@@ -7,7 +7,7 @@ signal bake_finished
 @export var travel_cost: float = 1.0 : set = set_travel_cost
 @export_flags_3d_navigation var navigation_layers: int = 1 : set = set_navigation_layers
 @export var template: NavigationMesh : set = set_template
-@export var terrain: Terrain3D
+@export var terrain: Pasture3D
 @export var player: Node3D
 @export var mesh_size := Vector3(256, 512, 256)
 @export var min_rebake_distance: float = 64.0

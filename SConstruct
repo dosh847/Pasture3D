@@ -11,7 +11,7 @@ env.Append(CPPPATH=["src/"])
 sources = Glob("src/*.cpp")
 
 # Find gdextension path even if the directory or extension is renamed (e.g. project/addons/example/example.gdextension).
-(extension_path,) = glob("project/addons/terrain_3d/*.gdextension")
+(extension_path,) = glob("project/addons/pasture_3d/*.gdextension")
 
 # Find the addon path (e.g. project/addons/example).
 addon_path = Path(extension_path).parent

@@ -6,14 +6,14 @@
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include "constants.h"
-#include "terrain_3d.h"
+#include "pasture_3d.h"
 
 /**
  * Prints warnings, errors, and messages to the console.
  * Regular messages are filtered based on the user specified debug level.
  * Warnings and errors always print except in release builds.
  * EXTREME is for continuously called prints like inside snapping.
- * See Terrain3D::DebugLevel and Terrain3D::debug_level.
+ * See Pasture3D::DebugLevel and Pasture3D::debug_level.
  *
  * Note that in DEBUG mode Godot will crash on quit due to an
  * access violation in editor_log.cpp EditorLog::_process_message().
@@ -28,7 +28,7 @@
 			UtilityFunctions::push_error(__class__, ":", __func__, ":", __LINE__, ": ", __VA_ARGS__); \
 		else if (level == WARN) \
 			UtilityFunctions::push_warning(__class__, ":", __func__, ":", __LINE__, ": ", __VA_ARGS__); \
-		else if (level <= Terrain3D::debug_level) \
+		else if (level <= Pasture3D::debug_level) \
 			UtilityFunctions::print(__class__, ":", __func__, ":", __LINE__, ": ", __VA_ARGS__); \
 	} while (false); // Macro safety
 #else
