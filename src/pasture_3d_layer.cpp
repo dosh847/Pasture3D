@@ -149,6 +149,57 @@ real_t Pasture3DLayer::get_weight(const Vector2i &p_region_loc, const Vector2i &
 	return tile->get_pixelv(_tile_local(p_px, tile_coord)).g;
 }
 
+// Deep-copies an image's pixel data so a snapshot never aliases the live tile.
+static Ref<Image> _dup_image(const Ref<Image> &p_img) {
+	if (p_img.is_null()) {
+		return Ref<Image>();
+	}
+	return Image::create_from_data(p_img->get_width(), p_img->get_height(), p_img->has_mipmaps(), p_img->get_format(), p_img->get_data());
+}
+
+Dictionary Pasture3DLayer::duplicate_region_tiles(const Vector2i &p_region_loc) const {
+	Dictionary out;
+	if (!_tiles.has(p_region_loc)) {
+		return out;
+	}
+	Dictionary region_tiles = _tiles[p_region_loc];
+	Array coords = region_tiles.keys();
+	for (const Vector2i &coord : coords) {
+		Ref<Image> img = region_tiles[coord];
+		out[coord] = _dup_image(img);
+	}
+	return out;
+}
+
+void Pasture3DLayer::restore_region_tiles(const Vector2i &p_region_loc, const Dictionary &p_tiles) {
+	if (p_tiles.is_empty()) {
+		_tiles.erase(p_region_loc);
+	} else {
+		// Store a fresh deep copy so later mutation of the snapshot can't bleed into our tiles.
+		Dictionary region_tiles;
+		Array coords = p_tiles.keys();
+		for (const Vector2i &coord : coords) {
+			Ref<Image> img = p_tiles[coord];
+			region_tiles[coord] = _dup_image(img);
+		}
+		_tiles[p_region_loc] = region_tiles;
+	}
+	_modified = true;
+}
+
+Ref<Pasture3DLayer> Pasture3DLayer::clone() const {
+	Ref<Pasture3DLayer> c;
+	c.instantiate();
+	Dictionary d = get_data();
+	d.erase("tiles"); // Copy pixels separately as deep duplicates.
+	c->set_data(d);
+	Array locations = _tiles.keys();
+	for (const Vector2i &loc : locations) {
+		c->restore_region_tiles(loc, duplicate_region_tiles(loc));
+	}
+	return c;
+}
+
 Ref<Image> Pasture3DLayer::get_tile(const Vector2i &p_region_loc, const Vector2i &p_tile_coord) const {
 	if (!_tiles.has(p_region_loc)) {
 		return Ref<Image>();

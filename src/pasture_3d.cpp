@@ -1240,6 +1240,9 @@ void Pasture3D::_notification(const int p_what) {
 			//test_differs();
 			//test_layer_compositing();
 			//test_layer_persistence();
+			//test_layer_idempotent_composite();
+			//test_layer_undo_restore();
+			//test_layer_base_persistence();
 
 			// Clear editor textures - also see ENTER_TREE
 			if (_free_editor_textures && !IS_EDITOR && _assets.is_valid()) {

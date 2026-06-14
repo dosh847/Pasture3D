@@ -6,6 +6,7 @@ extends EditorPlugin
 
 # Includes
 const Pasture3DUI: Script = preload("res://addons/pasture_3d/src/ui.gd")
+const Pasture3DLayersDock: Script = preload("res://addons/pasture_3d/src/layers_dock.gd")
 const ASSET_DOCK: String = "res://addons/pasture_3d/src/asset_dock.tscn"
 const ASSET_DOCK_45: String = "res://addons/pasture_3d/src/asset_dock_45.tscn"
 
@@ -15,6 +16,7 @@ var editor: Pasture3DEditor
 var editor_settings: EditorSettings
 var ui: Node # Pasture3DUI see Godot #75388
 var asset_dock: PanelContainer
+var layers_dock: PanelContainer
 var current_region_position: Vector2
 var mouse_global_position: Vector3 = Vector3.ZERO
 var godot_editor_window: Window # The Godot Editor window
@@ -66,12 +68,18 @@ func _enter_tree() -> void:
 		asset_dock = load(ASSET_DOCK_45).instantiate()
 	asset_dock.initialize(self)
 
+	# Non-destructive height-map layers panel (PASTURE3D_LAYERS_GUIDE.md §6)
+	layers_dock = Pasture3DLayersDock.new()
+	layers_dock.initialize(self)
+
 
 func _exit_tree() -> void:
 	if debug:
 		print("Pasture3DEditorPlugin: _exit_tree")
 	asset_dock.remove_dock(true)
 	asset_dock.queue_free()
+	layers_dock.remove_dock()
+	layers_dock.queue_free()
 	ui.queue_free()
 	editor.free()
 
@@ -129,6 +137,8 @@ func _edit(p_object: Object) -> void:
 		if not terrain.assets_changed.is_connected(asset_dock.update_assets):
 			terrain.assets_changed.connect(asset_dock.update_assets)
 		asset_dock.update_assets()
+		if layers_dock:
+			layers_dock.set_terrain(terrain)
 	else:
 		_clear()
 
@@ -157,6 +167,14 @@ func _clear() -> void:
 		terrain = null
 		editor.set_terrain(null)
 		ui.clear_picking()
+	if layers_dock:
+		layers_dock.set_terrain(null)
+
+
+## Forwarded from Pasture3DEditor when a stroke hits a locked/reserved active layer (§6).
+func flash_layer_warning(p_name: String) -> void:
+	if layers_dock:
+		layers_dock.flash_warning(p_name)
 
 
 func _forward_3d_gui_input(p_viewport_camera: Camera3D, p_event: InputEvent) -> AfterGUIInput:

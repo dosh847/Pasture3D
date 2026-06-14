@@ -103,6 +103,11 @@ void Pasture3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 		return;
 	}
 
+	// _stroke_layer is captured in start_operation when this is a non-destructive height-layer edit.
+	// When set, height writes go into that layer and the touched rects are recomposited (see below).
+	const bool route_to_layer = _stroke_layer.is_valid() && map_type == TYPE_HEIGHT;
+	_stroke_dirty.clear(); // Scratch: the region rects this single call touches.
+
 	bool modifier_alt = _brush_data["modifier_alt"];
 	bool modifier_ctrl = _brush_data["modifier_ctrl"];
 	//bool modifier_shift = _brush_data["modifier_shift"];
@@ -553,7 +558,29 @@ void Pasture3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 				}
 			}
 			backup_region(region);
-			map->set_pixelv(map_pixel_position, dest);
+			if (route_to_layer) {
+				// Non-destructive: author the brush-computed height into the active layer (full
+				// coverage), then recomposite the touched rect below. srcf was read from the live
+				// composited region map above, so the brush feels identical to direct editing.
+				_backup_layer_tile(region_loc);
+				_stroke_layer->set_sample(region_loc, map_pixel_position, dest.r, 1.f);
+				Rect2i px_rect(map_pixel_position, V2I(1));
+				if (_stroke_dirty.has(region_loc)) {
+					px_rect = Rect2i(_stroke_dirty[region_loc]).merge(px_rect);
+				}
+				_stroke_dirty[region_loc] = px_rect;
+			} else {
+				map->set_pixelv(map_pixel_position, dest);
+			}
+		}
+	}
+	// Non-destructive routing: recomposite the touched region rects so the region images (and the GPU
+	// upload below) reflect the active layer's new samples. composite_region sets is_edited(), so the
+	// update_maps fast path that follows uploads exactly these regions.
+	if (route_to_layer) {
+		Array dirty_locs = _stroke_dirty.keys();
+		for (const Vector2i &loc : dirty_locs) {
+			data->composite_region(loc, Rect2i(_stroke_dirty[loc]), false);
 		}
 	}
 	// Regenerate color mipmaps for edited regions
@@ -582,6 +609,23 @@ void Pasture3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 	}
 	if (_tool == HEIGHT || _tool == SCULPT || _tool == TEXTURE || _tool == AUTOSHADER) {
 		_terrain->snap();
+	}
+}
+
+// Snapshot the active layer's tiles for a region once, before the stroke first writes them. An absent
+// region snapshots as an empty Dictionary, which restores (on undo) by erasing the region again.
+void Pasture3DEditor::_backup_layer_tile(const Vector2i &p_region_loc) {
+	if (_stroke_layer.is_null() || _layer_undo_tiles.has(p_region_loc)) {
+		return;
+	}
+	_layer_undo_tiles[p_region_loc] = _stroke_layer->duplicate_region_tiles(p_region_loc);
+}
+
+void Pasture3DEditor::_notify_layer_blocked(const Ref<Pasture3DLayer> &p_layer) const {
+	LOG(WARN, "Active layer '", p_layer->get_layer_name(), "' is locked or reserved; stroke blocked");
+	Object *plugin = _terrain ? _terrain->get_plugin() : nullptr;
+	if (plugin && plugin->has_method("flash_layer_warning")) {
+		plugin->call("flash_layer_warning", p_layer->get_layer_name());
 	}
 }
 
@@ -632,6 +676,20 @@ void Pasture3DEditor::_store_undo() {
 		LOG(DEBUG, "Adding edited area to snapshots: ", _undo_data["edited_area"]);
 	}
 
+	// Non-destructive layer source: store the active layer's pre/post tile snapshots alongside the
+	// region (composite) snapshots, so undo/redo restores both the layer source and the composited
+	// region image (PASTURE3D_LAYERS_GUIDE.md §6).
+	if (_stroke_layer.is_valid() && !_layer_undo_tiles.is_empty()) {
+		Dictionary undo_snap;
+		undo_snap["layer"] = _stroke_layer;
+		undo_snap["tiles"] = _layer_undo_tiles;
+		_undo_data["layer_tiles"] = undo_snap;
+		Dictionary redo_snap;
+		redo_snap["layer"] = _stroke_layer;
+		redo_snap["tiles"] = _layer_redo_tiles;
+		redo_data["layer_tiles"] = redo_snap;
+	}
+
 	// Request the plugin store the undo/redo data.
 	if (_terrain->get_plugin()->has_method("create_undo_action")) {
 		LOG(INFO, "Storing undo snapshot");
@@ -657,6 +715,20 @@ void Pasture3DEditor::_apply_undo(const Dictionary &p_data) {
 	LOG(INFO, "Applying Undo/Redo data");
 
 	Pasture3DData *data = _terrain->get_data();
+
+	// Restore the active layer's source tiles. The composited region images are restored by the
+	// edited_regions path below; restoring the layer source keeps a later recomposite consistent.
+	if (p_data.has("layer_tiles")) {
+		Dictionary snap = p_data["layer_tiles"];
+		Ref<Pasture3DLayer> layer = snap.get("layer", Ref<Pasture3DLayer>());
+		Dictionary tiles = snap.get("tiles", Dictionary());
+		if (layer.is_valid()) {
+			Array locs = tiles.keys();
+			for (const Vector2i &loc : locs) {
+				layer->restore_region_tiles(loc, tiles[loc]);
+			}
+		}
+	}
 
 	if (p_data.has("edited_regions")) {
 		Util::print_arr("Edited regions", p_data["edited_regions"]);
@@ -734,6 +806,10 @@ void Pasture3DEditor::_apply_undo(const Dictionary &p_data) {
 		}
 	}
 	_terrain->get_instancer()->update_mmis(-1, V2I_MAX, true);
+
+	// Region objects were swapped above; re-point an aliased single-layer Base at the live maps so a
+	// later layer_add un-aliases from current data, not a stale detached image (PASTURE3D_LAYERS_GUIDE.md §6).
+	data->refresh_base_alias();
 }
 
 // Returns average of height, blend (as real_t(0-255)), or roughness. Overloaded version handles average color
@@ -918,6 +994,26 @@ void Pasture3DEditor::start_operation(const Vector3 &p_global_position) {
 	_terrain->get_data()->clear_edited_area();
 	_operation_position = p_global_position;
 	_operation_movement = V3_ZERO;
+
+	// Decide whether this stroke is a non-destructive height-layer edit and capture the target layer
+	// (PASTURE3D_LAYERS_GUIDE.md §6). A locked or reserved active layer swallows the whole stroke.
+	_stroke_blocked = false;
+	_stroke_layer = Ref<Pasture3DLayer>();
+	_layer_undo_tiles.clear();
+	_layer_redo_tiles.clear();
+	_stroke_dirty.clear();
+	if ((_tool == SCULPT || _tool == HEIGHT) && _terrain->get_data()->is_layer_routing()) {
+		Ref<Pasture3DLayerStack> stack = _terrain->get_data()->get_layer_stack();
+		Ref<Pasture3DLayer> active = stack.is_valid() ? stack->get_layer(stack->get_active_layer()) : Ref<Pasture3DLayer>();
+		if (active.is_valid()) {
+			if (active->is_locked() || active->is_reserved()) {
+				_stroke_blocked = true;
+				_notify_layer_blocked(active);
+			} else {
+				_stroke_layer = active;
+			}
+		}
+	}
 }
 
 // Called on mouse movement with left mouse button down
@@ -926,6 +1022,9 @@ void Pasture3DEditor::operate(const Vector3 &p_global_position, const real_t p_c
 	if (!_is_operating) {
 		LOG(ERROR, "Run start_operation() before operating");
 		return;
+	}
+	if (_stroke_blocked) {
+		return; // Active layer is locked/reserved; the whole stroke is swallowed (warning already flashed).
 	}
 	_operation_movement = p_global_position - _operation_position;
 	_operation_position = p_global_position;
@@ -987,12 +1086,24 @@ void Pasture3DEditor::stop_operation() {
 				redo_region->dump();
 			}
 		}
+		// Capture the active layer's post-stroke tiles for redo (mirrors the region redo snapshots).
+		if (_stroke_layer.is_valid()) {
+			Array locs = _layer_undo_tiles.keys();
+			for (const Vector2i &loc : locs) {
+				_layer_redo_tiles[loc] = _stroke_layer->duplicate_region_tiles(loc);
+			}
+		}
 		_store_undo();
 	}
 	_undo_data.clear();
 	_original_regions = TypedArray<Pasture3DRegion>(); //New pointers instead of clear
 	_edited_regions = TypedArray<Pasture3DRegion>();
 	_added_removed_locations = TypedArray<Vector2i>();
+	_stroke_layer = Ref<Pasture3DLayer>();
+	_layer_undo_tiles.clear();
+	_layer_redo_tiles.clear();
+	_stroke_dirty.clear();
+	_stroke_blocked = false;
 	_terrain->get_data()->clear_edited_area();
 	_is_operating = false;
 }

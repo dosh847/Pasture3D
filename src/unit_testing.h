@@ -24,5 +24,8 @@
 void test_differs();
 void test_layer_compositing();
 void test_layer_persistence();
+void test_layer_idempotent_composite();
+void test_layer_undo_restore();
+void test_layer_base_persistence();
 
 #endif // UNIT_TESTING_H

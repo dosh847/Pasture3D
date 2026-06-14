@@ -417,3 +417,214 @@ void test_layer_persistence() {
 	memdelete(data3);
 	UtilityFunctions::print("=== End layer persistence tests ===");
 }
+
+// Phase 4 regression guard (PASTURE3D_LAYERS_GUIDE.md §5.1, fact 1): with the Base un-aliased, N
+// repeated composites of a stack containing an ADD layer must be idempotent — the delta applies
+// exactly once, never drifting. Before the un-alias fix this would read an already-composited Base
+// and re-accumulate every pass. Also checks is_layer_routing flips off->on across the un-alias.
+void test_layer_idempotent_composite() {
+	UtilityFunctions::print("=== Testing idempotent composite (un-alias regression guard) ===");
+
+	const int region_size = 64;
+	const Vector2i loc(0, 0);
+	const Vector2i covered(10, 10);
+
+	Pasture3DData *data = memnew(Pasture3DData);
+	Ref<Pasture3DRegion> region;
+	region.instantiate();
+	region->set_region_size(region_size);
+	region->set_location(loc);
+	data->add_region(region, false);
+	Ref<Image> height_map = region->get_height_map();
+	EXPECT_TRUE(height_map.is_valid() && height_map->get_format() == Image::FORMAT_RF);
+	if (height_map.is_null()) {
+		memdelete(data);
+		return;
+	}
+	for (int y = 0; y < region_size; y++) {
+		for (int x = 0; x < region_size; x++) {
+			real_t h = real_t(x) * 0.5f - real_t(y) * 0.25f + real_t((x * 7 + y * 13) % 17);
+			height_map->set_pixel(x, y, Color(h, 0.f, 0.f, 1.f));
+		}
+	}
+
+	// Base aliased onto the region image, exactly as _synthesize_base_layer / load do.
+	Ref<Pasture3DLayerStack> stack;
+	stack.instantiate();
+	Ref<Pasture3DLayer> base;
+	base.instantiate();
+	base->set_layer_name("Base");
+	base->set_map_type(TYPE_HEIGHT);
+	base->set_tile_size(region_size);
+	base->set_blend_mode(Pasture3DLayer::REPLACE);
+	base->set_region_image(loc, height_map);
+	stack->add_layer_ref(base);
+	data->set_layer_stack(stack);
+
+	// Aliased Base => routing off (plain-terrain behaviour unchanged).
+	EXPECT_FALSE(data->is_layer_routing());
+
+	// Adding the first non-Base layer must un-alias the Base and enable routing.
+	int didx = data->layer_add("Detail", Pasture3DLayer::ADD);
+	EXPECT_TRUE(didx == 1);
+	EXPECT_TRUE(data->is_layer_routing());
+
+	const real_t base_h = height_map->get_pixelv(covered).r; // Region unchanged by un-alias.
+	Ref<Pasture3DLayer> detail = data->get_layer_stack()->get_layer(1);
+	detail->set_sample(loc, covered, 5.f, 1.f);
+
+	// Composite repeatedly: the ADD delta must land exactly once.
+	for (int i = 0; i < 5; i++) {
+		data->composite_region(loc, Rect2i(), false);
+	}
+	EXPECT_TRUE(Math::is_equal_approx(height_map->get_pixelv(covered).r, base_h + 5.f));
+
+	memdelete(data);
+	UtilityFunctions::print("=== End idempotent composite tests ===");
+}
+
+// Phase 4: the undo/redo tile-snapshot primitives (duplicate_region_tiles / restore_region_tiles)
+// must deep-copy, so restoring a pre-stroke snapshot fully reverts the layer source (including back
+// to "uncovered" when the region had no tile), and a snapshot is immune to later edits.
+void test_layer_undo_restore() {
+	UtilityFunctions::print("=== Testing layer undo tile restore ===");
+
+	const int region_size = 64;
+	const Vector2i loc(0, 0);
+	const Vector2i px(12, 9);
+
+	Ref<Pasture3DLayer> layer;
+	layer.instantiate();
+	layer->set_map_type(TYPE_HEIGHT);
+	layer->set_tile_size(region_size);
+	layer->set_blend_mode(Pasture3DLayer::ADD);
+
+	// Pre-stroke snapshot of an untouched region is empty (no tile yet).
+	Dictionary pre = layer->duplicate_region_tiles(loc);
+	EXPECT_TRUE(pre.is_empty());
+
+	// Stroke writes a sample; the snapshot taken earlier must NOT see it (deep copy).
+	layer->set_sample(loc, px, 9.f, 1.f);
+	EXPECT_TRUE(Math::is_equal_approx(layer->get_value(loc, px), 9.f));
+	EXPECT_TRUE(Math::is_equal_approx(layer->get_weight(loc, px), 1.f));
+	EXPECT_TRUE(pre.is_empty());
+
+	// Capture post-stroke (for redo), then undo by restoring the empty pre-snapshot.
+	Dictionary post = layer->duplicate_region_tiles(loc);
+	EXPECT_FALSE(post.is_empty());
+	layer->restore_region_tiles(loc, pre);
+	EXPECT_FALSE(layer->has_region(loc)); // Region erased => back to uncovered.
+	EXPECT_TRUE(layer->get_weight(loc, px) == 0.f);
+
+	// Redo by restoring the post-snapshot; the sample comes back.
+	layer->restore_region_tiles(loc, post);
+	EXPECT_TRUE(Math::is_equal_approx(layer->get_value(loc, px), 9.f));
+	EXPECT_TRUE(Math::is_equal_approx(layer->get_weight(loc, px), 1.f));
+
+	UtilityFunctions::print("=== End layer undo tile restore tests ===");
+}
+
+// Phase 4: once the Base is un-aliased it holds true base heights that the flattened region map no
+// longer carries, so save_layers must persist them. On load the Base loads its own buffer (routing
+// stays on) and a fresh composite reproduces the flattened runtime image byte-for-byte.
+void test_layer_base_persistence() {
+	UtilityFunctions::print("=== Testing un-aliased Base persistence ===");
+
+	const int region_size = 64;
+	const Vector2i loc(0, 0);
+	const Vector2i covered(10, 10);
+	const Vector2i base_px(3, 3);
+
+	const String dir = "user://p3d_layer_phase4";
+	Ref<DirAccess> da = DirAccess::open("user://");
+	if (da.is_valid()) {
+		da->make_dir_recursive("p3d_layer_phase4");
+	}
+	const String region_path = dir + String("/") + Util::location_to_filename(loc);
+	Ref<DirAccess> dda = DirAccess::open(dir);
+	if (dda.is_valid()) {
+		for (const String &f : Array::make(Util::location_to_filename(loc), String(Util::LAYER_MANIFEST_FILENAME), Util::location_to_layer_filename(loc))) {
+			if (dda->file_exists(f)) {
+				dda->remove(f);
+			}
+		}
+	}
+
+	Pasture3DData *data = memnew(Pasture3DData);
+	Ref<Pasture3DRegion> region;
+	region.instantiate();
+	region->set_region_size(region_size);
+	region->set_location(loc);
+	data->add_region(region, false);
+	Ref<Image> height_map = region->get_height_map();
+	if (height_map.is_null()) {
+		memdelete(data);
+		return;
+	}
+	for (int y = 0; y < region_size; y++) {
+		for (int x = 0; x < region_size; x++) {
+			real_t h = real_t(x) * 0.5f - real_t(y) * 0.25f + real_t((x * 7 + y * 13) % 17);
+			height_map->set_pixel(x, y, Color(h, 0.f, 0.f, 1.f));
+		}
+	}
+
+	Ref<Pasture3DLayerStack> stack;
+	stack.instantiate();
+	Ref<Pasture3DLayer> base;
+	base.instantiate();
+	base->set_layer_name("Base");
+	base->set_map_type(TYPE_HEIGHT);
+	base->set_tile_size(region_size);
+	base->set_blend_mode(Pasture3DLayer::REPLACE);
+	base->set_region_image(loc, height_map);
+	stack->add_layer_ref(base);
+	data->set_layer_stack(stack);
+
+	// Add a detail layer (un-aliases the Base), then author distinct values into BOTH the base and
+	// the detail so the base buffer and the flattened region map genuinely differ.
+	int didx = data->layer_add("Detail", Pasture3DLayer::ADD);
+	EXPECT_TRUE(didx == 1 && data->is_layer_routing());
+	Ref<Pasture3DLayer> base_u = data->get_layer_stack()->get_layer(0);
+	Ref<Pasture3DLayer> detail = data->get_layer_stack()->get_layer(1);
+	base_u->set_sample(loc, base_px, 99.f, 1.f);
+	detail->set_sample(loc, covered, 5.f, 1.f);
+	const real_t orig_covered = height_map->get_pixelv(covered).r;
+	data->composite_region(loc, Rect2i(), false);
+	PackedByteArray flattened = height_map->get_data();
+	// Sanity: the flatten reflects both edits.
+	EXPECT_TRUE(Math::is_equal_approx(height_map->get_pixelv(base_px).r, 99.f));
+	EXPECT_TRUE(Math::is_equal_approx(height_map->get_pixelv(covered).r, orig_covered + 5.f));
+
+	region->save(region_path, false);
+	data->save_layers(dir);
+
+	// Reload into a fresh data and load the stack on top.
+	Pasture3DData *data2 = memnew(Pasture3DData);
+	Ref<Pasture3DRegion> region2 = ResourceLoader::get_singleton()->load(region_path, "Pasture3DRegion", ResourceLoader::CACHE_MODE_IGNORE);
+	EXPECT_TRUE(region2.is_valid());
+	if (region2.is_null()) {
+		memdelete(data);
+		memdelete(data2);
+		return;
+	}
+	region2->set_location(loc);
+	data2->add_region(region2, false);
+	Ref<Image> height_map2 = region2->get_height_map();
+	EXPECT_TRUE(height_map2->get_data() == flattened); // Runtime image round-trips unchanged.
+
+	EXPECT_TRUE(data2->load_layers(dir));
+	// Base loaded its own heights => still un-aliased => routing stays on.
+	EXPECT_TRUE(data2->is_layer_routing());
+	Ref<Pasture3DLayer> base2 = data2->get_layer_stack()->get_layer(0);
+	EXPECT_TRUE(Math::is_equal_approx(base2->get_value(loc, base_px), 99.f));
+	// The base buffer is NOT the flattened map: at `covered` it holds the original height, not +5.
+	EXPECT_TRUE(Math::is_equal_approx(base2->get_value(loc, covered), orig_covered));
+
+	// A fresh composite after load reproduces the flattened runtime image exactly (no drift).
+	data2->composite_region(loc, Rect2i(), false);
+	EXPECT_TRUE(height_map2->get_data() == flattened);
+
+	memdelete(data);
+	memdelete(data2);
+	UtilityFunctions::print("=== End un-aliased Base persistence tests ===");
+}

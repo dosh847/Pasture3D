@@ -81,6 +81,14 @@ private:
 	// Functions
 	void _clear();
 	void _synthesize_base_layer();
+	// Whether the dense Base layer (index 0) still aliases the region height maps (same Ref<Image>).
+	// Aliasing is the zero-copy load state; it is correct for a single flatten but double-applies
+	// ADD/MAX/MIN under live re-compositing, so the Base must be un-aliased before per-stroke editing
+	// (PASTURE3D_LAYERS_GUIDE.md §5.1). Detected by pointer identity so tests need no extra flag.
+	bool _is_base_aliased() const;
+	// Give the Base its own source buffer (deep copy of each aliased region tile) so the composite
+	// target (region->_height_map) and the Base source become distinct. Idempotent.
+	void _unalias_base_layer();
 	void _copy_paste_dfr(const Pasture3DRegion *p_src_region, const Rect2i &p_src_rect, const Rect2i &p_dst_rect, const Pasture3DRegion *p_dst_region);
 
 public:
@@ -129,6 +137,32 @@ public:
 	bool has_layer_stack() const { return _layer_stack.is_valid(); }
 	Ref<Pasture3DLayerStack> get_layer_stack() const { return _layer_stack; }
 	void set_layer_stack(const Ref<Pasture3DLayerStack> &p_stack) { _layer_stack = p_stack; }
+
+	// True when sculpt strokes should route into the active layer instead of writing the region image
+	// directly: a real layer exists above the Base (count > 1). A Base-only stack (plain terrain, or a
+	// brand-new one) behaves exactly as before until the user adds a layer. By the un-alias invariant
+	// count > 1 implies the Base owns its own buffer. See PASTURE3D_LAYERS_GUIDE.md §6.
+	bool is_layer_routing() const { return _layer_stack.is_valid() && _layer_stack->get_layer_count() > 1; }
+	// Lazily create a single "Base" layer for a terrain that has none yet (e.g. a freshly added node
+	// that was never loaded from disk), so the Layers panel can show and grow the stack. Returns
+	// whether a stack exists afterward.
+	bool ensure_layer_stack();
+
+	// Layer-stack management surfaced for the GDScript Layers panel. These wrap Pasture3DLayerStack
+	// and additionally un-alias the Base (when the first non-Base layer appears) and recomposite the
+	// affected regions so the viewport stays live (PASTURE3D_LAYERS_GUIDE.md §5.2, §6). They return the
+	// new index where relevant, or -1 on failure.
+	int layer_add(const String &p_name, const int p_blend_mode);
+	int layer_duplicate(const int p_idx);
+	void layer_remove(const int p_idx);
+	void layer_move(const int p_from, const int p_to);
+	// Recomposite every region the layer covers, then push a single GPU update. Call after changing a
+	// layer's visibility, opacity, blend mode, or order.
+	void recomposite_layer(const int p_idx);
+	// Re-point an aliased (single-layer) Base onto the current region height maps. No-op once the Base
+	// is un-aliased (multi-layer). Called after undo/redo swaps region objects so a later layer_add
+	// un-aliases from the live region maps rather than a stale, detached image.
+	void refresh_base_alias();
 
 	// Compositing (editor-only). Flattens the layer stack down into the region height images that
 	// drive the shader/collision and ship in the runtime .res files. A no-op when no stack exists,

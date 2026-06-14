@@ -92,6 +92,14 @@ public:
 	real_t get_value(const Vector2i &p_region_loc, const Vector2i &p_px) const; // NAN if uncovered
 	real_t get_weight(const Vector2i &p_region_loc, const Vector2i &p_px) const; // 0 if uncovered
 
+	// Deep snapshot/restore of one region's tiles (images duplicated), for undo and duplication.
+	// duplicate_region_tiles returns an empty Dictionary if the region is absent; restore with an
+	// empty Dictionary erases the region (i.e. restores the "uncovered" pre-stroke state).
+	Dictionary duplicate_region_tiles(const Vector2i &p_region_loc) const;
+	void restore_region_tiles(const Vector2i &p_region_loc, const Dictionary &p_tiles);
+	// A deep copy of the whole layer (metadata + duplicated tiles), used by "Duplicate layer".
+	Ref<Pasture3DLayer> clone() const;
+
 	// Tile / region access.
 	Ref<Image> get_tile(const Vector2i &p_region_loc, const Vector2i &p_tile_coord) const;
 	// Adopt a whole region image as this layer's single tile. Only valid when _tile_size == region

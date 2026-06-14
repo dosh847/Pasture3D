@@ -510,8 +510,8 @@ Each phase is independently testable and leaves `main` shippable.
    `Util::location_to_layer_filename`; `test_layer_persistence` in `unit_testing.cpp`, 24/24 PASSED.
    Manifest + per-region split implemented directly; Base pixels never serialized, re-aliased on
    load; load does NOT re-composite to avoid the §5.1 ADD double-apply.)**
-4. **Editor routing + Layers panel.** Active-layer sculpting, visibility/opacity/blend/lock,
-   reorder; undo/redo of layer tiles. This is the bulk of UI work.
+4. ✅ **Editor routing + Layers panel.** Active-layer sculpting, visibility/opacity/blend/lock,
+   reorder; undo/redo of layer tiles. **(Done — see below.)**
 5. **Tool API + RoadPastureConnector.** `*_on_layer` / owned-layer methods; migrate the
    connector to a reserved "Roads" layer; confirm re-running roads is idempotent and base
    sculpt survives.
@@ -519,6 +519,44 @@ Each phase is independently testable and leaves `main` shippable.
    road-heavy scene. (Pure optimization — composite/coordinate code already abstracts it.)
 7. **(Later) Control & color layers.** Holes/texture/color layers using topmost-covered
    compositing for control; extends the road connector's hole carving to a layer.
+
+### 10.4 Phase 4 implementation notes (done)
+
+- **Un-alias the Base (the §5.1 prerequisite).** `Pasture3DData` detects aliasing by pointer identity
+  (`_is_base_aliased()` — a Base tile that *is* the region's `_height_map` Ref) so no persisted flag is
+  needed. `_unalias_base_layer()` deep-copies each aliased Base tile into a buffer the Base owns; it
+  fires the first time a non-Base layer is added (`layer_add`, idx>0) and on multi-layer load. After
+  that the composite *target* (region image) and Base *source* are distinct, so per-stroke
+  re-compositing is idempotent. Regression guard: `test_layer_idempotent_composite` (5× composite of an
+  ADD stack, no drift).
+- **Routing predicate.** `Pasture3DData::is_layer_routing()` = stack exists **and** Base is un-aliased.
+  A freshly loaded *plain* terrain keeps the Base aliased ⇒ routing **off** ⇒ sculpting writes the
+  region image directly exactly as before (zero behaviour change until the user adds a layer).
+- **Sculpt routing.** `Pasture3DEditor::start_operation` captures the active height layer into
+  `_stroke_layer` for SCULPT/HEIGHT when routing is on; a locked/reserved active layer sets
+  `_stroke_blocked` and flashes a warning (plugin → `flash_layer_warning` → Layers dock). In
+  `_operate_map`, height writes go to `_stroke_layer->set_sample(..., value=destf, weight=1)` (the brush
+  still reads `srcf` from the live composited region map, so it feels identical), and the touched
+  per-region rects are recomposited (dirty-scoped) before the existing `update_maps` upload. Hand-sculpt
+  layers therefore behave as REPLACE/absolute authoring; ADD/MAX/MIN are for tool-driven layers (Phase 5).
+- **Undo/redo.** Alongside the existing whole-region snapshots, a stroke deep-snapshots the active
+  layer's touched tiles before/after (`Pasture3DLayer::duplicate_region_tiles` / `restore_region_tiles`)
+  and stores them under `layer_tiles` in the same `EditorUndoRedoManager` action, so undo restores both
+  the layer **source** and the composited region image. Guard: `test_layer_undo_restore`.
+- **⚠ Persistence change (supersedes the Phase 3 "Base pixels never serialized" rule).** Once the Base
+  is un-aliased it holds *true base heights* that the flattened `pasture3d_<loc>.res` no longer carries,
+  so `save_layers` now serializes the Base's own tiles too (only while un-aliased; an aliased/plain Base
+  is still skipped). `load_layers` loads them and leaves the Base un-aliased (routing stays on); only
+  regions lacking persisted Base pixels are re-aliased onto the runtime maps. The shipped runtime files
+  are unchanged. Cost: per-region layer slices now include a dense Base RF tile (~region-map size) for
+  layered terrains — acceptable for editor-only data. Round-trip guard: `test_layer_base_persistence`
+  (Base buffer ≠ flattened map; a post-load composite reproduces the runtime image byte-for-byte).
+- **Layers panel** (`project/addons/pasture_3d/src/layers_dock.gd`, docked via `add_control_to_dock`):
+  top-first list with add / duplicate / remove / move-up / move-down **and** drag-reorder, per-row
+  visibility, name, blend, opacity, lock, and a highlighted active row. Structural/visual changes call
+  the bound `Pasture3DData::layer_*` / `recomposite_layer` helpers, which un-alias and dirty-scope
+  recomposite as needed. New Data binds: `is_layer_routing`, `layer_add`, `layer_duplicate`,
+  `layer_remove`, `layer_move`, `recomposite_layer`.
 
 ---
 

@@ -7,6 +7,7 @@
 #include <godot_cpp/classes/image_texture.hpp>
 
 #include "pasture_3d.h"
+#include "pasture_3d_layer.h"
 #include "pasture_3d_region.h"
 
 class Pasture3DEditor : public Object {
@@ -89,9 +90,22 @@ private:
 	Dictionary _undo_data; // See _get_undo_data for definition
 	uint64_t _last_pen_tick = 0;
 
+	// Non-destructive layer routing (PASTURE3D_LAYERS_GUIDE.md §6). When a stroke targets a height
+	// layer, writes go into _stroke_layer (the active layer) and the touched region rects are
+	// recomposited, instead of writing the region image directly. Null _stroke_layer => legacy path.
+	Ref<Pasture3DLayer> _stroke_layer; // Active height layer captured for the current stroke
+	bool _stroke_blocked = false; // Active layer is locked/reserved; swallow the stroke
+	Dictionary _layer_undo_tiles; // region_loc -> deep tile snapshot taken before the stroke
+	Dictionary _layer_redo_tiles; // region_loc -> deep tile snapshot taken after the stroke
+	Dictionary _stroke_dirty; // region_loc -> Rect2i of region-local pixels this stroke touched
+
 	void _send_region_aabb(const Vector2i &p_region_loc, const Vector2 &p_height_range = V2_ZERO);
 	Ref<Pasture3DRegion> _operate_region(const Vector2i &p_region_loc);
 	void _operate_map(const Vector3 &p_global_position, const real_t p_camera_direction);
+	// Snapshot the active layer's tiles for a region once, before the stroke first modifies them.
+	void _backup_layer_tile(const Vector2i &p_region_loc);
+	// Best-effort UE-style warning flash when a stroke hits a locked/reserved active layer.
+	void _notify_layer_blocked(const Ref<Pasture3DLayer> &p_layer) const;
 	MapType _get_map_type() const;
 	bool _is_in_bounds(const Point2i &p_pixel, const Point2i &p_size) const;
 	Vector2 _get_uv_position(const Vector3 &p_global_position, const int p_region_size, const real_t p_vertex_spacing) const;

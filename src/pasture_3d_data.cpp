@@ -56,6 +56,156 @@ void Pasture3DData::_synthesize_base_layer() {
 	LOG(INFO, "Synthesized Base layer over ", locations.size(), " region(s)");
 }
 
+// The Base aliases the region maps when at least one of its tiles is the very same Ref<Image> as the
+// region's height map. After un-aliasing none are, so this returns false and routing/live compositing
+// is safe (PASTURE3D_LAYERS_GUIDE.md §5.1).
+bool Pasture3DData::_is_base_aliased() const {
+	if (_layer_stack.is_null()) {
+		return false;
+	}
+	Pasture3DLayer *base = _layer_stack->get_layer_ptr(0);
+	if (!base) {
+		return false;
+	}
+	TypedArray<Vector2i> locations = base->get_region_locations();
+	for (const Vector2i &loc : locations) {
+		Pasture3DRegion *region = get_region_ptr(loc);
+		Ref<Image> tile = base->get_tile(loc, V2I_ZERO);
+		if (region && tile.is_valid() && tile == region->get_height_map()) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void Pasture3DData::_unalias_base_layer() {
+	if (_layer_stack.is_null()) {
+		return;
+	}
+	Pasture3DLayer *base = _layer_stack->get_layer_ptr(0);
+	if (!base) {
+		return;
+	}
+	bool changed = false;
+	TypedArray<Vector2i> locations = base->get_region_locations();
+	for (const Vector2i &loc : locations) {
+		Pasture3DRegion *region = get_region_ptr(loc);
+		Ref<Image> tile = base->get_tile(loc, V2I_ZERO);
+		if (region && tile.is_valid() && tile == region->get_height_map()) {
+			// Deep copy so the Base source and the composite target are distinct buffers.
+			Ref<Image> owned = Image::create_from_data(tile->get_width(), tile->get_height(), tile->has_mipmaps(), tile->get_format(), tile->get_data());
+			base->set_region_image(loc, owned);
+			changed = true;
+		}
+	}
+	if (changed) {
+		LOG(INFO, "Un-aliased Base layer; it now owns its source buffer");
+	}
+}
+
+bool Pasture3DData::ensure_layer_stack() {
+	if (_layer_stack.is_null()) {
+		_synthesize_base_layer(); // Builds an empty Base when no regions exist yet; that's fine.
+	}
+	return _layer_stack.is_valid();
+}
+
+int Pasture3DData::layer_add(const String &p_name, const int p_blend_mode) {
+	if (_layer_stack.is_null()) {
+		_synthesize_base_layer(); // No stack yet (e.g. plain terrain not yet opened through a stack).
+		if (_layer_stack.is_null()) {
+			LOG(ERROR, "Cannot add a layer: no region data to anchor a Base layer");
+			return -1;
+		}
+	}
+	int idx = _layer_stack->add_layer(p_name, Pasture3DLayer::BlendMode(p_blend_mode));
+	if (idx > 0) {
+		// First non-Base layer: the Base must own its buffer so live re-compositing is correct.
+		_unalias_base_layer();
+	}
+	return idx;
+}
+
+int Pasture3DData::layer_duplicate(const int p_idx) {
+	if (_layer_stack.is_null()) {
+		return -1;
+	}
+	Pasture3DLayer *src = _layer_stack->get_layer_ptr(p_idx);
+	if (!src) {
+		LOG(ERROR, "Cannot duplicate layer ", p_idx, ": out of range");
+		return -1;
+	}
+	Ref<Pasture3DLayer> copy = src->clone();
+	copy->set_layer_name(src->get_layer_name() + " copy");
+	copy->set_owner_id(String()); // A duplicate is hand-editable, never a tool-reserved layer.
+	copy->set_reserved(false);
+	int idx = _layer_stack->add_layer_ref(copy);
+	_unalias_base_layer();
+	recomposite_layer(idx);
+	return idx;
+}
+
+void Pasture3DData::layer_remove(const int p_idx) {
+	if (_layer_stack.is_null() || p_idx == 0) {
+		return; // The Base layer is protected.
+	}
+	Pasture3DLayer *layer = _layer_stack->get_layer_ptr(p_idx);
+	TypedArray<Vector2i> locs = layer ? layer->get_region_locations() : TypedArray<Vector2i>();
+	_layer_stack->remove_layer(p_idx);
+	// Recomposite the regions the removed layer used to cover so they fall back to what is below.
+	for (const Vector2i &loc : locs) {
+		composite_region(loc, Rect2i(), false);
+	}
+	update_maps(TYPE_HEIGHT, false, false);
+}
+
+void Pasture3DData::layer_move(const int p_from, const int p_to) {
+	if (_layer_stack.is_null()) {
+		return;
+	}
+	Pasture3DLayer *layer = _layer_stack->get_layer_ptr(p_from);
+	TypedArray<Vector2i> locs = layer ? layer->get_region_locations() : TypedArray<Vector2i>();
+	_layer_stack->move_layer(p_from, p_to);
+	for (const Vector2i &loc : locs) {
+		composite_region(loc, Rect2i(), false);
+	}
+	update_maps(TYPE_HEIGHT, false, false);
+}
+
+void Pasture3DData::recomposite_layer(const int p_idx) {
+	if (_layer_stack.is_null()) {
+		return;
+	}
+	Pasture3DLayer *layer = _layer_stack->get_layer_ptr(p_idx);
+	if (!layer) {
+		return;
+	}
+	TypedArray<Vector2i> locations = layer->get_region_locations();
+	for (const Vector2i &loc : locations) {
+		composite_region(loc, Rect2i(), false);
+	}
+	update_maps(TYPE_HEIGHT, false, false);
+}
+
+void Pasture3DData::refresh_base_alias() {
+	// Only a single-layer (plain-terrain) Base is meant to alias the region maps; a multi-layer Base
+	// owns its buffer and must not be disturbed by region swaps.
+	if (_layer_stack.is_null() || _layer_stack->get_layer_count() != 1) {
+		return;
+	}
+	Pasture3DLayer *base = _layer_stack->get_layer_ptr(0);
+	if (!base) {
+		return;
+	}
+	for (const Vector2i &loc : _regions.keys()) {
+		Pasture3DRegion *region = get_region_ptr(loc);
+		if (region && region->get_height_map().is_valid()) {
+			base->set_region_image(loc, region->get_height_map());
+		}
+	}
+	base->set_modified(false);
+}
+
 // Structured to work with do_for_regions. Should be renamed when copy_paste is expanded
 void Pasture3DData::_copy_paste_dfr(const Pasture3DRegion *p_src_region, const Rect2i &p_src_rect, const Rect2i &p_dst_rect, const Pasture3DRegion *p_dst_region) {
 	if (!p_src_region || !p_dst_region) {
@@ -284,6 +434,21 @@ Error Pasture3DData::add_region(const Ref<Pasture3DRegion> &p_region, const bool
 		LOG(INFO, "Overwriting ", (_regions.has(region_loc)) ? "deleted" : "existing", " region at ", region_loc);
 	}
 	_regions[region_loc] = p_region;
+	// If a layer stack already exists (editing, not the initial load — the stack is built after the
+	// load loop), make the Base cover this newly added region so compositing/routing include it. A
+	// single-layer Base aliases the region map; a multi-layer (un-aliased) Base owns a copy of it.
+	if (_layer_stack.is_valid()) {
+		Pasture3DLayer *base = _layer_stack->get_layer_ptr(0);
+		Ref<Image> hm = p_region->get_height_map();
+		if (base && hm.is_valid() && !base->has_region(region_loc) &&
+				hm->get_width() == base->get_tile_size() && hm->get_height() == base->get_tile_size()) {
+			if (_layer_stack->get_layer_count() <= 1) {
+				base->set_region_image(region_loc, hm);
+			} else {
+				base->set_region_image(region_loc, Image::create_from_data(hm->get_width(), hm->get_height(), hm->has_mipmaps(), hm->get_format(), hm->get_data()));
+			}
+		}
+	}
 	_region_map_dirty = true;
 	LOG(DEBUG, "Storing region ", region_loc, " version ", vformat("%.3f", p_region->get_version()), " id: ", _region_locations.size());
 	if (p_update) {
@@ -448,9 +613,15 @@ void Pasture3DData::save_layers(const String &p_dir) {
 	}
 	manifest->take_over_path(manifest_path);
 
+	// While the Base still aliases the region maps its pixels ARE the runtime data, so they are never
+	// serialized (re-aliased on load). Once un-aliased (the moment a real layer exists) the Base owns
+	// true base heights that the flattened region map no longer holds, so those must be persisted too
+	// — otherwise live re-compositing after load would read the flattened map as the base (§5.1).
+	const bool base_aliased = _is_base_aliased();
+
 	// Per-region slices: for each region, an index-aligned stack whose layer i carries only that
-	// region's tiles for stack layer i. Layer 0 (Base) is always empty here. Regions with no
-	// upper-layer tiles are skipped, and any stale slice file removed, to keep the layout sparse.
+	// region's tiles for stack layer i. Regions with no tiles to save are skipped, and any stale slice
+	// file removed, to keep the layout sparse.
 	for (const Vector2i &region_loc : _regions.keys()) {
 		const String slice_fname = Util::location_to_layer_filename(region_loc);
 		const String slice_path = p_dir + String("/") + slice_fname;
@@ -462,7 +633,7 @@ void Pasture3DData::save_layers(const String &p_dir) {
 		for (int i = 0; i < layer_count; i++) {
 			Ref<Pasture3DLayer> slice_layer;
 			slice_layer.instantiate();
-			if (i > 0) { // Skip Base; only upper layers carry serialized pixels.
+			if (i > 0 || !base_aliased) { // Serialize upper layers always; Base only once un-aliased.
 				Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
 				if (layer && layer->has_region(region_loc)) {
 					Dictionary tiles;
@@ -524,7 +695,8 @@ bool Pasture3DData::load_layers(const String &p_dir) {
 			continue;
 		}
 		const int slice_count = MIN(slice->get_layer_count(), layer_count);
-		for (int i = 1; i < slice_count; i++) { // Skip Base; its pixels are the region maps.
+		// i==0 (Base) carries pixels only when it was un-aliased at save time; if absent it is re-aliased below.
+		for (int i = 0; i < slice_count; i++) {
 			Pasture3DLayer *slice_layer = slice->get_layer_ptr(i);
 			Pasture3DLayer *layer = manifest->get_layer_ptr(i);
 			if (!slice_layer || !layer) {
@@ -539,11 +711,15 @@ bool Pasture3DData::load_layers(const String &p_dir) {
 		}
 	}
 
-	// Re-alias the Base layer (index 0) onto the loaded region height maps, exactly like
-	// _synthesize_base_layer. The persisted Base metadata is kept; its pixels are the region maps.
+	// Re-alias the Base layer (index 0) onto the loaded region maps ONLY for regions whose own base
+	// pixels were not persisted (plain/legacy terrains). Regions that loaded their own un-aliased base
+	// heights keep them — the flattened region map is the runtime data, the base buffer is the source.
 	Pasture3DLayer *base = manifest->get_layer_ptr(0);
 	if (base) {
 		for (const Vector2i &region_loc : _regions.keys()) {
+			if (base->has_region(region_loc)) {
+				continue; // Loaded its own (un-aliased) base heights.
+			}
 			Pasture3DRegion *region = get_region_ptr(region_loc);
 			if (region && region->get_height_map().is_valid()) {
 				base->set_region_image(region_loc, region->get_height_map());
@@ -1573,6 +1749,14 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_layer_stack", "layer_stack"), &Pasture3DData::set_layer_stack);
 	ClassDB::bind_method(D_METHOD("composite_region", "region_location", "dirty_rect", "update"), &Pasture3DData::composite_region, DEFVAL(Rect2i()), DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("composite_regions"), &Pasture3DData::composite_regions);
+
+	ClassDB::bind_method(D_METHOD("is_layer_routing"), &Pasture3DData::is_layer_routing);
+	ClassDB::bind_method(D_METHOD("ensure_layer_stack"), &Pasture3DData::ensure_layer_stack);
+	ClassDB::bind_method(D_METHOD("layer_add", "name", "blend_mode"), &Pasture3DData::layer_add);
+	ClassDB::bind_method(D_METHOD("layer_duplicate", "index"), &Pasture3DData::layer_duplicate);
+	ClassDB::bind_method(D_METHOD("layer_remove", "index"), &Pasture3DData::layer_remove);
+	ClassDB::bind_method(D_METHOD("layer_move", "from", "to"), &Pasture3DData::layer_move);
+	ClassDB::bind_method(D_METHOD("recomposite_layer", "index"), &Pasture3DData::recomposite_layer);
 
 	ClassDB::bind_method(D_METHOD("save_directory", "directory"), &Pasture3DData::save_directory);
 	ClassDB::bind_method(D_METHOD("save_region", "region_location", "directory", "save_16_bit"), &Pasture3DData::save_region, DEFVAL(false));
