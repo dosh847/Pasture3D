@@ -43,7 +43,9 @@ render_mode blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_sc
 
 // Private uniforms
 group_uniforms shader_uniforms;
-uniform vec3 _target_pos = vec3(0.f);
+// Pasture3D: per-instance so each camera's clipmap geomorphs to its own snap center
+// (set via RenderingServer.instance_geometry_set_shader_parameter per clipmap view).
+instance uniform vec3 _target_pos = vec3(0.f);
 uniform float _mesh_size = 48.f;
 uniform float _subdiv = 1.f;
 uniform float _tessellation_level = 0.f;

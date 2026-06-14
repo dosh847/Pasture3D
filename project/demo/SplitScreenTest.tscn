@@ -1,0 +1,85 @@
+[gd_scene format=3 uid="uid://b3p2nfbyo6nux"]
+
+[ext_resource type="Script" uid="uid://d2u4g1iuy1uuo" path="res://demo/src/SplitScreenTest.gd" id="1_splittest"]
+[ext_resource type="Terrain3DMaterial" uid="uid://ccvn15t8km0ft" path="res://demo/data/M_terrain.tres" id="2_mat"]
+[ext_resource type="Terrain3DAssets" uid="uid://dal3jhw6241qg" path="res://demo/data/assets.tres" id="3_assets"]
+
+[sub_resource type="World3D" id="World3D_shared"]
+
+[node name="SplitScreenTest" type="Control" unique_id=2132771447]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("1_splittest")
+
+[node name="Grid" type="GridContainer" parent="." unique_id=1282800624]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+columns = 2
+
+[node name="VC0" type="SubViewportContainer" parent="Grid" unique_id=602071403]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+stretch = true
+
+[node name="VP0" type="SubViewport" parent="Grid/VC0" unique_id=1684272433]
+world_3d = SubResource("World3D_shared")
+handle_input_locally = false
+size = Vector2i(574, 322)
+render_target_update_mode = 4
+
+[node name="Terrain3D" type="Terrain3D" parent="Grid/VC0/VP0" unique_id=1489496715]
+data_directory = "res://demo/data"
+material = ExtResource("2_mat")
+assets = ExtResource("3_assets")
+top_level = true
+metadata/_edit_lock_ = true
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="Grid/VC0/VP0" unique_id=1484917095]
+transform = Transform3D(0.707107, -0.5, 0.5, 0, 0.707107, 0.707107, -0.707107, -0.5, 0.5, 0, 200, 0)
+shadow_enabled = true
+
+[node name="VC1" type="SubViewportContainer" parent="Grid" unique_id=1132807699]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+stretch = true
+
+[node name="VP1" type="SubViewport" parent="Grid/VC1" unique_id=1547227721]
+world_3d = SubResource("World3D_shared")
+handle_input_locally = false
+size = Vector2i(574, 322)
+render_target_update_mode = 4
+
+[node name="VC2" type="SubViewportContainer" parent="Grid" unique_id=1161061468]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+stretch = true
+
+[node name="VP2" type="SubViewport" parent="Grid/VC2" unique_id=1813585714]
+world_3d = SubResource("World3D_shared")
+handle_input_locally = false
+size = Vector2i(574, 322)
+render_target_update_mode = 4
+
+[node name="VC3" type="SubViewportContainer" parent="Grid" unique_id=1110515886]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+stretch = true
+
+[node name="VP3" type="SubViewport" parent="Grid/VC3" unique_id=726519992]
+world_3d = SubResource("World3D_shared")
+handle_input_locally = false
+size = Vector2i(574, 322)
+render_target_update_mode = 4

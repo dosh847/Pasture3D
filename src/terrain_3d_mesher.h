@@ -3,6 +3,10 @@
 #ifndef TERRAIN3D_MESHER_CLASS_H
 #define TERRAIN3D_MESHER_CLASS_H
 
+#include <godot_cpp/templates/vector.hpp>
+#include <godot_cpp/variant/array.hpp>
+#include <godot_cpp/variant/rid.hpp>
+
 #include "constants.h"
 
 class Terrain3D;
@@ -24,14 +28,30 @@ public: // Constants
 		STANDARD_EDGE_B,
 	};
 
+	// Pasture3D: one clipmap instance-set per camera (local split-screen). Each view shares the
+	// terrain's mesh resources (_mesh_rids) and material, but snaps to its own camera and renders
+	// on its own layer, so a single Terrain3DData serves N viewers without duplicating VRAM.
+	struct ClipmapView {
+		Array clipmap_rids; // LODs -> MeshTypes -> Instances (this view only)
+		Vector<RID> instance_rids; // Flat list of all instances above (fast per-frame iteration)
+		Vector2 last_target_position = V2_MAX; // Snap tracking (xz)
+		Vector3 last_shader_target_pos = V3_MAX; // _target_pos tracking (avoid redundant updates)
+		uint32_t render_layers = 1u; // VisualInstance layer mask for this view
+		uint64_t camera_id = 0; // ObjectID of camera to follow; 0 = terrain's default clipmap target
+		bool cast_shadows = true; // Only the first view casts, to avoid double-shadowing (guide §4)
+	};
+
 private:
 	Terrain3D *_terrain = nullptr;
 	RID _scenario = RID();
-	Vector2 _last_target_position = V2_MAX;
 
+	// Shared, view-independent mesh resources
 	Array _mesh_rids;
-	// LODs -> MeshTypes -> Instances
-	Array _clipmap_rids;
+	// Per-camera clipmap instance-sets
+	Vector<ClipmapView> _views;
+	// Terrain mesher writes _target_pos per-instance (each view geomorphs to its own snap center).
+	// Ocean mesher leaves it false and writes _target_pos on the shared material (single view).
+	bool _uses_instance_target_pos = false;
 
 	// Mesh offset data
 	// LOD0 only
@@ -53,15 +73,18 @@ private:
 	int _lods = 0;
 	int _mesh_size = 0;
 	real_t _vertex_spacing = 1.f;
-	uint32_t _render_layers = 1u; // Bit 1 only
+	uint32_t _render_layers = 1u; // Default single-view layer mask
 
 	void _generate_mesh_types();
 	RID _generate_mesh(const Vector2i &p_size, const bool p_standard_grid = false);
 	RID _instantiate_mesh(const PackedVector3Array &p_vertices, const PackedInt32Array &p_indices, const AABB &p_aabb);
-	void _generate_clipmap();
+	void _generate_view_instances(ClipmapView &p_view);
 	void _generate_offset_data();
 
-	void _clear_clipmap();
+	Vector3 _resolve_view_target(const ClipmapView &p_view) const;
+	void _snap_view(ClipmapView &p_view);
+
+	void _clear_views();
 	void _clear_mesh_types();
 
 public:
@@ -69,11 +92,17 @@ public:
 	~Terrain3DMesher() { destroy(); }
 
 	void initialize(Terrain3D *p_terrain, const int p_mesh_size, const int p_lods, const int p_tessellation_level,
-			const real_t p_vertex_spacing, const RID &p_material, const uint32_t p_render_layers);
+			const real_t p_vertex_spacing, const RID &p_material, const uint32_t p_render_layers,
+			const bool p_uses_instance_target_pos = false);
 	void destroy();
 
+	// Reconfigure the clipmap views. Empty input => one default view following the terrain's
+	// clipmap target (single-view behavior). One entry per camera otherwise.
+	void set_views(const Vector<uint64_t> &p_camera_ids, const Vector<uint32_t> &p_render_layers);
+	int get_view_count() const { return _views.size(); }
+
 	void snap();
-	void reset_target_position() { _last_target_position = V2_MAX; }
+	void reset_target_position();
 	void update();
 	void update_aabbs(const real_t p_cull_margin = -1.f, const Vector2 &p_height_range = V2_MAX);
 
@@ -87,7 +116,7 @@ public:
 	int get_mesh_size() const { return _mesh_size; }
 	void set_vertex_spacing(const real_t p_spacing) { _vertex_spacing = p_spacing; }
 	real_t get_vertex_spacing() const { return _vertex_spacing; }
-	void set_render_layers(const uint32_t p_layers) { _render_layers = p_layers; }
+	void set_render_layers(const uint32_t p_layers);
 	uint32_t get_render_layers() const { return _render_layers; }
 };
 // Inline Functions

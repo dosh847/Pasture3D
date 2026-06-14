@@ -11,6 +11,8 @@
 #include <godot_cpp/classes/object.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/sub_viewport.hpp>
+#include <godot_cpp/templates/vector.hpp>
+#include <godot_cpp/variant/typed_array.hpp>
 
 #include "constants.h"
 #include "target_node_3d.h"
@@ -45,6 +47,11 @@ public: // Constants
 		SIZE_2048 = 2048,
 	};
 
+	// Pasture3D: per-camera clipmaps use a reserved top range of render layers, one bit per player,
+	// descending: camera i -> bit (TERRAIN_TOP_BIT - i). Default 19 => layers 20,19,18,17 for
+	// cameras 0..3. Keep gameplay (karts, props) on layers 1-16 so every camera sees it.
+	static const int TERRAIN_TOP_BIT = 19;
+
 private:
 	String _version = "1.1.0-dev";
 	String _data_directory;
@@ -71,6 +78,9 @@ private:
 	TargetNode3D _collision_target;
 	TargetNode3D _ocean_light_target;
 	TargetNode3D _camera; // Fallback target for clipmap and collision
+	// Pasture3D: explicit per-camera list for local split-screen (>=2 cameras). When set, the
+	// mesher renders one clipmap per camera; empty/single collapses to the single-view path above.
+	Vector<uint64_t> _cameras; // Camera3D ObjectIDs
 
 	// Terrain Mesh
 	Terrain3DMesher *_terrain_mesher = nullptr;
@@ -119,6 +129,7 @@ private:
 	void _destroy_collision(const bool p_final = false);
 
 	void _setup_terrain_mesher();
+	void _apply_cameras_to_mesher();
 	void _update_mesher_aabbs() { _terrain_mesher ? _terrain_mesher->update_aabbs() : void(); }
 	void _destroy_terrain_mesher(const bool p_final = false);
 	void _setup_ocean_mesher();
@@ -182,6 +193,11 @@ public:
 	// Target Tracking
 	void set_camera(Camera3D *p_camera);
 	Camera3D *get_camera() const { return cast_to<Camera3D>(_camera.ptr()); }
+	// Pasture3D: local split-screen. Renders one clipmap per camera (each on its own render layer,
+	// snapped to its own camera), all sharing the single Terrain3DData. set_cameras([one]) behaves
+	// exactly like set_camera(one); >=2 cameras enables true per-camera LOD. Collision is unchanged.
+	void set_cameras(const TypedArray<Camera3D> &p_cameras);
+	TypedArray<Camera3D> get_cameras() const;
 	void set_clipmap_target(Node3D *p_node);
 	Node3D *get_clipmap_target() const { return _clipmap_target.ptr(); }
 	Vector3 get_clipmap_target_position() const;
