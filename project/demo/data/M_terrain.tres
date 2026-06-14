@@ -49,6 +49,7 @@ _shader_parameters = {
 &"region_blend": 0.9600000456,
 &"shader_uniforms": null,
 &"shader_uniforms::auto_shader": null,
+&"shader_uniforms::displacement": null,
 &"shader_uniforms::dual_scaling": null,
 &"shader_uniforms::general": null,
 &"shader_uniforms::macro_variation": null,

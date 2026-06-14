@@ -3,7 +3,7 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://bdwolwswwy8wr"
-path="res://.godot/imported/autoshader.svg-9998e61bbc6afd5b134b767acd17a425.ctex"
+path="res://.godot/imported/autoshader.svg-76d9b7928510ef1e7ee37a2624b467e3.ctex"
 metadata={
 "has_editor_variant": true,
 "vram_texture": false
@@ -12,7 +12,7 @@ metadata={
 [deps]
 
 source_file="res://addons/pasture_3d/icons/autoshader.svg"
-dest_files=["res://.godot/imported/autoshader.svg-9998e61bbc6afd5b134b767acd17a425.ctex"]
+dest_files=["res://.godot/imported/autoshader.svg-76d9b7928510ef1e7ee37a2624b467e3.ctex"]
 
 [params]
 
