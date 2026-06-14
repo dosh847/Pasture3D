@@ -257,8 +257,18 @@ Height has no alpha, so each layer sample is **(value, weight)**:
 - `weight == 0` ⇒ pixel not owned by this layer ⇒ skipped in compositing.
 - Brush strokes accumulate weight like the existing brush alpha; the road connector writes
   `weight = 1` inside the road, feathering to 0 across `edge_falloff`.
+- **⚠ Coverage vs. NaN (Phase 3 finding).** `get_weight()` is the authoritative "is this pixel
+  owned?" signal — *not* a NaN `get_value()`. `get_value()` returns NaN **only when no tile exists**
+  at that coordinate. With the current `_tile_size == region_size` default, the *first* `set_sample`
+  in a region allocates the one region-sized tile, so every other pixel in that region is now
+  "allocated but uncovered": `get_weight == 0` and `get_value == 0` (the zero fill), **never NaN**.
+  Compositing already does the right thing (it tests `weight == 0` first and skips). Phase 4 code and
+  tests must gate coverage on `weight`, not on `isnan(value)`. Sub-region tiling (phase 6) makes NaN
+  meaningful again for *whole absent tiles*, but within an allocated tile weight is always the signal.
 - The **Base layer** can skip the weight channel (always-covered) and stay a plain `RF`
-  region image == today's `_height_map`, to avoid doubling Base memory.
+  region image == today's `_height_map`, to avoid doubling Base memory. (Phase 1/2 alias the
+  Base tile directly onto the region image. This is correct for load + a single flatten but
+  must be un-aliased before live re-compositing — see the ⚠ note in §5.1.)
 
 ---
 
@@ -294,6 +304,24 @@ data.update_maps(TYPE_HEIGHT, /*all_regions=*/false)  # only edited regions go t
 - **NaN**: NaN already means "hole" in `get_height`. Compositing must treat an
   all-uncovered pixel as "fall through to Base"; Base is always covered so the accumulator
   is defined wherever the terrain exists.
+
+> **⚠ Implementation note — Base-layer aliasing (Phase 2 finding).**
+> `_synthesize_base_layer` makes the dense Base layer **alias** each region's `_height_map`
+> (FORMAT_RF, zero-copy, §4.3), and `composite_region` writes its result back into that *same*
+> image. Per pixel this is safe: the Base value is read into the accumulator *before* the
+> composited value is written, and pixels are independent — so a **single composite pass is
+> correct**, and the Base-only case is byte-identical (verified by `test_layer_compositing`).
+>
+> It is **not safe to re-composite the same region repeatedly** once `ADD`/`MAX`/`MIN` layers
+> exist: the second pass would read an *already-composited* Base and re-accumulate the deltas
+> (e.g. an `ADD` layer would apply twice). v1 ships with Base aliased on purpose (the memory
+> win, and identity correctness for load + a single flatten). **Before Phase 4's live
+> per-stroke re-compositing lands, the Base layer must own its own source image** so the
+> composite *target* (`region->_height_map`) and the Base *source* are distinct buffers.
+> Options: un-alias the Base (deep-copy its tile) the first time a non-Base layer is added, or
+> always give Base its own buffer and treat the region image purely as the composite output.
+> A REPLACE-only stack stays safe under aliasing because REPLACE overwrites rather than
+> accumulates, but don't rely on that — the un-alias fix is the clean solution.
 
 ### 5.2 When compositing runs
 
@@ -468,14 +496,20 @@ Notes:
 
 Each phase is independently testable and leaves `main` shippable.
 
-1. **Core classes, no UX.** `Pasture3DLayer` (start with `_tile_size = region_size`, RGF
+1. ✅ **Core classes, no UX.** `Pasture3DLayer` (start with `_tile_size = region_size`, RGF
    tiles), `Pasture3DLayerStack`, bound to GDScript. `Pasture3DData` holds an optional
-   stack; `load_directory` synthesizes the Base layer. No behaviour change yet.
-2. **Compositing.** Implement `composite_region(loc, dirty_rect)` + REPLACE/ADD/MAX/MIN.
+   stack; `load_directory` synthesizes the Base layer. No behaviour change yet. **(Done.)**
+2. ✅ **Compositing.** Implement `composite_region(loc, dirty_rect)` + REPLACE/ADD/MAX/MIN.
    Wire `update_maps` to read composited images. Unit-test: Base-only composite == identity
-   with today's output.
-3. **Persistence.** Save/load `pasture3d_layers*.res`; round-trip test; verify a build with
-   no layer files is byte-identical in the runtime `pasture3d_<loc>.res`.
+   with today's output. **(Done — see `composite_region`/`composite_regions` in
+   `pasture_3d_data.cpp` and `test_layer_compositing` in `unit_testing.cpp`; surfaced the
+   Base-aliasing caveat in §5.1.)**
+3. ✅ **Persistence.** Save/load `pasture3d_layers*.res`; round-trip test; verify a build with
+   no layer files is byte-identical in the runtime `pasture3d_<loc>.res`. **(Done — `save_layers`/
+   `load_layers` in `pasture_3d_data.cpp`, wired into `save_directory`/`load_directory`;
+   `Util::location_to_layer_filename`; `test_layer_persistence` in `unit_testing.cpp`, 24/24 PASSED.
+   Manifest + per-region split implemented directly; Base pixels never serialized, re-aliased on
+   load; load does NOT re-composite to avoid the §5.1 ADD double-apply.)**
 4. **Editor routing + Layers panel.** Active-layer sculpting, visibility/opacity/blend/lock,
    reorder; undo/redo of layer tiles. This is the bulk of UI work.
 5. **Tool API + RoadPastureConnector.** `*_on_layer` / owned-layer methods; migrate the

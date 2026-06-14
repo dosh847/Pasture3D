@@ -22,5 +22,7 @@
 	} while (0)
 
 void test_differs();
+void test_layer_compositing();
+void test_layer_persistence();
 
 #endif // UNIT_TESTING_H

@@ -33,8 +33,14 @@ public:
 	static Vector2i filename_to_location(const String &p_filename);
 	static Vector2i string_to_location(const String &p_string);
 	static String location_to_filename(const Vector2i &p_region_loc);
+	static String location_to_layer_filename(const Vector2i &p_region_loc);
 	static String location_to_string(const Vector2i &p_region_loc);
 	static PackedStringArray get_files(const String &p_dir, const String &p_glob = "*");
+
+	// Editor-only non-destructive layer files (see PASTURE3D_LAYERS_GUIDE.md §7.1). The manifest holds
+	// ordered layer metadata; per-region slices hold each upper layer's sparse pixel tiles.
+	static inline const char *LAYER_MANIFEST_FILENAME = "pasture3d_layers.res";
+	static inline const char *LAYER_FILE_PREFIX = "pasture3d_layers";
 
 	// Image operations
 	static Ref<Image> black_to_alpha(const Ref<Image> &p_image);

@@ -19,6 +19,7 @@
 #include "logger.h"
 #include "pasture_3d.h"
 #include "pasture_3d_util.h"
+#include "unit_testing.h"
 
 // Initialize static member variable
 Pasture3D::DebugLevel Pasture3D::debug_level{ ERROR };
@@ -1235,9 +1236,10 @@ void Pasture3D::_notification(const int p_what) {
 		case NOTIFICATION_READY: {
 			// Node is ready
 			LOG(INFO, "NOTIFICATION_READY");
-			// Optional: Run the testing suite
-			//#include "unit_testing.h"
+			// Optional: Run the testing suite (unit_testing.h included at top of this file).
 			//test_differs();
+			//test_layer_compositing();
+			//test_layer_persistence();
 
 			// Clear editor textures - also see ENTER_TREE
 			if (_free_editor_textures && !IS_EDITOR && _assets.is_valid()) {

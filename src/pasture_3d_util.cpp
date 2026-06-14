@@ -103,6 +103,11 @@ String Pasture3DUtil::location_to_filename(const Vector2i &p_region_loc) {
 	return "pasture3d" + location_to_string(p_region_loc) + ".res";
 }
 
+// Expects a v2i(-1,2) and returns pasture3d_layers-01_02.res (the per-region layer pixel slice)
+String Pasture3DUtil::location_to_layer_filename(const Vector2i &p_region_loc) {
+	return String(LAYER_FILE_PREFIX) + location_to_string(p_region_loc) + ".res";
+}
+
 // Expects a v2i(-1,2) and returns -01_02
 String Pasture3DUtil::location_to_string(const Vector2i &p_region_loc) {
 	const String POS_REGION_FORMAT = "_%02d";
@@ -548,6 +553,7 @@ void Pasture3DUtil::_bind_methods() {
 	// String functions
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("filename_to_location", "filename"), &Pasture3DUtil::filename_to_location);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("location_to_filename", "region_location"), &Pasture3DUtil::location_to_filename);
+	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("location_to_layer_filename", "region_location"), &Pasture3DUtil::location_to_layer_filename);
 
 	// Image handling
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("black_to_alpha", "image"), &Pasture3DUtil::black_to_alpha);

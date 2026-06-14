@@ -1,6 +1,14 @@
 // Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 
+#include <godot_cpp/classes/dir_access.hpp>
+#include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/resource_loader.hpp>
+
 #include "unit_testing.h"
+#include "pasture_3d_data.h"
+#include "pasture_3d_layer.h"
+#include "pasture_3d_layer_stack.h"
+#include "pasture_3d_region.h"
 #include "pasture_3d_util.h"
 
 void test_differs() {
@@ -166,4 +174,246 @@ void test_differs() {
 	}
 
 	UtilityFunctions::print("=== End differs tests ===");
+}
+
+// Phase 2 acceptance test (PASTURE3D_LAYERS_GUIDE.md §10.2): with only the synthesized Base layer
+// present, compositing must be an identity — the region height map is byte-identical afterwards.
+// Also sanity-checks an ADD layer to confirm covered pixels blend and uncovered ones pass through.
+void test_layer_compositing() {
+	UtilityFunctions::print("=== Testing layer compositing ===");
+
+	const int region_size = 64; // Smallest valid region size; keeps the test fast.
+	const Vector2i loc(0, 0);
+
+	// Build a standalone Pasture3DData with one region. add_region(..., false) skips the GPU/terrain
+	// path, so no Pasture3D node or RenderingServer is needed.
+	Pasture3DData *data = memnew(Pasture3DData);
+	Ref<Pasture3DRegion> region;
+	region.instantiate();
+	region->set_region_size(region_size);
+	region->set_location(loc);
+	data->add_region(region, false);
+
+	Ref<Image> height_map = region->get_height_map();
+	const bool have_map = height_map.is_valid() && height_map->get_format() == Image::FORMAT_RF;
+	EXPECT_TRUE(have_map);
+	if (!have_map) {
+		memdelete(data);
+		return;
+	}
+
+	// Fill with a deterministic, varied pattern so an identity result is meaningful.
+	for (int y = 0; y < region_size; y++) {
+		for (int x = 0; x < region_size; x++) {
+			real_t h = real_t(x) * 0.5f - real_t(y) * 0.25f + real_t((x * 7 + y * 13) % 17);
+			height_map->set_pixel(x, y, Color(h, 0.f, 0.f, 1.f));
+		}
+	}
+	PackedByteArray original = height_map->get_data();
+
+	// Synthesize a Base-only stack whose dense Base layer aliases the region height map, exactly as
+	// Pasture3DData::_synthesize_base_layer does on load.
+	Ref<Pasture3DLayerStack> stack;
+	stack.instantiate();
+	Ref<Pasture3DLayer> base;
+	base.instantiate();
+	base->set_map_type(TYPE_HEIGHT);
+	base->set_tile_size(region_size);
+	base->set_blend_mode(Pasture3DLayer::REPLACE);
+	base->set_region_image(loc, height_map);
+	stack->add_layer_ref(base);
+	data->set_layer_stack(stack);
+
+	// Acceptance: Base-only composite is byte-identical to the input height map.
+	data->composite_region(loc, Rect2i(), false);
+	PackedByteArray composited = height_map->get_data();
+	EXPECT_TRUE(composited == original);
+
+	// Sanity: an ADD layer raises a covered pixel by its value and leaves an uncovered pixel alone.
+	Ref<Pasture3DLayer> detail;
+	detail.instantiate();
+	detail->set_map_type(TYPE_HEIGHT);
+	detail->set_tile_size(region_size);
+	detail->set_blend_mode(Pasture3DLayer::ADD);
+	const Vector2i covered(10, 10);
+	const Vector2i uncovered(20, 20);
+	detail->set_sample(loc, covered, 5.f, 1.f);
+	stack->add_layer_ref(detail);
+	const real_t base_h = height_map->get_pixelv(covered).r;
+	const real_t base_u = height_map->get_pixelv(uncovered).r;
+	data->composite_region(loc, Rect2i(), false);
+	EXPECT_TRUE(Math::is_equal_approx(height_map->get_pixelv(covered).r, base_h + 5.f));
+	EXPECT_TRUE(Math::is_equal_approx(height_map->get_pixelv(uncovered).r, base_u));
+
+	memdelete(data);
+	UtilityFunctions::print("=== End layer compositing tests ===");
+}
+
+// Phase 3 acceptance tests (PASTURE3D_LAYERS_GUIDE.md §10 phase 3 / PASTURE3D_LAYERS_PHASE3.md):
+//   1. Runtime files unchanged — the saved region image is byte-identical regardless of the stack.
+//   2. Stack round-trip — save, clear, load; layer count, metadata, and sampled (value, weight)
+//      survive, and the Base layer is re-aliased onto the loaded region image (not a stale copy).
+//   3. No-layer-files — a plain (Base-only) terrain writes no pasture3d_layers* files, and load_layers
+//      reports nothing to load so the caller synthesizes a single Base layer as before.
+// Like test_layer_compositing, this avoids a Pasture3D node by driving save_layers/load_layers and
+// region->save directly; it never calls save_directory/load_directory (which require _terrain).
+void test_layer_persistence() {
+	UtilityFunctions::print("=== Testing layer persistence ===");
+
+	const int region_size = 64;
+	const Vector2i loc(0, 0);
+	const Vector2i covered(10, 10);
+	const Vector2i covered2(40, 33);
+	const Vector2i uncovered(20, 20);
+
+	// A clean temp directory under user:// for the round-trip.
+	const String dir = "user://p3d_layer_test";
+	Ref<DirAccess> da = DirAccess::open("user://");
+	if (da.is_valid()) {
+		da->make_dir_recursive("p3d_layer_test");
+	}
+	const String region_path = dir + String("/") + Util::location_to_filename(loc);
+	const String manifest_path = dir + String("/") + Util::LAYER_MANIFEST_FILENAME;
+	const String slice_path = dir + String("/") + Util::location_to_layer_filename(loc);
+	Ref<DirAccess> dda = DirAccess::open(dir);
+	if (dda.is_valid()) {
+		for (const String &f : Array::make(Util::location_to_filename(loc), String(Util::LAYER_MANIFEST_FILENAME), Util::location_to_layer_filename(loc))) {
+			if (dda->file_exists(f)) {
+				dda->remove(f);
+			}
+		}
+	}
+
+	// Build a region with a deterministic height pattern and a Base + ADD "Detail" stack.
+	Pasture3DData *data = memnew(Pasture3DData);
+	Ref<Pasture3DRegion> region;
+	region.instantiate();
+	region->set_region_size(region_size);
+	region->set_location(loc);
+	data->add_region(region, false);
+	Ref<Image> height_map = region->get_height_map();
+	EXPECT_TRUE(height_map.is_valid() && height_map->get_format() == Image::FORMAT_RF);
+	if (height_map.is_null()) {
+		memdelete(data);
+		return;
+	}
+	for (int y = 0; y < region_size; y++) {
+		for (int x = 0; x < region_size; x++) {
+			real_t h = real_t(x) * 0.5f - real_t(y) * 0.25f + real_t((x * 7 + y * 13) % 17);
+			height_map->set_pixel(x, y, Color(h, 0.f, 0.f, 1.f));
+		}
+	}
+	region->set_modified(true);
+	PackedByteArray original = height_map->get_data();
+
+	Ref<Pasture3DLayerStack> stack;
+	stack.instantiate();
+	Ref<Pasture3DLayer> base;
+	base.instantiate();
+	base->set_layer_name("Base");
+	base->set_map_type(TYPE_HEIGHT);
+	base->set_tile_size(region_size);
+	base->set_blend_mode(Pasture3DLayer::REPLACE);
+	base->set_region_image(loc, height_map);
+	stack->add_layer_ref(base);
+
+	Ref<Pasture3DLayer> detail;
+	detail.instantiate();
+	detail->set_layer_name("Detail");
+	detail->set_map_type(TYPE_HEIGHT);
+	detail->set_tile_size(region_size);
+	detail->set_blend_mode(Pasture3DLayer::ADD);
+	detail->set_opacity(0.5f);
+	detail->set_sample(loc, covered, 5.f, 0.75f);
+	detail->set_sample(loc, covered2, -3.f, 1.f);
+	stack->add_layer_ref(detail);
+	data->set_layer_stack(stack);
+
+	// Save the runtime region file and the layer stack.
+	region->save(region_path, false);
+	data->save_layers(dir);
+	EXPECT_TRUE(FileAccess::file_exists(manifest_path));
+	EXPECT_TRUE(FileAccess::file_exists(slice_path));
+
+	// (1) Runtime data unchanged: save_layers must not touch the region image.
+	EXPECT_TRUE(height_map->get_data() == original);
+
+	// Reload region from disk into a fresh data, then load the layer stack on top.
+	Pasture3DData *data2 = memnew(Pasture3DData);
+	Ref<Pasture3DRegion> region2 = ResourceLoader::get_singleton()->load(region_path, "Pasture3DRegion", ResourceLoader::CACHE_MODE_IGNORE);
+	EXPECT_TRUE(region2.is_valid());
+	if (region2.is_null()) {
+		memdelete(data);
+		memdelete(data2);
+		return;
+	}
+	region2->set_location(loc);
+	data2->add_region(region2, false);
+	Ref<Image> height_map2 = region2->get_height_map();
+
+	// (1 cont.) The loaded runtime image matches the saved one byte-for-byte.
+	EXPECT_TRUE(height_map2->get_data() == original);
+
+	const bool loaded = data2->load_layers(dir);
+	EXPECT_TRUE(loaded);
+
+	// (2) Stack round-trip: count, metadata, and sampled (value, weight) survive.
+	Ref<Pasture3DLayerStack> stack2 = data2->get_layer_stack();
+	EXPECT_TRUE(stack2.is_valid());
+	EXPECT_TRUE(data2->has_layer_stack());
+	EXPECT_TRUE(stack2->get_layer_count() == 2);
+	Ref<Pasture3DLayer> detail2 = stack2->get_layer(1);
+	EXPECT_TRUE(detail2.is_valid());
+	EXPECT_TRUE(detail2->get_layer_name() == String("Detail"));
+	EXPECT_TRUE(detail2->get_blend_mode() == Pasture3DLayer::ADD);
+	EXPECT_TRUE(Math::is_equal_approx(detail2->get_opacity(), 0.5f));
+	EXPECT_TRUE(Math::is_equal_approx(detail2->get_value(loc, covered), 5.f));
+	EXPECT_TRUE(Math::is_equal_approx(detail2->get_weight(loc, covered), 0.75f));
+	EXPECT_TRUE(Math::is_equal_approx(detail2->get_value(loc, covered2), -3.f));
+	EXPECT_TRUE(Math::is_equal_approx(detail2->get_weight(loc, covered2), 1.f));
+	// Uncovered pixels round-trip as uncovered: weight 0 (the signal compositing checks). With one
+	// region-sized tile the whole region is allocated, so the value is the zero fill, not NaN.
+	EXPECT_TRUE(detail2->get_weight(loc, uncovered) == 0.f);
+	EXPECT_TRUE(detail2->get_value(loc, uncovered) == 0.f);
+
+	// (2 cont.) The Base layer aliases the loaded region image, so editing the image is visible
+	// through the layer — proving it was re-aliased, not restored from a stale copy.
+	Ref<Pasture3DLayer> base2 = stack2->get_layer(0);
+	EXPECT_TRUE(base2.is_valid());
+	height_map2->set_pixel(5, 5, Color(123.f, 0.f, 0.f, 1.f));
+	EXPECT_TRUE(Math::is_equal_approx(base2->get_value(loc, Vector2i(5, 5)), 123.f));
+
+	// (3) No-layer-files: a Base-only stack writes nothing and is removed if stale; load reports none.
+	const String plain_dir = "user://p3d_layer_test_plain";
+	if (da.is_valid()) {
+		da->make_dir_recursive("p3d_layer_test_plain");
+	}
+	Ref<DirAccess> pda = DirAccess::open(plain_dir);
+	if (pda.is_valid() && pda->file_exists(Util::LAYER_MANIFEST_FILENAME)) {
+		pda->remove(Util::LAYER_MANIFEST_FILENAME);
+	}
+	Pasture3DData *data3 = memnew(Pasture3DData);
+	Ref<Pasture3DRegion> region3;
+	region3.instantiate();
+	region3->set_region_size(region_size);
+	region3->set_location(loc);
+	data3->add_region(region3, false);
+	Ref<Pasture3DLayerStack> base_only;
+	base_only.instantiate();
+	Ref<Pasture3DLayer> b3;
+	b3.instantiate();
+	b3->set_layer_name("Base");
+	b3->set_tile_size(region_size);
+	b3->set_blend_mode(Pasture3DLayer::REPLACE);
+	b3->set_region_image(loc, region3->get_height_map());
+	base_only->add_layer_ref(b3);
+	data3->set_layer_stack(base_only);
+	data3->save_layers(plain_dir);
+	EXPECT_FALSE(FileAccess::file_exists(plain_dir + String("/") + Util::LAYER_MANIFEST_FILENAME));
+	EXPECT_FALSE(data3->load_layers(plain_dir));
+
+	memdelete(data);
+	memdelete(data2);
+	memdelete(data3);
+	UtilityFunctions::print("=== End layer persistence tests ===");
 }
