@@ -1,8 +1,8 @@
 [gd_scene format=3 uid="uid://b3p2nfbyo6nux"]
 
 [ext_resource type="Script" uid="uid://d2u4g1iuy1uuo" path="res://demo/src/SplitScreenTest.gd" id="1_splittest"]
-[ext_resource type="Terrain3DMaterial" uid="uid://ccvn15t8km0ft" path="res://demo/data/M_terrain.tres" id="2_mat"]
-[ext_resource type="Terrain3DAssets" uid="uid://dal3jhw6241qg" path="res://demo/data/assets.tres" id="3_assets"]
+[ext_resource type="Pasture3DMaterial" uid="uid://ccvn15t8km0ft" path="res://demo/data/M_terrain.tres" id="2_mat"]
+[ext_resource type="Pasture3DAssets" uid="uid://dal3jhw6241qg" path="res://demo/data/assets.tres" id="3_assets"]
 
 [sub_resource type="World3D" id="World3D_shared"]
 
@@ -37,7 +37,7 @@ handle_input_locally = false
 size = Vector2i(574, 322)
 render_target_update_mode = 4
 
-[node name="Terrain3D" type="Terrain3D" parent="Grid/VC0/VP0" unique_id=1489496715]
+[node name="Pasture3D" type="Pasture3D" parent="Grid/VC0/VP0" unique_id=1489496715]
 data_directory = "res://demo/data"
 material = ExtResource("2_mat")
 assets = ExtResource("3_assets")

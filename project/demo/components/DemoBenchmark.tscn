@@ -4,9 +4,9 @@
 [ext_resource type="PackedScene" uid="uid://d2jihfohphuue" path="res://demo/components/UI.tscn" id="2_3obxr"]
 [ext_resource type="PackedScene" uid="uid://bb2lp50sjndus" path="res://demo/components/Environment.tscn" id="3_b7ioy"]
 [ext_resource type="PackedScene" uid="uid://domhm87hbhbg1" path="res://demo/components/Player.tscn" id="5_bwggt"]
-[ext_resource type="Terrain3DAssets" uid="uid://dal3jhw6241qg" path="res://demo/data/assets.tres" id="6_3r2au"]
+[ext_resource type="Pasture3DAssets" uid="uid://dal3jhw6241qg" path="res://demo/data/assets.tres" id="6_3r2au"]
 
-[sub_resource type="Terrain3DMaterial" id="Terrain3DMaterial_klrp5"]
+[sub_resource type="Pasture3DMaterial" id="Pasture3DMaterial_klrp5"]
 _shader_parameters = {
 "bias_distance": 512.0,
 "blend_sharpness": 0.87,
@@ -30,9 +30,9 @@ script = ExtResource("1_2gjn4")
 [node name="Player" parent="." instance=ExtResource("5_bwggt")]
 transform = Transform3D(0.134125, 0, -0.990965, 0, 1, 0, 0.990965, 0, 0.134125, 216.455, 103.968, -1835.34)
 
-[node name="Terrain3D" type="Terrain3D" parent="."]
+[node name="Pasture3D" type="Pasture3D" parent="."]
 data_directory = "res://demo/data"
-material = SubResource("Terrain3DMaterial_klrp5")
+material = SubResource("Pasture3DMaterial_klrp5")
 assets = ExtResource("6_3r2au")
 collision_mask = 3
 displacement_sharpness = 0.5

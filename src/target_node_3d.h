@@ -8,7 +8,7 @@
 #include "constants.h"
 
 class TargetNode3D {
-	CLASS_NAME_STATIC("Terrain3DTargetNode3D");
+	CLASS_NAME_STATIC("Pasture3DTargetNode3D");
 
 private:
 	uint64_t _instance_id = 0;

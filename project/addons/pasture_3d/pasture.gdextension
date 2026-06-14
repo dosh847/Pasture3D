@@ -1,0 +1,32 @@
+[configuration]
+
+entry_symbol = "pasture_3d_init"
+compatibility_minimum = 4.5
+
+[icons]
+
+Pasture3D = "res://addons/pasture_3d/icons/pasture3d.svg"
+
+[libraries]
+
+windows.debug.x86_64 = "res://addons/pasture_3d/bin/libpasture.windows.debug.x86_64.dll"
+windows.release.x86_64 = "res://addons/pasture_3d/bin/libpasture.windows.release.x86_64.dll"
+
+linux.debug.x86_64 = "res://addons/pasture_3d/bin/libpasture.linux.debug.x86_64.so"
+linux.release.x86_64 = "res://addons/pasture_3d/bin/libpasture.linux.release.x86_64.so"
+linux.debug.arm64 = "res://addons/pasture_3d/bin/libpasture.linux.debug.arm64.so"
+linux.release.arm64 = "res://addons/pasture_3d/bin/libpasture.linux.release.arm64.so"
+linux.debug.rv64 = "res://addons/pasture_3d/bin/libpasture.linux.debug.rv64.so"
+linux.release.rv64 = "res://addons/pasture_3d/bin/libpasture.linux.release.rv64.so"
+
+macos.debug = "res://addons/pasture_3d/bin/libpasture.macos.debug.framework"
+macos.release = "res://addons/pasture_3d/bin/libpasture.macos.release.framework"
+
+android.debug.arm64 = "res://addons/pasture_3d/bin/libpasture.android.debug.arm64.so"
+android.release.arm64 = "res://addons/pasture_3d/bin/libpasture.android.release.arm64.so"
+
+ios.debug = "res://addons/pasture_3d/bin/libpasture.ios.debug.universal.dylib"
+ios.release = "res://addons/pasture_3d/bin/libpasture.ios.release.universal.dylib"
+
+web.debug = "res://addons/pasture_3d/bin/libpasture.web.debug.wasm32.wasm"
+web.release = "res://addons/pasture_3d/bin/libpasture.web.release.wasm32.wasm"

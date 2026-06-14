@@ -8,7 +8,7 @@
 #include "constants.h"
 
 class GeneratedTexture {
-	CLASS_NAME_STATIC("Terrain3DGenTex");
+	CLASS_NAME_STATIC("Pasture3DGenTex");
 
 private:
 	RID _rid = RID();
