@@ -1,6 +1,6 @@
 # Pasture3D — multi-camera split-screen clipmap test.
 #
-# Four SubViewports share ONE World3D and therefore ONE Terrain3D (one Terrain3DData in VRAM).
+# Four SubViewports share ONE World3D and therefore ONE Pasture3D (one Pasture3DData in VRAM).
 # Each viewport has its own Camera3D; terrain.set_cameras([...]) renders a separate geo-clipmap per
 # camera, each snapped + LOD'd to its own camera, isolated by render layer via per-camera cull_mask.
 # Gameplay markers live on layers 1-16 so every viewport sees them — only the terrain LOD is per-view.
@@ -31,7 +31,7 @@ const MARKER_COLORS := [
 	Color(1.0, 0.85, 0.2), # yellow
 ]
 
-@onready var terrain: Terrain3D = $Grid/VC0/VP0/Terrain3D
+@onready var terrain: Pasture3D = $Grid/VC0/VP0/Pasture3D
 @onready var _viewports: Array[SubViewport] = [
 	$Grid/VC0/VP0,
 	$Grid/VC1/VP1,
@@ -45,7 +45,7 @@ var _time: float = 0.0
 
 func _ready() -> void:
 	# Collision is built once for the whole terrain, independent of cameras (no one falls through).
-	terrain.collision_mode = Terrain3DCollision.FULL_GAME
+	terrain.collision_mode = Pasture3DCollision.FULL_GAME
 
 	for i in PLAYER_COUNT:
 		var focus: Vector3 = FOCUS_POINTS[i]
@@ -75,7 +75,7 @@ func _ready() -> void:
 		cam.current = true
 		_cameras.append(cam)
 
-	# The whole point of the fork: one node, N cameras, one shared Terrain3DData.
+	# The whole point of the fork: one node, N cameras, one shared Pasture3DData.
 	terrain.set_cameras(_cameras)
 	_update_cameras()
 	_build_overlay()
@@ -125,7 +125,7 @@ func _build_overlay() -> void:
 	label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.66))
 	label.add_theme_constant_override("shadow_offset_x", 1)
 	label.add_theme_constant_override("shadow_offset_y", 1)
-	label.text = "Pasture3D split-screen test — %d cameras, 1 shared Terrain3DData\n" % PLAYER_COUNT \
+	label.text = "Pasture3D split-screen test — %d cameras, 1 shared Pasture3DData\n" % PLAYER_COUNT \
 		+ "Each quadrant keeps high-detail terrain around its own orbiting player.\n" \
 		+ "F7 / Esc: back to demo     F8: quit"
 	layer.add_child(label)

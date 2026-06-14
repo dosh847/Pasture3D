@@ -16,7 +16,7 @@ using namespace godot;
 #endif
 
 // File Paths (e.g. extras)
-#define OCEAN_MATERIAL_PATH "res://addons/terrain_3d/extras/shaders/M_ocean.tres"
+#define OCEAN_MATERIAL_PATH "res://addons/pasture_3d/extras/shaders/M_ocean.tres"
 
 // Engine Shortcuts
 #define RS RenderingServer::get_singleton()
@@ -37,7 +37,7 @@ static const Color COLOR_WHITE{ 1.0f, 1.0f, 1.0f, 1.0f };
 #define FLT_MAX __FLT_MAX__
 #endif
 
-// Terrain3D::_warnings is uint8_t
+// Pasture3D::_warnings is uint8_t
 #define WARN_MISMATCHED_SIZE 0x01
 #define WARN_MISMATCHED_FORMAT 0x02
 #define WARN_MISMATCHED_MIPMAPS 0x04

@@ -1,7 +1,7 @@
 // Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 
 #include "unit_testing.h"
-#include "terrain_3d_util.h"
+#include "pasture_3d_util.h"
 
 void test_differs() {
 	UtilityFunctions::print("=== Testing differs function ===");

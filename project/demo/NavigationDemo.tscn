@@ -6,10 +6,10 @@
 [ext_resource type="PackedScene" uid="uid://djhl3foqkj4e2" path="res://demo/components/Tunnel.tscn" id="5_2lvlr"]
 [ext_resource type="PackedScene" uid="uid://d2jihfohphuue" path="res://demo/components/UI.tscn" id="5_rc7e2"]
 [ext_resource type="NavigationMesh" uid="uid://yf3fu23666k8" path="res://demo/data/nav_mesh.res" id="8_6jfdr"]
-[ext_resource type="Terrain3DAssets" uid="uid://dal3jhw6241qg" path="res://demo/data/assets.tres" id="10_qmhh8"]
+[ext_resource type="Pasture3DAssets" uid="uid://dal3jhw6241qg" path="res://demo/data/assets.tres" id="10_qmhh8"]
 [ext_resource type="PackedScene" uid="uid://di5fovhcyd7re" path="res://demo/components/Enemy.tscn" id="12_b2xl8"]
 
-[sub_resource type="Terrain3DMaterial" id="Terrain3DMaterial_s5mq5"]
+[sub_resource type="Pasture3DMaterial" id="Pasture3DMaterial_s5mq5"]
 _shader_parameters = {
 "_mouse_layer": 2147483648,
 "auto_base_texture": 0,
@@ -55,9 +55,9 @@ target = NodePath("../Player")
 [node name="NavigationRegion3D" type="NavigationRegion3D" parent="."]
 navigation_mesh = ExtResource("8_6jfdr")
 
-[node name="Terrain3D" type="Terrain3D" parent="NavigationRegion3D"]
+[node name="Pasture3D" type="Pasture3D" parent="NavigationRegion3D"]
 data_directory = "res://demo/data"
-material = SubResource("Terrain3DMaterial_s5mq5")
+material = SubResource("Pasture3DMaterial_s5mq5")
 assets = ExtResource("10_qmhh8")
 collision_mask = 3
 mesh_size = 64

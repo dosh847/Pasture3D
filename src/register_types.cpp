@@ -7,27 +7,35 @@
 #include <godot_cpp/core/class_db.hpp>
 
 #include "register_types.h"
-#include "terrain_3d.h"
-#include "terrain_3d_editor.h"
+#include "pasture_3d.h"
+#include "pasture_3d_compat.h"
+#include "pasture_3d_editor.h"
 
-void initialize_terrain_3d_module(ModuleInitializationLevel p_level) {
+void initialize_pasture_3d_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
-	ClassDB::register_class<Terrain3D>();
-	ClassDB::register_class<Terrain3DAssets>();
-	ClassDB::register_class<Terrain3DData>();
-	ClassDB::register_class<Terrain3DEditor>();
-	ClassDB::register_class<Terrain3DCollision>();
-	ClassDB::register_class<Terrain3DInstancer>();
-	ClassDB::register_class<Terrain3DMaterial>();
-	ClassDB::register_class<Terrain3DMeshAsset>();
+	ClassDB::register_class<Pasture3D>();
+	ClassDB::register_class<Pasture3DAssets>();
+	ClassDB::register_class<Pasture3DData>();
+	ClassDB::register_class<Pasture3DEditor>();
+	ClassDB::register_class<Pasture3DCollision>();
+	ClassDB::register_class<Pasture3DInstancer>();
+	ClassDB::register_class<Pasture3DMaterial>();
+	ClassDB::register_class<Pasture3DMeshAsset>();
+	ClassDB::register_class<Pasture3DRegion>();
+	ClassDB::register_class<Pasture3DTextureAsset>();
+	ClassDB::register_class<Pasture3DUtil>();
+
+	// Backward-compat: keep legacy Terrain3D* resource names loadable (see pasture_3d_compat.h).
 	ClassDB::register_class<Terrain3DRegion>();
+	ClassDB::register_class<Terrain3DMaterial>();
+	ClassDB::register_class<Terrain3DAssets>();
+	ClassDB::register_class<Terrain3DMeshAsset>();
 	ClassDB::register_class<Terrain3DTextureAsset>();
-	ClassDB::register_class<Terrain3DUtil>();
 }
 
-void uninitialize_terrain_3d_module(ModuleInitializationLevel p_level) {
+void uninitialize_pasture_3d_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
@@ -36,14 +44,14 @@ void uninitialize_terrain_3d_module(ModuleInitializationLevel p_level) {
 #ifdef GDEXTENSION
 extern "C" {
 // Initialization.
-GDExtensionBool GDE_EXPORT terrain_3d_init(
+GDExtensionBool GDE_EXPORT pasture_3d_init(
 		GDExtensionInterfaceGetProcAddress p_get_proc_address,
 		GDExtensionClassLibraryPtr p_library,
 		GDExtensionInitialization *r_initialization) {
 	GDExtensionBinding::InitObject init_obj(p_get_proc_address, p_library, r_initialization);
 
-	init_obj.register_initializer(initialize_terrain_3d_module);
-	init_obj.register_terminator(uninitialize_terrain_3d_module);
+	init_obj.register_initializer(initialize_pasture_3d_module);
+	init_obj.register_terminator(uninitialize_pasture_3d_module);
 	init_obj.set_minimum_library_initialization_level(MODULE_INITIALIZATION_LEVEL_SERVERS);
 
 	return init_obj.init();

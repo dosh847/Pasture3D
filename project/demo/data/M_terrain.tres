@@ -1,4 +1,4 @@
-[gd_resource type="Terrain3DMaterial" load_steps=4 format=3 uid="uid://ccvn15t8km0ft"]
+[gd_resource type="Pasture3DMaterial" format=3 uid="uid://ccvn15t8km0ft"]
 
 [sub_resource type="Gradient" id="Gradient_vr1m7"]
 offsets = PackedFloat32Array(0.2, 1)
@@ -49,7 +49,6 @@ _shader_parameters = {
 &"region_blend": 0.9600000456,
 &"shader_uniforms": null,
 &"shader_uniforms::auto_shader": null,
-&"shader_uniforms::displacement": null,
 &"shader_uniforms::dual_scaling": null,
 &"shader_uniforms::general": null,
 &"shader_uniforms::macro_variation": null,

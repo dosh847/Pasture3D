@@ -4,7 +4,7 @@
 
 #include "generated_texture.h"
 #include "logger.h"
-#include "terrain_3d.h"
+#include "pasture_3d.h"
 
 ///////////////////////////
 // Public Functions
@@ -26,7 +26,7 @@ void GeneratedTexture::clear() {
 
 RID GeneratedTexture::create(const TypedArray<Image> &p_layers) {
 	if (!p_layers.is_empty()) {
-		if (Terrain3D::debug_level >= DEBUG) {
+		if (Pasture3D::debug_level >= DEBUG) {
 			LOG(EXTREME, "RenderingServer creating Texture2DArray, layers size: ", p_layers.size());
 			for (int i = 0; i < p_layers.size(); i++) {
 				Ref<Image> img = p_layers[i];
