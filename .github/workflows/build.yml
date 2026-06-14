@@ -65,7 +65,7 @@ jobs:
             flags: threads=no
 
     steps:
-      - name: Checkout Terrain3D
+      - name: Checkout Pasture3D
         env:
             FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         uses: actions/checkout@v4
@@ -87,7 +87,7 @@ jobs:
           cache-name: ${{ matrix.identifier }}-${{ matrix.target }}
         continue-on-error: true
 
-      - name: Build Terrain3D
+      - name: Build Pasture3D
         env:
             SCONS_CACHE: "${{ github.workspace }}/.scons-cache/"
             TARGET: 'template_${{ matrix.target }}'
@@ -99,15 +99,15 @@ jobs:
         if: ${{ matrix.platform == 'windows' || matrix.platform == 'linux' }}
         shell: sh
         run: |
-          ls -l project/addons/terrain_3d/bin/
-          strip project/addons/terrain_3d/bin/libterrain.*
-          ls -l project/addons/terrain_3d/bin/
+          ls -l project/addons/pasture_3d/bin/
+          strip project/addons/pasture_3d/bin/libpasture.*
+          ls -l project/addons/pasture_3d/bin/
 
       - name: Prepare Files
         shell: sh
         run: |
           rm -v project/*.*
-          cp -v '${{ github.workspace }}/README.md' '${{ github.workspace }}/LICENSE.txt' ${{ github.workspace }}/project/addons/terrain_3d/
+          cp -v '${{ github.workspace }}/README.md' '${{ github.workspace }}/LICENSE.txt' ${{ github.workspace }}/project/addons/pasture_3d/
 
       - name: Upload Package
         env:
@@ -115,7 +115,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           include-hidden-files: true
-          name: t3d-${{ matrix.identifier }}-${{ matrix.target }}
+          name: p3d-${{ matrix.identifier }}-${{ matrix.target }}
           path: |
             ${{ github.workspace }}/project/
 
@@ -130,5 +130,5 @@ jobs:
         with:
           include-hidden-files: true
           name: ${{ github.event.repository.name }}
-          pattern: t3d-*
+          pattern: p3d-*
           delete-merged: true

@@ -13,7 +13,7 @@ jobs:
         arch: [x86_64]
 
     steps:
-      - name: Checkout Terrain3D
+      - name: Checkout Pasture3D
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -29,7 +29,7 @@ jobs:
           cache-name: ${{ matrix.platform }}-${{ matrix.target }}
         continue-on-error: true
 
-      - name: Build Terrain3D
+      - name: Build Pasture3D
         env:
             SCONS_CACHE: "${{ github.workspace }}/.scons-cache/"
             TARGET: 'template_${{ matrix.target }}'
@@ -41,17 +41,17 @@ jobs:
       - name: Prepare Files
         shell: sh
         run: |
-          ls -l project/addons/terrain_3d/bin/
-          strip project/addons/terrain_3d/bin/libterrain.*
-          ls -l project/addons/terrain_3d/bin/
+          ls -l project/addons/pasture_3d/bin/
+          strip project/addons/pasture_3d/bin/libpasture.*
+          ls -l project/addons/pasture_3d/bin/
           rm -v project/*.*
-          cp -v '${{ github.workspace }}/README.md' '${{ github.workspace }}/LICENSE.txt' ${{ github.workspace }}/project/addons/terrain_3d/
+          cp -v '${{ github.workspace }}/README.md' '${{ github.workspace }}/LICENSE.txt' ${{ github.workspace }}/project/addons/pasture_3d/
 
       - name: Upload Package
         uses: actions/upload-artifact@v4
         with:
           include-hidden-files: true
-          name: t3d-${{ matrix.platform }}-${{ matrix.arch }}-${{ matrix.target }}
+          name: p3d-${{ matrix.platform }}-${{ matrix.arch }}-${{ matrix.target }}
           path: |
             ${{ github.workspace }}/project/
   
@@ -64,5 +64,5 @@ jobs:
         with:
           include-hidden-files: true
           name: ${{ github.event.repository.name }}
-          pattern: t3d-*
+          pattern: p3d-*
           delete-merged: true
