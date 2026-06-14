@@ -27,5 +27,6 @@ void test_layer_persistence();
 void test_layer_idempotent_composite();
 void test_layer_undo_restore();
 void test_layer_base_persistence();
+void test_layer_road_connector();
 
 #endif // UNIT_TESTING_H

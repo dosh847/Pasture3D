@@ -512,9 +512,9 @@ Each phase is independently testable and leaves `main` shippable.
    load; load does NOT re-composite to avoid the §5.1 ADD double-apply.)**
 4. ✅ **Editor routing + Layers panel.** Active-layer sculpting, visibility/opacity/blend/lock,
    reorder; undo/redo of layer tiles. **(Done — see below.)**
-5. **Tool API + RoadPastureConnector.** `*_on_layer` / owned-layer methods; migrate the
+5. ✅ **Tool API + RoadPastureConnector.** `*_on_layer` / owned-layer methods; migrate the
    connector to a reserved "Roads" layer; confirm re-running roads is idempotent and base
-   sculpt survives.
+   sculpt survives. **(Done — see §10.5.)**
 6. **Sub-region tiling optimization.** Drop `_tile_size` to 64/128; verify memory win on a
    road-heavy scene. (Pure optimization — composite/coordinate code already abstracts it.)
 7. **(Later) Control & color layers.** Holes/texture/color layers using topmost-covered
@@ -557,6 +557,51 @@ Each phase is independently testable and leaves `main` shippable.
   the bound `Pasture3DData::layer_*` / `recomposite_layer` helpers, which un-alias and dirty-scope
   recomposite as needed. New Data binds: `is_layer_routing`, `layer_add`, `layer_duplicate`,
   `layer_remove`, `layer_move`, `recomposite_layer`.
+
+### 10.5 Phase 5 implementation notes (done)
+
+- **Tool-API methods on `Pasture3DData`** (bound in `_bind_methods`, declared in the "Tool API" block of
+  `pasture_3d_data.h`, implemented after `composite_regions` in `pasture_3d_data.cpp`):
+  `create_owned_layer(owner_id, name, blend_mode)`, `find_layer_by_owner`, `set_height_on_layer`,
+  `add_height_on_layer`, `get_layer_height`, `clear_layer_in_area(layer_id, AABB)`, `get_layer_stack_size`,
+  `set_active_layer` / `get_active_layer`. A private `_global_to_region_pixel(pos, &region_loc)` reuses the
+  `set_pixel` descale math (region_loc + clamped region-local vertex) so the writes line up with the sculpt path.
+- **Write path.** `set_height_on_layer` resolves the layer, writes `layer->set_sample(region_loc, px, height,
+  weight)`, then **dirty-scoped `composite_region(loc, Rect2i(px, 1), /*update=*/false)`** so the region image
+  is live without a GPU upload — the tool calls `update_maps(TYPE_HEIGHT)` once at the end. It also marks the
+  region `set_modified(true)` so the flattened result persists on save (matching the old destructive `set_height`).
+  `add_height_on_layer` accumulates within the layer (uncovered reads as 0). **Backward-compat:** a null stack or
+  invalid `layer_id` falls back to `set_height` (`add_height_on_layer` → `set_height(pos, get_height+delta)`), so
+  plain terrains and pre-layers builds keep working.
+- **`create_owned_layer` is idempotent by `owner_id`:** `ensure_layer_stack()`, then re-use an existing layer
+  with that owner, else `add_layer` + mark `reserved` + set `owner_id`; un-aliases the Base when it is the first
+  non-Base layer (so routing turns on and live re-compositing stays idempotent — §5.1). Reserved ⇒ user sculpt
+  strokes on it are blocked (§6).
+- **`clear_layer_in_area` is region-granular for v1** (settled decision; sub-tile-precise clears are phase 6):
+  for every region the world-space AABB overlaps, `layer->clear_region(loc)` then a full `composite_region` so
+  the dropped footprint falls back to what's below. ⚠ **Partial-refresh caveat:** because the clear is
+  region-granular, an auto-refresh of a subset of roads clears whole regions and only repaints that subset, so a
+  *different* road sharing a region is wiped until the next full refresh. `do_full_refresh` (the Refresh button)
+  bundles all segments/intersections, so a full refresh always self-heals. Acceptable for v1; phase 6 sub-tiling fixes it.
+- **Road blend = `REPLACE` + coverage weight (settled §11.2).** The connector authors absolute road height; the
+  shoulder `edge_falloff` becomes a coverage weight `1 - ease(factor, -1.5)` (1 on the road easing to 0), and the
+  REPLACE composite `lerp(below, road_y, weight)` feathers into whatever is underneath — **removing the old
+  `get_height`→`_lerp_smoothed_height` read-modify-write** on the live-layer path.
+- **`road_connector.gd` migration.** New `@export var target_layer_name := "Roads"`; `_ensure_layer()` resolves
+  the reserved layer via `create_owned_layer(str(get_path()), target_layer_name, REPLACE)` (stable owner id =
+  node path). `refresh_roads` calls `_ensure_layer()` then `clear_layer_in_area(_affected_aabb(mesh_parents))`
+  before repainting. Every former `terrain.data.set_height(pos, h)` (approx + raycast + intersection) now routes
+  through `_set_road_height(pos, h, weight)` → `set_height_on_layer` (or `set_height` when no layer). Falloff
+  branches pass `_falloff_weight(factor)`. **Hole carving stays on the composited control map** (`set_control_hole`,
+  `bake_holes` unchanged — §11.4, control layers are phase 7). If the build lacks `create_owned_layer`
+  (`has_method` check) the connector keeps writing the Base directly — plain-terrain compatibility preserved.
+- **Tests** (`unit_testing.{h,cpp}`, re-commented call in `pasture_3d.cpp` READY): `test_layer_road_connector`
+  proves (1) `create_owned_layer` is idempotent by `owner_id` (same idx, reserved, routing on); (2)
+  `set_height_on_layer` + composite places the road (REPLACE w=1) and feathers a shoulder (w=0.5 ⇒ lerp), and a
+  `clear_layer_in_area` + identical repaint reproduces the same composite; (3) a Base hand-sculpt under the road
+  survives the clear + road re-run; (4) the no-stack fallback writes the Base directly. Standalone like the other
+  layer tests; it sets `_region_size`/`_vertex_spacing` via a `friend` declaration on `Pasture3DData` (the tool
+  API needs the descale math a Pasture3D node normally supplies). All 22 checks PASSED headless on Godot 4.6.2.
 
 ---
 

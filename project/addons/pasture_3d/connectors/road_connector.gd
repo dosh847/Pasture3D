@@ -33,6 +33,11 @@ const IntersectionNGon = preload("res://addons/road-generator/procgen/intersecti
 const PASTURE_3D_MAPTYPE_HEIGHT:int = 0 # Pasture3DData.MapType.TYPE_HEIGHT
 const PASTURE_3D_MAPTYPE_CONTROL:int = 1 # Pasture3DData.MapType.TYPE_CONTROL
 
+## Blend mode index, matching Pasture3DLayer.BlendMode (REPLACE = 0). The road authors absolute
+## height; its edge falloff is expressed as coverage weight, so the composite feathers the shoulder
+## into whatever is underneath (PASTURE3D_LAYERS_GUIDE.md §3.1, §11.2). Hardcoded to avoid an enum dep.
+const PASTURE_3D_BLEND_REPLACE:int = 0 # Pasture3DLayer.BlendMode.REPLACE
+
 
 ## Reference to the Pasture3D instance, to be flattened
 @export var terrain:Pasture3D:
@@ -63,6 +68,11 @@ const PASTURE_3D_MAPTYPE_CONTROL:int = 1 # Pasture3DData.MapType.TYPE_CONTROL
 
 @export var flatten_terrain_method :Flatten_terrain_option = Flatten_terrain_option.APPROXIMATE
 
+## Name of the non-destructive height-map layer this connector owns and renders roads into. Roads are
+## written here (not into the Base) so hand-sculpting underneath survives and re-running is idempotent.
+## Falls back to direct (destructive) height writes on builds/terrains without the layers feature.
+@export var target_layer_name := "Roads"
+
 ## Create data for new terrain tiles when necessary.[br][br]
 ##
 ## If disabled, roads will only adjust heights for pre-existing data tiles.
@@ -86,6 +96,7 @@ var _container_unset_geo: Array[RoadContainer] = []
 var _timer:SceneTreeTimer
 var _mutex:Mutex = Mutex.new()
 var _skip_scene_load: bool = true # Also directly referecned by plugin to ensure top-level refresh works
+var _layer_id: int = -1 # Index of our reserved "Roads" layer; -1 = none / fall back to direct writes
 
 
 func _ready() -> void:
@@ -273,6 +284,75 @@ func _refresh_scheduled_segments() -> void:
 	_mutex.unlock()
 
 
+## Non-destructive layer plumbing (PASTURE3D_LAYERS_GUIDE.md §8)
+
+## Stable id identifying this connector's reserved layer across refreshes and reloads.
+func _owner_id() -> String:
+	return str(get_path())
+
+
+## Resolve (or create) our reserved "Roads" layer. Returns true when a layer is available; false on
+## plain terrains / older builds without the layers tool API, in which case writes fall back to the
+## destructive set_height path so the connector keeps working unchanged.
+func _ensure_layer() -> bool:
+	_layer_id = -1
+	if not terrain or not terrain.data:
+		return false
+	if not terrain.data.has_method("create_owned_layer"):
+		return false # Layers feature unavailable: caller falls back to direct writes.
+	_layer_id = terrain.data.create_owned_layer(_owner_id(), target_layer_name, PASTURE_3D_BLEND_REPLACE)
+	return _layer_id >= 0
+
+
+## Write an absolute road height. Routes into our reserved layer (weight feathers the shoulder via the
+## REPLACE composite) when available, else writes the Base height map directly (legacy behaviour).
+func _set_road_height(pos: Vector3, height: float, weight: float = 1.0) -> void:
+	if _layer_id >= 0:
+		terrain.data.set_height_on_layer(_layer_id, pos, height, weight)
+	else:
+		terrain.data.set_height(pos, height)
+
+
+## Coverage weight for a shoulder falloff. factor in [0,1] from road edge (0) to falloff end (1).
+## weight 1 keeps full road height, easing to 0 (full underlying terrain) — matches the old
+## _lerp_smoothed_height(road_y, terrain_y, ease(factor,-1.5)) curve but without a get_height read.
+func _falloff_weight(factor: float) -> float:
+	return 1.0 - ease(clampf(factor, 0.0, 1.0), -1.5)
+
+
+## World-space AABB (XZ) enclosing all road meshes being refreshed, padded by the shoulder influence.
+## Used to clear the reserved layer's previous road pose before repainting (idempotent re-runs).
+func _affected_aabb(mesh_parents: Array) -> AABB:
+	var aabb := AABB()
+	var has_any := false
+	for _p in mesh_parents:
+		if not is_instance_valid(_p):
+			continue
+		var node_aabb := AABB()
+		var got := false
+		var rm = _p.road_mesh if ("road_mesh" in _p) else null
+		if is_instance_valid(rm) and rm is MeshInstance3D and rm.mesh != null:
+			node_aabb = rm.global_transform * rm.get_aabb()
+			got = true
+		elif _p is Node3D:
+			node_aabb = AABB(_p.global_position, Vector3.ZERO)
+			got = true
+		if not got:
+			continue
+		if not has_any:
+			aabb = node_aabb
+			has_any = true
+		else:
+			aabb = aabb.merge(node_aabb)
+	if not has_any:
+		return AABB()
+	# Pad by the shoulder reach so falloff pixels (and any region they touch) are cleared too.
+	var pad := Vector3(edge_margin + edge_falloff, 0, edge_margin + edge_falloff)
+	aabb.position -= pad
+	aabb.size += pad * 2.0
+	return aabb
+
+
 ## Refreshes all segments of road identified
 ##
 ## Order of segments should be first intersections if any, then road segments
@@ -286,6 +366,14 @@ func refresh_roads(mesh_parents: Array) -> void:
 		return
 	if terrain.data.region_locations.size() == 0:
 		push_warning("Refresh warning: No Pasture3D regions defined yet, add regions in Pasture3D first")
+
+	# Resolve our reserved layer and drop the previous road pose so a moved/edited road leaves no stale
+	# flattening behind (non-destructive + idempotent). No-op when falling back to direct writes.
+	_ensure_layer()
+	if _layer_id >= 0:
+		var clear_aabb := _affected_aabb(mesh_parents)
+		if clear_aabb.size != Vector3.ZERO:
+			terrain.data.clear_layer_in_area(_layer_id, clear_aabb)
 
 	var skip_repeat_refreshes: Array = []
 
@@ -424,7 +512,7 @@ func flatten_terrain_via_roadsegment_raycast(segment: RoadSegment) -> void:
 			# create raycast to check the height at the (x,z) coords
 			var height := get_road_height(x,z,aabb_min.y,aabb_max.y,space_states)
 			if height.size() > 0:
-				terrain.data.set_height(Vector3(x, height[0], z), height[0] + offset)
+				_set_road_height(Vector3(x, height[0], z), height[0] + offset)
 				recorded[Vector2(x,z)] = height[0]
 			else:
 				missed[Vector2(x,z)] = true
@@ -444,7 +532,7 @@ func flatten_terrain_via_roadsegment_raycast(segment: RoadSegment) -> void:
 		neighbour = Vector2(_m.x,_m.y-neighbour_range)
 		if recorded.has(neighbour): heights.append(recorded[neighbour])
 		if heights.size() > 0:
-			terrain.data.set_height(Vector3(_m.x, heights.min(), _m.y), heights[0] + offset)
+			_set_road_height(Vector3(_m.x, heights.min(), _m.y), heights[0] + offset)
 
 	for _itemset in revert_layers:
 		var sbody: StaticBody3D = _itemset[0]
@@ -577,13 +665,17 @@ func flatten_terrain_via_intersection(inter: RoadIntersection) -> void:
 
 			if dist_to_boundary <= edge_margin:
 				var terrain_pos := Vector3(x, road_y, z)
-				terrain.data.set_height(terrain_pos, road_y)
+				_set_road_height(terrain_pos, road_y, 1.0)
 			elif dist_to_boundary <= edge_margin + edge_falloff:
 				var terrain_pos := Vector3(x, road_y, z)
-				var reference_height: float = terrain.data.get_height(terrain_pos)
 				var factor: float = (dist_to_boundary - edge_margin) / edge_falloff
-				var smoothed_height: float = _lerp_smoothed_height(road_y, reference_height, factor)
-				terrain.data.set_height(terrain_pos, smoothed_height)
+				# REPLACE-layer coverage weight feathers road_y into whatever is underneath; on the
+				# legacy fallback path this reproduces the old lerp against the live terrain height.
+				if _layer_id >= 0:
+					_set_road_height(terrain_pos, road_y, _falloff_weight(factor))
+				else:
+					var reference_height: float = terrain.data.get_height(terrain_pos)
+					_set_road_height(terrain_pos, _lerp_smoothed_height(road_y, reference_height, factor))
 
 			z += vertex_spacing
 		x += vertex_spacing
@@ -686,7 +778,7 @@ func flatten_terrain_via_roadsegment_approx(segment: RoadSegment) -> void:
 				#if not region:
 					#print("SKipping not region, todo: expand_boundaries")
 					#continue
-				terrain.data.set_height(terrain_pos, road_y)
+				_set_road_height(terrain_pos, road_y, 1.0)
 				#region.set_edited(true)
 			elif lat_dist <= width / 2.0 + edge_margin + edge_falloff:
 				# Smoothly interpolate height beyon shoulder to prior height
@@ -703,10 +795,13 @@ func flatten_terrain_via_roadsegment_approx(segment: RoadSegment) -> void:
 					#print("Skipping region")
 					#continue
 				#region.set_edited(true)
-				var reference_height:float = terrain.data.get_height(terrain_pos)
 				var factor: float = (lat_dist - edge_margin - width / 2.0) / edge_falloff
-				var smoothed_height := _lerp_smoothed_height(road_y, reference_height, factor)
-				terrain.data.set_height(terrain_pos, smoothed_height)
+				# REPLACE-layer coverage weight feathers the shoulder into the underlying terrain.
+				if _layer_id >= 0:
+					_set_road_height(terrain_pos, road_y, _falloff_weight(factor))
+				else:
+					var reference_height:float = terrain.data.get_height(terrain_pos)
+					_set_road_height(terrain_pos, _lerp_smoothed_height(road_y, reference_height, factor))
 
 
 			z += vertex_spacing

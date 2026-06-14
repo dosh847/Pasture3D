@@ -628,3 +628,132 @@ void test_layer_base_persistence() {
 	memdelete(data2);
 	UtilityFunctions::print("=== End un-aliased Base persistence tests ===");
 }
+
+// Phase 5 acceptance tests (PASTURE3D_LAYERS_GUIDE.md §8): the tool API a generator node (the
+// RoadPastureConnector) uses to draw non-destructively into its own reserved layer.
+//   1. create_owned_layer is idempotent by owner_id — the same owner re-uses its layer, never piling
+//      up duplicates; the layer is reserved and routing turns on (Base un-aliased).
+//   2. set_height_on_layer + dirty-scoped composite places the road on top (REPLACE, weight 1) and
+//      feathers a shoulder (weight 0.5); clearing the layer's area drops the old pose, and an
+//      identical repaint reproduces the same composite (re-running roads is idempotent).
+//   3. A hand-sculpt authored on the Base UNDER the road survives a clear + road re-run (the connector
+//      only ever touches its own layer).
+//   4. Backward-compat: with no stack / an invalid layer id, set_height_on_layer falls back to a direct
+//      Base write so plain terrains keep working.
+// Like the other layer tests this is standalone (no Pasture3D node); it sets the descale fields via the
+// friend declaration in pasture_3d_data.h since the tool API maps global positions to region pixels.
+void test_layer_road_connector() {
+	UtilityFunctions::print("=== Testing tool API + road connector layer ===");
+
+	const int region_size = 64;
+	const Vector2i loc(0, 0);
+	const Vector2i road_px(10, 10);
+	const Vector2i feather_px(12, 10);
+	const Vector2i sculpt_px(40, 40);
+	const Vector3 road_pos(10, 0, 10);
+	const Vector3 feather_pos(12, 0, 10);
+	const Vector3 sculpt_pos(40, 0, 40);
+
+	Pasture3DData *data = memnew(Pasture3DData);
+	// Configure the global->region descale math the tool API relies on (normally set by a Pasture3D node).
+	data->_region_size = region_size;
+	data->_region_sizev = V2I(region_size);
+	data->_vertex_spacing = 1.f;
+
+	Ref<Pasture3DRegion> region;
+	region.instantiate();
+	region->set_region_size(region_size);
+	region->set_location(loc);
+	data->add_region(region, false);
+	Ref<Image> height_map = region->get_height_map();
+	EXPECT_TRUE(height_map.is_valid() && height_map->get_format() == Image::FORMAT_RF);
+	if (height_map.is_null()) {
+		memdelete(data);
+		return;
+	}
+	for (int y = 0; y < region_size; y++) {
+		for (int x = 0; x < region_size; x++) {
+			real_t h = real_t(x) * 0.5f - real_t(y) * 0.25f + real_t((x * 7 + y * 13) % 17);
+			height_map->set_pixel(x, y, Color(h, 0.f, 0.f, 1.f));
+		}
+	}
+
+	// Base-only stack aliasing the region map, exactly as load / _synthesize_base_layer do.
+	Ref<Pasture3DLayerStack> stack;
+	stack.instantiate();
+	Ref<Pasture3DLayer> base;
+	base.instantiate();
+	base->set_layer_name("Base");
+	base->set_map_type(TYPE_HEIGHT);
+	base->set_tile_size(region_size);
+	base->set_blend_mode(Pasture3DLayer::REPLACE);
+	base->set_region_image(loc, height_map);
+	stack->add_layer_ref(base);
+	data->set_layer_stack(stack);
+
+	// (1) create_owned_layer is idempotent by owner_id.
+	const String owner = "/root/RoadConnector#42";
+	int lyr = data->create_owned_layer(owner, "Roads", Pasture3DLayer::REPLACE);
+	EXPECT_TRUE(lyr == 1);
+	int lyr_again = data->create_owned_layer(owner, "Roads", Pasture3DLayer::REPLACE);
+	EXPECT_TRUE(lyr_again == lyr); // Same layer reused, not a duplicate.
+	EXPECT_TRUE(data->get_layer_stack_size() == 2); // Base + Roads only.
+	EXPECT_TRUE(data->find_layer_by_owner(owner) == lyr);
+	Ref<Pasture3DLayer> roads = data->get_layer_stack()->get_layer(lyr);
+	EXPECT_TRUE(roads.is_valid() && roads->is_reserved());
+	EXPECT_TRUE(roads->get_blend_mode() == Pasture3DLayer::REPLACE);
+	EXPECT_TRUE(data->is_layer_routing()); // First non-Base layer un-aliased the Base.
+
+	// (3 setup) Hand-sculpt the Base under where the road network sits (simulates editor routing into
+	// the Base/active layer). Routes onto layer 0 via the same tool-API write.
+	Ref<Pasture3DLayer> base_u = data->get_layer_stack()->get_layer(0);
+	data->set_height_on_layer(0, sculpt_pos, 50.f, 1.f);
+	EXPECT_TRUE(Math::is_equal_approx(height_map->get_pixelv(sculpt_px).r, 50.f));
+	EXPECT_TRUE(Math::is_equal_approx(base_u->get_value(loc, sculpt_px), 50.f));
+
+	// (2) Paint the road into the reserved layer. Capture the underlying terrain first so we can prove
+	// the clear restores it and the feather blends against it.
+	const real_t below_road = height_map->get_pixelv(road_px).r;
+	const real_t below_feather = height_map->get_pixelv(feather_px).r;
+	data->set_height_on_layer(lyr, road_pos, 99.f, 1.f); // On the road: full coverage => sits on top.
+	data->set_height_on_layer(lyr, feather_pos, 99.f, 0.5f); // Shoulder: half coverage => lerp.
+	EXPECT_TRUE(Math::is_equal_approx(height_map->get_pixelv(road_px).r, 99.f));
+	const real_t expect_feather = below_feather + (99.f - below_feather) * 0.5f;
+	EXPECT_TRUE(Math::is_equal_approx(height_map->get_pixelv(feather_px).r, expect_feather));
+	EXPECT_TRUE(Math::is_equal_approx(data->get_layer_height(lyr, road_pos), 99.f));
+
+	// (2 cont.) Clear the road layer's footprint: the old pose drops back to what is underneath.
+	AABB area(Vector3(0, 0, 0), Vector3(region_size, 1, region_size)); // Covers region (0,0).
+	data->clear_layer_in_area(lyr, area);
+	EXPECT_FALSE(roads->has_region(loc)); // Road layer tiles erased in this region.
+	EXPECT_TRUE(Math::is_equal_approx(height_map->get_pixelv(road_px).r, below_road)); // Road gone.
+	EXPECT_TRUE(Math::is_equal_approx(height_map->get_pixelv(feather_px).r, below_feather));
+	// (3) The Base hand-sculpt survived the road clear (it lives on the Base layer, untouched).
+	EXPECT_TRUE(Math::is_equal_approx(height_map->get_pixelv(sculpt_px).r, 50.f));
+	EXPECT_TRUE(Math::is_equal_approx(base_u->get_value(loc, sculpt_px), 50.f));
+
+	// (2 cont.) Repaint identically — re-running the road is idempotent.
+	data->set_height_on_layer(lyr, road_pos, 99.f, 1.f);
+	data->set_height_on_layer(lyr, feather_pos, 99.f, 0.5f);
+	EXPECT_TRUE(Math::is_equal_approx(height_map->get_pixelv(road_px).r, 99.f));
+	EXPECT_TRUE(Math::is_equal_approx(height_map->get_pixelv(feather_px).r, expect_feather));
+	// (3) Base sculpt still intact after the full clear+repaint cycle.
+	EXPECT_TRUE(Math::is_equal_approx(height_map->get_pixelv(sculpt_px).r, 50.f));
+
+	// (4) Backward-compat: no stack / invalid layer id => set_height_on_layer writes the Base directly.
+	Pasture3DData *plain = memnew(Pasture3DData);
+	plain->_region_size = region_size;
+	plain->_region_sizev = V2I(region_size);
+	plain->_vertex_spacing = 1.f;
+	Ref<Pasture3DRegion> preg;
+	preg.instantiate();
+	preg->set_region_size(region_size);
+	preg->set_location(loc);
+	plain->add_region(preg, false);
+	plain->set_height_on_layer(5, Vector3(7, 0, 7), 33.f, 1.f); // No stack => fall back to set_height.
+	EXPECT_TRUE(Math::is_equal_approx(preg->get_height_map()->get_pixelv(Vector2i(7, 7)).r, 33.f));
+	memdelete(plain);
+
+	memdelete(data);
+	UtilityFunctions::print("=== End tool API + road connector tests ===");
+}

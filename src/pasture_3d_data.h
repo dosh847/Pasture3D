@@ -14,6 +14,9 @@ class Pasture3DData : public Object {
 	GDCLASS(Pasture3DData, Object);
 	CLASS_NAME();
 	friend Pasture3D;
+	// Phase 5 tool-API test drives the global->region math, which normally needs a Pasture3D node to
+	// set _region_size / _vertex_spacing. Friending lets the standalone test configure them directly.
+	friend void test_layer_road_connector();
 
 public: // Constants
 	static inline const real_t CURRENT_DATA_VERSION = 0.93f; // Current Data format version
@@ -89,6 +92,9 @@ private:
 	// Give the Base its own source buffer (deep copy of each aliased region tile) so the composite
 	// target (region->_height_map) and the Base source become distinct. Idempotent.
 	void _unalias_base_layer();
+	// Convert a world position to its region location (out param) and region-local vertex pixel,
+	// reusing the set_pixel math. Used by the layer-targeted tool-API writes (PASTURE3D_LAYERS_GUIDE.md §8.2).
+	Vector2i _global_to_region_pixel(const Vector3 &p_global_position, Vector2i &r_region_loc) const;
 	void _copy_paste_dfr(const Pasture3DRegion *p_src_region, const Rect2i &p_src_rect, const Rect2i &p_dst_rect, const Pasture3DRegion *p_dst_region);
 
 public:
@@ -171,6 +177,28 @@ public:
 	// whole region. With p_update, edited regions are pushed to the GPU via update_maps(TYPE_HEIGHT).
 	void composite_region(const Vector2i &p_region_loc, const Rect2i &p_dirty_rect = Rect2i(), const bool p_update = true);
 	void composite_regions(); // Composite every active region fully, then a single GPU update
+
+	// Tool API (PASTURE3D_LAYERS_GUIDE.md §8). Lets generator/tool nodes (RoadPastureConnector) draw
+	// into a reserved layer of their own instead of writing the Base destructively, so re-running them
+	// is idempotent and hand-sculpting underneath survives. The *_on_layer writes convert global_pos to
+	// a region_loc + region-local pixel, set the layer sample, and dirty-scope composite that pixel back
+	// into the region image (no GPU upload — the tool calls update_maps once at the end). When no stack
+	// exists, set_height_on_layer falls back to set_height so plain terrains keep working (§8.3).
+	int get_layer_stack_size() const { return _layer_stack.is_valid() ? _layer_stack->get_layer_count() : 0; }
+	int find_layer_by_owner(const String &p_owner_id) const;
+	// Find an existing reserved layer by owner_id, or create one (named p_name, blend p_blend_mode) and
+	// mark it reserved+owned. Un-aliases the Base when the new layer is the first non-Base layer. Returns
+	// the layer index, or -1 if a Base could not be anchored. Idempotent by owner_id.
+	int create_owned_layer(const String &p_owner_id, const String &p_name, const int p_blend_mode);
+	void set_height_on_layer(const int p_layer_id, const Vector3 &p_global_position, const real_t p_height, const real_t p_weight = 1.f);
+	void add_height_on_layer(const int p_layer_id, const Vector3 &p_global_position, const real_t p_delta, const real_t p_weight = 1.f);
+	real_t get_layer_height(const int p_layer_id, const Vector3 &p_global_position) const;
+	// Clear the layer's tiles in every region the area (world-space AABB, XZ used) overlaps, then
+	// recomposite those regions so the cleared footprint falls back to what is below. v1 is region-
+	// granular (clear_region per affected region); sub-tile-precise clears arrive with phase 6.
+	void clear_layer_in_area(const int p_layer_id, const AABB &p_area);
+	void set_active_layer(const int p_layer_id);
+	int get_active_layer() const { return _layer_stack.is_valid() ? _layer_stack->get_active_layer() : -1; }
 
 	// File I/O
 	void save_directory(const String &p_dir);
