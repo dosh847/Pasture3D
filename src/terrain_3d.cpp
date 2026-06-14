@@ -174,7 +174,30 @@ void Terrain3D::_setup_terrain_mesher() {
 		LOG(DEBUG, "Creating mesher");
 		_terrain_mesher = new Terrain3DMesher();
 	}
-	_terrain_mesher->initialize(this, _mesh_size, _mesh_lods, _tessellation_level, _vertex_spacing, _material->get_material_rid(), _render_layers);
+	// Terrain uses per-instance _target_pos so each split-screen view geomorphs to its own camera.
+	_terrain_mesher->initialize(this, _mesh_size, _mesh_lods, _tessellation_level, _vertex_spacing, _material->get_material_rid(), _render_layers, true);
+	// (Re)initialization resets the mesher to a single view; re-apply any multi-camera config.
+	if (!_cameras.is_empty()) {
+		_apply_cameras_to_mesher();
+	}
+}
+
+// Pasture3D: pushes the current camera list to the mesher as one clipmap view per camera, each on
+// its reserved render layer (camera i -> bit TERRAIN_TOP_BIT - i). Empty list => single view.
+void Terrain3D::_apply_cameras_to_mesher() {
+	if (!_terrain_mesher) {
+		return;
+	}
+	if (_cameras.is_empty()) {
+		_terrain_mesher->set_views(Vector<uint64_t>(), Vector<uint32_t>());
+		return;
+	}
+	Vector<uint32_t> layers;
+	for (int i = 0; i < _cameras.size(); i++) {
+		int bit = TERRAIN_TOP_BIT - i;
+		layers.push_back(bit >= 0 ? (1u << uint32_t(bit)) : 1u);
+	}
+	_terrain_mesher->set_views(_cameras, layers);
 }
 
 void Terrain3D::_destroy_terrain_mesher(const bool p_final) {
@@ -640,6 +663,53 @@ void Terrain3D::set_camera(Camera3D *p_camera) {
 	}
 }
 
+void Terrain3D::set_cameras(const TypedArray<Camera3D> &p_cameras) {
+	// 0 or 1 cameras => single-view path: behaves exactly like set_camera(). Solo / online / editor
+	// are unchanged. Only 2+ cameras enable per-camera split-screen clipmaps.
+	if (p_cameras.size() <= 1) {
+		_cameras.clear();
+		if (p_cameras.size() == 1) {
+			set_camera(cast_to<Camera3D>(p_cameras[0]));
+		}
+		_apply_cameras_to_mesher();
+		return;
+	}
+
+	LOG(INFO, "Setting ", p_cameras.size(), " cameras for split-screen clipmap rendering");
+	if (p_cameras.size() > 4) {
+		LOG(WARN, "More than 4 cameras set; only the reserved top 4 layers (17-20) map to players");
+	}
+	_cameras.clear();
+	for (int i = 0; i < p_cameras.size(); i++) {
+		Camera3D *cam = cast_to<Camera3D>(p_cameras[i]);
+		if (cam) {
+			_cameras.push_back(cam->get_instance_id());
+		}
+	}
+	// Keep a valid fallback camera (used by collision / clipmap-target fallback and to keep the
+	// physics process alive). The first camera serves as that fallback.
+	if (!_cameras.is_empty()) {
+		set_camera(cast_to<Camera3D>(ObjectDB::get_instance(_cameras[0])));
+	}
+	_apply_cameras_to_mesher();
+	set_physics_process(true);
+}
+
+TypedArray<Camera3D> Terrain3D::get_cameras() const {
+	TypedArray<Camera3D> cameras;
+	if (!_cameras.is_empty()) {
+		for (const uint64_t &id : _cameras) {
+			Camera3D *cam = cast_to<Camera3D>(ObjectDB::get_instance(id));
+			if (cam) {
+				cameras.push_back(cam);
+			}
+		}
+	} else if (Camera3D *cam = get_camera()) {
+		cameras.push_back(cam);
+	}
+	return cameras;
+}
+
 void Terrain3D::set_clipmap_target(Node3D *p_node) {
 	if (_clipmap_target.ptr() != p_node) {
 		LOG(INFO, "Setting clipmap target: ", p_node);
@@ -797,6 +867,9 @@ void Terrain3D::set_render_layers(const uint32_t p_layers) {
 	SET_IF_DIFF(_render_layers, p_layers);
 	LOG(INFO, "Setting terrain render layers to: ", p_layers);
 	if (_terrain_mesher) {
+		// Default (single) views follow this; camera-bound split-screen views keep their per-player
+		// layers assigned in set_cameras().
+		_terrain_mesher->set_render_layers(p_layers);
 		_terrain_mesher->update();
 	}
 }
@@ -1366,6 +1439,8 @@ void Terrain3D::_bind_methods() {
 	// Target Tracking
 	ClassDB::bind_method(D_METHOD("set_camera", "camera"), &Terrain3D::set_camera);
 	ClassDB::bind_method(D_METHOD("get_camera"), &Terrain3D::get_camera);
+	ClassDB::bind_method(D_METHOD("set_cameras", "cameras"), &Terrain3D::set_cameras);
+	ClassDB::bind_method(D_METHOD("get_cameras"), &Terrain3D::get_cameras);
 	ClassDB::bind_method(D_METHOD("set_clipmap_target", "node"), &Terrain3D::set_clipmap_target);
 	ClassDB::bind_method(D_METHOD("get_clipmap_target"), &Terrain3D::get_clipmap_target);
 	ClassDB::bind_method(D_METHOD("get_clipmap_target_position"), &Terrain3D::get_clipmap_target_position);

@@ -35,6 +35,12 @@
 				Returns the camera the terrain is currently tracking for position, if not overridden by [member clipmap_target]. See [method set_camera].
 			</description>
 		</method>
+		<method name="get_cameras" qualifiers="const">
+			<return type="Camera3D[]" />
+			<description>
+				Returns the cameras set for local split-screen rendering. If none were set with [method set_cameras], returns the single tracked camera (see [method get_camera]) or an empty array. See [method set_cameras].
+			</description>
+		</method>
 		<method name="get_clipmap_target_position" qualifiers="const">
 			<return type="Vector3" />
 			<description>
@@ -113,6 +119,17 @@
 				If the camera is instanced in a sub scene or by code, Terrain3D might not be able to find it, will issue an error, and the terrain will center at (0,0,0) causing LODs to not update until a trackable node is set.
 				Either specify the camera, or specify the clipmap and/or collision targets. It will use the targets first and fall back to the camera if they are null.
 				See [member clipmap_target] and [member collision_target].
+			</description>
+		</method>
+		<method name="set_cameras">
+			<return type="void" />
+			<param index="0" name="cameras" type="Camera3D[]" />
+			<description>
+				Renders one geo-clipmap per camera for local split-screen (2-4 players sharing a single [World3D]), each centered and LOD'd on its own camera, while all views share a single [Terrain3DData] (no per-player VRAM duplication).
+				Passing zero or one camera behaves exactly like [method set_camera] (single-view). Solo, online, and the editor are unaffected.
+				Each camera's clipmap is tagged with a reserved render layer, one per player descending from the top: camera 0 → layer 20, camera 1 → layer 19, camera 2 → layer 18, camera 3 → layer 17 (bits 19..16). Set each [member Camera3D.cull_mask] to your gameplay layers (keep gameplay on layers 1-16) plus that camera's terrain layer so each viewport sees only its own clipmap.
+				This affects rendering only. Collision remains a single shape on the node (see [member collision_mode]) and is unaffected by the camera list, so no player falls through regardless of which camera a clipmap follows.
+				[b]Note:[/b] when [member tessellation_level] is greater than 0, the displacement buffer follows the first camera only; use level 0 for split-screen.
 			</description>
 		</method>
 		<method name="set_editor">

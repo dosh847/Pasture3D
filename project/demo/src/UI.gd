@@ -22,6 +22,9 @@ func _process(_p_delta: float) -> void:
 			Gravity toggle: G
 			Collision toggle: C
 
+			Demos
+			Split-screen (multi-cam): F7
+
 			Window
 			Quit: F8
 			UI toggle: F9
@@ -34,6 +37,11 @@ func _process(_p_delta: float) -> void:
 func _unhandled_key_input(p_event: InputEvent) -> void:
 	if p_event is InputEventKey and p_event.pressed:
 		match p_event.keycode:
+			KEY_F7:
+				# Mark handled before changing scenes; the swap frees this node, after which
+				# get_viewport() would be null.
+				get_viewport().set_input_as_handled()
+				get_tree().change_scene_to_file("res://demo/SplitScreenTest.tscn")
 			KEY_F8:
 				get_tree().quit()
 			KEY_F9:

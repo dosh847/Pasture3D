@@ -1,5 +1,6 @@
 // Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 
+#include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/world3d.hpp>
 #include <godot_cpp/core/version.hpp>
@@ -111,10 +112,11 @@ RID Terrain3DMesher::_instantiate_mesh(const PackedVector3Array &p_vertices, con
 	return mesh;
 }
 
-void Terrain3DMesher::_generate_clipmap() {
-	_clear_clipmap();
-	_generate_mesh_types();
-	_generate_offset_data();
+// Builds one clipmap instance-set (one view / camera) from the shared _mesh_rids.
+// Mesh resources and offset data must already exist (see initialize()).
+void Terrain3DMesher::_generate_view_instances(ClipmapView &p_view) {
+	p_view.clipmap_rids.clear();
+	p_view.instance_rids.clear();
 	LOG(DEBUG, "Creating instances for all mesh segments for clipmap of size ", _mesh_size, " for ", _lods, " LODs");
 	for (int level = 0; level < _lods + _tessellation_level; level++) {
 		Array lod;
@@ -176,8 +178,17 @@ void Terrain3DMesher::_generate_clipmap() {
 			lod.append(trim_b_rids); // index 5 TRIM_B
 		}
 
-		// Append LOD to _lod_rids array
-		_clipmap_rids.append(lod);
+		// Append LOD to this view's instance array
+		p_view.clipmap_rids.append(lod);
+	}
+
+	// Flatten into a fast lookup list for per-frame updates (target_pos, layers, shadows).
+	for (const Array &lod_array : p_view.clipmap_rids) {
+		for (const Array &mesh_array : lod_array) {
+			for (const RID &rid : mesh_array) {
+				p_view.instance_rids.push_back(rid);
+			}
+		}
 	}
 }
 
@@ -249,21 +260,34 @@ void Terrain3DMesher::_generate_offset_data() {
 	return;
 }
 
-// Frees all clipmap instance RIDs. Mesh rids must be freed separately.
-void Terrain3DMesher::_clear_clipmap() {
-	LOG(INFO, "Freeing all clipmap instances");
-	for (const Array &lod_array : _clipmap_rids) {
-		for (const Array &mesh_array : lod_array) {
-			for (const RID &rid : mesh_array) {
-				RS->free_rid(rid);
-			}
+// Resolves the world-space focal point for a view: its camera if valid, else the terrain's
+// default clipmap target (preserves single-view / editor behavior).
+Vector3 Terrain3DMesher::_resolve_view_target(const ClipmapView &p_view) const {
+	if (p_view.camera_id != 0) {
+		Object *obj = ObjectDB::get_instance(p_view.camera_id);
+		Node3D *cam = Object::cast_to<Node3D>(obj);
+		if (cam) {
+			return cam->get_global_position();
 		}
 	}
-	_clipmap_rids.clear();
+	return _terrain->get_clipmap_target_position();
+}
+
+// Frees all view instance RIDs. Mesh rids must be freed separately.
+void Terrain3DMesher::_clear_views() {
+	LOG(INFO, "Freeing all clipmap view instances");
+	for (ClipmapView &view : _views) {
+		for (const RID &rid : view.instance_rids) {
+			RS->free_rid(rid);
+		}
+		view.instance_rids.clear();
+		view.clipmap_rids.clear();
+	}
+	_views.clear();
 	return;
 }
 
-// Frees all Mesh RIDs use for clipmap instances.
+// Frees all Mesh RIDs used for clipmap instances.
 void Terrain3DMesher::_clear_mesh_types() {
 	LOG(INFO, "Freeing all clipmap meshes");
 	for (const RID &rid : _mesh_rids) {
@@ -278,7 +302,8 @@ void Terrain3DMesher::_clear_mesh_types() {
 ///////////////////////////
 
 void Terrain3DMesher::initialize(Terrain3D *p_terrain, const int p_mesh_size, const int p_lods, const int p_tessellation_level,
-		const real_t p_vertex_spacing, const RID &p_material, const uint32_t p_render_layers) {
+		const real_t p_vertex_spacing, const RID &p_material, const uint32_t p_render_layers,
+		const bool p_uses_instance_target_pos) {
 	if (p_terrain) {
 		_terrain = p_terrain;
 	} else {
@@ -297,16 +322,18 @@ void Terrain3DMesher::initialize(Terrain3D *p_terrain, const int p_mesh_size, co
 	_mesh_size = p_mesh_size;
 	_vertex_spacing = p_vertex_spacing;
 	_render_layers = p_render_layers;
-	_generate_clipmap();
-	update();
+	_uses_instance_target_pos = p_uses_instance_target_pos;
+	_generate_mesh_types();
+	_generate_offset_data();
+	// Start with a single default view (current single-camera behavior). The Terrain3D node
+	// re-applies its multi-camera config via set_views() after (re)initialization if needed.
+	set_views(Vector<uint64_t>(), Vector<uint32_t>());
 	update_aabbs();
-	reset_target_position();
-	snap();
 }
 
 void Terrain3DMesher::destroy() {
 	LOG(INFO, "Destroying clipmap");
-	_clear_clipmap();
+	_clear_views();
 	_clear_mesh_types();
 	_tile_pos_lod_0.clear();
 	_trim_a_pos.clear();
@@ -314,28 +341,81 @@ void Terrain3DMesher::destroy() {
 	_edge_pos.clear();
 	_fill_a_pos.clear();
 	_fill_b_pos.clear();
+	_tile_pos.clear();
+}
+
+// Rebuilds the clipmap views. Pass an empty list for the default single view (follows the
+// terrain's clipmap target). Pass one camera ObjectID per view for local split-screen; each view
+// then renders on its own layer and snaps to its own camera, all sharing the single terrain data.
+void Terrain3DMesher::set_views(const Vector<uint64_t> &p_camera_ids, const Vector<uint32_t> &p_render_layers) {
+	IS_INIT(VOID);
+	if (!_terrain->is_inside_world() || _mesh_rids.is_empty()) {
+		LOG(DEBUG, "Mesher not ready; skipping set_views");
+		return;
+	}
+	_clear_views();
+	if (p_camera_ids.is_empty()) {
+		ClipmapView view;
+		view.camera_id = 0;
+		view.render_layers = _render_layers;
+		view.cast_shadows = true;
+		_generate_view_instances(view);
+		_views.push_back(view);
+	} else {
+		for (int i = 0; i < p_camera_ids.size(); i++) {
+			ClipmapView view;
+			view.camera_id = p_camera_ids[i];
+			view.render_layers = (i < p_render_layers.size()) ? p_render_layers[i] : _render_layers;
+			view.cast_shadows = (i == 0); // Single shadow caster across all viewports
+			_generate_view_instances(view);
+			_views.push_back(view);
+		}
+	}
+	LOG(INFO, "Configured ", _views.size(), " clipmap view(s)");
+	update();
+	reset_target_position();
+	snap();
+	return;
 }
 
 void Terrain3DMesher::snap() {
 	IS_INIT(VOID);
-	// Always update target position in shader
-	Vector3 target_pos = _terrain->get_clipmap_target_position();
-	if (_material.is_valid()) {
+	for (ClipmapView &view : _views) {
+		_snap_view(view);
+	}
+	return;
+}
+
+void Terrain3DMesher::_snap_view(ClipmapView &p_view) {
+	Vector3 target_pos = _resolve_view_target(p_view);
+
+	// Update _target_pos every frame so LOD geomorphing stays smooth between discrete ring snaps.
+	// Terrain: per-instance (each view morphs to its own center). Ocean: on the shared material.
+	if (_uses_instance_target_pos) {
+		if (target_pos != p_view.last_shader_target_pos) {
+			p_view.last_shader_target_pos = target_pos;
+			for (const RID &rid : p_view.instance_rids) {
+				RS->instance_geometry_set_shader_parameter(rid, "_target_pos", target_pos);
+			}
+		}
+	} else if (_material.is_valid()) {
 		RS->material_set_param(_material, "_target_pos", target_pos);
 	}
-	// If clipmap target hasn't moved enough, skip
+
+	// If this view's target hasn't moved enough, skip re-snapping its rings.
 	Vector2 target_pos_2d = v3v2(target_pos);
 	real_t tessellation_density = 1.f / pow(2.f, _tessellation_level);
 	real_t vertex_spacing = _vertex_spacing * tessellation_density;
-	if (MAX(std::abs(_last_target_position.x - target_pos_2d.x), std::abs(_last_target_position.y - target_pos_2d.y)) < vertex_spacing) {
+	if (MAX(std::abs(p_view.last_target_position.x - target_pos_2d.x), std::abs(p_view.last_target_position.y - target_pos_2d.y)) < vertex_spacing) {
 		return;
 	}
 
-	// Recenter terrain on the target
-	_last_target_position = target_pos_2d;
+	// Recenter this view's clipmap on its target
+	p_view.last_target_position = target_pos_2d;
 	Vector3 snapped_pos = (target_pos / vertex_spacing).floor() * vertex_spacing;
 	Vector3 pos = V3_ZERO;
-	for (int lod = 0; lod < _clipmap_rids.size(); ++lod) {
+	Array clipmap_rids = p_view.clipmap_rids;
+	for (int lod = 0; lod < clipmap_rids.size(); ++lod) {
 		real_t snap_step = pow(2.f, lod + 1.f) * vertex_spacing;
 		Vector3 lod_scale = Vector3(pow(2.f, lod) * vertex_spacing, 1.f, pow(2.f, lod) * vertex_spacing);
 
@@ -351,7 +431,7 @@ void Terrain3DMesher::snap() {
 		real_t next_z = round(snapped_pos.z / next_snap_step) * next_snap_step;
 		int test_x = CLAMP(int(round((pos.x - next_x) / snap_step)) + 1, 0, 2);
 		int test_z = CLAMP(int(round((pos.z - next_z) / snap_step)) + 1, 0, 2);
-		Array lod_array = _clipmap_rids[lod];
+		Array lod_array = clipmap_rids[lod];
 		for (int mesh = 0; mesh < lod_array.size(); ++mesh) {
 			Array mesh_array = lod_array[mesh];
 			for (int instance = 0; instance < mesh_array.size(); ++instance) {
@@ -404,7 +484,25 @@ void Terrain3DMesher::snap() {
 	return;
 }
 
-// Iterates over every instance of every mesh and updates all properties.
+void Terrain3DMesher::reset_target_position() {
+	for (ClipmapView &view : _views) {
+		view.last_target_position = V2_MAX;
+		view.last_shader_target_pos = V3_MAX;
+	}
+}
+
+void Terrain3DMesher::set_render_layers(const uint32_t p_layers) {
+	_render_layers = p_layers;
+	// Default (non-camera) views track the node's render_layers; camera-bound views keep their
+	// assigned per-player layer (set via set_views()).
+	for (ClipmapView &view : _views) {
+		if (view.camera_id == 0) {
+			view.render_layers = p_layers;
+		}
+	}
+}
+
+// Iterates over every instance of every view and updates all properties.
 void Terrain3DMesher::update() {
 	IS_INIT(VOID);
 	if (!_terrain->is_inside_world()) {
@@ -429,20 +527,21 @@ void Terrain3DMesher::update() {
 		} break;
 	}
 
-	RenderingServer::ShadowCastingSetting cast_shadows = _terrain->get_cast_shadows();
+	RenderingServer::ShadowCastingSetting node_cast_shadows = _terrain->get_cast_shadows();
 	bool visible = _terrain->is_visible_in_tree();
 
-	LOG(INFO, "Updating all mesh instances for ", _clipmap_rids.size(), " LODs");
-	for (const Array &lod_array : _clipmap_rids) {
-		for (const Array &mesh_array : lod_array) {
-			for (const RID &rid : mesh_array) {
-				RS->instance_set_visible(rid, visible);
-				RS->instance_set_scenario(rid, _scenario);
-				RS->instance_set_layer_mask(rid, _render_layers);
-				RS->instance_geometry_set_cast_shadows_setting(rid, cast_shadows);
-				RS->instance_geometry_set_flag(rid, RenderingServer::INSTANCE_FLAG_USE_BAKED_LIGHT, baked_light);
-				RS->instance_geometry_set_flag(rid, RenderingServer::INSTANCE_FLAG_USE_DYNAMIC_GI, dynamic_gi);
-			}
+	LOG(INFO, "Updating all mesh instances for ", _views.size(), " view(s)");
+	for (const ClipmapView &view : _views) {
+		// Only the first view casts shadows; identical geometry across views would otherwise
+		// double-shadow / z-fight (guide §4).
+		RenderingServer::ShadowCastingSetting cast_shadows = view.cast_shadows ? node_cast_shadows : RenderingServer::SHADOW_CASTING_SETTING_OFF;
+		for (const RID &rid : view.instance_rids) {
+			RS->instance_set_visible(rid, visible);
+			RS->instance_set_scenario(rid, _scenario);
+			RS->instance_set_layer_mask(rid, view.render_layers);
+			RS->instance_geometry_set_cast_shadows_setting(rid, cast_shadows);
+			RS->instance_geometry_set_flag(rid, RenderingServer::INSTANCE_FLAG_USE_BAKED_LIGHT, baked_light);
+			RS->instance_geometry_set_flag(rid, RenderingServer::INSTANCE_FLAG_USE_DYNAMIC_GI, dynamic_gi);
 		}
 	}
 	return;
