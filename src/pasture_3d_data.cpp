@@ -25,6 +25,35 @@ void Pasture3DData::_clear() {
 	_generated_height_maps.clear();
 	_generated_control_maps.clear();
 	_generated_color_maps.clear();
+	_layer_stack.unref();
+}
+
+// Builds a one-layer stack whose dense "Base" layer aliases the loaded region height maps, so an
+// existing terrain opens as a single-layer stack with no pixel copy. Called when no layer files are
+// present (phase 1 has no layer persistence yet, so this always runs after load). The stack is not
+// yet read by the runtime/compositor, so this introduces no behaviour change.
+void Pasture3DData::_synthesize_base_layer() {
+	if (_region_size <= 0) {
+		LOG(DEBUG, "No region size yet; skipping base layer synthesis");
+		return;
+	}
+	_layer_stack.instantiate();
+	Ref<Pasture3DLayer> base;
+	base.instantiate();
+	base->set_layer_name("Base");
+	base->set_map_type(TYPE_HEIGHT);
+	base->set_tile_size(_region_size); // Phase 1: one tile per region == the region image
+	base->set_blend_mode(Pasture3DLayer::REPLACE);
+	Array locations = _regions.keys();
+	for (const Vector2i &region_loc : locations) {
+		Pasture3DRegion *region = get_region_ptr(region_loc);
+		if (region && region->get_height_map().is_valid()) {
+			base->set_region_image(region_loc, region->get_height_map());
+		}
+	}
+	base->set_modified(false);
+	_layer_stack->add_layer_ref(base);
+	LOG(INFO, "Synthesized Base layer over ", locations.size(), " region(s)");
 }
 
 // Structured to work with do_for_regions. Should be renamed when copy_paste is expanded

@@ -10,6 +10,8 @@
 #include "pasture_3d.h"
 #include "pasture_3d_compat.h"
 #include "pasture_3d_editor.h"
+#include "pasture_3d_layer.h"
+#include "pasture_3d_layer_stack.h"
 
 void initialize_pasture_3d_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
@@ -21,6 +23,8 @@ void initialize_pasture_3d_module(ModuleInitializationLevel p_level) {
 	ClassDB::register_class<Pasture3DEditor>();
 	ClassDB::register_class<Pasture3DCollision>();
 	ClassDB::register_class<Pasture3DInstancer>();
+	ClassDB::register_class<Pasture3DLayer>();
+	ClassDB::register_class<Pasture3DLayerStack>();
 	ClassDB::register_class<Pasture3DMaterial>();
 	ClassDB::register_class<Pasture3DMeshAsset>();
 	ClassDB::register_class<Pasture3DRegion>();

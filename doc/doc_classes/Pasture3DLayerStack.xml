@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="Pasture3DLayerStack" inherits="Resource" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/godotengine/godot/master/doc/class.xsd">
+	<brief_description>
+		An ordered stack of non-destructive height-map layers for a terrain.
+	</brief_description>
+	<description>
+		Index 0 is the bottom (the dense "Base" layer); higher indices composite over lower ones. This is the editor-side source of truth: edits target the active layer, then the stack is composited down into the runtime [Pasture3DRegion] images. A terrain with no stack behaves exactly as before, so this resource is always optional and is held by [Pasture3DData].
+	</description>
+	<tutorials>
+	</tutorials>
+</class>

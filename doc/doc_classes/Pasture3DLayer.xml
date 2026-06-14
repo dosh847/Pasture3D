@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="Pasture3DLayer" inherits="Resource" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/godotengine/godot/master/doc/class.xsd">
+	<brief_description>
+		A single non-destructive height-map layer in a [Pasture3DLayerStack].
+	</brief_description>
+	<description>
+		Stores sparse, sub-region tiled pixel data as (value, weight) pairs ([code]FORMAT_RGF[/code]: R = value, G = weight). A weight of 0 means the pixel is not owned by this layer and is skipped when compositing. The dense Base layer may instead alias a region's plain [code]FORMAT_RF[/code] height map, in which case it is always covered (weight 1).
+		This is editor-only authoring data. The stack is composited down into the runtime [Pasture3DRegion] images, so layers add no runtime cost. Version 1 supports height layers only ([code]TYPE_HEIGHT[/code]).
+	</description>
+	<tutorials>
+	</tutorials>
+</class>

@@ -5,6 +5,7 @@
 
 #include "constants.h"
 #include "generated_texture.h"
+#include "pasture_3d_layer_stack.h"
 #include "pasture_3d_region.h"
 
 class Pasture3D;
@@ -73,8 +74,13 @@ private:
 	GeneratedTexture _generated_control_maps;
 	GeneratedTexture _generated_color_maps;
 
+	// Optional editor-only non-destructive layer stack. Null on plain terrains; the region images
+	// above remain the composited source of truth either way, so the runtime path is unchanged.
+	Ref<Pasture3DLayerStack> _layer_stack;
+
 	// Functions
 	void _clear();
+	void _synthesize_base_layer();
 	void _copy_paste_dfr(const Pasture3DRegion *p_src_region, const Rect2i &p_src_rect, const Rect2i &p_dst_rect, const Pasture3DRegion *p_dst_region);
 
 public:
@@ -119,11 +125,30 @@ public:
 	void remove_regionl(const Vector2i &p_region_loc, const bool p_update = true);
 	void remove_region(const Ref<Pasture3DRegion> &p_region, const bool p_update = true);
 
+	// Layer stack (editor-only, optional)
+	bool has_layer_stack() const { return _layer_stack.is_valid(); }
+	Ref<Pasture3DLayerStack> get_layer_stack() const { return _layer_stack; }
+	void set_layer_stack(const Ref<Pasture3DLayerStack> &p_stack) { _layer_stack = p_stack; }
+
+	// Compositing (editor-only). Flattens the layer stack down into the region height images that
+	// drive the shader/collision and ship in the runtime .res files. A no-op when no stack exists,
+	// so a build with no extra layers behaves exactly as before with zero added cost.
+	// p_dirty_rect is in region-local vertex coordinates [0, region_size); an empty rect means the
+	// whole region. With p_update, edited regions are pushed to the GPU via update_maps(TYPE_HEIGHT).
+	void composite_region(const Vector2i &p_region_loc, const Rect2i &p_dirty_rect = Rect2i(), const bool p_update = true);
+	void composite_regions(); // Composite every active region fully, then a single GPU update
+
 	// File I/O
 	void save_directory(const String &p_dir);
 	void save_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_16_bit = false);
 	void load_directory(const String &p_dir);
 	void load_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_update = true);
+
+	// Editor-only layer persistence (PASTURE3D_LAYERS_GUIDE.md §7). Save/load the layer stack as
+	// pasture3d_layers*.res alongside the runtime region files, which are never touched. Called by
+	// save_directory/load_directory; exposed so tools and tests can drive them directly.
+	void save_layers(const String &p_dir);
+	bool load_layers(const String &p_dir); // Returns true if a manifest was found and loaded.
 
 	// Maps
 	TypedArray<Image> get_height_maps() const { return _height_maps; }
