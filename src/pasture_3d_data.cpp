@@ -679,6 +679,98 @@ void Pasture3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 	}
 }
 
+// Flattens the layer stack down into one region's height image, dirty-scoped to p_dirty_rect.
+// For each pixel it walks the layers bottom->top, skipping hidden layers and uncovered (weight 0)
+// samples, applying the layer's blend with a = weight * opacity (see PASTURE3D_LAYERS_GUIDE.md §5.1).
+// All-uncovered pixels are left untouched: the Base layer is always covered wherever terrain exists,
+// so the accumulator is defined everywhere a height exists. Holes/control stay on the composited
+// control map for v1 (height-only). No stack => no-op, leaving the runtime path unchanged.
+void Pasture3DData::composite_region(const Vector2i &p_region_loc, const Rect2i &p_dirty_rect, const bool p_update) {
+	if (_layer_stack.is_null()) {
+		return; // Plain terrain: the region images already are the source of truth.
+	}
+	Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	if (!region || region->is_deleted()) {
+		return;
+	}
+	Ref<Image> height_map = region->get_height_map();
+	if (height_map.is_null()) {
+		LOG(ERROR, "Region ", p_region_loc, " has no height map to composite into");
+		return;
+	}
+	// An empty dirty rect means "the whole region". Clamp to the region image bounds either way.
+	Rect2i region_rect(V2I_ZERO, height_map->get_size());
+	Rect2i rect = p_dirty_rect.has_area() ? p_dirty_rect.intersection(region_rect) : region_rect;
+	if (!rect.has_area()) {
+		return;
+	}
+
+	const int layer_count = _layer_stack->get_layer_count();
+	const Vector2i end = rect.position + rect.size;
+	for (int y = rect.position.y; y < end.y; y++) {
+		for (int x = rect.position.x; x < end.x; x++) {
+			const Vector2i px(x, y);
+			real_t acc = NAN; // Undefined until the first covered layer (Base) writes it.
+			for (int i = 0; i < layer_count; i++) {
+				const Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+				if (!layer || !layer->is_visible()) {
+					continue;
+				}
+				const real_t w = layer->get_weight(p_region_loc, px);
+				if (w == 0.f) {
+					continue; // Pixel not owned by this layer.
+				}
+				const real_t v = layer->get_value(p_region_loc, px);
+				if (std::isnan(v)) {
+					continue; // Uncovered (no tile here).
+				}
+				const real_t a = w * layer->get_opacity();
+				switch (layer->get_blend_mode()) {
+					case Pasture3DLayer::REPLACE:
+						acc = std::isnan(acc) ? v : acc + (v - acc) * a;
+						break;
+					case Pasture3DLayer::ADD:
+						acc = (std::isnan(acc) ? 0.f : acc) + v * a;
+						break;
+					case Pasture3DLayer::MAX: {
+						const real_t blended = std::isnan(acc) ? v : acc + (v - acc) * a;
+						acc = std::isnan(acc) ? blended : MAX(acc, blended);
+						break;
+					}
+					case Pasture3DLayer::MIN: {
+						const real_t blended = std::isnan(acc) ? v : acc + (v - acc) * a;
+						acc = std::isnan(acc) ? blended : MIN(acc, blended);
+						break;
+					}
+					default:
+						break; // BLEND_MAX is an undefined placeholder; ignore.
+				}
+			}
+			// Skip all-uncovered pixels so genuine holes / absent data pass through unchanged.
+			if (!std::isnan(acc)) {
+				height_map->set_pixelv(px, Color(acc, 0.f, 0.f, 1.f));
+			}
+		}
+	}
+	region->set_edited(true);
+	if (p_update) {
+		// Reuse the is_edited() fast path: only edited regions are pushed to the GPU.
+		update_maps(TYPE_HEIGHT, false, false);
+	}
+}
+
+// Convenience: composite every active region in full, then a single GPU update for all edits.
+void Pasture3DData::composite_regions() {
+	if (_layer_stack.is_null()) {
+		return;
+	}
+	Array locations = _regions.keys();
+	for (const Vector2i &region_loc : locations) {
+		composite_region(region_loc, Rect2i(), false);
+	}
+	update_maps(TYPE_HEIGHT, false, false);
+}
+
 void Pasture3DData::set_pixel(const MapType p_map_type, const Vector3 &p_global_position, const Color &p_pixel) {
 	if (p_map_type < 0 || p_map_type >= TYPE_MAX) {
 		LOG(ERROR, "Specified map type out of range");
