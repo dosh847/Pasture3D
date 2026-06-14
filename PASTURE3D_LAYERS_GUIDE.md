@@ -603,6 +603,72 @@ Each phase is independently testable and leaves `main` shippable.
   layer tests; it sets `_region_size`/`_vertex_spacing` via a `friend` declaration on `Pasture3DData` (the tool
   API needs the descale math a Pasture3D node normally supplies). All 22 checks PASSED headless on Godot 4.6.2.
 
+### 10.6 Phase 6 plan — sub-region tiling optimization (NEXT, not yet implemented)
+
+> This subsection is a **forward-looking plan**, not a record of work done. It scopes the next phase and
+> how to verify it. Update it to past-tense "done" notes once the phase lands.
+
+**Why it's mostly already wired.** `_tile_size` is a per-layer field (`Pasture3DLayer`, default **64** per
+settled decision §11.3). `set_sample` / `get_value` / `get_weight` already compute
+`tile_coord = px / _tile_size` and allocate a `_tile_size`² `FORMAT_RGF` tile lazily on first write, and
+`composite_region` reads through `get_value`/`get_weight` — so sub-tiling is *transparent* to compositing and
+coordinate math. Non-Base layers added via `add_layer` (hand-sculpt layers, and the Phase 5 road layer) already
+default to `tile_size = 64`, so on a 256² region they are **already sub-tiled**. The Base stays pinned to
+`tile_size == region_size` (it aliases/owns one region-size `FORMAT_RF` image via `set_region_image`, which
+asserts `image size == tile_size`) and must **not** be sub-tiled.
+
+So Phase 6 is less "add sub-tiling" and more "**prove the memory win, reclaim freed tiles, and exploit the
+finer granularity**". Concrete scope:
+
+1. **Quantify / confirm the win.** A road crossing one 256² region in a ~6 m strip should allocate a handful of
+   64² tiles (~tens of KB) instead of a 256 KB region image. Measure on a road-heavy scene (§9). Decide whether
+   the default should stay 64 or drop further (128 is a middle ground); §11.3 settled on 64.
+2. **Tile garbage-collection.** Today `set_sample` *allocates* a tile on first write but a tile that later becomes
+   fully uncovered (all weights 0) is **never freed** — verify this and add a sweep that drops all-zero-weight
+   tiles (and removes the region entry when its last tile goes), so erasing/moving a road actually reclaims memory.
+3. **Sub-tile-precise clear.** Add a clear that drops only the tiles a write actually touched, so
+   `clear_layer_in_area(layer_id, AABB)` can clear just the sub-tiles overlapping the AABB instead of the whole
+   region. **This is the fix for the Phase 5 partial-refresh caveat** (§10.5): with region-granular clear, an
+   auto-refresh of a *subset* of roads wipes a co-located road in the same region until the next full refresh;
+   sub-tile clear scopes the drop to the refreshed road's footprint. Keep the region-granular path as a fallback.
+4. **NaN vs. weight, re-checked at sub-tile granularity.** With `tile_size < region_size` a *whole absent tile*
+   makes `get_value` return NaN again (now meaningful), while *within* an allocated tile `weight == 0` remains the
+   coverage signal (§4.3). Re-audit `composite_region` and the clear/undo paths handle both: the composite already
+   tests `weight == 0` first then `isnan(value)`, so it should be correct — confirm with a test.
+
+**Out of scope / guardrails:** don't sub-tile the Base (breaks aliasing/un-alias by pointer identity, §5.1, §10.4);
+keep the runtime `pasture3d_<loc>.res` format unchanged (this is editor-only authoring data); persistence already
+serializes `_tiles` as `Dict[region_loc → Dict[tile_coord → Image]]`, so multiple sub-tiles per region round-trip
+without a format change — but add a round-trip test to be sure.
+
+#### How to test / verify Phase 6 is working
+
+*Automated (the primary gate — add to `unit_testing.{h,cpp}`, drive standalone like the Phase 5 test):*
+- **Sparse allocation.** Build a layer with `tile_size = 64` on a 256² region, write a thin diagonal "road" band,
+  then assert the number of allocated tiles (`layer.get_tiles()[region_loc].size()`) equals only the sub-tiles the
+  band crosses — **not** all 16 (4×4) tiles of the region.
+- **Tile GC.** After clearing the band (or setting its weights to 0 and sweeping), assert the freed tiles are gone
+  and a fully-cleared region drops its region entry (`has_region(loc) == false`).
+- **Sub-tile-precise clear.** Paint a road through two adjacent sub-tiles, clear an AABB covering only one, and
+  assert the other sub-tile's samples survive (this is the regression test for the Phase 5 partial-refresh caveat).
+- **Composite parity.** Composite the same data once with `tile_size = region_size` and once with
+  `tile_size = 64`; assert the resulting region `_height_map` is **byte-identical** (`get_data()` equal) — proves
+  sub-tiling changed only storage, not output.
+- **Round-trip.** `save_layers`/`load_layers` a multi-sub-tile layer; assert tile count, `(value, weight)` per
+  sample, and a post-load composite all survive (extends `test_layer_persistence`).
+Run headless per the build/test recipe at the top of §10 and grep stdout for `PASSED`/`FAILED`; re-comment the
+test call in `pasture_3d.cpp` before committing.
+
+*Empirical / in-editor (to confirm the real-world memory win and behaviour):*
+- **Memory.** On a road-heavy demo scene, compare process RSS (or a logged sum of `image->get_data().size()` over
+  all layer tiles — easiest to add a temporary `dump()`-style log) with `tile_size = region_size` vs `= 64`. The
+  road layer's footprint should drop from ≈ one region image per touched region to a few 64² tiles.
+- **Partial-refresh fix.** Place two roads that cross the **same** region, move/refresh only one (auto-refresh),
+  and confirm the other road no longer disappears (the Phase 5 caveat). A full `do_full_refresh` already self-heals,
+  so test the *partial* path specifically.
+- **No visual/format regression.** Confirm the terrain looks identical and the runtime `pasture3d_<loc>.res` files
+  are byte-unchanged (the win is editor-side only).
+
 ---
 
 ## 11. Settled decisions
