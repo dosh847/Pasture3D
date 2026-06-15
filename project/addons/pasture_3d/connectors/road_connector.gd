@@ -98,6 +98,11 @@ var _mutex:Mutex = Mutex.new()
 var _skip_scene_load: bool = true # Also directly referecned by plugin to ensure top-level refresh works
 var _layer_id: int = -1 # Index of our reserved "Roads" height layer; -1 = none / fall back to direct writes
 var _hole_layer_id: int = -1 # Index of our reserved "Roads Holes" control layer; -1 = direct set_control_hole
+# Per-segment record of the padded world AABB we last flattened, keyed by the stable point-pair id
+# (RoadSegment.get_id_for_points, which survives a point-move since the RoadPoints persist). Lets a
+# moved/edited road clear its PREVIOUS footprint too, so a large move leaves no stale flattening trail.
+# Seeded at scene load (_seed_paint_cache) so even the first move of a session clears the old pose.
+var _last_paint_aabb: Dictionary = {} # String sid -> AABB
 
 
 func _ready() -> void:
@@ -266,6 +271,10 @@ func _on_manager_road_updated(segments: Array) -> void:
 func _schedule_refresh(segments: Array) -> void:
 	if _skip_scene_load:
 		_skip_scene_load = false
+		# This first post-load update fires right after road-generator rebuilt the segments at their
+		# saved poses but before any user edit — the ideal moment to seed the footprint cache so the
+		# first real move can clear the road's loaded position (no stale trail). See _seed_paint_cache.
+		_seed_paint_cache()
 		return
 	_mutex.lock()
 	for _seg in segments:
@@ -392,6 +401,104 @@ func _affected_aabb(mesh_parents: Array) -> AABB:
 	return aabb
 
 
+## XZ-plane AABB overlap test. The road footprints all live on the terrain plane but their meshes carry
+## real Y extents, so a full AABB.intersects() would miss two roads at different elevations that overlap
+## from above. We only care about the ground-plane footprint, so compare X and Z and ignore Y.
+func _aabb_overlaps_xz(a: AABB, b: AABB) -> bool:
+	var a_max := a.position + a.size
+	var b_max := b.position + b.size
+	if a_max.x < b.position.x or b_max.x < a.position.x:
+		return false
+	if a_max.z < b.position.z or b_max.z < a.position.z:
+		return false
+	return true
+
+
+## Padded world-space AABB of a single segment's flattened footprint (mesh AABB + shoulder reach), matching
+## the padding _affected_aabb uses. Returns an empty AABB for invalid / mesh-less segments.
+func _segment_padded_aabb(seg) -> AABB:
+	if not validate_segment(seg):
+		return AABB()
+	var rm = seg.road_mesh
+	if not (is_instance_valid(rm) and rm is MeshInstance3D and rm.mesh != null):
+		return AABB()
+	var aabb: AABB = rm.global_transform * rm.get_aabb()
+	var pad := Vector3(edge_margin + edge_falloff, 0, edge_margin + edge_falloff)
+	aabb.position -= pad
+	aabb.size += pad * 2.0
+	return aabb
+
+
+## Stable id for a segment, derived from its two RoadPoints (which persist across a point-move). Used to
+## key the previous-footprint cache so a moved road can clear where it WAS, not just where it is now.
+func _segment_id(seg) -> String:
+	return RoadSegment.get_id_for_points(seg.start_point, seg.end_point)
+
+
+## Append every road segment whose padded footprint overlaps `clear_aabb` (and isn't already queued) into
+## `into`. Used so a partial refresh repaints neighbours whose data the clear is about to wipe. Cheap AABB
+## math over all segments; runs only on the non-destructive layer path. Padding matches _affected_aabb so a
+## segment whose shoulder falloff merely reaches into the cleared box is caught too.
+func _add_segments_overlapping_aabb(clear_aabb: AABB, into: Array) -> void:
+	if not is_instance_valid(road_manager):
+		return
+	for _container in road_manager.get_containers():
+		_container = _container as RoadContainer
+		if not is_instance_valid(_container):
+			continue
+		for _seg in _container.get_segments():
+			if _seg in into:
+				continue
+			var seg_aabb := _segment_padded_aabb(_seg)
+			if seg_aabb.size == Vector3.ZERO:
+				continue
+			if _aabb_overlaps_xz(clear_aabb, seg_aabb):
+				into.append(_seg)
+
+
+## True when `outer` contains `inner` on the XZ plane (ignoring Y, like _aabb_overlaps_xz).
+func _aabb_encloses_xz(outer: AABB, inner: AABB) -> bool:
+	var outer_max := outer.position + outer.size
+	var inner_max := inner.position + inner.size
+	return (inner.position.x >= outer.position.x and inner_max.x <= outer_max.x
+		and inner.position.z >= outer.position.z and inner_max.z <= outer_max.z)
+
+
+## Previous footprints (cached old poses) of the segments in `mesh_parents` that are NOT already covered by
+## `current_aabb`. Returned as separate boxes (rather than one merged AABB) so we clear only the old pose,
+## not the whole swath spanned between the old and new positions. Skips boxes the current clear already
+## covers — so a plain refresh (old == new) and small nudges add no redundant clears.
+func _previous_footprints(mesh_parents: Array, current_aabb: AABB) -> Array:
+	var boxes: Array = []
+	for _p in mesh_parents:
+		if not (_p is RoadSegment) or not validate_segment(_p):
+			continue
+		var sid := _segment_id(_p)
+		if not _last_paint_aabb.has(sid):
+			continue
+		var prev: AABB = _last_paint_aabb[sid]
+		if prev.size == Vector3.ZERO or _aabb_encloses_xz(current_aabb, prev):
+			continue
+		boxes.append(prev)
+	return boxes
+
+
+## Record the current footprint of every existing segment into the previous-footprint cache WITHOUT
+## clearing or painting. Called once at scene load (before any user edit) so the first move of a session
+## can clear the road's loaded position. Overwrites are harmless — it just re-baselines to current poses.
+func _seed_paint_cache() -> void:
+	if not is_instance_valid(road_manager):
+		return
+	for _container in road_manager.get_containers():
+		_container = _container as RoadContainer
+		if not is_instance_valid(_container):
+			continue
+		for _seg in _container.get_segments():
+			var aabb := _segment_padded_aabb(_seg)
+			if aabb.size != Vector3.ZERO:
+				_last_paint_aabb[_segment_id(_seg)] = aabb
+
+
 ## Refreshes all segments of road identified
 ##
 ## Order of segments should be first intersections if any, then road segments
@@ -410,9 +517,25 @@ func refresh_roads(mesh_parents: Array) -> void:
 	# flattening behind (non-destructive + idempotent). No-op when falling back to direct writes.
 	_ensure_layer()
 	if _layer_id >= 0:
+		mesh_parents = mesh_parents.duplicate()
 		var clear_aabb := _affected_aabb(mesh_parents)
 		if clear_aabb.size != Vector3.ZERO:
+			# The clear box is the moved road's footprint padded by the shoulder reach, so it also covers
+			# the sub-tiles of any *other* segment that overlaps it — typically the neighbour sharing the
+			# moved RoadPoint. Clearing wipes their flattening too, but those segments aren't in the refresh
+			# set, so they would be left erased until a full Refresh. Pull every overlapping segment into the
+			# repaint set first; repainting is REPLACE/idempotent, so untouched neighbours are unharmed.
+			_add_segments_overlapping_aabb(clear_aabb, mesh_parents)
+			# Also clear where these roads were LAST painted (their cached previous footprints), so a large
+			# move leaves no stale flattening trail at the old pose. Each old box is cleared on its own (not
+			# merged into clear_aabb) to avoid wiping the whole swath between the old and new positions; for
+			# each, pull in any neighbour overlapping it so roads that sat by the old pose are repainted too.
+			var prev_boxes := _previous_footprints(mesh_parents, clear_aabb)
+			for _box in prev_boxes:
+				_add_segments_overlapping_aabb(_box, mesh_parents)
 			terrain.data.clear_layer_in_area(_layer_id, clear_aabb)
+			for _box in prev_boxes:
+				terrain.data.clear_layer_in_area(_layer_id, _box)
 
 	var skip_repeat_refreshes: Array = []
 
@@ -465,6 +588,10 @@ func refresh_roads(mesh_parents: Array) -> void:
 			or (not _seg.start_point.flatten_terrain and not _seg.end_point.flatten_terrain)
 		):
 			# print("Skipping ignored segment %s/%s" % [_seg.get_parent().name, _seg.name])
+			# Flattening is off for this road now: its old footprint was just cleared and won't be
+			# repainted, so drop its cache entry to stop merging a stale AABB on future refreshes.
+			if _layer_id >= 0:
+				_last_paint_aabb.erase(_segment_id(_seg))
 			continue
 		#print("Refreshing %s/%s" % [_seg.get_parent().name, _seg.name])
 		match flatten_terrain_method:
@@ -478,6 +605,9 @@ func refresh_roads(mesh_parents: Array) -> void:
 			_:
 				flatten_terrain_via_roadsegment_approx(_seg)
 		skip_repeat_refreshes.append(_seg)
+		# Remember where we just painted so the next move/edit of this road clears this pose too.
+		if _layer_id >= 0:
+			_last_paint_aabb[_segment_id(_seg)] = _segment_padded_aabb(_seg)
 
 	terrain.data.update_maps(PASTURE_3D_MAPTYPE_HEIGHT) # set 2nd arg false to be optimal
 
