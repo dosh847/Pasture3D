@@ -120,6 +120,10 @@ public:
 	// empty Dictionary erases the region (i.e. restores the "uncovered" pre-stroke state).
 	Dictionary duplicate_region_tiles(const Vector2i &p_region_loc) const;
 	void restore_region_tiles(const Vector2i &p_region_loc, const Dictionary &p_tiles);
+	// Deep-clone a whole region_loc -> {tile_coord -> Image} snapshot (every Image duplicated) into a
+	// dictionary that shares nothing with the input. The editor uses this so a committed undo/redo
+	// payload owns its tile data and can't be emptied when the live snapshot members are cleared.
+	static Dictionary clone_tile_snapshot(const Dictionary &p_snapshot);
 	// A deep copy of the whole layer (metadata + duplicated tiles), used by "Duplicate layer".
 	Ref<Pasture3DLayer> clone() const;
 

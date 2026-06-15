@@ -526,6 +526,129 @@ void test_layer_undo_restore() {
 	UtilityFunctions::print("=== End layer undo tile restore tests ===");
 }
 
+// Bugfix regression guard: the editor builds an undo/redo payload from per-region tile snapshots in
+// _store_undo, then stop_operation() clears its live snapshot members. The payload MUST own its tile
+// data (Pasture3DLayer::clone_tile_snapshot) so the clear can't empty it — otherwise undo restores the
+// composite but not the layer source ("undo clears the layer"). This drives the full snapshot ->
+// clone-into-payload -> clear-sources -> restore -> recomposite path that test_layer_undo_restore (a
+// pure-primitive test) never exercised, across two sub-tiles and two regions, and confirms a co-located
+// earlier stroke survives undo of a later one.
+void test_layer_stroke_undo_integration() {
+	UtilityFunctions::print("=== Testing per-stroke undo integration ===");
+
+	const int region_size = 128; // > overlay tile_size (64) so a region holds a 2x2 grid of sub-tiles
+	const real_t base_h = 3.f;
+	const Vector2i loc0(0, 0);
+	const Vector2i loc1(1, 0);
+	const Vector2i px_a(10, 10); // region (0,0) sub-tile (0,0): an earlier stroke that must survive
+	const Vector2i px_b1(70, 70); // region (0,0) sub-tile (1,1): the tested stroke, a 2nd sub-tile
+	const Vector2i px_b2(20, 20); // region (1,0): the tested stroke spans a 2nd region
+
+	Pasture3DData *data = memnew(Pasture3DData);
+	Ref<Pasture3DLayerStack> stack;
+	stack.instantiate();
+	Ref<Pasture3DLayer> base;
+	base.instantiate();
+	base->set_layer_name("Base");
+	base->set_map_type(TYPE_HEIGHT);
+	base->set_tile_size(region_size);
+	base->set_blend_mode(Pasture3DLayer::REPLACE);
+	for (const Vector2i &loc : Array::make(loc0, loc1)) {
+		Ref<Pasture3DRegion> region;
+		region.instantiate();
+		region->set_region_size(region_size);
+		region->set_location(loc);
+		data->add_region(region, false);
+		Ref<Image> hm = region->get_height_map();
+		if (hm.is_null()) {
+			memdelete(data);
+			return;
+		}
+		hm->fill(Color(base_h, 0.f, 0.f, 1.f));
+		base->set_region_image(loc, hm); // Base aliases the region height maps (un-aliased by layer_add)
+	}
+	stack->add_layer_ref(base);
+	data->set_layer_stack(stack);
+
+	// Add a REPLACE overlay and make it active; this un-aliases the Base across both regions so a
+	// recomposite always derives from the Base buffer, not a stale region map.
+	int oidx = data->layer_add("Overlay", Pasture3DLayer::REPLACE);
+	EXPECT_TRUE(oidx == 1 && data->is_layer_routing());
+	Ref<Pasture3DLayer> overlay = data->get_layer_stack()->get_layer(oidx);
+
+	Ref<Image> hm0 = data->get_region(loc0)->get_height_map();
+	Ref<Image> hm1 = data->get_region(loc1)->get_height_map();
+
+	// Earlier stroke A (region 0, sub-tile (0,0)).
+	overlay->set_sample(loc0, px_a, 11.f, 1.f);
+	data->composite_region(loc0, Rect2i(), false);
+	EXPECT_TRUE(Math::is_equal_approx(hm0->get_pixelv(px_a).r, 11.f));
+
+	// --- Tested stroke B: pre-snapshot the touched regions (as _backup_layer_tile does on first touch). ---
+	Dictionary undo_tiles; // region_loc -> {tile_coord -> Image}, the editor's _layer_undo_tiles
+	undo_tiles[loc0] = overlay->duplicate_region_tiles(loc0); // non-empty: already holds stroke A
+	undo_tiles[loc1] = overlay->duplicate_region_tiles(loc1); // empty: region had no tile before B
+	EXPECT_FALSE(Dictionary(undo_tiles[loc0]).is_empty());
+	EXPECT_TRUE(Dictionary(undo_tiles[loc1]).is_empty());
+
+	// Apply stroke B across a 2nd sub-tile of region 0 and into region 1, then recomposite.
+	overlay->set_sample(loc0, px_b1, 22.f, 1.f);
+	overlay->set_sample(loc1, px_b2, 33.f, 1.f);
+	data->composite_region(loc0, Rect2i(), false);
+	data->composite_region(loc1, Rect2i(), false);
+	EXPECT_TRUE(Math::is_equal_approx(hm0->get_pixelv(px_b1).r, 22.f));
+	EXPECT_TRUE(Math::is_equal_approx(hm0->get_pixelv(px_a).r, 11.f)); // stroke A still present
+	EXPECT_TRUE(Math::is_equal_approx(hm1->get_pixelv(px_b2).r, 33.f));
+
+	// Post-snapshot for redo (as stop_operation does), then build the committed payloads via the
+	// production clone helper.
+	Dictionary redo_tiles;
+	redo_tiles[loc0] = overlay->duplicate_region_tiles(loc0);
+	redo_tiles[loc1] = overlay->duplicate_region_tiles(loc1);
+	Dictionary undo_payload = Pasture3DLayer::clone_tile_snapshot(undo_tiles);
+	Dictionary redo_payload = Pasture3DLayer::clone_tile_snapshot(redo_tiles);
+
+	// Emulate the hazard: stop_operation() clears the live snapshot members right after committing.
+	undo_tiles.clear();
+	redo_tiles.clear();
+
+	// REGRESSION GUARD: the committed payloads must be unaffected by the clear above. Before the fix
+	// (payload aliased the members) these would be empty here.
+	EXPECT_TRUE(undo_payload.size() == 2); // both region keys survive
+	EXPECT_TRUE(redo_payload.size() == 2);
+	EXPECT_FALSE(Dictionary(redo_payload[loc1]).is_empty()); // region 1's painted tile survived
+	EXPECT_FALSE(Dictionary(undo_payload[loc0]).is_empty()); // region 0's pre-stroke (stroke A) tile survived
+
+	// --- Undo stroke B: restore the layer source from the undo payload, then recomposite. ---
+	Array ulocs = undo_payload.keys();
+	for (const Vector2i &loc : ulocs) {
+		overlay->restore_region_tiles(loc, undo_payload[loc]);
+	}
+	data->composite_region(loc0, Rect2i(), false);
+	data->composite_region(loc1, Rect2i(), false);
+	// Stroke B reverted (back to base); stroke A preserved; region 1's tile erased (was empty pre-B).
+	EXPECT_TRUE(Math::is_equal_approx(hm0->get_pixelv(px_b1).r, base_h));
+	EXPECT_TRUE(Math::is_equal_approx(hm0->get_pixelv(px_a).r, 11.f));
+	EXPECT_TRUE(Math::is_equal_approx(hm1->get_pixelv(px_b2).r, base_h));
+	EXPECT_TRUE(overlay->get_weight(loc0, px_b1) == 0.f);
+	EXPECT_FALSE(overlay->has_region(loc1));
+	EXPECT_TRUE(Math::is_equal_approx(overlay->get_value(loc0, px_a), 11.f)); // source kept stroke A
+
+	// --- Redo stroke B: restore from the redo payload, recomposite, expect the full stroke back. ---
+	Array rlocs = redo_payload.keys();
+	for (const Vector2i &loc : rlocs) {
+		overlay->restore_region_tiles(loc, redo_payload[loc]);
+	}
+	data->composite_region(loc0, Rect2i(), false);
+	data->composite_region(loc1, Rect2i(), false);
+	EXPECT_TRUE(Math::is_equal_approx(hm0->get_pixelv(px_b1).r, 22.f));
+	EXPECT_TRUE(Math::is_equal_approx(hm0->get_pixelv(px_a).r, 11.f));
+	EXPECT_TRUE(Math::is_equal_approx(hm1->get_pixelv(px_b2).r, 33.f));
+
+	memdelete(data);
+	UtilityFunctions::print("=== End per-stroke undo integration tests ===");
+}
+
 // Phase 4: once the Base is un-aliased it holds true base heights that the flattened region map no
 // longer carries, so save_layers must persist them. On load the Base loads its own buffer (routing
 // stays on) and a fresh composite reproduces the flattened runtime image byte-for-byte.

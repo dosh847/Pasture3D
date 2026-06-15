@@ -1,13 +1,17 @@
-[gd_scene load_steps=10 format=3 uid="uid://x34e4v60vdmy"]
+[gd_scene format=3 uid="uid://x34e4v60vdmy"]
 
 [ext_resource type="Script" uid="uid://chstoagn42gbr" path="res://demo/src/DemoScene.gd" id="1_po4vw"]
 [ext_resource type="PackedScene" uid="uid://bb2lp50sjndus" path="res://demo/components/Environment.tscn" id="2_i74wg"]
+[ext_resource type="Script" uid="uid://brm6p1ca6p7o6" path="res://addons/road-generator/nodes/road_manager.gd" id="4_3pdvl"]
 [ext_resource type="PackedScene" uid="uid://domhm87hbhbg1" path="res://demo/components/Player.tscn" id="4_fk3ul"]
 [ext_resource type="PackedScene" uid="uid://djhl3foqkj4e2" path="res://demo/components/Tunnel.tscn" id="5_2lvlr"]
 [ext_resource type="PackedScene" uid="uid://d2jihfohphuue" path="res://demo/components/UI.tscn" id="5_rc7e2"]
+[ext_resource type="Script" uid="uid://bkche4ip07xfu" path="res://addons/road-generator/nodes/road_container.gd" id="5_yx0lc"]
+[ext_resource type="Script" uid="uid://cn7224ow1rdj6" path="res://addons/road-generator/nodes/road_point.gd" id="6_is7y6"]
 [ext_resource type="NavigationMesh" uid="uid://yf3fu23666k8" path="res://demo/data/nav_mesh.res" id="8_6jfdr"]
 [ext_resource type="Pasture3DAssets" uid="uid://dal3jhw6241qg" path="res://demo/data/assets.tres" id="10_qmhh8"]
 [ext_resource type="PackedScene" uid="uid://di5fovhcyd7re" path="res://demo/components/Enemy.tscn" id="12_b2xl8"]
+[ext_resource type="Script" uid="uid://2vhjm1t0432a" path="res://addons/pasture_3d/connectors/road_connector.gd" id="12_dgpao"]
 
 [sub_resource type="Pasture3DMaterial" id="Pasture3DMaterial_s5mq5"]
 _shader_parameters = {
@@ -36,26 +40,77 @@ world_background = 0
 auto_shader_enabled = true
 dual_scaling_enabled = true
 
-[node name="Demo" type="Node"]
+[node name="Demo" type="Node" unique_id=2094521637]
 script = ExtResource("1_po4vw")
 
-[node name="UI" parent="." instance=ExtResource("5_rc7e2")]
+[node name="UI" parent="." unique_id=716135166 instance=ExtResource("5_rc7e2")]
 
-[node name="Environment" parent="." instance=ExtResource("2_i74wg")]
+[node name="Environment" parent="." unique_id=1937954366 instance=ExtResource("2_i74wg")]
 
-[node name="Tunnel" parent="." instance=ExtResource("5_2lvlr")]
+[node name="RoadManager" type="Node3D" parent="Environment" unique_id=1584780142]
+script = ExtResource("4_3pdvl")
+metadata/_custom_type_script = "uid://brm6p1ca6p7o6"
 
-[node name="Player" parent="." instance=ExtResource("4_fk3ul")]
+[node name="RoadContainer" type="Node3D" parent="Environment/RoadManager" unique_id=326159901]
+script = ExtResource("5_yx0lc")
+use_lowpoly_preview = true
+edge_containers = Array[NodePath]([NodePath(""), NodePath("")])
+edge_rp_targets = Array[NodePath]([NodePath(""), NodePath("")])
+edge_rp_target_dirs = Array[int]([-1, -1])
+edge_rp_locals = Array[NodePath]([NodePath("RP_001"), NodePath("RP_004")])
+edge_rp_local_dirs = Array[int]([0, 1])
+metadata/_custom_type_script = "uid://bkche4ip07xfu"
+
+[node name="RP_001" type="Node3D" parent="Environment/RoadManager/RoadContainer" unique_id=2097695421]
+transform = Transform3D(-0.05860252, -1.5165982e-07, -0.9982814, 0, 1, -1.519209e-07, 0.9982814, -8.902948e-09, -0.05860252, 497.63675, 0, -574.6772)
+script = ExtResource("6_is7y6")
+traffic_dir = Array[int]([2, 2, 1, 1])
+lanes = Array[int]([2, 4, 4, 2])
+next_mag = 25.109758
+prior_pt_init = NodePath("../RP_002")
+
+[node name="RP_002" type="Node3D" parent="Environment/RoadManager/RoadContainer" unique_id=602065994]
+transform = Transform3D(-0.05860216, 3.2790981e-15, -0.9982814, 5.595524e-14, 1, 0, 0.9982814, -5.585908e-14, -0.05860216, 547.76996, 7.6293945e-06, -571.7342)
+script = ExtResource("6_is7y6")
+traffic_dir = Array[int]([2, 2, 1, 1])
+lanes = Array[int]([2, 4, 4, 2])
+prior_mag = 29.8374
+next_mag = 25.109758
+prior_pt_init = NodePath("../RP_003")
+next_pt_init = NodePath("../RP_001")
+
+[node name="RP_003" type="Node3D" parent="Environment/RoadManager/RoadContainer" unique_id=2127145932]
+transform = Transform3D(0.43129656, 3.2790981e-15, -0.90221024, 4.8982367e-14, 1, 2.7050263e-14, 0.90221024, -5.585908e-14, 0.43129656, 606.2338, 7.6293945e-06, -583.6949)
+script = ExtResource("6_is7y6")
+traffic_dir = Array[int]([2, 2, 1, 1])
+lanes = Array[int]([2, 4, 4, 2])
+prior_mag = 63.84641
+next_mag = 29.8374
+prior_pt_init = NodePath("../RP_004")
+next_pt_init = NodePath("../RP_002")
+
+[node name="RP_004" type="Node3D" parent="Environment/RoadManager/RoadContainer" unique_id=1491171444]
+transform = Transform3D(0.91967183, 3.2790981e-15, -0.39268777, 1.8919482e-14, 1, 4.973799e-14, 0.39268777, -5.585908e-14, 0.91967183, 692.3406, 1.5258789e-05, -677.9874)
+script = ExtResource("6_is7y6")
+traffic_dir = Array[int]([2, 2, 1, 1])
+lanes = Array[int]([2, 4, 4, 2])
+prior_mag = 63.84641
+next_mag = 63.84641
+next_pt_init = NodePath("../RP_003")
+
+[node name="Tunnel" parent="." unique_id=1908417742 instance=ExtResource("5_2lvlr")]
+
+[node name="Player" parent="." unique_id=1527810593 instance=ExtResource("4_fk3ul")]
 transform = Transform3D(0.0774673, 0, -0.996995, 0, 1, 0, 0.996995, 0, 0.0774673, 229.418, 104.956, -1838.16)
 
-[node name="Enemy" parent="." node_paths=PackedStringArray("target") instance=ExtResource("12_b2xl8")]
+[node name="Enemy" parent="." unique_id=64204129 node_paths=PackedStringArray("target") instance=ExtResource("12_b2xl8")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 192.727, 105.171, -1787.81)
 target = NodePath("../Player")
 
-[node name="NavigationRegion3D" type="NavigationRegion3D" parent="."]
+[node name="NavigationRegion3D" type="NavigationRegion3D" parent="." unique_id=880343074]
 navigation_mesh = ExtResource("8_6jfdr")
 
-[node name="Pasture3D" type="Pasture3D" parent="NavigationRegion3D"]
+[node name="Pasture3D" type="Pasture3D" parent="NavigationRegion3D" unique_id=111836649]
 data_directory = "res://demo/data"
 material = SubResource("Pasture3DMaterial_s5mq5")
 assets = ExtResource("10_qmhh8")
@@ -64,3 +119,9 @@ mesh_size = 64
 displacement_sharpness = 0.5
 top_level = true
 metadata/_edit_lock_ = true
+
+[node name="RoadPastureConnector" type="Node" parent="NavigationRegion3D" unique_id=1007199115 node_paths=PackedStringArray("terrain", "road_manager")]
+script = ExtResource("12_dgpao")
+terrain = NodePath("../Pasture3D")
+road_manager = NodePath("../../Environment/RoadManager")
+metadata/_custom_type_script = "uid://2vhjm1t0432a"

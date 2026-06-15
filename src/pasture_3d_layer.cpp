@@ -226,6 +226,22 @@ void Pasture3DLayer::restore_region_tiles(const Vector2i &p_region_loc, const Di
 	_modified = true;
 }
 
+Dictionary Pasture3DLayer::clone_tile_snapshot(const Dictionary &p_snapshot) {
+	Dictionary out;
+	Array locs = p_snapshot.keys();
+	for (const Vector2i &loc : locs) {
+		Dictionary region_tiles = p_snapshot[loc];
+		Dictionary cloned;
+		Array coords = region_tiles.keys();
+		for (const Vector2i &coord : coords) {
+			Ref<Image> img = region_tiles[coord];
+			cloned[coord] = _dup_image(img);
+		}
+		out[loc] = cloned;
+	}
+	return out;
+}
+
 Ref<Pasture3DLayer> Pasture3DLayer::clone() const {
 	Ref<Pasture3DLayer> c;
 	c.instantiate();
