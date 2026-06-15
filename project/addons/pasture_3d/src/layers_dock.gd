@@ -110,8 +110,11 @@ func _stack() -> Pasture3DLayerStack:
 
 
 ## Flash a UE-style warning. Called by the editor plugin when a stroke is blocked.
-func flash_warning(p_layer_name: String) -> void:
-	_warning.text = "Layer '%s' is locked or reserved — stroke blocked" % p_layer_name
+func flash_warning(p_layer_name: String, p_hidden: bool = false) -> void:
+	if p_hidden:
+		_warning.text = "Layer '%s' is hidden — stroke blocked. Make it visible to paint." % p_layer_name
+	else:
+		_warning.text = "Layer '%s' is locked or reserved — stroke blocked" % p_layer_name
 	_warning.visible = true
 	_warning_timer.start()
 

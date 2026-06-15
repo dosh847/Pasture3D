@@ -171,10 +171,10 @@ func _clear() -> void:
 		layers_dock.set_terrain(null)
 
 
-## Forwarded from Pasture3DEditor when a stroke hits a locked/reserved active layer (§6).
-func flash_layer_warning(p_name: String) -> void:
+## Forwarded from Pasture3DEditor when a stroke hits a locked/reserved/hidden active layer (§6).
+func flash_layer_warning(p_name: String, p_hidden: bool = false) -> void:
 	if layers_dock:
-		layers_dock.flash_warning(p_name)
+		layers_dock.flash_warning(p_name, p_hidden)
 
 
 func _forward_3d_gui_input(p_viewport_camera: Camera3D, p_event: InputEvent) -> AfterGUIInput:

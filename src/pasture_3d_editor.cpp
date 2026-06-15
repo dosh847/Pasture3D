@@ -621,11 +621,33 @@ void Pasture3DEditor::_backup_layer_tile(const Vector2i &p_region_loc) {
 	_layer_undo_tiles[p_region_loc] = _stroke_layer->duplicate_region_tiles(p_region_loc);
 }
 
-void Pasture3DEditor::_notify_layer_blocked(const Ref<Pasture3DLayer> &p_layer) const {
-	LOG(WARN, "Active layer '", p_layer->get_layer_name(), "' is locked or reserved; stroke blocked");
+// Deep-clone a region_loc -> {tile_coord -> Image} snapshot into a payload-owned dictionary. The
+// committed undo/redo actions must NOT alias _layer_undo_tiles/_layer_redo_tiles, because
+// stop_operation() clears those right after the action is committed.
+static Dictionary _deep_clone_tile_snapshot(const Dictionary &p_snapshot) {
+	Dictionary out;
+	Array locs = p_snapshot.keys();
+	for (const Vector2i &loc : locs) {
+		Dictionary region_tiles = p_snapshot[loc];
+		Dictionary cloned;
+		Array coords = region_tiles.keys();
+		for (const Vector2i &coord : coords) {
+			Ref<Image> img = region_tiles[coord];
+			if (img.is_valid()) {
+				cloned[coord] = Image::create_from_data(img->get_width(), img->get_height(), img->has_mipmaps(), img->get_format(), img->get_data());
+			}
+		}
+		out[loc] = cloned;
+	}
+	return out;
+}
+
+void Pasture3DEditor::_notify_layer_blocked(const Ref<Pasture3DLayer> &p_layer, BlockReason p_reason) const {
+	const bool hidden = (p_reason == BLOCK_HIDDEN);
+	LOG(WARN, "Active layer '", p_layer->get_layer_name(), "' is ", hidden ? "hidden" : "locked or reserved", "; stroke blocked");
 	Object *plugin = _terrain ? _terrain->get_plugin() : nullptr;
 	if (plugin && plugin->has_method("flash_layer_warning")) {
-		plugin->call("flash_layer_warning", p_layer->get_layer_name());
+		plugin->call("flash_layer_warning", p_layer->get_layer_name(), hidden);
 	}
 }
 
@@ -680,13 +702,16 @@ void Pasture3DEditor::_store_undo() {
 	// region (composite) snapshots, so undo/redo restores both the layer source and the composited
 	// region image (PASTURE3D_LAYERS_GUIDE.md §6).
 	if (_stroke_layer.is_valid() && !_layer_undo_tiles.is_empty()) {
+		// Deep-clone the tile snapshots so each committed action owns its own Image data. Storing the
+		// members directly would alias them, and stop_operation()'s clear() below would then leave the
+		// actions with empty tile payloads — the "undo clears the whole layer" bug.
 		Dictionary undo_snap;
 		undo_snap["layer"] = _stroke_layer;
-		undo_snap["tiles"] = _layer_undo_tiles;
+		undo_snap["tiles"] = _deep_clone_tile_snapshot(_layer_undo_tiles);
 		_undo_data["layer_tiles"] = undo_snap;
 		Dictionary redo_snap;
 		redo_snap["layer"] = _stroke_layer;
-		redo_snap["tiles"] = _layer_redo_tiles;
+		redo_snap["tiles"] = _deep_clone_tile_snapshot(_layer_redo_tiles);
 		redo_data["layer_tiles"] = redo_snap;
 	}
 
@@ -703,7 +728,7 @@ void Pasture3DEditor::_store_undo() {
 
 		LOG(DEBUG, "Storing redo snapshot: ");
 		Util::print_dict("redo_data snapshot", redo_data, DEBUG);
-		_terrain->get_plugin()->call("add_do_method", Callable(this, "apply_undo").bind(redo_data));
+		_terrain->get_plugin()->call("add_do_method", Callable(this, "apply_undo").bind(redo_data.duplicate()));
 
 		LOG(DEBUG, "Committing undo action");
 		_terrain->get_plugin()->call("commit_action", false);
@@ -1008,9 +1033,14 @@ void Pasture3DEditor::start_operation(const Vector3 &p_global_position) {
 		// Only height layers receive sculpt/height strokes. A control/color active layer is simply not a
 		// height-edit target, so the stroke writes the region height map directly (as on a plain terrain).
 		if (active.is_valid() && active->get_map_type() == TYPE_HEIGHT) {
-			if (active->is_locked() || active->is_reserved()) {
+			// A hidden active layer also swallows the stroke: editing geometry the user can't see is
+			// confusing, and the compositor skips hidden layers anyway so the edit would silently vanish.
+			if (!active->is_visible()) {
 				_stroke_blocked = true;
-				_notify_layer_blocked(active);
+				_notify_layer_blocked(active, BLOCK_HIDDEN);
+			} else if (active->is_locked() || active->is_reserved()) {
+				_stroke_blocked = true;
+				_notify_layer_blocked(active, BLOCK_LOCKED);
 			} else {
 				_stroke_layer = active;
 			}

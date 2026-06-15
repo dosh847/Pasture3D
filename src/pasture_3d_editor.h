@@ -104,8 +104,10 @@ private:
 	void _operate_map(const Vector3 &p_global_position, const real_t p_camera_direction);
 	// Snapshot the active layer's tiles for a region once, before the stroke first modifies them.
 	void _backup_layer_tile(const Vector2i &p_region_loc);
-	// Best-effort UE-style warning flash when a stroke hits a locked/reserved active layer.
-	void _notify_layer_blocked(const Ref<Pasture3DLayer> &p_layer) const;
+	// Why an active-layer stroke was swallowed (drives the warning message).
+	enum BlockReason { BLOCK_LOCKED, BLOCK_HIDDEN };
+	// Best-effort UE-style warning flash when a stroke hits a locked/reserved/hidden active layer.
+	void _notify_layer_blocked(const Ref<Pasture3DLayer> &p_layer, BlockReason p_reason = BLOCK_LOCKED) const;
 	MapType _get_map_type() const;
 	bool _is_in_bounds(const Point2i &p_pixel, const Point2i &p_size) const;
 	Vector2 _get_uv_position(const Vector3 &p_global_position, const int p_region_size, const real_t p_vertex_spacing) const;
