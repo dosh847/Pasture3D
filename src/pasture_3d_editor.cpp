@@ -1005,7 +1005,9 @@ void Pasture3DEditor::start_operation(const Vector3 &p_global_position) {
 	if ((_tool == SCULPT || _tool == HEIGHT) && _terrain->get_data()->is_layer_routing()) {
 		Ref<Pasture3DLayerStack> stack = _terrain->get_data()->get_layer_stack();
 		Ref<Pasture3DLayer> active = stack.is_valid() ? stack->get_layer(stack->get_active_layer()) : Ref<Pasture3DLayer>();
-		if (active.is_valid()) {
+		// Only height layers receive sculpt/height strokes. A control/color active layer is simply not a
+		// height-edit target, so the stroke writes the region height map directly (as on a plain terrain).
+		if (active.is_valid() && active->get_map_type() == TYPE_HEIGHT) {
 			if (active->is_locked() || active->is_reserved()) {
 				_stroke_blocked = true;
 				_notify_layer_blocked(active);

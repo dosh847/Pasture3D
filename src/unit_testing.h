@@ -29,5 +29,6 @@ void test_layer_undo_restore();
 void test_layer_base_persistence();
 void test_layer_road_connector();
 void test_layer_subtiling();
+void test_layer_control_color();
 
 #endif // UNIT_TESTING_H

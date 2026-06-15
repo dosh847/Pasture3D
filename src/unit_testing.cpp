@@ -1024,3 +1024,219 @@ void test_layer_subtiling() {
 
 	UtilityFunctions::print("=== End sub-region tiling tests ===");
 }
+
+// Phase 7 acceptance tests (PASTURE3D_LAYERS_GUIDE.md §10.7): control & color layers.
+//   (a) Control composite is topmost-covered-wins — an upper covered control overlay overrides a lower
+//       one; a pixel no overlay covers falls through to the hand-authored control base (no float blend).
+//   (b) Color composite blends by weight — alpha-over of the overlay albedo onto the hand-authored base
+//       color, with the roughness (alpha) channel preserved.
+//   (c) Height composite is still byte-identical after control/color layers are added (the height pass
+//       is unchanged; the new passes only touch the control/color region maps).
+//   (d) A hole authored on a control layer carves the composited control map and survives a clear +
+//       repaint (idempotent); the hand-authored control underneath is preserved, and clearing the hole
+//       layer entirely restores the hand-authored base (no hole).
+//   (e) Save/load round-trips control + color layers (overlays AND their dense bases); a post-load
+//       composite reproduces the composited control and color region maps byte-for-byte.
+// Standalone like the Phase 5/6 tests; sets the descale fields via the friend declaration in
+// pasture_3d_data.h since the tool API maps global positions to region pixels.
+void test_layer_control_color() {
+	UtilityFunctions::print("=== Testing control & color layers (phase 7) ===");
+
+	const int region_size = 64;
+	const Vector2i loc(0, 0);
+
+	// Hand-authored control values (all base ids < 16 so the packed uint32 stays a positive int).
+	const uint32_t CTRL_KEEP = enc_base(3) | enc_auto(true); // (5,5)   — no overlay covers it.
+	const uint32_t CTRL_OVER = enc_base(7); // (20,20) — both control overlays cover it.
+	const uint32_t CTRL_LOW = enc_base(11); // lower overlay value.
+	const uint32_t CTRL_HIGH = enc_base(13); // upper overlay value (must win at the shared pixel).
+	const uint32_t CTRL_AP = enc_base(9); // (40,40) — hand-authored under the hole layer.
+
+	const Vector2i keep_px(5, 5), over_px(20, 20), low_px(25, 25), ap_px(40, 40), hp_px(42, 42), c_px(33, 33);
+	const Vector3 over_pos(20, 0, 20), low_pos(25, 0, 25), ap_pos(40, 0, 40), hp_pos(42, 0, 42), c_pos(33, 0, 33);
+
+	const Color base_col(0.2f, 0.4f, 0.6f);
+	const Color over_col(0.9f, 0.1f, 0.1f);
+	const real_t col_weight = 0.5f;
+	auto approx8 = [](real_t a, real_t b) { return Math::abs(a - b) < 0.02f; }; // 8-bit color tolerance.
+
+	Pasture3DData *data = memnew(Pasture3DData);
+	data->_region_size = region_size;
+	data->_region_sizev = V2I(region_size);
+	data->_vertex_spacing = 1.f;
+	Ref<Pasture3DRegion> region;
+	region.instantiate();
+	region->set_region_size(region_size);
+	region->set_location(loc);
+	data->add_region(region, false);
+	Ref<Image> height_map = region->get_height_map();
+	Ref<Image> control_map = region->get_control_map();
+	Ref<Image> color_map = region->get_color_map();
+	EXPECT_TRUE(height_map.is_valid() && control_map.is_valid() && color_map.is_valid());
+	if (height_map.is_null()) {
+		memdelete(data);
+		return;
+	}
+	for (int y = 0; y < region_size; y++) {
+		for (int x = 0; x < region_size; x++) {
+			real_t h = real_t(x) * 0.5f - real_t(y) * 0.25f + real_t((x * 7 + y * 13) % 17);
+			height_map->set_pixel(x, y, Color(h, 0.f, 0.f, 1.f));
+		}
+	}
+
+	// Base-only stack aliasing the region height map (as load / _synthesize_base_layer do).
+	Ref<Pasture3DLayerStack> stack;
+	stack.instantiate();
+	Ref<Pasture3DLayer> base;
+	base.instantiate();
+	base->set_layer_name("Base");
+	base->set_map_type(TYPE_HEIGHT);
+	base->set_tile_size(region_size);
+	base->set_blend_mode(Pasture3DLayer::REPLACE);
+	base->set_base(true);
+	base->set_region_image(loc, height_map);
+	stack->add_layer_ref(base);
+	data->set_layer_stack(stack);
+
+	// Hand-author control + color DIRECTLY into the region maps (simulates the user painting before any
+	// tool layer exists). These become the dense bases captured when the first typed layer is created.
+	data->set_control(Vector3(5, 0, 5), CTRL_KEEP);
+	data->set_control(over_pos, CTRL_OVER);
+	data->set_control(ap_pos, CTRL_AP);
+	data->set_color(c_pos, base_col); // Roughness stays at the default (0.5).
+
+	// A height detail layer so the height composite is non-trivial; capture its output as the baseline.
+	int hdetail = data->layer_add("Detail", Pasture3DLayer::ADD);
+	EXPECT_TRUE(hdetail == 1 && data->is_layer_routing());
+	data->get_layer_stack()->get_layer(hdetail)->set_sample(loc, Vector2i(10, 10), 5.f, 1.f);
+	data->composite_region(loc, Rect2i(), false);
+	PackedByteArray height_baseline = height_map->get_data(); // (c) reference.
+
+	// Create the control overlays (lower then upper) and a separate hole control layer, plus a color
+	// overlay. Each create_owned_layer_typed lazily snapshots the hand-authored map into a dense base.
+	int low_id = data->create_owned_layer_typed("/root/CtrlLow", "Low", Pasture3DLayer::REPLACE, TYPE_CONTROL);
+	int high_id = data->create_owned_layer_typed("/root/CtrlHigh", "High", Pasture3DLayer::REPLACE, TYPE_CONTROL);
+	int hole_id = data->create_owned_layer_typed("/root/Holes", "Holes", Pasture3DLayer::REPLACE, TYPE_CONTROL);
+	int color_id = data->create_owned_layer_typed("/root/Paint", "Paint", Pasture3DLayer::REPLACE, TYPE_COLOR);
+	EXPECT_TRUE(low_id > 0 && high_id > low_id && hole_id > high_id && color_id > hole_id);
+	// A control base and a color base were created lazily.
+	EXPECT_TRUE(data->get_layer_stack()->find_base_layer(TYPE_CONTROL) >= 0);
+	EXPECT_TRUE(data->get_layer_stack()->find_base_layer(TYPE_COLOR) >= 0);
+
+	// Author the overlays.
+	data->set_control_on_layer(low_id, over_pos, int(CTRL_LOW), 1.f);
+	data->set_control_on_layer(high_id, over_pos, int(CTRL_HIGH), 1.f); // Upper => must win at over_px.
+	data->set_control_on_layer(low_id, low_pos, int(CTRL_LOW), 1.f); // Only the lower overlay here.
+	data->set_hole_on_layer(hole_id, hp_pos, true);
+	data->set_color_on_layer(color_id, c_pos, over_col, col_weight);
+
+	// Full recomposite so every pixel is consistent, then capture the composited maps.
+	data->composite_region(loc, Rect2i(), false);
+	PackedByteArray height_after = height_map->get_data();
+	PackedByteArray control_saved = control_map->get_data();
+	PackedByteArray color_saved = color_map->get_data();
+
+	// ---- (c) Height composite is byte-identical despite the control/color layers. ----
+	EXPECT_TRUE(height_after == height_baseline);
+
+	// ---- (a) Control topmost-covered-wins. ----
+	EXPECT_TRUE(data->get_control(over_pos) == CTRL_HIGH); // Upper overlay overrides the lower one.
+	EXPECT_TRUE(data->get_control(low_pos) == CTRL_LOW); // Only the lower overlay covers here.
+	EXPECT_TRUE(data->get_control(Vector3(5, 0, 5)) == CTRL_KEEP); // No overlay => hand-authored base.
+
+	// ---- (b) Color blends by weight, roughness preserved. ----
+	{
+		Color composited = color_map->get_pixelv(c_px);
+		EXPECT_TRUE(approx8(composited.r, base_col.r + (over_col.r - base_col.r) * col_weight));
+		EXPECT_TRUE(approx8(composited.g, base_col.g + (over_col.g - base_col.g) * col_weight));
+		EXPECT_TRUE(approx8(composited.b, base_col.b + (over_col.b - base_col.b) * col_weight));
+		EXPECT_TRUE(approx8(composited.a, 0.5f)); // Roughness from the base is untouched.
+	}
+
+	// ---- (d) Hole carved on the control layer; hand-authored control under it preserved. ----
+	EXPECT_TRUE(data->get_control_hole(hp_pos)); // Hole present at the carved pixel.
+	EXPECT_TRUE(data->get_control(ap_pos) == CTRL_AP); // Hand-authored control beneath is intact.
+	EXPECT_FALSE(data->get_control_hole(ap_pos)); // ...and not itself a hole.
+
+	// Clear the hole layer's footprint and re-carve identically: the result is the same (idempotent).
+	AABB hole_area(Vector3(40, 0, 40), Vector3(8, 1, 8)); // Covers hp_px (42,42), not the rest.
+	data->clear_layer_in_area(hole_id, hole_area);
+	EXPECT_FALSE(data->get_control_hole(hp_pos)); // Cleared => hole gone, base shows through.
+	EXPECT_TRUE(data->get_control(ap_pos) == CTRL_AP); // Hand-authored control still preserved.
+	data->set_hole_on_layer(hole_id, hp_pos, true);
+	EXPECT_TRUE(data->get_control_hole(hp_pos)); // Re-carved => identical result.
+
+	// ---- (e) Save/load round-trip of control + color layers. ----
+	{
+		const String dir = "user://p3d_layer_phase7";
+		Ref<DirAccess> da = DirAccess::open("user://");
+		if (da.is_valid()) {
+			da->make_dir_recursive("p3d_layer_phase7");
+		}
+		const String region_path = dir + String("/") + Util::location_to_filename(loc);
+		Ref<DirAccess> dda = DirAccess::open(dir);
+		if (dda.is_valid()) {
+			for (const String &f : Array::make(Util::location_to_filename(loc), String(Util::LAYER_MANIFEST_FILENAME), Util::location_to_layer_filename(loc))) {
+				if (dda->file_exists(f)) {
+					dda->remove(f);
+				}
+			}
+		}
+		// Recompose so the saved region maps are fully consistent, then capture the runtime maps.
+		data->composite_region(loc, Rect2i(), false);
+		PackedByteArray ctrl_ref = control_map->get_data();
+		PackedByteArray color_ref = color_map->get_data();
+		region->set_modified(true);
+		region->save(region_path, false);
+		data->save_layers(dir);
+
+		Pasture3DData *data2 = memnew(Pasture3DData);
+		data2->_region_size = region_size;
+		data2->_region_sizev = V2I(region_size);
+		data2->_vertex_spacing = 1.f;
+		Ref<Pasture3DRegion> region2 = ResourceLoader::get_singleton()->load(region_path, "Pasture3DRegion", ResourceLoader::CACHE_MODE_IGNORE);
+		EXPECT_TRUE(region2.is_valid());
+		if (region2.is_null()) {
+			memdelete(data);
+			memdelete(data2);
+			return;
+		}
+		region2->set_location(loc);
+		data2->add_region(region2, false);
+		EXPECT_TRUE(data2->load_layers(dir));
+
+		Ref<Pasture3DLayerStack> stack2 = data2->get_layer_stack();
+		EXPECT_TRUE(stack2.is_valid());
+		// Both typed bases and all four overlays survived (Base + Detail + Ctrl bases/overlays + Color).
+		EXPECT_TRUE(stack2->find_base_layer(TYPE_CONTROL) >= 0);
+		EXPECT_TRUE(stack2->find_base_layer(TYPE_COLOR) >= 0);
+		int high_id2 = data2->find_layer_by_owner("/root/CtrlHigh");
+		int color_id2 = data2->find_layer_by_owner("/root/Paint");
+		EXPECT_TRUE(high_id2 >= 0 && color_id2 >= 0);
+		// Overlay sample values round-tripped (control bits exact; color albedo + weight within 8-bit).
+		EXPECT_TRUE(as_uint(stack2->get_layer_ptr(high_id2)->get_value(loc, over_px)) == CTRL_HIGH);
+		{
+			Color c = stack2->get_layer_ptr(color_id2)->get_sample(loc, c_px);
+			EXPECT_TRUE(approx8(c.r, over_col.r) && approx8(c.b, over_col.b));
+			EXPECT_TRUE(approx8(c.a, col_weight)); // Coverage weight stored in alpha.
+		}
+
+		// A post-load composite reproduces the composited control & color region maps byte-for-byte.
+		Ref<Image> control_map2 = region2->get_control_map();
+		Ref<Image> color_map2 = region2->get_color_map();
+		data2->composite_region(loc, Rect2i(), false);
+		EXPECT_TRUE(control_map2->get_data() == ctrl_ref);
+		EXPECT_TRUE(color_map2->get_data() == color_ref);
+
+		memdelete(data2);
+	}
+
+	// ---- (d cont.) Clearing the hole layer entirely restores the hand-authored base (no hole). ----
+	AABB whole_region(Vector3(0, 0, 0), Vector3(region_size, 1, region_size));
+	data->clear_layer_in_area(hole_id, whole_region);
+	EXPECT_FALSE(data->get_control_hole(hp_pos)); // Hole fully removed.
+	EXPECT_TRUE(data->get_control(ap_pos) == CTRL_AP); // Hand-authored control intact throughout.
+
+	memdelete(data);
+	UtilityFunctions::print("=== End control & color layer tests ===");
+}

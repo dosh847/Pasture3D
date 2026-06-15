@@ -96,7 +96,8 @@ var _container_unset_geo: Array[RoadContainer] = []
 var _timer:SceneTreeTimer
 var _mutex:Mutex = Mutex.new()
 var _skip_scene_load: bool = true # Also directly referecned by plugin to ensure top-level refresh works
-var _layer_id: int = -1 # Index of our reserved "Roads" layer; -1 = none / fall back to direct writes
+var _layer_id: int = -1 # Index of our reserved "Roads" height layer; -1 = none / fall back to direct writes
+var _hole_layer_id: int = -1 # Index of our reserved "Roads Holes" control layer; -1 = direct set_control_hole
 
 
 func _ready() -> void:
@@ -203,15 +204,28 @@ func do_full_refresh() -> void:
 		_next_refresh_parents += _container.get_segments() # Always add RoadSegments last
 		_mutex.unlock()
 
-## Removes mesh under roads as a baking process.
+## Removes mesh under roads as a baking process. Holes are carved into our reserved CONTROL layer
+## (non-destructive, idempotent) when the layers feature is present, else into the base control map.
 func bake_holes() -> void:
 	if not is_configured():
 		return
+
+	# Resolve our reserved hole (control) layer and gather every segment up front.
+	_ensure_hole_layer()
+	var all_segs: Array = []
 	for _container in road_manager.get_containers():
 		_container = _container as RoadContainer
-		var segs:Array = _container.get_segments()
-		for _seg in segs:
-			cull_terrain_via_roadsegment(_seg)
+		all_segs += _container.get_segments()
+
+	# Drop the previously baked holes so a re-bake is idempotent (clear + re-carve). No-op on the
+	# destructive fallback path, where set_control_hole writes the base control map directly.
+	if _hole_layer_id >= 0:
+		var clear_aabb := _affected_aabb(all_segs)
+		if clear_aabb.size != Vector3.ZERO:
+			terrain.data.clear_layer_in_area(_hole_layer_id, clear_aabb)
+
+	for _seg in all_segs:
+		cull_terrain_via_roadsegment(_seg)
 
 	terrain.data.update_maps(PASTURE_3D_MAPTYPE_CONTROL)
 
@@ -311,6 +325,31 @@ func _set_road_height(pos: Vector3, height: float, weight: float = 1.0) -> void:
 		terrain.data.set_height_on_layer(_layer_id, pos, height, weight)
 	else:
 		terrain.data.set_height(pos, height)
+
+
+## Resolve (or create) our reserved "Roads Holes" CONTROL layer. Returns true when a control layer is
+## available; false on plain terrains / builds without typed layers, where holes fall back to the
+## destructive set_control_hole path so the connector keeps working unchanged.
+func _ensure_hole_layer() -> bool:
+	_hole_layer_id = -1
+	if not terrain or not terrain.data:
+		return false
+	if not terrain.data.has_method("create_owned_layer_typed"):
+		return false # Control layers unavailable: caller falls back to set_control_hole.
+	# Separate owner id from the height "Roads" layer so each tool owns one layer per map type.
+	_hole_layer_id = terrain.data.create_owned_layer_typed(
+		_owner_id() + "#holes", target_layer_name + " Holes",
+		PASTURE_3D_BLEND_REPLACE, PASTURE_3D_MAPTYPE_CONTROL)
+	return _hole_layer_id >= 0
+
+
+## Carve (or clear) a hole. Routes into our reserved control layer (non-destructive / idempotent) when
+## available, else flips the hole bit on the base control map directly (legacy behaviour).
+func _set_road_hole(pos: Vector3, hole: bool) -> void:
+	if _hole_layer_id >= 0:
+		terrain.data.set_hole_on_layer(_hole_layer_id, pos, hole)
+	else:
+		terrain.data.set_control_hole(pos, hole)
 
 
 ## Coverage weight for a shoulder falloff. factor in [0,1] from road edge (0) to falloff end (1).
@@ -887,7 +926,7 @@ func cull_terrain_via_roadsegment(segment: RoadSegment) -> void:
 		and intersect_coords.has(Vector2(point.x + vertex_spacing,point.y + vertex_spacing)) \
 		and intersect_coords.has(Vector2(point.x + vertex_spacing,point.y - vertex_spacing)) \
 		and intersect_coords.has(Vector2(point.x - vertex_spacing,point.y + vertex_spacing)):
-			terrain.data.set_control_hole(Vector3(point.x, 0, point.y), true)
+			_set_road_hole(Vector3(point.x, 0, point.y), true)
 
 
 ## Helper Methods

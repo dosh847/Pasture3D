@@ -16,13 +16,19 @@
 // The inner key is a sub-region tile of `_tile_size` vertices. Phase 1 ships with
 // `_tile_size == region_size` (one tile per region); sub-tiling is a later, drop-in optimization.
 //
-// Each sample is a (value, weight) pair. Tiles are stored as FORMAT_RGF (R = value, G = weight).
-// A weight of 0 means the pixel is not owned by this layer and is skipped when compositing.
-// The dense Base layer may instead alias a region's plain FORMAT_RF height map (always covered,
-// weight implicitly 1) to avoid doubling memory; sampling handles both formats transparently.
+// The tile format follows the layer's map type (Phase 7):
+//   TYPE_HEIGHT / TYPE_CONTROL overlay tiles: FORMAT_RGF — R = value (height, or control uint32 as
+//     float bits), G = weight in [0,1]. A weight of 0 means the pixel is not owned by this layer.
+//   TYPE_COLOR overlay tiles: FORMAT_RGBA8 — RGB = albedo, A = coverage weight (roughness is carried
+//     by the region color map's base, not authored per color layer).
+// The dense Base of each map type may instead alias / own a region map verbatim: the height Base is a
+// FORMAT_RF region image (always covered, weight implicitly 1); the control Base is FORMAT_RF; the
+// color Base is FORMAT_RGBA8 with `_is_base` set (so its alpha reads as roughness, not weight). Sampling
+// (get_value / get_sample / get_weight) handles all formats transparently.
 //
-// This class is editor-only authoring data. Compositing the stack down into the runtime region
-// images happens in Pasture3DData (phase 2); v1 ships height layers only (TYPE_HEIGHT).
+// This class is editor-only authoring data. Compositing the stack down into the runtime region images
+// happens in Pasture3DData: height blends (REPLACE/ADD/MAX/MIN), control is topmost-covered-wins (no
+// arithmetic blend), and color is alpha-over by weight (PASTURE3D_LAYERS_GUIDE.md §5.1).
 class Pasture3DLayer : public Resource {
 	GDCLASS(Pasture3DLayer, Resource);
 	CLASS_NAME();
@@ -45,8 +51,14 @@ private:
 	bool _locked = false;
 	bool _reserved = false; // Owned by a tool/node; user edits disabled
 	String _owner_id; // Optional: node path / generator id that owns it
-	MapType _map_type = TYPE_HEIGHT; // v1: height only
+	MapType _map_type = TYPE_HEIGHT; // height (RGF value+weight), control (RGF bits+weight), color (RGBA8 rgb+weight-alpha)
 	int _tile_size = 64; // Sub-region tile edge in vertices (power of two, <= region_size)
+	// Dense, always-covered base of its map type (Phase 7). The bottom of each map type's sub-stack:
+	// height Base aliases/owns the region height map; control/color bases own a deep copy of the region
+	// control/color map so compositing has a hand-authored source distinct from the composite target
+	// (the idempotency requirement, PASTURE3D_LAYERS_GUIDE.md §5.1). A base is full-coverage (weight 1)
+	// and is never garbage-collected.
+	bool _is_base = false;
 
 	// Saved pixel data. Sparse, sub-region tiles.
 	//   _tiles[region_location:Vector2i] -> Dict[tile_coord:Vector2i] -> Ref<Image>(FORMAT_RGF)
@@ -60,6 +72,7 @@ private:
 	Vector2i _tile_local(const Vector2i &p_px, const Vector2i &p_tile_coord) const { return p_px - p_tile_coord * _tile_size; }
 	Image *_get_tile_ptr(const Vector2i &p_region_loc, const Vector2i &p_tile_coord) const;
 	Ref<Image> _get_or_create_tile(const Vector2i &p_region_loc, const Vector2i &p_tile_coord);
+	Image::Format _overlay_format() const; // RGBA8 for color, RGF for height/control overlays
 	// True if every sample in a tile is uncovered (weight 0). An aliased Base FORMAT_RF tile is always
 	// covered, so it is never considered empty (the Base must never be GC'd — §5.1 / §10.4).
 	static bool _tile_all_uncovered(const Ref<Image> &p_tile);
@@ -89,10 +102,17 @@ public:
 	MapType get_map_type() const { return _map_type; }
 	void set_tile_size(const int p_tile_size);
 	int get_tile_size() const { return _tile_size; }
+	void set_base(const bool p_is_base);
+	bool is_base() const { return _is_base; }
 
 	// Pixel access. p_px is a vertex offset within the region [0, region_size).
+	// set_sample writes a scalar value + weight (height / control overlays, FORMAT_RGF tiles).
 	void set_sample(const Vector2i &p_region_loc, const Vector2i &p_px, const real_t p_value, const real_t p_weight = 1.f);
-	real_t get_value(const Vector2i &p_region_loc, const Vector2i &p_px) const; // NAN if uncovered
+	// set_sample_color writes an RGBA color + weight (color overlays, FORMAT_RGBA8 tiles; weight -> alpha).
+	void set_sample_color(const Vector2i &p_region_loc, const Vector2i &p_px, const Color &p_color, const real_t p_weight = 1.f);
+	real_t get_value(const Vector2i &p_region_loc, const Vector2i &p_px) const; // NAN if uncovered; .r of the tile
+	// Full RGBA of the tile pixel (color compositing). Color(0,0,0,0) if no tile exists.
+	Color get_sample(const Vector2i &p_region_loc, const Vector2i &p_px) const;
 	real_t get_weight(const Vector2i &p_region_loc, const Vector2i &p_px) const; // 0 if uncovered
 
 	// Deep snapshot/restore of one region's tiles (images duplicated), for undo and duplication.

@@ -45,6 +45,11 @@ public:
 	Ref<Pasture3DLayer> get_layer(const int p_idx) const;
 	Pasture3DLayer *get_layer_ptr(const int p_idx) const;
 	int find_layer_by_owner(const String &p_owner_id) const;
+	// Index of the dense base layer for a map type (is_base() && map_type), or -1 if none exists.
+	int find_base_layer(const MapType p_map_type) const;
+	// Whether the stack holds at least one non-base overlay layer of the given map type (cheap gate so
+	// compositing skips control/color passes entirely on height-only terrains).
+	bool has_overlay_of_type(const MapType p_map_type) const;
 
 	void set_layers(const TypedArray<Pasture3DLayer> &p_layers) { _layers = p_layers; }
 	TypedArray<Pasture3DLayer> get_layers() const { return _layers; }

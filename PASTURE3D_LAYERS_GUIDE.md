@@ -518,8 +518,9 @@ Each phase is independently testable and leaves `main` shippable.
 6. ✅ **Sub-region tiling optimization.** `_tile_size` defaults to 64 (already wired); tile GC,
    sub-tile-precise clear (fixes the Phase 5 partial-refresh caveat), and a NaN-vs-weight re-audit.
    **(Done — see §10.6.)**
-7. **(Later) Control & color layers.** Holes/texture/color layers using topmost-covered
-   compositing for control; extends the road connector's hole carving to a layer.
+7. ✅ **Control & color layers.** Holes/texture/color layers using topmost-covered-wins compositing for
+   control and alpha-over for color; extends the road connector's hole carving to a reserved control
+   layer. **(Done — see §10.7.)**
 
 ### 10.4 Phase 4 implementation notes (done)
 
@@ -667,6 +668,90 @@ post-load composite all survive. All 35 checks PASSED headless on Godot 4.6.2.
   footprint sit at a few 64² tiles per touched region instead of a full region image.
 - **No regression.** The terrain should look identical and the runtime `pasture3d_<loc>.res` files byte-unchanged.
 
+### 10.7 Phase 7 implementation notes — control & color layers (done)
+
+**Status: ✅ implemented 2026-06-14, builds clean, 32/32 PASSED headless (full suite 139/139).** This phase
+generalises the stack beyond a single blendable height channel: CONTROL is a packed `uint32` (not
+float-blendable) and COLOR is `RGBA8`, so each gets its own compositing rule and its own dense base.
+
+**Per-map-type layer storage (`Pasture3DLayer`).** A new serialized `bool _is_base` marks the dense,
+always-covered base of a map type. The tile format now follows the map type (`_overlay_format()`): color
+overlays are `FORMAT_RGBA8` (RGB = albedo, **A = coverage weight**), height/control overlays stay
+`FORMAT_RGF` (R = value or control-as-float-bits, G = weight). New accessors: `set_sample_color` /
+`get_sample` (full RGBA) alongside the scalar `set_sample` / `get_value`. `get_weight` is still the
+authoritative coverage test (§4.3) and is now format-aware: a base or `FORMAT_RF` tile is always covered
+(weight 1), an `RGBA8` overlay reads coverage from alpha, an `RGF` overlay from green. GC (`_tile_all_uncovered`)
+scans alpha for `RGBA8` and skips base layers entirely (`gc_region` early-returns for `_is_base`). NaN still
+means only "whole absent tile".
+
+**Compositing per map type (`composite_region`).** Refactored into three passes — `_composite_height_region`
+(filters `map_type==TYPE_HEIGHT`; **byte-identical** to pre-Phase-7, proven by a baseline test), the new
+`_composite_control_region` (**topmost-covered-wins** — seed from the control base, then each covered control
+overlay bottom→top *fully replaces* the value; no arithmetic blend, §5.1), and `_composite_color_region`
+(**alpha-over** — seed from the color base, `acc.rgb = lerp(acc.rgb, overlay.rgb, weight*opacity)`, roughness
+in `acc.a` preserved). Control/color passes only run when `stack->has_overlay_of_type(...)` (a new cheap
+gate), so height-only terrains pay zero extra cost. `composite_region(update=true)` now pushes only the map
+types it touched; the management paths (`recomposite_layer`/`layer_remove`/`layer_move`) use `update_maps(TYPE_MAX)`.
+
+**Dense typed bases (the idempotency key).** Control/color have no Base layer in the original stack, so the
+hand-authored control/color lives in the region map — which is *also* the composite target. To make a
+clear+recomposite idempotent (the height un-alias problem, §5.1, for control/color), `_ensure_typed_base(map_type)`
+lazily creates a dense base layer **seeded from a deep copy of the current region control/color map** the first
+time a control/color overlay is created. The base is full-coverage, `reserved`, never GC'd, and never
+sub-tiled. `Pasture3DLayerStack::find_base_layer(map_type)` locates it; `_adopt_region_into_bases` makes every
+base (height + typed) cover regions added after the stack exists (generalising the old height-only adoption in
+`add_region`). `_synthesize_base_layer` and `load_layers` now set `_is_base` on the height Base so old manifests
+normalise.
+
+**Holes → a control layer (connector).** `Pasture3DData::create_owned_layer_typed(owner,name,blend,map_type)`
+(the height `create_owned_layer` now delegates to it with `TYPE_HEIGHT`), plus `set_control_on_layer`,
+`set_hole_on_layer` (reads the composited control, flips the hole bit preserving texture/nav/etc, stores the
+full value at weight 1 so topmost-wins replaces cleanly), and `set_color_on_layer` — all with the same
+null-stack/invalid-layer fallback to the destructive `set_control`/`set_control_hole`/`set_color` path.
+`road_connector.gd` now owns a second reserved layer (`owner_id + "#holes"`, `target_layer_name + " Holes"`,
+`TYPE_CONTROL`): `bake_holes` resolves it, `clear_layer_in_area`s its footprint, re-carves via
+`_set_road_hole` → `set_hole_on_layer`, then `update_maps(CONTROL)`. Carving is now non-destructive and
+idempotent like the road height; on a build/terrain without typed layers it falls back to `set_control_hole`
+unchanged. (Editor guard: `start_operation` only captures a height active layer as the sculpt `_stroke_layer`,
+so a control/color active layer is never written height into.)
+
+**Persistence + undo.** No format change — `save_layers`/`load_layers` already serialise `_tiles` generically
+and align layers by index, so the new RGBA8 tiles and the dense control/color bases (upper layers, `i>0`)
+round-trip with the height path untouched. The undo tile-snapshot primitives (`duplicate_region_tiles` /
+`restore_region_tiles`) are map-type agnostic, so control/color edits undo via the existing path.
+
+**Guardrails honoured:** the dense height Base un-alias-by-pointer identity is unchanged; the runtime
+`pasture3d_<loc>.res` format is unchanged (editor-only data); non-Base layers default to `tile_size 64`; and
+the height composite output is byte-identical to a pre-Phase-7 baseline.
+
+**Tests** (`test_layer_control_color` in `unit_testing.{h,cpp}`; re-commented call in `pasture_3d.cpp` READY;
+standalone, sets `_region_size`/`_vertex_spacing` via a new `friend void test_layer_control_color();` on
+`Pasture3DData`): (a) control is topmost-covered-wins (upper overlay overrides lower at a shared pixel; an
+uncovered pixel falls through to the hand-authored base); (b) color blends by weight (alpha-over) with
+roughness preserved; (c) the height composite is byte-identical after control/color layers are added;
+(d) a hole authored on a control layer carves the composited control map, survives a clear + identical
+re-carve (idempotent) with the hand-authored control beneath preserved, and clearing the hole layer entirely
+restores the hand-authored base (no hole); (e) save/load round-trips the control + color overlays AND their
+dense bases, and a post-load composite reproduces the composited control and color region maps byte-for-byte.
+All 32 checks PASSED headless on Godot 4.6.2.
+
+**Empirical / in-editor (recommended, like the Phase 5/6 user-verification steps):**
+- **Hole migration.** Bake holes under a road (Bake Holes), then move the road / re-bake and confirm the old
+  hole vanishes and the new one appears with no leftover holes, all without disturbing hand-painted control
+  under the road. Clearing the road's hole layer should restore the hand-painted control beneath.
+- **No regression.** A height-only terrain looks identical and its runtime `pasture3d_<loc>.res` files are
+  byte-unchanged (control/color passes never run when no control/color overlay exists).
+
+**Follow-ups (this was the last planned phase):**
+- No Layers-panel UX yet for *adding* control/color layers or painting into them by hand — they are created
+  via the tool API (the connector) only. A panel affordance + an editor paint route (control/color analogue
+  of the height sculpt routing) would round out hand-authoring; the compositing + storage are ready for it.
+- Color overlays author albedo + coverage only (roughness is carried by the color base); a roughness/weight
+  authoring channel could be added if per-layer roughness is wanted.
+- `is_layer_routing()` is still count-based (`> 1`), so a terrain with only a control/color layer also enables
+  height sculpt routing into the active (height Base) layer. Harmless today, but a per-map-type routing
+  predicate would be cleaner if control/color hand-painting lands.
+
 ---
 
 ## 11. Settled decisions
@@ -682,9 +767,11 @@ These four were confirmed and are now binding for the implementation:
    is underneath (§8.3). `ADD` is reserved for detail/erosion layers, not roads.
 3. **Default `_tile_size` = 64.** Matches the default region size of 256 (4×4 tiles/region)
    and keeps thin generated features (roads, paths, rivers) maximally sparse (§4.2, §9).
-4. **v1 is height-only.** Holes and texture/color stay on the composited control/color maps;
-   the road connector keeps carving holes via `set_control_hole` until control layering
-   arrives in phase 7. No control/color layers ship in v1.
+4. **v1 was height-only.** Holes and texture/color stayed on the composited control/color maps, and the
+   road connector kept carving holes via `set_control_hole` — **until phase 7 (now done, §10.7):** control
+   (topmost-covered-wins) and color (alpha-over) layers exist, and the connector carves holes into a
+   reserved control layer (non-destructive/idempotent), falling back to `set_control_hole` only when the
+   typed-layers feature is absent.
 
 ---
 

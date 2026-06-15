@@ -18,12 +18,19 @@ Image *Pasture3DLayer::_get_tile_ptr(const Vector2i &p_region_loc, const Vector2
 	return cast_to<Image>(region_tiles[p_tile_coord]);
 }
 
+// Overlay tile format follows the map type: color overlays carry RGBA8 (rgb albedo, a = weight),
+// height/control overlays carry RGF (r = value/control-bits, g = weight). Base tiles are assigned
+// directly via set_region_image and may be any region-map format (RF / RGBA8).
+Image::Format Pasture3DLayer::_overlay_format() const {
+	return _map_type == TYPE_COLOR ? Image::FORMAT_RGBA8 : Image::FORMAT_RGF;
+}
+
 Ref<Image> Pasture3DLayer::_get_or_create_tile(const Vector2i &p_region_loc, const Vector2i &p_tile_coord) {
 	Dictionary region_tiles = _tiles.has(p_region_loc) ? Dictionary(_tiles[p_region_loc]) : Dictionary();
 	Ref<Image> tile = region_tiles.get(p_tile_coord, Ref<Image>());
 	if (tile.is_null()) {
-		// New tiles start fully uncovered: value 0, weight 0.
-		tile = Util::get_filled_image(V2I(_tile_size), Color(0.f, 0.f, 0.f, 0.f), false, Image::FORMAT_RGF);
+		// New tiles start fully uncovered: all channels 0 (value 0, weight 0).
+		tile = Util::get_filled_image(V2I(_tile_size), Color(0.f, 0.f, 0.f, 0.f), false, _overlay_format());
 		region_tiles[p_tile_coord] = tile;
 		_tiles[p_region_loc] = region_tiles;
 		_modified = true;
@@ -45,8 +52,14 @@ void Pasture3DLayer::clear() {
 	_owner_id = String();
 	_map_type = TYPE_HEIGHT;
 	_tile_size = 64;
+	_is_base = false;
 	_tiles.clear();
 	_modified = false;
+}
+
+void Pasture3DLayer::set_base(const bool p_is_base) {
+	SET_IF_DIFF(_is_base, p_is_base);
+	_modified = true;
 }
 
 void Pasture3DLayer::set_layer_name(const String &p_name) {
@@ -127,6 +140,18 @@ void Pasture3DLayer::set_sample(const Vector2i &p_region_loc, const Vector2i &p_
 	_modified = true;
 }
 
+void Pasture3DLayer::set_sample_color(const Vector2i &p_region_loc, const Vector2i &p_px, const Color &p_color, const real_t p_weight) {
+	Vector2i tile_coord = _tile_coord(p_px);
+	Vector2i local = _tile_local(p_px, tile_coord);
+	Ref<Image> tile = _get_or_create_tile(p_region_loc, tile_coord);
+	if (tile.is_null()) {
+		return;
+	}
+	// RGBA8 color overlay: RGB = albedo, A = coverage weight.
+	tile->set_pixelv(local, Color(p_color.r, p_color.g, p_color.b, CLAMP(p_weight, 0.f, 1.f)));
+	_modified = true;
+}
+
 real_t Pasture3DLayer::get_value(const Vector2i &p_region_loc, const Vector2i &p_px) const {
 	Vector2i tile_coord = _tile_coord(p_px);
 	Image *tile = _get_tile_ptr(p_region_loc, tile_coord);
@@ -136,15 +161,29 @@ real_t Pasture3DLayer::get_value(const Vector2i &p_region_loc, const Vector2i &p
 	return tile->get_pixelv(_tile_local(p_px, tile_coord)).r;
 }
 
+Color Pasture3DLayer::get_sample(const Vector2i &p_region_loc, const Vector2i &p_px) const {
+	Vector2i tile_coord = _tile_coord(p_px);
+	Image *tile = _get_tile_ptr(p_region_loc, tile_coord);
+	if (!tile) {
+		return Color(0.f, 0.f, 0.f, 0.f);
+	}
+	return tile->get_pixelv(_tile_local(p_px, tile_coord));
+}
+
 real_t Pasture3DLayer::get_weight(const Vector2i &p_region_loc, const Vector2i &p_px) const {
 	Vector2i tile_coord = _tile_coord(p_px);
 	Image *tile = _get_tile_ptr(p_region_loc, tile_coord);
 	if (!tile) {
 		return 0.f;
 	}
-	// A dense Base layer aliases a single-channel FORMAT_RF region image and is always covered.
-	if (tile->get_format() == Image::FORMAT_RF) {
+	// A dense Base is always covered: its alpha/green may carry data (roughness for a color base), not
+	// coverage. Single-channel FORMAT_RF bases (height/control) are likewise always covered.
+	if (_is_base || tile->get_format() == Image::FORMAT_RF) {
 		return 1.f;
+	}
+	// Color overlays carry coverage in the alpha channel; height/control overlays carry it in green.
+	if (tile->get_format() == Image::FORMAT_RGBA8) {
+		return tile->get_pixelv(_tile_local(p_px, tile_coord)).a;
 	}
 	return tile->get_pixelv(_tile_local(p_px, tile_coord)).g;
 }
@@ -259,15 +298,18 @@ bool Pasture3DLayer::_tile_all_uncovered(const Ref<Image> &p_tile) {
 	if (p_tile.is_null()) {
 		return true;
 	}
-	// The dense Base aliases a single-channel FORMAT_RF image; it is always covered (never empty).
+	// A dense single-channel FORMAT_RF base (height/control) is always covered (never empty).
 	if (p_tile->get_format() == Image::FORMAT_RF) {
 		return false;
 	}
+	// Coverage lives in alpha for RGBA8 (color overlays), green for RGF (height/control overlays).
+	const bool rgba = p_tile->get_format() == Image::FORMAT_RGBA8;
 	const int w = p_tile->get_width();
 	const int h = p_tile->get_height();
 	for (int y = 0; y < h; y++) {
 		for (int x = 0; x < w; x++) {
-			if (p_tile->get_pixel(x, y).g != 0.f) {
+			const Color c = p_tile->get_pixel(x, y);
+			if ((rgba ? c.a : c.g) != 0.f) {
 				return false; // Some pixel is owned by this layer.
 			}
 		}
@@ -276,6 +318,9 @@ bool Pasture3DLayer::_tile_all_uncovered(const Ref<Image> &p_tile) {
 }
 
 bool Pasture3DLayer::gc_region(const Vector2i &p_region_loc) {
+	if (_is_base) {
+		return !_tiles.has(p_region_loc); // A base is full-coverage; never GC its tiles.
+	}
 	if (!_tiles.has(p_region_loc)) {
 		return true; // Already absent == effectively empty.
 	}
@@ -337,6 +382,7 @@ void Pasture3DLayer::set_data(const Dictionary &p_data) {
 	SET_IF_HAS(_reserved, "reserved");
 	SET_IF_HAS(_owner_id, "owner_id");
 	SET_IF_HAS(_tile_size, "tile_size");
+	SET_IF_HAS(_is_base, "is_base");
 	SET_IF_HAS(_tiles, "tiles");
 #undef SET_IF_HAS
 	if (p_data.has("blend_mode")) {
@@ -358,6 +404,7 @@ Dictionary Pasture3DLayer::get_data() const {
 	dict["owner_id"] = _owner_id;
 	dict["map_type"] = _map_type;
 	dict["tile_size"] = _tile_size;
+	dict["is_base"] = _is_base;
 	dict["tiles"] = _tiles;
 	return dict;
 }
@@ -393,9 +440,13 @@ void Pasture3DLayer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_map_type"), &Pasture3DLayer::get_map_type);
 	ClassDB::bind_method(D_METHOD("set_tile_size", "tile_size"), &Pasture3DLayer::set_tile_size);
 	ClassDB::bind_method(D_METHOD("get_tile_size"), &Pasture3DLayer::get_tile_size);
+	ClassDB::bind_method(D_METHOD("set_base", "is_base"), &Pasture3DLayer::set_base);
+	ClassDB::bind_method(D_METHOD("is_base"), &Pasture3DLayer::is_base);
 
 	ClassDB::bind_method(D_METHOD("set_sample", "region_location", "pixel", "value", "weight"), &Pasture3DLayer::set_sample, DEFVAL(1.f));
+	ClassDB::bind_method(D_METHOD("set_sample_color", "region_location", "pixel", "color", "weight"), &Pasture3DLayer::set_sample_color, DEFVAL(1.f));
 	ClassDB::bind_method(D_METHOD("get_value", "region_location", "pixel"), &Pasture3DLayer::get_value);
+	ClassDB::bind_method(D_METHOD("get_sample", "region_location", "pixel"), &Pasture3DLayer::get_sample);
 	ClassDB::bind_method(D_METHOD("get_weight", "region_location", "pixel"), &Pasture3DLayer::get_weight);
 	ClassDB::bind_method(D_METHOD("get_tile", "region_location", "tile_coord"), &Pasture3DLayer::get_tile);
 	ClassDB::bind_method(D_METHOD("set_region_image", "region_location", "image"), &Pasture3DLayer::set_region_image);
@@ -424,5 +475,6 @@ void Pasture3DLayer::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "owner_id", PROPERTY_HINT_NONE, "", meta_flags), "set_owner_id", "get_owner_id");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "map_type", PROPERTY_HINT_ENUM, "Height,Control,Color", ro_flags), "set_map_type", "get_map_type");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "tile_size", PROPERTY_HINT_NONE, "", ro_flags), "set_tile_size", "get_tile_size");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "is_base", PROPERTY_HINT_NONE, "", ro_flags), "set_base", "is_base");
 	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "tiles", PROPERTY_HINT_NONE, "", ro_flags), "set_tiles", "get_tiles");
 }

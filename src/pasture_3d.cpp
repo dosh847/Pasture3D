@@ -1245,6 +1245,7 @@ void Pasture3D::_notification(const int p_what) {
 			//test_layer_base_persistence();
 			//test_layer_road_connector();
 			//test_layer_subtiling();
+			//test_layer_control_color();
 
 			// Clear editor textures - also see ENTER_TREE
 			if (_free_editor_textures && !IS_EDITOR && _assets.is_valid()) {

@@ -18,6 +18,7 @@ class Pasture3DData : public Object {
 	// set _region_size / _vertex_spacing. Friending lets the standalone test configure them directly.
 	friend void test_layer_road_connector();
 	friend void test_layer_subtiling(); // Phase 6 test; same descale-field access as above.
+	friend void test_layer_control_color(); // Phase 7 test; same descale-field access as above.
 
 public: // Constants
 	static inline const real_t CURRENT_DATA_VERSION = 0.93f; // Current Data format version
@@ -99,6 +100,21 @@ private:
 	// Region-local vertex rect (clamped to [0, region_size]) covered by a world-space AABB's XZ extent,
 	// for one region location. Used to scope a sub-tile clear to the footprint of a tool re-render.
 	Rect2i _region_pixel_rect(const AABB &p_area, const Vector2i &p_region_loc) const;
+	// Per-map-type compositing passes (Phase 7), each writing one region map over the given rect:
+	//   height  — REPLACE/ADD/MAX/MIN blend (unchanged; byte-identical to pre-Phase-7).
+	//   control — topmost-covered-wins; a covered overlay fully replaces the value below (no float blend).
+	//   color   — alpha-over: acc.rgb = lerp(below, overlay.rgb, weight*opacity); roughness (alpha) kept.
+	// control/color seed from the dense base of that map type (the hand-authored source, distinct from
+	// the region map being written), so a clear + recomposite is idempotent (§5.1).
+	void _composite_height_region(Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Rect2i &p_rect);
+	void _composite_control_region(Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Rect2i &p_rect);
+	void _composite_color_region(Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Rect2i &p_rect);
+	// Lazily create the dense base layer for a control/color map type, seeded from the current region
+	// maps (the hand-authored control/color). Idempotent; returns the base layer index or -1.
+	int _ensure_typed_base(const MapType p_map_type);
+	// Make every base layer (height/control/color) cover a newly added region by adopting its region map
+	// (alias for a single-layer height base, an owned copy otherwise). Skipped during initial load.
+	void _adopt_region_into_bases(Pasture3DRegion *p_region);
 	void _copy_paste_dfr(const Pasture3DRegion *p_src_region, const Rect2i &p_src_rect, const Rect2i &p_dst_rect, const Pasture3DRegion *p_dst_region);
 
 public:
@@ -194,7 +210,20 @@ public:
 	// mark it reserved+owned. Un-aliases the Base when the new layer is the first non-Base layer. Returns
 	// the layer index, or -1 if a Base could not be anchored. Idempotent by owner_id.
 	int create_owned_layer(const String &p_owner_id, const String &p_name, const int p_blend_mode);
+	// Like create_owned_layer but for a chosen map type (Phase 7). For TYPE_CONTROL/TYPE_COLOR it first
+	// ensures the dense typed base exists (capturing the current hand-authored control/color), then adds
+	// the reserved overlay. Holes/texture/color tools own a control/color layer this way (§8.3, §11.4).
+	int create_owned_layer_typed(const String &p_owner_id, const String &p_name, const int p_blend_mode, const int p_map_type);
 	void set_height_on_layer(const int p_layer_id, const Vector3 &p_global_position, const real_t p_height, const real_t p_weight = 1.f);
+	// Write a packed control uint32 (or just a hole bit) into a control overlay layer, then dirty-scope
+	// composite it back into the region control map. set_hole_on_layer reads the composited control at the
+	// position, sets/clears the hole bit (preserving texture/nav/etc), and stores the full value at weight 1.
+	// Both fall back to the destructive set_control/set_control_hole path when no stack/invalid layer (§8.3).
+	void set_control_on_layer(const int p_layer_id, const Vector3 &p_global_position, const int p_control, const real_t p_weight = 1.f);
+	void set_hole_on_layer(const int p_layer_id, const Vector3 &p_global_position, const bool p_hole);
+	// Write an RGBA albedo + coverage weight into a color overlay layer, then dirty-scope composite it
+	// (alpha-over). Falls back to set_color when no stack/invalid layer.
+	void set_color_on_layer(const int p_layer_id, const Vector3 &p_global_position, const Color &p_color, const real_t p_weight = 1.f);
 	void add_height_on_layer(const int p_layer_id, const Vector3 &p_global_position, const real_t p_delta, const real_t p_weight = 1.f);
 	real_t get_layer_height(const int p_layer_id, const Vector3 &p_global_position) const;
 	// Clear the layer's tiles in every region the area (world-space AABB, XZ used) overlaps, then

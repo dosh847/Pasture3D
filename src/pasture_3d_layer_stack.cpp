@@ -90,6 +90,26 @@ int Pasture3DLayerStack::find_layer_by_owner(const String &p_owner_id) const {
 	return -1;
 }
 
+int Pasture3DLayerStack::find_base_layer(const MapType p_map_type) const {
+	for (int i = 0; i < _layers.size(); i++) {
+		const Pasture3DLayer *layer = cast_to<Pasture3DLayer>(_layers[i]);
+		if (layer && layer->is_base() && layer->get_map_type() == p_map_type) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+bool Pasture3DLayerStack::has_overlay_of_type(const MapType p_map_type) const {
+	for (int i = 0; i < _layers.size(); i++) {
+		const Pasture3DLayer *layer = cast_to<Pasture3DLayer>(_layers[i]);
+		if (layer && !layer->is_base() && layer->get_map_type() == p_map_type) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void Pasture3DLayerStack::set_active_layer(const int p_idx) {
 	if (p_idx < 0 || p_idx >= _layers.size()) {
 		LOG(ERROR, "Active layer index ", p_idx, " out of range [0, ", _layers.size(), ")");
@@ -130,6 +150,8 @@ void Pasture3DLayerStack::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("move_layer", "from", "to"), &Pasture3DLayerStack::move_layer);
 	ClassDB::bind_method(D_METHOD("get_layer", "index"), &Pasture3DLayerStack::get_layer);
 	ClassDB::bind_method(D_METHOD("find_layer_by_owner", "owner_id"), &Pasture3DLayerStack::find_layer_by_owner);
+	ClassDB::bind_method(D_METHOD("find_base_layer", "map_type"), &Pasture3DLayerStack::find_base_layer);
+	ClassDB::bind_method(D_METHOD("has_overlay_of_type", "map_type"), &Pasture3DLayerStack::has_overlay_of_type);
 
 	ClassDB::bind_method(D_METHOD("set_layers", "layers"), &Pasture3DLayerStack::set_layers);
 	ClassDB::bind_method(D_METHOD("get_layers"), &Pasture3DLayerStack::get_layers);

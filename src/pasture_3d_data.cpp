@@ -44,6 +44,7 @@ void Pasture3DData::_synthesize_base_layer() {
 	base->set_map_type(TYPE_HEIGHT);
 	base->set_tile_size(_region_size); // Phase 1: one tile per region == the region image
 	base->set_blend_mode(Pasture3DLayer::REPLACE);
+	base->set_base(true);
 	Array locations = _regions.keys();
 	for (const Vector2i &region_loc : locations) {
 		Pasture3DRegion *region = get_region_ptr(region_loc);
@@ -156,7 +157,7 @@ void Pasture3DData::layer_remove(const int p_idx) {
 	for (const Vector2i &loc : locs) {
 		composite_region(loc, Rect2i(), false);
 	}
-	update_maps(TYPE_HEIGHT, false, false);
+	update_maps(TYPE_MAX, false, false); // The removed layer may be control/color, not just height.
 }
 
 void Pasture3DData::layer_move(const int p_from, const int p_to) {
@@ -169,7 +170,7 @@ void Pasture3DData::layer_move(const int p_from, const int p_to) {
 	for (const Vector2i &loc : locs) {
 		composite_region(loc, Rect2i(), false);
 	}
-	update_maps(TYPE_HEIGHT, false, false);
+	update_maps(TYPE_MAX, false, false);
 }
 
 void Pasture3DData::recomposite_layer(const int p_idx) {
@@ -184,7 +185,7 @@ void Pasture3DData::recomposite_layer(const int p_idx) {
 	for (const Vector2i &loc : locations) {
 		composite_region(loc, Rect2i(), false);
 	}
-	update_maps(TYPE_HEIGHT, false, false);
+	update_maps(TYPE_MAX, false, false);
 }
 
 void Pasture3DData::refresh_base_alias() {
@@ -434,20 +435,11 @@ Error Pasture3DData::add_region(const Ref<Pasture3DRegion> &p_region, const bool
 		LOG(INFO, "Overwriting ", (_regions.has(region_loc)) ? "deleted" : "existing", " region at ", region_loc);
 	}
 	_regions[region_loc] = p_region;
-	// If a layer stack already exists (editing, not the initial load — the stack is built after the
-	// load loop), make the Base cover this newly added region so compositing/routing include it. A
-	// single-layer Base aliases the region map; a multi-layer (un-aliased) Base owns a copy of it.
+	// If a layer stack already exists (editing, not the initial load — the stack is built after the load
+	// loop), make every base layer (height + any control/color base) cover this newly added region so
+	// compositing/routing include it. A single-layer height Base aliases the region map; others own a copy.
 	if (_layer_stack.is_valid()) {
-		Pasture3DLayer *base = _layer_stack->get_layer_ptr(0);
-		Ref<Image> hm = p_region->get_height_map();
-		if (base && hm.is_valid() && !base->has_region(region_loc) &&
-				hm->get_width() == base->get_tile_size() && hm->get_height() == base->get_tile_size()) {
-			if (_layer_stack->get_layer_count() <= 1) {
-				base->set_region_image(region_loc, hm);
-			} else {
-				base->set_region_image(region_loc, Image::create_from_data(hm->get_width(), hm->get_height(), hm->has_mipmaps(), hm->get_format(), hm->get_data()));
-			}
-		}
+		_adopt_region_into_bases(p_region.ptr());
 	}
 	_region_map_dirty = true;
 	LOG(DEBUG, "Storing region ", region_loc, " version ", vformat("%.3f", p_region->get_version()), " id: ", _region_locations.size());
@@ -716,6 +708,7 @@ bool Pasture3DData::load_layers(const String &p_dir) {
 	// heights keep them — the flattened region map is the runtime data, the base buffer is the source.
 	Pasture3DLayer *base = manifest->get_layer_ptr(0);
 	if (base) {
+		base->set_base(true); // Normalize pre-Phase-7 manifests whose Base predates the is_base flag.
 		for (const Vector2i &region_loc : _regions.keys()) {
 			if (base->has_region(region_loc)) {
 				continue; // Loaded its own (un-aliased) base heights.
@@ -1059,15 +1052,47 @@ void Pasture3DData::composite_region(const Vector2i &p_region_loc, const Rect2i 
 		return;
 	}
 
+	// Height always composites (the stack carries the dense height Base). Control/color only run when an
+	// overlay of that type exists, so height-only terrains stay byte-identical and pay zero extra cost.
+	const bool do_control = _layer_stack->has_overlay_of_type(TYPE_CONTROL);
+	const bool do_color = _layer_stack->has_overlay_of_type(TYPE_COLOR);
+	_composite_height_region(region, p_region_loc, rect);
+	if (do_control) {
+		_composite_control_region(region, p_region_loc, rect);
+	}
+	if (do_color) {
+		_composite_color_region(region, p_region_loc, rect);
+	}
+	region->set_edited(true);
+	if (p_update) {
+		// Reuse the is_edited() fast path: only edited regions are pushed to the GPU.
+		update_maps(TYPE_HEIGHT, false, false);
+		if (do_control) {
+			update_maps(TYPE_CONTROL, false, false);
+		}
+		if (do_color) {
+			update_maps(TYPE_COLOR, false, false);
+		}
+	}
+}
+
+// Height pass — walks only the height layers (the dense Base + height overlays) bottom->top and blends
+// REPLACE/ADD/MAX/MIN exactly as before. Filtering by map type is a no-op for pre-Phase-7 stacks (all
+// layers were height), so the output stays byte-identical.
+void Pasture3DData::_composite_height_region(Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Rect2i &p_rect) {
+	Ref<Image> height_map = p_region->get_height_map();
+	if (height_map.is_null()) {
+		return;
+	}
 	const int layer_count = _layer_stack->get_layer_count();
-	const Vector2i end = rect.position + rect.size;
-	for (int y = rect.position.y; y < end.y; y++) {
-		for (int x = rect.position.x; x < end.x; x++) {
+	const Vector2i end = p_rect.position + p_rect.size;
+	for (int y = p_rect.position.y; y < end.y; y++) {
+		for (int x = p_rect.position.x; x < end.x; x++) {
 			const Vector2i px(x, y);
 			real_t acc = NAN; // Undefined until the first covered layer (Base) writes it.
 			for (int i = 0; i < layer_count; i++) {
 				const Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
-				if (!layer || !layer->is_visible()) {
+				if (!layer || !layer->is_visible() || layer->get_map_type() != TYPE_HEIGHT) {
 					continue;
 				}
 				const real_t w = layer->get_weight(p_region_loc, px);
@@ -1106,10 +1131,78 @@ void Pasture3DData::composite_region(const Vector2i &p_region_loc, const Rect2i 
 			}
 		}
 	}
-	region->set_edited(true);
-	if (p_update) {
-		// Reuse the is_edited() fast path: only edited regions are pushed to the GPU.
-		update_maps(TYPE_HEIGHT, false, false);
+}
+
+// Control pass — topmost-covered-wins (PASTURE3D_LAYERS_GUIDE.md §5.1). Control is a packed uint32 (a
+// float bit pattern in the R channel), NOT float-blendable, so there is no arithmetic mix: the seed is
+// the dense control base (the hand-authored control map captured into its own buffer), and each covered
+// control overlay, walked bottom->top, fully replaces the accumulated value. The last (topmost) covered
+// overlay wins. Uncovered pixels keep the hand-authored base, so clearing a control layer restores it.
+void Pasture3DData::_composite_control_region(Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Rect2i &p_rect) {
+	Ref<Image> control_map = p_region->get_control_map();
+	if (control_map.is_null()) {
+		return;
+	}
+	const int base_idx = _layer_stack->find_base_layer(TYPE_CONTROL);
+	const Pasture3DLayer *base = base_idx >= 0 ? _layer_stack->get_layer_ptr(base_idx) : nullptr;
+	const int layer_count = _layer_stack->get_layer_count();
+	const Vector2i end = p_rect.position + p_rect.size;
+	for (int y = p_rect.position.y; y < end.y; y++) {
+		for (int x = p_rect.position.x; x < end.x; x++) {
+			const Vector2i px(x, y);
+			// Seed from the hand-authored base (always covered). Fall back to the current region pixel if
+			// no base exists yet (defensive — a base is ensured before any control overlay is created).
+			real_t acc = base ? base->get_value(p_region_loc, px) : control_map->get_pixelv(px).r;
+			for (int i = 0; i < layer_count; i++) {
+				const Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+				if (!layer || layer->is_base() || !layer->is_visible() || layer->get_map_type() != TYPE_CONTROL) {
+					continue;
+				}
+				if (layer->get_weight(p_region_loc, px) == 0.f) {
+					continue; // Not owned here; the value below shows through.
+				}
+				acc = layer->get_value(p_region_loc, px); // Covered => override (topmost wins).
+			}
+			if (!std::isnan(acc)) {
+				control_map->set_pixelv(px, Color(acc, 0.f, 0.f, 1.f));
+			}
+		}
+	}
+}
+
+// Color pass — alpha-over by weight. The seed is the dense color base (the hand-authored color map,
+// RGBA8, carrying albedo in RGB and roughness in A). Each covered color overlay (walked bottom->top)
+// blends its albedo over the accumulator by weight*opacity; the roughness (alpha) channel is preserved
+// from the base, since color overlays author albedo + coverage, not roughness.
+void Pasture3DData::_composite_color_region(Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Rect2i &p_rect) {
+	Ref<Image> color_map = p_region->get_color_map();
+	if (color_map.is_null()) {
+		return;
+	}
+	const int base_idx = _layer_stack->find_base_layer(TYPE_COLOR);
+	const Pasture3DLayer *base = base_idx >= 0 ? _layer_stack->get_layer_ptr(base_idx) : nullptr;
+	const int layer_count = _layer_stack->get_layer_count();
+	const Vector2i end = p_rect.position + p_rect.size;
+	for (int y = p_rect.position.y; y < end.y; y++) {
+		for (int x = p_rect.position.x; x < end.x; x++) {
+			const Vector2i px(x, y);
+			Color acc = base ? base->get_sample(p_region_loc, px) : color_map->get_pixelv(px);
+			for (int i = 0; i < layer_count; i++) {
+				const Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+				if (!layer || layer->is_base() || !layer->is_visible() || layer->get_map_type() != TYPE_COLOR) {
+					continue;
+				}
+				const real_t w = layer->get_weight(p_region_loc, px) * layer->get_opacity();
+				if (w <= 0.f) {
+					continue;
+				}
+				const Color c = layer->get_sample(p_region_loc, px);
+				acc.r = acc.r + (c.r - acc.r) * w;
+				acc.g = acc.g + (c.g - acc.g) * w;
+				acc.b = acc.b + (c.b - acc.b) * w; // Roughness (acc.a) is left untouched.
+			}
+			color_map->set_pixelv(px, acc);
+		}
 	}
 }
 
@@ -1122,7 +1215,67 @@ void Pasture3DData::composite_regions() {
 	for (const Vector2i &region_loc : locations) {
 		composite_region(region_loc, Rect2i(), false);
 	}
-	update_maps(TYPE_HEIGHT, false, false);
+	update_maps(TYPE_MAX, false, false);
+}
+
+int Pasture3DData::_ensure_typed_base(const MapType p_map_type) {
+	if (_layer_stack.is_null() || (p_map_type != TYPE_CONTROL && p_map_type != TYPE_COLOR)) {
+		return -1;
+	}
+	int idx = _layer_stack->find_base_layer(p_map_type);
+	if (idx >= 0) {
+		return idx;
+	}
+	// Create the dense base seeded from each region's current (hand-authored) control/color map. The base
+	// owns its own buffer so the composite target (the region map) and the seed are distinct (§5.1).
+	Ref<Pasture3DLayer> base;
+	base.instantiate();
+	base->set_layer_name(p_map_type == TYPE_CONTROL ? "Control Base" : "Color Base");
+	base->set_map_type(p_map_type);
+	base->set_tile_size(_region_size);
+	base->set_blend_mode(Pasture3DLayer::REPLACE);
+	base->set_base(true);
+	base->set_reserved(true); // Internal; not a user-editable layer.
+	for (const Vector2i &region_loc : _regions.keys()) {
+		Pasture3DRegion *region = get_region_ptr(region_loc);
+		if (!region || region->is_deleted()) {
+			continue;
+		}
+		Ref<Image> src = region->get_map_ptr(p_map_type);
+		if (src.is_valid() && src->get_width() == _region_size && src->get_height() == _region_size) {
+			base->set_region_image(region_loc, Image::create_from_data(src->get_width(), src->get_height(), src->has_mipmaps(), src->get_format(), src->get_data()));
+		}
+	}
+	base->set_modified(true);
+	idx = _layer_stack->add_layer_ref(base);
+	// A non-Base layer now exists, so the height Base must own its buffer too (live-recomposite safety).
+	_unalias_base_layer();
+	return idx;
+}
+
+void Pasture3DData::_adopt_region_into_bases(Pasture3DRegion *p_region) {
+	if (_layer_stack.is_null() || !p_region) {
+		return;
+	}
+	const Vector2i loc = p_region->get_location();
+	const int layer_count = _layer_stack->get_layer_count();
+	for (int i = 0; i < layer_count; i++) {
+		Pasture3DLayer *base = _layer_stack->get_layer_ptr(i);
+		if (!base || !base->is_base() || base->has_region(loc)) {
+			continue;
+		}
+		Ref<Image> src = p_region->get_map_ptr(base->get_map_type());
+		if (src.is_null() || src->get_width() != base->get_tile_size() || src->get_height() != base->get_tile_size()) {
+			continue;
+		}
+		// A single-layer height Base aliases the region map (zero copy); any other base owns a copy so the
+		// composite target and the base source stay distinct (the un-alias invariant, §5.1 / §10.4).
+		if (base->get_map_type() == TYPE_HEIGHT && layer_count <= 1) {
+			base->set_region_image(loc, src);
+		} else {
+			base->set_region_image(loc, Image::create_from_data(src->get_width(), src->get_height(), src->has_mipmaps(), src->get_format(), src->get_data()));
+		}
+	}
 }
 
 ///////////////////////////
@@ -1142,8 +1295,16 @@ int Pasture3DData::find_layer_by_owner(const String &p_owner_id) const {
 }
 
 int Pasture3DData::create_owned_layer(const String &p_owner_id, const String &p_name, const int p_blend_mode) {
+	return create_owned_layer_typed(p_owner_id, p_name, p_blend_mode, TYPE_HEIGHT);
+}
+
+int Pasture3DData::create_owned_layer_typed(const String &p_owner_id, const String &p_name, const int p_blend_mode, const int p_map_type) {
 	if (!ensure_layer_stack()) {
 		LOG(ERROR, "Cannot create owned layer '", p_name, "': no region data to anchor a Base layer");
+		return -1;
+	}
+	if (p_map_type < 0 || p_map_type >= TYPE_MAX) {
+		LOG(ERROR, "Invalid map type ", p_map_type, " for owned layer '", p_name, "'");
 		return -1;
 	}
 	// Idempotent: re-use the existing reserved layer for this owner if it is already present.
@@ -1151,12 +1312,18 @@ int Pasture3DData::create_owned_layer(const String &p_owner_id, const String &p_
 	if (existing >= 0) {
 		return existing;
 	}
+	// Control/color overlays need a dense base of their type so compositing has a hand-authored source
+	// distinct from the region map it writes (the idempotency requirement, §5.1).
+	if (p_map_type == TYPE_CONTROL || p_map_type == TYPE_COLOR) {
+		_ensure_typed_base((MapType)p_map_type);
+	}
 	int idx = _layer_stack->add_layer(p_name, Pasture3DLayer::BlendMode(p_blend_mode));
 	if (idx < 0) {
 		return -1;
 	}
 	Pasture3DLayer *layer = _layer_stack->get_layer_ptr(idx);
 	if (layer) {
+		layer->set_map_type((MapType)p_map_type); // Before any tiles: picks the tile format (RGF / RGBA8).
 		layer->set_owner_id(p_owner_id);
 		layer->set_reserved(true); // Tool-owned: user sculpt strokes are blocked (§6).
 	}
@@ -1212,6 +1379,59 @@ real_t Pasture3DData::get_layer_height(const int p_layer_id, const Vector3 &p_gl
 	Vector2i region_loc;
 	Vector2i img_pos = _global_to_region_pixel(p_global_position, region_loc);
 	return layer->get_value(region_loc, img_pos);
+}
+
+void Pasture3DData::set_control_on_layer(const int p_layer_id, const Vector3 &p_global_position, const int p_control, const real_t p_weight) {
+	Pasture3DLayer *layer = _layer_stack.is_valid() ? _layer_stack->get_layer_ptr(p_layer_id) : nullptr;
+	if (!layer || layer->get_map_type() != TYPE_CONTROL) {
+		// Backward-compat: no stack / wrong layer => write the region control map directly (§8.3).
+		set_control(p_global_position, uint32_t(p_control));
+		return;
+	}
+	Vector2i region_loc;
+	Vector2i img_pos = _global_to_region_pixel(p_global_position, region_loc);
+	Pasture3DRegion *region = get_region_ptr(region_loc);
+	if (!region || region->is_deleted()) {
+		return;
+	}
+	// Control is a packed uint32 stored as float bits in the R channel (same encoding as the region map).
+	layer->set_sample(region_loc, img_pos, as_float(uint32_t(p_control)), p_weight);
+	composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
+	region->set_modified(true);
+}
+
+void Pasture3DData::set_hole_on_layer(const int p_layer_id, const Vector3 &p_global_position, const bool p_hole) {
+	Pasture3DLayer *layer = _layer_stack.is_valid() ? _layer_stack->get_layer_ptr(p_layer_id) : nullptr;
+	if (!layer || layer->get_map_type() != TYPE_CONTROL) {
+		set_control_hole(p_global_position, p_hole); // Fallback: destructive carve into the region map.
+		return;
+	}
+	// Author the FULL control value (the composited control here, with the hole bit set) so the
+	// topmost-covered-wins composite preserves texture/nav/etc and only flips the hole bit. Reading the
+	// live composite picks up the hand-authored base (no hole), so a clear + repaint is idempotent.
+	uint32_t control = get_control(p_global_position);
+	if (control == UINT32_MAX) {
+		control = 0; // No data here yet; start from an empty control word.
+	}
+	control = (control & ~(0x1 << 2)) | enc_hole(p_hole);
+	set_control_on_layer(p_layer_id, p_global_position, int(control), 1.f);
+}
+
+void Pasture3DData::set_color_on_layer(const int p_layer_id, const Vector3 &p_global_position, const Color &p_color, const real_t p_weight) {
+	Pasture3DLayer *layer = _layer_stack.is_valid() ? _layer_stack->get_layer_ptr(p_layer_id) : nullptr;
+	if (!layer || layer->get_map_type() != TYPE_COLOR) {
+		set_color(p_global_position, p_color); // Backward-compat: write the region color map directly.
+		return;
+	}
+	Vector2i region_loc;
+	Vector2i img_pos = _global_to_region_pixel(p_global_position, region_loc);
+	Pasture3DRegion *region = get_region_ptr(region_loc);
+	if (!region || region->is_deleted()) {
+		return;
+	}
+	layer->set_sample_color(region_loc, img_pos, p_color, p_weight);
+	composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
+	region->set_modified(true);
 }
 
 Rect2i Pasture3DData::_region_pixel_rect(const AABB &p_area, const Vector2i &p_region_loc) const {
@@ -1921,7 +2141,11 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_layer_stack_size"), &Pasture3DData::get_layer_stack_size);
 	ClassDB::bind_method(D_METHOD("find_layer_by_owner", "owner_id"), &Pasture3DData::find_layer_by_owner);
 	ClassDB::bind_method(D_METHOD("create_owned_layer", "owner_id", "name", "blend_mode"), &Pasture3DData::create_owned_layer);
+	ClassDB::bind_method(D_METHOD("create_owned_layer_typed", "owner_id", "name", "blend_mode", "map_type"), &Pasture3DData::create_owned_layer_typed);
 	ClassDB::bind_method(D_METHOD("set_height_on_layer", "layer_id", "global_position", "height", "weight"), &Pasture3DData::set_height_on_layer, DEFVAL(1.f));
+	ClassDB::bind_method(D_METHOD("set_control_on_layer", "layer_id", "global_position", "control", "weight"), &Pasture3DData::set_control_on_layer, DEFVAL(1.f));
+	ClassDB::bind_method(D_METHOD("set_hole_on_layer", "layer_id", "global_position", "hole"), &Pasture3DData::set_hole_on_layer);
+	ClassDB::bind_method(D_METHOD("set_color_on_layer", "layer_id", "global_position", "color", "weight"), &Pasture3DData::set_color_on_layer, DEFVAL(1.f));
 	ClassDB::bind_method(D_METHOD("add_height_on_layer", "layer_id", "global_position", "delta", "weight"), &Pasture3DData::add_height_on_layer, DEFVAL(1.f));
 	ClassDB::bind_method(D_METHOD("get_layer_height", "layer_id", "global_position"), &Pasture3DData::get_layer_height);
 	ClassDB::bind_method(D_METHOD("clear_layer_in_area", "layer_id", "area"), &Pasture3DData::clear_layer_in_area);
