@@ -1242,7 +1242,7 @@ void Pasture3D::_notification(const int p_what) {
 			//test_layer_persistence();
 			//test_layer_idempotent_composite();
 			//test_layer_undo_restore();
-			test_layer_stroke_undo_integration();
+			//test_layer_stroke_undo_integration();
 			//test_layer_base_persistence();
 			//test_layer_road_connector();
 			//test_layer_subtiling();
