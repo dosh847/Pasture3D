@@ -1,5 +1,7 @@
 // Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 
+#include <cmath>
+
 #include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
@@ -756,4 +758,269 @@ void test_layer_road_connector() {
 
 	memdelete(data);
 	UtilityFunctions::print("=== End tool API + road connector tests ===");
+}
+
+// Phase 6 acceptance tests (PASTURE3D_LAYERS_GUIDE.md §10.6): sub-region tiling.
+//   (a) Sparse allocation — a thin diagonal band on a 256² region with tile_size 64 allocates only the
+//       sub-tiles it crosses (the 4 diagonal tiles), not all 16.
+//   (b) Tile GC — gc_region frees fully-uncovered tiles and drops the region entry when its last tile
+//       goes, while keeping a still-covered tile.
+//   (c) Sub-tile-precise clear — clearing an AABB over one sub-tile leaves an adjacent sub-tile's
+//       samples intact (the Phase 5 partial-refresh regression guard).
+//   (d) Composite byte-parity — the same data composited at tile_size 64 vs region_size yields a
+//       byte-identical region height map (sub-tiling changed storage, not output).
+//   (e) NaN vs weight — a whole absent tile reads NaN; an allocated-but-uncovered pixel reads weight 0
+//       with a non-NaN value (§4.3).
+//   (f) Round-trip — save/load a multi-sub-tile layer; tile count, (value, weight), and a post-load
+//       composite all survive.
+void test_layer_subtiling() {
+	UtilityFunctions::print("=== Testing sub-region tiling (phase 6) ===");
+
+	const int region_size = 256;
+	const int tile_size = 64; // 4x4 = 16 sub-tiles per region.
+	const Vector2i loc(0, 0);
+
+	auto fill = [](const Ref<Image> &hm, int rs) {
+		for (int y = 0; y < rs; y++) {
+			for (int x = 0; x < rs; x++) {
+				real_t h = real_t(x) * 0.5f - real_t(y) * 0.25f + real_t((x * 7 + y * 13) % 17);
+				hm->set_pixel(x, y, Color(h, 0.f, 0.f, 1.f));
+			}
+		}
+	};
+
+	// ---- (a) Sparse allocation: a diagonal band crosses only the 4 diagonal sub-tiles. ----
+	{
+		Ref<Pasture3DLayer> road;
+		road.instantiate();
+		road->set_map_type(TYPE_HEIGHT);
+		road->set_tile_size(tile_size);
+		road->set_blend_mode(Pasture3DLayer::REPLACE);
+		for (int t = 0; t < region_size; t++) {
+			road->set_sample(loc, Vector2i(t, t), 10.f, 1.f); // y == x => tiles (0,0)(1,1)(2,2)(3,3)
+		}
+		EXPECT_TRUE(road->get_region_tile_count(loc) == 4);
+		EXPECT_FALSE(road->get_region_tile_count(loc) == 16); // Not the whole region.
+	}
+
+	// ---- (b) Tile GC: free fully-uncovered tiles; drop the region entry when the last tile goes. ----
+	{
+		Ref<Pasture3DLayer> lyr;
+		lyr.instantiate();
+		lyr->set_tile_size(tile_size);
+		lyr->set_blend_mode(Pasture3DLayer::REPLACE);
+		const Vector2i a(10, 10); // tile (0,0)
+		const Vector2i b(70, 70); // tile (1,1)
+		lyr->set_sample(loc, a, 5.f, 1.f);
+		lyr->set_sample(loc, b, 6.f, 1.f);
+		EXPECT_TRUE(lyr->get_region_tile_count(loc) == 2);
+		// Wipe coverage of tile (0,0) only; gc frees it and keeps tile (1,1).
+		lyr->set_sample(loc, a, 0.f, 0.f);
+		EXPECT_FALSE(lyr->gc_region(loc)); // Region still holds tile (1,1).
+		EXPECT_TRUE(lyr->get_region_tile_count(loc) == 1);
+		EXPECT_TRUE(lyr->has_region(loc));
+		EXPECT_TRUE(Math::is_equal_approx(lyr->get_weight(loc, b), 1.f)); // Survivor intact.
+		// Wipe the last tile; gc drops the whole region entry.
+		lyr->set_sample(loc, b, 0.f, 0.f);
+		EXPECT_TRUE(lyr->gc_region(loc));
+		EXPECT_FALSE(lyr->has_region(loc));
+	}
+
+	// ---- (c) Sub-tile-precise clear: an adjacent sub-tile's road survives (partial-refresh fix). ----
+	{
+		Pasture3DData *data = memnew(Pasture3DData);
+		data->_region_size = region_size;
+		data->_region_sizev = V2I(region_size);
+		data->_vertex_spacing = 1.f;
+		Ref<Pasture3DRegion> region;
+		region.instantiate();
+		region->set_region_size(region_size);
+		region->set_location(loc);
+		data->add_region(region, false);
+		Ref<Image> hm = region->get_height_map();
+		fill(hm, region_size);
+
+		Ref<Pasture3DLayerStack> stack;
+		stack.instantiate();
+		Ref<Pasture3DLayer> base;
+		base.instantiate();
+		base->set_tile_size(region_size);
+		base->set_blend_mode(Pasture3DLayer::REPLACE);
+		base->set_region_image(loc, hm);
+		stack->add_layer_ref(base);
+		data->set_layer_stack(stack);
+
+		// Two roads in adjacent sub-tiles of the SAME region: A in tile (0,0), B in tile (1,0).
+		int lyr = data->create_owned_layer("/root/RoadA", "Roads", Pasture3DLayer::REPLACE);
+		EXPECT_TRUE(lyr == 1);
+		const Vector3 a_pos(30, 0, 30); // tile (0,0)
+		const Vector3 b_pos(80, 0, 30); // tile (1,0)
+		const Vector2i a_px(30, 30), b_px(80, 30);
+		data->set_height_on_layer(lyr, a_pos, 99.f, 1.f);
+		data->set_height_on_layer(lyr, b_pos, 88.f, 1.f);
+		Ref<Pasture3DLayer> roads = data->get_layer_stack()->get_layer(lyr);
+		EXPECT_TRUE(roads->get_region_tile_count(loc) == 2);
+		EXPECT_TRUE(Math::is_equal_approx(hm->get_pixelv(a_px).r, 99.f));
+		EXPECT_TRUE(Math::is_equal_approx(hm->get_pixelv(b_px).r, 88.f));
+
+		// Clear an AABB covering ONLY tile (0,0) (road A's footprint): px [20,38) intersects tile (0,0).
+		AABB area(Vector3(20, 0, 20), Vector3(18, 1, 18));
+		data->clear_layer_in_area(lyr, area);
+		EXPECT_TRUE(roads->get_region_tile_count(loc) == 1); // Only road A's tile dropped.
+		EXPECT_TRUE(roads->get_weight(loc, b_px) > 0.f); // Road B's sample survives.
+		EXPECT_TRUE(Math::is_equal_approx(hm->get_pixelv(b_px).r, 88.f)); // Road B still composited.
+		EXPECT_TRUE(roads->get_weight(loc, a_px) == 0.f); // Road A gone => its tile freed.
+		EXPECT_FALSE(Math::is_equal_approx(hm->get_pixelv(a_px).r, 99.f)); // Fell back to base.
+
+		memdelete(data);
+	}
+
+	// ---- (d) Composite byte-parity: tile_size 64 vs region_size yields identical output. ----
+	{
+		auto composite_bytes = [&](int ts) -> PackedByteArray {
+			Pasture3DData *d = memnew(Pasture3DData);
+			d->_region_size = region_size;
+			d->_region_sizev = V2I(region_size);
+			d->_vertex_spacing = 1.f;
+			Ref<Pasture3DRegion> r;
+			r.instantiate();
+			r->set_region_size(region_size);
+			r->set_location(loc);
+			d->add_region(r, false);
+			Ref<Image> hm = r->get_height_map();
+			fill(hm, region_size);
+			Ref<Pasture3DLayerStack> s;
+			s.instantiate();
+			Ref<Pasture3DLayer> b;
+			b.instantiate();
+			b->set_tile_size(region_size);
+			b->set_blend_mode(Pasture3DLayer::REPLACE);
+			b->set_region_image(loc, hm);
+			s->add_layer_ref(b);
+			Ref<Pasture3DLayer> det;
+			det.instantiate();
+			det->set_tile_size(ts);
+			det->set_blend_mode(Pasture3DLayer::ADD);
+			det->set_opacity(0.5f);
+			det->set_sample(loc, Vector2i(10, 10), 5.f, 1.f); // scattered across multiple sub-tiles
+			det->set_sample(loc, Vector2i(200, 40), -3.f, 0.75f);
+			det->set_sample(loc, Vector2i(70, 150), 7.f, 1.f);
+			s->add_layer_ref(det);
+			d->set_layer_stack(s);
+			d->composite_region(loc, Rect2i(), false);
+			PackedByteArray out = hm->get_data();
+			memdelete(d);
+			return out;
+		};
+		PackedByteArray sub = composite_bytes(tile_size);
+		PackedByteArray whole = composite_bytes(region_size);
+		EXPECT_TRUE(sub == whole);
+	}
+
+	// ---- (e) NaN vs weight at sub-tile granularity (§4.3). ----
+	{
+		Ref<Pasture3DLayer> lyr;
+		lyr.instantiate();
+		lyr->set_tile_size(tile_size);
+		lyr->set_blend_mode(Pasture3DLayer::REPLACE);
+		lyr->set_sample(loc, Vector2i(10, 10), 5.f, 1.f); // Allocates tile (0,0) only.
+		// Within the allocated tile, an unwritten pixel is uncovered (weight 0) but has a real value.
+		EXPECT_TRUE(lyr->get_weight(loc, Vector2i(20, 20)) == 0.f);
+		EXPECT_FALSE(std::isnan(lyr->get_value(loc, Vector2i(20, 20))));
+		// A pixel in a whole absent tile reads NaN (and weight 0).
+		EXPECT_TRUE(std::isnan(lyr->get_value(loc, Vector2i(200, 200))));
+		EXPECT_TRUE(lyr->get_weight(loc, Vector2i(200, 200)) == 0.f);
+	}
+
+	// ---- (f) Round-trip a multi-sub-tile layer. ----
+	{
+		const String dir = "user://p3d_layer_phase6";
+		Ref<DirAccess> da = DirAccess::open("user://");
+		if (da.is_valid()) {
+			da->make_dir_recursive("p3d_layer_phase6");
+		}
+		const String region_path = dir + String("/") + Util::location_to_filename(loc);
+		Ref<DirAccess> dda = DirAccess::open(dir);
+		if (dda.is_valid()) {
+			for (const String &f : Array::make(Util::location_to_filename(loc), String(Util::LAYER_MANIFEST_FILENAME), Util::location_to_layer_filename(loc))) {
+				if (dda->file_exists(f)) {
+					dda->remove(f);
+				}
+			}
+		}
+		Pasture3DData *data = memnew(Pasture3DData);
+		data->_region_size = region_size;
+		data->_region_sizev = V2I(region_size);
+		data->_vertex_spacing = 1.f;
+		Ref<Pasture3DRegion> region;
+		region.instantiate();
+		region->set_region_size(region_size);
+		region->set_location(loc);
+		data->add_region(region, false);
+		Ref<Image> hm = region->get_height_map();
+		fill(hm, region_size);
+		region->set_modified(true);
+
+		Ref<Pasture3DLayerStack> stack;
+		stack.instantiate();
+		Ref<Pasture3DLayer> base;
+		base.instantiate();
+		base->set_layer_name("Base");
+		base->set_tile_size(region_size);
+		base->set_blend_mode(Pasture3DLayer::REPLACE);
+		base->set_region_image(loc, hm);
+		stack->add_layer_ref(base);
+		Ref<Pasture3DLayer> det;
+		det.instantiate();
+		det->set_layer_name("Detail");
+		det->set_tile_size(tile_size);
+		det->set_blend_mode(Pasture3DLayer::ADD);
+		const Vector2i s0(10, 10), s1(200, 40), s2(70, 150); // three distinct sub-tiles
+		det->set_sample(loc, s0, 5.f, 1.f);
+		det->set_sample(loc, s1, -3.f, 0.75f);
+		det->set_sample(loc, s2, 7.f, 1.f);
+		stack->add_layer_ref(det);
+		data->set_layer_stack(stack);
+		EXPECT_TRUE(det->get_region_tile_count(loc) == 3);
+
+		region->save(region_path, false);
+		data->save_layers(dir);
+
+		Pasture3DData *data2 = memnew(Pasture3DData);
+		data2->_region_size = region_size;
+		data2->_region_sizev = V2I(region_size);
+		data2->_vertex_spacing = 1.f;
+		Ref<Pasture3DRegion> region2 = ResourceLoader::get_singleton()->load(region_path, "Pasture3DRegion", ResourceLoader::CACHE_MODE_IGNORE);
+		EXPECT_TRUE(region2.is_valid());
+		if (region2.is_null()) {
+			memdelete(data);
+			memdelete(data2);
+			return;
+		}
+		region2->set_location(loc);
+		data2->add_region(region2, false);
+		EXPECT_TRUE(data2->load_layers(dir));
+
+		Ref<Pasture3DLayerStack> stack2 = data2->get_layer_stack();
+		EXPECT_TRUE(stack2.is_valid() && stack2->get_layer_count() == 2);
+		Ref<Pasture3DLayer> det2 = stack2->get_layer(1);
+		EXPECT_TRUE(det2.is_valid());
+		// Sub-tile structure round-trips: still 3 separate tiles, not collapsed into one.
+		EXPECT_TRUE(det2->get_region_tile_count(loc) == 3);
+		EXPECT_TRUE(Math::is_equal_approx(det2->get_value(loc, s0), 5.f));
+		EXPECT_TRUE(Math::is_equal_approx(det2->get_weight(loc, s1), 0.75f));
+		EXPECT_TRUE(Math::is_equal_approx(det2->get_value(loc, s2), 7.f));
+
+		// A post-load composite reproduces the live one byte-for-byte.
+		data->composite_region(loc, Rect2i(), false);
+		PackedByteArray ref_bytes = hm->get_data();
+		Ref<Image> hm2 = region2->get_height_map();
+		data2->composite_region(loc, Rect2i(), false);
+		EXPECT_TRUE(hm2->get_data() == ref_bytes);
+
+		memdelete(data);
+		memdelete(data2);
+	}
+
+	UtilityFunctions::print("=== End sub-region tiling tests ===");
 }

@@ -17,6 +17,7 @@ class Pasture3DData : public Object {
 	// Phase 5 tool-API test drives the global->region math, which normally needs a Pasture3D node to
 	// set _region_size / _vertex_spacing. Friending lets the standalone test configure them directly.
 	friend void test_layer_road_connector();
+	friend void test_layer_subtiling(); // Phase 6 test; same descale-field access as above.
 
 public: // Constants
 	static inline const real_t CURRENT_DATA_VERSION = 0.93f; // Current Data format version
@@ -95,6 +96,9 @@ private:
 	// Convert a world position to its region location (out param) and region-local vertex pixel,
 	// reusing the set_pixel math. Used by the layer-targeted tool-API writes (PASTURE3D_LAYERS_GUIDE.md §8.2).
 	Vector2i _global_to_region_pixel(const Vector3 &p_global_position, Vector2i &r_region_loc) const;
+	// Region-local vertex rect (clamped to [0, region_size]) covered by a world-space AABB's XZ extent,
+	// for one region location. Used to scope a sub-tile clear to the footprint of a tool re-render.
+	Rect2i _region_pixel_rect(const AABB &p_area, const Vector2i &p_region_loc) const;
 	void _copy_paste_dfr(const Pasture3DRegion *p_src_region, const Rect2i &p_src_rect, const Rect2i &p_dst_rect, const Pasture3DRegion *p_dst_region);
 
 public:
@@ -194,9 +198,13 @@ public:
 	void add_height_on_layer(const int p_layer_id, const Vector3 &p_global_position, const real_t p_delta, const real_t p_weight = 1.f);
 	real_t get_layer_height(const int p_layer_id, const Vector3 &p_global_position) const;
 	// Clear the layer's tiles in every region the area (world-space AABB, XZ used) overlaps, then
-	// recomposite those regions so the cleared footprint falls back to what is below. v1 is region-
-	// granular (clear_region per affected region); sub-tile-precise clears arrive with phase 6.
+	// recomposite the cleared footprint so it falls back to what is below. Sub-tile precise (phase 6):
+	// only the sub-tiles overlapping the AABB are dropped, so a co-located feature in another sub-tile
+	// of the same region survives (the Phase 5 partial-refresh fix). Degrades to region-granular when
+	// _tile_size == region size.
 	void clear_layer_in_area(const int p_layer_id, const AABB &p_area);
+	// Garbage-collect a layer's fully-uncovered tiles (frees memory after erasing/moving a feature).
+	void gc_layer(const int p_layer_id);
 	void set_active_layer(const int p_layer_id);
 	int get_active_layer() const { return _layer_stack.is_valid() ? _layer_stack->get_active_layer() : -1; }
 

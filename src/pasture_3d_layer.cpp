@@ -229,6 +229,88 @@ void Pasture3DLayer::clear_region(const Vector2i &p_region_loc) {
 	}
 }
 
+bool Pasture3DLayer::clear_tiles_in_rect(const Vector2i &p_region_loc, const Rect2i &p_px_rect) {
+	if (!_tiles.has(p_region_loc) || !p_px_rect.has_area()) {
+		return false;
+	}
+	Dictionary region_tiles = _tiles[p_region_loc];
+	Array coords = region_tiles.keys();
+	bool any = false;
+	for (const Vector2i &coord : coords) {
+		// A tile covers vertices [coord*tile_size, coord*tile_size + tile_size).
+		Rect2i tile_rect(coord * _tile_size, V2I(_tile_size));
+		if (tile_rect.intersects(p_px_rect)) {
+			region_tiles.erase(coord);
+			any = true;
+		}
+	}
+	if (any) {
+		if (region_tiles.is_empty()) {
+			_tiles.erase(p_region_loc);
+		} else {
+			_tiles[p_region_loc] = region_tiles;
+		}
+		_modified = true;
+	}
+	return any;
+}
+
+bool Pasture3DLayer::_tile_all_uncovered(const Ref<Image> &p_tile) {
+	if (p_tile.is_null()) {
+		return true;
+	}
+	// The dense Base aliases a single-channel FORMAT_RF image; it is always covered (never empty).
+	if (p_tile->get_format() == Image::FORMAT_RF) {
+		return false;
+	}
+	const int w = p_tile->get_width();
+	const int h = p_tile->get_height();
+	for (int y = 0; y < h; y++) {
+		for (int x = 0; x < w; x++) {
+			if (p_tile->get_pixel(x, y).g != 0.f) {
+				return false; // Some pixel is owned by this layer.
+			}
+		}
+	}
+	return true;
+}
+
+bool Pasture3DLayer::gc_region(const Vector2i &p_region_loc) {
+	if (!_tiles.has(p_region_loc)) {
+		return true; // Already absent == effectively empty.
+	}
+	Dictionary region_tiles = _tiles[p_region_loc];
+	Array coords = region_tiles.keys();
+	for (const Vector2i &coord : coords) {
+		Ref<Image> tile = region_tiles[coord];
+		if (_tile_all_uncovered(tile)) {
+			region_tiles.erase(coord);
+			_modified = true;
+		}
+	}
+	if (region_tiles.is_empty()) {
+		_tiles.erase(p_region_loc);
+		_modified = true;
+		return true;
+	}
+	_tiles[p_region_loc] = region_tiles;
+	return false;
+}
+
+void Pasture3DLayer::gc() {
+	Array locations = _tiles.keys();
+	for (const Vector2i &loc : locations) {
+		gc_region(loc);
+	}
+}
+
+int Pasture3DLayer::get_region_tile_count(const Vector2i &p_region_loc) const {
+	if (!_tiles.has(p_region_loc)) {
+		return 0;
+	}
+	return Dictionary(_tiles[p_region_loc]).size();
+}
+
 Rect2i Pasture3DLayer::covered_region_bounds() const {
 	Array locations = _tiles.keys();
 	if (locations.is_empty()) {
@@ -318,7 +400,11 @@ void Pasture3DLayer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_tile", "region_location", "tile_coord"), &Pasture3DLayer::get_tile);
 	ClassDB::bind_method(D_METHOD("set_region_image", "region_location", "image"), &Pasture3DLayer::set_region_image);
 	ClassDB::bind_method(D_METHOD("clear_region", "region_location"), &Pasture3DLayer::clear_region);
+	ClassDB::bind_method(D_METHOD("clear_tiles_in_rect", "region_location", "pixel_rect"), &Pasture3DLayer::clear_tiles_in_rect);
+	ClassDB::bind_method(D_METHOD("gc_region", "region_location"), &Pasture3DLayer::gc_region);
+	ClassDB::bind_method(D_METHOD("gc"), &Pasture3DLayer::gc);
 	ClassDB::bind_method(D_METHOD("has_region", "region_location"), &Pasture3DLayer::has_region);
+	ClassDB::bind_method(D_METHOD("get_region_tile_count", "region_location"), &Pasture3DLayer::get_region_tile_count);
 	ClassDB::bind_method(D_METHOD("get_region_locations"), &Pasture3DLayer::get_region_locations);
 	ClassDB::bind_method(D_METHOD("covered_region_bounds"), &Pasture3DLayer::covered_region_bounds);
 

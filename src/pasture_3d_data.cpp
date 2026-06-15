@@ -1214,11 +1214,26 @@ real_t Pasture3DData::get_layer_height(const int p_layer_id, const Vector3 &p_gl
 	return layer->get_value(region_loc, img_pos);
 }
 
+Rect2i Pasture3DData::_region_pixel_rect(const AABB &p_area, const Vector2i &p_region_loc) const {
+	Vector3 mn = p_area.position / _vertex_spacing;
+	Vector3 mx = (p_area.position + p_area.size) / _vertex_spacing;
+	Vector2i region_offset = p_region_loc * _region_size;
+	// Floor the min and ceil the max so a tile is dropped even on partial coverage.
+	Vector2i local_min(Math::floor(mn.x) - region_offset.x, Math::floor(mn.z) - region_offset.y);
+	Vector2i local_max(Math::ceil(mx.x) - region_offset.x, Math::ceil(mx.z) - region_offset.y);
+	local_min = local_min.clamp(V2I_ZERO, V2I(_region_size));
+	local_max = local_max.clamp(V2I_ZERO, V2I(_region_size));
+	return Rect2i(local_min, local_max - local_min);
+}
+
 void Pasture3DData::clear_layer_in_area(const int p_layer_id, const AABB &p_area) {
 	Pasture3DLayer *layer = _layer_stack.is_valid() ? _layer_stack->get_layer_ptr(p_layer_id) : nullptr;
 	if (!layer) {
 		return; // No stack / invalid layer: nothing to clear (plain-terrain writes go to the Base image).
 	}
+	// A layer tiled at region granularity has one tile per region; sub-tile clearing then degrades to
+	// clearing that whole tile. Sub-tiled layers (the default) drop only the tiles the AABB overlaps.
+	const bool region_granular = layer->get_tile_size() >= _region_size;
 	Vector3 mn = p_area.position;
 	Vector3 mx = p_area.position + p_area.size;
 	Vector2i loc_min = get_region_location(mn);
@@ -1230,10 +1245,21 @@ void Pasture3DData::clear_layer_in_area(const int p_layer_id, const AABB &p_area
 			if (!layer->has_region(loc)) {
 				continue;
 			}
-			layer->clear_region(loc);
 			Pasture3DRegion *region = get_region_ptr(loc);
-			if (region && !region->is_deleted()) {
+			if (!region || region->is_deleted()) {
+				continue;
+			}
+			bool cleared = false;
+			if (region_granular) {
+				layer->clear_region(loc);
+				cleared = true;
+			} else {
+				cleared = layer->clear_tiles_in_rect(loc, _region_pixel_rect(p_area, loc));
+			}
+			if (cleared) {
 				// Recomposite the whole region so the dropped footprint falls back to what is below.
+				// Tiles NOT overlapping the AABB (e.g. a co-located road in another sub-tile) survive
+				// and are re-applied here — this is the Phase 5 partial-refresh fix.
 				composite_region(loc, Rect2i(), false);
 				region->set_modified(true);
 				any = true;
@@ -1242,6 +1268,13 @@ void Pasture3DData::clear_layer_in_area(const int p_layer_id, const AABB &p_area
 	}
 	if (any) {
 		LOG(DEBUG, "Cleared layer ", p_layer_id, " in regions overlapping ", p_area);
+	}
+}
+
+void Pasture3DData::gc_layer(const int p_layer_id) {
+	Pasture3DLayer *layer = _layer_stack.is_valid() ? _layer_stack->get_layer_ptr(p_layer_id) : nullptr;
+	if (layer) {
+		layer->gc();
 	}
 }
 
@@ -1892,6 +1925,7 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("add_height_on_layer", "layer_id", "global_position", "delta", "weight"), &Pasture3DData::add_height_on_layer, DEFVAL(1.f));
 	ClassDB::bind_method(D_METHOD("get_layer_height", "layer_id", "global_position"), &Pasture3DData::get_layer_height);
 	ClassDB::bind_method(D_METHOD("clear_layer_in_area", "layer_id", "area"), &Pasture3DData::clear_layer_in_area);
+	ClassDB::bind_method(D_METHOD("gc_layer", "layer_id"), &Pasture3DData::gc_layer);
 	ClassDB::bind_method(D_METHOD("set_active_layer", "layer_id"), &Pasture3DData::set_active_layer);
 	ClassDB::bind_method(D_METHOD("get_active_layer"), &Pasture3DData::get_active_layer);
 

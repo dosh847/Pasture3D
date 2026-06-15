@@ -60,6 +60,9 @@ private:
 	Vector2i _tile_local(const Vector2i &p_px, const Vector2i &p_tile_coord) const { return p_px - p_tile_coord * _tile_size; }
 	Image *_get_tile_ptr(const Vector2i &p_region_loc, const Vector2i &p_tile_coord) const;
 	Ref<Image> _get_or_create_tile(const Vector2i &p_region_loc, const Vector2i &p_tile_coord);
+	// True if every sample in a tile is uncovered (weight 0). An aliased Base FORMAT_RF tile is always
+	// covered, so it is never considered empty (the Base must never be GC'd — §5.1 / §10.4).
+	static bool _tile_all_uncovered(const Ref<Image> &p_tile);
 
 public:
 	Pasture3DLayer() {}
@@ -106,7 +109,18 @@ public:
 	// size (the Phase 1 default); used to alias the Base layer onto existing region height maps.
 	void set_region_image(const Vector2i &p_region_loc, const Ref<Image> &p_image);
 	void clear_region(const Vector2i &p_region_loc); // Used by tools to re-render
+	// Sub-tile-precise clear: drop only the sub-tiles overlapping p_px_rect (a region-local vertex
+	// rect), and drop the region entry if it becomes empty. Returns true if any tile was removed.
+	// This scopes a tool re-render to its own footprint instead of wiping the whole region (the
+	// Phase 5 partial-refresh fix); falls back to clearing the one tile when _tile_size == region size.
+	bool clear_tiles_in_rect(const Vector2i &p_region_loc, const Rect2i &p_px_rect);
+	// Tile garbage-collection: free tiles that became fully uncovered (every weight 0), and drop the
+	// region entry when its last tile goes, so erasing/moving a feature actually reclaims memory.
+	// gc_region returns true if the region entry is now gone (was/became empty). gc sweeps all regions.
+	bool gc_region(const Vector2i &p_region_loc);
+	void gc();
 	bool has_region(const Vector2i &p_region_loc) const { return _tiles.has(p_region_loc); }
+	int get_region_tile_count(const Vector2i &p_region_loc) const; // Allocated sub-tiles in a region
 	TypedArray<Vector2i> get_region_locations() const { return _tiles.keys(); }
 	Rect2i covered_region_bounds() const;
 
