@@ -735,10 +735,11 @@ restores the hand-authored base (no hole); (e) save/load round-trips the control
 dense bases, and a post-load composite reproduces the composited control and color region maps byte-for-byte.
 All 32 checks PASSED headless on Godot 4.6.2.
 
-**Empirical / in-editor (recommended, like the Phase 5/6 user-verification steps):**
-- **Hole migration.** Bake holes under a road (Bake Holes), then move the road / re-bake and confirm the old
-  hole vanishes and the new one appears with no leftover holes, all without disturbing hand-painted control
-  under the road. Clearing the road's hole layer should restore the hand-painted control beneath.
+**Empirical / in-editor** (full step-by-step in `PASTURE3D_LAYERS_HOLE_TESTING.md`):
+- **Hole migration — ✅ confirmed working in-editor (2026-06-14):** baking holes under a road carves the
+  terrain, and re-baking is idempotent. (Recommended follow-ups, not yet exhaustively run: move the road /
+  re-bake and confirm the old hole vanishes with no leftovers; bake over hand-painted control and confirm it
+  survives, and that clearing the hole layer restores it.)
 - **No regression.** A height-only terrain looks identical and its runtime `pasture3d_<loc>.res` files are
   byte-unchanged (control/color passes never run when no control/color overlay exists).
 
