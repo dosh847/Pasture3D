@@ -5,6 +5,11 @@
 **Author:** Migration review (5-section audit of the full plugin against the official
 [Upgrading to Godot 4.7](https://docs.godotengine.org/en/4.7/tutorials/migrating/upgrading_to_godot_4.7.html) guide)
 
+> **STATUS: EXECUTED ✅ (2026-06-18).** Plugin builds clean against Godot 4.7.0-stable and loads
+> in the 4.7 editor with no compatibility errors. See [§7 Execution record](#7-execution-record)
+> for exactly what was done (it diverged from the original Phase A plan because godot-cpp had no
+> 4.7 tag yet).
+
 ---
 
 ## 0. Executive summary
@@ -224,3 +229,49 @@ After Phases A–C:
 | 3. Material + shaders | pasture_3d_material.cpp/.h, all 14 GLSL shaders | 0 blockers; `roughness_layers` visual note |
 | 4. Editor/collision/mesher/instancer | editor, collision, mesher, instancer (+docs) | 0 blockers; no input/draw/physics hits in C++ |
 | 5. Assets/layers/tests/docs/demos | assets, mesh_asset, texture_asset, layer, layer_stack, unit_testing, demos, docs | 0 blockers; no GDScript breaking patterns |
+
+---
+
+## 7. Execution record (2026-06-18)
+
+The migration was executed on branch `godot-4.7-migration`. The original Phase A assumed an
+official `godot-4.7-stable` **godot-cpp** tag; **none exists yet** (godot-cpp's latest is
+`master` @ `10.0.0-rc1`, which bundles only a 4.7-**rc3** API). So the toolchain step was adapted:
+
+**What was done:**
+
+1. **godot-cpp submodule bumped** `60b5a41` (godot-4.5-stable-27) → `f8a4e78`
+   (`master`, godot-cpp `10.0.0-rc1-66`). This is the 4.7-capable line: its
+   `tools/godotcpp.py` lists `supported_api_versions = [.., "4.7"]`.
+2. **Built against the exact 4.7.0-stable API**, not godot-cpp's bundled rc3. The API was dumped
+   from the user's `Godot_v4.7-stable_win64.exe` (`--dump-extension-api`) and committed to
+   [`engine_api/extension_api-4.7.0-stable.json`](engine_api/extension_api-4.7.0-stable.json).
+   The build passes it via `custom_api_file=` so godot-cpp's generated method-bind hashes match
+   the stable engine. (Matching **stable**, not rc3, is what makes the extension load — rc→stable
+   method hashes can differ.) See [engine_api/README.md](engine_api/README.md) for build commands.
+3. **Stale objects cleaned** — removed `src/*.obj` (old 4.5 ABI + pre-rebrand `terrain_3d_*.obj`)
+   and `.sconsign.dblite` for a from-scratch build.
+4. **Both targets rebuilt clean** (exit 0, no warnings/errors on any flagged API):
+   - `target=editor` → `libpasture.windows.debug.x86_64.dll` (2.37 MB)
+   - `target=template_release` → `libpasture.windows.release.x86_64.dll` (1.59 MB)
+5. **Config bumped to 4.7**: `pasture.gdextension` `compatibility_minimum 4.5→4.7`;
+   `project.godot` `features 4.6→4.7`; `Pasture3D.csproj` `Godot.NET.Sdk 4.6.3→4.7.0`.
+6. **Verified load**: headless `--editor` launch on Godot 4.7.0-stable passed
+   "Verifying GDExtensions…" and "Initializing plugins…" with no compatibility rejection,
+   missing-library, or entry-point error. (Dummy-renderer RID-leak-at-exit lines on forced
+   headless `--quit` are benign and version-independent.)
+
+**Confirmed source-compatible at compile time** (the §2 inventory held — zero source edits were
+needed): `Image::save_exr`, `RenderingServer::viewport_set_size`, `Object::is_class`.
+
+**Still open / recommended (not blocking):**
+
+- **Run the layer byte-parity unit tests under 4.7.** They are commented out at
+  `src/pasture_3d.cpp:1240-1249`; re-enabling + a rebuild + a scene run would validate
+  `test_layer_compositing` / `_idempotent_composite` / `_subtiling` / `_control_color`.
+- **In-editor visual smoke test** (non-headless): wet-terrain reflections (`roughness_layers`
+  7→8), displacement/depth debug view, mesh-thumbnail dock, the five demo scenes.
+- **Drop the `custom_api_file` override** once godot-cpp tags a real 4.7-stable, pinning the
+  submodule to it instead of `master`.
+- **Pre-existing rebrand drift** (CI `build.yml` paths, `vcxproj` `terrain.gdextension`,
+  Terrain3D-branded docs) per §4 — unfixed; independent of 4.7.
