@@ -13,8 +13,8 @@ _shader_parameters = {
 &"flat_terrain_normals": null,
 &"mipmap_bias": null,
 &"shader_uniforms": null,
-&"shader_uniforms::general": null,
-&"shader_uniforms::mipmaps": null
+&"shader_uniforms/general": null,
+&"shader_uniforms/mipmaps": null
 }
 world_background = 0
 show_checkered = true
