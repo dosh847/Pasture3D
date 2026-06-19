@@ -52,9 +52,8 @@ enum BlendMode { REPLACE, ADD, MAX, MIN }
 @export_tool_button("Make Descend") var _descend_btn = make_descend
 
 
-func _init() -> void:
-	if target_layer_name == "":
-		target_layer_name = "Troughs"
+func _default_layer_name() -> String:
+	return "Troughs"
 
 
 func _get_blend_mode() -> int:

@@ -9,6 +9,9 @@ const BLEND_NAMES: Array[String] = [ "Replace", "Add", "Max", "Min" ]
 # Option index -> Pasture3DLayer.BlendMode. BLEND_MAX (placeholder) is intentionally omitted.
 const BLEND_MODES: Array[int] = [
 	Pasture3DLayer.REPLACE, Pasture3DLayer.ADD, Pasture3DLayer.MAX, Pasture3DLayer.MIN ]
+# Owner_id namespace of brush tool layers (Pasture3DTerrainBrush.BRUSH_OWNER_PREFIX). Used to tell a
+# tool layer apart from hand layers / road-connector layers when flagging orphaned tool layers.
+const BRUSH_OWNER_PREFIX: String = "pasture3d_brush:"
 
 var plugin: EditorPlugin
 var terrain: Pasture3D
@@ -22,6 +25,7 @@ var _down_btn: Button
 var _warning: Label
 var _warning_timer: Timer
 var _rows: Array = []
+var _assigned_owners: Dictionary = {} # owner_id -> true, the tool layers some brush node targets
 
 
 func initialize(p_plugin: EditorPlugin) -> void:
@@ -139,6 +143,10 @@ func refresh() -> void:
 	if stack == null:
 		return
 
+	# Which tool layers a Pasture3DTerrainBrush currently targets — recomputed each refresh so the
+	# orphaned-tool-layer badges stay current as tools are added/removed/reassigned.
+	_assigned_owners = _assigned_brush_owners()
+
 	var active: int = stack.get_active_layer()
 	var count: int = stack.get_layer_count()
 	# List top layer first so the visual order matches compositing (top = drawn last/over).
@@ -171,6 +179,20 @@ func _build_row(p_idx: int, p_layer: Pasture3DLayer, p_active: bool) -> Control:
 	vis.tooltip_text = "Visible"
 	vis.toggled.connect(func(v): _on_visible(p_idx, v))
 	hb.add_child(vis)
+
+	# Warning badge: orphaned tool layer (no tool targets it) or, as a fallback, an empty layer.
+	var status := _layer_status(p_layer)
+	if status != "":
+		var warn := TextureRect.new()
+		warn.stretch_mode = TextureRect.STRETCH_KEEP_CENTERED
+		warn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		if EditorInterface.get_edited_scene_root() != self:
+			warn.texture = get_theme_icon("NodeWarning", "EditorIcons")
+		if status == "orphan":
+			warn.tooltip_text = "Tool layer '%s' has no tools assigned — safe to delete, or assign a tool to it." % p_layer.get_layer_name()
+		else:
+			warn.tooltip_text = "Layer '%s' is empty (nothing painted into it yet)." % p_layer.get_layer_name()
+		hb.add_child(warn)
 
 	# Name (click to make active; submit to rename)
 	var name_edit := LineEdit.new()
@@ -213,6 +235,36 @@ func _build_row(p_idx: int, p_layer: Pasture3DLayer, p_active: bool) -> Control:
 	row.set_drag_forwarding(
 		_get_row_drag.bind(p_idx), _can_drop_row.bind(p_idx), _drop_row.bind(p_idx))
 	return row
+
+
+## ---- Tool-layer health (orphaned / empty) ----
+
+## owner_ids of the tool layers that some Pasture3DTerrainBrush in the edited scene currently targets.
+func _assigned_brush_owners() -> Dictionary:
+	var owners := {}
+	var root := EditorInterface.get_edited_scene_root()
+	if root:
+		_collect_brush_owners(root, owners)
+	return owners
+
+
+func _collect_brush_owners(node: Node, owners: Dictionary) -> void:
+	var brush := node as Pasture3DTerrainBrush
+	if brush and brush.terrain == terrain and brush._layer_owner != "":
+		owners[brush._layer_owner] = true
+	for c in node.get_children():
+		_collect_brush_owners(c, owners)
+
+
+## "" = healthy, "orphan" = brush tool layer no tool targets, "empty" = non-base layer with no tiles.
+## Orphan is the primary signal (requirement 4); empty is the fallback (requirement 5).
+func _layer_status(p_layer: Pasture3DLayer) -> String:
+	var owner := p_layer.get_owner_id()
+	if p_layer.is_reserved() and owner.begins_with(BRUSH_OWNER_PREFIX) and not _assigned_owners.has(owner):
+		return "orphan"
+	if not p_layer.is_base() and p_layer.get_region_locations().is_empty():
+		return "empty"
+	return ""
 
 
 ## Row interactions

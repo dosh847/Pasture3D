@@ -1,17 +1,19 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
 # Pasture3DTerrainBrush — shared base for the spline-driven landscape brushes
-# (Pasture3DMound / Pasture3DRidge / Pasture3DTrough). See PASTURE3D_LANDSCAPE_TOOLS_SPEC.md.
+# (Pasture3DMound / Pasture3DRidge / Pasture3DTrough). See PASTURE3D_LANDSCAPE_TOOLS_SPEC.md and
+# PASTURE3D_TOOL_LAYER_ASSIGNMENT_SPEC.md.
 #
-# A brush node owns ONE reserved, non-destructive height layer and N child Path3D splines that all
-# share the node's shape settings. On a refresh it clears the footprint it last painted and repaints
-# every spline, so re-running is idempotent and hand-sculpting underneath survives. This is the same
-# layer/idempotency contract RoadPastureConnector uses (PASTURE3D_LAYERS_GUIDE.md §8); the plumbing
-# is factored here and each subclass implements only `_paint_spline()` plus its own shape exports.
+# A brush node paints N child Path3D splines into ONE reserved, non-destructive height layer. Tools
+# bind to a layer BY NAME: the layer owner_id is "pasture3d_brush:<name>", so two tools that target
+# the same name share one layer automatically (create_owned_layer is idempotent by owner). A refresh
+# is layer-granular — it repaints every tool bound to the layer — so co-located tools survive each
+# other's edits, and re-running is idempotent. Binding is by owner_id, so renaming the layer in the
+# Layers dock never breaks the tools pointing at it (the inspector dropdown shows the live name).
 #
 # GDScript-only: it calls the already-bound C++ Tool API (create_owned_layer / set_height_on_layer /
-# add_height_on_layer / clear_layer_in_area / update_maps), so no engine rebuild is required. On a
-# build without that API it falls back to destructive set_height (still works, not idempotent).
+# add_height_on_layer / clear_layer_in_area / composite_region / update_maps), so no engine rebuild is
+# required. On a build without that API it falls back to destructive set_height (works, not idempotent).
 @tool
 class_name Pasture3DTerrainBrush
 extends Node3D
@@ -23,6 +25,11 @@ const BLEND_REPLACE: int = 0 # Pasture3DLayer.BlendMode.REPLACE
 const BLEND_ADD: int = 1     # Pasture3DLayer.BlendMode.ADD
 const BLEND_MAX: int = 2     # Pasture3DLayer.BlendMode.MAX
 const BLEND_MIN: int = 3     # Pasture3DLayer.BlendMode.MIN
+
+## owner_id namespace marking a layer as a brush tool layer (vs hand layers / road-connector layers).
+const BRUSH_OWNER_PREFIX: String = "pasture3d_brush:"
+## Group every brush node joins so siblings can find each other for layer-granular refresh.
+const BRUSH_GROUP: StringName = &"pasture3d_brush"
 
 # Debounce for auto-refresh while dragging spline handles (seconds).
 const REFRESH_DELAY: float = 0.1
@@ -37,15 +44,18 @@ const REFRESH_DELAY: float = 0.1
 ## Re-paint automatically while editing the splines / moving the node.
 @export var auto_refresh: bool = true
 
-## Name of the reserved non-destructive layer this brush renders into. Subclasses set a default in
-## _init (e.g. "Mounds"). Painting here keeps hand-sculpting beneath and makes re-runs idempotent.
-@export var target_layer_name: String = ""
-
 @export_tool_button("Refresh") var _refresh_btn = _refresh_button
 @export_tool_button("Add Spline") var _add_spline_btn = add_spline
+## Create a brand-new tool layer named after this node and assign this node to it.
+@export_tool_button("Add New Layer") var _add_layer_btn = add_new_layer
 
-var _layer_id: int = -1               # Reserved layer index; -1 = none (destructive fallback)
-var _blend: int = BLEND_REPLACE       # Cached from _get_blend_mode() at layer creation
+## Stable binding to a tool layer = its owner_id ("pasture3d_brush:<name>"). Persisted (hidden); shown
+## in the inspector via the `tool_layer` dropdown (which displays the layer's live name). Empty until
+## _ready defaults it to the subclass layer name, so a fresh tool auto-attaches to e.g. "Mounds".
+var _layer_owner: String = ""
+
+var _layer_id: int = -1               # Reserved layer index for the current paint; -1 = destructive fallback
+var _blend: int = BLEND_REPLACE       # Blend mode used by _paint_height for the current paint
 var _last_paint_aabb: Dictionary = {} # spline instance_id -> world AABB last painted (idempotent clear)
 var _timer: SceneTreeTimer = null
 var _dirty: bool = false
@@ -53,6 +63,9 @@ var _suspend_auto: bool = false # Blocks auto-refresh while we mutate curves pro
 
 
 func _ready() -> void:
+	if _layer_owner == "":
+		_layer_owner = BRUSH_OWNER_PREFIX + _default_layer_name()
+	add_to_group(BRUSH_GROUP)
 	set_notify_transform(true)
 	if not child_entered_tree.is_connected(_on_child_changed):
 		child_entered_tree.connect(_on_child_changed)
@@ -68,6 +81,8 @@ func _ready() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_TRANSFORM_CHANGED:
 		_schedule_refresh()
+	elif what == NOTIFICATION_EXIT_TREE:
+		remove_from_group(BRUSH_GROUP)
 
 
 func _get_configuration_warnings() -> PackedStringArray:
@@ -106,6 +121,75 @@ func _on_child_changed(node: Node) -> void:
 	_schedule_refresh()
 
 
+## ---- Inspector: the tool-layer dropdown (bind by owner_id, display live name) ----
+
+func _get_property_list() -> Array:
+	var props: Array = []
+	# The real binding: persisted, hidden from the inspector (shown via `tool_layer`).
+	props.append({"name": "_layer_owner", "type": TYPE_STRING, "usage": PROPERTY_USAGE_STORAGE})
+	props.append({"name": "Layer", "type": TYPE_NIL, "usage": PROPERTY_USAGE_GROUP, "hint_string": ""})
+	var names := _brush_layer_names()
+	var cur := _layer_display_name()
+	if not names.has(cur):
+		names.append(cur)
+	props.append({
+		"name": "tool_layer",
+		"type": TYPE_STRING,
+		"hint": PROPERTY_HINT_ENUM,
+		"hint_string": ",".join(names),
+		"usage": PROPERTY_USAGE_EDITOR,
+	})
+	return props
+
+
+func _get(property: StringName) -> Variant:
+	if property == &"tool_layer":
+		return _layer_display_name()
+	return null
+
+
+func _set(property: StringName, value: Variant) -> bool:
+	if property == &"tool_layer":
+		_assign_layer_by_name(str(value))
+		return true
+	return false
+
+
+## Point this tool at the brush layer whose live name is `display_name` (or a new owner for that name).
+func _assign_layer_by_name(display_name: String) -> void:
+	var owner := _owner_for_layer_name(display_name)
+	if owner == "":
+		owner = BRUSH_OWNER_PREFIX + display_name
+	_set_layer_owner(owner)
+
+
+## Create a new tool layer named after this node and assign this node to it (de-duplicated so it is
+## always a fresh layer rather than silently joining an existing same-named one).
+func add_new_layer() -> void:
+	_set_layer_owner(BRUSH_OWNER_PREFIX + _unique_brush_layer_name(name))
+
+
+## Re-bind to a different tool layer: lift our contribution off the old layer, then bake into the new.
+func _set_layer_owner(owner: String) -> void:
+	if owner == _layer_owner:
+		return
+	var old := _layer_owner
+	_layer_owner = owner
+	notify_property_list_changed()
+	update_configuration_warnings()
+	if Engine.is_editor_hint() and is_inside_tree() and is_configured():
+		_rebind(old)
+
+
+func _rebind(old_owner: String) -> void:
+	# Clear our footprint off the OLD layer (we're no longer one of its tools) and repaint whoever is
+	# left on it, then bake into the new layer.
+	if old_owner != "":
+		_refresh_owner(old_owner, false, _own_footprints())
+	_last_paint_aabb.clear()
+	refresh()
+
+
 ## ---- Refresh scheduling (debounced; defers while a handle is being dragged) ----
 
 func _schedule_refresh() -> void:
@@ -129,12 +213,12 @@ func _on_refresh_timer() -> void:
 		refresh()
 
 
-## ---- The paint cycle: clear last footprint(s), repaint every spline, push to GPU once ----
+## ---- The paint cycle (layer-granular: repaint every tool bound to the layer) ----
 
 ## The Refresh button. Records an undoable action so Ctrl+Z reverts the bake — needed for the
 ## auto_refresh-off / manual-bake workflow (and harmless when auto_refresh is on). Auto-refresh and
-## property-driven repaints DON'T record their own action: their undoable cause (the spline gizmo
-## edit or the inspector property change) re-triggers auto-refresh on undo, so the terrain follows.
+## property-driven repaints DON'T record their own action: their undoable cause (the spline gizmo edit
+## or the inspector property change) re-triggers auto-refresh on undo, so the terrain follows.
 func _refresh_button() -> void:
 	refresh(true)
 
@@ -142,77 +226,176 @@ func _refresh_button() -> void:
 func refresh(record_undo: bool = false) -> void:
 	if not Engine.is_editor_hint() or not is_configured():
 		return
-	var ur: EditorUndoRedoManager = _editor_undo() if record_undo else null
-	var can_undo := ur != null and terrain.data.has_method("find_layer_by_owner") \
-		and terrain.data.has_method("get_layer_stack") and terrain.data.has_method("recomposite_layer")
-	var before: Dictionary = _snapshot_layer() if can_undo else {}
-	_do_paint()
-	if can_undo:
-		var after := _snapshot_layer()
-		# Already painted, so commit without re-executing the do method (execute = false).
-		ur.create_action("Pasture3D %s Bake" % _spline_basename())
-		ur.add_do_method(self, "_restore_layer", after)
-		ur.add_undo_method(self, "_restore_layer", before)
-		ur.commit_action(false)
+	_refresh_owner(_layer_owner, record_undo, [])
 
 
-func _do_paint() -> void:
-	var have_layer := _ensure_layer()
-	var splines := _get_splines()
+## Refresh a whole tool layer: clear every bound tool's footprints (+ any extras), repaint every bound
+## tool's splines, then one GPU push. Sharing means editing one tool must repaint its layer-mates so an
+## overlapping mate isn't left wiped (the road-connector partial-refresh hazard); with the O(cells)
+## rasteriser each bake is cheap. `extra_clears` lets a rebind also drop a departing tool's footprint.
+func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> void:
+	if not is_configured():
+		return
+	var sibs := _tools_on_owner(owner)
+	var layer_id := _ensure_layer_for(owner, owner == _layer_owner)
+	var can_undo := record_undo and _layers_api_available() and layer_id >= 0
+	var ur: EditorUndoRedoManager = _editor_undo() if can_undo else null
+	var before: Dictionary = _snapshot_owner(owner) if (ur != null) else {}
 
-	# Idempotent clear: drop every footprint we currently occupy AND every footprint we painted last
-	# time (cached), so a moved/edited/removed spline leaves no stale flattening behind. Each box is
-	# cleared separately (not merged) to avoid wiping a large swath between an old and a new pose; we
-	# repaint ALL of the node's splines afterwards anyway, so any co-located sibling is restored.
-	if have_layer:
-		for s in splines:
-			var a := _spline_footprint_aabb(s)
-			if a.size != Vector3.ZERO:
-				terrain.data.clear_layer_in_area(_layer_id, a)
-		for sid in _last_paint_aabb:
-			var b: AABB = _last_paint_aabb[sid]
-			if b.size != Vector3.ZERO:
-				terrain.data.clear_layer_in_area(_layer_id, b)
-		_last_paint_aabb.clear()
-
-	for s in splines:
-		if not _spline_paintable(s):
-			continue
-		_paint_spline(s)
-		if have_layer:
-			_last_paint_aabb[s.get_instance_id()] = _spline_footprint_aabb(s)
+	if layer_id >= 0:
+		var blend := _layer_blend_for(layer_id)
+		for box: AABB in extra_clears:
+			if box.size != Vector3.ZERO:
+				terrain.data.clear_layer_in_area(layer_id, box)
+		for s in sibs:
+			for box: AABB in s._own_footprints():
+				if box.size != Vector3.ZERO:
+					terrain.data.clear_layer_in_area(layer_id, box)
+			s._last_paint_aabb.clear()
+		for s in sibs:
+			s._paint_into(layer_id, blend)
+	else:
+		# Fallback: no layers Tool API → each tool writes the base height map destructively.
+		for s in sibs:
+			s._paint_into(-1, _get_blend_mode())
 
 	terrain.data.update_maps(PASTURE_3D_MAPTYPE_HEIGHT)
 
-
-## Resolve (or create) our reserved layer. Returns false on terrains/builds without the layers Tool
-## API, in which case callers fall back to destructive set_height so the brush keeps working.
-func _ensure_layer() -> bool:
-	_layer_id = -1
-	_blend = _get_blend_mode()
-	if not terrain or not terrain.data:
-		return false
-	if not terrain.data.has_method("create_owned_layer"):
-		return false
-	_layer_id = terrain.data.create_owned_layer(_owner_id(), target_layer_name, _blend)
-	if _layer_id < 0:
-		return false
-	_sync_layer_blend()
-	return true
+	if ur != null:
+		var after := _snapshot_owner(owner)
+		ur.create_action("Pasture3D %s Bake" % _spline_basename())
+		ur.add_do_method(self, "_restore_owner", owner, after)
+		ur.add_undo_method(self, "_restore_owner", owner, before)
+		ur.commit_action(false)
 
 
-## create_owned_layer only sets the blend mode when the layer is first created (it is idempotent by
-## owner_id and returns the existing layer unchanged). Re-apply the export so changing blend_mode in
-## the inspector takes effect. The subsequent repaint composites with the new blend.
-func _sync_layer_blend() -> void:
-	var layer := _resolve_layer()
-	if layer and layer.has_method("get_blend_mode") and layer.get_blend_mode() != _blend:
-		layer.set_blend_mode(_blend)
+## Paint this node's splines into the given layer (-1 = destructive). Records the per-spline footprint
+## cache. Driven by _refresh_owner for self and every layer-mate.
+func _paint_into(layer_id: int, blend: int) -> void:
+	_layer_id = layer_id
+	_blend = blend
+	for path in _get_splines():
+		if not _spline_paintable(path):
+			continue
+		_paint_spline(path)
+		if layer_id >= 0:
+			_last_paint_aabb[path.get_instance_id()] = _spline_footprint_aabb(path)
 
 
-## Stable id identifying this brush's reserved layer across refreshes and reloads.
-func _owner_id() -> String:
-	return str(get_path())
+## Every brush node bound to `owner` (same terrain). Includes self when `owner` is our binding.
+func _tools_on_owner(owner: String) -> Array:
+	var out: Array = []
+	if is_inside_tree():
+		for n in get_tree().get_nodes_in_group(BRUSH_GROUP):
+			if n is Pasture3DTerrainBrush and is_instance_valid(n) and n.terrain == terrain and n._layer_owner == owner:
+				out.append(n)
+	if owner == _layer_owner and not out.has(self):
+		out.append(self)
+	return out
+
+
+## Our current + previously-cached spline footprints (cleared off a layer before repaint / on rebind).
+func _own_footprints() -> Array:
+	var out: Array = []
+	for s in _get_splines():
+		var a := _spline_footprint_aabb(s)
+		if a.size != Vector3.ZERO:
+			out.append(a)
+	for sid in _last_paint_aabb:
+		var b: AABB = _last_paint_aabb[sid]
+		if b.size != Vector3.ZERO:
+			out.append(b)
+	return out
+
+
+## ---- Layer resolution / identity ----
+
+func _layers_api_available() -> bool:
+	return terrain != null and terrain.data != null \
+		and terrain.data.has_method("create_owned_layer") and terrain.data.has_method("find_layer_by_owner") \
+		and terrain.data.has_method("get_layer_stack") and terrain.data.has_method("composite_region")
+
+
+## Resolve (or create) the tool layer for `owner`. When `sync_blend`, push this node's blend_mode onto
+## the layer so changing blend_mode re-bakes (a shared layer has one blend — last refresher wins).
+## Returns the layer index, or -1 on builds/terrains without the layers Tool API (destructive fallback).
+func _ensure_layer_for(owner: String, sync_blend: bool) -> int:
+	if not terrain or not terrain.data or not terrain.data.has_method("create_owned_layer"):
+		return -1
+	var id: int = terrain.data.create_owned_layer(owner, owner.trim_prefix(BRUSH_OWNER_PREFIX), _get_blend_mode())
+	if id < 0:
+		return -1
+	if sync_blend:
+		var layer := _layer_at(id)
+		if layer and layer.has_method("get_blend_mode") and layer.get_blend_mode() != _get_blend_mode():
+			layer.set_blend_mode(_get_blend_mode())
+	return id
+
+
+func _layer_at(id: int) -> Pasture3DLayer:
+	if not terrain or not terrain.data or not terrain.data.has_method("get_layer_stack"):
+		return null
+	var stack = terrain.data.get_layer_stack()
+	return stack.get_layer(id) if stack else null
+
+
+func _layer_blend_for(id: int) -> int:
+	var layer := _layer_at(id)
+	return layer.get_blend_mode() if layer else _get_blend_mode()
+
+
+func _resolve_layer_for(owner: String) -> Pasture3DLayer:
+	if not terrain or not terrain.data or not terrain.data.has_method("find_layer_by_owner"):
+		return null
+	var idx: int = terrain.data.find_layer_by_owner(owner)
+	return _layer_at(idx) if idx >= 0 else null
+
+
+## Every reserved brush tool layer in the stack (owner in the brush namespace).
+func _brush_layers() -> Array:
+	var out: Array = []
+	if not terrain or not terrain.data or not terrain.data.has_method("get_layer_stack"):
+		return out
+	var stack = terrain.data.get_layer_stack()
+	if not stack:
+		return out
+	for i in range(stack.get_layer_count()):
+		var l = stack.get_layer(i)
+		if l and l.is_reserved() and l.get_owner_id().begins_with(BRUSH_OWNER_PREFIX):
+			out.append(l)
+	return out
+
+
+func _brush_layer_names() -> PackedStringArray:
+	var out := PackedStringArray()
+	for l in _brush_layers():
+		out.append(l.get_layer_name())
+	return out
+
+
+func _owner_for_layer_name(display_name: String) -> String:
+	for l in _brush_layers():
+		if l.get_layer_name() == display_name:
+			return l.get_owner_id()
+	return ""
+
+
+## Live display name of the layer we're bound to, or our owner slug if it doesn't exist yet.
+func _layer_display_name() -> String:
+	for l in _brush_layers():
+		if l.get_owner_id() == _layer_owner:
+			return l.get_layer_name()
+	return _layer_owner.trim_prefix(BRUSH_OWNER_PREFIX)
+
+
+func _unique_brush_layer_name(base: String) -> String:
+	var names := _brush_layer_names()
+	if not names.has(base):
+		return base
+	var i := 2
+	while names.has("%s %d" % [base, i]):
+		i += 1
+	return "%s %d" % [base, i]
 
 
 ## Write one terrain sample. MAX/MIN/REPLACE author the absolute target surface (the layer's blend
@@ -245,32 +428,18 @@ func _editor_undo() -> EditorUndoRedoManager:
 	return EditorInterface.get_editor_undo_redo()
 
 
-## Resolve our reserved layer object (by owner id, so it survives index shifts), or null.
-func _resolve_layer() -> Pasture3DLayer:
-	if not terrain or not terrain.data:
-		return null
-	if not terrain.data.has_method("find_layer_by_owner") or not terrain.data.has_method("get_layer_stack"):
-		return null
-	var idx: int = terrain.data.find_layer_by_owner(_owner_id())
-	if idx < 0:
-		return null
-	var stack = terrain.data.get_layer_stack()
-	return stack.get_layer(idx) if stack else null
-
-
-## Deep snapshot of the reserved layer's tiles (empty Dictionary if no layer yet = the initial state).
-func _snapshot_layer() -> Dictionary:
-	var layer := _resolve_layer()
+## Deep snapshot of a tool layer's tiles (empty Dictionary if no layer yet = the initial state).
+func _snapshot_owner(owner: String) -> Dictionary:
+	var layer := _resolve_layer_for(owner)
 	return _copy_tiles(layer.get_tiles()) if layer else {}
 
 
-## Restore a tile snapshot into the reserved layer, then recomposite + push to GPU. Registered as the
-## do/undo method of the bake action; re-resolves the layer each call so it is robust to index shifts.
-## We recomposite the UNION of the regions the layer covered before and after the swap — recompositing
-## only the layer's current regions would leave a region that the restore *emptied* still showing the
-## old contribution (it re-seeds from the base and re-applies every layer for each region).
-func _restore_layer(snapshot: Dictionary) -> void:
-	var layer := _resolve_layer()
+## Restore a tile snapshot into a tool layer, then recomposite + push to GPU. Registered as the do/undo
+## method of the bake action; re-resolves the layer by owner each call. Recomposites the UNION of the
+## regions the layer covered before and after the swap — recompositing only the layer's current regions
+## would leave a region the restore *emptied* still showing the old contribution.
+func _restore_owner(owner: String, snapshot: Dictionary) -> void:
+	var layer := _resolve_layer_for(owner)
 	if not layer or not terrain.data.has_method("composite_region"):
 		return
 	var regions := {}
@@ -316,7 +485,7 @@ func _set_curve_points_and_repaint(points: Array) -> void:
 			c.set_point_position(e[1], e[2])
 	_suspend_auto = false
 	if Engine.is_editor_hint() and is_configured():
-		_do_paint()
+		refresh()
 
 
 ## ---- Add Spline button ----
@@ -614,6 +783,11 @@ func _polyline_field(pts: PackedVector3Array, min_x: float, min_z: float, vs: fl
 
 func _get_blend_mode() -> int:
 	return BLEND_REPLACE
+
+
+## Default tool-layer name for a fresh node of this type (e.g. "Mounds"). Used to build _layer_owner.
+func _default_layer_name() -> String:
+	return "Brush"
 
 
 func _padding() -> float:

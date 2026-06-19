@@ -44,9 +44,8 @@ enum BlendMode { REPLACE, ADD, MAX, MIN }
 @export var falloff: float = 10.0
 
 
-func _init() -> void:
-	if target_layer_name == "":
-		target_layer_name = "Ridges"
+func _default_layer_name() -> String:
+	return "Ridges"
 
 
 func _get_blend_mode() -> int:

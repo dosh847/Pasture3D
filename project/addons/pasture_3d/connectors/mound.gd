@@ -45,9 +45,8 @@ enum BlendMode { REPLACE, ADD, MAX, MIN }
 @export var noise_strength: float = 0.0
 
 
-func _init() -> void:
-	if target_layer_name == "":
-		target_layer_name = "Mounds"
+func _default_layer_name() -> String:
+	return "Mounds"
 
 
 func _get_blend_mode() -> int:
