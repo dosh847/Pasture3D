@@ -39,6 +39,11 @@ const REFRESH_DELAY: float = 0.1
 ## The Pasture3D terrain this brush paints into.
 @export var terrain: Pasture3D:
 	set(value):
+		# Leaving a terrain (reparent or an inspector re-assignment): lift our contribution off the old
+		# one first — otherwise our baked footprint is stranded on it. `terrain` still holds the old
+		# value here, so the detach resolves the old terrain's layer.
+		if Engine.is_editor_hint() and value != terrain and is_instance_valid(terrain) and terrain.data != null:
+			_detach_from_current()
 		terrain = value
 		update_configuration_warnings()
 		# Rebuild dynamic property hints (e.g. the material/texture dropdown) now that a terrain — and
@@ -81,6 +86,7 @@ var _last_paint_aabb: Dictionary = {} # spline instance_id -> world AABB last pa
 var _timer: SceneTreeTimer = null
 var _dirty: bool = false
 var _suspend_auto: bool = false # Blocks auto-refresh while we mutate curves programmatically (undo)
+var _ready_done: bool = false   # True once _ready ran — gates re-parent auto-assign off scene-load
 
 
 func _ready() -> void:
@@ -94,16 +100,66 @@ func _ready() -> void:
 		child_exiting_tree.connect(_on_child_changed)
 	for s in _get_splines():
 		_connect_spline(s)
+	# Convenience: when a brush is first added under a Pasture3D (at any depth), auto-target it — but
+	# never clobber a terrain the user picked, and only in the editor.
+	if Engine.is_editor_hint() and terrain == null:
+		var anc := _terrain_ancestor()
+		if anc != null:
+			terrain = anc
 	# Baseline the footprint cache to the loaded poses (without painting) so the first edit of the
 	# session clears where a spline WAS, not just where it ends up — no stale flattening trail.
 	_seed_cache()
+	_ready_done = true
 
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_TRANSFORM_CHANGED:
 		_schedule_refresh()
+	elif what == NOTIFICATION_ENTER_TREE:
+		# Re-join the group on every enter (a reparent exits + re-enters the tree, and _ready only runs
+		# once) so layer-sharing keeps seeing this brush after it has been moved.
+		add_to_group(BRUSH_GROUP)
 	elif what == NOTIFICATION_EXIT_TREE:
 		remove_from_group(BRUSH_GROUP)
+	elif what == NOTIFICATION_PARENTED:
+		# Re-parented under a different terrain after creation → follow it. Deferred so the reparent has
+		# fully settled (node back in the tree) before we detach/rebind. _ready_done gates this so it
+		# never fires during initial scene load (PARENTED precedes _ready then).
+		if Engine.is_editor_hint() and _ready_done:
+			_auto_assign_terrain.call_deferred()
+
+
+## Follow a reparent: bind to the nearest Pasture3D ancestor (the setter detaches from the old one).
+## Moving the brush out from under any terrain leaves its current target as-is rather than clearing it.
+func _auto_assign_terrain() -> void:
+	if not Engine.is_editor_hint() or not _ready_done or not is_inside_tree():
+		return
+	var anc := _terrain_ancestor()
+	if anc != null and terrain != anc:
+		terrain = anc
+
+
+## Nearest Pasture3D ancestor (direct parent first), or null. Drives the auto-terrain assignment.
+func _terrain_ancestor() -> Pasture3D:
+	var n := get_parent()
+	while n != null:
+		if n is Pasture3D:
+			return n
+		n = n.get_parent()
+	return null
+
+
+## Lift our contribution off the CURRENT terrain's tool layer, repainting any layer-mates so we don't
+## punch a hole in their overlapping footprints. Used before switching terrains. Excludes self from the
+## repaint by blanking _layer_owner for the duration (mirrors how _rebind excludes a departing tool).
+func _detach_from_current() -> void:
+	if not is_configured() or not is_inside_tree():
+		return
+	var saved_owner := _layer_owner
+	_layer_owner = ""
+	_refresh_owner(saved_owner, false, _own_footprints())
+	_layer_owner = saved_owner
+	_last_paint_aabb.clear()
 
 
 func _get_configuration_warnings() -> PackedStringArray:
