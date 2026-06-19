@@ -1,11 +1,11 @@
 # Modeled off of godot-cpp https://github.com/godotengine/godot-cpp/blob/master/.github/workflows/ci.yml
 
 name: 🛠️ Build All
-on: 
-    push:
-        branches: [ main, 1.1-godot4.4 ]
-    pull_request:
-        paths: [ '**' ]
+# NOTE (Pasture3D fork): this all-platform build is inherited from Terrain3D and still uses upstream
+# paths (terrain_3d / libterrain) and builds platforms this fork doesn't target, so it fails as-is.
+# Auto-run on push/PR is disabled to avoid spamming failed builds. For the Linux + macOS libraries we
+# actually need, use pasture-libs.yml. Left here (manual dispatch only) for future multi-platform work.
+on:
     workflow_dispatch:
 
 concurrency:
