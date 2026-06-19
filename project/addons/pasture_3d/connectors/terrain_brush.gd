@@ -20,7 +20,9 @@ extends Node3D
 
 ## Map type / blend-mode indices, matching Pasture3DData.MapType and Pasture3DLayer.BlendMode.
 ## Hardcoded as ints so this script does not hard-depend on the enum bindings.
-const PASTURE_3D_MAPTYPE_HEIGHT: int = 0 # Pasture3DData.MapType.TYPE_HEIGHT
+const PASTURE_3D_MAPTYPE_HEIGHT: int = 0  # Pasture3DData.MapType.TYPE_HEIGHT
+const PASTURE_3D_MAPTYPE_CONTROL: int = 1 # Pasture3DData.MapType.TYPE_CONTROL
+const PASTURE_3D_MAPTYPE_COLOR: int = 2   # Pasture3DData.MapType.TYPE_COLOR
 const BLEND_REPLACE: int = 0 # Pasture3DLayer.BlendMode.REPLACE
 const BLEND_ADD: int = 1     # Pasture3DLayer.BlendMode.ADD
 const BLEND_MAX: int = 2     # Pasture3DLayer.BlendMode.MAX
@@ -39,6 +41,9 @@ const REFRESH_DELAY: float = 0.1
 	set(value):
 		terrain = value
 		update_configuration_warnings()
+		# Rebuild dynamic property hints (e.g. the material/texture dropdown) now that a terrain — and
+		# thus its texture list — is known, so they populate without needing to reselect the node.
+		notify_property_list_changed()
 		_schedule_refresh()
 
 ## Re-paint automatically while editing the splines / moving the node.
@@ -286,7 +291,7 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 		for s in sibs:
 			s._paint_into(-1, _get_blend_mode())
 
-	terrain.data.update_maps(PASTURE_3D_MAPTYPE_HEIGHT)
+	terrain.data.update_maps(_map_type())
 
 	if ur != null:
 		var after := _snapshot_owner(owner)
@@ -347,15 +352,23 @@ func _layers_api_available() -> bool:
 ## the layer so changing blend_mode re-bakes (a shared layer has one blend — last refresher wins).
 ## Returns the layer index, or -1 on builds/terrains without the layers Tool API (destructive fallback).
 func _ensure_layer_for(owner: String, sync_blend: bool) -> int:
-	if not terrain or not terrain.data or not terrain.data.has_method("create_owned_layer"):
+	if not terrain or not terrain.data:
 		return -1
-	var id: int = terrain.data.create_owned_layer(owner, owner.trim_prefix(BRUSH_OWNER_PREFIX), _get_blend_mode())
+	var mt := _map_type()
+	var nm := owner.trim_prefix(BRUSH_OWNER_PREFIX)
+	var id: int = -1
+	if terrain.data.has_method("create_owned_layer_typed"):
+		id = terrain.data.create_owned_layer_typed(owner, nm, _get_blend_mode(), mt)
+	elif mt == PASTURE_3D_MAPTYPE_HEIGHT and terrain.data.has_method("create_owned_layer"):
+		id = terrain.data.create_owned_layer(owner, nm, _get_blend_mode())
 	if id < 0:
 		return -1
-	if sync_blend:
-		var layer := _layer_at(id)
-		if layer and layer.has_method("get_blend_mode") and layer.get_blend_mode() != _get_blend_mode():
-			layer.set_blend_mode(_get_blend_mode())
+	var layer := _layer_at(id)
+	# Owner is keyed by name only, so a same-named layer of another map type would be reused — warn.
+	if layer and layer.has_method("get_map_type") and layer.get_map_type() != mt:
+		push_warning("Pasture3D brush '%s': layer '%s' already exists with a different map type — give this tool a unique layer name." % [name, nm])
+	if sync_blend and layer and layer.has_method("get_blend_mode") and layer.get_blend_mode() != _get_blend_mode():
+		layer.set_blend_mode(_get_blend_mode())
 	return id
 
 
@@ -388,7 +401,9 @@ func _brush_layers() -> Array:
 		return out
 	for i in range(stack.get_layer_count()):
 		var l = stack.get_layer(i)
-		if l and l.is_reserved() and l.get_owner_id().begins_with(BRUSH_OWNER_PREFIX):
+		# Scope to brush layers of THIS tool's map type so sharing / the dropdown / de-dup don't mix
+		# height and control layers (their owners are name-keyed only).
+		if l and l.is_reserved() and l.get_owner_id().begins_with(BRUSH_OWNER_PREFIX) and l.get_map_type() == _map_type():
 			out.append(l)
 	return out
 
@@ -439,6 +454,17 @@ func _paint_height(world_pos: Vector3, target: float, delta: float) -> void:
 		terrain.data.set_height_on_layer(_layer_id, world_pos, target, 1.0)
 
 
+## Write a packed control value (texture ids + blend + uv) into the layer. Falls back to the
+## destructive set_control path internally when _layer_id is invalid (set_control_on_layer handles it).
+func _paint_control(world_pos: Vector3, control: int, weight: float) -> void:
+	terrain.data.set_control_on_layer(_layer_id, world_pos, control, weight)
+
+
+## Write an albedo+coverage colour into the layer (alpha-over composite).
+func _paint_color(world_pos: Vector3, color: Color, weight: float) -> void:
+	terrain.data.set_color_on_layer(_layer_id, world_pos, color, weight)
+
+
 func _seed_cache() -> void:
 	for s in _get_splines():
 		var a := _spline_footprint_aabb(s)
@@ -477,7 +503,7 @@ func _restore_owner(owner: String, snapshot: Dictionary) -> void:
 	layer.set_tiles(_copy_tiles(snapshot))
 	for loc in regions:
 		terrain.data.composite_region(loc, Rect2i(), false)
-	terrain.data.update_maps(PASTURE_3D_MAPTYPE_HEIGHT)
+	terrain.data.update_maps(_map_type())
 
 
 ## Deep copy of the {region_loc -> {tile_coord -> Image}} tile structure. get_tiles/set_tiles share
@@ -872,6 +898,12 @@ func _polyline_field(pts: PackedVector3Array, min_x: float, min_z: float, vs: fl
 
 func _get_blend_mode() -> int:
 	return BLEND_REPLACE
+
+
+## Map type this brush paints (TYPE_HEIGHT default; Pasture3DSplat returns TYPE_CONTROL). Drives the
+## reserved layer's type, update_maps, and which brush layers this tool shares with.
+func _map_type() -> int:
+	return PASTURE_3D_MAPTYPE_HEIGHT
 
 
 ## Default tool-layer name for a fresh node of this type (e.g. "Mounds"). Used to build _layer_owner.
