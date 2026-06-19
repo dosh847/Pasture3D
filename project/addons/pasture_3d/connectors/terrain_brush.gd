@@ -49,6 +49,22 @@ const REFRESH_DELAY: float = 0.1
 ## Create a brand-new tool layer named after this node and assign this node to it.
 @export_tool_button("Add New Layer") var _add_layer_btn = add_new_layer
 
+@export_group("Surface")
+## Keep this brush's spline points glued to the terrain surface while editing (their Y follows the
+## ground). Leave off for free vertical control. See PASTURE3D_SPLINE_SURFACE_SNAP_SPEC.md.
+@export var snap_to_surface: bool = false:
+	set(v):
+		snap_to_surface = v
+		_schedule_refresh()
+## Metres above the surface to sit the snapped points at (0 = on the surface).
+@export var surface_offset: float = 0.0:
+	set(v):
+		surface_offset = v
+		if snap_to_surface:
+			_schedule_refresh()
+## Drop every spline point onto the terrain once, now (works whether or not snap_to_surface is on).
+@export_tool_button("Snap Points to Surface") var _snap_btn = snap_points_to_surface
+
 ## Stable binding to a tool layer = its owner_id ("pasture3d_brush:<name>"). Persisted (hidden); shown
 ## in the inspector via the `tool_layer` dropdown (which displays the layer's live name). Empty until
 ## _ready defaults it to the subclass layer name, so a fresh tool auto-attaches to e.g. "Mounds".
@@ -252,10 +268,21 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 				if box.size != Vector3.ZERO:
 					terrain.data.clear_layer_in_area(layer_id, box)
 			s._last_paint_aabb.clear()
+		# (B) Snap AFTER the clear: with this tool's influence removed and the region recomposited,
+		# get_height reads the BASE the points should sit on — not the tool's own ridge — so points
+		# can't climb their own contribution on each refresh. Snapping moves Y only, so the footprints
+		# just cleared (XZ) stay valid, and unchanged points are skipped (idempotent).
+		for s in sibs:
+			if s.snap_to_surface:
+				s._apply_surface_snap()
 		for s in sibs:
 			s._paint_into(layer_id, blend)
 	else:
-		# Fallback: no layers Tool API → each tool writes the base height map destructively.
+		# Fallback: no layers Tool API → destructive writes (no own-layer to clear). Snap against the
+		# live surface as a best effort; the non-destructive path above is the supported one.
+		for s in sibs:
+			if s.snap_to_surface:
+				s._apply_surface_snap()
 		for s in sibs:
 			s._paint_into(-1, _get_blend_mode())
 
@@ -486,6 +513,68 @@ func _set_curve_points_and_repaint(points: Array) -> void:
 	_suspend_auto = false
 	if Engine.is_editor_hint() and is_configured():
 		refresh()
+
+
+## ---- Surface snapping (PASTURE3D_SPLINE_SURFACE_SNAP_SPEC.md) ----
+
+## (A) Snap every control point of every child spline onto the terrain (+ surface_offset), as ONE
+## undoable action. On-demand via the inspector button; reuses the Make Descend do/undo helper.
+func snap_points_to_surface() -> void:
+	if not is_configured():
+		return
+	var edits := _surface_snap_edits()
+	var new_pts: Array = edits[1]
+	if new_pts.is_empty():
+		return
+	var ur := _editor_undo()
+	if ur:
+		ur.create_action("Pasture3D Snap %s to Surface" % _spline_basename())
+		ur.add_do_method(self, "_set_curve_points_and_repaint", new_pts)
+		ur.add_undo_method(self, "_set_curve_points_and_repaint", edits[0])
+		ur.commit_action()
+	else:
+		_set_curve_points_and_repaint(new_pts)
+
+
+## (B) Snap points to the surface in place, with no undo action of its own — it runs inside an
+## auto-refresh whose undoable cause is the user's gizmo edit. Guarded so the writes don't recurse.
+func _apply_surface_snap() -> void:
+	if not is_configured():
+		return
+	var new_pts: Array = _surface_snap_edits()[1]
+	if new_pts.is_empty():
+		return
+	_suspend_auto = true
+	for e in new_pts:
+		e[0].set_point_position(e[1], e[2])
+	_suspend_auto = false
+
+
+## Compute the snap edits for every child spline: [old_points, new_points], each an Array of
+## [curve, index, local_position]. Snaps in world space (so a transformed brush/Path3D still works);
+## points with no region beneath them (get_height returns NaN) are skipped.
+func _surface_snap_edits() -> Array:
+	var old_pts: Array = []
+	var new_pts: Array = []
+	for path in _get_splines():
+		var c: Curve3D = path.curve
+		if c == null:
+			continue
+		var xf: Transform3D = path.global_transform
+		var inv := xf.affine_inverse()
+		for i in range(c.point_count):
+			var local := c.get_point_position(i)
+			var world: Vector3 = xf * local
+			var h: float = terrain.data.get_height(Vector3(world.x, 0.0, world.z))
+			if not is_finite(h):
+				continue
+			world.y = h + surface_offset
+			var new_local: Vector3 = inv * world
+			if new_local.is_equal_approx(local):
+				continue
+			old_pts.append([c, i, local])
+			new_pts.append([c, i, new_local])
+	return [old_pts, new_pts]
 
 
 ## ---- Add Spline button ----
