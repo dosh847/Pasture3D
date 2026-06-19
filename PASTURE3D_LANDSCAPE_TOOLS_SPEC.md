@@ -406,11 +406,22 @@ flow. Optional follow-up: a **"Make Descend"** tool button that clamps each curv
 
 ## 9. Caveats / open questions
 
-- **Performance:** per-pixel polygon-distance (Mound) and closest-offset (Ridge/Trough) in GDScript
-  is fine for editor-time block-outs (road connector does the same), but a very large loop × small
-  `vertex_spacing` is O(pixels × poly edges). Mitigations: precompute `max_interior_d` once; cap the
-  grid; **optional C++ acceleration later** (`paint_mound`/`paint_ridge`/`paint_trough` Data methods)
-  if needed.
+- **Performance (SOLVED in GDScript — no C++ needed):** the first cut was per-pixel
+  `is_point_in_polygon` + boundary distance (Mound) / closest-point-on-polyline (Ridge/Trough), i.e.
+  **O(cells × baked-edges)**. Because `Curve3D` bakes at ~0.2 m, a simple loop became 1400–4900 edges
+  on a 1 m grid, so a 5-point loop froze the editor for **4–164 s** (measured). Replaced with
+  rasterisation that is **O(cells)**:
+  - **Mound** → decimate the loop to grid resolution, scanline-fill an inside mask, then a two-pass
+    **chamfer signed distance field** (`_signed_distance_field` + `_chamfer`); the dome's max-interior
+    falls out of the same field (no second pass).
+  - **Ridge / Trough** → a **polyline feature field** (`_polyline_field` + `_chamfer_payload`): a
+    chamfer DT that also propagates the nearest point's crest/bed **Y** and **arc length**, so the
+    paint loop reads distance + base-Y + taper from arrays instead of scanning every segment per pixel.
+  - Measured after: Mound **164 s → 0.23 s**, Ridge **9.6 s → 0.06 s**, Trough **7.7 s → 0.06 s**
+    (region 256, large brushes). Inspired by image-editor SDF falloff + Krita's dirty-rect/LOD ideas.
+  - Remaining bounded cost: `clear_layer_in_area` recomposites whole touched regions on each re-bake
+    (≈0.1 s at region 256; grows with `region_size`) — shared with the road connector, not brush-specific.
+    C++ `paint_*` Data methods remain a *possible* future win but are no longer needed for usability.
 - **Undo/redo:** curve-point edits undo via Godot's Path3D gizmo; the *terrain repaint* is a derived
   effect and is **not** wired into `EditorUndoRedoManager` in v1 (same limitation the road connector
   documents). Pressing Refresh always reconverges. Full undo integration = follow-up.

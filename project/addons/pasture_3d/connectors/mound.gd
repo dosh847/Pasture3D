@@ -78,11 +78,13 @@ func _make_starter_curve() -> Curve3D:
 	return c
 
 
+## Loop projected to world XZ and decimated to ~terrain resolution (the raw Curve3D bake is far finer
+## than the grid and would make the scanline fill needlessly slow).
 func _polygon_xz(path: Path3D) -> PackedVector2Array:
-	var out := PackedVector2Array()
+	var raw := PackedVector2Array()
 	for p in _baked_world_points(path):
-		out.append(Vector2(p.x, p.z))
-	return out
+		raw.append(Vector2(p.x, p.z))
+	return _decimate(raw, maxf(terrain.vertex_spacing, 0.25))
 
 
 func _paint_spline(path: Path3D) -> void:
@@ -91,49 +93,40 @@ func _paint_spline(path: Path3D) -> void:
 		return
 	var vs: float = terrain.vertex_spacing
 	var b := _snapped_bounds(_spline_footprint_aabb(path), vs)
+	var min_x: float = b[0]
+	var min_z: float = b[2]
+	var gw := int(round((b[1] - b[0]) / vs)) + 1
+	var gh := int(round((b[3] - b[2]) / vs)) + 1
+	if gw < 1 or gh < 1:
+		return
+
+	# One O(cells) signed distance field replaces the old per-pixel O(edges) polygon distance (×2 for
+	# the dome's max-interior pass). Positive inside, in metres; max_inside normalises the dome.
+	var sdf := _signed_distance_field(poly, min_x, min_z, vs, gw, gh)
+	var field: PackedFloat32Array = sdf[0]
+	var max_inside: float = sdf[1]
 	var sign := -1.0 if invert else 1.0
+	var dome_denom := maxf(max_inside + edge_offset, 0.001)
+	var ramp_denom := maxf(falloff_width, 0.001)
 
-	# Uncapped domes ramp over the whole interior, so we need the deepest interior point.
-	var max_d := 1.0
-	if not capped:
-		max_d = _max_interior_distance(poly, b, vs)
-
-	var x: float = b[0]
-	while x <= b[1]:
-		var z: float = b[2]
-		while z <= b[3]:
-			var pt := Vector2(x, z)
-			var inside := Geometry2D.is_point_in_polygon(pt, poly)
-			var dist_b := _distance_to_polygon_boundary_2d(pt, poly)
-			var signed_d := (dist_b if inside else -dist_b) + edge_offset
-			if signed_d > 0.0:
-				var profile: float
-				if capped:
-					profile = _ramp(falloff_curve, signed_d / maxf(falloff_width, 0.001))
-				else:
-					profile = _ramp(falloff_curve, signed_d / max_d)
-				if profile > 0.0:
-					var pos := Vector3(x, 0.0, z)
-					var base_y := terrain.data.get_height(pos) if relative_to_terrain else global_position.y
-					var amp := sign * height * profile
-					if noise:
-						amp += noise_strength * noise.get_noise_2d(x, z) * profile
-					_paint_height(pos, base_y + amp, amp)
-			z += vs
-		x += vs
-
-
-## Largest distance-to-boundary over the loop interior — normalises the dome so its centre hits `height`.
-func _max_interior_distance(poly: PackedVector2Array, b: Array, vs: float) -> float:
-	var md := 0.0
-	var x: float = b[0]
-	while x <= b[1]:
-		var z: float = b[2]
-		while z <= b[3]:
-			var pt := Vector2(x, z)
-			if Geometry2D.is_point_in_polygon(pt, poly):
-				var d := _distance_to_polygon_boundary_2d(pt, poly) + edge_offset
-				md = maxf(md, d)
-			z += vs
-		x += vs
-	return md if md > 0.0 else 1.0
+	for iz in range(gh):
+		var z := min_z + iz * vs
+		var row := iz * gw
+		for ix in range(gw):
+			var signed_d := field[row + ix] + edge_offset
+			if signed_d <= 0.0:
+				continue
+			var profile: float
+			if capped:
+				profile = _ramp(falloff_curve, signed_d / ramp_denom)
+			else:
+				profile = _ramp(falloff_curve, signed_d / dome_denom)
+			if profile <= 0.0:
+				continue
+			var x := min_x + ix * vs
+			var pos := Vector3(x, 0.0, z)
+			var base_y := terrain.data.get_height(pos) if relative_to_terrain else global_position.y
+			var amp := sign * height * profile
+			if noise:
+				amp += noise_strength * noise.get_noise_2d(x, z) * profile
+			_paint_height(pos, base_y + amp, amp)

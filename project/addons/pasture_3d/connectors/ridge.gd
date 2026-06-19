@@ -73,37 +73,48 @@ func _paint_spline(path: Path3D) -> void:
 	var pts := _baked_world_points(path)
 	if pts.size() < 2:
 		return
-	var cum := _cumulative_lengths(pts)
-	var total: float = cum[cum.size() - 1]
 	var vs: float = terrain.vertex_spacing
 	var b := _snapped_bounds(_spline_footprint_aabb(path), vs)
+	var min_x: float = b[0]
+	var min_z: float = b[2]
+	var gw := int(round((b[1] - b[0]) / vs)) + 1
+	var gh := int(round((b[3] - b[2]) / vs)) + 1
+	if gw < 1 or gh < 1:
+		return
+
+	# One O(cells) polyline feature field replaces the per-pixel O(segments) closest-point scan: each
+	# cell gets its lateral distance, the crest Y at the nearest point, and the arc length (for taper).
+	var fld := _polyline_field(pts, min_x, min_z, vs, gw, gh)
+	var lat_arr: PackedFloat32Array = fld[0]
+	var by_arr: PackedFloat32Array = fld[1]
+	var al_arr: PackedFloat32Array = fld[2]
+	var total: float = fld[3]
 	var sign := -1.0 if invert else 1.0
 	var reach := width + falloff
+	var edge_val := _cross(profile, 1.0) # profile value at the skirt edge, feathered out over `falloff`
 
-	var x: float = b[0]
-	while x <= b[1]:
-		var z: float = b[2]
-		while z <= b[3]:
-			var near := _nearest_on_polyline(Vector2(x, z), pts, cum)
-			var lat: float = near[0]
-			if lat <= reach:
-				var pos := Vector3(x, 0.0, z)
-				var base_y: float = near[1] if follow_spline_height else terrain.data.get_height(pos)
-				var e := _end_taper(near[2], total)
-				var p: float
-				if lat <= width:
-					p = _cross(profile, lat / maxf(width, 0.001))
-				else:
-					# Feather whatever the profile still has at its edge down to 0 over `falloff`.
-					var t := (lat - width) / maxf(falloff, 0.001)
-					p = _cross(profile, 1.0) * (1.0 - clampf(t, 0.0, 1.0))
-				if p > 0.0:
-					var amp := sign * crest_height * p * e
-					if noise:
-						amp += noise_strength * noise.get_noise_2d(x, z) * p
-					_paint_height(pos, base_y + amp, amp)
-			z += vs
-		x += vs
+	for iz in range(gh):
+		var z := min_z + iz * vs
+		var row := iz * gw
+		for ix in range(gw):
+			var i := row + ix
+			var lat := lat_arr[i]
+			if lat > reach:
+				continue
+			var x := min_x + ix * vs
+			var pos := Vector3(x, 0.0, z)
+			var base_y: float = by_arr[i] if follow_spline_height else terrain.data.get_height(pos)
+			var e := _end_taper(al_arr[i], total)
+			var p: float
+			if lat <= width:
+				p = _cross(profile, lat / maxf(width, 0.001))
+			else:
+				p = edge_val * (1.0 - clampf((lat - width) / maxf(falloff, 0.001), 0.0, 1.0))
+			if p > 0.0:
+				var amp := sign * crest_height * p * e
+				if noise:
+					amp += noise_strength * noise.get_noise_2d(x, z) * p
+				_paint_height(pos, base_y + amp, amp)
 
 
 func _end_taper(along: float, total: float) -> float:

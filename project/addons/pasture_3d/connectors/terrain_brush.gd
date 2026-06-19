@@ -376,63 +376,6 @@ func _snapped_bounds(aabb: AABB, vs: float) -> Array:
 	return [min_x, max_x, min_z, max_z]
 
 
-func _distance_point_to_segment_2d(p: Vector2, a: Vector2, b: Vector2) -> float:
-	var v := b - a
-	var len_sq := v.length_squared()
-	if is_zero_approx(len_sq):
-		return p.distance_to(a)
-	var t := clampf((p - a).dot(v) / len_sq, 0.0, 1.0)
-	return p.distance_to(a + t * v)
-
-
-## Minimum distance from a point to any edge of a closed polygon (wraps last → first).
-func _distance_to_polygon_boundary_2d(point: Vector2, polygon: PackedVector2Array) -> float:
-	var n := polygon.size()
-	if n < 2:
-		return INF
-	var min_dist := INF
-	for i in range(n):
-		var d := _distance_point_to_segment_2d(point, polygon[i], polygon[(i + 1) % n])
-		min_dist = minf(min_dist, d)
-	return min_dist
-
-
-## Nearest point on a world polyline to an XZ query point. Returns [lateral_dist, sampled_y, along_dist].
-func _nearest_on_polyline(pt: Vector2, pts: PackedVector3Array, cum: PackedFloat32Array) -> Array:
-	var best := INF
-	var best_y := 0.0
-	var best_along := 0.0
-	for i in range(pts.size() - 1):
-		var a := pts[i]
-		var b := pts[i + 1]
-		var a2 := Vector2(a.x, a.z)
-		var b2 := Vector2(b.x, b.z)
-		var v := b2 - a2
-		var len_sq := v.length_squared()
-		var t := 0.0
-		if len_sq > 0.0:
-			t = clampf((pt - a2).dot(v) / len_sq, 0.0, 1.0)
-		var d := pt.distance_to(a2 + v * t)
-		if d < best:
-			best = d
-			best_y = lerpf(a.y, b.y, t)
-			best_along = cum[i] + t * sqrt(len_sq)
-	return [best, best_y, best_along]
-
-
-func _cumulative_lengths(pts: PackedVector3Array) -> PackedFloat32Array:
-	var cum := PackedFloat32Array()
-	cum.resize(pts.size())
-	if pts.is_empty():
-		return cum
-	cum[0] = 0.0
-	for i in range(1, pts.size()):
-		var a := Vector2(pts[i - 1].x, pts[i - 1].z)
-		var b := Vector2(pts[i].x, pts[i].z)
-		cum[i] = cum[i - 1] + a.distance_to(b)
-	return cum
-
-
 ## Increasing 0→1 ramp from an optional Curve, defaulting to smoothstep.
 func _ramp(c: Curve, x: float) -> float:
 	x = clampf(x, 0.0, 1.0)
@@ -447,6 +390,224 @@ func _cross(c: Curve, t: float) -> float:
 	if c:
 		return c.sample_baked(t)
 	return 0.5 + 0.5 * cos(t * PI)
+
+
+## ---- Rasterisation acceleration (PASTURE3D_LANDSCAPE_TOOLS_SPEC.md §9 performance) ----
+##
+## Curve3D bakes at ~0.2 m, so a simple loop becomes 1000s of edges — 5× finer than the 1 m terrain
+## grid and the source of the O(cells × edges) freeze. Decimate the baked polyline down to roughly the
+## terrain resolution before rasterising; the chamfer distance field below then runs in O(cells).
+
+## Decimate a world-space point list, keeping a point about every `step` metres (drops the dense
+## in-between bakes). Used for both closed loops (Mound) and open polylines (Ridge/Trough).
+func _decimate(pts: PackedVector2Array, step: float) -> PackedVector2Array:
+	var n := pts.size()
+	if n < 3:
+		return pts
+	var out := PackedVector2Array()
+	out.append(pts[0])
+	var acc := 0.0
+	for i in range(1, n):
+		acc += pts[i].distance_to(pts[i - 1])
+		if acc >= step:
+			out.append(pts[i])
+			acc = 0.0
+	# Always keep the final point so an open polyline reaches its real end.
+	if out[out.size() - 1] != pts[n - 1]:
+		out.append(pts[n - 1])
+	return out
+
+
+## Two-pass chamfer distance transform, in place. Each cell ends up holding (approximately) the
+## Euclidean distance to the nearest zero-seeded cell, in metres (orthogonal step `a`, diagonal `b`).
+## O(cells) — replaces the per-pixel-per-edge distance loop. (Refs: chamfer DT / SDF literature.)
+func _chamfer(arr: PackedFloat32Array, gw: int, gh: int, a: float, b: float) -> void:
+	for iz in range(gh):
+		var row := iz * gw
+		for ix in range(gw):
+			var i := row + ix
+			var d := arr[i]
+			if iz > 0:
+				var up := i - gw
+				if arr[up] + a < d:
+					d = arr[up] + a
+				if ix > 0 and arr[up - 1] + b < d:
+					d = arr[up - 1] + b
+				if ix < gw - 1 and arr[up + 1] + b < d:
+					d = arr[up + 1] + b
+			if ix > 0 and arr[i - 1] + a < d:
+				d = arr[i - 1] + a
+			arr[i] = d
+	for iz in range(gh - 1, -1, -1):
+		var row := iz * gw
+		for ix in range(gw - 1, -1, -1):
+			var i := row + ix
+			var d := arr[i]
+			if iz < gh - 1:
+				var dn := i + gw
+				if arr[dn] + a < d:
+					d = arr[dn] + a
+				if ix < gw - 1 and arr[dn + 1] + b < d:
+					d = arr[dn + 1] + b
+				if ix > 0 and arr[dn - 1] + b < d:
+					d = arr[dn - 1] + b
+			if ix < gw - 1 and arr[i + 1] + a < d:
+				d = arr[i + 1] + a
+			arr[i] = d
+
+
+## Signed distance field of a closed world polygon over a grid: positive inside, negative outside, in
+## metres. Returns [PackedFloat32Array field, float max_inside_distance]. Inside is found with one
+## scanline fill (O(rows × edges)); both sides get a chamfer DT (O(cells)). The whole thing is O(cells)
+## instead of the old O(cells × edges) per-pixel polygon distance.
+func _signed_distance_field(poly: PackedVector2Array, min_x: float, min_z: float, vs: float, gw: int, gh: int) -> Array:
+	var n := gw * gh
+	var pc := poly.size()
+	const BIG := 1.0e9
+	var inside := PackedByteArray()
+	inside.resize(n)
+	# Even-odd scanline fill (half-open edge rule avoids double-counting shared vertices).
+	for iz in range(gh):
+		var zc := min_z + iz * vs
+		var xs := PackedFloat32Array()
+		for e in range(pc):
+			var pa := poly[e]
+			var pb := poly[(e + 1) % pc]
+			if (pa.y <= zc and pb.y > zc) or (pb.y <= zc and pa.y > zc):
+				var tt := (zc - pa.y) / (pb.y - pa.y)
+				xs.append(pa.x + tt * (pb.x - pa.x))
+		xs.sort()
+		var row := iz * gw
+		var k := 0
+		while k + 1 < xs.size():
+			var ix0 := int(ceil((xs[k] - min_x) / vs))
+			var ix1 := int(floor((xs[k + 1] - min_x) / vs))
+			if ix0 < 0:
+				ix0 = 0
+			if ix1 > gw - 1:
+				ix1 = gw - 1
+			for ix in range(ix0, ix1 + 1):
+				inside[row + ix] = 1
+			k += 2
+	var din := PackedFloat32Array()
+	var dout := PackedFloat32Array()
+	din.resize(n)
+	dout.resize(n)
+	for i in range(n):
+		if inside[i] == 1:
+			din[i] = BIG
+			dout[i] = 0.0
+		else:
+			din[i] = 0.0
+			dout[i] = BIG
+	var diag := vs * 1.4142135624
+	_chamfer(din, gw, gh, vs, diag)
+	_chamfer(dout, gw, gh, vs, diag)
+	var field := PackedFloat32Array()
+	field.resize(n)
+	var max_inside := 0.0
+	for i in range(n):
+		if inside[i] == 1:
+			field[i] = din[i]
+			if din[i] < BIG and din[i] > max_inside:
+				max_inside = din[i]
+		else:
+			field[i] = -dout[i]
+	return [field, max_inside]
+
+
+## Two-pass chamfer that ALSO carries two payload arrays: whenever a neighbour offers a shorter
+## distance, copy its payloads too. Turns a distance transform into a nearest-feature transform, so a
+## cell ends up with both its distance to the seeds and the seed values of the nearest one. O(cells).
+func _chamfer_payload(dist: PackedFloat32Array, p1: PackedFloat32Array, p2: PackedFloat32Array, gw: int, gh: int, a: float, b: float) -> void:
+	for iz in range(gh):
+		var row := iz * gw
+		for ix in range(gw):
+			var i := row + ix
+			var bd := dist[i]
+			var bj := -1
+			if iz > 0:
+				var up := i - gw
+				if dist[up] + a < bd:
+					bd = dist[up] + a
+					bj = up
+				if ix > 0 and dist[up - 1] + b < bd:
+					bd = dist[up - 1] + b
+					bj = up - 1
+				if ix < gw - 1 and dist[up + 1] + b < bd:
+					bd = dist[up + 1] + b
+					bj = up + 1
+			if ix > 0 and dist[i - 1] + a < bd:
+				bd = dist[i - 1] + a
+				bj = i - 1
+			if bj >= 0:
+				dist[i] = bd
+				p1[i] = p1[bj]
+				p2[i] = p2[bj]
+	for iz in range(gh - 1, -1, -1):
+		var row := iz * gw
+		for ix in range(gw - 1, -1, -1):
+			var i := row + ix
+			var bd := dist[i]
+			var bj := -1
+			if iz < gh - 1:
+				var dn := i + gw
+				if dist[dn] + a < bd:
+					bd = dist[dn] + a
+					bj = dn
+				if ix < gw - 1 and dist[dn + 1] + b < bd:
+					bd = dist[dn + 1] + b
+					bj = dn + 1
+				if ix > 0 and dist[dn - 1] + b < bd:
+					bd = dist[dn - 1] + b
+					bj = dn - 1
+			if ix < gw - 1 and dist[i + 1] + a < bd:
+				bd = dist[i + 1] + a
+				bj = i + 1
+			if bj >= 0:
+				dist[i] = bd
+				p1[i] = p1[bj]
+				p2[i] = p2[bj]
+
+
+## Feature field of a world-space polyline over a grid. Returns
+## [lat: PackedFloat32Array, base_y: PackedFloat32Array, along: PackedFloat32Array, total_length: float]:
+## per cell, the lateral distance to the polyline (metres), the spline Y at the nearest point, and the
+## arc length to it (for end taper). Seeds the cells the polyline passes through then chamfer-propagates
+## the nearest-feature values — O(cells), replacing the per-pixel O(segments) closest-point scan.
+func _polyline_field(pts: PackedVector3Array, min_x: float, min_z: float, vs: float, gw: int, gh: int) -> Array:
+	var n := gw * gh
+	const BIG := 1.0e9
+	var dist := PackedFloat32Array()
+	var base_y := PackedFloat32Array()
+	var along := PackedFloat32Array()
+	dist.resize(n)
+	base_y.resize(n)
+	along.resize(n)
+	for i in range(n):
+		dist[i] = BIG
+	var sample := vs * 0.5
+	var run := 0.0
+	for k in range(pts.size() - 1):
+		var a := pts[k]
+		var b := pts[k + 1]
+		var ax := a.x
+		var az := a.z
+		var seg := Vector2(b.x - ax, b.z - az).length()
+		var along_a := run
+		run += seg
+		var steps := maxi(1, int(ceil(seg / sample)))
+		for s in range(steps + 1):
+			var tt := float(s) / float(steps)
+			var ix := int(round((ax + (b.x - ax) * tt - min_x) / vs))
+			var iz := int(round((az + (b.z - az) * tt - min_z) / vs))
+			if ix >= 0 and ix < gw and iz >= 0 and iz < gh:
+				var idx := iz * gw + ix
+				dist[idx] = 0.0
+				base_y[idx] = a.y + (b.y - a.y) * tt
+				along[idx] = along_a + seg * tt
+	_chamfer_payload(dist, base_y, along, gw, gh, vs, vs * 1.4142135624)
+	return [dist, base_y, along, run]
 
 
 ## ---- Virtuals for subclasses ----

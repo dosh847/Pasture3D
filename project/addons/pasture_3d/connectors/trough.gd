@@ -81,45 +81,56 @@ func _paint_spline(path: Path3D) -> void:
 	var pts := _baked_world_points(path)
 	if pts.size() < 2:
 		return
-	var cum := _cumulative_lengths(pts)
-	var total: float = cum[cum.size() - 1]
 	var vs: float = terrain.vertex_spacing
 	var b := _snapped_bounds(_spline_footprint_aabb(path), vs)
+	var min_x: float = b[0]
+	var min_z: float = b[2]
+	var gw := int(round((b[1] - b[0]) / vs)) + 1
+	var gh := int(round((b[3] - b[2]) / vs)) + 1
+	if gw < 1 or gh < 1:
+		return
+
+	# One O(cells) polyline feature field replaces the per-pixel O(segments) closest-point scan: each
+	# cell gets its lateral distance, the bed-reference Y at the nearest point, and the arc length.
+	var fld := _polyline_field(pts, min_x, min_z, vs, gw, gh)
+	var lat_arr: PackedFloat32Array = fld[0]
+	var by_arr: PackedFloat32Array = fld[1]
+	var al_arr: PackedFloat32Array = fld[2]
+	var total: float = fld[3]
 	var reach := bed_half_width + bank_width + falloff
 	var span := bed_half_width + bank_width
 
-	var x: float = b[0]
-	while x <= b[1]:
-		var z: float = b[2]
-		while z <= b[3]:
-			var near := _nearest_on_polyline(Vector2(x, z), pts, cum)
-			var lat: float = near[0]
-			if lat <= reach:
-				var pos := Vector3(x, 0.0, z)
-				var top_y: float = near[1] if follow_spline_height else terrain.data.get_height(pos)
-				var e := _end_taper(near[2], total)
-				var bed_y := top_y - depth * e
-				var h: float
-				if flat_bed:
-					if lat <= bed_half_width:
-						h = bed_y
-					elif lat <= span:
-						var bt := (lat - bed_half_width) / maxf(bank_width, 0.001)
-						h = lerpf(bed_y, top_y, _ramp(bank_profile, bt))
-					else:
-						h = top_y
+	for iz in range(gh):
+		var z := min_z + iz * vs
+		var row := iz * gw
+		for ix in range(gw):
+			var i := row + ix
+			var lat := lat_arr[i]
+			if lat > reach:
+				continue
+			var x := min_x + ix * vs
+			var pos := Vector3(x, 0.0, z)
+			var top_y: float = by_arr[i] if follow_spline_height else terrain.data.get_height(pos)
+			var e := _end_taper(al_arr[i], total)
+			var bed_y := top_y - depth * e
+			var h: float
+			if flat_bed:
+				if lat <= bed_half_width:
+					h = bed_y
+				elif lat <= span:
+					h = lerpf(bed_y, top_y, _ramp(bank_profile, (lat - bed_half_width) / maxf(bank_width, 0.001)))
 				else:
-					if lat <= span:
-						h = lerpf(bed_y, top_y, _ramp(bank_profile, lat / maxf(span, 0.001)))
-					else:
-						h = top_y
-				if noise and h < top_y:
-					# Lift the banks a little for a natural edge, never above the surrounding terrain.
-					var mask := clampf((top_y - h) / maxf(depth, 0.001), 0.0, 1.0)
-					h = minf(h + noise_strength * noise.get_noise_2d(x, z) * mask, top_y)
-				_paint_height(pos, h, h - top_y)
-			z += vs
-		x += vs
+					h = top_y
+			else:
+				if lat <= span:
+					h = lerpf(bed_y, top_y, _ramp(bank_profile, lat / maxf(span, 0.001)))
+				else:
+					h = top_y
+			if noise and h < top_y:
+				# Lift the banks a little for a natural edge, never above the surrounding terrain.
+				var mask := clampf((top_y - h) / maxf(depth, 0.001), 0.0, 1.0)
+				h = minf(h + noise_strength * noise.get_noise_2d(x, z) * mask, top_y)
+			_paint_height(pos, h, h - top_y)
 
 
 func _end_taper(along: float, total: float) -> float:
