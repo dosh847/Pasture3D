@@ -233,6 +233,44 @@ float raster_polyline_field(const PackedVector3Array &pts, double min_x, double 
 
 } // namespace
 
+void Pasture3DData::_stamp_write(Pasture3DLayer *p_layer, const int p_layer_id, const bool p_composite,
+		Vector2i &r_loc, Pasture3DRegion *&r_region, const Vector3 &p_pos, const real_t p_value, const bool p_add) {
+	if (p_composite) {
+		// Full-refresh path: keep the per-pixel composite semantics of the public API.
+		if (p_add) {
+			add_height_on_layer(p_layer_id, p_pos, p_value, 1.0, true);
+		} else {
+			set_height_on_layer(p_layer_id, p_pos, p_value, 1.0, true);
+		}
+		return;
+	}
+	if (!p_layer) {
+		// No stack / invalid layer: destructive fallback (the deferred partial path normally has a layer).
+		if (p_add) {
+			set_height(p_pos, get_height(p_pos) + p_value);
+		} else {
+			set_height(p_pos, p_value);
+		}
+		return;
+	}
+	Vector2i region_loc;
+	const Vector2i img_pos = _global_to_region_pixel(p_pos, region_loc);
+	if (region_loc != r_loc) { // cache the region across a run of same-region cells
+		r_loc = region_loc;
+		r_region = get_region_ptr(region_loc);
+	}
+	if (!r_region || r_region->is_deleted()) {
+		return;
+	}
+	if (p_add) {
+		const real_t cur = p_layer->get_weight(region_loc, img_pos) > 0.f ? p_layer->get_value(region_loc, img_pos) : 0.f;
+		p_layer->set_sample(region_loc, img_pos, cur + p_value, 1.0);
+	} else {
+		p_layer->set_sample(region_loc, img_pos, p_value, 1.0);
+	}
+	r_region->set_modified(true);
+}
+
 // ---- Closed-loop dome/plateau (Pasture3DMound) ----
 void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Array &p_poly, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut) {
 	if (p_poly.size() < 3) {
@@ -268,6 +306,10 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	const double ramp_denom = MAX(falloff_width, 0.001);
 	const bool add = (blend == 1); // BLEND_ADD
 
+	Pasture3DLayer *wlayer = (composite || _layer_stack.is_null()) ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
+	Vector2i wloc(0x7fffffff, 0x7fffffff);
+	Pasture3DRegion *wregion = nullptr;
+
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
 	const double cx1 = p_clip.position.x + p_clip.size.x;
@@ -299,11 +341,7 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 			if (noise.is_valid()) {
 				amp += noise_strength * noise->get_noise_2d(x, z) * profile;
 			}
-			if (add) {
-				add_height_on_layer(p_layer_id, pos, amp, 1.0, composite);
-			} else {
-				set_height_on_layer(p_layer_id, pos, base_y + amp, 1.0, composite);
-			}
+			_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? amp : (base_y + amp), add);
 		}
 	}
 }
@@ -343,6 +381,10 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 	const double falloff_d = MAX(falloff, 0.001);
 	const float edge_val = raster_ramp(p_lut, 1.0f); // _cross at t=1
 	const bool add = (blend == 1);
+
+	Pasture3DLayer *wlayer = (composite || _layer_stack.is_null()) ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
+	Vector2i wloc(0x7fffffff, 0x7fffffff);
+	Pasture3DRegion *wregion = nullptr;
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -385,11 +427,7 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 				if (noise.is_valid()) {
 					amp += noise_strength * noise->get_noise_2d(x, z) * p;
 				}
-				if (add) {
-					add_height_on_layer(p_layer_id, pos, amp, 1.0, composite);
-				} else {
-					set_height_on_layer(p_layer_id, pos, by + amp, 1.0, composite);
-				}
+				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? amp : (by + amp), add);
 			}
 		}
 	}
@@ -431,6 +469,10 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 	const double span_d = MAX(span, 0.001);
 	const double depth_d = MAX(depth, 0.001);
 	const bool add = (blend == 1);
+
+	Pasture3DLayer *wlayer = (composite || _layer_stack.is_null()) ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
+	Vector2i wloc(0x7fffffff, 0x7fffffff);
+	Pasture3DRegion *wregion = nullptr;
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -485,11 +527,7 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 				const double mask = CLAMP((top_y - h) / depth_d, 0.0, 1.0);
 				h = MIN(h + noise_strength * noise->get_noise_2d(x, z) * mask, top_y);
 			}
-			if (add) {
-				add_height_on_layer(p_layer_id, pos, h - top_y, 1.0, composite);
-			} else {
-				set_height_on_layer(p_layer_id, pos, h, 1.0, composite);
-			}
+			_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? (h - top_y) : h, add);
 		}
 	}
 }

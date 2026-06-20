@@ -250,6 +250,13 @@ public:
 	void stamp_mound_loop(const int p_layer_id, const PackedVector2Array &p_poly, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut);
 	void stamp_ridge_line(const int p_layer_id, const PackedVector3Array &p_pts, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut);
 	void stamp_trough_line(const int p_layer_id, const PackedVector3Array &p_pts, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut);
+	// Per-cell write used by the native rasterisers. When p_composite, defers to the per-pixel composite
+	// API (full-refresh path). Otherwise writes the sample directly into p_layer, caching the resolved
+	// region in r_loc/r_region so a run of cells in the same region skips the per-cell layer+region
+	// lookups (the bottleneck for write-heavy brushes like Trough). r_value is the target (set) or the
+	// delta (add). Not bound — internal helper for stamp_*.
+	void _stamp_write(class Pasture3DLayer *p_layer, const int p_layer_id, const bool p_composite,
+			Vector2i &r_loc, Pasture3DRegion *&r_region, const Vector3 &p_pos, const real_t p_value, const bool p_add);
 	// Garbage-collect a layer's fully-uncovered tiles (frees memory after erasing/moving a feature).
 	void gc_layer(const int p_layer_id);
 	void set_active_layer(const int p_layer_id);
