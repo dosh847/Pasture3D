@@ -54,6 +54,10 @@ const REFRESH_DELAY: float = 0.1
 ## Re-paint automatically while editing the splines / moving the node.
 @export var auto_refresh: bool = true
 
+## Print a per-bake timing breakdown (clear / snap / paint / GPU push, in µs) to Output while editing
+## this brush. Diagnostic for the partial-redraw bottleneck — leave off in normal use.
+@export var log_bake_timing: bool = false
+
 @export_tool_button("Refresh") var _refresh_btn = _refresh_button
 @export_tool_button("Add Spline") var _add_spline_btn = add_spline
 ## Create a brand-new tool layer named after this node and assign this node to it.
@@ -498,11 +502,13 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary) -> void:
 	var clip_box := _snap_aabb_to_tiles(dirty, _layer_tile_world(layer_id))
 
 	var blend := _layer_blend_for(layer_id)
+	var t_start := Time.get_ticks_usec()
 	# Start from a clean edited-flag slate so the targeted update_maps below uploads EXACTLY the regions
 	# this bake touches. composite_region sets is_edited but update_maps never clears it, so without this
 	# every later partial would re-push every region edited this session (the far-spline slowdown).
 	_clear_region_edited_flags()
 	terrain.data.clear_layer_in_area(layer_id, clip_box)
+	var t_clear := Time.get_ticks_usec()
 	# Re-seat ONLY the points the user actually moved, against the freshly-cleared base inside the box.
 	# Snapping every point here is the snap-to-self regression: an unmoved point elsewhere reads terrain
 	# the box clear didn't touch (its own ridge) and climbs. A whole-spline / node move instead takes the
@@ -513,12 +519,16 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary) -> void:
 			var sp := _find_spline_by_id(sid)
 			if sp != null:
 				_apply_surface_snap_points(sp, _moved_point_indices(sp))
+	var t_snap := Time.get_ticks_usec()
+	var painted := 0
 	for s in _tools_on_owner(owner):
 		if not s._overlaps_box(clip_box):
 			continue
 		s._clip_aabb = clip_box
 		s._paint_into(layer_id, blend)
 		s._clip_aabb = AABB()
+		painted += 1
+	var t_paint := Time.get_ticks_usec()
 	# Remember the (possibly snapped) point layout so the next edit only re-snaps what changes again.
 	for sid in changed_ids:
 		var cp := _find_spline_by_id(sid)
@@ -527,6 +537,8 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary) -> void:
 	# Push only the regions this bake actually edited. (The bound default is all_regions=TRUE, which
 	# rebuilds the whole height texture array from every region — the reason a far-away spline was slow.)
 	terrain.data.update_maps(_map_type(), false, false)
+	if log_bake_timing:
+		_log_bake_timing(clip_box, painted, t_start, t_clear, t_snap, t_paint, Time.get_ticks_usec())
 
 
 ## Clear the per-region "edited" GPU-push flag on every active region. update_maps(all_regions=false)
@@ -541,6 +553,20 @@ func _clear_region_edited_flags() -> void:
 		var r = terrain.data.get_region(loc)
 		if r and r.has_method("set_edited"):
 			r.set_edited(false)
+
+
+## Print the partial-bake timing breakdown to Output (enabled by log_bake_timing). Splits the µs spent in
+## the layer clear (whole-region recomposite — the suspected bottleneck), point snap, paint (rasterise +
+## per-pixel composite), and the GPU push, plus the box size and how many regions the clear recomposited.
+func _log_bake_timing(box: AABB, painted: int, t_start: int, t_clear: int, t_snap: int, t_paint: int, t_push: int) -> void:
+	var region_span := 1
+	if terrain and terrain.data and terrain.data.has_method("get_region_location"):
+		var rl0: Vector2i = terrain.data.get_region_location(box.position)
+		var rl1: Vector2i = terrain.data.get_region_location(box.position + box.size)
+		region_span = (absi(rl1.x - rl0.x) + 1) * (absi(rl1.y - rl0.y) + 1)
+	print("[Pasture3D bake] %s | total %d us = clear %d + snap %d + paint %d + push %d | box %.0fx%.0fm, %d region(s), %d tool(s)" % [
+		name, t_push - t_start, t_clear - t_start, t_snap - t_clear, t_paint - t_snap, t_push - t_paint,
+		box.size.x, box.size.z, region_span, painted])
 
 
 ## A direct Path3D child of this node by instance id, or null (e.g. it was removed before the bake ran).
