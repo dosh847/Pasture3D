@@ -7,6 +7,8 @@
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/resource_saver.hpp>
 
+#include <vector>
+
 #include "logger.h"
 #include "pasture_3d_data.h"
 
@@ -1084,52 +1086,123 @@ void Pasture3DData::_composite_height_region(Pasture3DRegion *p_region, const Ve
 	if (height_map.is_null()) {
 		return;
 	}
+	// Round 3 compositing: accumulate per-layer into a rect-sized buffer, resolving each layer's tile ONCE
+	// per tile-block instead of a Dictionary lookup + image decode PER PIXEL PER LAYER (the old hot path).
+	const int rect_x = p_rect.position.x;
+	const int rect_y = p_rect.position.y;
+	const int rect_w = p_rect.size.x;
+	const int rect_h = p_rect.size.y;
+	if (rect_w <= 0 || rect_h <= 0) {
+		return;
+	}
+	std::vector<real_t> acc(rect_w * rect_h, NAN); // Undefined until the first covered layer (Base) writes.
+
 	const int layer_count = _layer_stack->get_layer_count();
-	const Vector2i end = p_rect.position + p_rect.size;
-	for (int y = p_rect.position.y; y < end.y; y++) {
-		for (int x = p_rect.position.x; x < end.x; x++) {
-			const Vector2i px(x, y);
-			real_t acc = NAN; // Undefined until the first covered layer (Base) writes it.
-			for (int i = 0; i < layer_count; i++) {
-				const Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
-				if (!layer || !layer->is_visible() || layer->get_map_type() != TYPE_HEIGHT) {
+	for (int i = 0; i < layer_count; i++) {
+		const Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+		if (!layer || !layer->is_visible() || layer->get_map_type() != TYPE_HEIGHT) {
+			continue;
+		}
+		if (!layer->has_region(p_region_loc)) {
+			continue; // (C) per-region cull: this layer has no tiles in this region.
+		}
+		const int ts = layer->get_tile_size();
+		const real_t op = layer->get_opacity();
+		const int bm = (int)layer->get_blend_mode();
+		// Tiles overlapping the rect (rect coords are region-local, >= 0, so integer division floors).
+		const int tx0 = rect_x / ts;
+		const int tx1 = (rect_x + rect_w - 1) / ts;
+		const int ty0 = rect_y / ts;
+		const int ty1 = (rect_y + rect_h - 1) / ts;
+		for (int ty = ty0; ty <= ty1; ty++) {
+			for (int tx = tx0; tx <= tx1; tx++) {
+				Ref<Image> tile = layer->get_tile(p_region_loc, Vector2i(tx, ty));
+				if (tile.is_null()) {
 					continue;
 				}
-				const real_t w = layer->get_weight(p_region_loc, px);
-				if (w == 0.f) {
-					continue; // Pixel not owned by this layer.
+				const bool rf = tile->get_format() == Image::FORMAT_RF;
+				const int stride = rf ? 1 : 2;
+				const bool always_covered = layer->is_base() || rf;
+				const int bx = tx * ts;
+				const int by = ty * ts;
+				const int x0 = MAX(rect_x, bx);
+				const int x1 = MIN(rect_x + rect_w, bx + ts);
+				const int y0 = MAX(rect_y, by);
+				const int y1 = MIN(rect_y + rect_h, by + ts);
+				const int sub_w = x1 - x0;
+				const int sub_h = y1 - y0;
+				if (sub_w <= 0 || sub_h <= 0) {
+					continue;
 				}
-				const real_t v = layer->get_value(p_region_loc, px);
-				if (std::isnan(v)) {
-					continue; // Uncovered (no tile here).
+				// Copy ONLY the tile's box-overlap (get_region) and read it raw — NOT get_data on the whole
+				// tile: the region-granular base tile is region-sized, so that would copy the entire region
+				// on every composite (the small-box floor). get_pixelv per pixel is a per-px boundary call.
+				const Ref<Image> sub = tile->get_region(Rect2i(x0 - bx, y0 - by, sub_w, sub_h));
+				if (sub.is_null()) {
+					continue;
 				}
-				const real_t a = w * layer->get_opacity();
-				switch (layer->get_blend_mode()) {
-					case Pasture3DLayer::REPLACE:
-						acc = std::isnan(acc) ? v : acc + (v - acc) * a;
-						break;
-					case Pasture3DLayer::ADD:
-						acc = (std::isnan(acc) ? 0.f : acc) + v * a;
-						break;
-					case Pasture3DLayer::MAX: {
-						const real_t blended = std::isnan(acc) ? v : acc + (v - acc) * a;
-						acc = std::isnan(acc) ? blended : MAX(acc, blended);
-						break;
+				const PackedByteArray sdata = sub->get_data();
+				const float *fdata = reinterpret_cast<const float *>(sdata.ptr());
+				for (int y = y0; y < y1; y++) {
+					real_t *acc_row = &acc[(y - rect_y) * rect_w];
+					for (int x = x0; x < x1; x++) {
+						const int fi = ((y - y0) * sub_w + (x - x0)) * stride;
+						const real_t w = always_covered ? 1.f : fdata[fi + 1];
+						if (w == 0.f) {
+							continue; // Pixel not owned by this layer.
+						}
+						const real_t v = fdata[fi];
+						if (std::isnan(v)) {
+							continue; // Uncovered.
+						}
+						const real_t a = w * op;
+						real_t &dst = acc_row[x - rect_x];
+						switch (bm) {
+							case Pasture3DLayer::REPLACE:
+								dst = std::isnan(dst) ? v : dst + (v - dst) * a;
+								break;
+							case Pasture3DLayer::ADD:
+								dst = (std::isnan(dst) ? 0.f : dst) + v * a;
+								break;
+							case Pasture3DLayer::MAX: {
+								const real_t blended = std::isnan(dst) ? v : dst + (v - dst) * a;
+								dst = std::isnan(dst) ? blended : MAX(dst, blended);
+								break;
+							}
+							case Pasture3DLayer::MIN: {
+								const real_t blended = std::isnan(dst) ? v : dst + (v - dst) * a;
+								dst = std::isnan(dst) ? blended : MIN(dst, blended);
+								break;
+							}
+							default:
+								break; // BLEND_MAX is an undefined placeholder; ignore.
+						}
 					}
-					case Pasture3DLayer::MIN: {
-						const real_t blended = std::isnan(acc) ? v : acc + (v - acc) * a;
-						acc = std::isnan(acc) ? blended : MIN(acc, blended);
-						break;
-					}
-					default:
-						break; // BLEND_MAX is an undefined placeholder; ignore.
 				}
-			}
-			// Skip all-uncovered pixels so genuine holes / absent data pass through unchanged.
-			if (!std::isnan(acc)) {
-				height_map->set_pixelv(px, Color(acc, 0.f, 0.f, 1.f));
 			}
 		}
+	}
+	// Write back via an ISOLATED box image + blit_rect, not set_pixelv per pixel (each a GDExtension
+	// boundary call — the real cost) and NOT set_data on the shared region image (that hung the editor).
+	// Seed the box from the existing region pixels so all-uncovered (NaN) cells pass through unchanged,
+	// overlay the composited values, then blit the box back in one in-place copy.
+	const Rect2i box_rect(rect_x, rect_y, rect_w, rect_h);
+	Ref<Image> box_img = height_map->get_region(box_rect);
+	if (box_img.is_valid()) {
+		PackedByteArray bdata = box_img->get_data();
+		float *bptr = reinterpret_cast<float *>(bdata.ptrw());
+		for (int y = 0; y < rect_h; y++) {
+			const real_t *acc_row = &acc[y * rect_w];
+			float *brow = bptr + (size_t)y * rect_w;
+			for (int x = 0; x < rect_w; x++) {
+				const real_t v = acc_row[x];
+				if (!std::isnan(v)) {
+					brow[x] = (float)v;
+				}
+			}
+		}
+		box_img->set_data(rect_w, rect_h, false, Image::FORMAT_RF, bdata);
+		height_map->blit_rect(box_img, Rect2i(0, 0, rect_w, rect_h), Vector2i(rect_x, rect_y));
 	}
 }
 
