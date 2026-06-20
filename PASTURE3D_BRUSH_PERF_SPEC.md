@@ -191,3 +191,23 @@ same hook §4 uses, so §4 is mostly "shrink the dirty rect + identify the moved
 - **Snap-to-self on partial.** Re-snapping every point after a partial clear lets points outside the
   cleared box read their own (uncleared) contribution and climb. Snap ONLY the moved points (diff curve
   positions vs a per-spline cache); the full path still snaps all (it clears everything first).
+
+## 7. Stage 2 (compositing) — DONE 2026-06-20, measured
+
+Profiling the dirty-rect bake (per-brush `log_bake_timing`) showed **compositing**, not rasterisation,
+dominated normal edits: `clear_layer_in_area` recomposited the WHOLE region (~75–90 µs-thousands per
+edit, size-independent) and every layer write composited one pixel. Fixed in C++:
+- `clear_layer_in_area` composites only the dropped tiles' span (tile-bounded rect).
+- `set/add_height_on_layer` + `set_control/color_on_layer` gained `composite=false`; the brush writes
+  samples deferred and calls the new `composite_area(AABB)` once.
+
+**Measured:** small/common edit 84 ms → **24 ms** (clear 73 → 5 ms, 14×); 2-loop 116 → 54 ms.
+
+**Remaining bottleneck = GDScript rasterisation (not compositing).** A big 448×384 m mound edit only
+went 1150 → 870 ms because `paint` (730 ms) is the SDF/chamfer + per-cell loop over a huge grid × the
+overlapping tools — removing the per-pixel composite shaved only ~90 ms. Compositing is now a small
+bucket everywhere. To speed large features further, the only levers are: **(a) §4 per-moved-point grid
+shrink** (GDScript, no rebuild — rasterise only the moved point's neighbourhood instead of the whole
+spline footprint; complex for closed-loop SDF because `max_inside`/distance are global), **(b) port the
+rasterisers to C++**, or **(c) threading** (declined). The common case is already fast, so this only
+matters if editing very large single features becomes a real pain point.
