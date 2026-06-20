@@ -99,6 +99,8 @@ func _paint_spline(path: Path3D) -> void:
 			"taper_ends": taper_ends, "blend": _blend, "composite": not _defer_composite,
 			"noise": noise, "noise_strength": noise_strength,
 		}
+		if not follow_spline_height:
+			params["base_below"] = _base_below_grid(min_x, min_z, vs, gw, gh)
 		terrain.data.stamp_trough_line(_layer_id, pts, _clip_aabb, params, _ramp_lut(bank_profile))
 		return
 
@@ -122,7 +124,7 @@ func _paint_spline(path: Path3D) -> void:
 				continue
 			var x := min_x + ix * vs
 			var pos := Vector3(x, 0.0, z)
-			var top_y: float = by_arr[i] if follow_spline_height else terrain.data.get_height(pos)
+			var top_y: float = by_arr[i] if follow_spline_height else _base_height_below(pos)
 			var e := _end_taper(al_arr[i], total)
 			var bed_y := top_y - depth * e
 			var h: float

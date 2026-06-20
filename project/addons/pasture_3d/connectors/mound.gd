@@ -110,6 +110,8 @@ func _paint_spline(path: Path3D) -> void:
 			"blend": _blend, "composite": not _defer_composite,
 			"noise": noise, "noise_strength": noise_strength,
 		}
+		if relative_to_terrain:
+			params["base_below"] = _base_below_grid(min_x, min_z, vs, gw, gh)
 		terrain.data.stamp_mound_loop(_layer_id, poly, _clip_aabb, params, _ramp_lut(falloff_curve))
 		return
 
@@ -138,7 +140,7 @@ func _paint_spline(path: Path3D) -> void:
 				continue
 			var x := min_x + ix * vs
 			var pos := Vector3(x, 0.0, z)
-			var base_y := terrain.data.get_height(pos) if relative_to_terrain else global_position.y
+			var base_y := _base_height_below(pos) if relative_to_terrain else global_position.y
 			var amp := sign * height * profile
 			if noise:
 				amp += noise_strength * noise.get_noise_2d(x, z) * profile

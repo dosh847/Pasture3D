@@ -466,6 +466,7 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 		# can't climb their own contribution on each refresh. Snapping moves Y only, so the footprints
 		# just cleared (XZ) stay valid, and unchanged points are skipped (idempotent).
 		for s in sibs:
+			s._layer_id = layer_id # set before snap reads the below-layer height
 			if s.snap_to_surface:
 				s._apply_surface_snap()
 		for s in sibs:
@@ -474,6 +475,7 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 		# Fallback: no layers Tool API → destructive writes (no own-layer to clear). Snap against the
 		# live surface as a best effort; the non-destructive path above is the supported one.
 		for s in sibs:
+			s._layer_id = layer_id # set before snap reads the below-layer height
 			if s.snap_to_surface:
 				s._apply_surface_snap()
 		for s in sibs:
@@ -504,6 +506,7 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary) -> void:
 		# Destructive fallback has no per-area clear — the whole-layer path is the only correct option.
 		_refresh_owner(owner, false, [])
 		return
+	_layer_id = layer_id # set before the snap below reads it (paint sets it again per tool)
 
 	# Union the previous (cached) and current footprint of every changed spline into one world box.
 	var dirty := AABB()
@@ -965,7 +968,7 @@ func _apply_surface_snap_points(path: Path3D, indices: PackedInt32Array) -> void
 			continue
 		var local := c.get_point_position(idx)
 		var world: Vector3 = xf * local
-		var h: float = terrain.data.get_height(Vector3(world.x, 0.0, world.z))
+		var h: float = _base_height_below(Vector3(world.x, 0.0, world.z))
 		if not is_finite(h):
 			continue
 		world.y = h + surface_offset
@@ -1024,7 +1027,7 @@ func _surface_snap_edits() -> Array:
 		for i in range(c.point_count):
 			var local := c.get_point_position(i)
 			var world: Vector3 = xf * local
-			var h: float = terrain.data.get_height(Vector3(world.x, 0.0, world.z))
+			var h: float = _base_height_below(Vector3(world.x, 0.0, world.z))
 			if not is_finite(h):
 				continue
 			world.y = h + surface_offset
@@ -1154,6 +1157,26 @@ func _ridge_cross_lut(c: Curve) -> PackedFloat32Array:
 ## GDScript reference loop otherwise.
 func _native_raster(method: String) -> bool:
 	return not force_gdscript_raster and terrain != null and terrain.data != null and terrain.data.has_method(method)
+
+
+## Grid of the height of layers BELOW this brush's own, over the spline grid (origin min_x/min_z, step vs,
+## gw*gh). The native rasterisers sample this instead of the full terrain so features don't climb each
+## other / their own layer. Empty when there's no lower layer or the API is absent → the rasteriser then
+## falls back to the live height (only where no lower layer covers, i.e. no terrain → nothing painted).
+func _base_below_grid(min_x: float, min_z: float, vs: float, gw: int, gh: int) -> PackedFloat32Array:
+	if _layer_id > 0 and terrain.data.has_method("composite_height_below"):
+		return terrain.data.composite_height_below(_layer_id, min_x, min_z, vs, gw, gh)
+	return PackedFloat32Array()
+
+
+## Height of the layers below this brush's, at a world position (snap + the GDScript fallback rasteriser).
+## Falls back to the full composited height where no lower layer covers (or the API is absent).
+func _base_height_below(pos: Vector3) -> float:
+	if _layer_id > 0 and terrain.data.has_method("get_height_below"):
+		var h: float = terrain.data.get_height_below(_layer_id, pos)
+		if is_finite(h):
+			return h
+	return terrain.data.get_height(pos)
 
 
 ## ---- Rasterisation acceleration (PASTURE3D_LANDSCAPE_TOOLS_SPEC.md §9 performance) ----

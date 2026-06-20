@@ -1078,38 +1078,25 @@ void Pasture3DData::composite_region(const Vector2i &p_region_loc, const Rect2i 
 	}
 }
 
-// Height pass — walks only the height layers (the dense Base + height overlays) bottom->top and blends
-// REPLACE/ADD/MAX/MIN exactly as before. Filtering by map type is a no-op for pre-Phase-7 stacks (all
-// layers were height), so the output stays byte-identical.
-void Pasture3DData::_composite_height_region(Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Rect2i &p_rect) {
-	Ref<Image> height_map = p_region->get_height_map();
-	if (height_map.is_null()) {
-		return;
-	}
-	// Round 3 compositing: accumulate per-layer into a rect-sized buffer, resolving each layer's tile ONCE
-	// per tile-block instead of a Dictionary lookup + image decode PER PIXEL PER LAYER (the old hot path).
+// Blend height layers [0, p_layer_end) over p_rect into p_acc (rect-relative, NaN-prefilled). Shared by
+// the full height composite and composite_height_below: resolve each tile once and read only its
+// box-overlap raw (see _composite_height_region for the rationale).
+void Pasture3DData::_accumulate_height(real_t *p_acc, const Vector2i &p_region_loc, const Rect2i &p_rect, const int p_layer_end) {
 	const int rect_x = p_rect.position.x;
 	const int rect_y = p_rect.position.y;
 	const int rect_w = p_rect.size.x;
 	const int rect_h = p_rect.size.y;
-	if (rect_w <= 0 || rect_h <= 0) {
-		return;
-	}
-	std::vector<real_t> acc(rect_w * rect_h, NAN); // Undefined until the first covered layer (Base) writes.
-
-	const int layer_count = _layer_stack->get_layer_count();
-	for (int i = 0; i < layer_count; i++) {
+	for (int i = 0; i < p_layer_end; i++) {
 		const Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
 		if (!layer || !layer->is_visible() || layer->get_map_type() != TYPE_HEIGHT) {
 			continue;
 		}
 		if (!layer->has_region(p_region_loc)) {
-			continue; // (C) per-region cull: this layer has no tiles in this region.
+			continue; // (C) per-region cull.
 		}
 		const int ts = layer->get_tile_size();
 		const real_t op = layer->get_opacity();
 		const int bm = (int)layer->get_blend_mode();
-		// Tiles overlapping the rect (rect coords are region-local, >= 0, so integer division floors).
 		const int tx0 = rect_x / ts;
 		const int tx1 = (rect_x + rect_w - 1) / ts;
 		const int ty0 = rect_y / ts;
@@ -1134,9 +1121,6 @@ void Pasture3DData::_composite_height_region(Pasture3DRegion *p_region, const Ve
 				if (sub_w <= 0 || sub_h <= 0) {
 					continue;
 				}
-				// Copy ONLY the tile's box-overlap (get_region) and read it raw — NOT get_data on the whole
-				// tile: the region-granular base tile is region-sized, so that would copy the entire region
-				// on every composite (the small-box floor). get_pixelv per pixel is a per-px boundary call.
 				const Ref<Image> sub = tile->get_region(Rect2i(x0 - bx, y0 - by, sub_w, sub_h));
 				if (sub.is_null()) {
 					continue;
@@ -1144,16 +1128,16 @@ void Pasture3DData::_composite_height_region(Pasture3DRegion *p_region, const Ve
 				const PackedByteArray sdata = sub->get_data();
 				const float *fdata = reinterpret_cast<const float *>(sdata.ptr());
 				for (int y = y0; y < y1; y++) {
-					real_t *acc_row = &acc[(y - rect_y) * rect_w];
+					real_t *acc_row = &p_acc[(y - rect_y) * rect_w];
 					for (int x = x0; x < x1; x++) {
 						const int fi = ((y - y0) * sub_w + (x - x0)) * stride;
 						const real_t w = always_covered ? 1.f : fdata[fi + 1];
 						if (w == 0.f) {
-							continue; // Pixel not owned by this layer.
+							continue;
 						}
 						const real_t v = fdata[fi];
 						if (std::isnan(v)) {
-							continue; // Uncovered.
+							continue;
 						}
 						const real_t a = w * op;
 						real_t &dst = acc_row[x - rect_x];
@@ -1175,13 +1159,103 @@ void Pasture3DData::_composite_height_region(Pasture3DRegion *p_region, const Ve
 								break;
 							}
 							default:
-								break; // BLEND_MAX is an undefined placeholder; ignore.
+								break;
 						}
 					}
 				}
 			}
 		}
 	}
+}
+
+// Composite the height of layers [0, p_below_layer_id) over a brush grid (origin min_x/min_z, step vs,
+// gw*gh). Returns row-major heights, NaN where no lower layer covers, so a brush samples the ground
+// beneath its own layer instead of the full terrain (features stop climbing each other).
+PackedFloat32Array Pasture3DData::composite_height_below(const int p_below_layer_id, const double p_min_x, const double p_min_z, const double p_vs, const int p_gw, const int p_gh) {
+	PackedFloat32Array out;
+	if (p_gw < 1 || p_gh < 1) {
+		return out;
+	}
+	out.resize(p_gw * p_gh);
+	real_t *optr = out.ptrw();
+	for (int i = 0; i < p_gw * p_gh; i++) {
+		optr[i] = NAN;
+	}
+	if (_layer_stack.is_null() || p_below_layer_id <= 0) {
+		return out; // Nothing below -> all NaN (caller falls back to plane / live height).
+	}
+	const int ox = (int)Math::round(p_min_x / p_vs); // grid origin in global vertex units
+	const int oz = (int)Math::round(p_min_z / p_vs);
+	const int rsz = _region_size;
+	const Vector2i loc_min = get_region_location(Vector3(p_min_x, 0.0, p_min_z));
+	const Vector2i loc_max = get_region_location(Vector3(p_min_x + (p_gw - 1) * p_vs, 0.0, p_min_z + (p_gh - 1) * p_vs));
+	std::vector<real_t> acc;
+	for (int ry = loc_min.y; ry <= loc_max.y; ry++) {
+		for (int rx = loc_min.x; rx <= loc_max.x; rx++) {
+			const Vector2i loc(rx, ry);
+			Pasture3DRegion *region = get_region_ptr(loc);
+			if (!region || region->is_deleted()) {
+				continue;
+			}
+			// Grid columns/rows that fall in this region: global vertex (ox+ix) in [rx*rsz, (rx+1)*rsz).
+			const int ix0 = MAX(0, rx * rsz - ox);
+			const int ix1 = MIN(p_gw, (rx + 1) * rsz - ox);
+			const int iz0 = MAX(0, ry * rsz - oz);
+			const int iz1 = MIN(p_gh, (ry + 1) * rsz - oz);
+			if (ix0 >= ix1 || iz0 >= iz1) {
+				continue;
+			}
+			const int rw = ix1 - ix0;
+			const int rh = iz1 - iz0;
+			const Rect2i rect(ox + ix0 - rx * rsz, oz + iz0 - ry * rsz, rw, rh);
+			acc.assign((size_t)rw * rh, NAN);
+			_accumulate_height(acc.data(), loc, rect, p_below_layer_id);
+			for (int j = 0; j < rh; j++) {
+				const int iz = iz0 + j;
+				for (int k = 0; k < rw; k++) {
+					optr[iz * p_gw + (ix0 + k)] = acc[(size_t)j * rw + k];
+				}
+			}
+		}
+	}
+	return out;
+}
+
+// Single-point version of composite_height_below (moved-point surface snap). NaN if no lower layer covers.
+real_t Pasture3DData::get_height_below(const int p_below_layer_id, const Vector3 &p_global_position) {
+	if (_layer_stack.is_null() || p_below_layer_id <= 0) {
+		return NAN;
+	}
+	Vector2i region_loc;
+	const Vector2i img_pos = _global_to_region_pixel(p_global_position, region_loc);
+	Pasture3DRegion *region = get_region_ptr(region_loc);
+	if (!region || region->is_deleted()) {
+		return NAN;
+	}
+	real_t acc = NAN;
+	_accumulate_height(&acc, region_loc, Rect2i(img_pos, V2I(1)), p_below_layer_id);
+	return acc;
+}
+
+// Height pass — walks only the height layers (the dense Base + height overlays) bottom->top and blends
+// REPLACE/ADD/MAX/MIN exactly as before. Filtering by map type is a no-op for pre-Phase-7 stacks (all
+// layers were height), so the output stays byte-identical.
+void Pasture3DData::_composite_height_region(Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Rect2i &p_rect) {
+	Ref<Image> height_map = p_region->get_height_map();
+	if (height_map.is_null()) {
+		return;
+	}
+	// Round 3 compositing: accumulate per-layer into a rect-sized buffer, resolving each layer's tile ONCE
+	// per tile-block instead of a Dictionary lookup + image decode PER PIXEL PER LAYER (the old hot path).
+	const int rect_x = p_rect.position.x;
+	const int rect_y = p_rect.position.y;
+	const int rect_w = p_rect.size.x;
+	const int rect_h = p_rect.size.y;
+	if (rect_w <= 0 || rect_h <= 0) {
+		return;
+	}
+	std::vector<real_t> acc(rect_w * rect_h, NAN); // Undefined until the first covered layer (Base) writes.
+	_accumulate_height(acc.data(), p_region_loc, p_rect, _layer_stack->get_layer_count());
 	// Write back via an ISOLATED box image + blit_rect, not set_pixelv per pixel (each a GDExtension
 	// boundary call — the real cost) and NOT set_data on the shared region image (that hung the editor).
 	// Seed the box from the existing region pixels so all-uncovered (NaN) cells pass through unchanged,
@@ -2246,6 +2320,8 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("composite_region", "region_location", "dirty_rect", "update"), &Pasture3DData::composite_region, DEFVAL(Rect2i()), DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("composite_regions"), &Pasture3DData::composite_regions);
 	ClassDB::bind_method(D_METHOD("composite_area", "area", "update"), &Pasture3DData::composite_area, DEFVAL(false));
+	ClassDB::bind_method(D_METHOD("composite_height_below", "below_layer_id", "min_x", "min_z", "vs", "gw", "gh"), &Pasture3DData::composite_height_below);
+	ClassDB::bind_method(D_METHOD("get_height_below", "below_layer_id", "global_position"), &Pasture3DData::get_height_below);
 
 	ClassDB::bind_method(D_METHOD("is_layer_routing"), &Pasture3DData::is_layer_routing);
 	ClassDB::bind_method(D_METHOD("ensure_layer_stack"), &Pasture3DData::ensure_layer_stack);

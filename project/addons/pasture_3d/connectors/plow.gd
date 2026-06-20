@@ -188,6 +188,8 @@ func _paint_spline(path: Path3D) -> void:
 			"src_strength": src_strength, "tile_size": tile_size, "source": int(source),
 			"data_w": lut_w, "data_h": lut_h, "noise": noise,
 		}
+		if relative_to_terrain:
+			params["base_below"] = _base_below_grid(min_x, min_z, vs, gw, gh)
 		terrain.data.stamp_plow_loop(_layer_id, poly, _clip_aabb, params, _ramp_lut(falloff_curve), data)
 		return
 
@@ -212,7 +214,7 @@ func _paint_spline(path: Path3D) -> void:
 			if absf(amp) < 0.0001:
 				continue
 			var pos := Vector3(x, 0.0, z)
-			var base_y: float = terrain.data.get_height(pos) if relative_to_terrain else global_position.y
+			var base_y: float = _base_height_below(pos) if relative_to_terrain else global_position.y
 			_paint_height(pos, base_y + amp, amp)
 
 

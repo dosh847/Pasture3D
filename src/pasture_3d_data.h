@@ -106,6 +106,10 @@ private:
 	//   color   — alpha-over: acc.rgb = lerp(below, overlay.rgb, weight*opacity); roughness (alpha) kept.
 	// control/color seed from the dense base of that map type (the hand-authored source, distinct from
 	// the region map being written), so a clear + recomposite is idempotent (§5.1).
+	// Blend height layers [0, p_layer_end) over p_rect into p_acc (rect_w*rect_h, row-major, indexed by
+	// (y-rect.y)*rect_w + (x-rect.x); pre-filled with NaN by the caller). Shared by the full height
+	// composite and composite_height_below. p_acc is a raw pointer to avoid <vector> in the header.
+	void _accumulate_height(real_t *p_acc, const Vector2i &p_region_loc, const Rect2i &p_rect, const int p_layer_end);
 	void _composite_height_region(Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Rect2i &p_rect);
 	void _composite_control_region(Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Rect2i &p_rect);
 	void _composite_color_region(Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Rect2i &p_rect);
@@ -201,6 +205,12 @@ public:
 	// p_update). Lets a tool composite its whole footprint ONCE after a batch of no-composite layer writes,
 	// instead of paying a per-pixel composite on each write — the dirty-rect counterpart of composite_region.
 	void composite_area(const AABB &p_area, const bool p_update = false);
+	// Below-layer sampling (PASTURE3D_BRUSH_BELOW_LAYER_SPEC.md): a brush's base reference = the composite
+	// of the layers BENEATH its own, so features stop climbing each other / their own layer.
+	// composite_height_below fills a gw*gh row-major grid (aligned to min_x/min_z, step vs) with the height
+	// of layers [0, below_layer_id); NaN where uncovered. get_height_below is the single-point version (snap).
+	PackedFloat32Array composite_height_below(const int p_below_layer_id, const double p_min_x, const double p_min_z, const double p_vs, const int p_gw, const int p_gh);
+	real_t get_height_below(const int p_below_layer_id, const Vector3 &p_global_position);
 
 	// Tool API (PASTURE3D_LAYERS_GUIDE.md §8). Lets generator/tool nodes (RoadPastureConnector) draw
 	// into a reserved layer of their own instead of writing the Base destructively, so re-running them

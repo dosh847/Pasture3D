@@ -310,6 +310,10 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	Pasture3DLayer *wlayer = (composite || _layer_stack.is_null()) ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
 	Vector2i wloc(0x7fffffff, 0x7fffffff);
 	Pasture3DRegion *wregion = nullptr;
+	// Below-layer base: the composite of layers beneath this brush's, so it samples the ground under its
+	// own layer (not the full terrain) and features stop climbing each other. NaN/empty => fall back.
+	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
+	const bool has_below = base_below.size() == gw * gh;
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -337,7 +341,13 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 				continue;
 			}
 			const Vector3 pos(x, 0.0, z);
-			const double base_y = relative ? (double)get_height(pos) : plane_y;
+			double base_y;
+			if (relative) {
+				const float bb = has_below ? base_below[row + ix] : (float)NAN;
+				base_y = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
+			} else {
+				base_y = plane_y;
+			}
 			double amp = sign * height * profile;
 			if (noise.is_valid()) {
 				amp += noise_strength * noise->get_noise_2d(x, z) * profile;
@@ -386,6 +396,10 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 	Pasture3DLayer *wlayer = (composite || _layer_stack.is_null()) ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
 	Vector2i wloc(0x7fffffff, 0x7fffffff);
 	Pasture3DRegion *wregion = nullptr;
+	// Below-layer base: the composite of layers beneath this brush's, so it samples the ground under its
+	// own layer (not the full terrain) and features stop climbing each other. NaN/empty => fall back.
+	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
+	const bool has_below = base_below.size() == gw * gh;
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -410,7 +424,13 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 				continue;
 			}
 			const Vector3 pos(x, 0.0, z);
-			const double by = follow ? (double)base_yf[i] : (double)get_height(pos);
+			double by;
+			if (follow) {
+				by = (double)base_yf[i];
+			} else {
+				const float bb = has_below ? base_below[i] : (float)NAN;
+				by = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
+			}
 			double e = 1.0;
 			if (taper_ends > 0.0) {
 				const double al = (double)along[i];
@@ -474,6 +494,10 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 	Pasture3DLayer *wlayer = (composite || _layer_stack.is_null()) ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
 	Vector2i wloc(0x7fffffff, 0x7fffffff);
 	Pasture3DRegion *wregion = nullptr;
+	// Below-layer base: the composite of layers beneath this brush's, so it samples the ground under its
+	// own layer (not the full terrain) and features stop climbing each other. NaN/empty => fall back.
+	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
+	const bool has_below = base_below.size() == gw * gh;
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -498,7 +522,13 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 				continue;
 			}
 			const Vector3 pos(x, 0.0, z);
-			const double top_y = follow ? (double)base_yf[i] : (double)get_height(pos);
+			double top_y;
+			if (follow) {
+				top_y = (double)base_yf[i];
+			} else {
+				const float bb = has_below ? base_below[i] : (float)NAN;
+				top_y = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
+			}
 			double e = 1.0;
 			if (taper_ends > 0.0) {
 				const double al = (double)along[i];
@@ -572,6 +602,10 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 	Pasture3DLayer *wlayer = (composite || _layer_stack.is_null()) ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
 	Vector2i wloc(0x7fffffff, 0x7fffffff);
 	Pasture3DRegion *wregion = nullptr;
+	// Below-layer base: the composite of layers beneath this brush's, so it samples the ground under its
+	// own layer (not the full terrain) and features stop climbing each other. NaN/empty => fall back.
+	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
+	const bool has_below = base_below.size() == gw * gh;
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -618,7 +652,13 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 				continue;
 			}
 			const Vector3 pos(x, 0.0, z);
-			const double base_y = relative ? (double)get_height(pos) : plane_y;
+			double base_y;
+			if (relative) {
+				const float bb = has_below ? base_below[row + ix] : (float)NAN;
+				base_y = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
+			} else {
+				base_y = plane_y;
+			}
 			_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? amp : (base_y + amp), add);
 		}
 	}
