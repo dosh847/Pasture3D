@@ -5,6 +5,25 @@ spline rasterisation to C++**, phased — **Phase 1 raw speed (sync C++)** now, 
 (non-blocking) only if a fast bake still hitches during live drag. GPU compute **(d)** is deferred to a
 later experimental branch — see `PASTURE3D_BRUSH_GPU_RASTER_NOTES.md`.
 
+## DONE — Phase 1 complete & verified 2026-06-20
+
+All five brushes rasterise natively (`src/pasture_3d_brush_raster.cpp`): Mound/Plow/Splat (closed-loop
+SDF) + Ridge/Trough (open polyline). Each GDScript `_paint_spline` shims to a `stamp_*` method on
+`Pasture3DData` when present, keeping the GDScript loop as fallback + A/B oracle (`force_gdscript_raster`
+export toggles it). Profiles are baked to LUTs so C++ matches `_ramp`/`_cross`. A `_stamp_write` helper
+resolves the layer once + caches the region across same-region cells (the direct-write fast path).
+
+**Measured `paint` speedups (native vs GDScript, same scene):** Mound 5.2× (284→54 ms, 3 tools/384²),
+Ridge 7.6× (56→7 ms), Trough 9.5× (38→4 ms), Plow 5× (181→36 ms), Splat 4.3× (5.6→1.3 ms). Big-mound
+total ~870 ms (round 1) → ~205 ms. **`paint` is no longer the bottleneck on any brush** — clear +
+composite (compositing the box area, twice: base read + result) now dominate; that is native C++ already
+and a separate subsystem (candidate "Round 3").
+
+**Phase 2 (threading): NOT pursued** — sync bakes feel fine; revisit only if live-drag hitches.
+**Splat caveat:** uses `set_control_on_layer` per cell (not the direct-write path); fast enough, and its
+visual A/B wasn't fully exercised (no terrain material set up at test time) — re-verify coverage once
+textures are configured.
+
 ## 0. Why
 
 Round 1 (merged to `main`) made the dirty-rect bake cheap on compositing: common edits 84 ms → 24 ms.
