@@ -5,6 +5,7 @@
 // are kept as a fallback / A-B reference. See PASTURE3D_BRUSH_PERF_ROUND2_SPEC.md.
 
 #include "pasture_3d_data.h"
+#include "pasture_3d_util.h"
 
 #include <godot_cpp/classes/fast_noise_lite.hpp>
 
@@ -528,6 +529,166 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 				h = MIN(h + noise_strength * noise->get_noise_2d(x, z) * mask, top_y);
 			}
 			_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? (h - top_y) : h, add);
+		}
+	}
+}
+
+// ---- Closed-loop source relief (Pasture3DPlow) ----
+void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Array &p_poly, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut, const PackedFloat32Array &p_src_data) {
+	if (p_poly.size() < 3) {
+		return;
+	}
+	const double min_x = p_params.get("min_x", 0.0);
+	const double min_z = p_params.get("min_z", 0.0);
+	const double vs = p_params.get("vs", 1.0);
+	const int gw = (int)p_params.get("gw", 0);
+	const int gh = (int)p_params.get("gh", 0);
+	if (gw < 1 || gh < 1) {
+		return;
+	}
+
+	std::vector<float> field;
+	raster_sdf(p_poly, min_x, min_z, vs, gw, gh, field);
+
+	const double height_scale = p_params.get("height_scale", 0.0);
+	const double height_offset = p_params.get("height_offset", 0.5);
+	const double edge_offset = p_params.get("edge_offset", 0.0);
+	const double falloff_width = p_params.get("falloff_width", 0.0);
+	const bool relative = p_params.get("relative_to_terrain", true);
+	const double plane_y = p_params.get("plane_y", 0.0);
+	const int blend = (int)p_params.get("blend", 1);
+	const bool composite = p_params.get("composite", true);
+	const double src_strength = p_params.get("src_strength", 1.0);
+	const double tile_size = MAX((double)p_params.get("tile_size", 16.0), 0.0001);
+	const int source = (int)p_params.get("source", 0); // 0=NOISE 1=TEXTURE 2=MATERIAL
+	const int data_w = (int)p_params.get("data_w", 0);
+	const int data_h = (int)p_params.get("data_h", 0);
+	Object *noise_obj = p_params.get("noise", Variant());
+	Ref<FastNoiseLite> noise = Object::cast_to<FastNoiseLite>(noise_obj);
+
+	const double ramp_denom = MAX(falloff_width, 0.001);
+	const bool add = (blend == 1); // BLEND_ADD
+
+	Pasture3DLayer *wlayer = (composite || _layer_stack.is_null()) ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
+	Vector2i wloc(0x7fffffff, 0x7fffffff);
+	Pasture3DRegion *wregion = nullptr;
+
+	const bool has_clip = p_clip.size != Vector3();
+	const double cx0 = p_clip.position.x;
+	const double cx1 = p_clip.position.x + p_clip.size.x;
+	const double cz0 = p_clip.position.z;
+	const double cz1 = p_clip.position.z + p_clip.size.z;
+
+	for (int iz = 0; iz < gh; iz++) {
+		const double z = min_z + iz * vs;
+		if (has_clip && (z < cz0 || z >= cz1)) {
+			continue;
+		}
+		const int row = iz * gw;
+		for (int ix = 0; ix < gw; ix++) {
+			const double signed_d = (double)field[row + ix] + edge_offset;
+			if (signed_d <= 0.0) {
+				continue;
+			}
+			const double mask = raster_ramp(p_lut, (float)(signed_d / ramp_denom));
+			if (mask <= 0.0) {
+				continue;
+			}
+			const double x = min_x + ix * vs;
+			if (has_clip && (x < cx0 || x >= cx1)) {
+				continue;
+			}
+			// Source value in [0,1] (mirrors Pasture3DPlow._sample01).
+			double sv;
+			if (source == 0) {
+				sv = noise.is_valid() ? CLAMP(noise->get_noise_2d(x, z) * 0.5 + 0.5, 0.0, 1.0) : height_offset;
+			} else if (p_src_data.is_empty() || data_w <= 0 || data_h <= 0) {
+				sv = height_offset;
+			} else {
+				const double u = (x / tile_size) - std::floor(x / tile_size);
+				const double t = (z / tile_size) - std::floor(z / tile_size);
+				int px = (int)(u * data_w);
+				int py = (int)(t * data_h);
+				px = CLAMP(px, 0, data_w - 1);
+				py = CLAMP(py, 0, data_h - 1);
+				sv = p_src_data[py * data_w + px];
+			}
+			double amp = height_scale * (sv - height_offset) * mask * src_strength;
+			if (std::fabs(amp) < 0.0001) {
+				continue;
+			}
+			const Vector3 pos(x, 0.0, z);
+			const double base_y = relative ? (double)get_height(pos) : plane_y;
+			_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? amp : (base_y + amp), add);
+		}
+	}
+}
+
+// ---- Closed-loop control/texture paint (Pasture3DSplat) ----
+void Pasture3DData::stamp_splat_loop(const int p_layer_id, const PackedVector2Array &p_poly, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut) {
+	if (p_poly.size() < 3) {
+		return;
+	}
+	const double min_x = p_params.get("min_x", 0.0);
+	const double min_z = p_params.get("min_z", 0.0);
+	const double vs = p_params.get("vs", 1.0);
+	const int gw = (int)p_params.get("gw", 0);
+	const int gh = (int)p_params.get("gh", 0);
+	if (gw < 1 || gh < 1) {
+		return;
+	}
+
+	std::vector<float> field;
+	raster_sdf(p_poly, min_x, min_z, vs, gw, gh, field);
+
+	const double strength = p_params.get("strength", 1.0);
+	const double edge_offset = p_params.get("edge_offset", 0.0);
+	const double falloff_width = p_params.get("falloff_width", 0.0);
+	const int material = (int)p_params.get("material", 0);
+	const bool preserve_base = p_params.get("preserve_base", true);
+	const uint32_t uv_bits = (uint32_t)(int64_t)p_params.get("uv_bits", 0);
+	const bool composite = p_params.get("composite", true);
+	const double noise_strength = p_params.get("noise_strength", 0.0);
+	Object *noise_obj = p_params.get("noise", Variant());
+	Ref<FastNoiseLite> noise = Object::cast_to<FastNoiseLite>(noise_obj);
+
+	const double ramp_denom = MAX(falloff_width, 0.001);
+
+	const bool has_clip = p_clip.size != Vector3();
+	const double cx0 = p_clip.position.x;
+	const double cx1 = p_clip.position.x + p_clip.size.x;
+	const double cz0 = p_clip.position.z;
+	const double cz1 = p_clip.position.z + p_clip.size.z;
+
+	for (int iz = 0; iz < gh; iz++) {
+		const double z = min_z + iz * vs;
+		if (has_clip && (z < cz0 || z >= cz1)) {
+			continue;
+		}
+		const int row = iz * gw;
+		for (int ix = 0; ix < gw; ix++) {
+			const double signed_d = (double)field[row + ix] + edge_offset;
+			if (signed_d <= 0.0) {
+				continue;
+			}
+			const double x = min_x + ix * vs;
+			if (has_clip && (x < cx0 || x >= cx1)) {
+				continue;
+			}
+			double t = (double)raster_ramp(p_lut, (float)(signed_d / ramp_denom)) * strength;
+			if (noise.is_valid()) {
+				t += noise_strength * noise->get_noise_2d(x, z);
+			}
+			t = CLAMP(t, 0.0, 1.0);
+			const int blend_int = (int)std::lround(t * 255.0);
+			if (blend_int <= 0) {
+				continue;
+			}
+			const Vector3 pos(x, 0.0, z);
+			const uint32_t cur = get_control(pos);
+			const uint8_t base_id = preserve_base ? get_base(cur) : (uint8_t)material;
+			const uint32_t ctrl = enc_base(base_id) | enc_overlay((uint8_t)material) | enc_blend((uint8_t)blend_int) | uv_bits | (cur & 0x6);
+			set_control_on_layer(p_layer_id, pos, (int)ctrl, 1.0, composite);
 		}
 	}
 }

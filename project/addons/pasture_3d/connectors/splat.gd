@@ -147,11 +147,23 @@ func _paint_spline(path: Path3D) -> void:
 	if gw < 1 or gh < 1:
 		return
 
+	var uv_bits := Pasture3DUtil.enc_uv_scale(uv_scale) | Pasture3DUtil.enc_uv_rotation(uv_rotation)
+
+	# Native rasteriser (Round 2): same SDF + control encode in C++. GDScript reference below.
+	if _native_raster("stamp_splat_loop"):
+		var params := {
+			"min_x": min_x, "min_z": min_z, "vs": vs, "gw": gw, "gh": gh,
+			"strength": strength, "edge_offset": edge_offset, "falloff_width": falloff_width,
+			"material": material, "preserve_base": preserve_base, "uv_bits": uv_bits,
+			"composite": not _defer_composite, "noise": noise, "noise_strength": noise_strength,
+		}
+		terrain.data.stamp_splat_loop(_layer_id, poly, _clip_aabb, params, _ramp_lut(falloff_curve))
+		return
+
 	# Same O(cells) signed distance field as Mound — gives the area mask + falloff for free.
 	var sdf := _signed_distance_field(poly, min_x, min_z, vs, gw, gh)
 	var field: PackedFloat32Array = sdf[0]
 	var ramp_denom := maxf(falloff_width, 0.001)
-	var uv_bits := Pasture3DUtil.enc_uv_scale(uv_scale) | Pasture3DUtil.enc_uv_rotation(uv_rotation)
 
 	for iz in range(gh):
 		var z := min_z + iz * vs

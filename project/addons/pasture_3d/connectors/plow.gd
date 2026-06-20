@@ -160,13 +160,8 @@ func _paint_spline(path: Path3D) -> void:
 	if gw < 1 or gh < 1:
 		return
 
-	# Same O(cells) area mask as Splat/Mound.
-	var sdf := _signed_distance_field(poly, min_x, min_z, vs, gw, gh)
-	var field: PackedFloat32Array = sdf[0]
-	var ramp_denom := maxf(falloff_width, 0.001)
-
 	# Resolve the height source ONCE (decompress + cache the LUT for TEXTURE/MATERIAL). Bail if the
-	# active source has nothing to read — nothing to stamp.
+	# active source has nothing to read — nothing to stamp. Shared by the native path and the fallback.
 	var lut := _load_height_lut()
 	var lut_w: int = lut[1]
 	var lut_h: int = lut[2]
@@ -181,6 +176,25 @@ func _paint_spline(path: Path3D) -> void:
 	var src_strength := 1.0
 	if source == Source.MATERIAL and plow_material != null:
 		src_strength = plow_material.strength
+
+	# Native rasteriser (Round 2): same SDF + source-sample + relief math in C++.
+	if _native_raster("stamp_plow_loop"):
+		var params := {
+			"min_x": min_x, "min_z": min_z, "vs": vs, "gw": gw, "gh": gh,
+			"height_scale": height_scale, "height_offset": height_offset,
+			"edge_offset": edge_offset, "falloff_width": falloff_width,
+			"relative_to_terrain": relative_to_terrain, "plane_y": global_position.y,
+			"blend": _blend, "composite": not _defer_composite,
+			"src_strength": src_strength, "tile_size": tile_size, "source": int(source),
+			"data_w": lut_w, "data_h": lut_h, "noise": noise,
+		}
+		terrain.data.stamp_plow_loop(_layer_id, poly, _clip_aabb, params, _ramp_lut(falloff_curve), data)
+		return
+
+	# Same O(cells) area mask as Splat/Mound.
+	var sdf := _signed_distance_field(poly, min_x, min_z, vs, gw, gh)
+	var field: PackedFloat32Array = sdf[0]
+	var ramp_denom := maxf(falloff_width, 0.001)
 
 	for iz in range(gh):
 		var z := min_z + iz * vs

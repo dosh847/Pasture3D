@@ -2197,6 +2197,8 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("stamp_mound_loop", "layer_id", "poly", "clip", "params", "lut"), &Pasture3DData::stamp_mound_loop);
 	ClassDB::bind_method(D_METHOD("stamp_ridge_line", "layer_id", "pts", "clip", "params", "lut"), &Pasture3DData::stamp_ridge_line);
 	ClassDB::bind_method(D_METHOD("stamp_trough_line", "layer_id", "pts", "clip", "params", "lut"), &Pasture3DData::stamp_trough_line);
+	ClassDB::bind_method(D_METHOD("stamp_plow_loop", "layer_id", "poly", "clip", "params", "lut", "src_data"), &Pasture3DData::stamp_plow_loop);
+	ClassDB::bind_method(D_METHOD("stamp_splat_loop", "layer_id", "poly", "clip", "params", "lut"), &Pasture3DData::stamp_splat_loop);
 	ClassDB::bind_method(D_METHOD("gc_layer", "layer_id"), &Pasture3DData::gc_layer);
 	ClassDB::bind_method(D_METHOD("set_active_layer", "layer_id"), &Pasture3DData::set_active_layer);
 	ClassDB::bind_method(D_METHOD("get_active_layer"), &Pasture3DData::get_active_layer);
