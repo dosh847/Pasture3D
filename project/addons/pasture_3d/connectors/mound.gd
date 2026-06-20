@@ -99,6 +99,20 @@ func _paint_spline(path: Path3D) -> void:
 	if gw < 1 or gh < 1:
 		return
 
+	# Native rasteriser (Round 2): same SDF + per-cell math in C++ (~15-40x faster than this GDScript loop
+	# on large edits). The GDScript reference below runs on builds without it (and is the A/B oracle).
+	if _native_raster("stamp_mound_loop"):
+		var params := {
+			"min_x": min_x, "min_z": min_z, "vs": vs, "gw": gw, "gh": gh,
+			"height": height, "capped": capped, "invert": invert,
+			"falloff_width": falloff_width, "edge_offset": edge_offset,
+			"relative_to_terrain": relative_to_terrain, "plane_y": global_position.y,
+			"blend": _blend, "composite": not _defer_composite,
+			"noise": noise, "noise_strength": noise_strength,
+		}
+		terrain.data.stamp_mound_loop(_layer_id, poly, _clip_aabb, params, _ramp_lut(falloff_curve))
+		return
+
 	# One O(cells) signed distance field replaces the old per-pixel O(edges) polygon distance (×2 for
 	# the dome's max-interior pass). Positive inside, in metres; max_inside normalises the dome.
 	var sdf := _signed_distance_field(poly, min_x, min_z, vs, gw, gh)

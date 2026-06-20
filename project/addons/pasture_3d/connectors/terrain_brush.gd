@@ -58,6 +58,10 @@ const REFRESH_DELAY: float = 0.1
 ## this brush. Diagnostic for the partial-redraw bottleneck — leave off in normal use.
 @export var log_bake_timing: bool = false
 
+## Force the GDScript reference rasteriser even when the native C++ one is available. For A/B correctness
+## checks (toggle and compare shape + timing on the same brush). Leave off in normal use.
+@export var force_gdscript_raster: bool = false
+
 @export_tool_button("Refresh") var _refresh_btn = _refresh_button
 @export_tool_button("Add Spline") var _add_spline_btn = add_spline
 ## Create a brand-new tool layer named after this node and assign this node to it.
@@ -1078,6 +1082,34 @@ func _cross(c: Curve, t: float) -> float:
 	if c:
 		return c.sample_baked(t)
 	return 0.5 + 0.5 * cos(t * PI)
+
+
+## Number of samples in a profile LUT handed to the native rasteriser.
+const RAMP_LUT_N: int = 256
+
+## Bake `_ramp(c, x)` to a LUT so the native rasteriser evaluates the SAME ramp (curve or smoothstep
+## default) without per-cell GDScript callbacks. Always full (never empty) so C++ just interpolates.
+func _ramp_lut(c: Curve) -> PackedFloat32Array:
+	var lut := PackedFloat32Array()
+	lut.resize(RAMP_LUT_N)
+	for i in range(RAMP_LUT_N):
+		lut[i] = _ramp(c, float(i) / float(RAMP_LUT_N - 1))
+	return lut
+
+
+## Bake `_cross(c, t)` to a LUT (cosine default) for the polyline rasterisers.
+func _cross_lut(c: Curve) -> PackedFloat32Array:
+	var lut := PackedFloat32Array()
+	lut.resize(RAMP_LUT_N)
+	for i in range(RAMP_LUT_N):
+		lut[i] = _cross(c, float(i) / float(RAMP_LUT_N - 1))
+	return lut
+
+
+## True when the native C++ rasteriser for `method` is available (post-Round-2 build). Falls back to the
+## GDScript reference loop otherwise.
+func _native_raster(method: String) -> bool:
+	return not force_gdscript_raster and terrain != null and terrain.data != null and terrain.data.has_method(method)
 
 
 ## ---- Rasterisation acceleration (PASTURE3D_LANDSCAPE_TOOLS_SPEC.md §9 performance) ----

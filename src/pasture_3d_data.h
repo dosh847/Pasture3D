@@ -240,6 +240,14 @@ public:
 	// p_composite=false drops the tiles without recompositing (a tool that follows with a batch of writes
 	// + one composite_area should pass false to avoid a redundant recomposite of the cleared footprint).
 	void clear_layer_in_area(const int p_layer_id, const AABB &p_area, const bool p_composite = true);
+
+	// Native spline-brush rasterisers (Round 2 perf): port of the GDScript Pasture3DTerrainBrush per-cell
+	// loops. Each builds the field (closed-loop SDF / open polyline) over the grid in `params` and writes
+	// the result into the layer DEFERRED (no per-pixel composite — the tool calls composite_area once).
+	// Geometry is world-space + decimated; `clip` is the tile-snapped dirty box (max-edge exclusive);
+	// `params` is a Dictionary of grid (min_x/min_z/vs/gw/gh) + shape knobs; `lut` is a 0..1 ramp LUT
+	// (empty => analytic default). The GDScript keeps the equivalent loop as a fallback / A/B reference.
+	void stamp_mound_loop(const int p_layer_id, const PackedVector2Array &p_poly, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut);
 	// Garbage-collect a layer's fully-uncovered tiles (frees memory after erasing/moving a feature).
 	void gc_layer(const int p_layer_id);
 	void set_active_layer(const int p_layer_id);

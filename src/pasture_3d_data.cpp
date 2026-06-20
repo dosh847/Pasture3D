@@ -2194,6 +2194,7 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("add_height_on_layer", "layer_id", "global_position", "delta", "weight", "composite"), &Pasture3DData::add_height_on_layer, DEFVAL(1.f), DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("get_layer_height", "layer_id", "global_position"), &Pasture3DData::get_layer_height);
 	ClassDB::bind_method(D_METHOD("clear_layer_in_area", "layer_id", "area", "composite"), &Pasture3DData::clear_layer_in_area, DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("stamp_mound_loop", "layer_id", "poly", "clip", "params", "lut"), &Pasture3DData::stamp_mound_loop);
 	ClassDB::bind_method(D_METHOD("gc_layer", "layer_id"), &Pasture3DData::gc_layer);
 	ClassDB::bind_method(D_METHOD("set_active_layer", "layer_id"), &Pasture3DData::set_active_layer);
 	ClassDB::bind_method(D_METHOD("get_active_layer"), &Pasture3DData::get_active_layer);
