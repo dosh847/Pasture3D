@@ -123,7 +123,9 @@ void Pasture3DLayerStack::set_data(const Dictionary &p_data) {
 		_version = p_data["version"];
 	}
 	if (p_data.has("layers")) {
-		_layers = p_data["layers"];
+		// Cast Variant -> Array explicitly: assigning a Variant straight into a TypedArray is an
+		// ambiguous operator= overload on GCC/Clang (MSVC accepts it).
+		_layers = (Array)p_data["layers"];
 	}
 }
 
