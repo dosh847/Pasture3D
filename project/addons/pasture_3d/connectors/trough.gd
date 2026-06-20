@@ -89,6 +89,19 @@ func _paint_spline(path: Path3D) -> void:
 	if gw < 1 or gh < 1:
 		return
 
+	# Native rasteriser (Round 2): same polyline field + per-cell bed/bank math in C++. GDScript
+	# reference below for builds without it (and the A/B oracle via force_gdscript_raster).
+	if _native_raster("stamp_trough_line"):
+		var params := {
+			"min_x": min_x, "min_z": min_z, "vs": vs, "gw": gw, "gh": gh,
+			"bed_half_width": bed_half_width, "bank_width": bank_width, "falloff": falloff,
+			"depth": depth, "flat_bed": flat_bed, "follow_spline_height": follow_spline_height,
+			"taper_ends": taper_ends, "blend": _blend, "composite": not _defer_composite,
+			"noise": noise, "noise_strength": noise_strength,
+		}
+		terrain.data.stamp_trough_line(_layer_id, pts, _clip_aabb, params, _ramp_lut(bank_profile))
+		return
+
 	# One O(cells) polyline feature field replaces the per-pixel O(segments) closest-point scan: each
 	# cell gets its lateral distance, the bed-reference Y at the nearest point, and the arc length.
 	var fld := _polyline_field(pts, min_x, min_z, vs, gw, gh)

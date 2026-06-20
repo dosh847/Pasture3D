@@ -81,6 +81,19 @@ func _paint_spline(path: Path3D) -> void:
 	if gw < 1 or gh < 1:
 		return
 
+	# Native rasteriser (Round 2): same polyline field + per-cell crest math in C++. GDScript reference
+	# below for builds without it (and the A/B oracle via force_gdscript_raster).
+	if _native_raster("stamp_ridge_line"):
+		var params := {
+			"min_x": min_x, "min_z": min_z, "vs": vs, "gw": gw, "gh": gh,
+			"crest_height": crest_height, "width": width, "falloff": falloff,
+			"invert": invert, "follow_spline_height": follow_spline_height,
+			"taper_ends": taper_ends, "blend": _blend, "composite": not _defer_composite,
+			"noise": noise, "noise_strength": noise_strength,
+		}
+		terrain.data.stamp_ridge_line(_layer_id, pts, _clip_aabb, params, _cross_lut(profile))
+		return
+
 	# One O(cells) polyline feature field replaces the per-pixel O(segments) closest-point scan: each
 	# cell gets its lateral distance, the crest Y at the nearest point, and the arc length (for taper).
 	var fld := _polyline_field(pts, min_x, min_z, vs, gw, gh)
