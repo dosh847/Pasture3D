@@ -92,6 +92,7 @@ var _dirty: bool = false
 var _full_dirty: bool = false   # A queued refresh needs the whole layer (param/transform/structural change)
 var _dirty_splines: Dictionary = {} # Path3D instance_id -> true: splines whose curve changed (partial redraw)
 var _clip_aabb: AABB = AABB()   # When non-empty, _paint_* writes only cells inside this world box (dirty-rect)
+var _defer_composite: bool = false # When true, _paint_* write samples without compositing (caller composites the box once)
 var _curve_cache: Dictionary = {}   # spline instance_id -> PackedVector3Array of point positions at last bake
 var _suspend_auto: bool = false # Blocks auto-refresh while we mutate curves programmatically (undo)
 var _ready_done: bool = false   # True once _ready ran — gates re-parent auto-assign off scene-load
@@ -507,6 +508,9 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary) -> void:
 	# this bake touches. composite_region sets is_edited but update_maps never clears it, so without this
 	# every later partial would re-push every region edited this session (the far-spline slowdown).
 	_clear_region_edited_flags()
+	# Clear the dropped tiles AND composite the (tile-bounded) box back to base. This composite is required
+	# before painting: the rasterisers read get_height per cell for relative_to_terrain / follow_spline_height,
+	# so they must see the cleared base (not this tool's own previous dome) or the feature climbs each edit.
 	terrain.data.clear_layer_in_area(layer_id, clip_box)
 	var t_clear := Time.get_ticks_usec()
 	# Re-seat ONLY the points the user actually moved, against the freshly-cleared base inside the box.
@@ -525,10 +529,15 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary) -> void:
 		if not s._overlaps_box(clip_box):
 			continue
 		s._clip_aabb = clip_box
+		s._defer_composite = true # write samples only; we composite the whole box once below
 		s._paint_into(layer_id, blend)
+		s._defer_composite = false
 		s._clip_aabb = AABB()
 		painted += 1
 	var t_paint := Time.get_ticks_usec()
+	# Composite the whole footprint ONCE instead of per painted pixel — the big win for large edits.
+	terrain.data.composite_area(clip_box, false)
+	var t_composite := Time.get_ticks_usec()
 	# Remember the (possibly snapped) point layout so the next edit only re-snaps what changes again.
 	for sid in changed_ids:
 		var cp := _find_spline_by_id(sid)
@@ -538,7 +547,7 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary) -> void:
 	# rebuilds the whole height texture array from every region — the reason a far-away spline was slow.)
 	terrain.data.update_maps(_map_type(), false, false)
 	if log_bake_timing:
-		_log_bake_timing(clip_box, painted, t_start, t_clear, t_snap, t_paint, Time.get_ticks_usec())
+		_log_bake_timing(clip_box, painted, t_start, t_clear, t_snap, t_paint, t_composite, Time.get_ticks_usec())
 
 
 ## Clear the per-region "edited" GPU-push flag on every active region. update_maps(all_regions=false)
@@ -556,16 +565,16 @@ func _clear_region_edited_flags() -> void:
 
 
 ## Print the partial-bake timing breakdown to Output (enabled by log_bake_timing). Splits the µs spent in
-## the layer clear (whole-region recomposite — the suspected bottleneck), point snap, paint (rasterise +
-## per-pixel composite), and the GPU push, plus the box size and how many regions the clear recomposited.
-func _log_bake_timing(box: AABB, painted: int, t_start: int, t_clear: int, t_snap: int, t_paint: int, t_push: int) -> void:
+## the layer clear (now a tile-bounded recomposite), point snap + rasterise, the per-cell sample writes,
+## the single box composite, and the GPU push, plus the box size and how many regions the box spans.
+func _log_bake_timing(box: AABB, painted: int, t_start: int, t_clear: int, t_snap: int, t_paint: int, t_composite: int, t_push: int) -> void:
 	var region_span := 1
 	if terrain and terrain.data and terrain.data.has_method("get_region_location"):
 		var rl0: Vector2i = terrain.data.get_region_location(box.position)
 		var rl1: Vector2i = terrain.data.get_region_location(box.position + box.size)
 		region_span = (absi(rl1.x - rl0.x) + 1) * (absi(rl1.y - rl0.y) + 1)
-	print("[Pasture3D bake] %s | total %d us = clear %d + snap %d + paint %d + push %d | box %.0fx%.0fm, %d region(s), %d tool(s)" % [
-		name, t_push - t_start, t_clear - t_start, t_snap - t_clear, t_paint - t_snap, t_push - t_paint,
+	print("[Pasture3D bake] %s | total %d us = clear %d + snap %d + paint %d + composite %d + push %d | box %.0fx%.0fm, %d region(s), %d tool(s)" % [
+		name, t_push - t_start, t_clear - t_start, t_snap - t_clear, t_paint - t_snap, t_composite - t_paint, t_push - t_composite,
 		box.size.x, box.size.z, region_span, painted])
 
 
@@ -776,10 +785,11 @@ func _paint_height(world_pos: Vector3, target: float, delta: float) -> void:
 	if _layer_id < 0:
 		terrain.data.set_height(world_pos, target)
 		return
+	var comp := not _defer_composite
 	if _blend == BLEND_ADD:
-		terrain.data.add_height_on_layer(_layer_id, world_pos, delta, 1.0)
+		terrain.data.add_height_on_layer(_layer_id, world_pos, delta, 1.0, comp)
 	else:
-		terrain.data.set_height_on_layer(_layer_id, world_pos, target, 1.0)
+		terrain.data.set_height_on_layer(_layer_id, world_pos, target, 1.0, comp)
 
 
 ## Write a packed control value (texture ids + blend + uv) into the layer. Falls back to the
@@ -787,14 +797,14 @@ func _paint_height(world_pos: Vector3, target: float, delta: float) -> void:
 func _paint_control(world_pos: Vector3, control: int, weight: float) -> void:
 	if not _clip_contains(world_pos):
 		return
-	terrain.data.set_control_on_layer(_layer_id, world_pos, control, weight)
+	terrain.data.set_control_on_layer(_layer_id, world_pos, control, weight, not _defer_composite)
 
 
 ## Write an albedo+coverage colour into the layer (alpha-over composite).
 func _paint_color(world_pos: Vector3, color: Color, weight: float) -> void:
 	if not _clip_contains(world_pos):
 		return
-	terrain.data.set_color_on_layer(_layer_id, world_pos, color, weight)
+	terrain.data.set_color_on_layer(_layer_id, world_pos, color, weight, not _defer_composite)
 
 
 func _seed_cache() -> void:

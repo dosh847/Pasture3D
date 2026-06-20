@@ -197,6 +197,10 @@ public:
 	// whole region. With p_update, edited regions are pushed to the GPU via update_maps(TYPE_HEIGHT).
 	void composite_region(const Vector2i &p_region_loc, const Rect2i &p_dirty_rect = Rect2i(), const bool p_update = true);
 	void composite_regions(); // Composite every active region fully, then a single GPU update
+	// Composite the dirty rect of a world-space AABB across every region it overlaps (no GPU upload unless
+	// p_update). Lets a tool composite its whole footprint ONCE after a batch of no-composite layer writes,
+	// instead of paying a per-pixel composite on each write — the dirty-rect counterpart of composite_region.
+	void composite_area(const AABB &p_area, const bool p_update = false);
 
 	// Tool API (PASTURE3D_LAYERS_GUIDE.md §8). Lets generator/tool nodes (RoadPastureConnector) draw
 	// into a reserved layer of their own instead of writing the Base destructively, so re-running them
@@ -214,24 +218,28 @@ public:
 	// ensures the dense typed base exists (capturing the current hand-authored control/color), then adds
 	// the reserved overlay. Holes/texture/color tools own a control/color layer this way (§8.3, §11.4).
 	int create_owned_layer_typed(const String &p_owner_id, const String &p_name, const int p_blend_mode, const int p_map_type);
-	void set_height_on_layer(const int p_layer_id, const Vector3 &p_global_position, const real_t p_height, const real_t p_weight = 1.f);
+	// p_composite=false writes the layer sample but SKIPS the per-pixel composite, so a tool can batch many
+	// writes and composite the whole footprint once via composite_area (much cheaper for large edits).
+	void set_height_on_layer(const int p_layer_id, const Vector3 &p_global_position, const real_t p_height, const real_t p_weight = 1.f, const bool p_composite = true);
 	// Write a packed control uint32 (or just a hole bit) into a control overlay layer, then dirty-scope
 	// composite it back into the region control map. set_hole_on_layer reads the composited control at the
 	// position, sets/clears the hole bit (preserving texture/nav/etc), and stores the full value at weight 1.
 	// Both fall back to the destructive set_control/set_control_hole path when no stack/invalid layer (§8.3).
-	void set_control_on_layer(const int p_layer_id, const Vector3 &p_global_position, const int p_control, const real_t p_weight = 1.f);
+	void set_control_on_layer(const int p_layer_id, const Vector3 &p_global_position, const int p_control, const real_t p_weight = 1.f, const bool p_composite = true);
 	void set_hole_on_layer(const int p_layer_id, const Vector3 &p_global_position, const bool p_hole);
 	// Write an RGBA albedo + coverage weight into a color overlay layer, then dirty-scope composite it
 	// (alpha-over). Falls back to set_color when no stack/invalid layer.
-	void set_color_on_layer(const int p_layer_id, const Vector3 &p_global_position, const Color &p_color, const real_t p_weight = 1.f);
-	void add_height_on_layer(const int p_layer_id, const Vector3 &p_global_position, const real_t p_delta, const real_t p_weight = 1.f);
+	void set_color_on_layer(const int p_layer_id, const Vector3 &p_global_position, const Color &p_color, const real_t p_weight = 1.f, const bool p_composite = true);
+	void add_height_on_layer(const int p_layer_id, const Vector3 &p_global_position, const real_t p_delta, const real_t p_weight = 1.f, const bool p_composite = true);
 	real_t get_layer_height(const int p_layer_id, const Vector3 &p_global_position) const;
 	// Clear the layer's tiles in every region the area (world-space AABB, XZ used) overlaps, then
 	// recomposite the cleared footprint so it falls back to what is below. Sub-tile precise (phase 6):
 	// only the sub-tiles overlapping the AABB are dropped, so a co-located feature in another sub-tile
 	// of the same region survives (the Phase 5 partial-refresh fix). Degrades to region-granular when
 	// _tile_size == region size.
-	void clear_layer_in_area(const int p_layer_id, const AABB &p_area);
+	// p_composite=false drops the tiles without recompositing (a tool that follows with a batch of writes
+	// + one composite_area should pass false to avoid a redundant recomposite of the cleared footprint).
+	void clear_layer_in_area(const int p_layer_id, const AABB &p_area, const bool p_composite = true);
 	// Garbage-collect a layer's fully-uncovered tiles (frees memory after erasing/moving a feature).
 	void gc_layer(const int p_layer_id);
 	void set_active_layer(const int p_layer_id);

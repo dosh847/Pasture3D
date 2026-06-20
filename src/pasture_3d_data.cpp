@@ -1218,6 +1218,29 @@ void Pasture3DData::composite_regions() {
 	update_maps(TYPE_MAX, false, false);
 }
 
+void Pasture3DData::composite_area(const AABB &p_area, const bool p_update) {
+	if (_layer_stack.is_null()) {
+		return; // Plain terrain: region images already are the source of truth.
+	}
+	const Vector2i loc_min = get_region_location(p_area.position);
+	const Vector2i loc_max = get_region_location(p_area.position + p_area.size);
+	for (int y = loc_min.y; y <= loc_max.y; y++) {
+		for (int x = loc_min.x; x <= loc_max.x; x++) {
+			const Vector2i loc(x, y);
+			Pasture3DRegion *region = get_region_ptr(loc);
+			if (!region || region->is_deleted()) {
+				continue;
+			}
+			// composite_region clamps the rect to the region; an empty rect would mean the whole region, so
+			// skip a region the area only grazes to a zero-width pixel rect (nothing to composite there).
+			const Rect2i px_rect = _region_pixel_rect(p_area, loc);
+			if (px_rect.has_area()) {
+				composite_region(loc, px_rect, p_update);
+			}
+		}
+	}
+}
+
 int Pasture3DData::_ensure_typed_base(const MapType p_map_type) {
 	if (_layer_stack.is_null() || (p_map_type != TYPE_CONTROL && p_map_type != TYPE_COLOR)) {
 		return -1;
@@ -1334,7 +1357,7 @@ int Pasture3DData::create_owned_layer_typed(const String &p_owner_id, const Stri
 	return idx;
 }
 
-void Pasture3DData::set_height_on_layer(const int p_layer_id, const Vector3 &p_global_position, const real_t p_height, const real_t p_weight) {
+void Pasture3DData::set_height_on_layer(const int p_layer_id, const Vector3 &p_global_position, const real_t p_height, const real_t p_weight, const bool p_composite) {
 	Pasture3DLayer *layer = _layer_stack.is_valid() ? _layer_stack->get_layer_ptr(p_layer_id) : nullptr;
 	if (!layer) {
 		// Backward-compat: no stack / invalid layer => write the region image directly (§8.3).
@@ -1348,11 +1371,13 @@ void Pasture3DData::set_height_on_layer(const int p_layer_id, const Vector3 &p_g
 		return; // No region here; skip silently (the tool may sweep beyond the terrain bounds).
 	}
 	layer->set_sample(region_loc, img_pos, p_height, p_weight);
-	composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
+	if (p_composite) {
+		composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
+	}
 	region->set_modified(true); // The composited runtime image changed; persist it on save.
 }
 
-void Pasture3DData::add_height_on_layer(const int p_layer_id, const Vector3 &p_global_position, const real_t p_delta, const real_t p_weight) {
+void Pasture3DData::add_height_on_layer(const int p_layer_id, const Vector3 &p_global_position, const real_t p_delta, const real_t p_weight, const bool p_composite) {
 	Pasture3DLayer *layer = _layer_stack.is_valid() ? _layer_stack->get_layer_ptr(p_layer_id) : nullptr;
 	if (!layer) {
 		set_height(p_global_position, get_height(p_global_position) + p_delta);
@@ -1367,7 +1392,9 @@ void Pasture3DData::add_height_on_layer(const int p_layer_id, const Vector3 &p_g
 	// Accumulate within this layer (uncovered reads as 0); the blend mode decides how it stacks below.
 	real_t current = layer->get_weight(region_loc, img_pos) > 0.f ? layer->get_value(region_loc, img_pos) : 0.f;
 	layer->set_sample(region_loc, img_pos, current + p_delta, p_weight);
-	composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
+	if (p_composite) {
+		composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
+	}
 	region->set_modified(true);
 }
 
@@ -1381,7 +1408,7 @@ real_t Pasture3DData::get_layer_height(const int p_layer_id, const Vector3 &p_gl
 	return layer->get_value(region_loc, img_pos);
 }
 
-void Pasture3DData::set_control_on_layer(const int p_layer_id, const Vector3 &p_global_position, const int p_control, const real_t p_weight) {
+void Pasture3DData::set_control_on_layer(const int p_layer_id, const Vector3 &p_global_position, const int p_control, const real_t p_weight, const bool p_composite) {
 	Pasture3DLayer *layer = _layer_stack.is_valid() ? _layer_stack->get_layer_ptr(p_layer_id) : nullptr;
 	if (!layer || layer->get_map_type() != TYPE_CONTROL) {
 		// Backward-compat: no stack / wrong layer => write the region control map directly (§8.3).
@@ -1396,7 +1423,9 @@ void Pasture3DData::set_control_on_layer(const int p_layer_id, const Vector3 &p_
 	}
 	// Control is a packed uint32 stored as float bits in the R channel (same encoding as the region map).
 	layer->set_sample(region_loc, img_pos, as_float(uint32_t(p_control)), p_weight);
-	composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
+	if (p_composite) {
+		composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
+	}
 	region->set_modified(true);
 }
 
@@ -1417,7 +1446,7 @@ void Pasture3DData::set_hole_on_layer(const int p_layer_id, const Vector3 &p_glo
 	set_control_on_layer(p_layer_id, p_global_position, int(control), 1.f);
 }
 
-void Pasture3DData::set_color_on_layer(const int p_layer_id, const Vector3 &p_global_position, const Color &p_color, const real_t p_weight) {
+void Pasture3DData::set_color_on_layer(const int p_layer_id, const Vector3 &p_global_position, const Color &p_color, const real_t p_weight, const bool p_composite) {
 	Pasture3DLayer *layer = _layer_stack.is_valid() ? _layer_stack->get_layer_ptr(p_layer_id) : nullptr;
 	if (!layer || layer->get_map_type() != TYPE_COLOR) {
 		set_color(p_global_position, p_color); // Backward-compat: write the region color map directly.
@@ -1430,7 +1459,9 @@ void Pasture3DData::set_color_on_layer(const int p_layer_id, const Vector3 &p_gl
 		return;
 	}
 	layer->set_sample_color(region_loc, img_pos, p_color, p_weight);
-	composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
+	if (p_composite) {
+		composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
+	}
 	region->set_modified(true);
 }
 
@@ -1446,7 +1477,7 @@ Rect2i Pasture3DData::_region_pixel_rect(const AABB &p_area, const Vector2i &p_r
 	return Rect2i(local_min, local_max - local_min);
 }
 
-void Pasture3DData::clear_layer_in_area(const int p_layer_id, const AABB &p_area) {
+void Pasture3DData::clear_layer_in_area(const int p_layer_id, const AABB &p_area, const bool p_composite) {
 	Pasture3DLayer *layer = _layer_stack.is_valid() ? _layer_stack->get_layer_ptr(p_layer_id) : nullptr;
 	if (!layer) {
 		return; // No stack / invalid layer: nothing to clear (plain-terrain writes go to the Base image).
@@ -1454,6 +1485,7 @@ void Pasture3DData::clear_layer_in_area(const int p_layer_id, const AABB &p_area
 	// A layer tiled at region granularity has one tile per region; sub-tile clearing then degrades to
 	// clearing that whole tile. Sub-tiled layers (the default) drop only the tiles the AABB overlaps.
 	const bool region_granular = layer->get_tile_size() >= _region_size;
+	const int ts = layer->get_tile_size();
 	Vector3 mn = p_area.position;
 	Vector3 mx = p_area.position + p_area.size;
 	Vector2i loc_min = get_region_location(mn);
@@ -1470,17 +1502,29 @@ void Pasture3DData::clear_layer_in_area(const int p_layer_id, const AABB &p_area
 				continue;
 			}
 			bool cleared = false;
+			const Rect2i px_rect = region_granular ? Rect2i() : _region_pixel_rect(p_area, loc);
 			if (region_granular) {
 				layer->clear_region(loc);
 				cleared = true;
 			} else {
-				cleared = layer->clear_tiles_in_rect(loc, _region_pixel_rect(p_area, loc));
+				cleared = layer->clear_tiles_in_rect(loc, px_rect);
 			}
 			if (cleared) {
-				// Recomposite the whole region so the dropped footprint falls back to what is below.
-				// Tiles NOT overlapping the AABB (e.g. a co-located road in another sub-tile) survive
-				// and are re-applied here — this is the Phase 5 partial-refresh fix.
-				composite_region(loc, Rect2i(), false);
+				if (p_composite) {
+					// Recomposite ONLY the dropped tiles' span (the pixel rect grown to tile boundaries),
+					// not the whole region — the whole-region recomposite was the dirty-rect bottleneck.
+					// Tiles NOT overlapping the AABB (e.g. a co-located feature in another sub-tile) keep
+					// their existing composite. An empty rect (region-granular) means the whole region.
+					Rect2i comp_rect; // empty => whole region
+					if (!region_granular && px_rect.has_area()) {
+						const int x0 = (px_rect.position.x / ts) * ts;
+						const int y0 = (px_rect.position.y / ts) * ts;
+						const int x1 = ((px_rect.position.x + px_rect.size.x + ts - 1) / ts) * ts;
+						const int y1 = ((px_rect.position.y + px_rect.size.y + ts - 1) / ts) * ts;
+						comp_rect = Rect2i(x0, y0, x1 - x0, y1 - y0);
+					}
+					composite_region(loc, comp_rect, false);
+				}
 				region->set_modified(true);
 				any = true;
 			}
@@ -2128,6 +2172,7 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_layer_stack", "layer_stack"), &Pasture3DData::set_layer_stack);
 	ClassDB::bind_method(D_METHOD("composite_region", "region_location", "dirty_rect", "update"), &Pasture3DData::composite_region, DEFVAL(Rect2i()), DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("composite_regions"), &Pasture3DData::composite_regions);
+	ClassDB::bind_method(D_METHOD("composite_area", "area", "update"), &Pasture3DData::composite_area, DEFVAL(false));
 
 	ClassDB::bind_method(D_METHOD("is_layer_routing"), &Pasture3DData::is_layer_routing);
 	ClassDB::bind_method(D_METHOD("ensure_layer_stack"), &Pasture3DData::ensure_layer_stack);
@@ -2142,13 +2187,13 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("find_layer_by_owner", "owner_id"), &Pasture3DData::find_layer_by_owner);
 	ClassDB::bind_method(D_METHOD("create_owned_layer", "owner_id", "name", "blend_mode"), &Pasture3DData::create_owned_layer);
 	ClassDB::bind_method(D_METHOD("create_owned_layer_typed", "owner_id", "name", "blend_mode", "map_type"), &Pasture3DData::create_owned_layer_typed);
-	ClassDB::bind_method(D_METHOD("set_height_on_layer", "layer_id", "global_position", "height", "weight"), &Pasture3DData::set_height_on_layer, DEFVAL(1.f));
-	ClassDB::bind_method(D_METHOD("set_control_on_layer", "layer_id", "global_position", "control", "weight"), &Pasture3DData::set_control_on_layer, DEFVAL(1.f));
+	ClassDB::bind_method(D_METHOD("set_height_on_layer", "layer_id", "global_position", "height", "weight", "composite"), &Pasture3DData::set_height_on_layer, DEFVAL(1.f), DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("set_control_on_layer", "layer_id", "global_position", "control", "weight", "composite"), &Pasture3DData::set_control_on_layer, DEFVAL(1.f), DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("set_hole_on_layer", "layer_id", "global_position", "hole"), &Pasture3DData::set_hole_on_layer);
-	ClassDB::bind_method(D_METHOD("set_color_on_layer", "layer_id", "global_position", "color", "weight"), &Pasture3DData::set_color_on_layer, DEFVAL(1.f));
-	ClassDB::bind_method(D_METHOD("add_height_on_layer", "layer_id", "global_position", "delta", "weight"), &Pasture3DData::add_height_on_layer, DEFVAL(1.f));
+	ClassDB::bind_method(D_METHOD("set_color_on_layer", "layer_id", "global_position", "color", "weight", "composite"), &Pasture3DData::set_color_on_layer, DEFVAL(1.f), DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("add_height_on_layer", "layer_id", "global_position", "delta", "weight", "composite"), &Pasture3DData::add_height_on_layer, DEFVAL(1.f), DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("get_layer_height", "layer_id", "global_position"), &Pasture3DData::get_layer_height);
-	ClassDB::bind_method(D_METHOD("clear_layer_in_area", "layer_id", "area"), &Pasture3DData::clear_layer_in_area);
+	ClassDB::bind_method(D_METHOD("clear_layer_in_area", "layer_id", "area", "composite"), &Pasture3DData::clear_layer_in_area, DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("gc_layer", "layer_id"), &Pasture3DData::gc_layer);
 	ClassDB::bind_method(D_METHOD("set_active_layer", "layer_id"), &Pasture3DData::set_active_layer);
 	ClassDB::bind_method(D_METHOD("get_active_layer"), &Pasture3DData::get_active_layer);
