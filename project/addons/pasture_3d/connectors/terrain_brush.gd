@@ -85,6 +85,10 @@ var _blend: int = BLEND_REPLACE       # Blend mode used by _paint_height for the
 var _last_paint_aabb: Dictionary = {} # spline instance_id -> world AABB last painted (idempotent clear)
 var _timer: SceneTreeTimer = null
 var _dirty: bool = false
+var _full_dirty: bool = false   # A queued refresh needs the whole layer (param/transform/structural change)
+var _dirty_splines: Dictionary = {} # Path3D instance_id -> true: splines whose curve changed (partial redraw)
+var _clip_aabb: AABB = AABB()   # When non-empty, _paint_* writes only cells inside this world box (dirty-rect)
+var _curve_cache: Dictionary = {}   # spline instance_id -> PackedVector3Array of point positions at last bake
 var _suspend_auto: bool = false # Blocks auto-refresh while we mutate curves programmatically (undo)
 var _ready_done: bool = false   # True once _ready ran — gates re-parent auto-assign off scene-load
 
@@ -110,6 +114,8 @@ func _ready() -> void:
 	# session clears where a spline WAS, not just where it ends up — no stale flattening trail.
 	_seed_cache()
 	_ready_done = true
+	# A freshly added/duplicated brush may have made an existing brush's curve newly shared — refresh all.
+	_refresh_group_warnings()
 
 
 func _notification(what: int) -> void:
@@ -170,7 +176,33 @@ func _get_configuration_warnings() -> PackedStringArray:
 		warnings.append("The Pasture3D terrain has no regions yet — add regions in Pasture3D first.")
 	if _get_splines().is_empty():
 		warnings.append("Add at least one spline (press Add Spline, or add a Path3D child).")
+	var shared := _shared_curve_spline_names()
+	if not shared.is_empty():
+		warnings.append(("These splines share a Curve3D with another spline, so editing one edits "
+			+ "(and re-bakes) them all: %s. Select each Path3D and use the Curve property's dropdown "
+			+ "→ Make Unique.") % ", ".join(shared))
 	return warnings
+
+
+## Names of this brush's child splines whose Curve3D is also referenced by another spline anywhere in the
+## scene's brushes. Duplicating a brush copies the child Path3D but SHARES its Curve3D by reference, so a
+## single edit drives every clone's bake — a silent performance trap. Counts curve instances across every
+## brush in the group, then flags ours that appear more than once.
+func _shared_curve_spline_names() -> PackedStringArray:
+	var out := PackedStringArray()
+	if not is_inside_tree():
+		return out
+	var counts := {}
+	for n in get_tree().get_nodes_in_group(BRUSH_GROUP):
+		if n is Pasture3DTerrainBrush:
+			for s in n._get_splines():
+				if s.curve != null:
+					var id: int = s.curve.get_instance_id()
+					counts[id] = int(counts.get(id, 0)) + 1
+	for s in _get_splines():
+		if s.curve != null and int(counts.get(s.curve.get_instance_id(), 0)) > 1:
+			out.append(String(s.name))
+	return out
 
 
 func is_configured() -> bool:
@@ -187,15 +219,48 @@ func _get_splines() -> Array:
 
 
 func _connect_spline(path: Path3D) -> void:
-	if path.curve and not path.curve.changed.is_connected(_schedule_refresh):
-		path.curve.changed.connect(_schedule_refresh)
+	# React to the Path3D swapping its Curve3D resource itself (Make Unique / assigning a new curve) so we
+	# rebind to the new curve and the shared-curve warning re-evaluates. Idempotent (bound Callable compares
+	# equal). Connected even when curve is null so a later assignment is caught.
+	var pc := _on_path_curve_changed.bind(path)
+	if not path.curve_changed.is_connected(pc):
+		path.curve_changed.connect(pc)
+	if path.curve == null:
+		return
+	# Bind the owning Path3D so a curve edit schedules a per-spline (dirty-rect) redraw, not a whole-layer
+	# one. The bound Callable compares equal across calls (same method + bind), so this stays idempotent.
+	var cb := _schedule_spline_refresh.bind(path)
+	if not path.curve.changed.is_connected(cb):
+		path.curve.changed.connect(cb)
+
+
+## The Path3D swapped its Curve3D resource (e.g. Make Unique). Rebind to the new curve's change signal,
+## re-evaluate the shared-curve warnings across all brushes, and re-bake so the swap takes effect.
+func _on_path_curve_changed(path: Path3D) -> void:
+	if not is_instance_valid(path):
+		return
+	_connect_spline(path)
+	_refresh_group_warnings()
+	_schedule_spline_refresh(path)
 
 
 func _on_child_changed(node: Node) -> void:
 	if node is Path3D:
 		_connect_spline(node)
-	update_configuration_warnings()
+	# Broadcast, not just self: adding/removing a spline can make another brush's curve newly (non-)shared.
+	_refresh_group_warnings()
 	_schedule_refresh()
+
+
+## Ask every brush in the scene to re-evaluate its configuration warnings, so the shared-curve warning
+## appears/clears on ALL affected brushes at once (e.g. both the duplicate and its original) rather than
+## only the one being edited. No-op outside the editor.
+func _refresh_group_warnings() -> void:
+	if not Engine.is_editor_hint() or not is_inside_tree():
+		return
+	for n in get_tree().get_nodes_in_group(BRUSH_GROUP):
+		if n is Pasture3DTerrainBrush:
+			n.update_configuration_warnings()
 
 
 ## ---- Inspector: the tool-layer dropdown (bind by owner_id, display live name) ----
@@ -269,9 +334,31 @@ func _rebind(old_owner: String) -> void:
 
 ## ---- Refresh scheduling (debounced; defers while a handle is being dragged) ----
 
+## True when auto-refresh may queue work: not mid-programmatic-edit, enabled, in the editor and tree.
+func _can_auto_refresh() -> bool:
+	return not _suspend_auto and auto_refresh and Engine.is_editor_hint() and is_inside_tree()
+
+
+## Whole-layer refresh scheduler — for param / transform / structural changes (anything that isn't a
+## single spline's curve edit). Marks the queued bake as needing a full repaint.
 func _schedule_refresh() -> void:
-	if _suspend_auto or not auto_refresh or not Engine.is_editor_hint() or not is_inside_tree():
+	if not _can_auto_refresh():
 		return
+	_full_dirty = true
+	_arm_refresh_timer()
+
+
+## Per-spline scheduler — a single child curve changed, so only its footprint needs reworking. Records
+## which spline moved; the bake takes the dirty-rect path unless a full refresh was also queued.
+func _schedule_spline_refresh(path: Path3D) -> void:
+	if not _can_auto_refresh():
+		return
+	if is_instance_valid(path):
+		_dirty_splines[path.get_instance_id()] = true
+	_arm_refresh_timer()
+
+
+func _arm_refresh_timer() -> void:
 	_dirty = true
 	if is_instance_valid(_timer):
 		return
@@ -282,12 +369,23 @@ func _schedule_refresh() -> void:
 func _on_refresh_timer() -> void:
 	_timer = null
 	if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
-		# Still dragging — repaint once on release rather than every frame.
-		_schedule_refresh()
+		# Still dragging — repaint once on release rather than every frame (keep accumulated dirty state).
+		_arm_refresh_timer()
 		return
-	if _dirty:
-		_dirty = false
-		refresh()
+	if not _dirty:
+		return
+	_dirty = false
+	# Snapshot + clear the queued dirty state up front so a refresh that re-enters scheduling is coherent.
+	var full := _full_dirty
+	var splines := _dirty_splines
+	_full_dirty = false
+	_dirty_splines = {}
+	if not Engine.is_editor_hint() or not is_configured():
+		return
+	if full or splines.is_empty():
+		_refresh_owner(_layer_owner, false, [])
+	else:
+		_refresh_owner_rect(_layer_owner, splines)
 
 
 ## ---- The paint cycle (layer-granular: repaint every tool bound to the layer) ----
@@ -357,13 +455,147 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 		ur.commit_action(false)
 
 
+## Dirty-rect refresh (Stage 1 partial redraw): one or more of THIS node's splines moved. Rework only the
+## box they touched instead of the whole layer. The box = ∪ of each changed spline's previous∪current
+## footprint; we clear just that box, then repaint every tool on the layer whose footprint intersects it,
+## with each paint CLIPPED to the box. Tools/splines outside the box are untouched. Repainting overlapping
+## layer-mates inside the box (not just the moved spline) is what keeps shared cells correct — the same
+## reason the full refresh repaints mates. Auto-refresh only (no undo action; the gizmo edit is the
+## undoable cause). Falls back to a full refresh when there's no layers Tool API or nothing locatable.
+func _refresh_owner_rect(owner: String, changed_ids: Dictionary) -> void:
+	if not is_configured():
+		return
+	var layer_id := _ensure_layer_for(owner, owner == _layer_owner)
+	if layer_id < 0:
+		# Destructive fallback has no per-area clear — the whole-layer path is the only correct option.
+		_refresh_owner(owner, false, [])
+		return
+
+	# Union the previous (cached) and current footprint of every changed spline into one world box.
+	var dirty := AABB()
+	var have := false
+	for sid in changed_ids:
+		var path := _find_spline_by_id(sid)
+		if path != null:
+			var curr := _spline_footprint_aabb(path)
+			if curr.size != Vector3.ZERO:
+				dirty = curr if not have else dirty.merge(curr)
+				have = true
+		if _last_paint_aabb.has(sid):
+			var prev: AABB = _last_paint_aabb[sid]
+			if prev.size != Vector3.ZERO:
+				dirty = prev if not have else dirty.merge(prev)
+				have = true
+	if not have:
+		# Splines vanished (e.g. removed) — let the full path reconcile the layer.
+		_refresh_owner(owner, false, [])
+		return
+
+	# CRITICAL: clear_layer_in_area drops WHOLE tiles (tile_size verts) that the box touches, so the area
+	# actually cleared is the box grown out to tile boundaries — larger than `dirty`. Clip the repaint to
+	# that SAME grown box, or a neighbour's samples in a dropped tile outside `dirty` are erased and never
+	# repainted (the far-away "cut"). Tile boundaries sit at world multiples of tile_size * vertex_spacing.
+	var clip_box := _snap_aabb_to_tiles(dirty, _layer_tile_world(layer_id))
+
+	var blend := _layer_blend_for(layer_id)
+	# Start from a clean edited-flag slate so the targeted update_maps below uploads EXACTLY the regions
+	# this bake touches. composite_region sets is_edited but update_maps never clears it, so without this
+	# every later partial would re-push every region edited this session (the far-spline slowdown).
+	_clear_region_edited_flags()
+	terrain.data.clear_layer_in_area(layer_id, clip_box)
+	# Re-seat ONLY the points the user actually moved, against the freshly-cleared base inside the box.
+	# Snapping every point here is the snap-to-self regression: an unmoved point elsewhere reads terrain
+	# the box clear didn't touch (its own ridge) and climbs. A whole-spline / node move instead takes the
+	# full-refresh path, which clears everything first and re-snaps all points. Snap is world-Y only, so
+	# the XZ box just cleared stays valid.
+	if snap_to_surface:
+		for sid in changed_ids:
+			var sp := _find_spline_by_id(sid)
+			if sp != null:
+				_apply_surface_snap_points(sp, _moved_point_indices(sp))
+	for s in _tools_on_owner(owner):
+		if not s._overlaps_box(clip_box):
+			continue
+		s._clip_aabb = clip_box
+		s._paint_into(layer_id, blend)
+		s._clip_aabb = AABB()
+	# Remember the (possibly snapped) point layout so the next edit only re-snaps what changes again.
+	for sid in changed_ids:
+		var cp := _find_spline_by_id(sid)
+		if cp != null:
+			_update_curve_cache(cp)
+	# Push only the regions this bake actually edited. (The bound default is all_regions=TRUE, which
+	# rebuilds the whole height texture array from every region — the reason a far-away spline was slow.)
+	terrain.data.update_maps(_map_type(), false, false)
+
+
+## Clear the per-region "edited" GPU-push flag on every active region. update_maps(all_regions=false)
+## pushes flagged regions but doesn't reset the flag, so the dirty-rect bake clears the slate first and
+## lets its own clear/paint re-flag exactly what it touched. Safe to clear globally: the brush's undo uses
+## layer-tile snapshots (not this flag), and the editor's sculpt brush sets+clears it within one operation.
+func _clear_region_edited_flags() -> void:
+	if not terrain or not terrain.data or not terrain.data.has_method("get_region_locations") \
+			or not terrain.data.has_method("get_region"):
+		return
+	for loc in terrain.data.get_region_locations():
+		var r = terrain.data.get_region(loc)
+		if r and r.has_method("set_edited"):
+			r.set_edited(false)
+
+
+## A direct Path3D child of this node by instance id, or null (e.g. it was removed before the bake ran).
+func _find_spline_by_id(id: int) -> Path3D:
+	for c in get_children():
+		if c is Path3D and c.get_instance_id() == id:
+			return c
+	return null
+
+
+## True if any of this node's spline footprints overlaps `box` (XZ; footprint Y spans are nominal). Drives
+## which layer-mates a dirty-rect refresh must repaint.
+func _overlaps_box(box: AABB) -> bool:
+	for s in _get_splines():
+		var fp := _spline_footprint_aabb(s)
+		if fp.size != Vector3.ZERO and fp.intersects(box):
+			return true
+	return false
+
+
+## Grow a world box outward in XZ to the layer's tile grid (multiples of `step`), so it coincides exactly
+## with the set of tiles clear_layer_in_area will drop. Y (the nominal footprint span) is left untouched.
+func _snap_aabb_to_tiles(box: AABB, step: float) -> AABB:
+	if step <= 0.0:
+		return box
+	var min_x := floorf(box.position.x / step) * step
+	var min_z := floorf(box.position.z / step) * step
+	var max_x := ceilf((box.position.x + box.size.x) / step) * step
+	var max_z := ceilf((box.position.z + box.size.z) / step) * step
+	return AABB(Vector3(min_x, box.position.y, min_z), Vector3(max_x - min_x, box.size.y, max_z - min_z))
+
+
+## World size of one layer tile edge = tile_size (verts) * vertex_spacing. Tile boundaries land on world
+## multiples of this (region_size is a multiple of tile_size, so the grid is global with no half-offset).
+func _layer_tile_world(layer_id: int) -> float:
+	var vs: float = terrain.vertex_spacing if terrain else 1.0
+	var layer := _layer_at(layer_id)
+	var ts := 64
+	if layer and layer.has_method("get_tile_size"):
+		ts = layer.get_tile_size()
+	return float(ts) * vs
+
+
 ## Paint this node's splines into the given layer (-1 = destructive). Records the per-spline footprint
 ## cache. Driven by _refresh_owner for self and every layer-mate.
 func _paint_into(layer_id: int, blend: int) -> void:
 	_layer_id = layer_id
 	_blend = blend
+	var clipping := _clip_aabb.size != Vector3.ZERO
 	for path in _get_splines():
 		if not _spline_paintable(path):
+			continue
+		# Dirty-rect repaint: a spline that doesn't touch the box contributes nothing inside it — skip its
+		# whole rasterise (its cached footprint outside the box is untouched and stays valid).
+		if clipping and not _spline_footprint_aabb(path).intersects(_clip_aabb):
 			continue
 		_paint_spline(path)
 		if layer_id >= 0:
@@ -500,7 +732,21 @@ func _unique_brush_layer_name(base: String) -> String:
 ## clamps it against what's beneath); ADD applies the signed delta. The per-pixel shape/taper is baked
 ## into `target`/`delta` by the subclass, so weight stays 1 (the rim eases as target → base). Falls
 ## back to destructive set_height when no reserved layer is available.
+## True when `p` is inside the active dirty-rect clip box (XZ), or always when no clip is set. Lets a
+## partial redraw rasterise a spline's full field (needed for correct distances) but only WRITE in the box.
+## Max edge is EXCLUSIVE to match the tile-clear's half-open pixel span [min, max): the vertex line on the
+## max boundary lives in the next (un-dropped) tile, so painting it would double-add for ADD-blend brushes.
+func _clip_contains(p: Vector3) -> bool:
+	if _clip_aabb.size == Vector3.ZERO:
+		return true
+	var lo := _clip_aabb.position
+	var hi := lo + _clip_aabb.size
+	return p.x >= lo.x and p.x < hi.x and p.z >= lo.z and p.z < hi.z
+
+
 func _paint_height(world_pos: Vector3, target: float, delta: float) -> void:
+	if not _clip_contains(world_pos):
+		return
 	if _layer_id < 0:
 		terrain.data.set_height(world_pos, target)
 		return
@@ -513,11 +759,15 @@ func _paint_height(world_pos: Vector3, target: float, delta: float) -> void:
 ## Write a packed control value (texture ids + blend + uv) into the layer. Falls back to the
 ## destructive set_control path internally when _layer_id is invalid (set_control_on_layer handles it).
 func _paint_control(world_pos: Vector3, control: int, weight: float) -> void:
+	if not _clip_contains(world_pos):
+		return
 	terrain.data.set_control_on_layer(_layer_id, world_pos, control, weight)
 
 
 ## Write an albedo+coverage colour into the layer (alpha-over composite).
 func _paint_color(world_pos: Vector3, color: Color, weight: float) -> void:
+	if not _clip_contains(world_pos):
+		return
 	terrain.data.set_color_on_layer(_layer_id, world_pos, color, weight)
 
 
@@ -526,6 +776,7 @@ func _seed_cache() -> void:
 		var a := _spline_footprint_aabb(s)
 		if a.size != Vector3.ZERO:
 			_last_paint_aabb[s.get_instance_id()] = a
+		_curve_cache[s.get_instance_id()] = _curve_point_array(s)
 
 
 ## ---- Undo / redo (editor only) ----
@@ -630,6 +881,67 @@ func _apply_surface_snap() -> void:
 	for e in new_pts:
 		e[0].set_point_position(e[1], e[2])
 	_suspend_auto = false
+
+
+## Snap a specific set of a single spline's points onto the surface (world Y only), in place, no undo
+## action. The dirty-rect path uses this to re-seat ONLY the points the user moved — against the base
+## inside the freshly-cleared box — instead of re-snapping the whole spline (the snap-to-self regression).
+func _apply_surface_snap_points(path: Path3D, indices: PackedInt32Array) -> void:
+	if not is_configured() or indices.is_empty():
+		return
+	var c: Curve3D = path.curve
+	if c == null:
+		return
+	var xf: Transform3D = path.global_transform
+	var inv := xf.affine_inverse()
+	_suspend_auto = true
+	for idx in indices:
+		if idx < 0 or idx >= c.point_count:
+			continue
+		var local := c.get_point_position(idx)
+		var world: Vector3 = xf * local
+		var h: float = terrain.data.get_height(Vector3(world.x, 0.0, world.z))
+		if not is_finite(h):
+			continue
+		world.y = h + surface_offset
+		var new_local: Vector3 = inv * world
+		if not new_local.is_equal_approx(local):
+			c.set_point_position(idx, new_local)
+	_suspend_auto = false
+
+
+## Local point positions of a spline's curve, for moved-point detection.
+func _curve_point_array(path: Path3D) -> PackedVector3Array:
+	var out := PackedVector3Array()
+	var c: Curve3D = path.curve if is_instance_valid(path) else null
+	if c == null:
+		return out
+	for i in range(c.point_count):
+		out.append(c.get_point_position(i))
+	return out
+
+
+## Indices of `path`'s curve points that moved since the last bake (vs `_curve_cache`). Returns EVERY
+## index when the point count changed (add/remove/insert) or there's no cache yet — so the dirty-rect
+## snap falls back to re-seating the whole spline in those cases rather than guessing.
+func _moved_point_indices(path: Path3D) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	var cur := _curve_point_array(path)
+	var prev: PackedVector3Array = _curve_cache.get(path.get_instance_id(), PackedVector3Array())
+	if prev.size() != cur.size():
+		for i in range(cur.size()):
+			out.append(i)
+		return out
+	for i in range(cur.size()):
+		if not prev[i].is_equal_approx(cur[i]):
+			out.append(i)
+	return out
+
+
+## Record a spline's current point layout as the new baseline for moved-point detection.
+func _update_curve_cache(path: Path3D) -> void:
+	if is_instance_valid(path):
+		_curve_cache[path.get_instance_id()] = _curve_point_array(path)
 
 
 ## Compute the snap edits for every child spline: [old_points, new_points], each an Array of
