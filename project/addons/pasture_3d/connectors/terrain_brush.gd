@@ -125,6 +125,11 @@ func _ready() -> void:
 	_ready_done = true
 	# A freshly added/duplicated brush may have made an existing brush's curve newly shared — refresh all.
 	_refresh_group_warnings()
+	# Most shape properties are plain @export (no setter), so they wouldn't auto-refresh on inspector edit.
+	# Hook the inspector's property_edited signal instead (gated to the selected brush) — one hook covers
+	# every brush's every property without per-property setters.
+	if Engine.is_editor_hint():
+		_connect_inspector_refresh()
 
 
 func _notification(what: int) -> void:
@@ -270,6 +275,26 @@ func _refresh_group_warnings() -> void:
 	for n in get_tree().get_nodes_in_group(BRUSH_GROUP):
 		if n is Pasture3DTerrainBrush:
 			n.update_configuration_warnings()
+
+
+## Connect (idempotently) to the editor inspector's property_edited signal so editing a shape property
+## re-bakes. EditorInterface is a @tool-accessible singleton in Godot 4.2+. Safe no-op if unavailable.
+func _connect_inspector_refresh() -> void:
+	if not Engine.is_editor_hint():
+		return
+	var inspector := EditorInterface.get_inspector()
+	if inspector and not inspector.property_edited.is_connected(_on_inspector_property_edited):
+		inspector.property_edited.connect(_on_inspector_property_edited)
+
+
+## A property was edited in the inspector. Re-bake only when THIS brush is the one being edited (the
+## signal is global; get_edited_object() disambiguates). Spline edits go through curve.changed instead.
+func _on_inspector_property_edited(_property: StringName) -> void:
+	if not is_inside_tree():
+		return
+	var inspector := EditorInterface.get_inspector()
+	if inspector and inspector.get_edited_object() == self:
+		_schedule_refresh()
 
 
 ## ---- Inspector: the tool-layer dropdown (bind by owner_id, display live name) ----
@@ -1103,6 +1128,25 @@ func _cross_lut(c: Curve) -> PackedFloat32Array:
 	lut.resize(RAMP_LUT_N)
 	for i in range(RAMP_LUT_N):
 		lut[i] = _cross(c, float(i) / float(RAMP_LUT_N - 1))
+	return lut
+
+
+## Ridge cross-section, corrected convention: 1 at the centre (d=0) → 0 at the skirt edge (d=1), but a
+## custom Curve is read edge→centre (sampled at 1-d) so an INCREASING curve makes a natural peaked ridge,
+## consistent with Trough's bank_profile. Default (no curve) = rounded cosine — identical to the old
+## behaviour (cosine is symmetric), so default-shaped ridges are unchanged; only custom-curve ridges flip.
+func _ridge_cross(c: Curve, d: float) -> float:
+	d = clampf(d, 0.0, 1.0)
+	if c:
+		return c.sample_baked(1.0 - d)
+	return 0.5 + 0.5 * cos(d * PI)
+
+
+func _ridge_cross_lut(c: Curve) -> PackedFloat32Array:
+	var lut := PackedFloat32Array()
+	lut.resize(RAMP_LUT_N)
+	for i in range(RAMP_LUT_N):
+		lut[i] = _ridge_cross(c, float(i) / float(RAMP_LUT_N - 1))
 	return lut
 
 

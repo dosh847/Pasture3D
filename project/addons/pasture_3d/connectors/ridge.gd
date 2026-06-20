@@ -91,7 +91,7 @@ func _paint_spline(path: Path3D) -> void:
 			"taper_ends": taper_ends, "blend": _blend, "composite": not _defer_composite,
 			"noise": noise, "noise_strength": noise_strength,
 		}
-		terrain.data.stamp_ridge_line(_layer_id, pts, _clip_aabb, params, _cross_lut(profile))
+		terrain.data.stamp_ridge_line(_layer_id, pts, _clip_aabb, params, _ridge_cross_lut(profile))
 		return
 
 	# One O(cells) polyline feature field replaces the per-pixel O(segments) closest-point scan: each
@@ -103,7 +103,7 @@ func _paint_spline(path: Path3D) -> void:
 	var total: float = fld[3]
 	var sign := -1.0 if invert else 1.0
 	var reach := width + falloff
-	var edge_val := _cross(profile, 1.0) # profile value at the skirt edge, feathered out over `falloff`
+	var edge_val := _ridge_cross(profile, 1.0) # profile value at the skirt edge, feathered out over `falloff`
 
 	for iz in range(gh):
 		var z := min_z + iz * vs
@@ -119,7 +119,7 @@ func _paint_spline(path: Path3D) -> void:
 			var e := _end_taper(al_arr[i], total)
 			var p: float
 			if lat <= width:
-				p = _cross(profile, lat / maxf(width, 0.001))
+				p = _ridge_cross(profile, lat / maxf(width, 0.001))
 			else:
 				p = edge_val * (1.0 - clampf((lat - width) / maxf(falloff, 0.001), 0.0, 1.0))
 			if p > 0.0:
