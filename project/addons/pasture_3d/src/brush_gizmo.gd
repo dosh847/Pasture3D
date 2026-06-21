@@ -409,7 +409,7 @@ func _stub_offset(p_node: Node3D, p_path: Path3D, p_idx: int, p_kind: int) -> Ve
 func _is_closed(p_node: Node3D, p_path: Path3D) -> bool:
 	var brush := p_node as Pasture3DTerrainBrush
 	if brush != null:
-		return brush._min_points() >= 3
+		return brush._is_closed()
 	return p_path.curve.point_count >= 3
 
 

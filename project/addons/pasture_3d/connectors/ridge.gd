@@ -30,8 +30,22 @@ enum BlendMode { REPLACE, ADD, MAX, MIN }
 @export var profile: Curve
 
 @export_group("Crest line")
+## Connect the last point back to the first, forming a closed ring ridge instead of an open line.
+@export var closed: bool = false:
+	set(v):
+		closed = v
+		_schedule_refresh() # re-bake so the ring closes/opens immediately (and undo-coherently)
+		if is_inside_tree():
+			update_gizmos() # redraw the loop wrap segment + tangents
 ## Crest follows the spline's own Y (true) or the terrain height + crest_height (false).
 @export var follow_spline_height: bool = true
+## Drape the cross-section onto the ground beneath: 0 = level (skirts stay at the crest reference, so
+## on a hillside the uphill side floats and the downhill side buries); 1 = the cross-section banks onto
+## the slope, each skirt meeting the ground at its own height.
+@export_range(0.0, 1.0) var slope_tilt: float = 0.0:
+	set(v):
+		slope_tilt = clampf(v, 0.0, 1.0)
+		_schedule_refresh()
 ## Metres at each end over which the crest eases to 0 (blends into the ground).
 @export var taper_ends: float = 0.0
 
@@ -57,6 +71,10 @@ func _spline_basename() -> String:
 	return "Ridge"
 
 
+func _is_closed() -> bool:
+	return closed
+
+
 func _padding() -> float:
 	return width + falloff + 2.0
 
@@ -73,6 +91,8 @@ func _paint_spline(path: Path3D) -> void:
 	var pts := _baked_world_points(path)
 	if pts.size() < 2:
 		return
+	if closed:
+		pts.append(pts[0]) # wrap the ring: rasterisers see the last->first segment like any other
 	var vs: float = terrain.vertex_spacing
 	var b := _snapped_bounds(_spline_footprint_aabb(path), vs)
 	var min_x: float = b[0]
@@ -89,10 +109,11 @@ func _paint_spline(path: Path3D) -> void:
 			"min_x": min_x, "min_z": min_z, "vs": vs, "gw": gw, "gh": gh,
 			"crest_height": crest_height, "width": width, "falloff": falloff,
 			"invert": invert, "follow_spline_height": follow_spline_height,
-			"taper_ends": taper_ends, "blend": _blend, "composite": not _defer_composite,
-			"noise": noise, "noise_strength": noise_strength,
+			"taper_ends": (0.0 if closed else taper_ends), "blend": _blend, "composite": not _defer_composite,
+			"noise": noise, "noise_strength": noise_strength, "slope_tilt": slope_tilt,
 		}
-		if not follow_spline_height:
+		# The drape needs the below-ground grid too, not just the follow=false path.
+		if not follow_spline_height or slope_tilt > 0.0:
 			params["base_below"] = _base_below_grid(min_x, min_z, vs, gw, gh)
 		terrain.data.stamp_ridge_line(_layer_id, pts, _clip_aabb, params, _ridge_cross_lut(profile))
 		return
@@ -119,6 +140,8 @@ func _paint_spline(path: Path3D) -> void:
 			var x := min_x + ix * vs
 			var pos := Vector3(x, 0.0, z)
 			var base_y: float = by_arr[i] if follow_spline_height else _base_height_below(pos)
+			if slope_tilt > 0.0:
+				base_y = lerpf(base_y, _base_height_below(pos), slope_tilt)
 			var e := _end_taper(al_arr[i], total)
 			var p: float
 			if lat <= width:
@@ -133,7 +156,7 @@ func _paint_spline(path: Path3D) -> void:
 
 
 func _end_taper(along: float, total: float) -> float:
-	if taper_ends <= 0.0:
+	if taper_ends <= 0.0 or closed:
 		return 1.0
 	var d := minf(along, total - along)
 	return clampf(d / taper_ends, 0.0, 1.0)

@@ -388,6 +388,9 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 	const int blend = (int)p_params.get("blend", 0);
 	const bool composite = p_params.get("composite", true);
 	const double noise_strength = p_params.get("noise_strength", 0.0);
+	// Slope tilt (0..1): drape the cross-section onto the ground beneath. 0 = level (anchor stays at the
+	// crest reference); 1 = the anchor follows the per-cell below-ground, so the ridge banks onto a hill.
+	const double slope_tilt = CLAMP((double)p_params.get("slope_tilt", 0.0), 0.0, 1.0);
 	Object *noise_obj = p_params.get("noise", Variant());
 	Ref<FastNoiseLite> noise = Object::cast_to<FastNoiseLite>(noise_obj);
 
@@ -435,6 +438,12 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 			} else {
 				const float bb = has_below ? base_below[i] : (float)NAN;
 				by = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
+			}
+			if (slope_tilt > 0.0) {
+				// Blend the anchor toward the per-cell ground so the cross-section drapes onto the slope.
+				const float bb = has_below ? base_below[i] : (float)NAN;
+				const double ground = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
+				by += (ground - by) * slope_tilt;
 			}
 			double e = 1.0;
 			if (taper_ends > 0.0) {
@@ -486,6 +495,9 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 	const int blend = (int)p_params.get("blend", 0);
 	const bool composite = p_params.get("composite", true);
 	const double noise_strength = p_params.get("noise_strength", 0.0);
+	// Slope tilt (0..1): drape the channel's rim reference onto the ground beneath, so a trough cut into
+	// a hillside banks with the slope instead of holding a level rim. 0 = level; 1 = follows the ground.
+	const double slope_tilt = CLAMP((double)p_params.get("slope_tilt", 0.0), 0.0, 1.0);
 	Object *noise_obj = p_params.get("noise", Variant());
 	Ref<FastNoiseLite> noise = Object::cast_to<FastNoiseLite>(noise_obj);
 
@@ -533,6 +545,12 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 			} else {
 				const float bb = has_below ? base_below[i] : (float)NAN;
 				top_y = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
+			}
+			if (slope_tilt > 0.0) {
+				// Blend the rim toward the per-cell ground so the channel drapes onto the slope.
+				const float bb = has_below ? base_below[i] : (float)NAN;
+				const double ground = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
+				top_y += (ground - top_y) * slope_tilt;
 			}
 			double e = 1.0;
 			if (taper_ends > 0.0) {

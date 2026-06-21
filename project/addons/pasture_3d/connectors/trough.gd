@@ -38,9 +38,22 @@ enum BlendMode { REPLACE, ADD, MAX, MIN }
 @export var falloff: float = 6.0
 
 @export_group("Bed line")
+## Connect the last point back to the first, forming a closed ring channel (a moat) instead of a line.
+@export var closed: bool = false:
+	set(v):
+		closed = v
+		_schedule_refresh() # re-bake so the ring closes/opens immediately (and undo-coherently)
+		if is_inside_tree():
+			update_gizmos() # redraw the loop wrap segment + tangents
 ## Bed reference = the spline's own Y (true; author flow by drawing downhill) or the per-pixel
 ## terrain height (false; a uniform-depth ditch that hugs the ground).
 @export var follow_spline_height: bool = true
+## Drape the channel rim onto the ground beneath: 0 = level rim; 1 = the rim banks onto the slope so a
+## trough cut across a hillside sits naturally instead of holding one flat reference height.
+@export_range(0.0, 1.0) var slope_tilt: float = 0.0:
+	set(v):
+		slope_tilt = clampf(v, 0.0, 1.0)
+		_schedule_refresh()
 ## Metres at each end over which the depth eases to 0 (mouth / source blend).
 @export var taper_ends: float = 0.0
 
@@ -65,6 +78,10 @@ func _spline_basename() -> String:
 	return "Channel"
 
 
+func _is_closed() -> bool:
+	return closed
+
+
 func _padding() -> float:
 	return bed_half_width + bank_width + falloff + 2.0
 
@@ -81,6 +98,8 @@ func _paint_spline(path: Path3D) -> void:
 	var pts := _baked_world_points(path)
 	if pts.size() < 2:
 		return
+	if closed:
+		pts.append(pts[0]) # wrap the ring: rasterisers see the last->first segment like any other
 	var vs: float = terrain.vertex_spacing
 	var b := _snapped_bounds(_spline_footprint_aabb(path), vs)
 	var min_x: float = b[0]
@@ -97,10 +116,11 @@ func _paint_spline(path: Path3D) -> void:
 			"min_x": min_x, "min_z": min_z, "vs": vs, "gw": gw, "gh": gh,
 			"bed_half_width": bed_half_width, "bank_width": bank_width, "falloff": falloff,
 			"depth": depth, "flat_bed": flat_bed, "follow_spline_height": follow_spline_height,
-			"taper_ends": taper_ends, "blend": _blend, "composite": not _defer_composite,
-			"noise": noise, "noise_strength": noise_strength,
+			"taper_ends": (0.0 if closed else taper_ends), "blend": _blend, "composite": not _defer_composite,
+			"noise": noise, "noise_strength": noise_strength, "slope_tilt": slope_tilt,
 		}
-		if not follow_spline_height:
+		# The drape needs the below-ground grid too, not just the follow=false path.
+		if not follow_spline_height or slope_tilt > 0.0:
 			params["base_below"] = _base_below_grid(min_x, min_z, vs, gw, gh)
 		terrain.data.stamp_trough_line(_layer_id, pts, _clip_aabb, params, _ramp_lut(bank_profile))
 		return
@@ -126,6 +146,8 @@ func _paint_spline(path: Path3D) -> void:
 			var x := min_x + ix * vs
 			var pos := Vector3(x, 0.0, z)
 			var top_y: float = by_arr[i] if follow_spline_height else _base_height_below(pos)
+			if slope_tilt > 0.0:
+				top_y = lerpf(top_y, _base_height_below(pos), slope_tilt)
 			var e := _end_taper(al_arr[i], total)
 			var bed_y := top_y - depth * e
 			var h: float
@@ -149,7 +171,7 @@ func _paint_spline(path: Path3D) -> void:
 
 
 func _end_taper(along: float, total: float) -> float:
-	if taper_ends <= 0.0:
+	if taper_ends <= 0.0 or closed:
 		return 1.0
 	var d := minf(along, total - along)
 	return clampf(d / taper_ends, 0.0, 1.0)

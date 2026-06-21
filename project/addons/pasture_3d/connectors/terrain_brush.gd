@@ -1230,7 +1230,7 @@ func _smooth_handle(path: Path3D, idx: int) -> Vector3:
 	var c := path.curve
 	var n := c.point_count
 	var p := c.get_point_position(idx)
-	var closed := _min_points() >= 3
+	var closed := _is_closed()
 	var prev_i := idx - 1
 	if prev_i < 0:
 		prev_i = (n - 1) if closed else idx
@@ -1255,7 +1255,7 @@ func _nearest_segment_index(path: Path3D, world: Vector3) -> int:
 	var n := c.point_count
 	if n < 2:
 		return n
-	var closed := _min_points() >= 3
+	var closed := _is_closed()
 	var segs := n if closed else n - 1
 	var best_i := n # default: append
 	var best_d := INF
@@ -1701,6 +1701,13 @@ func _spline_paintable(path: Path3D) -> bool:
 
 func _min_points() -> int:
 	return 2
+
+
+## Whether the loop wraps last-point-to-first (a closed ring). Closed-fill brushes (Mound/Plow/Splat,
+## min ≥ 3 points) are always closed; the open polyline brushes (Ridge/Trough) override this with a
+## runtime toggle. Drives loop-wrap in the gizmo (tangents, segment insertion) and the rasterizers.
+func _is_closed() -> bool:
+	return _min_points() >= 3
 
 
 func _paint_spline(_path: Path3D) -> void:
