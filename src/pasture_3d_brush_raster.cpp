@@ -235,19 +235,11 @@ float raster_polyline_field(const PackedVector3Array &pts, double min_x, double 
 } // namespace
 
 void Pasture3DData::_stamp_write(Pasture3DLayer *p_layer, const int p_layer_id, const bool p_composite,
-		Vector2i &r_loc, Pasture3DRegion *&r_region, const Vector3 &p_pos, const real_t p_value, const bool p_add) {
-	if (p_composite) {
-		// Full-refresh path: keep the per-pixel composite semantics of the public API.
-		if (p_add) {
-			add_height_on_layer(p_layer_id, p_pos, p_value, 1.0, true);
-		} else {
-			set_height_on_layer(p_layer_id, p_pos, p_value, 1.0, true);
-		}
-		return;
-	}
+		Vector2i &r_loc, Pasture3DRegion *&r_region, const Vector3 &p_pos, const real_t p_value, const int p_blend) {
+	// p_blend matches Pasture3DLayer::BlendMode / the GDScript BLEND_* consts: 0=REPLACE,1=ADD,2=MAX,3=MIN.
 	if (!p_layer) {
 		// No stack / invalid layer: destructive fallback (the deferred partial path normally has a layer).
-		if (p_add) {
+		if (p_blend == 1) {
 			set_height(p_pos, get_height(p_pos) + p_value);
 		} else {
 			set_height(p_pos, p_value);
@@ -263,13 +255,26 @@ void Pasture3DData::_stamp_write(Pasture3DLayer *p_layer, const int p_layer_id, 
 	if (!r_region || r_region->is_deleted()) {
 		return;
 	}
-	if (p_add) {
-		const real_t cur = p_layer->get_weight(region_loc, img_pos) > 0.f ? p_layer->get_value(region_loc, img_pos) : 0.f;
-		p_layer->set_sample(region_loc, img_pos, cur + p_value, 1.0);
-	} else {
-		p_layer->set_sample(region_loc, img_pos, p_value, 1.0);
+	// Combine with any same-layer value already written THIS bake, by the brush's blend mode, so two
+	// overlapping tools on one layer stack correctly (MAX keeps the taller, MIN the deeper, ADD sums)
+	// instead of the later tool overwriting the earlier one — the "cut" two mounds carved in each other.
+	// The bake clears the layer in the box first, so the first tool finds it uncovered and just writes.
+	real_t v = p_value;
+	if (p_layer->get_weight(region_loc, img_pos) > 0.f) {
+		const real_t cur = p_layer->get_value(region_loc, img_pos);
+		switch (p_blend) {
+			case 1: v = cur + p_value; break;   // ADD
+			case 2: v = MAX(cur, p_value); break; // MAX
+			case 3: v = MIN(cur, p_value); break; // MIN
+			default: break;                       // REPLACE: last write wins
+		}
 	}
+	p_layer->set_sample(region_loc, img_pos, v, 1.0);
 	r_region->set_modified(true);
+	if (p_composite) {
+		// Full-refresh path: keep the public API's per-pixel composite (layer-vs-below) up to date.
+		composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
+	}
 }
 
 // ---- Closed-loop dome/plateau (Pasture3DMound) ----
@@ -307,7 +312,7 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	const double ramp_denom = MAX(falloff_width, 0.001);
 	const bool add = (blend == 1); // BLEND_ADD
 
-	Pasture3DLayer *wlayer = (composite || _layer_stack.is_null()) ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
+	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
 	Vector2i wloc(0x7fffffff, 0x7fffffff);
 	Pasture3DRegion *wregion = nullptr;
 	// Below-layer base: the composite of layers beneath this brush's, so it samples the ground under its
@@ -352,7 +357,7 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 			if (noise.is_valid()) {
 				amp += noise_strength * noise->get_noise_2d(x, z) * profile;
 			}
-			_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? amp : (base_y + amp), add);
+			_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? amp : (base_y + amp), blend);
 		}
 	}
 }
@@ -393,7 +398,7 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 	const float edge_val = raster_ramp(p_lut, 1.0f); // _cross at t=1
 	const bool add = (blend == 1);
 
-	Pasture3DLayer *wlayer = (composite || _layer_stack.is_null()) ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
+	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
 	Vector2i wloc(0x7fffffff, 0x7fffffff);
 	Pasture3DRegion *wregion = nullptr;
 	// Below-layer base: the composite of layers beneath this brush's, so it samples the ground under its
@@ -448,7 +453,7 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 				if (noise.is_valid()) {
 					amp += noise_strength * noise->get_noise_2d(x, z) * p;
 				}
-				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? amp : (by + amp), add);
+				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? amp : (by + amp), blend);
 			}
 		}
 	}
@@ -491,7 +496,7 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 	const double depth_d = MAX(depth, 0.001);
 	const bool add = (blend == 1);
 
-	Pasture3DLayer *wlayer = (composite || _layer_stack.is_null()) ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
+	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
 	Vector2i wloc(0x7fffffff, 0x7fffffff);
 	Pasture3DRegion *wregion = nullptr;
 	// Below-layer base: the composite of layers beneath this brush's, so it samples the ground under its
@@ -558,7 +563,7 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 				const double mask = CLAMP((top_y - h) / depth_d, 0.0, 1.0);
 				h = MIN(h + noise_strength * noise->get_noise_2d(x, z) * mask, top_y);
 			}
-			_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? (h - top_y) : h, add);
+			_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? (h - top_y) : h, blend);
 		}
 	}
 }
@@ -599,7 +604,7 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 	const double ramp_denom = MAX(falloff_width, 0.001);
 	const bool add = (blend == 1); // BLEND_ADD
 
-	Pasture3DLayer *wlayer = (composite || _layer_stack.is_null()) ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
+	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
 	Vector2i wloc(0x7fffffff, 0x7fffffff);
 	Pasture3DRegion *wregion = nullptr;
 	// Below-layer base: the composite of layers beneath this brush's, so it samples the ground under its
@@ -659,7 +664,7 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 			} else {
 				base_y = plane_y;
 			}
-			_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? amp : (base_y + amp), add);
+			_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? amp : (base_y + amp), blend);
 		}
 	}
 }

@@ -268,7 +268,7 @@ public:
 	// lookups (the bottleneck for write-heavy brushes like Trough). r_value is the target (set) or the
 	// delta (add). Not bound — internal helper for stamp_*.
 	void _stamp_write(class Pasture3DLayer *p_layer, const int p_layer_id, const bool p_composite,
-			Vector2i &r_loc, Pasture3DRegion *&r_region, const Vector3 &p_pos, const real_t p_value, const bool p_add);
+			Vector2i &r_loc, Pasture3DRegion *&r_region, const Vector3 &p_pos, const real_t p_value, const int p_blend);
 	// Garbage-collect a layer's fully-uncovered tiles (frees memory after erasing/moving a feature).
 	void gc_layer(const int p_layer_id);
 	void set_active_layer(const int p_layer_id);
