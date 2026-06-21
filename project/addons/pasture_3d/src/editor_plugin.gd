@@ -486,6 +486,8 @@ func consume_hotkey(p_event: InputEventKey) -> bool:
 			ui.toolbar.get_button("Height").set_pressed(true)
 		KEY_S:
 			ui.toolbar.get_button("Slope").set_pressed(true)
+		KEY_G:
+			ui.toolbar.get_button("EraseLayer").set_pressed(true)
 		KEY_C:
 			ui.toolbar.get_button("PaintColor").set_pressed(true)
 		KEY_N:

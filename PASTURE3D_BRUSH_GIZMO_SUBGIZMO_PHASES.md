@@ -58,13 +58,12 @@ surface normal, so banking to the hillside needs rasterizer (C++) work + a rebui
 Other still-open: close/open-loop toggle.
 
 ## Phase 5 — refinements & backlog
-- **Paint-stroke undo on landscape HEIGHT does not undo** (user report 2026-06-20). This is the
-  shallow-copy aliasing defect already diagnosed in `.claude/specs/per-stroke-undo-spec.md`
-  (`pasture_3d_editor.cpp` `_store_undo` shares `_layer_undo_tiles`/`_layer_redo_tiles` with the
-  committed payload via non-recursive `Dictionary::duplicate()`, then `stop_operation` `clear()`s
-  them — committed undo/redo end up with empty `layer_tiles`). Fix per that spec §4(A): deep-isolate
-  the tile payloads at commit; also isolate the redo payload (line 706); add the integration test.
-  **C++ change — needs engine rebuild.**
+- **Paint-stroke undo on landscape HEIGHT does not undo** — ✅ DONE (commit 875c570, built into the
+  live DLL in bd51cca). The shallow-copy aliasing defect diagnosed in
+  `.claude/specs/per-stroke-undo-spec.md` is fixed: `_store_undo` now deep-isolates the tile payloads
+  via `Pasture3DLayer::clone_tile_snapshot` (editor.cpp ~683-695) and both the undo and redo payloads
+  use `.duplicate()`, so `stop_operation`'s `clear()` no longer empties committed history. Integration
+  test added in `unit_testing.cpp`. The hidden-layer paint guard landed in the same commit.
 - "Moving layers cleared the paint layer" — suspected GPU re-push gap in `layer_move` (push all
   affected regions, not just the moved layer's). Needs the Refresh-restores-it confirmation.
 - **Slope tilt** (moved from Phase 4) — bank ridge/trough cross-sections to the surface normal; needs

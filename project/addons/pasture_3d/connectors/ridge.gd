@@ -8,6 +8,7 @@
 # See PASTURE3D_LANDSCAPE_TOOLS_SPEC.md §5. Paints non-destructively into a reserved layer via the
 # Pasture3DTerrainBrush base.
 @tool
+@icon("res://addons/pasture_3d/icons/brush_ridge.svg")
 class_name Pasture3DRidge
 extends Pasture3DTerrainBrush
 

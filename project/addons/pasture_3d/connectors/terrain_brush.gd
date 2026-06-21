@@ -15,6 +15,7 @@
 # add_height_on_layer / clear_layer_in_area / composite_region / update_maps), so no engine rebuild is
 # required. On a build without that API it falls back to destructive set_height (works, not idempotent).
 @tool
+@icon("res://addons/pasture_3d/icons/brush_terrain.svg")
 class_name Pasture3DTerrainBrush
 extends Node3D
 
@@ -323,8 +324,8 @@ func _on_inspector_property_edited(_property: StringName) -> void:
 
 ## ---- Inspector: the tool-layer dropdown (bind by owner_id, display live name) ----
 
-func _get_property_list() -> Array:
-	var props: Array = []
+func _get_property_list() -> Array[Dictionary]:
+	var props: Array[Dictionary] = []
 	# The real binding: persisted, hidden from the inspector (shown via `tool_layer`).
 	props.append({"name": "_layer_owner", "type": TYPE_STRING, "usage": PROPERTY_USAGE_STORAGE})
 	props.append({"name": "Layer", "type": TYPE_NIL, "usage": PROPERTY_USAGE_GROUP, "hint_string": ""})

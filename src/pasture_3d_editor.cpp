@@ -106,6 +106,14 @@ void Pasture3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 	// _stroke_layer is captured in start_operation when this is a non-destructive height-layer edit.
 	// When set, height writes go into that layer and the touched rects are recomposited (see below).
 	const bool route_to_layer = _stroke_layer.is_valid() && map_type == TYPE_HEIGHT;
+	// Erase is purely a non-destructive layer op: it lowers the active layer's coverage so the
+	// composite reveals the layers beneath. With no routed overlay layer there is nothing to reveal,
+	// so the stroke is a no-op (and must not fall through to the destructive region-map write below).
+	// The Base layer is the bottom of the stack — there is nothing under it to reveal — so erasing it
+	// is also a no-op rather than punching holes in the dense base.
+	if (_operation == ERASE && (!route_to_layer || _stroke_layer->is_base())) {
+		return;
+	}
 	_stroke_dirty.clear(); // Scratch: the region rects this single call touches.
 
 	bool modifier_alt = _brush_data["modifier_alt"];
@@ -559,11 +567,29 @@ void Pasture3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 			}
 			backup_region(region);
 			if (route_to_layer) {
-				// Non-destructive: author the brush-computed height into the active layer (full
-				// coverage), then recomposite the touched rect below. srcf was read from the live
-				// composited region map above, so the brush feels identical to direct editing.
-				_backup_layer_tile(region_loc);
-				_stroke_layer->set_sample(region_loc, map_pixel_position, dest.r, 1.f);
+				if (_operation == ERASE) {
+					// Eraser: lower the active layer's coverage (weight) toward 0 so the composite
+					// re-derives this pixel from the layers beneath. Feathered by brush alpha * strength
+					// so soft brushes fade the edge and repeated passes fully clear. Skip pixels the
+					// layer doesn't cover (nothing to erase) to avoid allocating empty tiles.
+					const real_t cur_weight = _stroke_layer->get_weight(region_loc, map_pixel_position);
+					if (cur_weight <= 0.f) {
+						continue;
+					}
+					_backup_layer_tile(region_loc);
+					const real_t new_weight = CLAMP(cur_weight - brush_alpha * strength, 0.f, 1.f);
+					real_t keep_value = _stroke_layer->get_value(region_loc, map_pixel_position);
+					if (std::isnan(keep_value)) {
+						keep_value = dest.r;
+					}
+					_stroke_layer->set_sample(region_loc, map_pixel_position, keep_value, new_weight);
+				} else {
+					// Non-destructive: author the brush-computed height into the active layer (full
+					// coverage), then recomposite the touched rect below. srcf was read from the live
+					// composited region map above, so the brush feels identical to direct editing.
+					_backup_layer_tile(region_loc);
+					_stroke_layer->set_sample(region_loc, map_pixel_position, dest.r, 1.f);
+				}
 				Rect2i px_rect(map_pixel_position, V2I(1));
 				if (_stroke_dirty.has(region_loc)) {
 					px_rect = Rect2i(_stroke_dirty[region_loc]).merge(px_rect);
@@ -1129,6 +1155,7 @@ void Pasture3DEditor::_bind_methods() {
 	BIND_ENUM_CONSTANT(REPLACE);
 	BIND_ENUM_CONSTANT(AVERAGE);
 	BIND_ENUM_CONSTANT(GRADIENT);
+	BIND_ENUM_CONSTANT(ERASE);
 	BIND_ENUM_CONSTANT(OP_MAX);
 
 	BIND_ENUM_CONSTANT(SCULPT);

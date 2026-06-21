@@ -11,6 +11,7 @@ const ICON_HEIGHT_SUB: String = "res://addons/pasture_3d/icons/height_sub.svg"
 const ICON_HEIGHT_FLAT: String = "res://addons/pasture_3d/icons/height_flat.svg"
 const ICON_HEIGHT_SLOPE: String = "res://addons/pasture_3d/icons/height_slope.svg"
 const ICON_HEIGHT_SMOOTH: String = "res://addons/pasture_3d/icons/height_smooth.svg"
+const ICON_LAYER_ERASE: String = "res://addons/pasture_3d/icons/layer_erase.svg"
 const ICON_PAINT_TEXTURE: String = "res://addons/pasture_3d/icons/texture_paint.svg"
 const ICON_SPRAY_TEXTURE: String = "res://addons/pasture_3d/icons/texture_spray.svg"
 const ICON_COLOR: String = "res://addons/pasture_3d/icons/color_paint.svg"
@@ -51,8 +52,12 @@ func _ready() -> void:
 		"add_text":"Height (H)", "add_op":Pasture3DEditor.ADD, "add_icon":ICON_HEIGHT_FLAT,
 		"sub_text":"Height (H)", "sub_op":Pasture3DEditor.SUBTRACT, "sub_icon":ICON_HEIGHT_FLAT })
 
-	add_tool_button({ "tool":Pasture3DEditor.SCULPT, 
+	add_tool_button({ "tool":Pasture3DEditor.SCULPT,
 		"add_text":"Slope (S)", "add_op":Pasture3DEditor.GRADIENT, "add_icon":ICON_HEIGHT_SLOPE })
+
+	# Erase the active height layer's coverage to reveal the layers beneath (non-destructive).
+	add_tool_button({ "tool":Pasture3DEditor.SCULPT,
+		"add_text":"Erase Layer (G)", "add_op":Pasture3DEditor.ERASE, "add_icon":ICON_LAYER_ERASE })
 
 	add_child(HSeparator.new())
 

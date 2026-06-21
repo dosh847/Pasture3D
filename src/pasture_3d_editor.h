@@ -53,6 +53,7 @@ public: // Constants
 		REPLACE,
 		AVERAGE,
 		GRADIENT,
+		ERASE, // Non-destructive: reduce the active layer's coverage to reveal layers beneath
 		OP_MAX,
 	};
 
@@ -62,6 +63,7 @@ public: // Constants
 		"Replace",
 		"Average",
 		"Gradient",
+		"Erase",
 		"OP_MAX",
 	};
 

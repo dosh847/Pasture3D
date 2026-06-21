@@ -9,6 +9,7 @@
 # See PASTURE3D_LANDSCAPE_TOOLS_SPEC.md §6. Paints non-destructively into a reserved layer via the
 # Pasture3DTerrainBrush base.
 @tool
+@icon("res://addons/pasture_3d/icons/brush_trough.svg")
 class_name Pasture3DTrough
 extends Pasture3DTerrainBrush
 

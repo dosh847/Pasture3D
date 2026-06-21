@@ -10,6 +10,7 @@
 # BLEND field (base→overlay in the shader), not in layer coverage: inside the loop blend = 255 (full
 # material), feathering to 0 at the rim where the underlying base texture shows.
 @tool
+@icon("res://addons/pasture_3d/icons/brush_splat.svg")
 class_name Pasture3DSplat
 extends Pasture3DTerrainBrush
 

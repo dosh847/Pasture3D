@@ -10,6 +10,7 @@
 # Paints non-destructively into a reserved HEIGHT layer via the Pasture3DTerrainBrush base, so it gets
 # layer-sharing, undo, surface-snap and the clear-then-snap climbing-fix for free.
 @tool
+@icon("res://addons/pasture_3d/icons/brush_plow.svg")
 class_name Pasture3DPlow
 extends Pasture3DTerrainBrush
 
