@@ -1194,6 +1194,59 @@ func editor_remove_point(path: Path3D, idx: int) -> void:
 	update_gizmos() # drop the removed point's marker right away
 
 
+## Toggle a loop point between a smooth curve and a sharp corner (double-click). Smoothing seeds
+## mirrored in/out tangents from the neighbour direction; a second toggle zeroes them back to a corner.
+## Undoable. Used by the brush gizmo.
+func editor_smooth_point(path: Path3D, idx: int) -> void:
+	if path == null or path.curve == null or idx < 0 or idx >= path.curve.point_count:
+		return
+	var c := path.curve
+	var old_in := c.get_point_in(idx)
+	var old_out := c.get_point_out(idx)
+	var new_in := Vector3.ZERO
+	var new_out := Vector3.ZERO
+	var smoothing := old_in.length() <= 0.02 and old_out.length() <= 0.02
+	if smoothing:
+		new_out = _smooth_handle(path, idx)
+		new_in = -new_out
+	var ur := _editor_undo()
+	if ur:
+		ur.create_action("Smooth Loop Point" if smoothing else "Sharpen Loop Point")
+		ur.add_do_method(c, "set_point_in", idx, new_in)
+		ur.add_do_method(c, "set_point_out", idx, new_out)
+		ur.add_undo_method(c, "set_point_in", idx, old_in)
+		ur.add_undo_method(c, "set_point_out", idx, old_out)
+		ur.commit_action()
+	else:
+		c.set_point_in(idx, new_in)
+		c.set_point_out(idx, new_out)
+	update_gizmos()
+
+
+## A mirrored tangent handle (path-local) for smoothing a point: along the previous→next direction,
+## scaled to a quarter of the shorter adjacent segment so the curve is gentle and doesn't overshoot.
+func _smooth_handle(path: Path3D, idx: int) -> Vector3:
+	var c := path.curve
+	var n := c.point_count
+	var p := c.get_point_position(idx)
+	var closed := _min_points() >= 3
+	var prev_i := idx - 1
+	if prev_i < 0:
+		prev_i = (n - 1) if closed else idx
+	var next_i := idx + 1
+	if next_i >= n:
+		next_i = 0 if closed else idx
+	var prev_p := c.get_point_position(prev_i)
+	var next_p := c.get_point_position(next_i)
+	var dir := next_p - prev_p
+	if dir.length() < 0.001:
+		return Vector3.ZERO
+	var s1 := (next_p - p).length()
+	var s2 := (p - prev_p).length()
+	var seg := minf(s1, s2) if (s1 > 0.001 and s2 > 0.001) else maxf(s1, s2)
+	return dir.normalized() * (seg * 0.25)
+
+
 ## Insertion index so a new point lands on the loop segment nearest `world`. Closed loops (min ≥ 3
 ## points: Mound/Plow/Splat) also test the wrap segment so a point can be added between last and first.
 func _nearest_segment_index(path: Path3D, world: Vector3) -> int:

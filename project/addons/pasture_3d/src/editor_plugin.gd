@@ -318,6 +318,17 @@ func _current_brush() -> Pasture3DTerrainBrush:
 ## point on the nearest loop segment; right-click ON a point removes it. Everything else passes through
 ## so camera navigation and the subgizmo point-move (handled by the editor) keep working.
 func _forward_brush_input(p_camera: Camera3D, p_event: InputEvent, p_brush: Pasture3DTerrainBrush) -> AfterGUIInput:
+	# Delete/Backspace removes the selected loop point (keyboard alternative to right-click). Only fires
+	# when a point is actually selected, so plain Delete still deletes the brush node otherwise.
+	if p_event is InputEventKey and p_event.pressed and not p_event.echo:
+		if p_event.keycode == KEY_DELETE or p_event.keycode == KEY_BACKSPACE:
+			var sel: Array = brush_gizmo.selected_point(p_brush) if brush_gizmo else [null, -1]
+			if sel[0] != null:
+				p_brush.editor_remove_point(sel[0], sel[1])
+				brush_gizmo.clear_point_selection()
+				return AFTER_GUI_INPUT_STOP
+		return AFTER_GUI_INPUT_PASS
+
 	if not (p_event is InputEventMouseButton) or not p_event.is_pressed():
 		return AFTER_GUI_INPUT_PASS
 	var terr: Pasture3D = p_brush.terrain
@@ -329,6 +340,14 @@ func _forward_brush_input(p_camera: Camera3D, p_event: InputEvent, p_brush: Past
 	var full_res: bool = vp.get_parent().stretch_shrink != 2
 	var raw: Vector2 = vp.get_mouse_position()
 	var mouse_pos: Vector2 = raw if full_res else raw / 2.0
+
+	# Double-click a point → toggle it between a smooth curve and a sharp corner.
+	if p_event.get_button_index() == MOUSE_BUTTON_LEFT and p_event.double_click:
+		var dpicked: Array = p_brush.pick_point_screen(p_camera, mouse_pos, 14.0)
+		if dpicked[0] != null:
+			p_brush.editor_smooth_point(dpicked[0], dpicked[1])
+			return AFTER_GUI_INPUT_STOP
+		return AFTER_GUI_INPUT_PASS
 
 	var add_mod: bool = p_event.meta_pressed if _use_meta else p_event.ctrl_pressed
 	if p_event.get_button_index() == MOUSE_BUTTON_LEFT and add_mod:

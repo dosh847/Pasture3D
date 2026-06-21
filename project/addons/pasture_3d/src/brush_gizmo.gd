@@ -45,6 +45,10 @@ var _start: Dictionary = {}
 var _sel_node_id: int = 0
 var _sel_gpi: int = -1
 
+## Per-drag note of whether the point being dragged started "smooth" (gpi -> bool), captured before the
+## first mutation. When true, dragging one tangent mirrors the other (Shift breaks the symmetry).
+var _smooth_drag: Dictionary = {}
+
 
 func _init() -> void:
 	# on_top so the markers show through the terrain (a brush sunk below the surface stays findable).
@@ -156,6 +160,28 @@ func _show_tangents(p_node: Node3D, p_gpi: int) -> bool:
 	return p_node.get_instance_id() == _sel_node_id and p_gpi == _sel_gpi
 
 
+## A point is "smooth" when both tangents are non-trivial and roughly mirror images (collinear, equal
+## length). Such points keep their handles mirrored while dragging.
+func _is_smooth(p_in: Vector3, p_out: Vector3) -> bool:
+	if p_in.length() < 0.02 or p_out.length() < 0.02:
+		return false
+	return (p_in + p_out).length() < 0.1 * maxf(p_in.length(), p_out.length())
+
+
+## [Path3D, point index] of the currently-selected loop point on `p_brush`, or [null, -1]. Lets the
+## plugin remove it on the Delete key (see editor_plugin.gd).
+func selected_point(p_brush: Node3D) -> Array:
+	if p_brush == null or _sel_node_id != p_brush.get_instance_id() or _sel_gpi < 0:
+		return [null, -1]
+	var res := _resolve_handle(p_brush, _sel_gpi * 3)
+	return [res[0], res[1]]
+
+
+## Forget the selected point (e.g. after it was deleted) so its now-stale index isn't reused.
+func clear_point_selection() -> void:
+	_sel_gpi = -1
+
+
 ## Box-select: every loop POSITION inside the selection frustum (group move). Tangents are excluded so
 ## a box drag never drags curvature handles by surprise.
 func _subgizmos_intersect_frustum(p_gizmo: EditorNode3DGizmo, _camera: Camera3D, p_frustum: Array[Plane]) -> PackedInt32Array:
@@ -208,9 +234,12 @@ func _set_subgizmo_transform(p_gizmo: EditorNode3DGizmo, p_id: int, p_transform:
 		path.curve.set_point_position(idx, path.to_local(world))
 		return
 	# Tangent (in/out).
+	var gpi: int = p_id / 3
 	if not _orig.has(p_id):
 		_orig[p_id] = path.curve.get_point_in(idx) if kind == 1 else path.curve.get_point_out(idx)
 		_start[p_id] = _handle_display_local(node, path, idx, kind)
+		if not _smooth_drag.has(gpi):
+			_smooth_drag[gpi] = _is_smooth(path.curve.get_point_in(idx), path.curve.get_point_out(idx))
 	var delta_node: Vector3 = p_transform.origin - (_start[p_id] as Vector3)
 	var delta_path: Vector3 = path.global_transform.basis.inverse() * (node.global_transform.basis * delta_node)
 	var new_off: Vector3 = (_orig[p_id] as Vector3) + delta_path
@@ -220,6 +249,17 @@ func _set_subgizmo_transform(p_gizmo: EditorNode3DGizmo, p_id: int, p_transform:
 		path.curve.set_point_in(idx, new_off)
 	else:
 		path.curve.set_point_out(idx, new_off)
+	# On a smooth point, keep the opposite handle mirrored (equal length, opposite direction). Hold Shift
+	# to break symmetry into an independent corner. The partner is folded into the same undo at commit.
+	if _smooth_drag.get(gpi, false) and not Input.is_key_pressed(KEY_SHIFT):
+		var partner_kind := 2 if kind == 1 else 1
+		var partner_id := gpi * 3 + partner_kind
+		if not _orig.has(partner_id):
+			_orig[partner_id] = path.curve.get_point_in(idx) if partner_kind == 1 else path.curve.get_point_out(idx)
+		if partner_kind == 1:
+			path.curve.set_point_in(idx, -new_off)
+		else:
+			path.curve.set_point_out(idx, -new_off)
 
 
 ## Commit the drag(s) as one undoable action. The curve change fires curve.changed → the brush repaints
@@ -228,10 +268,13 @@ func _set_subgizmo_transform(p_gizmo: EditorNode3DGizmo, p_id: int, p_transform:
 func _commit_subgizmos(p_gizmo: EditorNode3DGizmo, p_ids: PackedInt32Array, p_restores: Array[Transform3D], p_cancel: bool) -> void:
 	var node := p_gizmo.get_node_3d()
 	if p_cancel:
-		for i in p_ids.size():
-			_restore_handle(node, p_ids[i], p_restores[i])
+		# Restore every handle we touched — including mirrored partners not in p_ids (their pre-drag value
+		# lives in _orig, so the passed restore transform is unused for them).
+		for key in _orig.keys():
+			_restore_handle(node, key, Transform3D())
 		_orig.clear()
 		_start.clear()
+		_smooth_drag.clear()
 		return
 	var has_tangent := false
 	for id in p_ids:
@@ -263,9 +306,28 @@ func _commit_subgizmos(p_gizmo: EditorNode3DGizmo, p_ids: PackedInt32Array, p_re
 			var cur := path.curve.get_point_out(idx)
 			ur.add_do_method(path.curve, "set_point_out", idx, cur)
 			ur.add_undo_method(path.curve, "set_point_out", idx, _orig.get(p_ids[i], cur))
+	# Mirrored partner tangents were moved but aren't in p_ids — fold them into the same action so undo
+	# reverts both handles together.
+	for key in _orig.keys():
+		if key % 3 == 0 or key in p_ids:
+			continue
+		var pres := _resolve_handle(node, key)
+		var ppath: Path3D = pres[0]
+		if ppath == null:
+			continue
+		var pidx: int = pres[1]
+		if pres[2] == 1:
+			var pcur := ppath.curve.get_point_in(pidx)
+			ur.add_do_method(ppath.curve, "set_point_in", pidx, pcur)
+			ur.add_undo_method(ppath.curve, "set_point_in", pidx, _orig[key])
+		else:
+			var pcur := ppath.curve.get_point_out(pidx)
+			ur.add_do_method(ppath.curve, "set_point_out", pidx, pcur)
+			ur.add_undo_method(ppath.curve, "set_point_out", pidx, _orig[key])
 	ur.commit_action()
 	_orig.clear()
 	_start.clear()
+	_smooth_drag.clear()
 
 
 ## Put one handle back to a transform (used on drag-cancel), preferring the captured pre-drag value.

@@ -40,9 +40,22 @@ Snap to Surface is on, so the loop stays planar with the surface. Frustum/box-se
 (static `Pasture3DTerrainBrush._show_all_tangents`, mirroring "Toggle Labels") shows every point's
 tangents at once.
 
-## Phase 4 — niceties (planned)
-Close/open-loop toggle; an "auto-smooth point" affordance (seed mirrored tangents so a straight
-point becomes a curve in one action); optional slope tilt from `get_normal`; per-point delete key.
+## Phase 4 — niceties
+GDScript trio ✅ DONE (user-verified), all no-rebuild:
+- **Auto-smooth point** — double-click a loop point toggles it between a smooth curve (seeds mirrored
+  in/out tangents at ¼ of the shorter adjacent segment) and a sharp corner. `terrain_brush.gd`
+  `editor_smooth_point`/`_smooth_handle`; wired in `editor_plugin.gd` `_forward_brush_input` on
+  left double-click.
+- **Mirror tangents** — on an already-smooth point, dragging one tangent mirrors the opposite (equal
+  length, opposite dir); **Shift** breaks symmetry. Partner handle folded into the same undo.
+  `brush_gizmo.gd` `_set_subgizmo_transform` + `_is_smooth` + `_smooth_drag`.
+- **Delete-key remove** — Delete/Backspace removes the selected loop point (only when one is selected,
+  else the brush deletes normally). Gizmo `selected_point`/`clear_point_selection` + plugin key handler.
+
+**Slope tilt — DEFERRED to Phase 5** (not GDScript-only): the ridge/trough rasterizer
+(`stamp_ridge_line` + GDScript fallback) applies a flat XZ cross-section and ignores curve tilt /
+surface normal, so banking to the hillside needs rasterizer (C++) work + a rebuild.
+Other still-open: close/open-loop toggle.
 
 ## Phase 5 — refinements & backlog
 - **Paint-stroke undo on landscape HEIGHT does not undo** (user report 2026-06-20). This is the
@@ -54,6 +67,8 @@ point becomes a curve in one action); optional slope tilt from `get_normal`; per
   **C++ change — needs engine rebuild.**
 - "Moving layers cleared the paint layer" — suspected GPU re-push gap in `layer_move` (push all
   affected regions, not just the moved layer's). Needs the Refresh-restores-it confirmation.
+- **Slope tilt** (moved from Phase 4) — bank ridge/trough cross-sections to the surface normal; needs
+  the rasterizer (`stamp_ridge_line` + GDScript fallback) to rotate the cross-section. C++ + rebuild.
 - Brush-specific settings defaults (user to supply the per-brush values they kept re-setting).
 - Eraser brush for the hand-paint tool (clear a section to reveal layers underneath).
 - Fix B (changed-point-only snap) / slope tilt, if still wanted.
