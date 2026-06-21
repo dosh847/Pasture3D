@@ -69,6 +69,9 @@ const REFRESH_DELAY: float = 0.1
 ## Show/hide the floating "Name — Layer" nameplate over EVERY brush at once (an editor-only label that
 ## makes brushes easy to find/select in a busy scene). The selected brush always shows its own.
 @export_tool_button("Toggle Labels") var _toggle_labels_btn = _toggle_all_labels
+## Show/hide the in/out curve-tangent handles for EVERY loop point at once. Off by default — only the
+## selected point shows its tangents — to keep dense loops readable.
+@export_tool_button("Toggle Tangents") var _toggle_tangents_btn = _toggle_all_tangents
 
 @export_group("Surface")
 ## Keep this brush's spline points glued to the terrain surface while editing (their Y follows the
@@ -110,6 +113,9 @@ var _ready_done: bool = false   # True once _ready ran — gates re-parent auto-
 var _name_label: Label3D = null
 ## Shared across every brush: the "Toggle Labels" button flips this so all nameplates show/hide together.
 static var _show_all_labels: bool = false
+## Shared across every brush: the "Toggle Tangents" button flips this so the gizmo (brush_gizmo.gd) draws
+## every loop point's tangent handles instead of just the selected point's.
+static var _show_all_tangents: bool = false
 
 
 func _ready() -> void:
@@ -887,6 +893,14 @@ func _toggle_all_labels() -> void:
 	_show_all_labels = not _show_all_labels
 	if is_inside_tree():
 		get_tree().call_group(BRUSH_GROUP, "_update_label_visibility")
+
+
+## "Toggle Tangents" button: flip the shared flag and redraw every brush's gizmo so all loops' tangent
+## handles show/hide together (otherwise only the selected point's tangents are drawn).
+func _toggle_all_tangents() -> void:
+	_show_all_tangents = not _show_all_tangents
+	if is_inside_tree():
+		get_tree().call_group(BRUSH_GROUP, "update_gizmos")
 
 
 func _unique_brush_layer_name(base: String) -> String:
