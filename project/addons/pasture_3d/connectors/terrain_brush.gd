@@ -66,6 +66,9 @@ const REFRESH_DELAY: float = 0.1
 @export_tool_button("Add Spline") var _add_spline_btn = add_spline
 ## Create a brand-new tool layer named after this node and assign this node to it.
 @export_tool_button("Add New Layer") var _add_layer_btn = add_new_layer
+## Show/hide the floating "Name — Layer" nameplate over EVERY brush at once (an editor-only label that
+## makes brushes easy to find/select in a busy scene). The selected brush always shows its own.
+@export_tool_button("Toggle Labels") var _toggle_labels_btn = _toggle_all_labels
 
 @export_group("Surface")
 ## Keep this brush's spline points glued to the terrain surface while editing (their Y follows the
@@ -95,11 +98,17 @@ var _timer: SceneTreeTimer = null
 var _dirty: bool = false
 var _full_dirty: bool = false   # A queued refresh needs the whole layer (param/transform/structural change)
 var _dirty_splines: Dictionary = {} # Path3D instance_id -> true: splines whose curve changed (partial redraw)
+var _moved_node: bool = false   # A queued refresh is a node-transform move (dirty-rect, but re-snap all points)
 var _clip_aabb: AABB = AABB()   # When non-empty, _paint_* writes only cells inside this world box (dirty-rect)
 var _defer_composite: bool = false # When true, _paint_* write samples without compositing (caller composites the box once)
 var _curve_cache: Dictionary = {}   # spline instance_id -> PackedVector3Array of point positions at last bake
 var _suspend_auto: bool = false # Blocks auto-refresh while we mutate curves programmatically (undo)
 var _ready_done: bool = false   # True once _ready ran — gates re-parent auto-assign off scene-load
+
+## Editor-only floating nameplate (internal child → never saved, hidden from the Scene dock).
+var _name_label: Label3D = null
+## Shared across every brush: the "Toggle Labels" button flips this so all nameplates show/hide together.
+static var _show_all_labels: bool = false
 
 
 func _ready() -> void:
@@ -130,11 +139,17 @@ func _ready() -> void:
 	# every brush's every property without per-property setters.
 	if Engine.is_editor_hint():
 		_connect_inspector_refresh()
+		_ensure_label()
+		var sel := EditorInterface.get_selection()
+		if not sel.selection_changed.is_connected(_update_label_visibility):
+			sel.selection_changed.connect(_update_label_visibility)
+		if not renamed.is_connected(_update_label_text):
+			renamed.connect(_update_label_text)
 
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_TRANSFORM_CHANGED:
-		_schedule_refresh()
+		_schedule_transform_refresh()
 	elif what == NOTIFICATION_ENTER_TREE:
 		# Re-join the group on every enter (a reparent exits + re-enters the tree, and _ready only runs
 		# once) so layer-sharing keeps seeing this brush after it has been moved.
@@ -259,6 +274,8 @@ func _on_path_curve_changed(path: Path3D) -> void:
 
 
 func _on_child_changed(node: Node) -> void:
+	if node == _name_label:
+		return # our internal nameplate is not a spline and must not trigger a refresh
 	if node is Path3D:
 		_connect_spline(node)
 	# Broadcast, not just self: adding/removing a spline can make another brush's curve newly (non-)shared.
@@ -353,6 +370,7 @@ func _set_layer_owner(owner: String) -> void:
 	_layer_owner = owner
 	notify_property_list_changed()
 	update_configuration_warnings()
+	_update_label_text() # nameplate shows the layer name → keep it current on a re-bind
 	if Engine.is_editor_hint() and is_inside_tree() and is_configured():
 		_rebind(old)
 
@@ -379,6 +397,19 @@ func _schedule_refresh() -> void:
 	if not _can_auto_refresh():
 		return
 	_full_dirty = true
+	_arm_refresh_timer()
+
+
+## Node-transform scheduler — the whole brush moved/rotated/scaled. Every child spline shifts together,
+## so only this node's old∪new footprint is affected: take the dirty-rect path (clip to that box, repaint
+## just the overlapping layer-mates) instead of redrawing the entire layer (the many-brushes-on-one-layer
+## slowdown). The points didn't move in local space, so flag a full re-snap of this node's points.
+func _schedule_transform_refresh() -> void:
+	if not _can_auto_refresh():
+		return
+	for s in _get_splines():
+		_dirty_splines[s.get_instance_id()] = true
+	_moved_node = true
 	_arm_refresh_timer()
 
 
@@ -412,14 +443,16 @@ func _on_refresh_timer() -> void:
 	# Snapshot + clear the queued dirty state up front so a refresh that re-enters scheduling is coherent.
 	var full := _full_dirty
 	var splines := _dirty_splines
+	var moved_node := _moved_node
 	_full_dirty = false
 	_dirty_splines = {}
+	_moved_node = false
 	if not Engine.is_editor_hint() or not is_configured():
 		return
 	if full or splines.is_empty():
 		_refresh_owner(_layer_owner, false, [])
 	else:
-		_refresh_owner_rect(_layer_owner, splines)
+		_refresh_owner_rect(_layer_owner, splines, moved_node)
 
 
 ## ---- The paint cycle (layer-granular: repaint every tool bound to the layer) ----
@@ -482,6 +515,7 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 			s._paint_into(-1, _get_blend_mode())
 
 	terrain.data.update_maps(_map_type())
+	update_gizmos() # re-float the origin marker onto the new surface height
 
 	if ur != null:
 		var after := _snapshot_owner(owner)
@@ -498,7 +532,7 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 ## layer-mates inside the box (not just the moved spline) is what keeps shared cells correct — the same
 ## reason the full refresh repaints mates. Auto-refresh only (no undo action; the gizmo edit is the
 ## undoable cause). Falls back to a full refresh when there's no layers Tool API or nothing locatable.
-func _refresh_owner_rect(owner: String, changed_ids: Dictionary) -> void:
+func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool = false) -> void:
 	if not is_configured():
 		return
 	var layer_id := _ensure_layer_for(owner, owner == _layer_owner)
@@ -554,7 +588,10 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary) -> void:
 		for sid in changed_ids:
 			var sp := _find_spline_by_id(sid)
 			if sp != null:
-				_apply_surface_snap_points(sp, _moved_point_indices(sp))
+				# A node move shifts every point's world XZ but leaves the local curve unchanged, so the
+				# moved-point diff finds nothing — re-snap all points against the freshly-cleared base.
+				var idxs := _all_point_indices(sp) if snap_all else _moved_point_indices(sp)
+				_apply_surface_snap_points(sp, idxs)
 	var t_snap := Time.get_ticks_usec()
 	var painted := 0
 	for s in _tools_on_owner(owner):
@@ -578,6 +615,7 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary) -> void:
 	# Push only the regions this bake actually edited. (The bound default is all_regions=TRUE, which
 	# rebuilds the whole height texture array from every region — the reason a far-away spline was slow.)
 	terrain.data.update_maps(_map_type(), false, false)
+	update_gizmos() # re-float the origin marker onto the new surface height
 	if log_bake_timing:
 		_log_bake_timing(clip_box, painted, t_start, t_clear, t_snap, t_paint, t_composite, Time.get_ticks_usec())
 
@@ -785,6 +823,64 @@ func _layer_display_name() -> String:
 	return _layer_owner.trim_prefix(BRUSH_OWNER_PREFIX)
 
 
+## Editor-only floating nameplate
+##
+## A billboarded Label3D added as an INTERNAL child: it isn't saved with the scene and never shows in
+## the Scene dock, but it draws in the viewport so brushes are easy to find. The clickable origin marker
+## (Pasture3DBrushGizmo) handles selection; this just shows "Name — Layer".
+
+
+func _ensure_label() -> void:
+	if not Engine.is_editor_hint() or is_instance_valid(_name_label):
+		return
+	_name_label = Label3D.new()
+	_name_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_name_label.fixed_size = true        # constant on-screen size regardless of camera distance
+	_name_label.no_depth_test = true     # readable even when the brush is below the surface
+	_name_label.pixel_size = 0.0007
+	_name_label.font_size = 64
+	_name_label.outline_size = 16
+	_name_label.modulate = Color(1.0, 0.96, 0.85)
+	_name_label.outline_modulate = Color(0.0, 0.0, 0.0, 0.85)
+	_name_label.render_priority = 20
+	_name_label.outline_render_priority = 19
+	_name_label.position = Vector3(0.0, 2.0, 0.0) # float just above the origin marker
+	add_child(_name_label, false, Node.INTERNAL_MODE_BACK)
+	_update_label_text()
+	_update_label_visibility()
+
+
+func _update_label_text() -> void:
+	if not is_instance_valid(_name_label):
+		return
+	_name_label.text = "%s — %s" % [name, _layer_display_name()]
+
+
+func _update_label_visibility() -> void:
+	if not is_instance_valid(_name_label):
+		return
+	_name_label.visible = _show_all_labels or _brush_is_selected()
+	if _name_label.visible:
+		_update_label_text() # refresh in case the node was renamed or the layer relabelled
+
+
+## This brush, or one of its child splines, is the current editor selection.
+func _brush_is_selected() -> bool:
+	if not Engine.is_editor_hint():
+		return false
+	for n in EditorInterface.get_selection().get_selected_nodes():
+		if n == self or (n is Node and is_ancestor_of(n)):
+			return true
+	return false
+
+
+## "Toggle Labels" button: flip the shared flag and refresh every brush's nameplate at once.
+func _toggle_all_labels() -> void:
+	_show_all_labels = not _show_all_labels
+	if is_inside_tree():
+		get_tree().call_group(BRUSH_GROUP, "_update_label_visibility")
+
+
 func _unique_brush_layer_name(base: String) -> String:
 	var names := _brush_layer_names()
 	if not names.has(base):
@@ -821,6 +917,9 @@ func _paint_height(world_pos: Vector3, target: float, delta: float) -> void:
 	if _blend == BLEND_ADD:
 		terrain.data.add_height_on_layer(_layer_id, world_pos, delta, 1.0, comp)
 	else:
+		# REPLACE here (last write wins). The native rasteriser combines overlapping same-layer tools by
+		# blend mode (MAX/MIN) in _stamp_write; this GDScript fallback is the A/B oracle for a SINGLE
+		# brush, where each pixel is written once so the distinction doesn't arise.
 		terrain.data.set_height_on_layer(_layer_id, world_pos, target, 1.0, comp)
 
 
@@ -1002,6 +1101,15 @@ func _moved_point_indices(path: Path3D) -> PackedInt32Array:
 		return out
 	for i in range(cur.size()):
 		if not prev[i].is_equal_approx(cur[i]):
+			out.append(i)
+	return out
+
+
+## Every point index of a spline (for re-snapping all points after a whole-node move).
+func _all_point_indices(path: Path3D) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	if path.curve != null:
+		for i in range(path.curve.point_count):
 			out.append(i)
 	return out
 

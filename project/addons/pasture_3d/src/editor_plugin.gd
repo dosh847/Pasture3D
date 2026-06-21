@@ -7,6 +7,7 @@ extends EditorPlugin
 # Includes
 const Pasture3DUI: Script = preload("res://addons/pasture_3d/src/ui.gd")
 const Pasture3DLayersDock: Script = preload("res://addons/pasture_3d/src/layers_dock.gd")
+const Pasture3DBrushGizmo: Script = preload("res://addons/pasture_3d/src/brush_gizmo.gd")
 const ASSET_DOCK: String = "res://addons/pasture_3d/src/asset_dock.tscn"
 const ASSET_DOCK_45: String = "res://addons/pasture_3d/src/asset_dock_45.tscn"
 
@@ -17,6 +18,7 @@ var editor_settings: EditorSettings
 var ui: Node # Pasture3DUI see Godot #75388
 var asset_dock: PanelContainer
 var layers_dock: PanelContainer
+var brush_gizmo: EditorNode3DGizmoPlugin # Clickable origin markers for brush nodes
 var current_region_position: Vector2
 var mouse_global_position: Vector3 = Vector3.ZERO
 var godot_editor_window: Window # The Godot Editor window
@@ -72,6 +74,10 @@ func _enter_tree() -> void:
 	layers_dock = Pasture3DLayersDock.new()
 	layers_dock.initialize(self)
 
+	# Clickable origin markers so brush nodes are easy to select in a busy scene.
+	brush_gizmo = Pasture3DBrushGizmo.new()
+	add_node_3d_gizmo_plugin(brush_gizmo)
+
 
 func _exit_tree() -> void:
 	if debug:
@@ -80,6 +86,8 @@ func _exit_tree() -> void:
 	asset_dock.queue_free()
 	layers_dock.remove_dock()
 	layers_dock.queue_free()
+	if brush_gizmo:
+		remove_node_3d_gizmo_plugin(brush_gizmo)
 	ui.queue_free()
 	editor.free()
 
