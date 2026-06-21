@@ -42,7 +42,7 @@ enum BlendMode { REPLACE, ADD, MAX, MIN }
 ## Drape the cross-section onto the ground beneath: 0 = level (skirts stay at the crest reference, so
 ## on a hillside the uphill side floats and the downhill side buries); 1 = the cross-section banks onto
 ## the slope, each skirt meeting the ground at its own height.
-@export_range(0.0, 1.0) var slope_tilt: float = 0.0:
+@export_range(0.0, 1.0) var slope_tilt: float = 1.0:
 	set(v):
 		slope_tilt = clampf(v, 0.0, 1.0)
 		_schedule_refresh()

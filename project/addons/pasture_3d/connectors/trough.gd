@@ -50,7 +50,7 @@ enum BlendMode { REPLACE, ADD, MAX, MIN }
 @export var follow_spline_height: bool = true
 ## Drape the channel rim onto the ground beneath: 0 = level rim; 1 = the rim banks onto the slope so a
 ## trough cut across a hillside sits naturally instead of holding one flat reference height.
-@export_range(0.0, 1.0) var slope_tilt: float = 0.0:
+@export_range(0.0, 1.0) var slope_tilt: float = 1.0:
 	set(v):
 		slope_tilt = clampf(v, 0.0, 1.0)
 		_schedule_refresh()
