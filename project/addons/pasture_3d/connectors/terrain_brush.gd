@@ -1113,6 +1113,99 @@ func _moved_point_indices(path: Path3D) -> PackedInt32Array:
 	return out
 
 
+## ---- Editor loop-point editing (driven by the plugin's 3D input when this brush is selected) ----
+
+## The loop point nearest `screen_pos` within `radius` px → [Path3D, point_index], or [null, -1].
+func pick_point_screen(camera: Camera3D, screen_pos: Vector2, radius: float) -> Array:
+	var best: Array = [null, -1]
+	var best_d := radius
+	for s in _get_splines():
+		if s.curve == null:
+			continue
+		for i in s.curve.point_count:
+			var wp: Vector3 = s.to_global(s.curve.get_point_position(i))
+			if camera.is_position_behind(wp):
+				continue
+			var d := camera.unproject_position(wp).distance_to(screen_pos)
+			if d < best_d:
+				best_d = d
+				best = [s, i]
+	return best
+
+
+## Insert a point at `world` on the nearest loop's nearest segment (undoable). The curve change drives
+## the rebake. Used by Ctrl-click add.
+func editor_add_point(world: Vector3) -> void:
+	var best_path: Path3D = null
+	var best_d := INF
+	for s in _get_splines():
+		if s.curve == null:
+			continue
+		for i in s.curve.point_count:
+			var d: float = s.to_global(s.curve.get_point_position(i)).distance_squared_to(world)
+			if d < best_d:
+				best_d = d
+				best_path = s
+	if best_path == null:
+		return
+	var idx := _nearest_segment_index(best_path, world)
+	var local := best_path.to_local(world)
+	var ur := _editor_undo()
+	if ur:
+		ur.create_action("Add %s Point" % _spline_basename())
+		ur.add_do_method(best_path.curve, "add_point", local, Vector3.ZERO, Vector3.ZERO, idx)
+		ur.add_undo_method(best_path.curve, "remove_point", idx)
+		ur.commit_action()
+	else:
+		best_path.curve.add_point(local, Vector3.ZERO, Vector3.ZERO, idx)
+	update_gizmos() # show the new point marker right away
+
+
+## Remove a loop point (undoable), refusing to drop below the brush's minimum. Used by right-click.
+func editor_remove_point(path: Path3D, idx: int) -> void:
+	if path == null or path.curve == null or idx < 0 or idx >= path.curve.point_count:
+		return
+	if path.curve.point_count <= _min_points():
+		push_warning("Pasture3D: a %s needs at least %d points." % [_spline_basename(), _min_points()])
+		return
+	var pos := path.curve.get_point_position(idx)
+	var ur := _editor_undo()
+	if ur:
+		ur.create_action("Remove %s Point" % _spline_basename())
+		ur.add_do_method(path.curve, "remove_point", idx)
+		ur.add_undo_method(path.curve, "add_point", pos, Vector3.ZERO, Vector3.ZERO, idx)
+		ur.commit_action()
+	else:
+		path.curve.remove_point(idx)
+	update_gizmos() # drop the removed point's marker right away
+
+
+## Insertion index so a new point lands on the loop segment nearest `world`. Closed loops (min ≥ 3
+## points: Mound/Plow/Splat) also test the wrap segment so a point can be added between last and first.
+func _nearest_segment_index(path: Path3D, world: Vector3) -> int:
+	var c := path.curve
+	var n := c.point_count
+	if n < 2:
+		return n
+	var closed := _min_points() >= 3
+	var segs := n if closed else n - 1
+	var best_i := n # default: append
+	var best_d := INF
+	for i in range(segs):
+		var a: Vector3 = path.to_global(c.get_point_position(i))
+		var b: Vector3 = path.to_global(c.get_point_position((i + 1) % n))
+		var ab := b - a
+		var t := 0.0
+		var denom := ab.length_squared()
+		if denom > 1e-9:
+			t = clampf((world - a).dot(ab) / denom, 0.0, 1.0)
+		var d := world.distance_to(a + ab * t)
+		if d < best_d:
+			best_d = d
+			best_i = i + 1
+	return best_i
+
+
 ## Every point index of a spline (for re-snapping all points after a whole-node move).
 func _all_point_indices(path: Path3D) -> PackedInt32Array:
 	var out := PackedInt32Array()

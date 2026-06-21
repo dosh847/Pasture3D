@@ -112,6 +112,10 @@ func _on_godot_focus_entered() -> void:
 func _handles(p_object: Object) -> bool:
 	if p_object is Pasture3D:
 		return true
+	elif p_object is Pasture3DTerrainBrush:
+		# Handle brushes so we receive 3D input for in-place loop-point add/remove. We deliberately keep
+		# the terrain editing context intact (see _edit) — this never enters the sculpt path.
+		return true
 	elif p_object is NavigationRegion3D and is_instance_valid(_last_terrain):
 		return true
 	
@@ -126,6 +130,17 @@ func _handles(p_object: Object) -> bool:
 
 
 func _edit(p_object: Object) -> void:
+	# A brush is selected: don't _clear the terrain context (keep ray-march live), and populate the Layers
+	# dock from the brush's PARENT terrain so it shows even if that terrain was never selected first.
+	# Point editing is handled in _forward_3d_gui_input.
+	if p_object is Pasture3DTerrainBrush:
+		var bt: Pasture3D = p_object.terrain
+		if is_instance_valid(bt):
+			_last_terrain = bt
+			if layers_dock:
+				layers_dock.set_terrain(bt)
+		return
+
 	if !p_object:
 		_clear()
 
@@ -187,6 +202,13 @@ func flash_layer_warning(p_name: String, p_hidden: bool = false) -> void:
 
 func _forward_3d_gui_input(p_viewport_camera: Camera3D, p_event: InputEvent) -> AfterGUIInput:
 	mouse_in_main = true
+
+	# Brush selected → loop-point editing (Ctrl-click add / right-click-a-point remove). Mutually
+	# exclusive with sculpting (which only runs when the terrain is selected), so they never collide.
+	var brush := _current_brush()
+	if brush != null:
+		return _forward_brush_input(p_viewport_camera, p_event, brush)
+
 	if not is_terrain_valid():
 		return AFTER_GUI_INPUT_PASS
 
@@ -280,6 +302,56 @@ func _forward_3d_gui_input(p_viewport_camera: Camera3D, p_event: InputEvent) -> 
 		elif editor.is_operating():
 			editor.stop_operation()
 			return AFTER_GUI_INPUT_STOP
+
+	return AFTER_GUI_INPUT_PASS
+
+
+## The currently-selected Pasture3D brush, or null. Drives the loop-point editing input path.
+func _current_brush() -> Pasture3DTerrainBrush:
+	for n in EditorInterface.get_selection().get_selected_nodes():
+		if n is Pasture3DTerrainBrush:
+			return n
+	return null
+
+
+## Loop-point editing input for a selected brush. Ctrl-click (Cmd on macOS) on the surface inserts a
+## point on the nearest loop segment; right-click ON a point removes it. Everything else passes through
+## so camera navigation and the subgizmo point-move (handled by the editor) keep working.
+func _forward_brush_input(p_camera: Camera3D, p_event: InputEvent, p_brush: Pasture3DTerrainBrush) -> AfterGUIInput:
+	if not (p_event is InputEventMouseButton) or not p_event.is_pressed():
+		return AFTER_GUI_INPUT_PASS
+	var terr: Pasture3D = p_brush.terrain
+	if not is_instance_valid(terr) or terr.data == null:
+		return AFTER_GUI_INPUT_PASS
+
+	# Mouse position in the camera's (possibly half-resolution) viewport space, matching the sculpt path.
+	var vp: SubViewport = p_camera.get_parent()
+	var full_res: bool = vp.get_parent().stretch_shrink != 2
+	var raw: Vector2 = vp.get_mouse_position()
+	var mouse_pos: Vector2 = raw if full_res else raw / 2.0
+
+	var add_mod: bool = p_event.meta_pressed if _use_meta else p_event.ctrl_pressed
+	if p_event.get_button_index() == MOUSE_BUTTON_LEFT and add_mod:
+		var from: Vector3 = p_camera.project_ray_origin(mouse_pos)
+		var dir: Vector3 = p_camera.project_ray_normal(mouse_pos)
+		var hit: Vector3 = terr.get_intersection(from, dir, true)
+		if hit.z > 3.4e38 or is_nan(hit.y):
+			return AFTER_GUI_INPUT_PASS
+		var pos := hit
+		if p_brush.snap_to_surface:
+			var h: float = p_brush._base_height_below(Vector3(hit.x, 0.0, hit.z))
+			if is_finite(h):
+				pos = Vector3(hit.x, h + p_brush.surface_offset, hit.z)
+		p_brush.editor_add_point(pos)
+		return AFTER_GUI_INPUT_STOP
+
+	if p_event.get_button_index() == MOUSE_BUTTON_RIGHT:
+		var picked: Array = p_brush.pick_point_screen(p_camera, mouse_pos, 14.0)
+		if picked[0] != null:
+			p_brush.editor_remove_point(picked[0], picked[1])
+			return AFTER_GUI_INPUT_STOP
+		# Not on a point → let the right-button through for camera look.
+		return AFTER_GUI_INPUT_PASS
 
 	return AFTER_GUI_INPUT_PASS
 
