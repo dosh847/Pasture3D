@@ -383,18 +383,14 @@ func _on_move_down() -> void:
 
 
 func _move_active(p_dir: int) -> void:
-	var d := _data()
 	var stack := _stack()
-	if not d or not stack:
+	if not stack:
 		return
 	var from: int = stack.get_active_layer()
 	var to: int = from + p_dir
 	if from <= 0 or to <= 0 or to >= stack.get_layer_count():
 		return
-	d.layer_move(from, to)
-	stack.set_active_layer(to)
-	refresh()
-	_mark_unsaved()
+	_move_layer_undoable(from, to)
 
 
 ## Drag-and-drop reordering (forwarded from each row)
@@ -416,16 +412,38 @@ func _can_drop_row(_pos: Vector2, p_data: Variant, p_idx: int) -> bool:
 
 
 func _drop_row(_pos: Vector2, p_data: Variant, p_idx: int) -> void:
-	var d := _data()
 	var stack := _stack()
-	if not d or not stack:
+	if not stack:
 		return
 	var from: int = int(p_data["p3d_layer"])
 	var to: int = p_idx
 	if from == to or from == 0 or to == 0:
 		return
-	d.layer_move(from, to)
-	stack.set_active_layer(to)
+	_move_layer_undoable(from, to)
+
+
+## Reorder a layer as one undoable action so Ctrl+Z restores the previous order. move_layer is its own
+## inverse: undoing move(from→to) is move(to→from), so a single _apply_move serves both directions.
+## Routed to the terrain's scene-local history via the custom context.
+func _move_layer_undoable(p_from: int, p_to: int) -> void:
+	var ur := EditorInterface.get_editor_undo_redo()
+	if ur == null:
+		_apply_move(p_from, p_to)
+		return
+	ur.create_action("Reorder Pasture3D Layer", UndoRedo.MERGE_DISABLE, terrain)
+	ur.add_do_method(self, "_apply_move", p_from, p_to)
+	ur.add_undo_method(self, "_apply_move", p_to, p_from)
+	ur.commit_action()
+
+
+## Apply a reorder and rebuild the list. One entry point for both do and undo, so call order is trivial.
+func _apply_move(p_from: int, p_to: int) -> void:
+	var d := _data()
+	var stack := _stack()
+	if not d or not stack:
+		return
+	d.layer_move(p_from, p_to)
+	stack.set_active_layer(p_to)
 	refresh()
 	_mark_unsaved()
 
