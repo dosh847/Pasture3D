@@ -73,12 +73,13 @@ const REFRESH_DELAY: float = 0.1
 @export_group("Surface")
 ## Keep this brush's spline points glued to the terrain surface while editing (their Y follows the
 ## ground). Leave off for free vertical control. See PASTURE3D_SPLINE_SURFACE_SNAP_SPEC.md.
-@export var snap_to_surface: bool = false:
+@export var snap_to_surface: bool = true:
 	set(v):
 		snap_to_surface = v
 		_schedule_refresh()
-## Metres above the surface to sit the snapped points at (0 = on the surface).
-@export var surface_offset: float = 0.0:
+## Metres above the surface to sit the snapped points at (0 = on the surface). A small lift keeps the
+## loop visible above the brush falloff while still tracking the terrain.
+@export var surface_offset: float = 1.0:
 	set(v):
 		surface_offset = v
 		if snap_to_surface:
@@ -141,8 +142,8 @@ func _ready() -> void:
 		_connect_inspector_refresh()
 		_ensure_label()
 		var sel := EditorInterface.get_selection()
-		if not sel.selection_changed.is_connected(_update_label_visibility):
-			sel.selection_changed.connect(_update_label_visibility)
+		if not sel.selection_changed.is_connected(_on_editor_selection_changed):
+			sel.selection_changed.connect(_on_editor_selection_changed)
 		if not renamed.is_connected(_update_label_text):
 			renamed.connect(_update_label_text)
 
@@ -854,6 +855,13 @@ func _update_label_text() -> void:
 	if not is_instance_valid(_name_label):
 		return
 	_name_label.text = "%s — %s" % [name, _layer_display_name()]
+
+
+## Editor selection changed: update the nameplate, and redraw the gizmo so the loop-point handles
+## appear/disappear with selection (handles are only added when this brush itself is selected).
+func _on_editor_selection_changed() -> void:
+	_update_label_visibility()
+	update_gizmos()
 
 
 func _update_label_visibility() -> void:

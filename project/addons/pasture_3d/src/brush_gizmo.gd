@@ -15,11 +15,18 @@ const MARKER_R: float = 4.0
 const SURFACE_LIFT: float = 3.0
 ## Light neon purple — stands out against terrain greens / browns / yellows / ochres.
 const MARKER_COLOR := Color(0.74, 0.42, 1.0)
+## World half-size of the per-point marker drawn at each loop control point.
+const POINT_R: float = 1.1
+## Cyan-white point markers, distinct from the purple origin marker.
+const POINT_COLOR := Color(0.55, 0.95, 1.0)
+## Screen-space pick radius (px) for clicking a loop point.
+const PICK_RADIUS: float = 13.0
 
 
 func _init() -> void:
 	# on_top so the marker shows through the terrain (a brush sunk below the surface stays findable).
 	create_material("marker", MARKER_COLOR, false, true)
+	create_material("points", POINT_COLOR, false, true)
 
 
 func _get_gizmo_name() -> String:
@@ -53,6 +60,154 @@ func _redraw(p_gizmo: EditorNode3DGizmo) -> void:
 	var tmesh := am.generate_triangle_mesh()
 	if tmesh:
 		p_gizmo.add_collision_triangles(tmesh)
+
+	# Loop-point markers + transform-gizmo editing, shown only while the BRUSH itself is selected (not a
+	# child loop), so they don't clutter every brush or duplicate Godot's native Path3D handles. The
+	# points are SUBGIZMOS (below), so clicking one selects it and shows the standard move/rotate/scale
+	# gizmo — the brush keeps its own selection the whole time.
+	if _brush_selected(node):
+		var pmat := get_material("points", p_gizmo)
+		for path in _loop_paths(node):
+			for i in path.curve.point_count:
+				var c := node.to_local(path.to_global(path.curve.get_point_position(i)))
+				p_gizmo.add_lines(_point_lines(c), pmat)
+
+
+# ---- Loop points as subgizmos (Phase 1: select a point → transform gizmo → move it) ----
+
+
+## Click test: the loop point nearest the cursor in screen space (or -1). Selecting it shows the gizmo.
+func _subgizmos_intersect_ray(p_gizmo: EditorNode3DGizmo, p_camera: Camera3D, p_point: Vector2) -> int:
+	var node := p_gizmo.get_node_3d()
+	if not _brush_selected(node):
+		return -1
+	var best := -1
+	var best_d := PICK_RADIUS
+	var id := 0
+	for path in _loop_paths(node):
+		for i in path.curve.point_count:
+			var world: Vector3 = path.to_global(path.curve.get_point_position(i))
+			if not p_camera.is_position_behind(world):
+				var d := p_camera.unproject_position(world).distance_to(p_point)
+				if d < best_d:
+					best_d = d
+					best = id
+			id += 1
+	return best
+
+
+## Box-select: every loop point inside the selection frustum (enables group move/rotate/scale).
+func _subgizmos_intersect_frustum(p_gizmo: EditorNode3DGizmo, _camera: Camera3D, p_frustum: Array[Plane]) -> PackedInt32Array:
+	var node := p_gizmo.get_node_3d()
+	var out := PackedInt32Array()
+	if not _brush_selected(node):
+		return out
+	var id := 0
+	for path in _loop_paths(node):
+		for i in path.curve.point_count:
+			var world: Vector3 = path.to_global(path.curve.get_point_position(i))
+			if _inside_frustum(p_frustum, world):
+				out.append(id)
+			id += 1
+	return out
+
+
+## The point's transform (translation only) in the gizmo node's local space — where the gizmo appears.
+func _get_subgizmo_transform(p_gizmo: EditorNode3DGizmo, p_id: int) -> Transform3D:
+	var node := p_gizmo.get_node_3d()
+	var res := _resolve_handle(node, p_id)
+	var path: Path3D = res[0]
+	if path == null:
+		return Transform3D()
+	return Transform3D(Basis(), node.to_local(path.to_global(path.curve.get_point_position(res[1]))))
+
+
+## Live drag from the transform gizmo. We take the new origin (rotation/scale of a lone point is a no-op
+## for its position); Snap to Surface overrides Y onto the terrain beneath the brush's layer.
+func _set_subgizmo_transform(p_gizmo: EditorNode3DGizmo, p_id: int, p_transform: Transform3D) -> void:
+	var node := p_gizmo.get_node_3d()
+	var res := _resolve_handle(node, p_id)
+	var path: Path3D = res[0]
+	if path == null:
+		return
+	var world := node.to_global(p_transform.origin)
+	var brush := node as Pasture3DTerrainBrush
+	if brush != null and brush.snap_to_surface:
+		var h: float = brush._base_height_below(Vector3(world.x, 0.0, world.z))
+		if is_finite(h):
+			world.y = h + brush.surface_offset
+	path.curve.set_point_position(res[1], path.to_local(world))
+
+
+## Commit the move(s) as one undoable action. set_point_position fires curve.changed → the brush
+## repaints (and repaints again on undo).
+func _commit_subgizmos(p_gizmo: EditorNode3DGizmo, p_ids: PackedInt32Array, p_restores: Array[Transform3D], p_cancel: bool) -> void:
+	var node := p_gizmo.get_node_3d()
+	if p_cancel:
+		for i in p_ids.size():
+			var res := _resolve_handle(node, p_ids[i])
+			var path: Path3D = res[0]
+			if path != null:
+				path.curve.set_point_position(res[1], path.to_local(node.to_global(p_restores[i].origin)))
+		return
+	var ur := EditorInterface.get_editor_undo_redo()
+	ur.create_action("Move Loop Point" if p_ids.size() == 1 else "Move Loop Points")
+	for i in p_ids.size():
+		var res := _resolve_handle(node, p_ids[i])
+		var path: Path3D = res[0]
+		if path == null:
+			continue
+		var idx: int = res[1]
+		var cur := path.curve.get_point_position(idx)
+		var restore_local := path.to_local(node.to_global(p_restores[i].origin))
+		ur.add_do_method(path.curve, "set_point_position", idx, cur)
+		ur.add_undo_method(path.curve, "set_point_position", idx, restore_local)
+	ur.commit_action()
+
+
+## Map a flat subgizmo id back to (child Path3D, point index), in the same order _redraw drew them.
+func _resolve_handle(p_node: Node3D, p_id: int) -> Array:
+	var base := 0
+	for path in _loop_paths(p_node):
+		var n: int = path.curve.point_count
+		if p_id < base + n:
+			return [path, p_id - base]
+		base += n
+	return [null, -1]
+
+
+## A point is inside the selection frustum when it is on the inner side of every plane.
+func _inside_frustum(p_planes: Array[Plane], p_point: Vector3) -> bool:
+	for pl in p_planes:
+		if pl.is_point_over(p_point):
+			return false
+	return true
+
+
+## Small octahedron wireframe at a loop point, centred on `c` (node-local).
+func _point_lines(c: Vector3) -> PackedVector3Array:
+	var r := POINT_R
+	var a := c + Vector3(r, 0, 0)
+	var b := c + Vector3(-r, 0, 0)
+	var t := c + Vector3(0, r, 0)
+	var d := c + Vector3(0, -r, 0)
+	var e := c + Vector3(0, 0, r)
+	var f := c + Vector3(0, 0, -r)
+	return PackedVector3Array([a, e, e, b, b, f, f, a, t, a, t, e, t, b, t, f, d, a, d, e, d, b, d, f])
+
+
+## This brush's child loops that have a curve (the editable splines), in child order.
+func _loop_paths(p_node: Node3D) -> Array:
+	var out: Array = []
+	for c in p_node.get_children():
+		if c is Path3D and c.curve != null:
+			out.append(c)
+	return out
+
+
+## The brush node itself (not a child loop) is the current editor selection.
+func _brush_selected(p_node: Node3D) -> bool:
+	return p_node in EditorInterface.get_selection().get_selected_nodes()
 
 
 ## Marker centre in node-local space: the terrain surface height under the brush origin (+ lift), or the
