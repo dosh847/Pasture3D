@@ -1171,6 +1171,30 @@ func editor_add_point(world: Vector3) -> void:
 		return
 	var idx := _nearest_segment_index(best_path, world)
 	var local := best_path.to_local(world)
+	# Keep the new point on the existing crest/bed line instead of diving to the terrain hit far below
+	# (e.g. a tall follow-spline crest): an end-extension inherits the endpoint's height, a mid insert
+	# interpolates between its two neighbours along the segment. Snap-to-surface brushes intentionally
+	# sit on the ground, so only do this when snapping is off.
+	if not snap_to_surface:
+		var c := best_path.curve
+		var n := c.point_count
+		var closed := _is_closed()
+		if n > 0:
+			if not closed and idx <= 0:
+				local.y = c.get_point_position(0).y # prepend → match the first point
+			elif not closed and idx >= n:
+				local.y = c.get_point_position(n - 1).y # append → match the last point
+			else:
+				# Between point idx-1 and idx (wrapping for a closed ring): interpolate the height
+				# along that segment in the XZ plane so the point lands on the existing line.
+				var a := c.get_point_position((idx - 1 + n) % n)
+				var b := c.get_point_position(idx % n)
+				var ab := b - a
+				var t := 0.0
+				var denom := ab.x * ab.x + ab.z * ab.z
+				if denom > 1e-9:
+					t = clampf(((local.x - a.x) * ab.x + (local.z - a.z) * ab.z) / denom, 0.0, 1.0)
+				local.y = lerpf(a.y, b.y, t)
 	var ur := _editor_undo()
 	if ur:
 		ur.create_action("Add %s Point" % _spline_basename())
@@ -1272,11 +1296,27 @@ func _nearest_segment_index(path: Path3D, world: Vector3) -> int:
 		var t := 0.0
 		var denom := ab.length_squared()
 		if denom > 1e-9:
-			t = clampf((world - a).dot(ab) / denom, 0.0, 1.0)
+			t = (world - a).dot(ab) / denom
+		# Open splines can grow at their ends: let the first segment project before its start
+		# and the last segment past its end, so a click beyond an endpoint prepends / appends a
+		# point instead of always inserting between two existing ones.
+		var lo := 0.0
+		var hi := 1.0
+		if not closed:
+			if i == 0:
+				lo = -INF
+			if i == segs - 1:
+				hi = INF
+		t = clampf(t, lo, hi)
 		var d := world.distance_to(a + ab * t)
 		if d < best_d:
 			best_d = d
-			best_i = i + 1
+			if not closed and i == 0 and t < 0.0:
+				best_i = 0 # prepend before the first point
+			elif not closed and i == segs - 1 and t > 1.0:
+				best_i = n # append after the last point
+			else:
+				best_i = i + 1 # insert between point i and i+1
 	return best_i
 
 
