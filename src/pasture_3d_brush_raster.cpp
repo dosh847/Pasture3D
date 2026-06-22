@@ -389,6 +389,92 @@ void Pasture3DData::_apply_stamp_block(Pasture3DLayer *p_layer, const int p_min_
 	}
 }
 
+void Pasture3DData::_apply_control_block(Pasture3DLayer *p_layer, const int p_min_px, const int p_min_pz,
+		const int p_gw, const int p_gh, const uint32_t *p_ctrl, const uint8_t *p_mask) {
+	if (!p_layer) {
+		return;
+	}
+	const int rs = _region_size;
+	const int ts = p_layer->get_tile_size();
+	if (rs < 1 || ts < 1) {
+		return;
+	}
+	const int px_lo = p_min_px, px_hi = p_min_px + p_gw;
+	const int pz_lo = p_min_pz, pz_hi = p_min_pz + p_gh;
+	const int rx0 = _floordiv(px_lo, rs), rx1 = _floordiv(px_hi - 1, rs);
+	const int rz0 = _floordiv(pz_lo, rs), rz1 = _floordiv(pz_hi - 1, rs);
+
+	for (int rz = rz0; rz <= rz1; rz++) {
+		for (int rx = rx0; rx <= rx1; rx++) {
+			const Vector2i region_loc(rx, rz);
+			Pasture3DRegion *region = get_region_ptr(region_loc);
+			if (!region || region->is_deleted()) {
+				continue;
+			}
+			const int gx = rx * rs, gz = rz * rs;
+			const int lpx0 = MAX(0, px_lo - gx), lpx1 = MIN(rs, px_hi - gx);
+			const int lpz0 = MAX(0, pz_lo - gz), lpz1 = MIN(rs, pz_hi - gz);
+			if (lpx0 >= lpx1 || lpz0 >= lpz1) {
+				continue;
+			}
+			const int tx0 = lpx0 / ts, tx1 = (lpx1 - 1) / ts;
+			const int tz0 = lpz0 / ts, tz1 = (lpz1 - 1) / ts;
+			bool region_touched = false;
+			for (int tz = tz0; tz <= tz1; tz++) {
+				for (int tx = tx0; tx <= tx1; tx++) {
+					const int bx = tx * ts, bz = tz * ts;
+					const int x0 = MAX(lpx0, bx), x1 = MIN(lpx1, bx + ts);
+					const int z0 = MAX(lpz0, bz), z1 = MIN(lpz1, bz + ts);
+					if (x0 >= x1 || z0 >= z1) {
+						continue;
+					}
+					bool any = false;
+					for (int py = z0; py < z1 && !any; py++) {
+						const uint8_t *mrow = &p_mask[(size_t)(gz + py - p_min_pz) * p_gw];
+						for (int ix = gx + x0 - p_min_px, ixe = gx + x1 - p_min_px; ix < ixe; ix++) {
+							if (mrow[ix]) {
+								any = true;
+								break;
+							}
+						}
+					}
+					if (!any) {
+						continue;
+					}
+					Ref<Image> tile = p_layer->get_or_create_tile(region_loc, Vector2i(tx, tz));
+					if (tile.is_null() || tile->get_format() != Image::FORMAT_RGF) {
+						continue;
+					}
+					PackedByteArray data = tile->get_data();
+					float *f = reinterpret_cast<float *>(data.ptrw());
+					bool tile_touched = false;
+					for (int py = z0; py < z1; py++) {
+						const int idx_row = (gz + py - p_min_pz) * p_gw;
+						const int ly = py - bz;
+						for (int px = x0; px < x1; px++) {
+							const int idx = idx_row + (gx + px - p_min_px);
+							if (!p_mask[idx]) {
+								continue;
+							}
+							const int li = (ly * ts + (px - bx)) * 2;
+							f[li] = as_float(p_ctrl[idx]); // control bits as float (REPLACE; no numeric blend)
+							f[li + 1] = 1.f;
+							tile_touched = true;
+						}
+					}
+					if (tile_touched) {
+						tile->set_data(ts, ts, false, Image::FORMAT_RGF, data);
+						region_touched = true;
+					}
+				}
+			}
+			if (region_touched) {
+				region->set_modified(true);
+			}
+		}
+	}
+}
+
 // ---- Closed-loop dome/plateau (Pasture3DMound) ----
 void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Array &p_poly, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut) {
 	if (p_poly.size() < 3) {
@@ -910,6 +996,18 @@ void Pasture3DData::stamp_splat_loop(const int p_layer_id, const PackedVector2Ar
 
 	const double ramp_denom = MAX(falloff_width, 0.001);
 
+	// Phase 1d batched control apply: accumulate per-cell control words into a box buffer (+ skip mask),
+	// then commit one tile at a time. Used for the deferred non-base TYPE_CONTROL overlay; otherwise the
+	// per-cell set_control_on_layer path (full-refresh, region-map fallback, or base target).
+	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
+	const bool batched = wlayer && wlayer->get_map_type() == TYPE_CONTROL && !composite && !wlayer->is_base();
+	std::vector<uint32_t> cvals;
+	std::vector<uint8_t> cmask;
+	if (batched) {
+		cvals.assign((size_t)gw * gh, 0u);
+		cmask.assign((size_t)gw * gh, 0);
+	}
+
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
 	const double cx1 = p_clip.position.x + p_clip.size.x;
@@ -944,7 +1042,16 @@ void Pasture3DData::stamp_splat_loop(const int p_layer_id, const PackedVector2Ar
 			const uint32_t cur = get_control(pos);
 			const uint8_t base_id = preserve_base ? get_base(cur) : (uint8_t)material;
 			const uint32_t ctrl = enc_base(base_id) | enc_overlay((uint8_t)material) | enc_blend((uint8_t)blend_int) | uv_bits | (cur & 0x6);
-			set_control_on_layer(p_layer_id, pos, (int)ctrl, 1.0, composite);
+			if (batched) {
+				cvals[row + ix] = ctrl;
+				cmask[row + ix] = 1;
+			} else {
+				set_control_on_layer(p_layer_id, pos, (int)ctrl, 1.0, composite);
+			}
 		}
+	}
+
+	if (batched) {
+		_apply_control_block(wlayer, (int)std::lround(min_x / vs), (int)std::lround(min_z / vs), gw, gh, cvals.data(), cmask.data());
 	}
 }

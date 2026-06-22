@@ -291,6 +291,12 @@ public:
 	// already include base height + noise. Deferred-composite path only (orchestration composites the box).
 	void _apply_stamp_block(class Pasture3DLayer *p_layer, const int p_min_px, const int p_min_pz,
 			const int p_gw, const int p_gh, const float *p_vals, const int p_blend);
+	// Splat's Phase 1d analogue: batched control apply. Writes packed uint32 control words (where
+	// p_mask != 0) into the TYPE_CONTROL overlay's RGF tiles (R = control bits as float, G = weight 1),
+	// resolving each tile once. Control is REPLACE (no numeric blend); the skip mask is separate from the
+	// data because any uint32 bit pattern is a valid R value (so NaN can't double as a sentinel).
+	void _apply_control_block(class Pasture3DLayer *p_layer, const int p_min_px, const int p_min_pz,
+			const int p_gw, const int p_gh, const uint32_t *p_ctrl, const uint8_t *p_mask);
 	// Garbage-collect a layer's fully-uncovered tiles (frees memory after erasing/moving a feature).
 	void gc_layer(const int p_layer_id);
 	void set_active_layer(const int p_layer_id);

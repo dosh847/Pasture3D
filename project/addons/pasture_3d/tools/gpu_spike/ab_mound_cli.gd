@@ -111,8 +111,46 @@ func _run() -> bool:
 
 	_blend_test(data)
 	_plow_test(data)
+	_splat_test(data)
 	_timing_test(data)
 	return true
+
+# Phase 1d: validate the batched control apply for Splat. Bakes a TYPE_CONTROL layer batched
+# (composite=false → _apply_control_block) and per-cell (composite=true → set_control_on_layer); the layer
+# samples (as_float(ctrl)) must be identical. Batched runs FIRST so both read the same empty region control
+# map; preserve_base=false keeps the control word out of the float-NaN range so get_layer_height is exact.
+func _splat_test(data) -> void:
+	ProjectSettings.set_setting("pasture_3d/performance/gpu_raster_threshold", 0)
+	var n := 200
+	var clip := AABB(Vector3(0, -1e3, 0), Vector3(float(n), 2e3, float(n)))
+	var poly := _circle(100.0, 100.0, 80.0)
+	var lut := PackedFloat32Array()
+	var mk := func(comp): return {
+		"min_x": 0.0, "min_z": 0.0, "vs": 1.0, "gw": n, "gh": n,
+		"strength": 1.0, "edge_offset": 0.0, "falloff_width": 0.0, "material": 5,
+		"preserve_base": false, "uv_bits": 0, "composite": comp, "noise_strength": 0.0,
+	}
+	var lb: int = data.create_owned_layer_typed("splat_b", "SplatB", 0, 1) # 1 = TYPE_CONTROL
+	var lpc: int = data.create_owned_layer_typed("splat_pc", "SplatPC", 0, 1)
+	if lb < 0 or lpc < 0:
+		print("[AB] SPLAT: create_owned_layer_typed failed (%d,%d) — SKIP" % [lb, lpc])
+		return
+	data.stamp_splat_loop(lb, poly, clip, mk.call(false), lut)  # batched first (no composite)
+	data.stamp_splat_loop(lpc, poly, clip, mk.call(true), lut)  # per-cell
+	var diff := 0
+	var checked := 0
+	for iz in range(0, n, 3):
+		for ix in range(0, n, 3):
+			var p := Vector3(float(ix), 0.0, float(iz))
+			var a: float = data.get_layer_height(lpc, p)
+			var b: float = data.get_layer_height(lb, p)
+			if is_nan(a) and is_nan(b):
+				continue
+			if is_nan(a) != is_nan(b) or a != b:
+				diff += 1
+			checked += 1
+	print("[AB] SPLAT batched-vs-percell: checked=%d  mismatches=%d  RESULT: %s" % [
+		checked, diff, "PASS" if diff == 0 else "FAIL"])
 
 # Phase 1c: validate the batched apply for Plow (closed-loop, like Mound). Compares the batched write
 # (composite=false → _apply_stamp_block) against the per-cell write (composite=true → _stamp_write); the

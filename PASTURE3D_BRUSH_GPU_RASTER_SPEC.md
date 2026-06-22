@@ -413,10 +413,15 @@ are computed*, never how edits are recorded:
   other three height brushes (each now writes per-cell values into a `vals` buffer and commits via the
   batched tile writer, gated on the same `batched = wlayer && !composite && !is_base`). The value
   expression per brush is preserved verbatim (Ridge `add?amp:by+amp`, Trough `add?(h-top_y):h`, Plow
-  `add?amp:base_y+amp`). **Splat is NOT included** — it writes 32-bit control (R32_UINT via
-  `set_control_on_layer`), a different format/path that needs its own batched control writer (Phase 1d).
-  In-editor mound undo/visual gate already PASSED (user-confirmed). A Plow batched-vs-per-cell parity check
-  was added to `ab_mound_cli.gd`; run it (plus the mound A/B) once the build is available to confirm.
+  `add?amp:base_y+amp`).
+  In-editor mound undo/visual gate already PASSED (user-confirmed).
+- **Phase 1d — batched control apply for Splat. ✅ DONE + validated 2026-06-21.** Splat writes a packed
+  uint32 control word, stored as `as_float(ctrl)` in an RGF tile's R channel (same tile format as height).
+  Added `Pasture3DData::_apply_control_block` (a sibling of `_apply_stamp_block`: same tile iteration; inner
+  write is `f[li]=as_float(ctrl)`, weight 1, REPLACE — no numeric blend; a **separate skip mask** since any
+  uint32 bit pattern is a valid R value, so NaN can't be the sentinel). Gated to deferred non-base
+  TYPE_CONTROL overlay; full-refresh/region-map-fallback keep per-cell `set_control_on_layer`. **Automated
+  Splat batched-vs-per-cell parity = 0 mismatches.** All five brushes now use the batched apply.
 - **Phase 2 — Plow + Splat** (same closed-loop shader; Plow source sampling; Splat R32_UINT control).
 - **Phase 3 — open polyline (Ridge + Trough).** `open_polyline.glsl` + nearest-segment + `along`/`base_y`.
 - **Phase 4 — tuning.** Set `gpu_raster_threshold` from measured crossover; per-edge AABB cull for very
