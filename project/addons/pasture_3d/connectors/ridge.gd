@@ -5,29 +5,69 @@
 # profile Curve. Pasture3D's raise-side analogue of UE5's Landmass river brush. To CARVE a channel /
 # river along a spline use Pasture3DTrough instead — it adds a flat bed, bank run and carve defaults.
 #
-# See PASTURE3D_LANDSCAPE_TOOLS_SPEC.md §5. Paints non-destructively into a reserved layer via the
-# Pasture3DTerrainBrush base.
+# The cross-section is a TWO-reference drape: the crest sits at the spline (follow) or terrain + height,
+# and the flank descends from the crest down to the ACTUAL terrain surface at every point — either over
+# a fixed width or at a fixed slope angle. See PASTURE3D_RIDGE_TROUGH_FLANK_SPEC.md. Paints non-
+# destructively into a reserved layer via the Pasture3DTerrainBrush base.
 @tool
 @icon("res://addons/pasture_3d/icons/brush_ridge.svg")
 class_name Pasture3DRidge
 extends Pasture3DTerrainBrush
 
 enum BlendMode { REPLACE, ADD, MAX, MIN }
+## How the flank reaches the terrain: FIXED_WIDTH spreads over `width`; SLOPE_ANGLE descends at
+## `slope_angle` until it meets the ground (reach capped by `width`).
+enum FlankMode { FIXED_WIDTH, SLOPE_ANGLE }
 
 @export_group("Shape")
-## Height of the crest above the base reference.
-@export var crest_height: float = 30.0
-## Half-width: lateral distance from the centreline to the skirt edge.
-@export var width: float = 25.0
+## Extra lift of the crest above its reference. With Follow Spline Height on the spline IS the crest, so
+## this is an optional bonus height (default 0). With it off the crest sits this far above the terrain.
+@export var crest_height: float = 0.0:
+	set(v):
+		crest_height = v
+		_schedule_refresh()
+## Half-width: lateral reach from the centreline to the skirt edge (and the max reach in Slope Angle).
+@export var width: float = 25.0:
+	set(v):
+		width = v
+		_schedule_refresh()
+## FIXED_WIDTH = flank spreads over `width`; SLOPE_ANGLE = flank descends at `slope_angle` to terrain.
+@export var flank_mode: FlankMode = FlankMode.FIXED_WIDTH:
+	set(v):
+		flank_mode = v
+		_schedule_refresh()
+		notify_property_list_changed() # show/hide slope_angle
+## Slope-angle mode only: degrees the flank descends from the crest before it meets the terrain.
+@export_range(1.0, 89.0, 0.5) var slope_angle: float = 30.0:
+	set(v):
+		slope_angle = clampf(v, 1.0, 89.0)
+		_schedule_refresh()
 ## MAX = mountain ridge (raise-only, default); ADD = additive; MIN/REPLACE for special cases.
 @export var blend_mode: BlendMode = BlendMode.MAX:
 	set(v):
 		blend_mode = v
 		_schedule_refresh() # re-bake so the new blend takes effect immediately (and undo-coherently)
 ## Flip the sign (lower instead of raise).
-@export var invert: bool = false
+@export var invert: bool = false:
+	set(v):
+		invert = v
+		_schedule_refresh()
 ## Cross-section: centre (t=0) = 1 → skirt edge (t=1) = 0. Default = rounded cosine.
-@export var profile: Curve
+@export var profile: Curve:
+	set(v):
+		profile = v
+		_schedule_refresh()
+## Optional taper along the spline: sampled start (x=0) → end (x=1), multiplies `width` per point so the
+## ridge can fan wide in the middle and pinch at the ends. Null = constant width. Crest height is not
+## scaled. (Closed rings wrap 0→1 around the perimeter with a small seam at the join.)
+@export var width_curve: Curve:
+	set(v):
+		if width_curve != null and width_curve.changed.is_connected(_schedule_refresh):
+			width_curve.changed.disconnect(_schedule_refresh)
+		width_curve = v
+		if width_curve != null and not width_curve.changed.is_connected(_schedule_refresh):
+			width_curve.changed.connect(_schedule_refresh)
+		_schedule_refresh()
 
 @export_group("Crest line")
 ## Connect the last point back to the first, forming a closed ring ridge instead of an open line.
@@ -37,30 +77,38 @@ enum BlendMode { REPLACE, ADD, MAX, MIN }
 		_schedule_refresh() # re-bake so the ring closes/opens immediately (and undo-coherently)
 		if is_inside_tree():
 			update_gizmos() # redraw the loop wrap segment + tangents
-## Crest follows the spline's own Y (true) or the terrain height + crest_height (false).
-@export var follow_spline_height: bool = true
-## Drape the cross-section onto the ground beneath: 0 = level (skirts stay at the crest reference, so
-## on a hillside the uphill side floats and the downhill side buries); 1 = the cross-section banks onto
-## the slope, each skirt meeting the ground at its own height.
-@export_range(0.0, 1.0) var slope_tilt: float = 1.0:
+## Crest follows the spline's own Y (true) or the terrain height + crest_height (false). Either way the
+## flank now drapes down to the real terrain surface, so the skirt always meets the ground.
+@export var follow_spline_height: bool = true:
 	set(v):
-		slope_tilt = clampf(v, 0.0, 1.0)
+		follow_spline_height = v
 		_schedule_refresh()
-## Metres at each end over which the crest eases to 0 (blends into the ground).
-@export var taper_ends: float = 0.0
 
 @export_group("Noise")
-@export var noise: FastNoiseLite
+@export var noise: FastNoiseLite:
+	set(v):
+		noise = v
+		_schedule_refresh()
 ## Vertical jitter along the ridgeline (mountain-range feel), masked by the cross-section.
-@export var noise_strength: float = 0.0
+@export var noise_strength: float = 0.0:
+	set(v):
+		noise_strength = v
+		_schedule_refresh()
 
 @export_group("Falloff")
-## Extra skirt beyond `width` that feathers a non-zero profile edge into the terrain.
-@export var falloff: float = 10.0
+## Extra skirt beyond the flank reach that feathers a non-zero profile edge into the terrain.
+@export var falloff: float = 10.0:
+	set(v):
+		falloff = v
+		_schedule_refresh()
 
 
 func _default_layer_name() -> String:
 	return "Ridges"
+
+
+func _default_snap_to_surface() -> bool:
+	return false # ridges author a vertical crest line; the flank drapes to terrain on its own
 
 
 func _get_blend_mode() -> int:
@@ -77,6 +125,12 @@ func _is_closed() -> bool:
 
 func _padding() -> float:
 	return width + falloff + 2.0
+
+
+func _validate_property(property: Dictionary) -> void:
+	# Slope-angle field is only meaningful in SLOPE_ANGLE mode.
+	if property.name == "slope_angle" and flank_mode != FlankMode.SLOPE_ANGLE:
+		property.usage &= ~PROPERTY_USAGE_EDITOR
 
 
 ## Starter shape: a straight line in local space.
@@ -109,12 +163,14 @@ func _paint_spline(path: Path3D) -> void:
 			"min_x": min_x, "min_z": min_z, "vs": vs, "gw": gw, "gh": gh,
 			"crest_height": crest_height, "width": width, "falloff": falloff,
 			"invert": invert, "follow_spline_height": follow_spline_height,
-			"taper_ends": (0.0 if closed else taper_ends), "blend": _blend, "composite": not _defer_composite,
-			"noise": noise, "noise_strength": noise_strength, "slope_tilt": slope_tilt,
+			"flank_mode": int(flank_mode), "slope_tan": tan(deg_to_rad(slope_angle)),
+			"blend": _blend, "composite": not _defer_composite,
+			"noise": noise, "noise_strength": noise_strength,
+			# The flank always drapes onto the ground now, so the below-layer grid is always needed.
+			"base_below": _base_below_grid(min_x, min_z, vs, gw, gh),
 		}
-		# The drape needs the below-ground grid too, not just the follow=false path.
-		if not follow_spline_height or slope_tilt > 0.0:
-			params["base_below"] = _base_below_grid(min_x, min_z, vs, gw, gh)
+		if width_curve != null:
+			params["width_lut"] = _ramp_lut(width_curve)
 		terrain.data.stamp_ridge_line(_layer_id, pts, _clip_aabb, params, _ridge_cross_lut(profile))
 		return
 
@@ -124,8 +180,10 @@ func _paint_spline(path: Path3D) -> void:
 	var lat_arr: PackedFloat32Array = fld[0]
 	var by_arr: PackedFloat32Array = fld[1]
 	var al_arr: PackedFloat32Array = fld[2]
-	var total: float = fld[3]
-	var sign := -1.0 if invert else 1.0
+	var total: float = maxf(fld[3], 0.001)
+	var signed_crest := -crest_height if invert else crest_height
+	var use_angle := flank_mode == FlankMode.SLOPE_ANGLE
+	var slope_tan := maxf(tan(deg_to_rad(slope_angle)), 0.0001)
 	var reach := width + falloff
 	var edge_val := _ridge_cross(profile, 1.0) # profile value at the skirt edge, feathered out over `falloff`
 
@@ -139,24 +197,27 @@ func _paint_spline(path: Path3D) -> void:
 				continue
 			var x := min_x + ix * vs
 			var pos := Vector3(x, 0.0, z)
-			var base_y: float = by_arr[i] if follow_spline_height else _base_height_below(pos)
-			if slope_tilt > 0.0:
-				base_y = lerpf(base_y, _base_height_below(pos), slope_tilt)
-			var e := _end_taper(al_arr[i], total)
+			var ground: float = _base_height_below(pos)
+			var crest_top: float = (by_arr[i] if follow_spline_height else ground) + signed_crest
+			var w := width
+			if width_curve != null:
+				w *= maxf(width_curve.sample_baked(clampf(al_arr[i] / total, 0.0, 1.0)), 0.0)
+			var diff := crest_top - ground
+			var w_eff := w
+			if use_angle:
+				w_eff = clampf(absf(diff) / slope_tan, 0.0, w)
+			if w_eff <= 0.0:
+				continue
+			if lat > w_eff + falloff:
+				continue
 			var p: float
-			if lat <= width:
-				p = _ridge_cross(profile, lat / maxf(width, 0.001))
+			if lat <= w_eff:
+				p = _ridge_cross(profile, lat / w_eff)
 			else:
-				p = edge_val * (1.0 - clampf((lat - width) / maxf(falloff, 0.001), 0.0, 1.0))
+				p = edge_val * (1.0 - clampf((lat - w_eff) / maxf(falloff, 0.001), 0.0, 1.0))
 			if p > 0.0:
-				var amp := sign * crest_height * p * e
+				var painted := ground + diff * p
 				if noise:
-					amp += noise_strength * noise.get_noise_2d(x, z) * p
-				_paint_height(pos, base_y + amp, amp)
-
-
-func _end_taper(along: float, total: float) -> float:
-	if taper_ends <= 0.0 or closed:
-		return 1.0
-	var d := minf(along, total - along)
-	return clampf(d / taper_ends, 0.0, 1.0)
+					painted += noise_strength * noise.get_noise_2d(x, z) * p
+				# ADD writes the delta above the ground; the absolute paths write the draped height.
+				_paint_height(pos, painted, painted - ground)

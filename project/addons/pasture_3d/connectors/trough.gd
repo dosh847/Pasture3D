@@ -2,11 +2,12 @@
 #
 # Pasture3DTrough — spline-as-channel river / canyon / road-cut brush. Pasture3D's analogue of UE5's
 # Landmass CustomBrush_LandmassRiver. Carves a channel UNDER and along each (usually open) spline: an
-# optionally flat bed flanked by banks that rise back to the surrounding terrain. The bed follows the
-# spline's own Y, so drawing the spline downhill produces a channel that descends (water flow).
-# Defaults to MIN (carve-only) so banks never bulge above the ground.
+# optionally flat bed flanked by banks that rise back to the surrounding terrain. With Follow Spline
+# Height on the spline IS the bed floor, so drawing the spline downhill produces a channel that descends
+# (water flow). Banks rise from the bed up to the ACTUAL terrain surface, over a fixed width or at a
+# fixed slope angle. Defaults to MIN (carve-only) so banks never bulge above the ground.
 #
-# See PASTURE3D_LANDSCAPE_TOOLS_SPEC.md §6. Paints non-destructively into a reserved layer via the
+# See PASTURE3D_RIDGE_TROUGH_FLANK_SPEC.md. Paints non-destructively into a reserved layer via the
 # Pasture3DTerrainBrush base.
 @tool
 @icon("res://addons/pasture_3d/icons/brush_trough.svg")
@@ -14,15 +15,39 @@ class_name Pasture3DTrough
 extends Pasture3DTerrainBrush
 
 enum BlendMode { REPLACE, ADD, MAX, MIN }
+## How the banks reach the terrain: FIXED_WIDTH spreads over `bank_width`; SLOPE_ANGLE rises at
+## `slope_angle` until it meets the ground (reach capped by `bank_width`).
+enum FlankMode { FIXED_WIDTH, SLOPE_ANGLE }
 
 @export_group("Channel")
-## How far below the bed reference the channel floor sits.
-@export var depth: float = 8.0
+## Extra carve below the bed reference. With Follow Spline Height on the spline IS the bed floor, so this
+## is an optional bonus depth (default 0). With it off the bed sits this far below the terrain.
+@export var depth: float = 0.0:
+	set(v):
+		depth = v
+		_schedule_refresh()
 ## Half-width of the (flat) channel floor, centred on the spline.
-@export var bed_half_width: float = 4.0
+@export var bed_half_width: float = 4.0:
+	set(v):
+		bed_half_width = v
+		_schedule_refresh()
 ## true = flat floor of bed_half_width + bank ramp; false = a single smooth V/U basin across the
 ## whole half-width (bed_half_width + bank_width), deepest at the centreline.
-@export var flat_bed: bool = true
+@export var flat_bed: bool = true:
+	set(v):
+		flat_bed = v
+		_schedule_refresh()
+## FIXED_WIDTH = banks spread over `bank_width`; SLOPE_ANGLE = banks rise at `slope_angle` to terrain.
+@export var flank_mode: FlankMode = FlankMode.FIXED_WIDTH:
+	set(v):
+		flank_mode = v
+		_schedule_refresh()
+		notify_property_list_changed() # show/hide slope_angle
+## Slope-angle mode only: degrees the banks rise from the bed before they meet the terrain.
+@export_range(1.0, 89.0, 0.5) var slope_angle: float = 30.0:
+	set(v):
+		slope_angle = clampf(v, 1.0, 89.0)
+		_schedule_refresh()
 ## MIN = carve-only (default, never raises); REPLACE/ADD available for special cases.
 @export var blend_mode: BlendMode = BlendMode.MIN:
 	set(v):
@@ -30,12 +55,32 @@ enum BlendMode { REPLACE, ADD, MAX, MIN }
 		_schedule_refresh() # re-bake so the new blend takes effect immediately (and undo-coherently)
 
 @export_group("Banks")
-## Lateral run from the bed edge up to terrain level (the bank slope length).
-@export var bank_width: float = 10.0
+## Lateral run from the bed edge up to terrain level (the bank slope length / max reach in Slope Angle).
+@export var bank_width: float = 10.0:
+	set(v):
+		bank_width = v
+		_schedule_refresh()
 ## Bank shape: bed edge (0, deep) → bank top (1, terrain). Default = smoothstep.
-@export var bank_profile: Curve
+@export var bank_profile: Curve:
+	set(v):
+		bank_profile = v
+		_schedule_refresh()
 ## Extra feather beyond the bank top into the surrounding terrain.
-@export var falloff: float = 6.0
+@export var falloff: float = 6.0:
+	set(v):
+		falloff = v
+		_schedule_refresh()
+## Optional taper along the spline: sampled start (x=0) → end (x=1), multiplies the channel half-width
+## (bed + banks) per point so the channel can pinch toward the ends. Null = constant width. Depth is not
+## scaled. (Closed rings wrap 0→1 around the perimeter with a small seam at the join.)
+@export var width_curve: Curve:
+	set(v):
+		if width_curve != null and width_curve.changed.is_connected(_schedule_refresh):
+			width_curve.changed.disconnect(_schedule_refresh)
+		width_curve = v
+		if width_curve != null and not width_curve.changed.is_connected(_schedule_refresh):
+			width_curve.changed.connect(_schedule_refresh)
+		_schedule_refresh()
 
 @export_group("Bed line")
 ## Connect the last point back to the first, forming a closed ring channel (a moat) instead of a line.
@@ -45,22 +90,23 @@ enum BlendMode { REPLACE, ADD, MAX, MIN }
 		_schedule_refresh() # re-bake so the ring closes/opens immediately (and undo-coherently)
 		if is_inside_tree():
 			update_gizmos() # redraw the loop wrap segment + tangents
-## Bed reference = the spline's own Y (true; author flow by drawing downhill) or the per-pixel
-## terrain height (false; a uniform-depth ditch that hugs the ground).
-@export var follow_spline_height: bool = true
-## Drape the channel rim onto the ground beneath: 0 = level rim; 1 = the rim banks onto the slope so a
-## trough cut across a hillside sits naturally instead of holding one flat reference height.
-@export_range(0.0, 1.0) var slope_tilt: float = 1.0:
+## Bed reference = the spline's own Y (true; author flow by drawing downhill) or the per-pixel terrain
+## height (false; a uniform-depth ditch). Either way the banks rise to the real terrain surface.
+@export var follow_spline_height: bool = true:
 	set(v):
-		slope_tilt = clampf(v, 0.0, 1.0)
+		follow_spline_height = v
 		_schedule_refresh()
-## Metres at each end over which the depth eases to 0 (mouth / source blend).
-@export var taper_ends: float = 0.0
 
 @export_group("Noise")
-@export var noise: FastNoiseLite
+@export var noise: FastNoiseLite:
+	set(v):
+		noise = v
+		_schedule_refresh()
 ## Jitter on the banks for a natural edge (never lifts the bed above terrain).
-@export var noise_strength: float = 0.0
+@export var noise_strength: float = 0.0:
+	set(v):
+		noise_strength = v
+		_schedule_refresh()
 
 ## Clamp each spline's points so its Y never rises along the path — guarantees a downhill channel.
 @export_tool_button("Make Descend") var _descend_btn = make_descend
@@ -68,6 +114,10 @@ enum BlendMode { REPLACE, ADD, MAX, MIN }
 
 func _default_layer_name() -> String:
 	return "Troughs"
+
+
+func _default_snap_to_surface() -> bool:
+	return false # troughs author a vertical bed line (downhill flow); banks rise to terrain on their own
 
 
 func _get_blend_mode() -> int:
@@ -84,6 +134,12 @@ func _is_closed() -> bool:
 
 func _padding() -> float:
 	return bed_half_width + bank_width + falloff + 2.0
+
+
+func _validate_property(property: Dictionary) -> void:
+	# Slope-angle field is only meaningful in SLOPE_ANGLE mode.
+	if property.name == "slope_angle" and flank_mode != FlankMode.SLOPE_ANGLE:
+		property.usage &= ~PROPERTY_USAGE_EDITOR
 
 
 ## Starter shape: a straight line in local space.
@@ -116,12 +172,14 @@ func _paint_spline(path: Path3D) -> void:
 			"min_x": min_x, "min_z": min_z, "vs": vs, "gw": gw, "gh": gh,
 			"bed_half_width": bed_half_width, "bank_width": bank_width, "falloff": falloff,
 			"depth": depth, "flat_bed": flat_bed, "follow_spline_height": follow_spline_height,
-			"taper_ends": (0.0 if closed else taper_ends), "blend": _blend, "composite": not _defer_composite,
-			"noise": noise, "noise_strength": noise_strength, "slope_tilt": slope_tilt,
+			"flank_mode": int(flank_mode), "slope_tan": tan(deg_to_rad(slope_angle)),
+			"blend": _blend, "composite": not _defer_composite,
+			"noise": noise, "noise_strength": noise_strength,
+			# The banks always rise to the ground now, so the below-layer grid is always needed.
+			"base_below": _base_below_grid(min_x, min_z, vs, gw, gh),
 		}
-		# The drape needs the below-ground grid too, not just the follow=false path.
-		if not follow_spline_height or slope_tilt > 0.0:
-			params["base_below"] = _base_below_grid(min_x, min_z, vs, gw, gh)
+		if width_curve != null:
+			params["width_lut"] = _ramp_lut(width_curve)
 		terrain.data.stamp_trough_line(_layer_id, pts, _clip_aabb, params, _ramp_lut(bank_profile))
 		return
 
@@ -131,9 +189,10 @@ func _paint_spline(path: Path3D) -> void:
 	var lat_arr: PackedFloat32Array = fld[0]
 	var by_arr: PackedFloat32Array = fld[1]
 	var al_arr: PackedFloat32Array = fld[2]
-	var total: float = fld[3]
+	var total: float = maxf(fld[3], 0.001)
+	var use_angle := flank_mode == FlankMode.SLOPE_ANGLE
+	var slope_tan := maxf(tan(deg_to_rad(slope_angle)), 0.0001)
 	var reach := bed_half_width + bank_width + falloff
-	var span := bed_half_width + bank_width
 
 	for iz in range(gh):
 		var z := min_z + iz * vs
@@ -145,36 +204,35 @@ func _paint_spline(path: Path3D) -> void:
 				continue
 			var x := min_x + ix * vs
 			var pos := Vector3(x, 0.0, z)
-			var top_y: float = by_arr[i] if follow_spline_height else _base_height_below(pos)
-			if slope_tilt > 0.0:
-				top_y = lerpf(top_y, _base_height_below(pos), slope_tilt)
-			var e := _end_taper(al_arr[i], total)
-			var bed_y := top_y - depth * e
+			var ground: float = _base_height_below(pos)
+			var bed_y: float = (by_arr[i] if follow_spline_height else ground) - depth
+			var wscale := 1.0
+			if width_curve != null:
+				wscale = maxf(width_curve.sample_baked(clampf(al_arr[i] / total, 0.0, 1.0)), 0.0)
+			var bed_hw := bed_half_width * wscale
+			var span := (bed_half_width + bank_width) * wscale
+			if lat > span + falloff:
+				continue
+			# Bank reach: FIXED_WIDTH spans the whole half-width; SLOPE_ANGLE rises at the angle to ground.
+			# Flat bed keeps a level floor of bed_hw then ramps; basin ramps from the centreline.
+			var bank_floor := bed_hw if flat_bed else 0.0
+			var w_eff := span
+			if use_angle:
+				w_eff = clampf(bank_floor + absf(ground - bed_y) / slope_tan, bank_floor, span)
 			var h: float
-			if flat_bed:
-				if lat <= bed_half_width:
-					h = bed_y
-				elif lat <= span:
-					h = lerpf(bed_y, top_y, _ramp(bank_profile, (lat - bed_half_width) / maxf(bank_width, 0.001)))
-				else:
-					h = top_y
+			if flat_bed and lat <= bed_hw:
+				h = bed_y
+			elif lat <= w_eff:
+				var t := (lat - bank_floor) / maxf(w_eff - bank_floor, 0.001)
+				h = lerpf(bed_y, ground, _ramp(bank_profile, t))
 			else:
-				if lat <= span:
-					h = lerpf(bed_y, top_y, _ramp(bank_profile, lat / maxf(span, 0.001)))
-				else:
-					h = top_y
-			if noise and h < top_y:
-				# Lift the banks a little for a natural edge, never above the surrounding terrain.
-				var mask := clampf((top_y - h) / maxf(depth, 0.001), 0.0, 1.0)
-				h = minf(h + noise_strength * noise.get_noise_2d(x, z) * mask, top_y)
-			_paint_height(pos, h, h - top_y)
-
-
-func _end_taper(along: float, total: float) -> float:
-	if taper_ends <= 0.0 or closed:
-		return 1.0
-	var d := minf(along, total - along)
-	return clampf(d / taper_ends, 0.0, 1.0)
+				h = ground
+			if noise and h < ground:
+				# Lift the banks a little for a natural edge, never above the surrounding terrain. Mask by
+				# the local carve (ground - bed_y) so it fades to nothing at the rim, deepest in the bed.
+				var mask := clampf((ground - h) / maxf(ground - bed_y, 0.001), 0.0, 1.0)
+				h = minf(h + noise_strength * noise.get_noise_2d(x, z) * mask, ground)
+			_paint_height(pos, h, h - ground)
 
 
 func make_descend() -> void:
