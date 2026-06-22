@@ -107,6 +107,10 @@ func _default_layer_name() -> String:
 	return "Ridges"
 
 
+func _default_snap_to_surface() -> bool:
+	return false # ridges author a vertical crest line; the flank drapes to terrain on its own
+
+
 func _get_blend_mode() -> int:
 	return int(blend_mode)
 

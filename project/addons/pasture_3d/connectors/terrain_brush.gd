@@ -119,6 +119,12 @@ static var _show_all_labels: bool = false
 static var _show_all_tangents: bool = false
 
 
+func _init() -> void:
+	# Per-subclass default for the surface-snap toggle. Runs before scene deserialization, so a value
+	# stored in a scene still overrides it; new nodes get the subclass default (line brushes default OFF).
+	snap_to_surface = _default_snap_to_surface()
+
+
 func _ready() -> void:
 	if _layer_owner == "":
 		_layer_owner = BRUSH_OWNER_PREFIX + _default_layer_name()
@@ -1689,6 +1695,13 @@ func _map_type() -> int:
 ## Default tool-layer name for a fresh node of this type (e.g. "Mounds"). Used to build _layer_owner.
 func _default_layer_name() -> String:
 	return "Brush"
+
+
+## Whether a fresh node of this brush starts with snap_to_surface on. Area brushes (Mound/Plow/Splat)
+## want their loop glued to the ground; line brushes (Ridge/Trough) author vertical crest/bed shapes in
+## 3D, so they default OFF. Applied in _init (scene-stored values still win).
+func _default_snap_to_surface() -> bool:
+	return true
 
 
 func _padding() -> float:

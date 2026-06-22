@@ -116,6 +116,10 @@ func _default_layer_name() -> String:
 	return "Troughs"
 
 
+func _default_snap_to_surface() -> bool:
+	return false # troughs author a vertical bed line (downhill flow); banks rise to terrain on their own
+
+
 func _get_blend_mode() -> int:
 	return int(blend_mode)
 
