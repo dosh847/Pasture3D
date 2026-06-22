@@ -5,6 +5,7 @@
 // are kept as a fallback / A-B reference. See PASTURE3D_BRUSH_PERF_ROUND2_SPEC.md.
 
 #include "pasture_3d_data.h"
+#include "pasture_3d_gpu_raster.h"
 #include "pasture_3d_util.h"
 
 #include <godot_cpp/classes/fast_noise_lite.hpp>
@@ -277,6 +278,117 @@ void Pasture3DData::_stamp_write(Pasture3DLayer *p_layer, const int p_layer_id, 
 	}
 }
 
+// Floor division (toward -inf), for region coords that can be negative.
+static inline int _floordiv(const int a, const int b) {
+	int q = a / b;
+	if ((a % b != 0) && ((a < 0) != (b < 0))) {
+		q--;
+	}
+	return q;
+}
+
+void Pasture3DData::_apply_stamp_block(Pasture3DLayer *p_layer, const int p_min_px, const int p_min_pz,
+		const int p_gw, const int p_gh, const float *p_vals, const int p_blend) {
+	if (!p_layer) {
+		return;
+	}
+	const int rs = _region_size;
+	const int ts = p_layer->get_tile_size();
+	if (rs < 1 || ts < 1) {
+		return;
+	}
+	const int px_lo = p_min_px, px_hi = p_min_px + p_gw; // box world-pixel range [lo, hi)
+	const int pz_lo = p_min_pz, pz_hi = p_min_pz + p_gh;
+	const int rx0 = _floordiv(px_lo, rs), rx1 = _floordiv(px_hi - 1, rs);
+	const int rz0 = _floordiv(pz_lo, rs), rz1 = _floordiv(pz_hi - 1, rs);
+
+	for (int rz = rz0; rz <= rz1; rz++) {
+		for (int rx = rx0; rx <= rx1; rx++) {
+			const Vector2i region_loc(rx, rz);
+			Pasture3DRegion *region = get_region_ptr(region_loc);
+			if (!region || region->is_deleted()) {
+				continue; // only write where a region exists (matches _stamp_write)
+			}
+			const int gx = rx * rs, gz = rz * rs; // region's global pixel origin
+			// Region-local pixel rect covered by the box.
+			const int lpx0 = MAX(0, px_lo - gx), lpx1 = MIN(rs, px_hi - gx);
+			const int lpz0 = MAX(0, pz_lo - gz), lpz1 = MIN(rs, pz_hi - gz);
+			if (lpx0 >= lpx1 || lpz0 >= lpz1) {
+				continue;
+			}
+			const int tx0 = lpx0 / ts, tx1 = (lpx1 - 1) / ts;
+			const int tz0 = lpz0 / ts, tz1 = (lpz1 - 1) / ts;
+			bool region_touched = false;
+			for (int tz = tz0; tz <= tz1; tz++) {
+				for (int tx = tx0; tx <= tx1; tx++) {
+					const int bx = tx * ts, bz = tz * ts;
+					const int x0 = MAX(lpx0, bx), x1 = MIN(lpx1, bx + ts);
+					const int z0 = MAX(lpz0, bz), z1 = MIN(lpz1, bz + ts);
+					if (x0 >= x1 || z0 >= z1) {
+						continue;
+					}
+					// Pre-scan: skip tiles the feature doesn't touch (e.g. corner tiles of a circular dome)
+					// so we don't allocate/dirty empty tiles the per-cell path never created.
+					bool any = false;
+					for (int py = z0; py < z1 && !any; py++) {
+						const float *vrow = &p_vals[(size_t)(gz + py - p_min_pz) * p_gw];
+						const int ix0 = gx + x0 - p_min_px, ix1 = gx + x1 - p_min_px;
+						for (int ix = ix0; ix < ix1; ix++) {
+							if (!std::isnan(vrow[ix])) {
+								any = true;
+								break;
+							}
+						}
+					}
+					if (!any) {
+						continue;
+					}
+					Ref<Image> tile = p_layer->get_or_create_tile(region_loc, Vector2i(tx, tz));
+					if (tile.is_null() || tile->get_format() != Image::FORMAT_RGF) {
+						continue; // batched path is RGF-only; non-RGF shouldn't occur on a non-base overlay
+					}
+					PackedByteArray data = tile->get_data();
+					float *f = reinterpret_cast<float *>(data.ptrw()); // RGF: [r,g] per pixel, stride 2
+					bool tile_touched = false;
+					for (int py = z0; py < z1; py++) {
+						const int iz = gz + py - p_min_pz; // box-grid row
+						const float *vrow = &p_vals[(size_t)iz * p_gw];
+						const int ly = py - bz;
+						for (int px = x0; px < x1; px++) {
+							const int ix = gx + px - p_min_px;
+							const float v = vrow[ix];
+							if (std::isnan(v)) {
+								continue;
+							}
+							const int li = (ly * ts + (px - bx)) * 2;
+							float out = v;
+							if (f[li + 1] > 0.f) { // already written THIS bake (same-layer blend)
+								const float cur = f[li];
+								switch (p_blend) {
+									case 1: out = cur + v; break; // ADD
+									case 2: out = MAX(cur, v); break; // MAX
+									case 3: out = MIN(cur, v); break; // MIN
+									default: break; // REPLACE
+								}
+							}
+							f[li] = out;
+							f[li + 1] = 1.f;
+							tile_touched = true;
+						}
+					}
+					if (tile_touched) {
+						tile->set_data(ts, ts, false, Image::FORMAT_RGF, data);
+						region_touched = true;
+					}
+				}
+			}
+			if (region_touched) {
+				region->set_modified(true);
+			}
+		}
+	}
+}
+
 // ---- Closed-loop dome/plateau (Pasture3DMound) ----
 void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Array &p_poly, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut) {
 	if (p_poly.size() < 3) {
@@ -291,8 +403,23 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 		return;
 	}
 
+	// Signed-distance field: GPU analytic when the box is large enough and a local RenderingDevice exists,
+	// else the C++ serial chamfer. Three-tier fallback GPU -> C++ -> GDScript (spec §4). The GPU path is a
+	// drop-in: it fills `field` + `max_inside` identically in shape, so the per-cell loop below is unchanged
+	// and the only behavioural change is analytic-exact vs chamfer-approximate distance (A/B-validated §7).
 	std::vector<float> field;
-	const float max_inside = raster_sdf(p_poly, min_x, min_z, vs, gw, gh, field);
+	float max_inside = 0.f;
+	bool got_field = false;
+	const int threshold = _gpu_raster_threshold();
+	if (threshold > 0 && (gw * gh) >= threshold) {
+		Pasture3DGPURaster *gpu = _ensure_gpu_raster();
+		if (gpu) {
+			got_field = gpu->closed_loop_field(p_poly, min_x, min_z, vs, gw, gh, field, max_inside);
+		}
+	}
+	if (!got_field) {
+		max_inside = raster_sdf(p_poly, min_x, min_z, vs, gw, gh, field);
+	}
 
 	const double height = p_params.get("height", 0.0);
 	const bool capped = p_params.get("capped", false);
@@ -319,6 +446,16 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	// own layer (not the full terrain) and features stop climbing each other. NaN/empty => fall back.
 	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
 	const bool has_below = base_below.size() == gw * gh;
+
+	// Batched raw-tile apply path (Phase 1b): accumulate per-cell values into a box buffer, then commit them
+	// to the layer one tile at a time (no per-cell dict lookup / set_pixelv) — the cost that dominated
+	// terrain-scale bakes. Used for the common deferred, non-base overlay case; otherwise fall back to
+	// per-cell _stamp_write (full-refresh composite, no layer, or a dense Base target). NaN = no write.
+	const bool batched = wlayer && !composite && !wlayer->is_base();
+	std::vector<float> vals;
+	if (batched) {
+		vals.assign((size_t)gw * gh, NAN);
+	}
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -357,8 +494,19 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 			if (noise.is_valid()) {
 				amp += noise_strength * noise->get_noise_2d(x, z) * profile;
 			}
-			_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? amp : (base_y + amp), blend);
+			const double value = add ? amp : (base_y + amp);
+			if (batched) {
+				vals[row + ix] = (float)value;
+			} else {
+				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, value, blend);
+			}
 		}
+	}
+
+	if (batched) {
+		const int min_px = (int)std::lround(min_x / vs);
+		const int min_pz = (int)std::lround(min_z / vs);
+		_apply_stamp_block(wlayer, min_px, min_pz, gw, gh, vals.data(), blend);
 	}
 }
 
@@ -408,6 +556,12 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 	// own layer (not the full terrain) and features stop climbing each other. NaN/empty => fall back.
 	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
 	const bool has_below = base_below.size() == gw * gh;
+
+	const bool batched = wlayer && !composite && !wlayer->is_base(); // Phase 1b batched raw-tile apply
+	std::vector<float> vals;
+	if (batched) {
+		vals.assign((size_t)gw * gh, NAN);
+	}
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -462,9 +616,18 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 				if (noise.is_valid()) {
 					amp += noise_strength * noise->get_noise_2d(x, z) * p;
 				}
-				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? amp : (by + amp), blend);
+				const double value = add ? amp : (by + amp);
+				if (batched) {
+					vals[i] = (float)value;
+				} else {
+					_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, value, blend);
+				}
 			}
 		}
+	}
+
+	if (batched) {
+		_apply_stamp_block(wlayer, (int)std::lround(min_x / vs), (int)std::lround(min_z / vs), gw, gh, vals.data(), blend);
 	}
 }
 
@@ -515,6 +678,12 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 	// own layer (not the full terrain) and features stop climbing each other. NaN/empty => fall back.
 	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
 	const bool has_below = base_below.size() == gw * gh;
+
+	const bool batched = wlayer && !composite && !wlayer->is_base(); // Phase 1b batched raw-tile apply
+	std::vector<float> vals;
+	if (batched) {
+		vals.assign((size_t)gw * gh, NAN);
+	}
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -581,8 +750,17 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 				const double mask = CLAMP((top_y - h) / depth_d, 0.0, 1.0);
 				h = MIN(h + noise_strength * noise->get_noise_2d(x, z) * mask, top_y);
 			}
-			_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? (h - top_y) : h, blend);
+			const double value = add ? (h - top_y) : h;
+			if (batched) {
+				vals[i] = (float)value;
+			} else {
+				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, value, blend);
+			}
 		}
+	}
+
+	if (batched) {
+		_apply_stamp_block(wlayer, (int)std::lround(min_x / vs), (int)std::lround(min_z / vs), gw, gh, vals.data(), blend);
 	}
 }
 
@@ -629,6 +807,12 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 	// own layer (not the full terrain) and features stop climbing each other. NaN/empty => fall back.
 	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
 	const bool has_below = base_below.size() == gw * gh;
+
+	const bool batched = wlayer && !composite && !wlayer->is_base(); // Phase 1b batched raw-tile apply
+	std::vector<float> vals;
+	if (batched) {
+		vals.assign((size_t)gw * gh, NAN);
+	}
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -682,8 +866,17 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 			} else {
 				base_y = plane_y;
 			}
-			_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, add ? amp : (base_y + amp), blend);
+			const double value = add ? amp : (base_y + amp);
+			if (batched) {
+				vals[row + ix] = (float)value;
+			} else {
+				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, value, blend);
+			}
 		}
+	}
+
+	if (batched) {
+		_apply_stamp_block(wlayer, (int)std::lround(min_x / vs), (int)std::lround(min_z / vs), gw, gh, vals.data(), blend);
 	}
 }
 

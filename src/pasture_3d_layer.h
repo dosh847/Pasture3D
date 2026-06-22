@@ -129,6 +129,10 @@ public:
 
 	// Tile / region access.
 	Ref<Image> get_tile(const Vector2i &p_region_loc, const Vector2i &p_tile_coord) const;
+	// Public wrapper over _get_or_create_tile for the batched raw-tile stamp apply (brush_raster).
+	// Returns the overlay tile (created uncovered if absent); caller resolves it once per tile-block and
+	// reads/writes its raw bytes directly (the Round-3 idiom), instead of per-cell set_sample.
+	Ref<Image> get_or_create_tile(const Vector2i &p_region_loc, const Vector2i &p_tile_coord) { return _get_or_create_tile(p_region_loc, p_tile_coord); }
 	// Adopt a whole region image as this layer's single tile. Only valid when _tile_size == region
 	// size (the Phase 1 default); used to alias the Base layer onto existing region height maps.
 	void set_region_image(const Vector2i &p_region_loc, const Ref<Image> &p_image);

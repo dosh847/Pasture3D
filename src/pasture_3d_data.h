@@ -83,6 +83,17 @@ private:
 	// above remain the composited source of truth either way, so the runtime path is unchanged.
 	Ref<Pasture3DLayerStack> _layer_stack;
 
+	// GPU analytic rasteriser (PASTURE3D_BRUSH_GPU_RASTER_SPEC.md). Lazily created on the first large
+	// stamp; owns a local RenderingDevice. Null until used; freed in _clear(). Plain pointer (not an
+	// Object/Ref) — it is internal infrastructure, not exposed to the engine.
+	class Pasture3DGPURaster *_gpu_raster = nullptr;
+	// Lazily create + return the GPU rasteriser, or nullptr if GPU rasterisation is disabled
+	// (gpu_raster_threshold == 0) or unavailable. Cheap to call repeatedly.
+	class Pasture3DGPURaster *_ensure_gpu_raster();
+	// Project-setting threshold (cells) at/above which a stamp box uses the GPU path. 0 disables GPU;
+	// 1 forces GPU-always (testing). Reads `pasture_3d/performance/gpu_raster_threshold`.
+	int _gpu_raster_threshold() const;
+
 	// Functions
 	void _clear();
 	void _synthesize_base_layer();
@@ -262,6 +273,9 @@ public:
 	void stamp_trough_line(const int p_layer_id, const PackedVector3Array &p_pts, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut);
 	void stamp_plow_loop(const int p_layer_id, const PackedVector2Array &p_poly, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut, const PackedFloat32Array &p_src_data);
 	void stamp_splat_loop(const int p_layer_id, const PackedVector2Array &p_poly, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut);
+	// Capability query (spec §5.3): true if a local RenderingDevice + the analytic compute pipeline could
+	// be created. For tooling/tests/diagnostics; read-only, no behaviour change. Bound to GDScript.
+	bool gpu_raster_available();
 	// Per-cell write used by the native rasterisers. When p_composite, defers to the per-pixel composite
 	// API (full-refresh path). Otherwise writes the sample directly into p_layer, caching the resolved
 	// region in r_loc/r_region so a run of cells in the same region skips the per-cell layer+region
@@ -269,6 +283,14 @@ public:
 	// delta (add). Not bound — internal helper for stamp_*.
 	void _stamp_write(class Pasture3DLayer *p_layer, const int p_layer_id, const bool p_composite,
 			Vector2i &r_loc, Pasture3DRegion *&r_region, const Vector3 &p_pos, const real_t p_value, const int p_blend);
+	// Batched raw-tile apply for the native rasterisers (PASTURE3D_BRUSH_GPU_RASTER_SPEC.md Phase 1b). Writes
+	// a box-grid of values (gw*gh, row-major, NaN = skip) into a non-base RGF overlay layer, resolving each
+	// tile ONCE (get_data/set_data) and applying the same-layer blend per cell — replacing the per-cell
+	// _stamp_write (tile dict-lookup + set_pixelv) that dominated terrain-scale bakes. The box grid is
+	// anchored at vertex (p_min_px, p_min_pz) = round(min_x/vs), round(min_z/vs). Caller-provided values
+	// already include base height + noise. Deferred-composite path only (orchestration composites the box).
+	void _apply_stamp_block(class Pasture3DLayer *p_layer, const int p_min_px, const int p_min_pz,
+			const int p_gw, const int p_gh, const float *p_vals, const int p_blend);
 	// Garbage-collect a layer's fully-uncovered tiles (frees memory after erasing/moving a feature).
 	void gc_layer(const int p_layer_id);
 	void set_active_layer(const int p_layer_id);

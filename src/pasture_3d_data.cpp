@@ -9,8 +9,11 @@
 
 #include <vector>
 
+#include <godot_cpp/classes/project_settings.hpp>
+
 #include "logger.h"
 #include "pasture_3d_data.h"
+#include "pasture_3d_gpu_raster.h"
 
 ///////////////////////////
 // Private Functions
@@ -28,6 +31,37 @@ void Pasture3DData::_clear() {
 	_generated_control_maps.clear();
 	_generated_color_maps.clear();
 	_layer_stack.unref();
+	if (_gpu_raster) {
+		memdelete(_gpu_raster);
+		_gpu_raster = nullptr;
+	}
+}
+
+// --- GPU rasteriser plumbing (PASTURE3D_BRUSH_GPU_RASTER_SPEC.md) ---
+
+int Pasture3DData::_gpu_raster_threshold() const {
+	// Default ~256x256 cells; below it the C++ path wins (no readback latency). 0 disables GPU.
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	const int dflt = 1048576; // ~1024^2; measured crossover where GPU beats the batched CPU apply (Phase 1b)
+	if (!ps) {
+		return dflt;
+	}
+	return (int)ps->get_setting("pasture_3d/performance/gpu_raster_threshold", dflt);
+}
+
+Pasture3DGPURaster *Pasture3DData::_ensure_gpu_raster() {
+	if (_gpu_raster_threshold() == 0) {
+		return nullptr; // GPU globally disabled.
+	}
+	if (!_gpu_raster) {
+		_gpu_raster = memnew(Pasture3DGPURaster);
+	}
+	return _gpu_raster;
+}
+
+bool Pasture3DData::gpu_raster_available() {
+	Pasture3DGPURaster *gpu = _ensure_gpu_raster();
+	return gpu && gpu->available();
 }
 
 // Builds a one-layer stack whose dense "Base" layer aliases the loaded region height maps, so an
@@ -244,6 +278,20 @@ void Pasture3DData::initialize(Pasture3D *p_terrain) {
 	}
 	_region_size = _terrain->get_region_size();
 	_region_sizev = V2I(_region_size);
+
+	// Register the GPU-raster threshold setting once so it is discoverable/tunable in Project Settings
+	// (spec §5.1). Default ~256x256 cells; 0 disables GPU, 1 forces GPU-always (A/B testing). Idempotent.
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	if (ps && !ps->has_setting("pasture_3d/performance/gpu_raster_threshold")) {
+		ps->set_setting("pasture_3d/performance/gpu_raster_threshold", 1048576);
+		ps->set_initial_value("pasture_3d/performance/gpu_raster_threshold", 1048576);
+		Dictionary info;
+		info["name"] = "pasture_3d/performance/gpu_raster_threshold";
+		info["type"] = Variant::INT;
+		info["hint"] = PROPERTY_HINT_RANGE;
+		info["hint_string"] = "0,16777216,1";
+		ps->add_property_info(info);
+	}
 }
 
 void Pasture3DData::set_region_locations(const TypedArray<Vector2i> &p_locations) {
@@ -2348,6 +2396,7 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("stamp_trough_line", "layer_id", "pts", "clip", "params", "lut"), &Pasture3DData::stamp_trough_line);
 	ClassDB::bind_method(D_METHOD("stamp_plow_loop", "layer_id", "poly", "clip", "params", "lut", "src_data"), &Pasture3DData::stamp_plow_loop);
 	ClassDB::bind_method(D_METHOD("stamp_splat_loop", "layer_id", "poly", "clip", "params", "lut"), &Pasture3DData::stamp_splat_loop);
+	ClassDB::bind_method(D_METHOD("gpu_raster_available"), &Pasture3DData::gpu_raster_available);
 	ClassDB::bind_method(D_METHOD("gc_layer", "layer_id"), &Pasture3DData::gc_layer);
 	ClassDB::bind_method(D_METHOD("set_active_layer", "layer_id"), &Pasture3DData::set_active_layer);
 	ClassDB::bind_method(D_METHOD("get_active_layer"), &Pasture3DData::get_active_layer);
