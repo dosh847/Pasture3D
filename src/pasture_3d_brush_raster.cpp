@@ -611,26 +611,30 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 	}
 
 	std::vector<float> lat, base_yf, along;
-	const float total = raster_polyline_field(p_pts, min_x, min_z, vs, gw, gh, lat, base_yf, along);
+	const float total_raw = raster_polyline_field(p_pts, min_x, min_z, vs, gw, gh, lat, base_yf, along);
+	const double total = MAX((double)total_raw, 0.001);
 
 	const double crest_height = p_params.get("crest_height", 0.0);
 	const double width = p_params.get("width", 0.0);
 	const double falloff = p_params.get("falloff", 0.0);
 	const bool invert = p_params.get("invert", false);
 	const bool follow = p_params.get("follow_spline_height", true);
-	const double taper_ends = p_params.get("taper_ends", 0.0);
+	// Flank mode: 0 = fixed width (spread over `width`), 1 = slope angle (descend at slope_tan to ground,
+	// reach capped by `width`). slope_tan = tan(slope_angle).
+	const int flank_mode = (int)p_params.get("flank_mode", 0);
+	const double slope_tan = MAX((double)p_params.get("slope_tan", 1.0), 0.0001);
 	const int blend = (int)p_params.get("blend", 0);
 	const bool composite = p_params.get("composite", true);
 	const double noise_strength = p_params.get("noise_strength", 0.0);
-	// Slope tilt (0..1): drape the cross-section onto the ground beneath. 0 = level (anchor stays at the
-	// crest reference); 1 = the anchor follows the per-cell below-ground, so the ridge banks onto a hill.
-	const double slope_tilt = CLAMP((double)p_params.get("slope_tilt", 0.0), 0.0, 1.0);
 	Object *noise_obj = p_params.get("noise", Variant());
 	Ref<FastNoiseLite> noise = Object::cast_to<FastNoiseLite>(noise_obj);
+	// Optional along-spline width taper LUT (t = along/total -> width multiplier). Empty => constant width.
+	const PackedFloat32Array width_lut = p_params.get("width_lut", PackedFloat32Array());
+	const bool has_wlut = width_lut.size() > 0;
 
-	const double sign = invert ? -1.0 : 1.0;
+	const double signed_crest = invert ? -crest_height : crest_height;
+	const bool use_angle = (flank_mode == 1);
 	const double reach = width + falloff;
-	const double width_d = MAX(width, 0.001);
 	const double falloff_d = MAX(falloff, 0.001);
 	const float edge_val = raster_ramp(p_lut, 1.0f); // _cross at t=1
 	const bool add = (blend == 1);
@@ -638,8 +642,9 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
 	Vector2i wloc(0x7fffffff, 0x7fffffff);
 	Pasture3DRegion *wregion = nullptr;
-	// Below-layer base: the composite of layers beneath this brush's, so it samples the ground under its
-	// own layer (not the full terrain) and features stop climbing each other. NaN/empty => fall back.
+	// Below-layer base: the composite of layers beneath this brush's, so the flank drapes onto the ground
+	// under its own layer (not the full terrain) and features stop climbing each other. NaN/empty => fall
+	// back to the live height. The two-reference cross-section always needs this now.
 	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
 	const bool has_below = base_below.size() == gw * gh;
 
@@ -672,37 +677,37 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 				continue;
 			}
 			const Vector3 pos(x, 0.0, z);
-			double by;
-			if (follow) {
-				by = (double)base_yf[i];
-			} else {
-				const float bb = has_below ? base_below[i] : (float)NAN;
-				by = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
+			// Two references: the ground beneath (skirt target) and the crest top.
+			const float bb = has_below ? base_below[i] : (float)NAN;
+			const double ground = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
+			const double crest_top = (follow ? (double)base_yf[i] : ground) + signed_crest;
+			double w = width;
+			if (has_wlut) {
+				w *= MAX((double)raster_ramp(width_lut, (float)((double)along[i] / total)), 0.0);
 			}
-			if (slope_tilt > 0.0) {
-				// Blend the anchor toward the per-cell ground so the cross-section drapes onto the slope.
-				const float bb = has_below ? base_below[i] : (float)NAN;
-				const double ground = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
-				by += (ground - by) * slope_tilt;
+			const double diff = crest_top - ground;
+			double w_eff = w;
+			if (use_angle) {
+				w_eff = CLAMP(std::fabs(diff) / slope_tan, 0.0, w);
 			}
-			double e = 1.0;
-			if (taper_ends > 0.0) {
-				const double al = (double)along[i];
-				const double d = MIN(al, (double)total - al);
-				e = CLAMP(d / taper_ends, 0.0, 1.0);
+			if (w_eff <= 0.0) {
+				continue;
+			}
+			if (latd > w_eff + falloff) {
+				continue;
 			}
 			double p;
-			if (latd <= width) {
-				p = raster_ramp(p_lut, (float)(latd / width_d));
+			if (latd <= w_eff) {
+				p = raster_ramp(p_lut, (float)(latd / w_eff));
 			} else {
-				p = edge_val * (1.0 - CLAMP((latd - width) / falloff_d, 0.0, 1.0));
+				p = edge_val * (1.0 - CLAMP((latd - w_eff) / falloff_d, 0.0, 1.0));
 			}
 			if (p > 0.0) {
-				double amp = sign * crest_height * p * e;
+				double painted = ground + diff * p; // drape from crest down to the ground
 				if (noise.is_valid()) {
-					amp += noise_strength * noise->get_noise_2d(x, z) * p;
+					painted += noise_strength * noise->get_noise_2d(x, z) * p;
 				}
-				const double value = add ? amp : (by + amp);
+				const double value = add ? (painted - ground) : painted;
 				if (batched) {
 					vals[i] = (float)value;
 				} else {
@@ -732,7 +737,8 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 	}
 
 	std::vector<float> lat, base_yf, along;
-	const float total = raster_polyline_field(p_pts, min_x, min_z, vs, gw, gh, lat, base_yf, along);
+	const float total_raw = raster_polyline_field(p_pts, min_x, min_z, vs, gw, gh, lat, base_yf, along);
+	const double total = MAX((double)total_raw, 0.001);
 
 	const double bed_half_width = p_params.get("bed_half_width", 0.0);
 	const double bank_width = p_params.get("bank_width", 0.0);
@@ -740,28 +746,28 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 	const double depth = p_params.get("depth", 0.0);
 	const bool flat_bed = p_params.get("flat_bed", true);
 	const bool follow = p_params.get("follow_spline_height", true);
-	const double taper_ends = p_params.get("taper_ends", 0.0);
+	// Flank mode: 0 = fixed width (banks spread over bank_width), 1 = slope angle (banks rise at slope_tan
+	// to ground, reach capped by bank_width). slope_tan = tan(slope_angle).
+	const int flank_mode = (int)p_params.get("flank_mode", 0);
+	const double slope_tan = MAX((double)p_params.get("slope_tan", 1.0), 0.0001);
 	const int blend = (int)p_params.get("blend", 0);
 	const bool composite = p_params.get("composite", true);
 	const double noise_strength = p_params.get("noise_strength", 0.0);
-	// Slope tilt (0..1): drape the channel's rim reference onto the ground beneath, so a trough cut into
-	// a hillside banks with the slope instead of holding a level rim. 0 = level; 1 = follows the ground.
-	const double slope_tilt = CLAMP((double)p_params.get("slope_tilt", 0.0), 0.0, 1.0);
 	Object *noise_obj = p_params.get("noise", Variant());
 	Ref<FastNoiseLite> noise = Object::cast_to<FastNoiseLite>(noise_obj);
+	// Optional along-spline width taper LUT (t = along/total -> half-width multiplier). Empty => constant.
+	const PackedFloat32Array width_lut = p_params.get("width_lut", PackedFloat32Array());
+	const bool has_wlut = width_lut.size() > 0;
 
 	const double reach = bed_half_width + bank_width + falloff;
-	const double span = bed_half_width + bank_width;
-	const double bank_d = MAX(bank_width, 0.001);
-	const double span_d = MAX(span, 0.001);
-	const double depth_d = MAX(depth, 0.001);
+	const bool use_angle = (flank_mode == 1);
 	const bool add = (blend == 1);
 
 	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
 	Vector2i wloc(0x7fffffff, 0x7fffffff);
 	Pasture3DRegion *wregion = nullptr;
-	// Below-layer base: the composite of layers beneath this brush's, so it samples the ground under its
-	// own layer (not the full terrain) and features stop climbing each other. NaN/empty => fall back.
+	// Below-layer base: the composite of layers beneath this brush's, so the banks rise to the ground
+	// under its own layer (not the full terrain). NaN/empty => fall back. Always needed now.
 	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
 	const bool has_below = base_below.size() == gw * gh;
 
@@ -794,49 +800,39 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 				continue;
 			}
 			const Vector3 pos(x, 0.0, z);
-			double top_y;
-			if (follow) {
-				top_y = (double)base_yf[i];
-			} else {
-				const float bb = has_below ? base_below[i] : (float)NAN;
-				top_y = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
+			// Two references: the ground beneath (the rim the banks rise to) and the bed floor.
+			const float bb = has_below ? base_below[i] : (float)NAN;
+			const double ground = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
+			const double bed_y = (follow ? (double)base_yf[i] : ground) - depth;
+			double wscale = 1.0;
+			if (has_wlut) {
+				wscale = MAX((double)raster_ramp(width_lut, (float)((double)along[i] / total)), 0.0);
 			}
-			if (slope_tilt > 0.0) {
-				// Blend the rim toward the per-cell ground so the channel drapes onto the slope.
-				const float bb = has_below ? base_below[i] : (float)NAN;
-				const double ground = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
-				top_y += (ground - top_y) * slope_tilt;
+			const double bed_hw = bed_half_width * wscale;
+			const double span = (bed_half_width + bank_width) * wscale;
+			if (latd > span + falloff) {
+				continue;
 			}
-			double e = 1.0;
-			if (taper_ends > 0.0) {
-				const double al = (double)along[i];
-				const double d = MIN(al, (double)total - al);
-				e = CLAMP(d / taper_ends, 0.0, 1.0);
+			// Flat bed keeps a level floor of bed_hw then ramps; basin ramps from the centreline.
+			const double bank_floor = flat_bed ? bed_hw : 0.0;
+			double w_eff = span;
+			if (use_angle) {
+				w_eff = CLAMP(bank_floor + std::fabs(ground - bed_y) / slope_tan, bank_floor, span);
 			}
-			const double bed_y = top_y - depth * e;
 			double h;
-			if (flat_bed) {
-				if (latd <= bed_half_width) {
-					h = bed_y;
-				} else if (latd <= span) {
-					const double t = (double)raster_ramp(p_lut, (float)((latd - bed_half_width) / bank_d));
-					h = bed_y + (top_y - bed_y) * t;
-				} else {
-					h = top_y;
-				}
+			if (flat_bed && latd <= bed_hw) {
+				h = bed_y;
+			} else if (latd <= w_eff) {
+				const double t = (latd - bank_floor) / MAX(w_eff - bank_floor, 0.001);
+				h = bed_y + (ground - bed_y) * (double)raster_ramp(p_lut, (float)t);
 			} else {
-				if (latd <= span) {
-					const double t = (double)raster_ramp(p_lut, (float)(latd / span_d));
-					h = bed_y + (top_y - bed_y) * t;
-				} else {
-					h = top_y;
-				}
+				h = ground;
 			}
-			if (noise.is_valid() && h < top_y) {
-				const double mask = CLAMP((top_y - h) / depth_d, 0.0, 1.0);
-				h = MIN(h + noise_strength * noise->get_noise_2d(x, z) * mask, top_y);
+			if (noise.is_valid() && h < ground) {
+				const double mask = CLAMP((ground - h) / MAX(ground - bed_y, 0.001), 0.0, 1.0);
+				h = MIN(h + noise_strength * noise->get_noise_2d(x, z) * mask, ground);
 			}
-			const double value = add ? (h - top_y) : h;
+			const double value = add ? (h - ground) : h;
 			if (batched) {
 				vals[i] = (float)value;
 			} else {
