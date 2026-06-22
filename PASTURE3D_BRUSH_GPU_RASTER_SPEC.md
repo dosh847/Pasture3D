@@ -422,7 +422,12 @@ are computed*, never how edits are recorded:
   uint32 bit pattern is a valid R value, so NaN can't be the sentinel). Gated to deferred non-base
   TYPE_CONTROL overlay; full-refresh/region-map-fallback keep per-cell `set_control_on_layer`. **Automated
   Splat batched-vs-per-cell parity = 0 mismatches.** All five brushes now use the batched apply.
-- **Phase 2 — Plow + Splat** (same closed-loop shader; Plow source sampling; Splat R32_UINT control).
+- **Phase 2 — GPU field for Plow + Splat. ✅ DONE + validated 2026-06-21.** Both are closed-loop and ignore
+  `max_inside` (they normalise on `falloff_width`), so they reuse `closed_loop_field` directly — the same
+  threshold gate + 3-tier fallback wired into `stamp_plow_loop`/`stamp_splat_loop`. Plow GPU-vs-CPU field
+  parity confirmed (0.0 with a saturated ramp; the analytic-vs-chamfer delta itself is already quantified on
+  Mound, §7). All three closed-loop brushes now have the GPU field; Ridge/Trough (open polyline) remain
+  CPU-field pending the Phase 3 shader.
 - **Phase 3 — open polyline (Ridge + Trough).** `open_polyline.glsl` + nearest-segment + `along`/`base_y`.
 - **Phase 4 — tuning.** Set `gpu_raster_threshold` from measured crossover; per-edge AABB cull for very
   large polygons (the MicroVerse "per-curve bounds" 17→12 ms refinement); decide single-dispatch vs

@@ -172,24 +172,34 @@ func _plow_test(data) -> void:
 	}
 	var lpc: int = data.create_owned_layer("plow_pc", "PlowPC", 0)
 	var lb: int = data.create_owned_layer("plow_b", "PlowB", 0)
-	data.stamp_plow_loop(lpc, poly, clip, mk.call(true), lut, src)  # per-cell write
-	data.stamp_plow_loop(lb, poly, clip, mk.call(false), lut, src)  # batched write
+	data.stamp_plow_loop(lpc, poly, clip, mk.call(true), lut, src)  # per-cell write (CPU field)
+	data.stamp_plow_loop(lb, poly, clip, mk.call(false), lut, src)  # batched write (CPU field)
+	var lg: int = data.create_owned_layer("plow_g", "PlowG", 0)
+	ProjectSettings.set_setting("pasture_3d/performance/gpu_raster_threshold", 1) # force GPU field
+	data.stamp_plow_loop(lg, poly, clip, mk.call(false), lut, src)  # batched write (GPU field)
+	ProjectSettings.set_setting("pasture_3d/performance/gpu_raster_threshold", 0)
 	var maxd := 0.0
+	var gdmax := 0.0
 	var checked := 0
 	for iz in range(0, n, 3):
 		for ix in range(0, n, 3):
 			var p := Vector3(float(ix), 0.0, float(iz))
 			var a: float = data.get_layer_height(lpc, p)
 			var b: float = data.get_layer_height(lb, p)
+			var g: float = data.get_layer_height(lg, p)
 			if is_nan(a) and is_nan(b):
 				continue
 			if is_nan(a) != is_nan(b):
 				maxd = 1e9
 				continue
 			maxd = maxf(maxd, absf(a - b))
+			if not is_nan(g) and not is_nan(b):
+				gdmax = maxf(gdmax, absf(g - b))
 			checked += 1
 	print("[AB] PLOW batched-vs-percell: checked=%d  max|Δ|=%.6f  RESULT: %s" % [
 		checked, maxd, "PASS" if maxd <= 0.0001 else "FAIL"])
+	print("[AB] PLOW gpu-vs-cpu field: max|Δ|=%.5f m  RESULT: %s" % [
+		gdmax, "PASS (analytic≈chamfer)" if gdmax <= 1.0 else "REVIEW"])
 
 # Validate the batched apply's same-layer blend: bake A alone, B alone, then A+B with MAX on one layer
 # (no clear between) and confirm the combined layer equals the per-cell max — the "overlapping tools on a

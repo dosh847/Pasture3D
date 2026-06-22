@@ -864,8 +864,23 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 		return;
 	}
 
+	// Field: GPU analytic when the box is large enough + a local RD exists, else the C++ chamfer (Plow/Splat
+	// ignore max_inside; they normalise on falloff_width). Same 3-tier fallback as Mound (spec §4).
 	std::vector<float> field;
-	raster_sdf(p_poly, min_x, min_z, vs, gw, gh, field);
+	{
+		bool got_field = false;
+		const int threshold = _gpu_raster_threshold();
+		if (threshold > 0 && (gw * gh) >= threshold) {
+			Pasture3DGPURaster *gpu = _ensure_gpu_raster();
+			if (gpu) {
+				float mi_unused = 0.f;
+				got_field = gpu->closed_loop_field(p_poly, min_x, min_z, vs, gw, gh, field, mi_unused);
+			}
+		}
+		if (!got_field) {
+			raster_sdf(p_poly, min_x, min_z, vs, gw, gh, field);
+		}
+	}
 
 	const double height_scale = p_params.get("height_scale", 0.0);
 	const double height_offset = p_params.get("height_offset", 0.5);
@@ -980,8 +995,23 @@ void Pasture3DData::stamp_splat_loop(const int p_layer_id, const PackedVector2Ar
 		return;
 	}
 
+	// Field: GPU analytic when the box is large enough + a local RD exists, else the C++ chamfer (Plow/Splat
+	// ignore max_inside; they normalise on falloff_width). Same 3-tier fallback as Mound (spec §4).
 	std::vector<float> field;
-	raster_sdf(p_poly, min_x, min_z, vs, gw, gh, field);
+	{
+		bool got_field = false;
+		const int threshold = _gpu_raster_threshold();
+		if (threshold > 0 && (gw * gh) >= threshold) {
+			Pasture3DGPURaster *gpu = _ensure_gpu_raster();
+			if (gpu) {
+				float mi_unused = 0.f;
+				got_field = gpu->closed_loop_field(p_poly, min_x, min_z, vs, gw, gh, field, mi_unused);
+			}
+		}
+		if (!got_field) {
+			raster_sdf(p_poly, min_x, min_z, vs, gw, gh, field);
+		}
+	}
 
 	const double strength = p_params.get("strength", 1.0);
 	const double edge_offset = p_params.get("edge_offset", 0.0);
