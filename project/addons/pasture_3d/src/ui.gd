@@ -88,7 +88,9 @@ func _enter_tree() -> void:
 	toolbar.plugin = plugin
 	toolbar.hide()
 	toolbar.tool_changed.connect(_on_tool_changed)
-	
+	toolbar.placement_toggled.connect(_on_placement_toggled)
+	toolbar.selection_toggled.connect(_on_selection_toggled)
+
 	tool_settings = TerrainToolSettings.new()
 	tool_settings.setting_changed.connect(_on_setting_changed)
 	tool_settings.picking.connect(_on_picking)
@@ -102,6 +104,11 @@ func _enter_tree() -> void:
 	plugin.add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_SIDE_LEFT, toolbar)
 	plugin.add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_BOTTOM, tool_settings)
 	plugin.add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, terrain_menu)
+
+	# Bottom-bar landscape-brush type picker (shown only while the Place Brush tool is active).
+	tool_settings.build_placement_selector(toolbar.PLACEABLE_BRUSHES)
+	tool_settings.placement_type_changed.connect(_on_placement_type_changed)
+	tool_settings.placement_offset_changed.connect(_on_placement_offset_changed)
 
 	_on_tool_changed(Pasture3DEditor.REGION, Pasture3DEditor.ADD)
 	
@@ -278,6 +285,62 @@ func _on_tool_changed(p_tool: Pasture3DEditor.Tool, p_operation: Pasture3DEditor
 	if plugin.debug:
 		print("Pasture3DUI: _on_tool_changed: calling _on_setting_changed()")
 	_on_setting_changed()
+
+
+## Place-Brush tool toggled on/off (see toolbar.gd). While on, the native editor is parked on a no-op
+## tool so a click can never sculpt, and the bottom-bar brush-type picker is shown. Toggling off restores
+## the sculpt tool that's still selected in the radio.
+func _on_placement_toggled(p_enabled: bool) -> void:
+	plugin.placement_mode = p_enabled
+	if p_enabled:
+		plugin.selection_mode = false
+		_enter_landscape_mode()
+		tool_settings.show_placement_selector(true)
+	else:
+		tool_settings.show_placement_selector(false)
+		_exit_landscape_mode_if_idle()
+
+
+## Select-Brush tool toggled on/off. Same parking as placement, but no type picker (it selects, not adds).
+func _on_selection_toggled(p_enabled: bool) -> void:
+	plugin.selection_mode = p_enabled
+	if p_enabled:
+		plugin.placement_mode = false
+		tool_settings.show_placement_selector(false)
+		_enter_landscape_mode()
+	else:
+		_exit_landscape_mode_if_idle()
+
+
+## Shared setup when a landscape pseudo-tool turns on: drop picking and hide the standard tool rows. No
+## need to park the C++ editor tool — placement/selection are intercepted ahead of the sculpt path and
+## ahead of update_decal in _forward_3d_gui_input, so a click can never sculpt and the old brush decal
+## isn't refreshed (it just fades out).
+func _enter_landscape_mode() -> void:
+	clear_picking()
+	tool_settings.show_settings(PackedStringArray())
+
+
+## Leaving a landscape pseudo-tool: only when NEITHER is active (switching Place↔Select fires a stray
+## toggled(false) on the deselected button — don't let it tear down the mode we're entering). Rebuilds
+## the previously-selected sculpt tool's rows + restores its C++ tool/op. Force the guard open first
+## (active_tool may equal _selected_tool again after a set_active_operation), else the rebuild no-ops.
+func _exit_landscape_mode_if_idle() -> void:
+	if not plugin.placement_mode and not plugin.selection_mode:
+		active_tool = Pasture3DEditor.TOOL_MAX
+		active_operation = Pasture3DEditor.OP_MAX
+		_on_tool_changed(_selected_tool, _selected_operation)
+
+
+func _on_placement_type_changed(p_script: String, p_label: String, p_icon: String) -> void:
+	plugin.placement_brush_script = p_script
+	plugin.placement_brush_label = p_label
+	if toolbar and toolbar.placement_button:
+		toolbar.placement_button.set_button_icon(load(p_icon))
+
+
+func _on_placement_offset_changed(p_offset: float) -> void:
+	plugin.placement_y_offset = p_offset
 
 
 func _on_setting_changed(p_setting: Variant = null) -> void:
@@ -552,6 +615,36 @@ func update_decal() -> void:
 		RenderingServer.material_set_param(mat_rid, "_editor_decal_visible", editor_decal_visible)
 		RenderingServer.material_set_param(mat_rid, "_editor_decal_part", editor_decal_part)
 		RenderingServer.material_set_param(mat_rid, "_region_map", r_map)
+
+
+## Crosshair under the cursor for the Place Brush tool. Shows just the cursor reticle (no brush circle)
+## at `world_pos`, mirroring how the picking decal is drawn — placement skips the normal update_decal()
+## path, so it pushes the shader params itself.
+func show_placement_decal(world_pos: Vector3) -> void:
+	if not plugin.terrain or not visible:
+		return
+	mat_rid = plugin.terrain.material.get_material_rid()
+	if not is_shader_valid():
+		return
+	reset_decal_arrays()
+	editor_brush_texture_rid = RID()
+	editor_decal_position[0] = Vector2(world_pos.x, world_pos.z)
+	editor_decal_rotation[0] = 0.0
+	editor_decal_size[0] = maxf(plugin.terrain.get_vertex_spacing() * 4.0, 2.0)
+	editor_decal_color[0] = COLOR_PICK
+	editor_decal_color[0].a = 1.0
+	editor_decal_visible = [true, false, false]
+	editor_decal_part = [false, true] # reticle only (crosshair), no brush texture
+	editor_decal_timer.start()
+	var r_map: PackedInt32Array = plugin.terrain.data.get_region_map()
+	RenderingServer.material_set_param(mat_rid, "_editor_brush_texture", editor_brush_texture_rid)
+	RenderingServer.material_set_param(mat_rid, "_editor_decal_position", editor_decal_position)
+	RenderingServer.material_set_param(mat_rid, "_editor_decal_rotation", editor_decal_rotation)
+	RenderingServer.material_set_param(mat_rid, "_editor_decal_size", editor_decal_size)
+	RenderingServer.material_set_param(mat_rid, "_editor_decal_color", editor_decal_color)
+	RenderingServer.material_set_param(mat_rid, "_editor_decal_visible", editor_decal_visible)
+	RenderingServer.material_set_param(mat_rid, "_editor_decal_part", editor_decal_part)
+	RenderingServer.material_set_param(mat_rid, "_region_map", r_map)
 
 
 func is_shader_valid() -> bool:

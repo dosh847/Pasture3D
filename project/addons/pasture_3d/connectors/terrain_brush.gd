@@ -170,6 +170,13 @@ func _notification(what: int) -> void:
 		add_to_group(BRUSH_GROUP)
 	elif what == NOTIFICATION_EXIT_TREE:
 		remove_from_group(BRUSH_GROUP)
+	elif what == NOTIFICATION_PREDELETE:
+		# Freed while still attached (e.g. queue_free in the editor): lift our contribution off the layer
+		# so we don't strand a baked footprint. The is_inside_tree() guard inside _detach_from_current
+		# makes a node already removed from the tree (editor delete keeps it in undo history; placement
+		# undo removes it explicitly) a safe no-op, and reparent — which frees nothing — never reaches here.
+		if Engine.is_editor_hint() and is_inside_tree() and is_configured():
+			_detach_from_current()
 	elif what == NOTIFICATION_PARENTED:
 		# Re-parented under a different terrain after creation → follow it. Deferred so the reparent has
 		# fully settled (node back in the tree) before we detach/rebind. _ready_done gates this so it
@@ -498,7 +505,17 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 	var ur: EditorUndoRedoManager = _editor_undo() if can_undo else null
 	var before: Dictionary = _snapshot_owner(owner) if (ur != null) else {}
 
+	# Targeted GPU push (only the regions this bake touches) for the common refresh/placement/edit paths —
+	# this is what removed the multi-second freeze when placing a brush. The DETACH/rebind paths (undo,
+	# terrain-change, predelete) pass a non-empty extra_clears: those repaint the WHOLE layer's worth of
+	# tools and rely on the all-regions rebuild to refresh every region's GPU slice — the targeted per-region
+	# push left distant tools visually stale ("cut off") on undo, so they keep the original full push.
+	var targeted_push := layer_id >= 0 and extra_clears.is_empty()
 	if layer_id >= 0:
+		if targeted_push:
+			# Clean edited-flag slate so the targeted push uploads EXACTLY the regions this bake touches
+			# (the clear/paint/composite below re-flag them via composite_region). Mirrors the dirty-rect path.
+			_clear_region_edited_flags()
 		var blend := _layer_blend_for(layer_id)
 		for box: AABB in extra_clears:
 			if box.size != Vector3.ZERO:
@@ -528,7 +545,12 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 		for s in sibs:
 			s._paint_into(-1, _get_blend_mode())
 
-	terrain.data.update_maps(_map_type())
+	# GPU push — targeted (edited-regions-only) for placement/edit, full all-regions for detach/rebind and
+	# the destructive fallback (see targeted_push above).
+	if targeted_push:
+		terrain.data.update_maps(_map_type(), false, false)
+	else:
+		terrain.data.update_maps(_map_type())
 	update_gizmos() # re-float the origin marker onto the new surface height
 
 	if ur != null:
@@ -1006,7 +1028,65 @@ func _restore_owner(owner: String, snapshot: Dictionary) -> void:
 	layer.set_tiles(_copy_tiles(snapshot))
 	for loc in regions:
 		terrain.data.composite_region(loc, Rect2i(), false)
+	# Full all-regions push: this is a bake undo/redo restore (a whole-layer state swap), the same risk
+	# class as the detach path — a targeted per-region push left distant regions visually stale on undo.
 	terrain.data.update_maps(_map_type())
+
+
+## ---- Placement undo (Place Brush tool): rect-scoped live detach ----
+##
+## Undoing a placement must NOT use the full live-repaint detach (_detach_from_current): that clears+repaints
+## every layer-mate and re-snaps their curve points (a non-undoable mutation of OTHER brushes), and
+## recomposites whole regions — which on undo could move sibling mounds, paint stray areas, or leave a region
+## stale. It also must NOT do a whole-layer set_tiles + full recomposite (an earlier snapshot-restore did
+## exactly that), which exposed a pre-existing drift between the raw layer tiles and the incrementally-
+## composited heightmap, stacking corner mounds into a spike. detach_placement() below is the answer: it
+## reverses the placement bake within only this brush's own footprint box.
+
+## Placement undo, the robust path: clear ONLY this brush's own footprint and repaint the layer-mates that
+## overlap it — the same clipped clear/paint/composite the rect placement bake uses, just with self excluded
+## and no point re-snap. This is placement run in reverse. Crucially it does NOT do a whole-layer set_tiles +
+## full recomposite, which would expose a pre-existing drift between the raw layer tiles and the incrementally-
+## composited heightmap — overlapping mounds at a region corner would stack into a spike and others vanish on
+## undo. Touching only this brush's box keeps undo byte-consistent with how placement composited, so neighbours
+## are untouched and no other region is recomposited. Returns false (nothing baked) only when unconfigured or
+## this brush had no footprint, so the caller can still remove it.
+func detach_placement() -> bool:
+	if not Engine.is_editor_hint() or not is_configured():
+		return false
+	var owner := _layer_owner
+	var layer_id := _ensure_layer_for(owner, false)
+	if layer_id < 0:
+		return false
+	# Union of THIS brush's own spline footprints = the area its placement could have touched.
+	var box := AABB()
+	var have := false
+	for s in _get_splines():
+		var a := _spline_footprint_aabb(s)
+		if a.size != Vector3.ZERO:
+			box = a if not have else box.merge(a)
+			have = true
+	if not have:
+		return false
+	var clip_box := _snap_aabb_to_tiles(box, _layer_tile_world(layer_id))
+	# Clean edited-flag slate so the targeted push uploads exactly the regions this clear/repaint touches.
+	_clear_region_edited_flags()
+	# Drop the whole box (self + any mate samples in it), then repaint ONLY the mates back into it. Self is
+	# excluded, so its contribution is gone; mates are repainted from their unchanged curves (no snap).
+	terrain.data.clear_layer_in_area(layer_id, clip_box)
+	var blend := _layer_blend_for(layer_id)
+	for s in _tools_on_owner(owner):
+		if s == self or not s._overlaps_box(clip_box):
+			continue
+		s._clip_aabb = clip_box
+		s._defer_composite = true
+		s._paint_into(layer_id, blend)
+		s._defer_composite = false
+		s._clip_aabb = AABB()
+	terrain.data.composite_area(clip_box, false)
+	terrain.data.update_maps(_map_type(), false, false)
+	_last_paint_aabb.clear()
+	return true
 
 
 ## Deep copy of the {region_loc -> {tile_coord -> Image}} tile structure. get_tiles/set_tiles share
@@ -1365,6 +1445,13 @@ func _surface_snap_edits() -> Array:
 ## ---- Add Spline button ----
 
 func add_spline() -> void:
+	_new_spline()
+	refresh()
+
+
+## Create + attach a starter spline (no bake). Split out of add_spline so placement can build the spline
+## and then run a rect-scoped bake (see place_bake) instead of the full refresh add_spline does.
+func _new_spline() -> Path3D:
 	var path := Path3D.new()
 	path.name = "%s%d" % [_spline_basename(), _get_splines().size() + 1]
 	path.curve = _make_starter_curve()
@@ -1375,7 +1462,27 @@ func add_spline() -> void:
 		if root:
 			path.owner = root
 	_connect_spline(path)
-	refresh()
+	return path
+
+
+## Initial-placement bake (Place Brush tool). Bakes ONLY this freshly-placed brush via the dirty-rect path,
+## scoped to its own splines, so it does NOT clear + re-snap + repaint every layer-mate the way the full
+## refresh does. That sibling re-snap (_refresh_owner lines ~536) mutates OTHER brushes' curve points, a
+## side effect the placement-undo tile snapshot can't revert — undoing a placement would otherwise corrupt
+## neighbouring mounds. The rect path clears only the new brush's footprint box and repaints any siblings
+## inside it from their UNCHANGED curves, so undo (set_tiles of the pre-placement snapshot) reverts cleanly.
+## snap_all is true: a just-placed brush snaps all of its own points to the surface.
+func place_bake() -> void:
+	if not Engine.is_editor_hint() or not is_configured():
+		return
+	if _get_splines().is_empty():
+		_new_spline()
+	var ids := {}
+	for s in _get_splines():
+		ids[s.get_instance_id()] = true
+	if ids.is_empty():
+		return
+	_refresh_owner_rect(_layer_owner, ids, true)
 
 
 ## ---- Geometry helpers (shared) ----

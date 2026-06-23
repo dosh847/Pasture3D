@@ -39,6 +39,17 @@ var _input_mode: int = 0 # -1: camera move, 0: none, 1: operating
 var rmb_release_time: int = 0
 var _use_meta: bool = false
 
+# Landscape-brush pseudo-tools (GDScript-only — see PASTURE3D_BRUSH_PLACEMENT_TOOL_SPEC.md). Not C++
+# Pasture3DEditor.Tools: handled in _forward_placement_input / _forward_selection_input, ahead of the
+# sculpt path. placement_mode = click drops a brush; selection_mode = click selects an existing brush.
+var placement_mode: bool = false
+var selection_mode: bool = false
+var placement_brush_script: String = "res://addons/pasture_3d/connectors/mound.gd"
+var placement_brush_label: String = "Mound"
+## Vertical (Y) offset added to the surface hit when dropping a brush (set from the bottom-bar selector;
+## defaults per brush type — Ridge 20, Trough -10, others 0). See tool_settings.build_placement_selector.
+var placement_y_offset: float = 0.0
+
 
 func _init() -> void:
 	if debug:
@@ -184,6 +195,8 @@ func _make_visible(p_visible: bool, p_redraw: bool = false) -> void:
 
 
 func _clear() -> void:
+	placement_mode = false
+	selection_mode = false
 	if is_terrain_valid():
 		editor.set_tool(Pasture3DEditor.TOOL_MAX)
 		editor.set_operation(Pasture3DEditor.OP_MAX)
@@ -202,6 +215,13 @@ func flash_layer_warning(p_name: String, p_hidden: bool = false) -> void:
 
 func _forward_3d_gui_input(p_viewport_camera: Camera3D, p_event: InputEvent) -> AfterGUIInput:
 	mouse_in_main = true
+
+	# Landscape pseudo-tools → drop / select a brush where the user clicks. Take priority over the
+	# selected-brush loop editing and the sculpt path (spec §3.4); they never sculpt.
+	if placement_mode and is_terrain_valid():
+		return _forward_placement_input(p_viewport_camera, p_event)
+	if selection_mode and is_terrain_valid():
+		return _forward_selection_input(p_viewport_camera, p_event)
 
 	# Brush selected → loop-point editing (Ctrl-click add / right-click-a-point remove). Mutually
 	# exclusive with sculpting (which only runs when the terrain is selected), so they never collide.
@@ -353,7 +373,9 @@ func _forward_brush_input(p_camera: Camera3D, p_event: InputEvent, p_brush: Past
 	if p_event.get_button_index() == MOUSE_BUTTON_LEFT and add_mod:
 		var from: Vector3 = p_camera.project_ray_origin(mouse_pos)
 		var dir: Vector3 = p_camera.project_ray_normal(mouse_pos)
-		var hit: Vector3 = terr.get_intersection(from, dir, true)
+		# CPU raymarch (false): the GPU path is stale on a one-shot click (renders + reads a SubViewport
+		# the same frame), which lands the point far away / below ground.
+		var hit: Vector3 = terr.get_intersection(from, dir, false)
 		if hit.z > 3.4e38 or is_nan(hit.y):
 			return AFTER_GUI_INPUT_PASS
 		var pos := hit
@@ -373,6 +395,211 @@ func _forward_brush_input(p_camera: Camera3D, p_event: InputEvent, p_brush: Past
 		return AFTER_GUI_INPUT_PASS
 
 	return AFTER_GUI_INPUT_PASS
+
+
+## Brush placement input: track a crosshair under the cursor on mouse motion, and on left-click drop the
+## selected landscape brush at the surface hit (one undoable action — see place_brush_at). Other events
+## pass through so camera nav / right-click look keep working.
+func _forward_placement_input(p_camera: Camera3D, p_event: InputEvent) -> AfterGUIInput:
+	var is_motion: bool = p_event is InputEventMouseMotion
+	var is_click: bool = p_event is InputEventMouseButton and p_event.is_pressed() \
+		and p_event.get_button_index() == MOUSE_BUTTON_LEFT
+	if not is_motion and not is_click:
+		return AFTER_GUI_INPUT_PASS
+
+	var hit: Vector3 = _placement_surface_hit(p_camera)
+	var valid: bool = hit.z < 3.4e38 and not is_nan(hit.y)
+
+	if is_motion:
+		if valid:
+			mouse_global_position = hit
+			if ui and ui.has_method("show_placement_decal"):
+				ui.show_placement_decal(hit)
+		elif ui and ui.has_method("hide_decal"):
+			ui.hide_decal()
+		return AFTER_GUI_INPUT_PASS
+
+	if not valid:
+		return AFTER_GUI_INPUT_PASS
+	place_brush_at(hit)
+	return AFTER_GUI_INPUT_STOP
+
+
+## Surface point under the mouse, or a miss sentinel (z = max float). Uses the CPU raymarch
+## (gpu_mode=false): the GPU path renders a SubViewport UPDATE_ONCE and reads it the SAME frame, so a
+## one-shot click gets a stale depth (lands far away / below ground). The raymarch is synchronous and
+## exact. Y is then pinned to get_height so the brush origin sits precisely on the surface.
+func _placement_surface_hit(p_camera: Camera3D) -> Vector3:
+	var t: Pasture3D = get_terrain()
+	if not is_terrain_valid(t):
+		return Vector3(3.5e38, 3.5e38, 3.5e38)
+	var vp: SubViewport = p_camera.get_parent()
+	var full_res: bool = vp.get_parent().stretch_shrink != 2
+	var raw: Vector2 = vp.get_mouse_position()
+	var mouse_pos: Vector2 = raw if full_res else raw / 2.0
+	var from: Vector3 = p_camera.project_ray_origin(mouse_pos)
+	var dir: Vector3 = p_camera.project_ray_normal(mouse_pos)
+	var hit: Vector3 = t.get_intersection(from, dir, false)
+	if hit.z > 3.4e38 or is_nan(hit.y):
+		return hit
+	var h: float = t.data.get_height(Vector3(hit.x, 0.0, hit.z))
+	if is_finite(h):
+		hit.y = h
+	return hit
+
+
+## Instantiate the currently-selected landscape brush type, or null on failure.
+func _instantiate_placement_brush() -> Node3D:
+	var scr: Variant = load(placement_brush_script)
+	if scr == null:
+		push_error("Pasture3D: could not load brush script '%s'." % placement_brush_script)
+		return null
+	var node: Variant = scr.new()
+	if not (node is Node3D):
+		push_error("Pasture3D: '%s' is not a Node3D brush." % placement_brush_script)
+		if node is Object and not (node is RefCounted):
+			(node as Object).free()
+		return null
+	(node as Node).name = placement_brush_label
+	return node as Node3D
+
+
+## Place a new landscape brush at `world_pos`, as ONE undoable action: do = add the node under the
+## terrain + bake; undo = lift the brush's footprint off its layer + remove the node. Each direction is
+## a single encapsulated method so EditorUndoRedoManager's method-execution order is irrelevant, and
+## add_do_reference keeps the detached node alive while the action sits undone. See spec §4.
+func place_brush_at(world_pos: Vector3) -> void:
+	var t: Pasture3D = get_terrain()
+	if not is_terrain_valid(t):
+		return
+	var root: Node = get_tree().edited_scene_root
+	if root == null:
+		push_warning("Pasture3D: open and edit a scene before placing a brush.")
+		return
+	var node: Node3D = _instantiate_placement_brush()
+	if node == null:
+		return
+	# Apply the bottom-bar vertical offset on top of the surface hit (Ridge +20, Trough -10, etc.). Done
+	# before the action is created so the offset is baked into the captured world_pos (undo restores it too).
+	world_pos.y += placement_y_offset
+	# Name it uniquely among the terrain's children up front (Mound, Mound1, Mound2…), so add_child keeps
+	# a readable name instead of falling back to "@Node3D@<id>" on a collision.
+	node.name = _unique_child_name(t, placement_brush_label)
+	var ur: EditorUndoRedoManager = get_undo_redo()
+	ur.create_action("Place %s" % placement_brush_label, UndoRedo.MERGE_DISABLE, t)
+	ur.add_do_reference(node)
+	ur.add_do_method(self, "_do_place_brush", t, node, root, world_pos)
+	ur.add_undo_method(self, "_undo_place_brush", node)
+	ur.commit_action(true) # execute the do-method now → performs the initial placement + bake
+
+
+## Do/redo: add the brush under the terrain (owned by the scene so it saves), bind + position it, and
+## bake. Auto-refresh is suspended around the scripted add so only the explicit synchronous refresh()
+## runs (no debounced second bake that could race a fast undo — spec §4.3).
+func _do_place_brush(t: Pasture3D, node: Node3D, root: Node, world_pos: Vector3) -> void:
+	if not is_instance_valid(node) or not is_instance_valid(t):
+		return
+	node.set("_suspend_auto", true)
+	if node.get_parent() == null:
+		t.add_child(node, true) # force_readable_name → keep "Mound1" etc., not "@Node3D@<id>"
+		node.owner = root
+	if node.get("terrain") != t:
+		node.set("terrain", t) # deterministic bind (don't depend on the ancestor-walk auto-assign)
+	node.global_position = world_pos
+	# Bake via place_bake(): a rect-scoped bake of ONLY this freshly-placed brush. It adds a starter spline
+	# if there is none (on REDO the node still carries its original spline, so it won't add a second), then
+	# bakes through the dirty-rect path — which, unlike the full refresh, does NOT clear/re-snap/repaint
+	# layer-mates. That matters for undo: the full refresh re-snaps every sibling's curve points, a non-undoable
+	# mutation of OTHER brushes, so undoing a placement used to corrupt neighbouring brushes. _undo_place_brush
+	# reverses this with detach_placement() (rect-scoped). _suspend_auto stays on so the child-added
+	# auto-schedule doesn't queue a second debounced bake.
+	if node.has_method("place_bake"):
+		node.call("place_bake")
+	elif node.has_method("refresh"):
+		node.call("refresh")
+	node.set("_suspend_auto", false)
+	# Deliberately DON'T change the editor selection: keeping the terrain selected keeps the Pasture3D
+	# toolbar visible and placement mode active, so the user can drop several brushes in a row. Selecting
+	# a brush would hide the toolbar (is_selected() only counts the terrain). Use the Select Brush tool
+	# (or click the brush's gizmo) to edit one afterward.
+
+
+## Undo: lift this brush's contribution off the layer, then detach the node from the tree. add_do_reference
+## keeps it alive for a later redo.
+func _undo_place_brush(node: Node3D) -> void:
+	if not is_instance_valid(node):
+		return
+	# Rect-scoped detach: clear only this brush's own footprint and repaint the neighbours there, matching how
+	# placement composited (no whole-layer recomposite, no sibling re-snap). Falls back to the live detach.
+	var detached: bool = node.has_method("detach_placement") and bool(node.call("detach_placement"))
+	if not detached and node.has_method("_detach_from_current"):
+		node.call("_detach_from_current")
+	# Defer the tree removal to idle. Unparenting a Node3D (and its child Path3D loops) synchronously here,
+	# mid undo-commit, makes the editor's gizmo refresh read the node's global_transform after it has left the
+	# tree — harmless, but it spams "!is_inside_tree()" to the Output. Deferring lets the in-flight gizmo pass
+	# finish with the node still in the tree, then unparents it cleanly. add_do_reference keeps it alive for a
+	# redo; _do_place_brush re-checks get_parent(), so a redo issued before the deferred call still behaves.
+	var p: Node = node.get_parent()
+	if p:
+		p.remove_child.call_deferred(node)
+
+
+## A child name for `parent` that doesn't collide: base, then base1, base2, … (so a second Mound becomes
+## "Mound1"). Keeps placed brushes readably named instead of Godot's "@Node3D@<id>" collision fallback.
+func _unique_child_name(parent: Node, base: String) -> String:
+	if parent == null or not parent.has_node(NodePath(base)):
+		return base
+	var i: int = 1
+	while parent.has_node(NodePath("%s%d" % [base, i])):
+		i += 1
+	return "%s%d" % [base, i]
+
+
+## Select-Brush input: a left-click picks the nearest landscape brush (by screen distance to its origin
+## marker) and selects it in the editor, then turns the tool off so its loop points are editable right
+## away. A miss passes through (camera nav / deselect). See spec §3.3 / the Select Brush tool.
+func _forward_selection_input(p_camera: Camera3D, p_event: InputEvent) -> AfterGUIInput:
+	if not (p_event is InputEventMouseButton) or not p_event.is_pressed():
+		return AFTER_GUI_INPUT_PASS
+	if p_event.get_button_index() != MOUSE_BUTTON_LEFT:
+		return AFTER_GUI_INPUT_PASS
+
+	var vp: SubViewport = p_camera.get_parent()
+	var full_res: bool = vp.get_parent().stretch_shrink != 2
+	var raw: Vector2 = vp.get_mouse_position()
+	var mouse_pos: Vector2 = raw if full_res else raw / 2.0
+	var brush: Node3D = _pick_brush_screen(p_camera, mouse_pos, 40.0)
+	if brush == null:
+		return AFTER_GUI_INPUT_PASS # let the click through (deselect / camera)
+
+	# Picked one → leave selection mode (so the next clicks edit its loop points) and reset the toolbar.
+	selection_mode = false
+	if ui:
+		var tb: Variant = ui.get("toolbar")
+		if tb and tb.has_method("clear_landscape_toggles"):
+			tb.clear_landscape_toggles()
+	var sel: EditorSelection = EditorInterface.get_selection()
+	sel.clear()
+	sel.add_node(brush)
+	EditorInterface.edit_node(brush)
+	return AFTER_GUI_INPUT_STOP
+
+
+## Nearest Pasture3DTerrainBrush whose origin projects within `radius` px of `screen_pos`, or null.
+func _pick_brush_screen(p_camera: Camera3D, screen_pos: Vector2, radius: float) -> Node3D:
+	var best: Node3D = null
+	var best_d: float = radius
+	for n in get_tree().get_nodes_in_group(&"pasture3d_brush"):
+		if not (n is Node3D):
+			continue
+		var wp: Vector3 = (n as Node3D).global_position
+		if p_camera.is_position_behind(wp):
+			continue
+		var d: float = p_camera.unproject_position(wp).distance_to(screen_pos)
+		if d < best_d:
+			best_d = d
+			best = n
+	return best
 
 
 func _read_input(p_event: InputEvent = null) -> AfterGUIInput:

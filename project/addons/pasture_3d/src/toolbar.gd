@@ -3,6 +3,9 @@
 extends VFlowContainer
 
 signal tool_changed(p_tool: Pasture3DEditor.Tool, p_operation: Pasture3DEditor.Operation)
+## Landscape-brush pseudo-tools (not C++ Pasture3DEditor.Tools). See PASTURE3D_BRUSH_PLACEMENT_TOOL_SPEC.md.
+signal placement_toggled(p_enabled: bool) # Place Brush: click terrain to drop a brush
+signal selection_toggled(p_enabled: bool) # Select Brush: click a brush to select it
 
 const ICON_REGION_ADD: String = "res://addons/pasture_3d/icons/region_add.svg"
 const ICON_REGION_REMOVE: String = "res://addons/pasture_3d/icons/region_remove.svg"
@@ -21,9 +24,25 @@ const ICON_HOLES: String = "res://addons/pasture_3d/icons/holes.svg"
 const ICON_NAVIGATION: String = "res://addons/pasture_3d/icons/navigation.svg"
 const ICON_INSTANCER: String = "res://addons/pasture_3d/icons/multimesh.svg"
 
+## Landscape brushes the Place-Brush tool can drop. Add an entry here to make a new brush placeable;
+## the bottom-bar brush-type selector (built in tool_settings.gd) reads this list too. "offset" is the
+## default vertical (Y) placement offset applied on top of the surface hit for that brush type.
+const PLACEABLE_BRUSHES: Array[Dictionary] = [
+	{ "label":"Mound",  "script":"res://addons/pasture_3d/connectors/mound.gd",  "icon":"res://addons/pasture_3d/icons/brush_mound.svg",  "offset":0.0 },
+	{ "label":"Ridge",  "script":"res://addons/pasture_3d/connectors/ridge.gd",  "icon":"res://addons/pasture_3d/icons/brush_ridge.svg",  "offset":20.0 },
+	{ "label":"Trough", "script":"res://addons/pasture_3d/connectors/trough.gd", "icon":"res://addons/pasture_3d/icons/brush_trough.svg", "offset":-10.0 },
+	{ "label":"Plow",   "script":"res://addons/pasture_3d/connectors/plow.gd",   "icon":"res://addons/pasture_3d/icons/brush_plow.svg",   "offset":0.0 },
+	{ "label":"Splat",  "script":"res://addons/pasture_3d/connectors/splat.gd",  "icon":"res://addons/pasture_3d/icons/brush_splat.svg",  "offset":0.0 },
+]
+
 var add_tool_group: ButtonGroup = ButtonGroup.new()
 var sub_tool_group: ButtonGroup = ButtonGroup.new()
+## Place Brush / Select Brush share their own group (allow_unpress so neither needs to stay pressed) —
+## they're mutually exclusive with each other but independent of the sculpt/paint radio.
+var landscape_tool_group: ButtonGroup = ButtonGroup.new()
 var buttons: Dictionary
+var placement_button: Button
+var select_button: Button
 var plugin: EditorPlugin
 
 
@@ -95,6 +114,9 @@ func _ready() -> void:
 		"add_text":"Instance Meshes (I)", "add_op":Pasture3DEditor.ADD, "add_icon":ICON_INSTANCER,
 		"sub_text":"Remove Meshes (I)", "sub_op":Pasture3DEditor.SUBTRACT })
 
+	add_child(HSeparator.new())
+	_add_landscape_tools()
+
 	# Select first button
 	var buttons: Array[BaseButton] = add_tool_group.get_buttons()
 	buttons[0].set_pressed(true)
@@ -139,6 +161,59 @@ func add_tool_button(p_params: Dictionary) -> void:
 	buttons[button2.get_name()] = button
 
 
+## Build the Place Brush + Select Brush toggles. They live in landscape_tool_group (allow_unpress) so
+## they're mutually exclusive with each other but don't disturb the sculpt/paint radio. The brush-TYPE
+## picker lives in the bottom tool-settings bar (tool_settings.gd), not here.
+func _add_landscape_tools() -> void:
+	landscape_tool_group.allow_unpress = true
+
+	placement_button = Button.new()
+	placement_button.set_name("PlaceBrush")
+	placement_button.set_tooltip_text("Place Brush — click the terrain to drop the selected landscape brush")
+	placement_button.set_button_icon(load(str(PLACEABLE_BRUSHES[0]["icon"])))
+	placement_button.set_flat(true)
+	placement_button.set_toggle_mode(true)
+	placement_button.set_h_size_flags(SIZE_SHRINK_END)
+	placement_button.set_button_group(landscape_tool_group)
+	placement_button.toggled.connect(_on_placement_button_toggled)
+	add_child(placement_button, true)
+	buttons[placement_button.get_name()] = placement_button
+
+	select_button = Button.new()
+	select_button.set_name("SelectBrush")
+	select_button.set_tooltip_text("Select Brush — click a landscape brush in the viewport to select it")
+	select_button.set_button_icon(_select_tool_icon())
+	select_button.set_flat(true)
+	select_button.set_toggle_mode(true)
+	select_button.set_h_size_flags(SIZE_SHRINK_END)
+	select_button.set_button_group(landscape_tool_group)
+	select_button.toggled.connect(_on_select_button_toggled)
+	add_child(select_button, true)
+	buttons[select_button.get_name()] = select_button
+
+
+## Editor "select / arrow" icon for the Select Brush tool, with a fallback to a shipped brush icon.
+func _select_tool_icon() -> Texture2D:
+	var ic: Texture2D = EditorInterface.get_base_control().get_theme_icon("ToolSelect", "EditorIcons")
+	return ic if ic else load("res://addons/pasture_3d/icons/brush_terrain.svg")
+
+
+func _on_placement_button_toggled(p_pressed: bool) -> void:
+	emit_signal("placement_toggled", p_pressed)
+
+
+func _on_select_button_toggled(p_pressed: bool) -> void:
+	emit_signal("selection_toggled", p_pressed)
+
+
+## Untoggle both landscape tools without re-emitting (the caller has already updated the plugin flags).
+func clear_landscape_toggles() -> void:
+	if placement_button:
+		placement_button.set_pressed_no_signal(false)
+	if select_button:
+		select_button.set_pressed_no_signal(false)
+
+
 func get_button(p_name: String) -> Button:
 	return buttons.get(p_name, null)
 
@@ -153,6 +228,16 @@ func show_add_buttons(p_enable: bool) -> void:
 func _on_tool_selected(p_button: BaseButton) -> void:
 	if plugin.debug:
 		print("Pasture3DToolbar: _on_tool_selected: ", p_button)
+
+	# A sculpt/paint tool was chosen → leave any landscape tool (its own group won't auto-unpress on a
+	# different-group press, so do it explicitly + tell the UI).
+	if placement_button and placement_button.button_pressed:
+		placement_button.set_pressed_no_signal(false)
+		emit_signal("placement_toggled", false)
+	if select_button and select_button.button_pressed:
+		select_button.set_pressed_no_signal(false)
+		emit_signal("selection_toggled", false)
+
 	# Select same tool on negative bar
 	var group: ButtonGroup = p_button.get_button_group()
 	var change_group: ButtonGroup = add_tool_group if group == sub_tool_group else sub_tool_group

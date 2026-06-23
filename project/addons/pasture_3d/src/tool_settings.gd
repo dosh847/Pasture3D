@@ -4,6 +4,10 @@ extends PanelContainer
 
 signal picking(type: Pasture3DEditor.Tool, callback: Callable)
 signal setting_changed(setting: Variant)
+## Which landscape brush the Place-Brush tool should drop (bottom-bar selector). See toolbar.gd.
+signal placement_type_changed(script: String, label: String, icon: String)
+## Vertical (Y) placement offset for the Place-Brush tool, in metres (bottom-bar selector).
+signal placement_offset_changed(offset: float)
 
 enum Layout {
 	HORIZONTAL,
@@ -50,6 +54,13 @@ var rotation_list: VBoxContainer
 var color_list: VBoxContainer
 var collision_list: VBoxContainer
 var settings: Dictionary = {}
+
+## Bottom-bar landscape-brush type picker (Place Brush tool). Built on demand from PLACEABLE_BRUSHES;
+## kept OUT of the `settings` dict so the normal show_settings()/get_settings() flow ignores it.
+var placement_selector: OptionButton
+var placement_selector_row: HBoxContainer
+var placement_offset_spin: EditorSpinSlider
+var _placement_entries: Array = []
 
 
 func _ready() -> void:
@@ -645,6 +656,71 @@ func show_settings(p_settings: PackedStringArray) -> void:
 			select_brush_button.hide()
 		else:
 			select_brush_button.show()
+
+
+## Build the Place-Brush type picker into the bottom bar (called once by ui.gd after _ready). `p_entries`
+## is toolbar.PLACEABLE_BRUSHES ({label, script, icon}). Hidden until the Place Brush tool is active.
+func build_placement_selector(p_entries: Array) -> void:
+	if is_instance_valid(placement_selector_row) or not main_list:
+		return
+	_placement_entries = p_entries
+	placement_selector_row = HBoxContainer.new()
+	placement_selector_row.custom_minimum_size.y = 36
+	placement_selector_row.set_v_size_flags(SIZE_EXPAND_FILL)
+	var label := Label.new()
+	label.text = "Brush: "
+	placement_selector = OptionButton.new()
+	placement_selector.set_v_size_flags(SIZE_SHRINK_CENTER)
+	for i in p_entries.size():
+		var entry: Dictionary = p_entries[i]
+		placement_selector.add_icon_item(load(str(entry["icon"])), str(entry["label"]), i)
+	placement_selector.select(0)
+	placement_selector.item_selected.connect(_on_placement_type_selected)
+	placement_selector_row.add_child(label, true)
+	placement_selector_row.add_child(placement_selector, true)
+
+	# Vertical placement offset: editable value applied to the surface hit's Y when a brush is dropped.
+	# Switching brush type resets this to that type's default (Ridge 20, Trough -10, others 0).
+	var offset_label := Label.new()
+	offset_label.text = "  Y Offset: "
+	placement_offset_spin = EditorSpinSlider.new()
+	placement_offset_spin.set_flat(false)
+	placement_offset_spin.set_hide_slider(true)
+	placement_offset_spin.set_min(-500)
+	placement_offset_spin.set_max(500)
+	placement_offset_spin.set_step(0.5)
+	placement_offset_spin.set_allow_greater(true)
+	placement_offset_spin.set_allow_lesser(true)
+	placement_offset_spin.set_suffix("m")
+	placement_offset_spin.set_v_size_flags(SIZE_SHRINK_CENTER)
+	placement_offset_spin.set_custom_minimum_size(Vector2(70, 0))
+	placement_offset_spin.set_value_no_signal(float(p_entries[0].get("offset", 0.0)))
+	placement_offset_spin.value_changed.connect(_on_placement_offset_changed)
+	placement_selector_row.add_child(offset_label, true)
+	placement_selector_row.add_child(placement_offset_spin, true)
+
+	main_list.add_child(placement_selector_row, true)
+	main_list.move_child(placement_selector_row, 1) # near the front, where the brush gallery sits
+	placement_selector_row.hide()
+
+
+func _on_placement_type_selected(p_idx: int) -> void:
+	if p_idx < 0 or p_idx >= _placement_entries.size():
+		return
+	var entry: Dictionary = _placement_entries[p_idx]
+	emit_signal("placement_type_changed", str(entry["script"]), str(entry["label"]), str(entry["icon"]))
+	# Reset the offset to this brush type's default (fires value_changed → updates the plugin).
+	if is_instance_valid(placement_offset_spin):
+		placement_offset_spin.set_value(float(entry.get("offset", 0.0)))
+
+
+func _on_placement_offset_changed(p_value: float) -> void:
+	emit_signal("placement_offset_changed", p_value)
+
+
+func show_placement_selector(p_visible: bool) -> void:
+	if is_instance_valid(placement_selector_row):
+		placement_selector_row.visible = p_visible
 
 
 func _on_setting_changed(p_setting: Variant = null) -> void:

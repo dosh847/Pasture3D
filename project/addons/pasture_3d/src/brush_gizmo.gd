@@ -28,14 +28,8 @@ const TANGENT_COLOR := Color(1.0, 0.66, 0.2)
 ## Outward length (m) at which a zero-length tangent's grab handle is drawn/picked, so it can be pulled
 ## out from a straight point. Clamped to a fraction of the adjacent segment for short loops.
 const TANGENT_STUB: float = 3.0
-## Screen-space pick radius (px) for clicking a loop POINT. Generous so a near-miss that lands on the
-## spline line still grabs the point (which sits on that line) instead of falling through to the child
-## Path3D's own curve gizmo.
-const POINT_PICK_RADIUS: float = 20.0
-## Screen-space pick radius (px) for clicking a tangent handle. Tighter than points: points are tested
-## first and always win within their margin, so tangents only need to be grabbable when you click clear
-## of every point.
-const TANGENT_PICK_RADIUS: float = 13.0
+## Screen-space pick radius (px) for clicking a loop point or tangent handle.
+const PICK_RADIUS: float = 13.0
 
 ## Per-drag capture of the true pre-drag value of each touched subgizmo (id -> Vector3): position for a
 ## point handle, in/out offset for a tangent. Lets undo restore exactly (esp. a stubbed zero tangent
@@ -74,6 +68,10 @@ func _has_gizmo(p_node: Node3D) -> bool:
 func _redraw(p_gizmo: EditorNode3DGizmo) -> void:
 	p_gizmo.clear()
 	var node := p_gizmo.get_node_3d()
+	# A node mid-removal (e.g. placement undo detaches the brush) is briefly still gizmo-tracked but out of
+	# the tree, so global_transform reads would spam "!is_inside_tree()" and draw a stray marker. Skip it.
+	if node == null or not node.is_inside_tree():
+		return
 	# Float the marker above the terrain surface under the brush origin (not the node's own Y, which may
 	# be buried after a height change). Computed in node-local space so transforms/scale are respected.
 	var centre := _marker_centre(node)
@@ -122,46 +120,25 @@ func _redraw(p_gizmo: EditorNode3DGizmo) -> void:
 # 1=in-tangent, 2=out-tangent.
 
 
-## Click test: the handle nearest the cursor in screen space (or -1). Two passes so points beat tangents
-## and the spline line: every POSITION is tested first within the generous point margin, and a point that
-## lands wins outright. Only when no point is grabbed do we test tangents (tighter margin). This keeps
-## near-misses on a point from selecting the underlying loop curve.
+## Click test: the handle nearest the cursor in screen space (or -1). Position is tested first so it
+## wins at exact overlap (e.g. a tangent that is still on its point).
 func _subgizmos_intersect_ray(p_gizmo: EditorNode3DGizmo, p_camera: Camera3D, p_point: Vector2) -> int:
 	var node := p_gizmo.get_node_3d()
 	if not _brush_selected(node):
 		return -1
-	# Pass 1 — positions (generous margin); a hit wins over any tangent or the spline line.
 	var best := -1
-	var best_d := POINT_PICK_RADIUS
+	var best_d := PICK_RADIUS
 	var gpi := 0
 	for path in _loop_paths(node):
 		for i in path.curve.point_count:
-			var world: Vector3 = node.to_global(_handle_display_local(node, path, i, 0))
-			if not p_camera.is_position_behind(world):
-				var d := p_camera.unproject_position(world).distance_to(p_point)
-				if d < best_d:
-					best_d = d
-					best = gpi * 3
+			for kind in 3:
+				var world: Vector3 = node.to_global(_handle_display_local(node, path, i, kind))
+				if not p_camera.is_position_behind(world):
+					var d := p_camera.unproject_position(world).distance_to(p_point)
+					if d < best_d:
+						best_d = d
+						best = gpi * 3 + kind
 			gpi += 1
-	# Pass 2 — tangents (tighter margin), only when the click missed every point. Restricted to handles
-	# that are actually drawn (_show_tangents): tangents for unselected points aren't visible, so picking
-	# one invisibly would be surprising.
-	if best < 0:
-		best_d = TANGENT_PICK_RADIUS
-		gpi = 0
-		for path in _loop_paths(node):
-			for i in path.curve.point_count:
-				if not _show_tangents(node, gpi):
-					gpi += 1
-					continue
-				for kind in [1, 2]:
-					var world: Vector3 = node.to_global(_handle_display_local(node, path, i, kind))
-					if not p_camera.is_position_behind(world):
-						var d := p_camera.unproject_position(world).distance_to(p_point)
-						if d < best_d:
-							best_d = d
-							best = gpi * 3 + kind
-				gpi += 1
 	_update_selected_point(node, best / 3 if best >= 0 else -1)
 	return best
 
