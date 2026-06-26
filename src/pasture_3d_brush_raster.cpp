@@ -647,9 +647,6 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 		return;
 	}
 
-	std::vector<float> lat, base_yf, along;
-	const float total_raw = raster_polyline_field(p_pts, min_x, min_z, vs, gw, gh, lat, base_yf, along);
-	const double total = MAX((double)total_raw, 0.001);
 	const PackedFloat32Array base_below_param = p_params.get("base_below", PackedFloat32Array());
 	const bool has_below = base_below_param.size() == gw * gh;
 
@@ -678,49 +675,52 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 	const float edge_val = raster_ramp(p_lut, 1.0f); // _cross at t=1
 	const bool add = (blend == 1);
 
-	// Arc-length re-interpolation: the chamfer nearest-seed propagation creates Voronoi seams in
-	// base_yf when spline points are at different heights — each cell gets the height of its nearest
-	// sample, and the seam between two samples with different heights appears as a visible crease.
-	// Fix: propagate arc-length (continuous, tiny seams) via chamfer and re-interpolate base_yf from
-	// p_pts at along[i]. Also build ground_ref_arr (Option B): base_below at the interpolated spline
-	// XZ, so diff = crest_top - ground_ref is geometry-driven regardless of per-cell terrain variation.
-	std::vector<float> ground_ref_arr; // Option B smooth ground reference per cell (may stay empty)
-	{
-		const int npts = (int)p_pts.size();
-		std::vector<double> pt_arcs(npts, 0.0);
-		for (int k = 1; k < npts; k++) {
-			const Vector3 d = p_pts[k] - p_pts[k - 1];
-			pt_arcs[k] = pt_arcs[k - 1] + std::sqrt(d.x * d.x + d.z * d.z);
-		}
-		const double arc_max = pt_arcs[npts - 1];
-		const int n = gw * gh;
-		if (has_below) {
-			ground_ref_arr.assign(n, (float)NAN);
-		}
-		for (int i = 0; i < n; i++) {
-			if ((double)lat[i] > reach) {
-				continue;
-			}
-			const double al = CLAMP((double)along[i], 0.0, arc_max);
-			int lo = 0, hi = npts - 1;
-			while (lo + 1 < hi) {
-				const int mid = (lo + hi) / 2;
-				if (pt_arcs[mid] <= al) { lo = mid; } else { hi = mid; }
-			}
-			const double seg_len = pt_arcs[hi] - pt_arcs[lo];
-			const double t = seg_len > 1e-9 ? (al - pt_arcs[lo]) / seg_len : 0.0;
-			base_yf[i] = (float)(p_pts[lo].y * (1.0 - t) + p_pts[hi].y * t);
-			if (has_below) {
-				const double sx = p_pts[lo].x * (1.0 - t) + p_pts[hi].x * t;
-				const double sz = p_pts[lo].z * (1.0 - t) + p_pts[hi].z * t;
-				const int six = (int)std::lround((sx - min_x) / vs);
-				const int siz = (int)std::lround((sz - min_z) / vs);
-				if (six >= 0 && six < gw && siz >= 0 && siz < gh) {
-					ground_ref_arr[i] = base_below_param[siz * gw + six];
+	// Exact perpendicular-distance polyline field: for each grid cell, iterate every segment and keep the
+	// closest point. This gives true Euclidean `lat` (no chamfer angular approximation), exact `base_yf`
+	// and `along` from the nearest continuous point (no Voronoi seams, no arc-length re-interpolation
+	// needed), and exact `ground_ref_arr` at that closest XZ — all in one O(cells × segments) pass.
+	// Complexity is ~20× chamfer for typical ridges but ridges have few segments (~5-20), so bake time
+	// is still <5 ms for any grid a user would reasonably author.
+	const int n = gw * gh;
+	std::vector<float> lat(n, RBIG), base_yf(n, 0.f), along(n, 0.f);
+	std::vector<float> ground_ref_arr;
+	if (has_below) {
+		ground_ref_arr.assign(n, (float)NAN);
+	}
+	double arc = 0.0;
+	const int npts = (int)p_pts.size();
+	for (int k = 0; k < npts - 1; k++) {
+		const Vector3 a = p_pts[k], b = p_pts[k + 1];
+		const double dx = b.x - a.x, dz = b.z - a.z;
+		const double seg_len_sq = dx * dx + dz * dz;
+		const double seg_len = std::sqrt(seg_len_sq);
+		for (int iz = 0; iz < gh; iz++) {
+			const double cz = min_z + iz * vs;
+			const int row = iz * gw;
+			for (int ix = 0; ix < gw; ix++) {
+				const double cx = min_x + ix * vs;
+				const double qx = cx - a.x, qz = cz - a.z;
+				const double t = seg_len_sq > 1e-18 ? CLAMP((qx * dx + qz * dz) / seg_len_sq, 0.0, 1.0) : 0.0;
+				const double px = a.x + t * dx, pz = a.z + t * dz;
+				const double d = std::sqrt((cx - px) * (cx - px) + (cz - pz) * (cz - pz));
+				const int i = row + ix;
+				if (d < (double)lat[i]) {
+					lat[i] = (float)d;
+					base_yf[i] = (float)(a.y + t * (b.y - a.y));
+					along[i] = (float)(arc + t * seg_len);
+					if (has_below) {
+						const int six = (int)std::lround((px - min_x) / vs);
+						const int siz = (int)std::lround((pz - min_z) / vs);
+						if (six >= 0 && six < gw && siz >= 0 && siz < gh) {
+							ground_ref_arr[i] = base_below_param[siz * gw + six];
+						}
+					}
 				}
 			}
 		}
+		arc += seg_len;
 	}
+	const double total = MAX(arc, 0.001);
 	const bool has_gspline = !ground_ref_arr.empty();
 
 	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
