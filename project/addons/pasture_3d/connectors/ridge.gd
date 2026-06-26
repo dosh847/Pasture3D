@@ -102,6 +102,15 @@ enum FlankMode { FIXED_WIDTH, SLOPE_ANGLE }
 		falloff = v
 		_schedule_refresh()
 
+@export_group("Smoothing")
+## Passes of NaN-aware separable Gaussian blur applied after rasterisation to remove chamfer-DT
+## octagonal isocontour artefacts that appear as surface faceting when diff is large (e.g. an
+## elevated spline point over flat terrain). 0 = off, 1-2 = typical, 3+ = heavy.
+@export_range(0, 5) var smooth_passes: int = 1:
+	set(v):
+		smooth_passes = v
+		_schedule_refresh()
+
 
 func _default_layer_name() -> String:
 	return "Ridges"
@@ -166,6 +175,7 @@ func _paint_spline(path: Path3D) -> void:
 			"flank_mode": int(flank_mode), "slope_tan": tan(deg_to_rad(slope_angle)),
 			"blend": _blend, "composite": not _defer_composite,
 			"noise": noise, "noise_strength": noise_strength,
+			"smooth_passes": smooth_passes,
 			# The flank always drapes onto the ground now, so the below-layer grid is always needed.
 			"base_below": _base_below_grid(min_x, min_z, vs, gw, gh),
 		}
@@ -193,6 +203,8 @@ func _paint_spline(path: Path3D) -> void:
 	var use_angle := flank_mode == FlankMode.SLOPE_ANGLE
 	var slope_tan := maxf(tan(deg_to_rad(slope_angle)), 0.0001)
 	var edge_val := _ridge_cross(profile, 1.0) # profile value at the skirt edge, feathered out over `falloff`
+	# Buffer all ridge contributions (delta above ground) before writing so the smoothing pass can run.
+	var delta_vals := PackedFloat32Array(); delta_vals.resize(gw * gh); delta_vals.fill(NAN)
 
 	for iz in range(gh):
 		var z := min_z + iz * vs
@@ -230,8 +242,46 @@ func _paint_spline(path: Path3D) -> void:
 			else:
 				p = edge_val * (1.0 - clampf((lat - w_eff) / maxf(falloff, 0.001), 0.0, 1.0))
 			if p > 0.0:
-				var painted := ground + diff * p
+				var delta := diff * p
 				if noise:
-					painted += noise_strength * noise.get_noise_2d(x, z) * p
-				# ADD writes the delta above the ground; the absolute paths write the draped height.
-				_paint_height(pos, painted, painted - ground)
+					delta += noise_strength * noise.get_noise_2d(x, z) * p
+				delta_vals[i] = delta
+
+	# NaN-aware separable 3-tap Gaussian blur (same as C++ path).
+	if smooth_passes > 0:
+		var tmp := PackedFloat32Array(); tmp.resize(gw * gh)
+		for _pass in range(smooth_passes):
+			# Horizontal pass: delta_vals → tmp
+			for iz2 in range(gh):
+				var row2 := iz2 * gw
+				for ix2 in range(gw):
+					var v: float = delta_vals[row2 + ix2]
+					if not is_finite(v): tmp[row2 + ix2] = NAN; continue
+					var s := 0.5 * v; var wt := 0.5
+					if ix2 > 0 and is_finite(delta_vals[row2 + ix2 - 1]): s += 0.25 * delta_vals[row2 + ix2 - 1]; wt += 0.25
+					if ix2 < gw - 1 and is_finite(delta_vals[row2 + ix2 + 1]): s += 0.25 * delta_vals[row2 + ix2 + 1]; wt += 0.25
+					tmp[row2 + ix2] = s / wt
+			# Vertical pass: tmp → delta_vals
+			for iz2 in range(gh):
+				var row2 := iz2 * gw
+				for ix2 in range(gw):
+					var v: float = tmp[row2 + ix2]
+					if not is_finite(v): delta_vals[row2 + ix2] = NAN; continue
+					var s := 0.5 * v; var wt := 0.5
+					if iz2 > 0 and is_finite(tmp[(iz2 - 1) * gw + ix2]): s += 0.25 * tmp[(iz2 - 1) * gw + ix2]; wt += 0.25
+					if iz2 < gh - 1 and is_finite(tmp[(iz2 + 1) * gw + ix2]): s += 0.25 * tmp[(iz2 + 1) * gw + ix2]; wt += 0.25
+					delta_vals[row2 + ix2] = s / wt
+
+	# Write-back: ground + blurred delta.
+	for iz in range(gh):
+		var z := min_z + iz * vs
+		var row := iz * gw
+		for ix in range(gw):
+			var delta: float = delta_vals[row + ix]
+			if not is_finite(delta):
+				continue
+			var x := min_x + ix * vs
+			var pos := Vector3(x, 0.0, z)
+			var ground: float = _base_height_below(pos)
+			# ADD writes the delta above the ground; the absolute paths write the draped height.
+			_paint_height(pos, ground + delta, delta)

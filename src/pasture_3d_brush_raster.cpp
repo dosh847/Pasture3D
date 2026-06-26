@@ -724,14 +724,10 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 	const bool has_gspline = !ground_ref_arr.empty();
 
 	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
-	Vector2i wloc(0x7fffffff, 0x7fffffff);
-	Pasture3DRegion *wregion = nullptr;
 
 	const bool batched = wlayer && !composite && !wlayer->is_base(); // Phase 1b batched raw-tile apply
-	std::vector<float> vals;
-	if (batched) {
-		vals.assign((size_t)gw * gh, NAN);
-	}
+	// Always buffer into vals so the smoothing pass can run before any write.
+	std::vector<float> vals((size_t)gw * gh, (float)NAN);
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -794,18 +790,62 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 				if (noise.is_valid()) {
 					painted += noise_strength * noise->get_noise_2d(x, z) * p;
 				}
-				const double value = add ? (painted - ground) : painted;
-				if (batched) {
-					vals[i] = (float)value;
-				} else {
-					_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, value, blend);
+				vals[i] = (float)(add ? (painted - ground) : painted);
+			}
+		}
+	}
+
+	// NaN-aware separable 3-tap Gaussian blur. Smooths the chamfer DT's octagonal isocontour
+	// artifacts in `lat` that appear as angular surface faceting when diff is large.
+	const int smooth_passes = (int)p_params.get("smooth_passes", 0);
+	if (smooth_passes > 0) {
+		std::vector<float> tmp(gw * gh);
+		for (int pass = 0; pass < smooth_passes; pass++) {
+			// Horizontal pass: vals → tmp
+			for (int iz = 0; iz < gh; iz++) {
+				const int row = iz * gw;
+				for (int ix = 0; ix < gw; ix++) {
+					const float v = vals[row + ix];
+					if (std::isnan(v)) { tmp[row + ix] = (float)NAN; continue; }
+					float sum = 0.5f * v, weight = 0.5f;
+					if (ix > 0 && !std::isnan(vals[row + ix - 1])) { sum += 0.25f * vals[row + ix - 1]; weight += 0.25f; }
+					if (ix < gw - 1 && !std::isnan(vals[row + ix + 1])) { sum += 0.25f * vals[row + ix + 1]; weight += 0.25f; }
+					tmp[row + ix] = sum / weight;
+				}
+			}
+			// Vertical pass: tmp → vals
+			for (int iz = 0; iz < gh; iz++) {
+				const int row = iz * gw;
+				for (int ix = 0; ix < gw; ix++) {
+					const float v = tmp[row + ix];
+					if (std::isnan(v)) { vals[row + ix] = (float)NAN; continue; }
+					float sum = 0.5f * v, weight = 0.5f;
+					if (iz > 0 && !std::isnan(tmp[(iz - 1) * gw + ix])) { sum += 0.25f * tmp[(iz - 1) * gw + ix]; weight += 0.25f; }
+					if (iz < gh - 1 && !std::isnan(tmp[(iz + 1) * gw + ix])) { sum += 0.25f * tmp[(iz + 1) * gw + ix]; weight += 0.25f; }
+					vals[row + ix] = sum / weight;
 				}
 			}
 		}
 	}
 
+	// Write back.
 	if (batched) {
 		_apply_stamp_block(wlayer, (int)std::lround(min_x / vs), (int)std::lround(min_z / vs), gw, gh, vals.data(), blend);
+	} else {
+		Vector2i wloc(0x7fffffff, 0x7fffffff);
+		Pasture3DRegion *wregion = nullptr;
+		for (int iz = 0; iz < gh; iz++) {
+			const double z = min_z + iz * vs;
+			if (has_clip && (z < cz0 || z >= cz1)) { continue; }
+			const int row = iz * gw;
+			for (int ix = 0; ix < gw; ix++) {
+				const float v = vals[row + ix];
+				if (std::isnan(v)) { continue; }
+				const double x = min_x + ix * vs;
+				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
+				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
+			}
+		}
 	}
 }
 
