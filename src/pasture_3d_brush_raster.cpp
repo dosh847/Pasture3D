@@ -194,6 +194,42 @@ void raster_chamfer_payload(std::vector<float> &dist, std::vector<float> &p1, st
 	}
 }
 
+// Three-payload chamfer: same nearest-feature propagation as raster_chamfer_payload but carries p3 too.
+void raster_chamfer_payload3(std::vector<float> &dist, std::vector<float> &p1, std::vector<float> &p2, std::vector<float> &p3, int gw, int gh, float a, float b) {
+	for (int iz = 0; iz < gh; iz++) {
+		const int row = iz * gw;
+		for (int ix = 0; ix < gw; ix++) {
+			const int i = row + ix;
+			float bd = dist[i];
+			int bj = -1;
+			if (iz > 0) {
+				const int up = i - gw;
+				if (dist[up] + a < bd) { bd = dist[up] + a; bj = up; }
+				if (ix > 0 && dist[up - 1] + b < bd) { bd = dist[up - 1] + b; bj = up - 1; }
+				if (ix < gw - 1 && dist[up + 1] + b < bd) { bd = dist[up + 1] + b; bj = up + 1; }
+			}
+			if (ix > 0 && dist[i - 1] + a < bd) { bd = dist[i - 1] + a; bj = i - 1; }
+			if (bj >= 0) { dist[i] = bd; p1[i] = p1[bj]; p2[i] = p2[bj]; p3[i] = p3[bj]; }
+		}
+	}
+	for (int iz = gh - 1; iz >= 0; iz--) {
+		const int row = iz * gw;
+		for (int ix = gw - 1; ix >= 0; ix--) {
+			const int i = row + ix;
+			float bd = dist[i];
+			int bj = -1;
+			if (iz < gh - 1) {
+				const int dn = i + gw;
+				if (dist[dn] + a < bd) { bd = dist[dn] + a; bj = dn; }
+				if (ix < gw - 1 && dist[dn + 1] + b < bd) { bd = dist[dn + 1] + b; bj = dn + 1; }
+				if (ix > 0 && dist[dn - 1] + b < bd) { bd = dist[dn - 1] + b; bj = dn - 1; }
+			}
+			if (ix < gw - 1 && dist[i + 1] + a < bd) { bd = dist[i + 1] + a; bj = i + 1; }
+			if (bj >= 0) { dist[i] = bd; p1[i] = p1[bj]; p2[i] = p2[bj]; p3[i] = p3[bj]; }
+		}
+	}
+}
+
 // Feature field of a world-space polyline over the grid (port of _polyline_field). Fills lat / base_y /
 // along (size gw*gh); returns the polyline's total arc length.
 float raster_polyline_field(const PackedVector3Array &pts, double min_x, double min_z, double vs, int gw, int gh,
@@ -232,6 +268,7 @@ float raster_polyline_field(const PackedVector3Array &pts, double min_x, double 
 	raster_chamfer_payload(lat, base_y, along, gw, gh, (float)vs, (float)(vs * 1.4142135624));
 	return (float)run;
 }
+
 
 } // namespace
 
@@ -610,9 +647,8 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 		return;
 	}
 
-	std::vector<float> lat, base_yf, along;
-	const float total_raw = raster_polyline_field(p_pts, min_x, min_z, vs, gw, gh, lat, base_yf, along);
-	const double total = MAX((double)total_raw, 0.001);
+	const PackedFloat32Array base_below_param = p_params.get("base_below", PackedFloat32Array());
+	const bool has_below = base_below_param.size() == gw * gh;
 
 	const double crest_height = p_params.get("crest_height", 0.0);
 	const double width = p_params.get("width", 0.0);
@@ -639,20 +675,59 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 	const float edge_val = raster_ramp(p_lut, 1.0f); // _cross at t=1
 	const bool add = (blend == 1);
 
+	// Exact perpendicular-distance polyline field: for each grid cell, iterate every segment and keep the
+	// closest point. This gives true Euclidean `lat` (no chamfer angular approximation), exact `base_yf`
+	// and `along` from the nearest continuous point (no Voronoi seams, no arc-length re-interpolation
+	// needed), and exact `ground_ref_arr` at that closest XZ — all in one O(cells × segments) pass.
+	// Complexity is ~20× chamfer for typical ridges but ridges have few segments (~5-20), so bake time
+	// is still <5 ms for any grid a user would reasonably author.
+	const int n = gw * gh;
+	std::vector<float> lat(n, RBIG), base_yf(n, 0.f), along(n, 0.f);
+	std::vector<float> ground_ref_arr;
+	if (has_below) {
+		ground_ref_arr.assign(n, (float)NAN);
+	}
+	double arc = 0.0;
+	const int npts = (int)p_pts.size();
+	for (int k = 0; k < npts - 1; k++) {
+		const Vector3 a = p_pts[k], b = p_pts[k + 1];
+		const double dx = b.x - a.x, dz = b.z - a.z;
+		const double seg_len_sq = dx * dx + dz * dz;
+		const double seg_len = std::sqrt(seg_len_sq);
+		for (int iz = 0; iz < gh; iz++) {
+			const double cz = min_z + iz * vs;
+			const int row = iz * gw;
+			for (int ix = 0; ix < gw; ix++) {
+				const double cx = min_x + ix * vs;
+				const double qx = cx - a.x, qz = cz - a.z;
+				const double t = seg_len_sq > 1e-18 ? CLAMP((qx * dx + qz * dz) / seg_len_sq, 0.0, 1.0) : 0.0;
+				const double px = a.x + t * dx, pz = a.z + t * dz;
+				const double d = std::sqrt((cx - px) * (cx - px) + (cz - pz) * (cz - pz));
+				const int i = row + ix;
+				if (d < (double)lat[i]) {
+					lat[i] = (float)d;
+					base_yf[i] = (float)(a.y + t * (b.y - a.y));
+					along[i] = (float)(arc + t * seg_len);
+					if (has_below) {
+						const int six = (int)std::lround((px - min_x) / vs);
+						const int siz = (int)std::lround((pz - min_z) / vs);
+						if (six >= 0 && six < gw && siz >= 0 && siz < gh) {
+							ground_ref_arr[i] = base_below_param[siz * gw + six];
+						}
+					}
+				}
+			}
+		}
+		arc += seg_len;
+	}
+	const double total = MAX(arc, 0.001);
+	const bool has_gspline = !ground_ref_arr.empty();
+
 	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
-	Vector2i wloc(0x7fffffff, 0x7fffffff);
-	Pasture3DRegion *wregion = nullptr;
-	// Below-layer base: the composite of layers beneath this brush's, so the flank drapes onto the ground
-	// under its own layer (not the full terrain) and features stop climbing each other. NaN/empty => fall
-	// back to the live height. The two-reference cross-section always needs this now.
-	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
-	const bool has_below = base_below.size() == gw * gh;
 
 	const bool batched = wlayer && !composite && !wlayer->is_base(); // Phase 1b batched raw-tile apply
-	std::vector<float> vals;
-	if (batched) {
-		vals.assign((size_t)gw * gh, NAN);
-	}
+	// Always buffer into vals so the smoothing pass can run before any write.
+	std::vector<float> vals((size_t)gw * gh, (float)NAN);
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -677,15 +752,21 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 				continue;
 			}
 			const Vector3 pos(x, 0.0, z);
-			// Two references: the ground beneath (skirt target) and the crest top.
-			const float bb = has_below ? base_below[i] : (float)NAN;
+			// Per-cell terrain height (drape base — the skirt still meets the actual ground).
+			const float bb = has_below ? base_below_param[i] : (float)NAN;
 			const double ground = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
-			const double crest_top = (follow ? (double)base_yf[i] : ground) + signed_crest;
+			// Option B: use the terrain height at the nearest spline point (propagated via chamfer)
+			// for diff/w_eff so the cross-section shape is geometry-driven (consistent at the same
+			// lateral distance), not distorted by per-cell terrain variation. Falls back to ground
+			// when ground_spline isn't available (no base_below → same behaviour as before).
+			const double gs = has_gspline ? (double)ground_ref_arr[i] : ground;
+			const double ground_ref = std::isnan(gs) ? ground : gs;
+			const double crest_top = (follow ? (double)base_yf[i] : ground_ref) + signed_crest;
 			double w = width;
 			if (has_wlut) {
 				w *= MAX((double)raster_ramp(width_lut, (float)((double)along[i] / total)), 0.0);
 			}
-			const double diff = crest_top - ground;
+			const double diff = crest_top - ground_ref;
 			double w_eff = w;
 			if (use_angle) {
 				w_eff = CLAMP(std::fabs(diff) / slope_tan, 0.0, w);
@@ -703,22 +784,68 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 				p = edge_val * (1.0 - CLAMP((latd - w_eff) / falloff_d, 0.0, 1.0));
 			}
 			if (p > 0.0) {
-				double painted = ground + diff * p; // drape from crest down to the ground
+				// Drape on actual per-cell ground — the skirt meets the terrain; only the shape
+				// (diff, w_eff) is anchored to the spline-point reference so it stays smooth.
+				double painted = ground + diff * p;
 				if (noise.is_valid()) {
 					painted += noise_strength * noise->get_noise_2d(x, z) * p;
 				}
-				const double value = add ? (painted - ground) : painted;
-				if (batched) {
-					vals[i] = (float)value;
-				} else {
-					_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, value, blend);
+				vals[i] = (float)(add ? (painted - ground) : painted);
+			}
+		}
+	}
+
+	// NaN-aware separable 3-tap Gaussian blur. Smooths the chamfer DT's octagonal isocontour
+	// artifacts in `lat` that appear as angular surface faceting when diff is large.
+	const int smooth_passes = (int)p_params.get("smooth_passes", 0);
+	if (smooth_passes > 0) {
+		std::vector<float> tmp(gw * gh);
+		for (int pass = 0; pass < smooth_passes; pass++) {
+			// Horizontal pass: vals → tmp
+			for (int iz = 0; iz < gh; iz++) {
+				const int row = iz * gw;
+				for (int ix = 0; ix < gw; ix++) {
+					const float v = vals[row + ix];
+					if (std::isnan(v)) { tmp[row + ix] = (float)NAN; continue; }
+					float sum = 0.5f * v, weight = 0.5f;
+					if (ix > 0 && !std::isnan(vals[row + ix - 1])) { sum += 0.25f * vals[row + ix - 1]; weight += 0.25f; }
+					if (ix < gw - 1 && !std::isnan(vals[row + ix + 1])) { sum += 0.25f * vals[row + ix + 1]; weight += 0.25f; }
+					tmp[row + ix] = sum / weight;
+				}
+			}
+			// Vertical pass: tmp → vals
+			for (int iz = 0; iz < gh; iz++) {
+				const int row = iz * gw;
+				for (int ix = 0; ix < gw; ix++) {
+					const float v = tmp[row + ix];
+					if (std::isnan(v)) { vals[row + ix] = (float)NAN; continue; }
+					float sum = 0.5f * v, weight = 0.5f;
+					if (iz > 0 && !std::isnan(tmp[(iz - 1) * gw + ix])) { sum += 0.25f * tmp[(iz - 1) * gw + ix]; weight += 0.25f; }
+					if (iz < gh - 1 && !std::isnan(tmp[(iz + 1) * gw + ix])) { sum += 0.25f * tmp[(iz + 1) * gw + ix]; weight += 0.25f; }
+					vals[row + ix] = sum / weight;
 				}
 			}
 		}
 	}
 
+	// Write back.
 	if (batched) {
 		_apply_stamp_block(wlayer, (int)std::lround(min_x / vs), (int)std::lround(min_z / vs), gw, gh, vals.data(), blend);
+	} else {
+		Vector2i wloc(0x7fffffff, 0x7fffffff);
+		Pasture3DRegion *wregion = nullptr;
+		for (int iz = 0; iz < gh; iz++) {
+			const double z = min_z + iz * vs;
+			if (has_clip && (z < cz0 || z >= cz1)) { continue; }
+			const int row = iz * gw;
+			for (int ix = 0; ix < gw; ix++) {
+				const float v = vals[row + ix];
+				if (std::isnan(v)) { continue; }
+				const double x = min_x + ix * vs;
+				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
+				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
+			}
+		}
 	}
 }
 
@@ -735,10 +862,6 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 	if (gw < 1 || gh < 1) {
 		return;
 	}
-
-	std::vector<float> lat, base_yf, along;
-	const float total_raw = raster_polyline_field(p_pts, min_x, min_z, vs, gw, gh, lat, base_yf, along);
-	const double total = MAX((double)total_raw, 0.001);
 
 	const double bed_half_width = p_params.get("bed_half_width", 0.0);
 	const double bank_width = p_params.get("bank_width", 0.0);
@@ -763,19 +886,48 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 	const bool use_angle = (flank_mode == 1);
 	const bool add = (blend == 1);
 
-	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
-	Vector2i wloc(0x7fffffff, 0x7fffffff);
-	Pasture3DRegion *wregion = nullptr;
 	// Below-layer base: the composite of layers beneath this brush's, so the banks rise to the ground
 	// under its own layer (not the full terrain). NaN/empty => fall back. Always needed now.
 	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
 	const bool has_below = base_below.size() == gw * gh;
 
-	const bool batched = wlayer && !composite && !wlayer->is_base(); // Phase 1b batched raw-tile apply
-	std::vector<float> vals;
-	if (batched) {
-		vals.assign((size_t)gw * gh, NAN);
+	// Exact perpendicular-distance polyline field (same approach as stamp_ridge_line): for each cell,
+	// iterate every segment and keep the closest point. Eliminates chamfer DT octagonal isocontour
+	// artefacts so bank profiles are geometrically clean even at large depths or steep banks.
+	const int n = gw * gh;
+	std::vector<float> lat(n, RBIG), base_yf(n, 0.f), along(n, 0.f);
+	double arc = 0.0;
+	const int npts = (int)p_pts.size();
+	for (int k = 0; k < npts - 1; k++) {
+		const Vector3 a = p_pts[k], b = p_pts[k + 1];
+		const double dx = b.x - a.x, dz = b.z - a.z;
+		const double seg_len_sq = dx * dx + dz * dz;
+		const double seg_len = std::sqrt(seg_len_sq);
+		for (int iz = 0; iz < gh; iz++) {
+			const double cz = min_z + iz * vs;
+			const int row = iz * gw;
+			for (int ix = 0; ix < gw; ix++) {
+				const double cx = min_x + ix * vs;
+				const double qx = cx - a.x, qz = cz - a.z;
+				const double t = seg_len_sq > 1e-18 ? CLAMP((qx * dx + qz * dz) / seg_len_sq, 0.0, 1.0) : 0.0;
+				const double px = a.x + t * dx, pz = a.z + t * dz;
+				const double d = std::sqrt((cx - px) * (cx - px) + (cz - pz) * (cz - pz));
+				const int i = row + ix;
+				if (d < (double)lat[i]) {
+					lat[i] = (float)d;
+					base_yf[i] = (float)(a.y + t * (b.y - a.y));
+					along[i] = (float)(arc + t * seg_len);
+				}
+			}
+		}
+		arc += seg_len;
 	}
+	const double total = MAX(arc, 0.001);
+
+	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
+
+	const bool batched = wlayer && !composite && !wlayer->is_base(); // Phase 1b batched raw-tile apply
+	std::vector<float> vals((size_t)gw * gh, (float)NAN);
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -832,17 +984,27 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 				const double mask = CLAMP((ground - h) / MAX(ground - bed_y, 0.001), 0.0, 1.0);
 				h = MIN(h + noise_strength * noise->get_noise_2d(x, z) * mask, ground);
 			}
-			const double value = add ? (h - ground) : h;
-			if (batched) {
-				vals[i] = (float)value;
-			} else {
-				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, value, blend);
-			}
+			vals[i] = (float)(add ? (h - ground) : h);
 		}
 	}
 
 	if (batched) {
 		_apply_stamp_block(wlayer, (int)std::lround(min_x / vs), (int)std::lround(min_z / vs), gw, gh, vals.data(), blend);
+	} else {
+		Vector2i wloc(0x7fffffff, 0x7fffffff);
+		Pasture3DRegion *wregion = nullptr;
+		for (int iz = 0; iz < gh; iz++) {
+			const double z = min_z + iz * vs;
+			if (has_clip && (z < cz0 || z >= cz1)) { continue; }
+			const int row = iz * gw;
+			for (int ix = 0; ix < gw; ix++) {
+				const float v = vals[row + ix];
+				if (std::isnan(v)) { continue; }
+				const double x = min_x + ix * vs;
+				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
+				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
+			}
+		}
 	}
 }
 

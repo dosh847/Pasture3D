@@ -1787,6 +1787,38 @@ func _chamfer_payload(dist: PackedFloat32Array, p1: PackedFloat32Array, p2: Pack
 				p2[i] = p2[bj]
 
 
+## Three-payload chamfer: same as _chamfer_payload but propagates p3 alongside p1 and p2.
+func _chamfer_payload3(dist: PackedFloat32Array, p1: PackedFloat32Array, p2: PackedFloat32Array, p3: PackedFloat32Array, gw: int, gh: int, a: float, b: float) -> void:
+	for iz in range(gh):
+		var row := iz * gw
+		for ix in range(gw):
+			var i := row + ix
+			var bd := dist[i]
+			var bj := -1
+			if iz > 0:
+				var up := i - gw
+				if dist[up] + a < bd: bd = dist[up] + a; bj = up
+				if ix > 0 and dist[up - 1] + b < bd: bd = dist[up - 1] + b; bj = up - 1
+				if ix < gw - 1 and dist[up + 1] + b < bd: bd = dist[up + 1] + b; bj = up + 1
+			if ix > 0 and dist[i - 1] + a < bd: bd = dist[i - 1] + a; bj = i - 1
+			if bj >= 0:
+				dist[i] = bd; p1[i] = p1[bj]; p2[i] = p2[bj]; p3[i] = p3[bj]
+	for iz in range(gh - 1, -1, -1):
+		var row := iz * gw
+		for ix in range(gw - 1, -1, -1):
+			var i := row + ix
+			var bd := dist[i]
+			var bj := -1
+			if iz < gh - 1:
+				var dn := i + gw
+				if dist[dn] + a < bd: bd = dist[dn] + a; bj = dn
+				if ix < gw - 1 and dist[dn + 1] + b < bd: bd = dist[dn + 1] + b; bj = dn + 1
+				if ix > 0 and dist[dn - 1] + b < bd: bd = dist[dn - 1] + b; bj = dn - 1
+			if ix < gw - 1 and dist[i + 1] + a < bd: bd = dist[i + 1] + a; bj = i + 1
+			if bj >= 0:
+				dist[i] = bd; p1[i] = p1[bj]; p2[i] = p2[bj]; p3[i] = p3[bj]
+
+
 ## Feature field of a world-space polyline over a grid. Returns
 ## [lat: PackedFloat32Array, base_y: PackedFloat32Array, along: PackedFloat32Array, total_length: float]:
 ## per cell, the lateral distance to the polyline (metres), the spline Y at the nearest point, and the
@@ -1825,6 +1857,53 @@ func _polyline_field(pts: PackedVector3Array, min_x: float, min_z: float, vs: fl
 				along[idx] = along_a + seg * tt
 	_chamfer_payload(dist, base_y, along, gw, gh, vs, vs * 1.4142135624)
 	return [dist, base_y, along, run]
+
+
+## Arc-length re-interpolation of the chamfer polyline field. After _polyline_field fills base_y
+## via nearest-seed propagation, the Voronoi seams where adjacent spline samples have different
+## heights are visible as creases. This pass overwrites base_y[i] with the value interpolated from
+## pts at along[i] (a continuous arc-length value with only tiny seams), eliminating those creases.
+## Also builds ground_ref_arr: base_below sampled at the interpolated spline XZ position, so that
+## diff = crest_top - ground_ref is smooth (Option B). Returns [base_y, ground_ref_arr].
+func _smooth_arclength_fields(pts: PackedVector3Array, base_below: PackedFloat32Array,
+		base_y: PackedFloat32Array, along: PackedFloat32Array, lat: PackedFloat32Array,
+		min_x: float, min_z: float, vs: float, gw: int, gh: int, reach: float) -> Array:
+	# Build arc-length table for pts
+	var npts := pts.size()
+	var pt_arcs := PackedFloat64Array()
+	pt_arcs.resize(npts)
+	pt_arcs[0] = 0.0
+	for k in range(1, npts):
+		var d := pts[k] - pts[k - 1]
+		pt_arcs[k] = pt_arcs[k - 1] + Vector2(d.x, d.z).length()
+	var arc_max: float = pt_arcs[npts - 1]
+	var has_below := base_below.size() == gw * gh
+	var ground_ref_arr := PackedFloat32Array()
+	if has_below:
+		ground_ref_arr.resize(gw * gh)
+		ground_ref_arr.fill(NAN)
+	for i in range(gw * gh):
+		if lat[i] > reach:
+			continue
+		var al := clampf(along[i], 0.0, arc_max)
+		# Binary search for al in pt_arcs
+		var lo := 0
+		var hi := npts - 1
+		while lo + 1 < hi:
+			var mid := (lo + hi) / 2
+			if pt_arcs[mid] <= al: lo = mid
+			else: hi = mid
+		var seg_len: float = pt_arcs[hi] - pt_arcs[lo]
+		var t := (al - pt_arcs[lo]) / seg_len if seg_len > 1e-9 else 0.0
+		base_y[i] = pts[lo].y * (1.0 - t) + pts[hi].y * t
+		if has_below:
+			var sx := pts[lo].x * (1.0 - t) + pts[hi].x * t
+			var sz := pts[lo].z * (1.0 - t) + pts[hi].z * t
+			var six := int(round((sx - min_x) / vs))
+			var siz := int(round((sz - min_z) / vs))
+			if six >= 0 and six < gw and siz >= 0 and siz < gh:
+				ground_ref_arr[i] = base_below[siz * gw + six]
+	return [base_y, ground_ref_arr]
 
 
 ## ---- Virtuals for subclasses ----
