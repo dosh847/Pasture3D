@@ -863,10 +863,6 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 		return;
 	}
 
-	std::vector<float> lat, base_yf, along;
-	const float total_raw = raster_polyline_field(p_pts, min_x, min_z, vs, gw, gh, lat, base_yf, along);
-	const double total = MAX((double)total_raw, 0.001);
-
 	const double bed_half_width = p_params.get("bed_half_width", 0.0);
 	const double bank_width = p_params.get("bank_width", 0.0);
 	const double falloff = p_params.get("falloff", 0.0);
@@ -890,19 +886,48 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 	const bool use_angle = (flank_mode == 1);
 	const bool add = (blend == 1);
 
-	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
-	Vector2i wloc(0x7fffffff, 0x7fffffff);
-	Pasture3DRegion *wregion = nullptr;
 	// Below-layer base: the composite of layers beneath this brush's, so the banks rise to the ground
 	// under its own layer (not the full terrain). NaN/empty => fall back. Always needed now.
 	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
 	const bool has_below = base_below.size() == gw * gh;
 
-	const bool batched = wlayer && !composite && !wlayer->is_base(); // Phase 1b batched raw-tile apply
-	std::vector<float> vals;
-	if (batched) {
-		vals.assign((size_t)gw * gh, NAN);
+	// Exact perpendicular-distance polyline field (same approach as stamp_ridge_line): for each cell,
+	// iterate every segment and keep the closest point. Eliminates chamfer DT octagonal isocontour
+	// artefacts so bank profiles are geometrically clean even at large depths or steep banks.
+	const int n = gw * gh;
+	std::vector<float> lat(n, RBIG), base_yf(n, 0.f), along(n, 0.f);
+	double arc = 0.0;
+	const int npts = (int)p_pts.size();
+	for (int k = 0; k < npts - 1; k++) {
+		const Vector3 a = p_pts[k], b = p_pts[k + 1];
+		const double dx = b.x - a.x, dz = b.z - a.z;
+		const double seg_len_sq = dx * dx + dz * dz;
+		const double seg_len = std::sqrt(seg_len_sq);
+		for (int iz = 0; iz < gh; iz++) {
+			const double cz = min_z + iz * vs;
+			const int row = iz * gw;
+			for (int ix = 0; ix < gw; ix++) {
+				const double cx = min_x + ix * vs;
+				const double qx = cx - a.x, qz = cz - a.z;
+				const double t = seg_len_sq > 1e-18 ? CLAMP((qx * dx + qz * dz) / seg_len_sq, 0.0, 1.0) : 0.0;
+				const double px = a.x + t * dx, pz = a.z + t * dz;
+				const double d = std::sqrt((cx - px) * (cx - px) + (cz - pz) * (cz - pz));
+				const int i = row + ix;
+				if (d < (double)lat[i]) {
+					lat[i] = (float)d;
+					base_yf[i] = (float)(a.y + t * (b.y - a.y));
+					along[i] = (float)(arc + t * seg_len);
+				}
+			}
+		}
+		arc += seg_len;
 	}
+	const double total = MAX(arc, 0.001);
+
+	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
+
+	const bool batched = wlayer && !composite && !wlayer->is_base(); // Phase 1b batched raw-tile apply
+	std::vector<float> vals((size_t)gw * gh, (float)NAN);
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -959,17 +984,27 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 				const double mask = CLAMP((ground - h) / MAX(ground - bed_y, 0.001), 0.0, 1.0);
 				h = MIN(h + noise_strength * noise->get_noise_2d(x, z) * mask, ground);
 			}
-			const double value = add ? (h - ground) : h;
-			if (batched) {
-				vals[i] = (float)value;
-			} else {
-				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, value, blend);
-			}
+			vals[i] = (float)(add ? (h - ground) : h);
 		}
 	}
 
 	if (batched) {
 		_apply_stamp_block(wlayer, (int)std::lround(min_x / vs), (int)std::lround(min_z / vs), gw, gh, vals.data(), blend);
+	} else {
+		Vector2i wloc(0x7fffffff, 0x7fffffff);
+		Pasture3DRegion *wregion = nullptr;
+		for (int iz = 0; iz < gh; iz++) {
+			const double z = min_z + iz * vs;
+			if (has_clip && (z < cz0 || z >= cz1)) { continue; }
+			const int row = iz * gw;
+			for (int ix = 0; ix < gw; ix++) {
+				const float v = vals[row + ix];
+				if (std::isnan(v)) { continue; }
+				const double x = min_x + ix * vs;
+				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
+				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
+			}
+		}
 	}
 }
 

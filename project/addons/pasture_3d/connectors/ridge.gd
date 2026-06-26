@@ -106,7 +106,7 @@ enum FlankMode { FIXED_WIDTH, SLOPE_ANGLE }
 ## Passes of NaN-aware separable Gaussian blur applied after rasterisation to remove chamfer-DT
 ## octagonal isocontour artefacts that appear as surface faceting when diff is large (e.g. an
 ## elevated spline point over flat terrain). 0 = off, 1-2 = typical, 3+ = heavy.
-@export_range(0, 5) var smooth_passes: int = 1:
+@export_range(0, 5) var smooth_passes: int = 0:
 	set(v):
 		smooth_passes = v
 		_schedule_refresh()
