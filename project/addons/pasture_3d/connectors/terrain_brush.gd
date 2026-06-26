@@ -1787,6 +1787,38 @@ func _chamfer_payload(dist: PackedFloat32Array, p1: PackedFloat32Array, p2: Pack
 				p2[i] = p2[bj]
 
 
+## Three-payload chamfer: same as _chamfer_payload but propagates p3 alongside p1 and p2.
+func _chamfer_payload3(dist: PackedFloat32Array, p1: PackedFloat32Array, p2: PackedFloat32Array, p3: PackedFloat32Array, gw: int, gh: int, a: float, b: float) -> void:
+	for iz in range(gh):
+		var row := iz * gw
+		for ix in range(gw):
+			var i := row + ix
+			var bd := dist[i]
+			var bj := -1
+			if iz > 0:
+				var up := i - gw
+				if dist[up] + a < bd: bd = dist[up] + a; bj = up
+				if ix > 0 and dist[up - 1] + b < bd: bd = dist[up - 1] + b; bj = up - 1
+				if ix < gw - 1 and dist[up + 1] + b < bd: bd = dist[up + 1] + b; bj = up + 1
+			if ix > 0 and dist[i - 1] + a < bd: bd = dist[i - 1] + a; bj = i - 1
+			if bj >= 0:
+				dist[i] = bd; p1[i] = p1[bj]; p2[i] = p2[bj]; p3[i] = p3[bj]
+	for iz in range(gh - 1, -1, -1):
+		var row := iz * gw
+		for ix in range(gw - 1, -1, -1):
+			var i := row + ix
+			var bd := dist[i]
+			var bj := -1
+			if iz < gh - 1:
+				var dn := i + gw
+				if dist[dn] + a < bd: bd = dist[dn] + a; bj = dn
+				if ix < gw - 1 and dist[dn + 1] + b < bd: bd = dist[dn + 1] + b; bj = dn + 1
+				if ix > 0 and dist[dn - 1] + b < bd: bd = dist[dn - 1] + b; bj = dn - 1
+			if ix < gw - 1 and dist[i + 1] + a < bd: bd = dist[i + 1] + a; bj = i + 1
+			if bj >= 0:
+				dist[i] = bd; p1[i] = p1[bj]; p2[i] = p2[bj]; p3[i] = p3[bj]
+
+
 ## Feature field of a world-space polyline over a grid. Returns
 ## [lat: PackedFloat32Array, base_y: PackedFloat32Array, along: PackedFloat32Array, total_length: float]:
 ## per cell, the lateral distance to the polyline (metres), the spline Y at the nearest point, and the
@@ -1825,6 +1857,50 @@ func _polyline_field(pts: PackedVector3Array, min_x: float, min_z: float, vs: fl
 				along[idx] = along_a + seg * tt
 	_chamfer_payload(dist, base_y, along, gw, gh, vs, vs * 1.4142135624)
 	return [dist, base_y, along, run]
+
+
+## Variant of _polyline_field that also propagates the terrain height at each spline sample point
+## (ground_spline), seeded from base_below at those cells. Used by the GDScript ridge rasteriser for
+## Option B smooth drape: diff = crest_top - ground_at_spline is geometry-driven rather than per-cell.
+## Returns [lat, base_y, along, ground_spline, total_length].
+func _polyline_field_grounded(pts: PackedVector3Array, base_below: PackedFloat32Array, min_x: float, min_z: float, vs: float, gw: int, gh: int) -> Array:
+	var n := gw * gh
+	const BIG := 1.0e9
+	var dist := PackedFloat32Array()
+	var base_y := PackedFloat32Array()
+	var along := PackedFloat32Array()
+	var ground_spline := PackedFloat32Array()
+	dist.resize(n)
+	base_y.resize(n)
+	along.resize(n)
+	ground_spline.resize(n)
+	for i in range(n):
+		dist[i] = BIG
+		ground_spline[i] = NAN
+	var sample := vs * 0.5
+	var run := 0.0
+	var has_below := base_below.size() == n
+	for k in range(pts.size() - 1):
+		var a := pts[k]
+		var b := pts[k + 1]
+		var ax := a.x
+		var az := a.z
+		var seg := Vector2(b.x - ax, b.z - az).length()
+		var along_a := run
+		run += seg
+		var steps := maxi(1, int(ceil(seg / sample)))
+		for s in range(steps + 1):
+			var tt := float(s) / float(steps)
+			var ix := int(round((ax + (b.x - ax) * tt - min_x) / vs))
+			var iz := int(round((az + (b.z - az) * tt - min_z) / vs))
+			if ix >= 0 and ix < gw and iz >= 0 and iz < gh:
+				var idx := iz * gw + ix
+				dist[idx] = 0.0
+				base_y[idx] = a.y + (b.y - a.y) * tt
+				along[idx] = along_a + seg * tt
+				ground_spline[idx] = base_below[idx] if has_below else NAN
+	_chamfer_payload3(dist, base_y, along, ground_spline, gw, gh, vs, vs * 1.4142135624)
+	return [dist, base_y, along, ground_spline, run]
 
 
 ## ---- Virtuals for subclasses ----

@@ -174,13 +174,18 @@ func _paint_spline(path: Path3D) -> void:
 		terrain.data.stamp_ridge_line(_layer_id, pts, _clip_aabb, params, _ridge_cross_lut(profile))
 		return
 
-	# One O(cells) polyline feature field replaces the per-pixel O(segments) closest-point scan: each
-	# cell gets its lateral distance, the crest Y at the nearest point, and the arc length (for taper).
-	var fld := _polyline_field(pts, min_x, min_z, vs, gw, gh)
+	# Option B smooth drape: use the terrain height at the nearest spline point (propagated via
+	# chamfer alongside base_y / along) for diff / w_eff. The cross-section shape is then purely
+	# geometry-driven (consistent at the same lateral distance) and doesn't inherit per-cell terrain
+	# variation. The final drape (painted = ground + diff * p) still uses the actual per-cell ground
+	# so the skirt meets the real terrain surface.
+	var base_below := _base_below_grid(min_x, min_z, vs, gw, gh)
+	var fld := _polyline_field_grounded(pts, base_below, min_x, min_z, vs, gw, gh)
 	var lat_arr: PackedFloat32Array = fld[0]
 	var by_arr: PackedFloat32Array = fld[1]
 	var al_arr: PackedFloat32Array = fld[2]
-	var total: float = maxf(fld[3], 0.001)
+	var gs_arr: PackedFloat32Array = fld[3]
+	var total: float = maxf(fld[4], 0.001)
 	var signed_crest := -crest_height if invert else crest_height
 	var use_angle := flank_mode == FlankMode.SLOPE_ANGLE
 	var slope_tan := maxf(tan(deg_to_rad(slope_angle)), 0.0001)
@@ -198,11 +203,15 @@ func _paint_spline(path: Path3D) -> void:
 			var x := min_x + ix * vs
 			var pos := Vector3(x, 0.0, z)
 			var ground: float = _base_height_below(pos)
-			var crest_top: float = (by_arr[i] if follow_spline_height else ground) + signed_crest
+			# ground_ref: terrain at nearest spline point (geometry-driven diff/w_eff).
+			# Falls back to per-cell ground when base_below wasn't available (NaN propagated).
+			var gs: float = gs_arr[i]
+			var ground_ref: float = gs if is_finite(gs) else ground
+			var crest_top: float = (by_arr[i] if follow_spline_height else ground_ref) + signed_crest
 			var w := width
 			if width_curve != null:
 				w *= maxf(width_curve.sample_baked(clampf(al_arr[i] / total, 0.0, 1.0)), 0.0)
-			var diff := crest_top - ground
+			var diff := crest_top - ground_ref
 			var w_eff := w
 			if use_angle:
 				w_eff = clampf(absf(diff) / slope_tan, 0.0, w)
