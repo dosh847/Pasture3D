@@ -269,51 +269,6 @@ float raster_polyline_field(const PackedVector3Array &pts, double min_x, double 
 	return (float)run;
 }
 
-// Variant of raster_polyline_field that also propagates the terrain height at each spline sample
-// (ground_spline, seeded from base_below at the cells the polyline passes through). Used by
-// stamp_ridge_line for Option B smooth drape: diff = crest_top - ground_spline (geometry-driven
-// cross-section shape) while the final drape still uses the per-cell ground. NaN seeds fall back
-// to NAN propagation and are handled per-cell in stamp_ridge_line.
-float raster_polyline_field_grounded(const PackedVector3Array &pts, double min_x, double min_z, double vs, int gw, int gh,
-		const PackedFloat32Array &base_below,
-		std::vector<float> &lat, std::vector<float> &base_y, std::vector<float> &along, std::vector<float> &ground_spline) {
-	const int n = gw * gh;
-	lat.assign(n, RBIG);
-	base_y.assign(n, 0.f);
-	along.assign(n, 0.f);
-	ground_spline.assign(n, (float)NAN);
-	const double sample = vs * 0.5;
-	double run = 0.0;
-	const int np = pts.size();
-	const bool has_below = base_below.size() == n;
-	for (int k = 0; k < np - 1; k++) {
-		const Vector3 a = pts[k];
-		const Vector3 b = pts[k + 1];
-		const double ax = a.x;
-		const double az = a.z;
-		const double seg = std::sqrt((b.x - ax) * (b.x - ax) + (b.z - az) * (b.z - az));
-		const double along_a = run;
-		run += seg;
-		int steps = (int)std::ceil(seg / sample);
-		if (steps < 1) {
-			steps = 1;
-		}
-		for (int s = 0; s <= steps; s++) {
-			const double tt = (double)s / (double)steps;
-			const int ix = (int)std::lround((ax + (b.x - ax) * tt - min_x) / vs);
-			const int iz = (int)std::lround((az + (b.z - az) * tt - min_z) / vs);
-			if (ix >= 0 && ix < gw && iz >= 0 && iz < gh) {
-				const int idx = iz * gw + ix;
-				lat[idx] = 0.f;
-				base_y[idx] = (float)(a.y + (b.y - a.y) * tt);
-				along[idx] = (float)(along_a + seg * tt);
-				ground_spline[idx] = has_below ? base_below[idx] : (float)NAN;
-			}
-		}
-	}
-	raster_chamfer_payload3(lat, base_y, along, ground_spline, gw, gh, (float)vs, (float)(vs * 1.4142135624));
-	return (float)run;
-}
 
 } // namespace
 
@@ -692,21 +647,11 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 		return;
 	}
 
-	// Option B smooth drape: propagate the terrain height at each spline sample point so that
-	// diff = crest_top - ground_at_spline is geometry-driven (consistent at the same lateral
-	// distance) rather than per-cell-terrain-dependent. Requires base_below to be present;
-	// falls back to the per-cell ground (original behaviour) when it isn't.
-	std::vector<float> lat, base_yf, along, ground_spline;
+	std::vector<float> lat, base_yf, along;
+	const float total_raw = raster_polyline_field(p_pts, min_x, min_z, vs, gw, gh, lat, base_yf, along);
+	const double total = MAX((double)total_raw, 0.001);
 	const PackedFloat32Array base_below_param = p_params.get("base_below", PackedFloat32Array());
 	const bool has_below = base_below_param.size() == gw * gh;
-	float total_raw;
-	if (has_below) {
-		total_raw = raster_polyline_field_grounded(p_pts, min_x, min_z, vs, gw, gh,
-				base_below_param, lat, base_yf, along, ground_spline);
-	} else {
-		total_raw = raster_polyline_field(p_pts, min_x, min_z, vs, gw, gh, lat, base_yf, along);
-	}
-	const double total = MAX((double)total_raw, 0.001);
 
 	const double crest_height = p_params.get("crest_height", 0.0);
 	const double width = p_params.get("width", 0.0);
@@ -733,10 +678,54 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 	const float edge_val = raster_ramp(p_lut, 1.0f); // _cross at t=1
 	const bool add = (blend == 1);
 
+	// Arc-length re-interpolation: the chamfer nearest-seed propagation creates Voronoi seams in
+	// base_yf when spline points are at different heights — each cell gets the height of its nearest
+	// sample, and the seam between two samples with different heights appears as a visible crease.
+	// Fix: propagate arc-length (continuous, tiny seams) via chamfer and re-interpolate base_yf from
+	// p_pts at along[i]. Also build ground_ref_arr (Option B): base_below at the interpolated spline
+	// XZ, so diff = crest_top - ground_ref is geometry-driven regardless of per-cell terrain variation.
+	std::vector<float> ground_ref_arr; // Option B smooth ground reference per cell (may stay empty)
+	{
+		const int npts = (int)p_pts.size();
+		std::vector<double> pt_arcs(npts, 0.0);
+		for (int k = 1; k < npts; k++) {
+			const Vector3 d = p_pts[k] - p_pts[k - 1];
+			pt_arcs[k] = pt_arcs[k - 1] + std::sqrt(d.x * d.x + d.z * d.z);
+		}
+		const double arc_max = pt_arcs[npts - 1];
+		const int n = gw * gh;
+		if (has_below) {
+			ground_ref_arr.assign(n, (float)NAN);
+		}
+		for (int i = 0; i < n; i++) {
+			if ((double)lat[i] > reach) {
+				continue;
+			}
+			const double al = CLAMP((double)along[i], 0.0, arc_max);
+			int lo = 0, hi = npts - 1;
+			while (lo + 1 < hi) {
+				const int mid = (lo + hi) / 2;
+				if (pt_arcs[mid] <= al) { lo = mid; } else { hi = mid; }
+			}
+			const double seg_len = pt_arcs[hi] - pt_arcs[lo];
+			const double t = seg_len > 1e-9 ? (al - pt_arcs[lo]) / seg_len : 0.0;
+			base_yf[i] = (float)(p_pts[lo].y * (1.0 - t) + p_pts[hi].y * t);
+			if (has_below) {
+				const double sx = p_pts[lo].x * (1.0 - t) + p_pts[hi].x * t;
+				const double sz = p_pts[lo].z * (1.0 - t) + p_pts[hi].z * t;
+				const int six = (int)std::lround((sx - min_x) / vs);
+				const int siz = (int)std::lround((sz - min_z) / vs);
+				if (six >= 0 && six < gw && siz >= 0 && siz < gh) {
+					ground_ref_arr[i] = base_below_param[siz * gw + six];
+				}
+			}
+		}
+	}
+	const bool has_gspline = !ground_ref_arr.empty();
+
 	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
 	Vector2i wloc(0x7fffffff, 0x7fffffff);
 	Pasture3DRegion *wregion = nullptr;
-	const bool has_gspline = !ground_spline.empty(); // true when grounded polyline field was used
 
 	const bool batched = wlayer && !composite && !wlayer->is_base(); // Phase 1b batched raw-tile apply
 	std::vector<float> vals;
@@ -774,7 +763,7 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 			// for diff/w_eff so the cross-section shape is geometry-driven (consistent at the same
 			// lateral distance), not distorted by per-cell terrain variation. Falls back to ground
 			// when ground_spline isn't available (no base_below → same behaviour as before).
-			const double gs = has_gspline ? (double)ground_spline[i] : ground;
+			const double gs = has_gspline ? (double)ground_ref_arr[i] : ground;
 			const double ground_ref = std::isnan(gs) ? ground : gs;
 			const double crest_top = (follow ? (double)base_yf[i] : ground_ref) + signed_crest;
 			double w = width;

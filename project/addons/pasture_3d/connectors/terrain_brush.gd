@@ -1859,48 +1859,51 @@ func _polyline_field(pts: PackedVector3Array, min_x: float, min_z: float, vs: fl
 	return [dist, base_y, along, run]
 
 
-## Variant of _polyline_field that also propagates the terrain height at each spline sample point
-## (ground_spline), seeded from base_below at those cells. Used by the GDScript ridge rasteriser for
-## Option B smooth drape: diff = crest_top - ground_at_spline is geometry-driven rather than per-cell.
-## Returns [lat, base_y, along, ground_spline, total_length].
-func _polyline_field_grounded(pts: PackedVector3Array, base_below: PackedFloat32Array, min_x: float, min_z: float, vs: float, gw: int, gh: int) -> Array:
-	var n := gw * gh
-	const BIG := 1.0e9
-	var dist := PackedFloat32Array()
-	var base_y := PackedFloat32Array()
-	var along := PackedFloat32Array()
-	var ground_spline := PackedFloat32Array()
-	dist.resize(n)
-	base_y.resize(n)
-	along.resize(n)
-	ground_spline.resize(n)
-	for i in range(n):
-		dist[i] = BIG
-		ground_spline[i] = NAN
-	var sample := vs * 0.5
-	var run := 0.0
-	var has_below := base_below.size() == n
-	for k in range(pts.size() - 1):
-		var a := pts[k]
-		var b := pts[k + 1]
-		var ax := a.x
-		var az := a.z
-		var seg := Vector2(b.x - ax, b.z - az).length()
-		var along_a := run
-		run += seg
-		var steps := maxi(1, int(ceil(seg / sample)))
-		for s in range(steps + 1):
-			var tt := float(s) / float(steps)
-			var ix := int(round((ax + (b.x - ax) * tt - min_x) / vs))
-			var iz := int(round((az + (b.z - az) * tt - min_z) / vs))
-			if ix >= 0 and ix < gw and iz >= 0 and iz < gh:
-				var idx := iz * gw + ix
-				dist[idx] = 0.0
-				base_y[idx] = a.y + (b.y - a.y) * tt
-				along[idx] = along_a + seg * tt
-				ground_spline[idx] = base_below[idx] if has_below else NAN
-	_chamfer_payload3(dist, base_y, along, ground_spline, gw, gh, vs, vs * 1.4142135624)
-	return [dist, base_y, along, ground_spline, run]
+## Arc-length re-interpolation of the chamfer polyline field. After _polyline_field fills base_y
+## via nearest-seed propagation, the Voronoi seams where adjacent spline samples have different
+## heights are visible as creases. This pass overwrites base_y[i] with the value interpolated from
+## pts at along[i] (a continuous arc-length value with only tiny seams), eliminating those creases.
+## Also builds ground_ref_arr: base_below sampled at the interpolated spline XZ position, so that
+## diff = crest_top - ground_ref is smooth (Option B). Returns [base_y, ground_ref_arr].
+func _smooth_arclength_fields(pts: PackedVector3Array, base_below: PackedFloat32Array,
+		base_y: PackedFloat32Array, along: PackedFloat32Array, lat: PackedFloat32Array,
+		min_x: float, min_z: float, vs: float, gw: int, gh: int, reach: float) -> Array:
+	# Build arc-length table for pts
+	var npts := pts.size()
+	var pt_arcs := PackedFloat64Array()
+	pt_arcs.resize(npts)
+	pt_arcs[0] = 0.0
+	for k in range(1, npts):
+		var d := pts[k] - pts[k - 1]
+		pt_arcs[k] = pt_arcs[k - 1] + Vector2(d.x, d.z).length()
+	var arc_max: float = pt_arcs[npts - 1]
+	var has_below := base_below.size() == gw * gh
+	var ground_ref_arr := PackedFloat32Array()
+	if has_below:
+		ground_ref_arr.resize(gw * gh)
+		ground_ref_arr.fill(NAN)
+	for i in range(gw * gh):
+		if lat[i] > reach:
+			continue
+		var al := clampf(along[i], 0.0, arc_max)
+		# Binary search for al in pt_arcs
+		var lo := 0
+		var hi := npts - 1
+		while lo + 1 < hi:
+			var mid := (lo + hi) / 2
+			if pt_arcs[mid] <= al: lo = mid
+			else: hi = mid
+		var seg_len: float = pt_arcs[hi] - pt_arcs[lo]
+		var t := (al - pt_arcs[lo]) / seg_len if seg_len > 1e-9 else 0.0
+		base_y[i] = pts[lo].y * (1.0 - t) + pts[hi].y * t
+		if has_below:
+			var sx := pts[lo].x * (1.0 - t) + pts[hi].x * t
+			var sz := pts[lo].z * (1.0 - t) + pts[hi].z * t
+			var six := int(round((sx - min_x) / vs))
+			var siz := int(round((sz - min_z) / vs))
+			if six >= 0 and six < gw and siz >= 0 and siz < gh:
+				ground_ref_arr[i] = base_below[siz * gw + six]
+	return [base_y, ground_ref_arr]
 
 
 ## ---- Virtuals for subclasses ----

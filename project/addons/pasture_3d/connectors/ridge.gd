@@ -174,22 +174,24 @@ func _paint_spline(path: Path3D) -> void:
 		terrain.data.stamp_ridge_line(_layer_id, pts, _clip_aabb, params, _ridge_cross_lut(profile))
 		return
 
-	# Option B smooth drape: use the terrain height at the nearest spline point (propagated via
-	# chamfer alongside base_y / along) for diff / w_eff. The cross-section shape is then purely
-	# geometry-driven (consistent at the same lateral distance) and doesn't inherit per-cell terrain
-	# variation. The final drape (painted = ground + diff * p) still uses the actual per-cell ground
-	# so the skirt meets the real terrain surface.
-	var base_below := _base_below_grid(min_x, min_z, vs, gw, gh)
-	var fld := _polyline_field_grounded(pts, base_below, min_x, min_z, vs, gw, gh)
+	# Arc-length re-interpolation (smooth drape): the chamfer nearest-seed propagation creates Voronoi
+	# seams in base_y when spline points are at different heights. Re-interpolating base_y from the
+	# pts arc-length removes these seams. Also builds smooth ground_ref (Option B) from base_below at
+	# the interpolated spline XZ, so diff = crest_top - ground_ref is geometry-driven.
+	var fld := _polyline_field(pts, min_x, min_z, vs, gw, gh)
 	var lat_arr: PackedFloat32Array = fld[0]
 	var by_arr: PackedFloat32Array = fld[1]
 	var al_arr: PackedFloat32Array = fld[2]
-	var gs_arr: PackedFloat32Array = fld[3]
-	var total: float = maxf(fld[4], 0.001)
+	var total: float = maxf(fld[3], 0.001)
+	var reach := width + falloff
+	var base_below := _base_below_grid(min_x, min_z, vs, gw, gh)
+	var smooth := _smooth_arclength_fields(pts, base_below, by_arr, al_arr, lat_arr, min_x, min_z, vs, gw, gh, reach)
+	by_arr = smooth[0]
+	var gr_arr: PackedFloat32Array = smooth[1]
+	var has_gr := gr_arr.size() == gw * gh
 	var signed_crest := -crest_height if invert else crest_height
 	var use_angle := flank_mode == FlankMode.SLOPE_ANGLE
 	var slope_tan := maxf(tan(deg_to_rad(slope_angle)), 0.0001)
-	var reach := width + falloff
 	var edge_val := _ridge_cross(profile, 1.0) # profile value at the skirt edge, feathered out over `falloff`
 
 	for iz in range(gh):
@@ -203,10 +205,13 @@ func _paint_spline(path: Path3D) -> void:
 			var x := min_x + ix * vs
 			var pos := Vector3(x, 0.0, z)
 			var ground: float = _base_height_below(pos)
-			# ground_ref: terrain at nearest spline point (geometry-driven diff/w_eff).
-			# Falls back to per-cell ground when base_below wasn't available (NaN propagated).
-			var gs: float = gs_arr[i]
-			var ground_ref: float = gs if is_finite(gs) else ground
+			# ground_ref: terrain under the spline at this cell's arc-length (smooth, Option B).
+			# Falls back to per-cell ground when base_below isn't available.
+			var ground_ref: float = ground
+			if has_gr:
+				var gs: float = gr_arr[i]
+				if is_finite(gs):
+					ground_ref = gs
 			var crest_top: float = (by_arr[i] if follow_spline_height else ground_ref) + signed_crest
 			var w := width
 			if width_curve != null:
