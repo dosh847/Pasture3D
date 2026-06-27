@@ -1615,6 +1615,35 @@ func _base_height_below(pos: Vector3) -> float:
 ## grid and the source of the O(cells × edges) freeze. Decimate the baked polyline down to roughly the
 ## terrain resolution before rasterising; the chamfer distance field below then runs in O(cells).
 
+## Sample _base_height_below at each spline point. O(npts) — cheap alternative to _base_below_grid
+## for computing ground_ref in C++ via per-segment linear interpolation (a_ground + t*(b_ground-a_ground)).
+func _below_pts(pts: PackedVector3Array) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	out.resize(pts.size())
+	for i in range(pts.size()):
+		out[i] = _base_height_below(pts[i])
+	return out
+
+
+## 3-D version of _decimate for ridge/trough open polylines (preserves XYZ for height).
+func _decimate3(pts: PackedVector3Array, step: float) -> PackedVector3Array:
+	var n := pts.size()
+	if n < 3:
+		return pts
+	var out := PackedVector3Array()
+	out.append(pts[0])
+	var acc := 0.0
+	for i in range(1, n):
+		var d := Vector2(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z).length()
+		acc += d
+		if acc >= step:
+			out.append(pts[i])
+			acc = 0.0
+	if out[out.size() - 1] != pts[n - 1]:
+		out.append(pts[n - 1])
+	return out
+
+
 ## Decimate a world-space point list, keeping a point about every `step` metres (drops the dense
 ## in-between bakes). Used for both closed loops (Mound) and open polylines (Ridge/Trough).
 func _decimate(pts: PackedVector2Array, step: float) -> PackedVector2Array:
@@ -1865,10 +1894,9 @@ func _polyline_field(pts: PackedVector3Array, min_x: float, min_z: float, vs: fl
 ## pts at along[i] (a continuous arc-length value with only tiny seams), eliminating those creases.
 ## Also builds ground_ref_arr: base_below sampled at the interpolated spline XZ position, so that
 ## diff = crest_top - ground_ref is smooth (Option B). Returns [base_y, ground_ref_arr].
-func _smooth_arclength_fields(pts: PackedVector3Array, base_below: PackedFloat32Array,
+func _smooth_arclength_fields(pts: PackedVector3Array, below_pts: PackedFloat32Array,
 		base_y: PackedFloat32Array, along: PackedFloat32Array, lat: PackedFloat32Array,
 		min_x: float, min_z: float, vs: float, gw: int, gh: int, reach: float) -> Array:
-	# Build arc-length table for pts
 	var npts := pts.size()
 	var pt_arcs := PackedFloat64Array()
 	pt_arcs.resize(npts)
@@ -1877,16 +1905,14 @@ func _smooth_arclength_fields(pts: PackedVector3Array, base_below: PackedFloat32
 		var d := pts[k] - pts[k - 1]
 		pt_arcs[k] = pt_arcs[k - 1] + Vector2(d.x, d.z).length()
 	var arc_max: float = pt_arcs[npts - 1]
-	var has_below := base_below.size() == gw * gh
+	var has_below := below_pts.size() == npts
 	var ground_ref_arr := PackedFloat32Array()
-	if has_below:
-		ground_ref_arr.resize(gw * gh)
-		ground_ref_arr.fill(NAN)
+	ground_ref_arr.resize(gw * gh)
+	ground_ref_arr.fill(NAN)
 	for i in range(gw * gh):
 		if lat[i] > reach:
 			continue
 		var al := clampf(along[i], 0.0, arc_max)
-		# Binary search for al in pt_arcs
 		var lo := 0
 		var hi := npts - 1
 		while lo + 1 < hi:
@@ -1897,12 +1923,7 @@ func _smooth_arclength_fields(pts: PackedVector3Array, base_below: PackedFloat32
 		var t := (al - pt_arcs[lo]) / seg_len if seg_len > 1e-9 else 0.0
 		base_y[i] = pts[lo].y * (1.0 - t) + pts[hi].y * t
 		if has_below:
-			var sx := pts[lo].x * (1.0 - t) + pts[hi].x * t
-			var sz := pts[lo].z * (1.0 - t) + pts[hi].z * t
-			var six := int(round((sx - min_x) / vs))
-			var siz := int(round((sz - min_z) / vs))
-			if six >= 0 and six < gw and siz >= 0 and siz < gh:
-				ground_ref_arr[i] = base_below[siz * gw + six]
+			ground_ref_arr[i] = below_pts[lo] * (1.0 - t) + below_pts[hi] * t
 	return [base_y, ground_ref_arr]
 
 

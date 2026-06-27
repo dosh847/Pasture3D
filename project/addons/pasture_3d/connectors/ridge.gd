@@ -154,9 +154,12 @@ func _paint_spline(path: Path3D) -> void:
 	var pts := _baked_world_points(path)
 	if pts.size() < 2:
 		return
+	var vs: float = terrain.vertex_spacing
+	pts = _decimate3(pts, vs)
+	if pts.size() < 2:
+		return
 	if closed:
 		pts.append(pts[0]) # wrap the ring: rasterisers see the last->first segment like any other
-	var vs: float = terrain.vertex_spacing
 	var b := _snapped_bounds(_spline_footprint_aabb(path), vs)
 	var min_x: float = b[0]
 	var min_z: float = b[2]
@@ -176,8 +179,8 @@ func _paint_spline(path: Path3D) -> void:
 			"blend": _blend, "composite": not _defer_composite,
 			"noise": noise, "noise_strength": noise_strength,
 			"smooth_passes": smooth_passes,
-			# The flank always drapes onto the ground now, so the below-layer grid is always needed.
-			"base_below": _base_below_grid(min_x, min_z, vs, gw, gh),
+			# Per-point terrain heights for ground_ref interpolation in C++ (O(npts) vs O(cells)).
+			"base_below_pts": _below_pts(pts),
 		}
 		if width_curve != null:
 			params["width_lut"] = _ramp_lut(width_curve)
@@ -194,8 +197,8 @@ func _paint_spline(path: Path3D) -> void:
 	var al_arr: PackedFloat32Array = fld[2]
 	var total: float = maxf(fld[3], 0.001)
 	var reach := width + falloff
-	var base_below := _base_below_grid(min_x, min_z, vs, gw, gh)
-	var smooth := _smooth_arclength_fields(pts, base_below, by_arr, al_arr, lat_arr, min_x, min_z, vs, gw, gh, reach)
+	var below_pts := _below_pts(pts)
+	var smooth := _smooth_arclength_fields(pts, below_pts, by_arr, al_arr, lat_arr, min_x, min_z, vs, gw, gh, reach)
 	by_arr = smooth[0]
 	var gr_arr: PackedFloat32Array = smooth[1]
 	var has_gr := gr_arr.size() == gw * gh

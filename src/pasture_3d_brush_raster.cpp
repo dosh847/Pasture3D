@@ -647,8 +647,9 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 		return;
 	}
 
-	const PackedFloat32Array base_below_param = p_params.get("base_below", PackedFloat32Array());
-	const bool has_below = base_below_param.size() == gw * gh;
+	// Per-spline-point terrain heights for ground_ref interpolation — O(npts) vs O(cells) composite.
+	const PackedFloat32Array base_below_pts = p_params.get("base_below_pts", PackedFloat32Array());
+	const bool has_below_pts = base_below_pts.size() == p_pts.size();
 
 	const double crest_height = p_params.get("crest_height", 0.0);
 	const double width = p_params.get("width", 0.0);
@@ -675,18 +676,16 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 	const float edge_val = raster_ramp(p_lut, 1.0f); // _cross at t=1
 	const bool add = (blend == 1);
 
-	// Exact perpendicular-distance polyline field: for each grid cell, iterate every segment and keep the
-	// closest point. This gives true Euclidean `lat` (no chamfer angular approximation), exact `base_yf`
-	// and `along` from the nearest continuous point (no Voronoi seams, no arc-length re-interpolation
-	// needed), and exact `ground_ref_arr` at that closest XZ — all in one O(cells × segments) pass.
-	// Complexity is ~20× chamfer for typical ridges but ridges have few segments (~5-20), so bake time
-	// is still <5 ms for any grid a user would reasonably author.
-	const int n = gw * gh;
-	std::vector<float> lat(n, RBIG), base_yf(n, 0.f), along(n, 0.f);
-	std::vector<float> ground_ref_arr;
-	if (has_below) {
-		ground_ref_arr.assign(n, (float)NAN);
-	}
+	// Exact segment-driven field with adaptive downsampling: when reach/vs is large (fine vertex_spacing),
+	// compute at a coarser grid (capped at ~70 cells reach) then bilinearly upsample. This keeps inner
+	// iterations bounded at ~npts × 141×141 regardless of vs, with ≤vs_c/2 upsampling error in lat.
+	const int reach_cells = (int)(reach / vs + 0.5);
+	const int ds = MAX(1, (reach_cells + 69) / 70); // downsample factor: ceil(reach_cells/70)
+	const int gw_c = (gw + ds - 1) / ds;
+	const int gh_c = (gh + ds - 1) / ds;
+	const double vs_c = vs * ds;
+	const int nc = gw_c * gh_c;
+	std::vector<float> lat_c(nc, RBIG), base_yf_c(nc, 0.f), along_c(nc, 0.f), gr_c(nc, (float)NAN);
 	double arc = 0.0;
 	const int npts = (int)p_pts.size();
 	for (int k = 0; k < npts - 1; k++) {
@@ -694,34 +693,69 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 		const double dx = b.x - a.x, dz = b.z - a.z;
 		const double seg_len_sq = dx * dx + dz * dz;
 		const double seg_len = std::sqrt(seg_len_sq);
-		for (int iz = 0; iz < gh; iz++) {
-			const double cz = min_z + iz * vs;
-			const int row = iz * gw;
-			for (int ix = 0; ix < gw; ix++) {
-				const double cx = min_x + ix * vs;
+		const double ag = has_below_pts ? (double)base_below_pts[k] : (double)NAN;
+		const double bg = has_below_pts ? (double)base_below_pts[k + 1] : (double)NAN;
+		const int six0 = MAX(0, (int)std::floor((MIN(a.x, b.x) - reach - min_x) / vs_c));
+		const int six1 = MIN(gw_c - 1, (int)std::ceil((MAX(a.x, b.x) + reach - min_x) / vs_c));
+		const int siz0 = MAX(0, (int)std::floor((MIN(a.z, b.z) - reach - min_z) / vs_c));
+		const int siz1 = MIN(gh_c - 1, (int)std::ceil((MAX(a.z, b.z) + reach - min_z) / vs_c));
+		for (int iz = siz0; iz <= siz1; iz++) {
+			const double cz = min_z + iz * vs_c;
+			const int row = iz * gw_c;
+			for (int ix = six0; ix <= six1; ix++) {
+				const double cx = min_x + ix * vs_c;
 				const double qx = cx - a.x, qz = cz - a.z;
 				const double t = seg_len_sq > 1e-18 ? CLAMP((qx * dx + qz * dz) / seg_len_sq, 0.0, 1.0) : 0.0;
-				const double px = a.x + t * dx, pz = a.z + t * dz;
-				const double d = std::sqrt((cx - px) * (cx - px) + (cz - pz) * (cz - pz));
+				const double d = std::sqrt((cx - (a.x + t * dx)) * (cx - (a.x + t * dx)) + (cz - (a.z + t * dz)) * (cz - (a.z + t * dz)));
 				const int i = row + ix;
-				if (d < (double)lat[i]) {
-					lat[i] = (float)d;
-					base_yf[i] = (float)(a.y + t * (b.y - a.y));
-					along[i] = (float)(arc + t * seg_len);
-					if (has_below) {
-						const int six = (int)std::lround((px - min_x) / vs);
-						const int siz = (int)std::lround((pz - min_z) / vs);
-						if (six >= 0 && six < gw && siz >= 0 && siz < gh) {
-							ground_ref_arr[i] = base_below_param[siz * gw + six];
-						}
-					}
+				if (d < (double)lat_c[i]) {
+					lat_c[i] = (float)d;
+					base_yf_c[i] = (float)(a.y + t * (b.y - a.y));
+					along_c[i] = (float)(arc + t * seg_len);
+					gr_c[i] = has_below_pts ? (float)(ag + t * (bg - ag)) : (float)NAN;
 				}
 			}
 		}
 		arc += seg_len;
 	}
 	const double total = MAX(arc, 0.001);
-	const bool has_gspline = !ground_ref_arr.empty();
+	// Upsample coarse field to full resolution (no-op when ds==1: just move the arrays).
+	const int n = gw * gh;
+	std::vector<float> lat(n), base_yf(n), along(n), ground_ref_arr(n);
+	if (ds == 1) {
+		lat = std::move(lat_c);
+		base_yf = std::move(base_yf_c);
+		along = std::move(along_c);
+		ground_ref_arr = std::move(gr_c);
+	} else {
+		for (int iz = 0; iz < gh; iz++) {
+			const float fz = (float)iz / ds;
+			const int iz0 = (int)fz, iz1 = MIN(gh_c - 1, iz0 + 1);
+			const float wz1 = fz - iz0, wz0 = 1.f - wz1;
+			const int row = iz * gw;
+			for (int ix = 0; ix < gw; ix++) {
+				const float fx = (float)ix / ds;
+				const int ix0 = (int)fx, ix1 = MIN(gw_c - 1, ix0 + 1);
+				const float wx1 = fx - ix0, wx0 = 1.f - wx1;
+				const int c00 = iz0 * gw_c + ix0, c01 = iz0 * gw_c + ix1;
+				const int c10 = iz1 * gw_c + ix0, c11 = iz1 * gw_c + ix1;
+				const int i = row + ix;
+				auto bl = [&](const std::vector<float> &arr) {
+					return arr[c00] * wz0 * wx0 + arr[c01] * wz0 * wx1
+					     + arr[c10] * wz1 * wx0 + arr[c11] * wz1 * wx1;
+				};
+				lat[i] = bl(lat_c);
+				base_yf[i] = bl(base_yf_c);
+				along[i] = bl(along_c);
+				// NaN-aware bilinear for ground_ref.
+				float gsum = 0.f, gwt = 0.f;
+				auto addg = [&](int ci, float w) { float v = gr_c[ci]; if (!std::isnan(v)) { gsum += v * w; gwt += w; } };
+				addg(c00, wz0 * wx0); addg(c01, wz0 * wx1);
+				addg(c10, wz1 * wx0); addg(c11, wz1 * wx1);
+				ground_ref_arr[i] = gwt > 0.f ? gsum / gwt : (float)NAN;
+			}
+		}
+	}
 
 	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
 
@@ -752,14 +786,11 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 				continue;
 			}
 			const Vector3 pos(x, 0.0, z);
-			// Per-cell terrain height (drape base — the skirt still meets the actual ground).
-			const float bb = has_below ? base_below_param[i] : (float)NAN;
-			const double ground = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
-			// Option B: use the terrain height at the nearest spline point (propagated via chamfer)
-			// for diff/w_eff so the cross-section shape is geometry-driven (consistent at the same
-			// lateral distance), not distorted by per-cell terrain variation. Falls back to ground
-			// when ground_spline isn't available (no base_below → same behaviour as before).
-			const double gs = has_gspline ? (double)ground_ref_arr[i] : ground;
+			// Per-cell terrain height for the drape base. Own layer is cleared before paint so
+			// get_height == get_height_below here. ground_ref uses per-segment interpolated height
+			// (Option B: geometry-driven cross-section); falls back to ground when unavailable.
+			const double ground = (double)get_height(pos);
+			const double gs = (double)ground_ref_arr[i];
 			const double ground_ref = std::isnan(gs) ? ground : gs;
 			const double crest_top = (follow ? (double)base_yf[i] : ground_ref) + signed_crest;
 			double w = width;
@@ -886,16 +917,20 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 	const bool use_angle = (flank_mode == 1);
 	const bool add = (blend == 1);
 
-	// Below-layer base: the composite of layers beneath this brush's, so the banks rise to the ground
-	// under its own layer (not the full terrain). NaN/empty => fall back. Always needed now.
-	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
-	const bool has_below = base_below.size() == gw * gh;
+	// Per-point terrain heights (O(npts)); C++ interpolates ground per cell by arc-length t.
+	const PackedFloat32Array base_below_pts = p_params.get("base_below_pts", PackedFloat32Array());
+	const bool has_below_pts = base_below_pts.size() == p_pts.size();
 
-	// Exact perpendicular-distance polyline field (same approach as stamp_ridge_line): for each cell,
-	// iterate every segment and keep the closest point. Eliminates chamfer DT octagonal isocontour
-	// artefacts so bank profiles are geometrically clean even at large depths or steep banks.
-	const int n = gw * gh;
-	std::vector<float> lat(n, RBIG), base_yf(n, 0.f), along(n, 0.f);
+	// Adaptive coarse-grid field: when reach/vs is large (fine vertex_spacing) the per-segment bounding
+	// box has (2*reach/vs)^2 cells which blows up. Compute at coarser resolution vs_c = vs*ds, then
+	// bilinearly upsample. ds chosen so reach_cells_c <= 70 (error <= vs_c/2, imperceptible in practice).
+	const int reach_cells = (int)(reach / vs + 0.5);
+	const int ds = MAX(1, (reach_cells + 69) / 70);
+	const int gw_c = (gw + ds - 1) / ds;
+	const int gh_c = (gh + ds - 1) / ds;
+	const double vs_c = vs * ds;
+	const int nc = gw_c * gh_c;
+	std::vector<float> lat_c(nc, RBIG), base_yf_c(nc, 0.f), along_c(nc, 0.f), gr_c(nc, (float)NAN);
 	double arc = 0.0;
 	const int npts = (int)p_pts.size();
 	for (int k = 0; k < npts - 1; k++) {
@@ -903,26 +938,66 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 		const double dx = b.x - a.x, dz = b.z - a.z;
 		const double seg_len_sq = dx * dx + dz * dz;
 		const double seg_len = std::sqrt(seg_len_sq);
-		for (int iz = 0; iz < gh; iz++) {
-			const double cz = min_z + iz * vs;
-			const int row = iz * gw;
-			for (int ix = 0; ix < gw; ix++) {
-				const double cx = min_x + ix * vs;
+		const int six0 = MAX(0, (int)std::floor((MIN(a.x, b.x) - reach - min_x) / vs_c));
+		const int six1 = MIN(gw_c - 1, (int)std::ceil((MAX(a.x, b.x) + reach - min_x) / vs_c));
+		const int siz0 = MAX(0, (int)std::floor((MIN(a.z, b.z) - reach - min_z) / vs_c));
+		const int siz1 = MIN(gh_c - 1, (int)std::ceil((MAX(a.z, b.z) + reach - min_z) / vs_c));
+		for (int iz = siz0; iz <= siz1; iz++) {
+			const double cz = min_z + iz * vs_c;
+			const int row = iz * gw_c;
+			for (int ix = six0; ix <= six1; ix++) {
+				const double cx = min_x + ix * vs_c;
 				const double qx = cx - a.x, qz = cz - a.z;
 				const double t = seg_len_sq > 1e-18 ? CLAMP((qx * dx + qz * dz) / seg_len_sq, 0.0, 1.0) : 0.0;
 				const double px = a.x + t * dx, pz = a.z + t * dz;
 				const double d = std::sqrt((cx - px) * (cx - px) + (cz - pz) * (cz - pz));
 				const int i = row + ix;
-				if (d < (double)lat[i]) {
-					lat[i] = (float)d;
-					base_yf[i] = (float)(a.y + t * (b.y - a.y));
-					along[i] = (float)(arc + t * seg_len);
+				if (d < (double)lat_c[i]) {
+					lat_c[i] = (float)d;
+					base_yf_c[i] = (float)(a.y + t * (b.y - a.y));
+					along_c[i] = (float)(arc + t * seg_len);
+					if (has_below_pts) {
+						gr_c[i] = (float)((double)base_below_pts[k] * (1.0 - t) + (double)base_below_pts[k + 1] * t);
+					}
 				}
 			}
 		}
 		arc += seg_len;
 	}
 	const double total = MAX(arc, 0.001);
+
+	// Upsample coarse field to full resolution (no-op when ds==1: just move arrays).
+	const int n = gw * gh;
+	std::vector<float> lat(n), base_yf(n), along(n), ground_ref_arr(n, (float)NAN);
+	if (ds == 1) {
+		lat = std::move(lat_c); base_yf = std::move(base_yf_c);
+		along = std::move(along_c); ground_ref_arr = std::move(gr_c);
+	} else {
+		for (int iz = 0; iz < gh; iz++) {
+			const float fz = (float)iz / ds;
+			const int iz0 = (int)fz, iz1 = MIN(gh_c - 1, iz0 + 1);
+			const float wz1 = fz - iz0, wz0 = 1.f - wz1;
+			const int row = iz * gw;
+			for (int ix = 0; ix < gw; ix++) {
+				const float fx = (float)ix / ds;
+				const int ix0 = (int)fx, ix1 = MIN(gw_c - 1, ix0 + 1);
+				const float wx1 = fx - ix0, wx0 = 1.f - wx1;
+				const int c00 = iz0*gw_c+ix0, c01 = iz0*gw_c+ix1;
+				const int c10 = iz1*gw_c+ix0, c11 = iz1*gw_c+ix1;
+				const int i = row + ix;
+				auto bl = [&](const std::vector<float> &arr) {
+					return arr[c00]*wz0*wx0 + arr[c01]*wz0*wx1
+					     + arr[c10]*wz1*wx0 + arr[c11]*wz1*wx1;
+				};
+				lat[i] = bl(lat_c); base_yf[i] = bl(base_yf_c); along[i] = bl(along_c);
+				float gsum = 0.f, gwt = 0.f;
+				auto addg = [&](int ci, float w) { float v = gr_c[ci]; if (!std::isnan(v)) { gsum += v*w; gwt += w; } };
+				addg(c00, wz0*wx0); addg(c01, wz0*wx1);
+				addg(c10, wz1*wx0); addg(c11, wz1*wx1);
+				ground_ref_arr[i] = gwt > 0.f ? gsum/gwt : (float)NAN;
+			}
+		}
+	}
 
 	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
 
@@ -953,7 +1028,7 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 			}
 			const Vector3 pos(x, 0.0, z);
 			// Two references: the ground beneath (the rim the banks rise to) and the bed floor.
-			const float bb = has_below ? base_below[i] : (float)NAN;
+			const float bb = ground_ref_arr[i];
 			const double ground = std::isnan(bb) ? (double)get_height(pos) : (double)bb;
 			const double bed_y = (follow ? (double)base_yf[i] : ground) - depth;
 			double wscale = 1.0;
