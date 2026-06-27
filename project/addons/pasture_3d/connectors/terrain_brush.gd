@@ -1807,169 +1807,56 @@ func _signed_distance_field(poly: PackedVector2Array, min_x: float, min_z: float
 	return [field, max_inside]
 
 
-## Two-pass chamfer that ALSO carries two payload arrays: whenever a neighbour offers a shorter
-## distance, copy its payloads too. Turns a distance transform into a nearest-feature transform, so a
-## cell ends up with both its distance to the seeds and the seed values of the nearest one. O(cells).
-func _chamfer_payload(dist: PackedFloat32Array, p1: PackedFloat32Array, p2: PackedFloat32Array, gw: int, gh: int, a: float, b: float) -> void:
-	for iz in range(gh):
-		var row := iz * gw
-		for ix in range(gw):
-			var i := row + ix
-			var bd := dist[i]
-			var bj := -1
-			if iz > 0:
-				var up := i - gw
-				if dist[up] + a < bd:
-					bd = dist[up] + a
-					bj = up
-				if ix > 0 and dist[up - 1] + b < bd:
-					bd = dist[up - 1] + b
-					bj = up - 1
-				if ix < gw - 1 and dist[up + 1] + b < bd:
-					bd = dist[up + 1] + b
-					bj = up + 1
-			if ix > 0 and dist[i - 1] + a < bd:
-				bd = dist[i - 1] + a
-				bj = i - 1
-			if bj >= 0:
-				dist[i] = bd
-				p1[i] = p1[bj]
-				p2[i] = p2[bj]
-	for iz in range(gh - 1, -1, -1):
-		var row := iz * gw
-		for ix in range(gw - 1, -1, -1):
-			var i := row + ix
-			var bd := dist[i]
-			var bj := -1
-			if iz < gh - 1:
-				var dn := i + gw
-				if dist[dn] + a < bd:
-					bd = dist[dn] + a
-					bj = dn
-				if ix < gw - 1 and dist[dn + 1] + b < bd:
-					bd = dist[dn + 1] + b
-					bj = dn + 1
-				if ix > 0 and dist[dn - 1] + b < bd:
-					bd = dist[dn - 1] + b
-					bj = dn - 1
-			if ix < gw - 1 and dist[i + 1] + a < bd:
-				bd = dist[i + 1] + a
-				bj = i + 1
-			if bj >= 0:
-				dist[i] = bd
-				p1[i] = p1[bj]
-				p2[i] = p2[bj]
-
-
-## Three-payload chamfer: same as _chamfer_payload but propagates p3 alongside p1 and p2.
-func _chamfer_payload3(dist: PackedFloat32Array, p1: PackedFloat32Array, p2: PackedFloat32Array, p3: PackedFloat32Array, gw: int, gh: int, a: float, b: float) -> void:
-	for iz in range(gh):
-		var row := iz * gw
-		for ix in range(gw):
-			var i := row + ix
-			var bd := dist[i]
-			var bj := -1
-			if iz > 0:
-				var up := i - gw
-				if dist[up] + a < bd: bd = dist[up] + a; bj = up
-				if ix > 0 and dist[up - 1] + b < bd: bd = dist[up - 1] + b; bj = up - 1
-				if ix < gw - 1 and dist[up + 1] + b < bd: bd = dist[up + 1] + b; bj = up + 1
-			if ix > 0 and dist[i - 1] + a < bd: bd = dist[i - 1] + a; bj = i - 1
-			if bj >= 0:
-				dist[i] = bd; p1[i] = p1[bj]; p2[i] = p2[bj]; p3[i] = p3[bj]
-	for iz in range(gh - 1, -1, -1):
-		var row := iz * gw
-		for ix in range(gw - 1, -1, -1):
-			var i := row + ix
-			var bd := dist[i]
-			var bj := -1
-			if iz < gh - 1:
-				var dn := i + gw
-				if dist[dn] + a < bd: bd = dist[dn] + a; bj = dn
-				if ix < gw - 1 and dist[dn + 1] + b < bd: bd = dist[dn + 1] + b; bj = dn + 1
-				if ix > 0 and dist[dn - 1] + b < bd: bd = dist[dn - 1] + b; bj = dn - 1
-			if ix < gw - 1 and dist[i + 1] + a < bd: bd = dist[i + 1] + a; bj = i + 1
-			if bj >= 0:
-				dist[i] = bd; p1[i] = p1[bj]; p2[i] = p2[bj]; p3[i] = p3[bj]
-
-
-## Feature field of a world-space polyline over a grid. Returns
-## [lat: PackedFloat32Array, base_y: PackedFloat32Array, along: PackedFloat32Array, total_length: float]:
-## per cell, the lateral distance to the polyline (metres), the spline Y at the nearest point, and the
-## arc length to it (for end taper). Seeds the cells the polyline passes through then chamfer-propagates
-## the nearest-feature values — O(cells), replacing the per-pixel O(segments) closest-point scan.
-func _polyline_field(pts: PackedVector3Array, min_x: float, min_z: float, vs: float, gw: int, gh: int) -> Array:
+## EXACT closest-point-on-segment feature field of a world-space polyline (the GDScript reference oracle
+## for the native stamp_ridge/trough_line field; mirrors its ds==1 path verbatim). For each cell within
+## `reach` of the polyline, returns the nearest lateral distance, the spline crest/bed Y at the nearest
+## point, the arc length to it, and the below-layer ground there (linearly interpolated from `below_pts`).
+## Returns [lat, base_y, along, ground_ref, total]. Unreached cells keep lat=BIG, ground_ref=NAN. This is
+## O(cells × segments) like the native ds==1 path — exact (no chamfer angular error, no seams), so it
+## replaces _polyline_field + _smooth_arclength_fields for an exact A/B match with the C++ rasteriser.
+func _exact_polyline_field(pts: PackedVector3Array, below_pts: PackedFloat32Array,
+		min_x: float, min_z: float, vs: float, gw: int, gh: int, reach: float) -> Array:
 	var n := gw * gh
 	const BIG := 1.0e9
-	var dist := PackedFloat32Array()
-	var base_y := PackedFloat32Array()
-	var along := PackedFloat32Array()
-	dist.resize(n)
-	base_y.resize(n)
-	along.resize(n)
-	for i in range(n):
-		dist[i] = BIG
-	var sample := vs * 0.5
-	var run := 0.0
-	for k in range(pts.size() - 1):
+	var lat := PackedFloat32Array(); lat.resize(n); lat.fill(BIG)
+	var base_y := PackedFloat32Array(); base_y.resize(n)
+	var along := PackedFloat32Array(); along.resize(n)
+	var ground_ref := PackedFloat32Array(); ground_ref.resize(n); ground_ref.fill(NAN)
+	var has_below := below_pts.size() == pts.size()
+	var arc := 0.0
+	var npts := pts.size()
+	for k in range(npts - 1):
 		var a := pts[k]
 		var b := pts[k + 1]
-		var ax := a.x
-		var az := a.z
-		var seg := Vector2(b.x - ax, b.z - az).length()
-		var along_a := run
-		run += seg
-		var steps := maxi(1, int(ceil(seg / sample)))
-		for s in range(steps + 1):
-			var tt := float(s) / float(steps)
-			var ix := int(round((ax + (b.x - ax) * tt - min_x) / vs))
-			var iz := int(round((az + (b.z - az) * tt - min_z) / vs))
-			if ix >= 0 and ix < gw and iz >= 0 and iz < gh:
-				var idx := iz * gw + ix
-				dist[idx] = 0.0
-				base_y[idx] = a.y + (b.y - a.y) * tt
-				along[idx] = along_a + seg * tt
-	_chamfer_payload(dist, base_y, along, gw, gh, vs, vs * 1.4142135624)
-	return [dist, base_y, along, run]
-
-
-## Arc-length re-interpolation of the chamfer polyline field. After _polyline_field fills base_y
-## via nearest-seed propagation, the Voronoi seams where adjacent spline samples have different
-## heights are visible as creases. This pass overwrites base_y[i] with the value interpolated from
-## pts at along[i] (a continuous arc-length value with only tiny seams), eliminating those creases.
-## Also builds ground_ref_arr: base_below sampled at the interpolated spline XZ position, so that
-## diff = crest_top - ground_ref is smooth (Option B). Returns [base_y, ground_ref_arr].
-func _smooth_arclength_fields(pts: PackedVector3Array, below_pts: PackedFloat32Array,
-		base_y: PackedFloat32Array, along: PackedFloat32Array, lat: PackedFloat32Array,
-		min_x: float, min_z: float, vs: float, gw: int, gh: int, reach: float) -> Array:
-	var npts := pts.size()
-	var pt_arcs := PackedFloat64Array()
-	pt_arcs.resize(npts)
-	pt_arcs[0] = 0.0
-	for k in range(1, npts):
-		var d := pts[k] - pts[k - 1]
-		pt_arcs[k] = pt_arcs[k - 1] + Vector2(d.x, d.z).length()
-	var arc_max: float = pt_arcs[npts - 1]
-	var has_below := below_pts.size() == npts
-	var ground_ref_arr := PackedFloat32Array()
-	ground_ref_arr.resize(gw * gh)
-	ground_ref_arr.fill(NAN)
-	for i in range(gw * gh):
-		if lat[i] > reach:
-			continue
-		var al := clampf(along[i], 0.0, arc_max)
-		var lo := 0
-		var hi := npts - 1
-		while lo + 1 < hi:
-			var mid := (lo + hi) / 2
-			if pt_arcs[mid] <= al: lo = mid
-			else: hi = mid
-		var seg_len: float = pt_arcs[hi] - pt_arcs[lo]
-		var t := (al - pt_arcs[lo]) / seg_len if seg_len > 1e-9 else 0.0
-		base_y[i] = pts[lo].y * (1.0 - t) + pts[hi].y * t
-		if has_below:
-			ground_ref_arr[i] = below_pts[lo] * (1.0 - t) + below_pts[hi] * t
-	return [base_y, ground_ref_arr]
+		var dx := b.x - a.x
+		var dz := b.z - a.z
+		var seg_len_sq := dx * dx + dz * dz
+		var seg_len := sqrt(seg_len_sq)
+		var ag := below_pts[k] if has_below else NAN
+		var bg := below_pts[k + 1] if has_below else NAN
+		var six0 := maxi(0, int(floor((minf(a.x, b.x) - reach - min_x) / vs)))
+		var six1 := mini(gw - 1, int(ceil((maxf(a.x, b.x) + reach - min_x) / vs)))
+		var siz0 := maxi(0, int(floor((minf(a.z, b.z) - reach - min_z) / vs)))
+		var siz1 := mini(gh - 1, int(ceil((maxf(a.z, b.z) + reach - min_z) / vs)))
+		for iz in range(siz0, siz1 + 1):
+			var cz := min_z + iz * vs
+			var row := iz * gw
+			for ix in range(six0, six1 + 1):
+				var cx := min_x + ix * vs
+				var qx := cx - a.x
+				var qz := cz - a.z
+				var t := clampf((qx * dx + qz * dz) / seg_len_sq, 0.0, 1.0) if seg_len_sq > 1e-18 else 0.0
+				var px := a.x + t * dx
+				var pz := a.z + t * dz
+				var d := sqrt((cx - px) * (cx - px) + (cz - pz) * (cz - pz))
+				var i := row + ix
+				if d < lat[i]:
+					lat[i] = d
+					base_y[i] = a.y + t * (b.y - a.y)
+					along[i] = arc + t * seg_len
+					ground_ref[i] = (ag + t * (bg - ag)) if has_below else NAN
+		arc += seg_len
+	return [lat, base_y, along, ground_ref, maxf(arc, 0.001)]
 
 
 ## ---- Virtuals for subclasses ----

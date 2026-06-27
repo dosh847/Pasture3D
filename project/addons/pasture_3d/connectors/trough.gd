@@ -195,16 +195,19 @@ func _paint_spline(path: Path3D) -> void:
 		terrain.data.stamp_trough_line(_layer_id, pts, _clip_aabb, params, _ramp_lut(bank_profile))
 		return
 
-	# One O(cells) polyline feature field replaces the per-pixel O(segments) closest-point scan: each
-	# cell gets its lateral distance, the bed-reference Y at the nearest point, and the arc length.
-	var fld := _polyline_field(pts, min_x, min_z, vs, gw, gh)
-	var lat_arr: PackedFloat32Array = fld[0]
-	var by_arr: PackedFloat32Array = fld[1]
-	var al_arr: PackedFloat32Array = fld[2]
-	var total: float = maxf(fld[3], 0.001)
+	# Exact closest-point-on-segment field (mirrors the native ds==1 path): per cell the lateral distance,
+	# the bed-reference Y at the nearest point, the arc length, and the geometry-driven ground_ref. Exact =
+	# no chamfer error/seams, an exact A/B oracle of the C++ rasteriser.
 	var use_angle := flank_mode == FlankMode.SLOPE_ANGLE
 	var slope_tan := maxf(tan(deg_to_rad(slope_angle)), 0.0001)
 	var reach := bed_half_width + bank_width + falloff
+	var below_pts := _below_pts(pts)
+	var fld := _exact_polyline_field(pts, below_pts, min_x, min_z, vs, gw, gh, reach)
+	var lat_arr: PackedFloat32Array = fld[0]
+	var by_arr: PackedFloat32Array = fld[1]
+	var al_arr: PackedFloat32Array = fld[2]
+	var gr_arr: PackedFloat32Array = fld[3]
+	var total: float = fld[4]
 	# Buffer per-cell write values (NaN = no write) so the optional smoothing pass can run before writing.
 	# value = delta (ADD) or absolute target (else), matching _paint_height + the C++ path for A/B parity.
 	var add := _blend == BLEND_ADD
@@ -222,7 +225,10 @@ func _paint_spline(path: Path3D) -> void:
 				continue
 			var x := min_x + ix * vs
 			var pos := Vector3(x, 0.0, z)
-			var ground: float = _base_height_below(pos)
+			# ground = geometry-driven below-layer ground at the nearest spline point (Option B), matching
+			# the native path; falls back to the per-cell below height where no spline ground is available.
+			var gs := gr_arr[i]
+			var ground: float = gs if is_finite(gs) else _base_height_below(pos)
 			var bed_y: float = (by_arr[i] if follow_spline_height else ground) - depth
 			var wscale := 1.0
 			if width_curve != null:

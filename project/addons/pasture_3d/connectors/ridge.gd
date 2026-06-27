@@ -187,20 +187,18 @@ func _paint_spline(path: Path3D) -> void:
 		terrain.data.stamp_ridge_line(_layer_id, pts, _clip_aabb, params, _ridge_cross_lut(profile))
 		return
 
-	# Arc-length re-interpolation (smooth drape): the chamfer nearest-seed propagation creates Voronoi
-	# seams in base_y when spline points are at different heights. Re-interpolating base_y from the
-	# pts arc-length removes these seams. Also builds smooth ground_ref (Option B) from base_below at
-	# the interpolated spline XZ, so diff = crest_top - ground_ref is geometry-driven.
-	var fld := _polyline_field(pts, min_x, min_z, vs, gw, gh)
+	# Exact closest-point-on-segment field (mirrors the native ds==1 path): per cell the lateral distance,
+	# the crest Y at the nearest point, the arc length, and the geometry-driven ground_ref (base_below
+	# interpolated from the spline points). Exact = no chamfer angular error or Voronoi seams, so this is an
+	# exact A/B oracle of the C++ rasteriser (no arc-length re-interpolation needed).
+	var reach := width + falloff
+	var below_pts := _below_pts(pts)
+	var fld := _exact_polyline_field(pts, below_pts, min_x, min_z, vs, gw, gh, reach)
 	var lat_arr: PackedFloat32Array = fld[0]
 	var by_arr: PackedFloat32Array = fld[1]
 	var al_arr: PackedFloat32Array = fld[2]
-	var total: float = maxf(fld[3], 0.001)
-	var reach := width + falloff
-	var below_pts := _below_pts(pts)
-	var smooth := _smooth_arclength_fields(pts, below_pts, by_arr, al_arr, lat_arr, min_x, min_z, vs, gw, gh, reach)
-	by_arr = smooth[0]
-	var gr_arr: PackedFloat32Array = smooth[1]
+	var gr_arr: PackedFloat32Array = fld[3]
+	var total: float = fld[4]
 	var has_gr := gr_arr.size() == gw * gh
 	var signed_crest := -crest_height if invert else crest_height
 	var use_angle := flank_mode == FlankMode.SLOPE_ANGLE

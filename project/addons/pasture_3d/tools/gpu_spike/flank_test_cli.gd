@@ -41,6 +41,7 @@ func _run() -> void:
 	_ridge_width_curve(data)
 	_trough_carve(data)
 	_ab_oracle()
+	_ab_oracle_trough()
 
 # Flat ground 0, spline crest at Y=10, crest_height 0, fixed width 15. Expect: peak == 10 at the
 # centreline, monotonic descent to ~0 at the skirt (NO flat shelf at 10 — the old bug).
@@ -61,14 +62,20 @@ func _ridge_drape_flat(data) -> void:
 	_check("ridge.drape_flat skirt->ground", not is_nan(skirt) and skirt < 2.0, "skirt=%.3f" % skirt)
 
 # Sloped ground (rises +0.2/cell in x), same crest at Y=10. The skirt must meet the LOCAL ground, not a
-# flat plane: a skirt cell's height should be close to that cell's base_below.
-func _ridge_drape_slope(data) -> void:
+# flat plane: a skirt cell's height should be close to that cell's terrain height. The native ridge drapes
+# onto the ACTUAL terrain (get_height), so the test sets a real sloped base (not an unused base_below grid)
+# and supplies base_below_pts for the geometry-driven ground_ref.
+func _ridge_drape_slope(_unused) -> void:
+	var terrain = _fresh_terrain()
+	var data = terrain.data
+	for iz in range(N):
+		for ix in range(N):
+			data.set_height(Vector3(ix * VS, 0.0, iz * VS), 0.2 * ix) # ground = 0.2*x
 	var lid: int = data.create_owned_layer("rslope", "RSlope", 2)
 	var clip := _clip()
-	var base := _rampx(0.2) # ground = 0.2*x
 	var pts := _line_z(50.0, 20.0, 80.0, 10.0)
 	var params := _ridge_params(0.0, 15.0, 0, 30.0, true)
-	params["base_below"] = base
+	params["base_below_pts"] = PackedFloat32Array([0.2 * 20.0, 0.2 * 80.0]) # ground under the spline ends
 	data.clear_layer_in_area(lid, clip, false)
 	data.stamp_ridge_line(lid, pts, clip, params, _cos_lut())
 	# A skirt cell at x=50, z=50+14: local ground = 0.2*50 = 10.0; skirt height should approach it.
@@ -76,6 +83,7 @@ func _ridge_drape_slope(data) -> void:
 	var local_ground := 0.2 * 50.0
 	_check("ridge.drape_slope skirt meets local ground", not is_nan(skirt) and absf(skirt - local_ground) < 2.0,
 		"skirt=%.3f local_ground=%.3f" % [skirt, local_ground])
+	terrain.queue_free()
 
 # Slope-angle mode: crest 10 above flat ground, angle 45deg (tan=1) => reach ~10m, capped by width=40.
 # Verify the flank stops near 10m, not at width 40.
@@ -133,23 +141,19 @@ func _trough_carve(data) -> void:
 	_check("trough.carve bank rises to ground", not is_nan(bank) and bank > -1.5 and bank <= 0.05, "bank=%.3f" % bank)
 
 # A/B oracle: bake the SAME ridge via the native C++ path and the GDScript reference (force_gdscript_
-# raster). Uses a FRESH terrain so no earlier test layers sit below and pollute the GDScript path's
-# _base_height_below; the GDScript layer is created FIRST (lowest) so the native bake above it doesn't
-# either. The blank region reads height 0, so both drape onto ground 0 — match within chamfer tolerance.
+# raster). Each runs on its OWN fresh terrain so neither layer sits below the other and pollutes
+# get_height / _base_height_below — both drape onto blank ground 0. With the GDScript field now exact
+# (closest-point-on-segment, like native ds==1), they match within LUT-interpolation tolerance.
 func _ab_oracle() -> void:
-	var terrain = ClassDB.instantiate("Pasture3D")
-	get_root().add_child(terrain)
-	terrain.vertex_spacing = VS
-	terrain.change_region_size(256)
-	var data = terrain.data
-	data.add_region_blankp(Vector3(float(N) * 0.5, 0.0, float(N) * 0.5))
 	var clip := _clip()
 	var pts := _line_z(50.0, 20.0, 80.0, 10.0)
 
-	# GDScript layer first (lowest non-base) so nothing painted sits below it.
+	# GDScript reference on its own terrain.
+	var t_gd = _fresh_terrain()
+	var gd_data = t_gd.data
 	var ridge = Pasture3DRidge.new()
-	terrain.add_child(ridge)
-	ridge.terrain = terrain
+	t_gd.add_child(ridge)
+	ridge.terrain = t_gd
 	ridge.force_gdscript_raster = true
 	ridge.follow_spline_height = true
 	ridge.crest_height = 0.0
@@ -162,31 +166,98 @@ func _ab_oracle() -> void:
 	c.add_point(Vector3(80.0, 10.0, 50.0))
 	path.curve = c
 	ridge.add_child(path)
-	var gd_lid: int = data.create_owned_layer("ab_gd", "ABGd", 2)
+	var gd_lid: int = gd_data.create_owned_layer("ab_gd", "ABGd", 2)
 	ridge._layer_id = gd_lid
 	ridge._blend = 2 # MAX
-	data.clear_layer_in_area(gd_lid, clip, false)
+	gd_data.clear_layer_in_area(gd_lid, clip, false)
 	ridge._paint_spline(path)
 
-	# Native layer created AFTER (sits above), baked with an explicit flat-0 base so both see ground 0.
-	var native_lid: int = data.create_owned_layer("ab_native", "ABNative", 2)
+	# Native on a SEPARATE fresh terrain, given the same flat-0 ground at the spline points.
+	var t_n = _fresh_terrain()
+	var n_data = t_n.data
+	var native_lid: int = n_data.create_owned_layer("ab_native", "ABNative", 2)
 	var np := _ridge_params(0.0, 15.0, 0, 30.0, true)
-	np["base_below"] = _flat(0.0)
-	data.clear_layer_in_area(native_lid, clip, false)
-	data.stamp_ridge_line(native_lid, pts, clip, np, _cos_lut())
+	np["base_below_pts"] = PackedFloat32Array([0.0, 0.0])
+	n_data.clear_layer_in_area(native_lid, clip, false)
+	n_data.stamp_ridge_line(native_lid, pts, clip, np, _cos_lut())
 
 	var maxd := 0.0
 	var both := 0
 	for d in range(-15, 16):
 		for x in [30, 50, 70]:
-			var a := _h(data, native_lid, x, 50 + d)
-			var b := _h(data, gd_lid, x, 50 + d)
+			var a := _h(n_data, native_lid, x, 50 + d)
+			var b := _h(gd_data, gd_lid, x, 50 + d)
 			if is_nan(a) or is_nan(b):
 				continue
 			maxd = maxf(maxd, absf(a - b))
 			both += 1
 	_check("ab_oracle native≈gdscript", both > 50 and maxd < 0.6, "checked=%d max|Δ|=%.4f" % [both, maxd])
 	ridge.queue_free()
+	t_gd.queue_free()
+	t_n.queue_free()
+
+# A/B oracle for Trough: same channel via native C++ and the GDScript reference (exact field), each on its
+# own fresh terrain so neither layer pollutes the other's ground. Flat-0 ground => bed -5, banks rise to 0.
+func _ab_oracle_trough() -> void:
+	var clip := _clip()
+	var pts := _line_z(50.0, 20.0, 80.0, 0.0) # bed line at Y=0
+
+	# GDScript reference on its own terrain.
+	var t_gd = _fresh_terrain()
+	var gd_data = t_gd.data
+	var trough = Pasture3DTrough.new()
+	t_gd.add_child(trough)
+	trough.terrain = t_gd
+	trough.force_gdscript_raster = true
+	trough.follow_spline_height = true
+	trough.depth = 5.0
+	trough.bed_half_width = 4.0
+	trough.bank_width = 10.0
+	trough.falloff = 0.0
+	trough.flat_bed = true
+	trough.flank_mode = Pasture3DTrough.FlankMode.FIXED_WIDTH
+	var path := Path3D.new()
+	var c := Curve3D.new()
+	c.add_point(Vector3(20.0, 0.0, 50.0))
+	c.add_point(Vector3(80.0, 0.0, 50.0))
+	path.curve = c
+	trough.add_child(path)
+	var gd_lid: int = gd_data.create_owned_layer("abt_gd", "ABTGd", 3) # MIN
+	trough._layer_id = gd_lid
+	trough._blend = 3
+	gd_data.clear_layer_in_area(gd_lid, clip, false)
+	trough._paint_spline(path)
+
+	# Native on a separate fresh terrain.
+	var t_n = _fresh_terrain()
+	var n_data = t_n.data
+	var native_lid: int = n_data.create_owned_layer("abt_native", "ABTNative", 3)
+	var np := {
+		"min_x": 0.0, "min_z": 0.0, "vs": VS, "gw": N, "gh": N,
+		"bed_half_width": 4.0, "bank_width": 10.0, "falloff": 0.0,
+		"depth": 5.0, "flat_bed": true, "follow_spline_height": true,
+		"flank_mode": 0, "slope_tan": tan(deg_to_rad(30.0)),
+		"blend": 3, "composite": false, "noise_strength": 0.0, "noise": null,
+		"base_below_pts": PackedFloat32Array([0.0, 0.0]),
+	}
+	n_data.clear_layer_in_area(native_lid, clip, false)
+	n_data.stamp_trough_line(native_lid, pts, clip, np, _smooth_lut())
+
+	var maxd := 0.0
+	var both := 0
+	for d in range(-15, 16):
+		for x in [30, 50, 70]:
+			var a := _h(n_data, native_lid, x, 50 + d)
+			var b := _h(gd_data, gd_lid, x, 50 + d)
+			if is_nan(a) or is_nan(b):
+				continue
+			maxd = maxf(maxd, absf(a - b))
+			both += 1
+	_check("ab_oracle_trough native≈gdscript", both > 50 and maxd < 0.6, "checked=%d max|Δ|=%.4f" % [both, maxd])
+	trough.queue_free()
+	t_gd.queue_free()
+	t_n.queue_free()
+
 
 # --- helpers ---
 func _ridge_params(crest: float, width: float, mode: int, angle_deg: float, follow: bool) -> Dictionary:
@@ -197,6 +268,14 @@ func _ridge_params(crest: float, width: float, mode: int, angle_deg: float, foll
 		"flank_mode": mode, "slope_tan": tan(deg_to_rad(angle_deg)),
 		"blend": 2, "composite": false, "noise_strength": 0.0, "noise": null,
 	}
+
+func _fresh_terrain():
+	var t = ClassDB.instantiate("Pasture3D")
+	get_root().add_child(t)
+	t.vertex_spacing = VS
+	t.change_region_size(256)
+	t.data.add_region_blankp(Vector3(float(N) * 0.5, 0.0, float(N) * 0.5))
+	return t
 
 func _clip() -> AABB:
 	return AABB(Vector3(0, -1e4, 0), Vector3(float(N) * VS, 2e4, float(N) * VS))
