@@ -59,6 +59,14 @@ enum FlankMode { FIXED_WIDTH, SLOPE_ANGLE }
 ## Metres of jitter, masked by the interior profile so the rim stays clean.
 @export var noise_strength: float = 0.0
 
+@export_group("Smoothing")
+## Passes of NaN-aware separable Gaussian blur applied after rasterisation, to soften the dome/plateau
+## surface and any chamfer-DT faceting. 0 = off (no cost), 1-2 = subtle, 3+ = heavy rounding.
+@export_range(0, 5) var smooth_passes: int = 0:
+	set(v):
+		smooth_passes = v
+		_schedule_refresh()
+
 
 func _validate_property(property: Dictionary) -> void:
 	# Fixed-width and slope-angle drive the same ramp; only one is meaningful at a time.
@@ -142,6 +150,7 @@ func _paint_spline(path: Path3D) -> void:
 				"relative_to_terrain": relative_to_terrain, "plane_y": global_position.y,
 			"blend": _blend, "composite": not _defer_composite,
 			"noise": noise, "noise_strength": noise_strength,
+				"smooth_passes": smooth_passes,
 		}
 		if relative_to_terrain:
 			params["base_below"] = _base_below_grid(min_x, min_z, vs, gw, gh)
@@ -168,6 +177,13 @@ func _paint_spline(path: Path3D) -> void:
 	if use_angle and capped:
 		ramp_denom = maxf(absf(height) / slope_tan, 0.001)
 
+	# Buffer per-cell write values (NaN = no write) so the optional smoothing pass can run before writing.
+	# value = delta (ADD) or absolute target (else), matching _paint_height + the C++ path for A/B parity.
+	var add := _blend == BLEND_ADD
+	var vals := PackedFloat32Array()
+	vals.resize(gw * gh)
+	vals.fill(NAN)
+
 	for iz in range(gh):
 		var z := min_z + iz * vs
 		var row := iz * gw
@@ -193,4 +209,19 @@ func _paint_spline(path: Path3D) -> void:
 				amp = sign * height * profile
 				if noise:
 					amp += noise_strength * noise.get_noise_2d(x, z) * profile
-			_paint_height(pos, base_y + amp, amp)
+			vals[row + ix] = amp if add else base_y + amp
+
+	vals = _blur_grid(vals, gw, gh, smooth_passes)
+
+	for iz in range(gh):
+		var z := min_z + iz * vs
+		var row := iz * gw
+		for ix in range(gw):
+			var v := vals[row + ix]
+			if not is_finite(v):
+				continue
+			var pos := Vector3(min_x + ix * vs, 0.0, z)
+			if add:
+				_paint_height(pos, 0.0, v)
+			else:
+				_paint_height(pos, v, 0.0)

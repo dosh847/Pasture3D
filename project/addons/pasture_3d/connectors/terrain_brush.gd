@@ -1560,6 +1560,46 @@ func _ramp_lut(c: Curve) -> PackedFloat32Array:
 	return lut
 
 
+## NaN-aware separable 3-tap Gaussian blur of a packed grid (returns the blurred copy — PackedFloat32Array
+## is copy-on-write, so callers must reassign: `vals = _blur_grid(vals, gw, gh, passes)`). Cells holding NAN
+## are skipped (no contribution) so the blur never bleeds a feature past its footprint. No-op (returns the
+## input untouched) when passes <= 0 — an unused smoother costs nothing. Mirrors the C++ nan_blur exactly
+## so the GDScript reference stays an exact A/B oracle of the native path.
+func _blur_grid(vals: PackedFloat32Array, gw: int, gh: int, passes: int) -> PackedFloat32Array:
+	if passes <= 0:
+		return vals
+	var tmp := PackedFloat32Array()
+	tmp.resize(gw * gh)
+	for _pass in range(passes):
+		# Horizontal: vals -> tmp
+		for iz in range(gh):
+			var row := iz * gw
+			for ix in range(gw):
+				var v: float = vals[row + ix]
+				if not is_finite(v):
+					tmp[row + ix] = NAN
+					continue
+				var s := 0.5 * v
+				var wt := 0.5
+				if ix > 0 and is_finite(vals[row + ix - 1]): s += 0.25 * vals[row + ix - 1]; wt += 0.25
+				if ix < gw - 1 and is_finite(vals[row + ix + 1]): s += 0.25 * vals[row + ix + 1]; wt += 0.25
+				tmp[row + ix] = s / wt
+		# Vertical: tmp -> vals
+		for iz in range(gh):
+			var row := iz * gw
+			for ix in range(gw):
+				var v: float = tmp[row + ix]
+				if not is_finite(v):
+					vals[row + ix] = NAN
+					continue
+				var s := 0.5 * v
+				var wt := 0.5
+				if iz > 0 and is_finite(tmp[(iz - 1) * gw + ix]): s += 0.25 * tmp[(iz - 1) * gw + ix]; wt += 0.25
+				if iz < gh - 1 and is_finite(tmp[(iz + 1) * gw + ix]): s += 0.25 * tmp[(iz + 1) * gw + ix]; wt += 0.25
+				vals[row + ix] = s / wt
+	return vals
+
+
 ## Bake `_cross(c, t)` to a LUT (cosine default) for the polyline rasterisers.
 func _cross_lut(c: Curve) -> PackedFloat32Array:
 	var lut := PackedFloat32Array()

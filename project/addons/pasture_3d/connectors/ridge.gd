@@ -250,30 +250,8 @@ func _paint_spline(path: Path3D) -> void:
 					delta += noise_strength * noise.get_noise_2d(x, z) * p
 				delta_vals[i] = delta
 
-	# NaN-aware separable 3-tap Gaussian blur (same as C++ path).
-	if smooth_passes > 0:
-		var tmp := PackedFloat32Array(); tmp.resize(gw * gh)
-		for _pass in range(smooth_passes):
-			# Horizontal pass: delta_vals → tmp
-			for iz2 in range(gh):
-				var row2 := iz2 * gw
-				for ix2 in range(gw):
-					var v: float = delta_vals[row2 + ix2]
-					if not is_finite(v): tmp[row2 + ix2] = NAN; continue
-					var s := 0.5 * v; var wt := 0.5
-					if ix2 > 0 and is_finite(delta_vals[row2 + ix2 - 1]): s += 0.25 * delta_vals[row2 + ix2 - 1]; wt += 0.25
-					if ix2 < gw - 1 and is_finite(delta_vals[row2 + ix2 + 1]): s += 0.25 * delta_vals[row2 + ix2 + 1]; wt += 0.25
-					tmp[row2 + ix2] = s / wt
-			# Vertical pass: tmp → delta_vals
-			for iz2 in range(gh):
-				var row2 := iz2 * gw
-				for ix2 in range(gw):
-					var v: float = tmp[row2 + ix2]
-					if not is_finite(v): delta_vals[row2 + ix2] = NAN; continue
-					var s := 0.5 * v; var wt := 0.5
-					if iz2 > 0 and is_finite(tmp[(iz2 - 1) * gw + ix2]): s += 0.25 * tmp[(iz2 - 1) * gw + ix2]; wt += 0.25
-					if iz2 < gh - 1 and is_finite(tmp[(iz2 + 1) * gw + ix2]): s += 0.25 * tmp[(iz2 + 1) * gw + ix2]; wt += 0.25
-					delta_vals[row2 + ix2] = s / wt
+	# NaN-aware separable 3-tap Gaussian blur (shared helper; same as C++ path).
+	delta_vals = _blur_grid(delta_vals, gw, gh, smooth_passes)
 
 	# Write-back: ground + blurred delta.
 	for iz in range(gh):

@@ -108,6 +108,14 @@ enum FlankMode { FIXED_WIDTH, SLOPE_ANGLE }
 		noise_strength = v
 		_schedule_refresh()
 
+@export_group("Smoothing")
+## Passes of NaN-aware separable Gaussian blur applied after rasterisation, to soften the bed/bank
+## surface and any chamfer-DT faceting. 0 = off (no cost), 1-2 = subtle, 3+ = heavy rounding.
+@export_range(0, 5) var smooth_passes: int = 0:
+	set(v):
+		smooth_passes = v
+		_schedule_refresh()
+
 ## Clamp each spline's points so its Y never rises along the path — guarantees a downhill channel.
 @export_tool_button("Make Descend") var _descend_btn = make_descend
 
@@ -178,6 +186,7 @@ func _paint_spline(path: Path3D) -> void:
 			"flank_mode": int(flank_mode), "slope_tan": tan(deg_to_rad(slope_angle)),
 			"blend": _blend, "composite": not _defer_composite,
 			"noise": noise, "noise_strength": noise_strength,
+			"smooth_passes": smooth_passes,
 			# Per-point terrain heights for ground interpolation in C++ (O(npts) vs O(cells)).
 			"base_below_pts": _below_pts(pts),
 		}
@@ -196,6 +205,12 @@ func _paint_spline(path: Path3D) -> void:
 	var use_angle := flank_mode == FlankMode.SLOPE_ANGLE
 	var slope_tan := maxf(tan(deg_to_rad(slope_angle)), 0.0001)
 	var reach := bed_half_width + bank_width + falloff
+	# Buffer per-cell write values (NaN = no write) so the optional smoothing pass can run before writing.
+	# value = delta (ADD) or absolute target (else), matching _paint_height + the C++ path for A/B parity.
+	var add := _blend == BLEND_ADD
+	var vals := PackedFloat32Array()
+	vals.resize(gw * gh)
+	vals.fill(NAN)
 
 	for iz in range(gh):
 		var z := min_z + iz * vs
@@ -235,7 +250,22 @@ func _paint_spline(path: Path3D) -> void:
 				# the local carve (ground - bed_y) so it fades to nothing at the rim, deepest in the bed.
 				var mask := clampf((ground - h) / maxf(ground - bed_y, 0.001), 0.0, 1.0)
 				h = minf(h + noise_strength * noise.get_noise_2d(x, z) * mask, ground)
-			_paint_height(pos, h, h - ground)
+			vals[i] = (h - ground) if add else h
+
+	vals = _blur_grid(vals, gw, gh, smooth_passes)
+
+	for iz in range(gh):
+		var z := min_z + iz * vs
+		var row := iz * gw
+		for ix in range(gw):
+			var v := vals[row + ix]
+			if not is_finite(v):
+				continue
+			var pos := Vector3(min_x + ix * vs, 0.0, z)
+			if add:
+				_paint_height(pos, 0.0, v)
+			else:
+				_paint_height(pos, v, 0.0)
 
 
 func make_descend() -> void:

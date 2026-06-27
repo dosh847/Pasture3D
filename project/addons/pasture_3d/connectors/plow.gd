@@ -92,6 +92,14 @@ const _LUT_MAX := 256
 		edge_offset = v
 		_schedule_refresh()
 
+@export_group("Smoothing")
+## Passes of NaN-aware separable Gaussian blur applied after rasterisation, to soften the stamped relief
+## and any chamfer-DT faceting. 0 = off (no cost), 1-2 = subtle, 3+ = heavy rounding.
+@export_range(0, 5) var smooth_passes: int = 0:
+	set(v):
+		smooth_passes = v
+		_schedule_refresh()
+
 
 func _default_layer_name() -> String:
 	return "Plow"
@@ -188,6 +196,7 @@ func _paint_spline(path: Path3D) -> void:
 			"blend": _blend, "composite": not _defer_composite,
 			"src_strength": src_strength, "tile_size": tile_size, "source": int(source),
 			"data_w": lut_w, "data_h": lut_h, "noise": noise,
+			"smooth_passes": smooth_passes,
 		}
 		if relative_to_terrain:
 			params["base_below"] = _base_below_grid(min_x, min_z, vs, gw, gh)
@@ -198,6 +207,12 @@ func _paint_spline(path: Path3D) -> void:
 	var sdf := _signed_distance_field(poly, min_x, min_z, vs, gw, gh)
 	var field: PackedFloat32Array = sdf[0]
 	var ramp_denom := maxf(falloff_width, 0.001)
+	# Buffer per-cell write values (NaN = no write) so the optional smoothing pass can run before writing.
+	# value = delta (ADD) or absolute target (else), matching _paint_height + the C++ path for A/B parity.
+	var add := _blend == BLEND_ADD
+	var vals := PackedFloat32Array()
+	vals.resize(gw * gh)
+	vals.fill(NAN)
 
 	for iz in range(gh):
 		var z := min_z + iz * vs
@@ -216,7 +231,22 @@ func _paint_spline(path: Path3D) -> void:
 				continue
 			var pos := Vector3(x, 0.0, z)
 			var base_y: float = _base_height_below(pos) if relative_to_terrain else global_position.y
-			_paint_height(pos, base_y + amp, amp)
+			vals[row + ix] = amp if add else base_y + amp
+
+	vals = _blur_grid(vals, gw, gh, smooth_passes)
+
+	for iz in range(gh):
+		var z := min_z + iz * vs
+		var row := iz * gw
+		for ix in range(gw):
+			var wv := vals[row + ix]
+			if not is_finite(wv):
+				continue
+			var pos := Vector3(min_x + ix * vs, 0.0, z)
+			if add:
+				_paint_height(pos, 0.0, wv)
+			else:
+				_paint_height(pos, wv, 0.0)
 
 
 ## Sample the active source at world XZ, normalised to [0,1]. NOISE maps [-1,1]→[0,1]; TEXTURE/MATERIAL

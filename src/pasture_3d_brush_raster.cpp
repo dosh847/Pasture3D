@@ -44,6 +44,43 @@ inline float raster_ramp(const PackedFloat32Array &lut, float x) {
 	return lut[i0] * (1.f - frac) + lut[i0 + 1] * frac;
 }
 
+// NaN-aware separable 3-tap Gaussian blur of a packed grid, in place. NaN cells are skipped (treated as
+// "no contribution") so the blur never bleeds a feature outward past its footprint. No-op and NO
+// allocation when passes <= 0, so an unused smoother costs nothing. Shared by the spline height brushes
+// (mirrors Pasture3DTerrainBrush._blur_grid for A/B parity).
+static void nan_blur(std::vector<float> &vals, int gw, int gh, int passes) {
+	if (passes <= 0) {
+		return;
+	}
+	std::vector<float> tmp((size_t)gw * gh);
+	for (int pass = 0; pass < passes; pass++) {
+		// Horizontal: vals -> tmp
+		for (int iz = 0; iz < gh; iz++) {
+			const int row = iz * gw;
+			for (int ix = 0; ix < gw; ix++) {
+				const float v = vals[row + ix];
+				if (std::isnan(v)) { tmp[row + ix] = (float)NAN; continue; }
+				float sum = 0.5f * v, weight = 0.5f;
+				if (ix > 0 && !std::isnan(vals[row + ix - 1])) { sum += 0.25f * vals[row + ix - 1]; weight += 0.25f; }
+				if (ix < gw - 1 && !std::isnan(vals[row + ix + 1])) { sum += 0.25f * vals[row + ix + 1]; weight += 0.25f; }
+				tmp[row + ix] = sum / weight;
+			}
+		}
+		// Vertical: tmp -> vals
+		for (int iz = 0; iz < gh; iz++) {
+			const int row = iz * gw;
+			for (int ix = 0; ix < gw; ix++) {
+				const float v = tmp[row + ix];
+				if (std::isnan(v)) { vals[row + ix] = (float)NAN; continue; }
+				float sum = 0.5f * v, weight = 0.5f;
+				if (iz > 0 && !std::isnan(tmp[(iz - 1) * gw + ix])) { sum += 0.25f * tmp[(iz - 1) * gw + ix]; weight += 0.25f; }
+				if (iz < gh - 1 && !std::isnan(tmp[(iz + 1) * gw + ix])) { sum += 0.25f * tmp[(iz + 1) * gw + ix]; weight += 0.25f; }
+				vals[row + ix] = sum / weight;
+			}
+		}
+	}
+}
+
 // Two-pass chamfer distance transform, in place (port of Pasture3DTerrainBrush._chamfer).
 void raster_chamfer(std::vector<float> &arr, int gw, int gh, float a, float b) {
 	for (int iz = 0; iz < gh; iz++) {
@@ -580,15 +617,12 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
 	const bool has_below = base_below.size() == gw * gh;
 
-	// Batched raw-tile apply path (Phase 1b): accumulate per-cell values into a box buffer, then commit them
-	// to the layer one tile at a time (no per-cell dict lookup / set_pixelv) — the cost that dominated
-	// terrain-scale bakes. Used for the common deferred, non-base overlay case; otherwise fall back to
-	// per-cell _stamp_write (full-refresh composite, no layer, or a dense Base target). NaN = no write.
+	// Always buffer per-cell values into a box (NaN = no write) so the optional smoothing pass can run
+	// before any write. Batched raw-tile apply path (Phase 1b) then commits the buffer one tile at a time
+	// (no per-cell dict lookup / set_pixelv) for the common deferred non-base overlay; otherwise a per-cell
+	// _stamp_write loop handles full-refresh composite, no layer, or a dense Base target.
 	const bool batched = wlayer && !composite && !wlayer->is_base();
-	std::vector<float> vals;
-	if (batched) {
-		vals.assign((size_t)gw * gh, NAN);
-	}
+	std::vector<float> vals((size_t)gw * gh, (float)NAN);
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -636,19 +670,30 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 			if (noise.is_valid()) {
 				amp += noise_strength * noise->get_noise_2d(x, z) * profile;
 			}
-			const double value = add ? amp : (base_y + amp);
-			if (batched) {
-				vals[row + ix] = (float)value;
-			} else {
-				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, value, blend);
-			}
+			vals[row + ix] = (float)(add ? amp : (base_y + amp));
 		}
 	}
+
+	// Optional NaN-aware post-smoothing (default 0 = no-op, no allocation).
+	nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
 
 	if (batched) {
 		const int min_px = (int)std::lround(min_x / vs);
 		const int min_pz = (int)std::lround(min_z / vs);
 		_apply_stamp_block(wlayer, min_px, min_pz, gw, gh, vals.data(), blend);
+	} else {
+		for (int iz = 0; iz < gh; iz++) {
+			const double z = min_z + iz * vs;
+			if (has_clip && (z < cz0 || z >= cz1)) { continue; }
+			const int row = iz * gw;
+			for (int ix = 0; ix < gw; ix++) {
+				const float v = vals[row + ix];
+				if (std::isnan(v)) { continue; }
+				const double x = min_x + ix * vs;
+				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
+				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
+			}
+		}
 	}
 }
 
@@ -847,36 +892,7 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 
 	// NaN-aware separable 3-tap Gaussian blur. Smooths the chamfer DT's octagonal isocontour
 	// artifacts in `lat` that appear as angular surface faceting when diff is large.
-	const int smooth_passes = (int)p_params.get("smooth_passes", 0);
-	if (smooth_passes > 0) {
-		std::vector<float> tmp(gw * gh);
-		for (int pass = 0; pass < smooth_passes; pass++) {
-			// Horizontal pass: vals → tmp
-			for (int iz = 0; iz < gh; iz++) {
-				const int row = iz * gw;
-				for (int ix = 0; ix < gw; ix++) {
-					const float v = vals[row + ix];
-					if (std::isnan(v)) { tmp[row + ix] = (float)NAN; continue; }
-					float sum = 0.5f * v, weight = 0.5f;
-					if (ix > 0 && !std::isnan(vals[row + ix - 1])) { sum += 0.25f * vals[row + ix - 1]; weight += 0.25f; }
-					if (ix < gw - 1 && !std::isnan(vals[row + ix + 1])) { sum += 0.25f * vals[row + ix + 1]; weight += 0.25f; }
-					tmp[row + ix] = sum / weight;
-				}
-			}
-			// Vertical pass: tmp → vals
-			for (int iz = 0; iz < gh; iz++) {
-				const int row = iz * gw;
-				for (int ix = 0; ix < gw; ix++) {
-					const float v = tmp[row + ix];
-					if (std::isnan(v)) { vals[row + ix] = (float)NAN; continue; }
-					float sum = 0.5f * v, weight = 0.5f;
-					if (iz > 0 && !std::isnan(tmp[(iz - 1) * gw + ix])) { sum += 0.25f * tmp[(iz - 1) * gw + ix]; weight += 0.25f; }
-					if (iz < gh - 1 && !std::isnan(tmp[(iz + 1) * gw + ix])) { sum += 0.25f * tmp[(iz + 1) * gw + ix]; weight += 0.25f; }
-					vals[row + ix] = sum / weight;
-				}
-			}
-		}
-	}
+	nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
 
 	// Write back.
 	if (batched) {
@@ -1082,6 +1098,9 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 		}
 	}
 
+	// Optional NaN-aware post-smoothing (default 0 = no-op, no allocation).
+	nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
+
 	if (batched) {
 		_apply_stamp_block(wlayer, (int)std::lround(min_x / vs), (int)std::lround(min_z / vs), gw, gh, vals.data(), blend);
 	} else {
@@ -1161,11 +1180,10 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 	const PackedFloat32Array base_below = p_params.get("base_below", PackedFloat32Array());
 	const bool has_below = base_below.size() == gw * gh;
 
+	// Always buffer (NaN = no write) so the optional smoothing pass can run before any write; batched
+	// commit for the common deferred overlay, per-cell write-back otherwise.
 	const bool batched = wlayer && !composite && !wlayer->is_base(); // Phase 1b batched raw-tile apply
-	std::vector<float> vals;
-	if (batched) {
-		vals.assign((size_t)gw * gh, NAN);
-	}
+	std::vector<float> vals((size_t)gw * gh, (float)NAN);
 
 	const bool has_clip = p_clip.size != Vector3();
 	const double cx0 = p_clip.position.x;
@@ -1219,17 +1237,28 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 			} else {
 				base_y = plane_y;
 			}
-			const double value = add ? amp : (base_y + amp);
-			if (batched) {
-				vals[row + ix] = (float)value;
-			} else {
-				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, pos, value, blend);
-			}
+			vals[row + ix] = (float)(add ? amp : (base_y + amp));
 		}
 	}
 
+	// Optional NaN-aware post-smoothing (default 0 = no-op, no allocation).
+	nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
+
 	if (batched) {
 		_apply_stamp_block(wlayer, (int)std::lround(min_x / vs), (int)std::lround(min_z / vs), gw, gh, vals.data(), blend);
+	} else {
+		for (int iz = 0; iz < gh; iz++) {
+			const double z = min_z + iz * vs;
+			if (has_clip && (z < cz0 || z >= cz1)) { continue; }
+			const int row = iz * gw;
+			for (int ix = 0; ix < gw; ix++) {
+				const float v = vals[row + ix];
+				if (std::isnan(v)) { continue; }
+				const double x = min_x + ix * vs;
+				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
+				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
+			}
+		}
 	}
 }
 
