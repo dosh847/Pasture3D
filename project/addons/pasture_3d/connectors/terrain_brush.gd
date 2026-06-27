@@ -1455,6 +1455,11 @@ func _new_spline() -> Path3D:
 	var path := Path3D.new()
 	path.name = "%s%d" % [_spline_basename(), _get_splines().size() + 1]
 	path.curve = _make_starter_curve()
+	# Closed-fill brushes (Mound/Plow/Splat) author a polygon, so their spline node is a closed Curve3D
+	# from the start — the native Path3D gizmo then draws the last→first segment and editing stays coherent
+	# (no duplicated wrap point). Ridge/Trough stay open. Curve3D.closed is Godot 4.x native.
+	if path.curve and _is_closed():
+		path.curve.closed = true
 	add_child(path)
 	# Reparent under the edited scene so the new node persists when the scene is saved.
 	if Engine.is_editor_hint() and is_inside_tree():

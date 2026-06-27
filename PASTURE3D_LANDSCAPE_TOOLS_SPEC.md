@@ -179,7 +179,9 @@ feature only ever raises (MAX) or only ever lowers (MIN).
 @export var invert: bool = false           # flip sign → carve a depression with the same controls
 
 @export_group("Falloff")
-@export var falloff_width: float = 15.0     # metres from the loop edge inward over which height ramps in
+@export var flank_mode: FlankMode = FIXED_WIDTH  # FIXED_WIDTH ramps over falloff_width; SLOPE_ANGLE over height/tan(angle)
+@export var falloff_width: float = 15.0     # FIXED_WIDTH: metres from the loop edge inward over which height ramps in
+@export_range(1,89,0.5) var slope_angle: float = 30.0  # SLOPE_ANGLE only: grade the flank rises at (run = |height|/tan)
 @export var falloff_curve: Curve            # optional; default = smoothstep. Drives the edge slope shape
 @export var edge_offset: float = 0.0        # +expand / −contract the effective boundary off the spline
 
@@ -209,7 +211,12 @@ feature only ever raises (MAX) or only ever lowers (MIN).
      (reuse `_distance_to_polygon_boundary_2d` from the road connector).
    - Skip if `d < -|edge_offset|` clearly outside the falloff band.
    - **Edge factor** `t` (0 at the outer falloff edge → 1 fully inside):
-     `t = clamp(d / falloff_width, 0, 1)`, shaped by `falloff_curve` (default smoothstep).
+     `t = clamp(d / ramp, 0, 1)`, shaped by `falloff_curve` (default smoothstep). `ramp` is
+     `falloff_width` in FIXED_WIDTH mode, or (CAPPED + SLOPE_ANGLE) `|height| / tan(slope_angle)`.
+   - **SLOPE_ANGLE + UNCAPPED ("cone")** is a special case that bypasses the profile entirely: the
+     height rises freely at the grade, `h = tan(slope_angle) * d`, NOT limited by `height` — clamped only
+     to a region-sized safety ceiling (`region_size * vertex_spacing`) so a steep angle over a big loop
+     can't author a runaway peak. `t` (= `d / max_interior_d`) is reused solely to mask the noise.
    - **Profile**:
      - *capped* → `profile = t` (ramp up to a flat top at `height`).
      - *uncapped* → dome via the normalized distance transform:

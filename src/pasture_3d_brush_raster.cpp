@@ -549,6 +549,12 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	const bool invert = p_params.get("invert", false);
 	const double falloff_width = p_params.get("falloff_width", 0.0);
 	const double edge_offset = p_params.get("edge_offset", 0.0);
+	// Flank mode: 0 = fixed width (ramp over falloff_width / dome over max_inside), 1 = slope angle.
+	// CAPPED slope: ramp run = |height| / slope_tan (rises to height, then flat). UNCAPPED slope ("cone"):
+	// height = slope_tan * distance-from-edge, capped by slope_safety (region-sized). slope_tan = tan(angle).
+	const int flank_mode = (int)p_params.get("flank_mode", 0);
+	const double slope_tan = MAX((double)p_params.get("slope_tan", 1.0), 0.0001);
+	const double slope_safety = MAX((double)p_params.get("slope_safety", 1000.0), 0.001);
 	const bool relative = p_params.get("relative_to_terrain", true);
 	const double plane_y = p_params.get("plane_y", 0.0);
 	const int blend = (int)p_params.get("blend", 0);
@@ -558,8 +564,12 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	Ref<FastNoiseLite> noise = Object::cast_to<FastNoiseLite>(noise_obj);
 
 	const double sign = invert ? -1.0 : 1.0;
+	// Denominator that normalises signed_d -> 0..1 ramp. dome_denom is the natural interior run (also the
+	// noise mask for the cone); ramp_denom is falloff_width, or |height|/slope_tan in CAPPED slope mode.
+	const bool use_angle = (flank_mode == 1);
+	const bool cone = use_angle && !capped; // uncapped slope = free-rising cone (height from geometry)
 	const double dome_denom = MAX(max_inside + edge_offset, 0.001);
-	const double ramp_denom = MAX(falloff_width, 0.001);
+	const double ramp_denom = (use_angle && capped) ? MAX(std::fabs(height) / slope_tan, 0.001) : MAX(falloff_width, 0.001);
 	const bool add = (blend == 1); // BLEND_ADD
 
 	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
@@ -597,9 +607,19 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 			if (signed_d <= 0.0) {
 				continue;
 			}
-			const float profile = raster_ramp(p_lut, (float)(signed_d / (capped ? ramp_denom : dome_denom)));
-			if (profile <= 0.f) {
-				continue;
+			double amp;
+			double profile;
+			if (cone) {
+				// Free-rising cone: tan × distance, capped by the region safety height. profile (0..1
+				// interior mask) only gates the noise so the rim stays clean.
+				profile = CLAMP(signed_d / dome_denom, 0.0, 1.0);
+				amp = sign * MIN(slope_tan * signed_d, slope_safety);
+			} else {
+				profile = (double)raster_ramp(p_lut, (float)(signed_d / (capped ? ramp_denom : dome_denom)));
+				if (profile <= 0.0) {
+					continue;
+				}
+				amp = sign * height * profile;
 			}
 			const double x = min_x + ix * vs;
 			if (has_clip && (x < cx0 || x >= cx1)) {
@@ -613,7 +633,6 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 			} else {
 				base_y = plane_y;
 			}
-			double amp = sign * height * profile;
 			if (noise.is_valid()) {
 				amp += noise_strength * noise->get_noise_2d(x, z) * profile;
 			}
