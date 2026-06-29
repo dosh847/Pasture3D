@@ -1,0 +1,104 @@
+[gd_scene format=3 uid="uid://banmmrio06yy5"]
+
+[ext_resource type="Script" uid="uid://br5raorbyrwhw" path="res://addons/pasture_3d/connectors/mound.gd" id="1_ume0e"]
+[ext_resource type="Script" uid="uid://bvg7srpngxqfj" path="res://addons/pasture_3d/connectors/trough.gd" id="2_7ivm1"]
+[ext_resource type="Script" uid="uid://bj10ochgiqrlg" path="res://addons/pasture_3d/connectors/ridge.gd" id="3_4xbm0"]
+
+[sub_resource type="Pasture3DMaterial" id="Pasture3DMaterial_2bfyl"]
+_shader_parameters = {
+&"bias_distance": null,
+&"blend_sharpness": null,
+&"depth_blur": null,
+&"flat_terrain_normals": null,
+&"mipmap_bias": null,
+&"shader_uniforms": null,
+&"shader_uniforms/general": null,
+&"shader_uniforms/mipmaps": null
+}
+world_background = 0
+show_checkered = true
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_wxaqu"]
+transparency = 4
+cull_mode = 2
+vertex_color_use_as_albedo = true
+backlight_enabled = true
+backlight = Color(0.5, 0.5, 0.5, 1)
+distance_fade_mode = 1
+distance_fade_min_distance = 128.0
+distance_fade_max_distance = 96.0
+metadata/pasture3d_generated_material = true
+
+[sub_resource type="Pasture3DMeshAsset" id="Pasture3DMeshAsset_3b32r"]
+generated_type = 1
+height_offset = 0.5
+density = 10.0
+material_override = SubResource("StandardMaterial3D_wxaqu")
+last_lod = 0
+last_shadow_lod = 0
+lod0_range = 128.0
+
+[sub_resource type="Pasture3DAssets" id="Pasture3DAssets_878i5"]
+mesh_list = Array[Pasture3DMeshAsset]([SubResource("Pasture3DMeshAsset_3b32r")])
+
+[sub_resource type="Curve3D" id="Curve3D_ume0e"]
+_data = {
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -20, 0, -20, 0, 0, 0, 0, 0, 0, 20, 0, -20, 0, 0, 0, 0, 0, 0, 20, 0, 20, 0, 0, 0, 0, 0, 0, -20, 0, 20),
+"tilts": PackedFloat32Array(0, 0, 0, 0)
+}
+point_count = 4
+
+[sub_resource type="Curve3D" id="Curve3D_7ivm1"]
+_data = {
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, 0, 0, -20, 0, 0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, -2.2150497, 7.444336, 69.63768, 0, 0, 0, 0, 0, 0, -24.19318, -2.3092804, 109.323265, 0, 0, 0, 0, 0, 0, -43.42788, -32.97505, 99.069725, 0, 0, 0, 0, 0, 0, -16.316921, 27.61309, 148.82231),
+"tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0)
+}
+point_count = 6
+
+[sub_resource type="Curve3D" id="Curve3D_4xbm0"]
+_data = {
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, 0, 0, -20, 0, 0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 2.247078, -3.5071106, 72.774704, 0, 0, 0, 0, 0, 0, 33.926926, -24.190857, 123.62305),
+"tilts": PackedFloat32Array(0, 0, 0, 0)
+}
+point_count = 4
+
+[node name="Node3D" type="Node3D" unique_id=68729647]
+
+[node name="Pasture3D" type="Pasture3D" parent="." unique_id=2088469784]
+data_directory = "res://demo/data/Sculpting2"
+material = SubResource("Pasture3DMaterial_2bfyl")
+assets = SubResource("Pasture3DAssets_878i5")
+displacement_sharpness = 0.5
+show_checkered = true
+top_level = true
+metadata/_edit_lock_ = true
+
+[node name="Pasture3DMound" type="Node3D" parent="." unique_id=320252832 node_paths=PackedStringArray("terrain")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -236, 0, 41)
+script = ExtResource("1_ume0e")
+terrain = NodePath("../Pasture3D")
+target_layer_name = "Mounds"
+metadata/_custom_type_script = "uid://br5raorbyrwhw"
+
+[node name="Loop1" type="Path3D" parent="Pasture3DMound" unique_id=264325674]
+curve = SubResource("Curve3D_ume0e")
+
+[node name="Pasture3DRidge" type="Node3D" parent="." unique_id=2114424692 node_paths=PackedStringArray("terrain")]
+transform = Transform3D(-0.9828594, 0, -0.18435696, 0, 1, 0, 0.18435696, 0, -0.9828594, -40.987457, 0, 114.440506)
+script = ExtResource("3_4xbm0")
+terrain = NodePath("../Pasture3D")
+target_layer_name = "Ridges"
+metadata/_custom_type_script = "uid://bj10ochgiqrlg"
+
+[node name="Ridge1" type="Path3D" parent="Pasture3DRidge" unique_id=13448032]
+curve = SubResource("Curve3D_7ivm1")
+
+[node name="Pasture3DTrough" type="Node3D" parent="." unique_id=1403851721 node_paths=PackedStringArray("terrain")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -109, 0, 127)
+script = ExtResource("2_7ivm1")
+terrain = NodePath("../Pasture3D")
+target_layer_name = "Troughs"
+metadata/_custom_type_script = "uid://bvg7srpngxqfj"
+
+[node name="Channel1" type="Path3D" parent="Pasture3DTrough" unique_id=1667892792]
+curve = SubResource("Curve3D_4xbm0")

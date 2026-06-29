@@ -1,0 +1,98 @@
+[gd_scene format=3 uid="uid://t5hbmhmf5l5t"]
+
+[ext_resource type="Script" uid="uid://br5raorbyrwhw" path="res://addons/pasture_3d/connectors/mound.gd" id="1_xkygt"]
+
+[sub_resource type="Pasture3DMaterial" id="Pasture3DMaterial_g143p"]
+_shader_parameters = {
+&"bias_distance": null,
+&"blend_sharpness": null,
+&"depth_blur": null,
+&"flat_terrain_normals": null,
+&"mipmap_bias": null,
+&"shader_uniforms": null,
+&"shader_uniforms/general": null,
+&"shader_uniforms/mipmaps": null
+}
+show_checkered = true
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_xkygt"]
+transparency = 4
+cull_mode = 2
+vertex_color_use_as_albedo = true
+backlight_enabled = true
+backlight = Color(0.5, 0.5, 0.5, 1)
+distance_fade_mode = 1
+distance_fade_min_distance = 128.0
+distance_fade_max_distance = 96.0
+metadata/pasture3d_generated_material = true
+
+[sub_resource type="Pasture3DMeshAsset" id="Pasture3DMeshAsset_qlie2"]
+generated_type = 1
+height_offset = 0.5
+density = 10.0
+material_override = SubResource("StandardMaterial3D_xkygt")
+last_lod = 0
+last_shadow_lod = 0
+lod0_range = 128.0
+
+[sub_resource type="Pasture3DAssets" id="Pasture3DAssets_b520p"]
+mesh_list = Array[Pasture3DMeshAsset]([SubResource("Pasture3DMeshAsset_qlie2")])
+
+[sub_resource type="Curve3D" id="Curve3D_xkygt"]
+_data = {
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -20, 0.9999997, -20, 0, 0, 0, 0, 0, 0, 20, 0.9999997, -20, 0, 0, 0, 0, 0, 0, 20, 0.9999997, 20, 0, 0, 0, 0, 0, 0, -20, 0.9999997, 20),
+"tilts": PackedFloat32Array(0, 0, 0, 0)
+}
+point_count = 4
+
+[sub_resource type="Curve3D" id="Curve3D_qlie2"]
+_data = {
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -20, 0.9999973, -20, 0, 0, 0, 0, 0, 0, 20, 1.000002, -20, 0, 0, 0, 0, 0, 0, 20, 1.0000005, 20, 0, 0, 0, 0, 0, 0, -20, 0.9999941, 20),
+"tilts": PackedFloat32Array(0, 0, 0, 0)
+}
+point_count = 4
+
+[sub_resource type="Curve3D" id="Curve3D_b520p"]
+_data = {
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -20, 0.99999994, -20, 0, 0, 0, 0, 0, 0, 20.000002, 1.0000634, -20, 0, 0, 0, 0, 0, 0, 20.000002, 0.99999994, 20, 0, 0, 0, 0, 0, 0, -20, 1.0000001, 20),
+"tilts": PackedFloat32Array(0, 0, 0, 0)
+}
+point_count = 4
+
+[node name="SimplePasture" type="Node3D" unique_id=3132789]
+
+[node name="Pasture3D" type="Pasture3D" parent="." unique_id=1189028008]
+data_directory = "res://demo/data/SimplePasture"
+material = SubResource("Pasture3DMaterial_g143p")
+assets = SubResource("Pasture3DAssets_b520p")
+displacement_sharpness = 0.5
+show_checkered = true
+top_level = true
+metadata/_edit_lock_ = true
+
+[node name="Mound" type="Node3D" parent="Pasture3D" unique_id=1786347039 node_paths=PackedStringArray("terrain")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.9428177, 7.679277e-06, -0.3608036)
+script = ExtResource("1_xkygt")
+terrain = NodePath("..")
+_layer_owner = "pasture3d_brush:Mounds"
+
+[node name="Loop1" type="Path3D" parent="Pasture3D/Mound" unique_id=70890649]
+curve = SubResource("Curve3D_xkygt")
+
+[node name="Mound1" type="Node3D" parent="Pasture3D" unique_id=690234162 node_paths=PackedStringArray("terrain")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -35.494743, 5.883289e-06, 42.16842)
+script = ExtResource("1_xkygt")
+terrain = NodePath("..")
+_layer_owner = "pasture3d_brush:Mounds"
+
+[node name="Loop1" type="Path3D" parent="Pasture3D/Mound1" unique_id=1624261426]
+curve = SubResource("Curve3D_qlie2")
+
+[node name="Mound2" type="Node3D" parent="Pasture3D" unique_id=926659810 node_paths=PackedStringArray("terrain")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 25.085333, 7.4505797e-06, -32.612186)
+script = ExtResource("1_xkygt")
+terrain = NodePath("..")
+_layer_owner = "pasture3d_brush:Mounds"
+
+[node name="Loop1" type="Path3D" parent="Pasture3D/Mound2" unique_id=1020349248]
+curve = SubResource("Curve3D_b520p")
