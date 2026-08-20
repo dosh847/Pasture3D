@@ -90,8 +90,30 @@ Commit as normal, then:
 git push -u origin feat/short-description
 ```
 
-`gh` is **not installed on the dev box**, so open the PR from the link git prints, or from the
-*Compare & pull request* banner on the repo page. If you want the CLI:
+> [!danger] This repo is a FORK. Check the base repository on every single PR.
+> `Pasture3D` is a fork of `TokisanGames/Terrain3D`, and GitHub defaults a PR's **base repository to
+> the upstream parent**, not to your own fork. The `/pull/new/<branch>` link git prints after a push,
+> and the *Compare & pull request* banner, both inherit that default.
+>
+> The result is not a small mistake. On 2026-08-19 it opened
+> [TokisanGames/Terrain3D#1030](https://github.com/TokisanGames/Terrain3D/pull/1030) — a one-commit,
+> five-file chore offered to the upstream maintainers as **219 commits, 950 files, +459,020 / −5,824**,
+> because the diff against *their* `main` is the entire Pasture3D divergence. It also silently grants
+> upstream maintainers push access to your branch, via the `maintainer_can_modify` box that is ticked
+> by default.
+>
+> **Before clicking Create, the header must read `dosh847/Pasture3D` on BOTH sides.** If it says
+> `TokisanGames/Terrain3D` anywhere, change the *base repository* dropdown, or the commit count and
+> the diff size will tell you immediately — a chore is not 219 commits.
+
+Use the **compare link**, which defaults the base to your own fork and cannot make that mistake:
+
+```
+https://github.com/dosh847/Pasture3D/compare/main...YOUR-BRANCH
+```
+
+`gh` is **not installed on the dev box**, so open the PR from that link. If you want the CLI — which
+takes the fork trap away entirely, since `gh pr create` defaults to the repo you are standing in:
 
 ```bash
 winget install GitHub.cli
