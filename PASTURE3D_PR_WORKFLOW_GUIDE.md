@@ -10,8 +10,10 @@ created: 2026-08-19
 How a change gets into `main` now that there is a check standing in front of it.
 
 > [!abstract] The one-sentence version
-> Branch → push → open a PR → wait for **🧪 Headless gates** to go green → merge.
-> The only new thing is that the gates now run on GitHub instead of only on the dev box.
+> Branch → push → open a PR **against `dosh847/Pasture3D`, not the upstream fork parent** → wait for
+> **🧪 Headless gates** to go green → merge.
+> The only new thing is that the gates now run on GitHub instead of only on the dev box — and the
+> base repository is the one field worth checking every time (see [[#Making a change]]).
 
 ---
 
