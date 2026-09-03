@@ -54,7 +54,41 @@ extends Pasture3DTerrainBrush
 @export var closed: bool = false:
 	set(v):
 		closed = v
+		_apply_closed_to_splines()
 		_schedule_refresh()
+		if is_inside_tree():
+			update_gizmos() # redraw the last->first segment
+
+
+## Write `closed` through to every child spline's Curve3D.
+##
+## ---- WHY THE FLAG ALONE CLOSED NOTHING ----
+##
+## `_new_spline` sets `curve.closed` from `_is_closed()` at CREATION time, when `closed` is still false,
+## and the setter never revisited it. `brush_handles._is_closed` reads the brush flag directly, so the
+## GIZMO drew the last->first segment — and the grader, the mesher, the arc-length space, the junction
+## detector and the graph path all still saw an open road with a gap at the seam. Ticking the box drew a
+## ring and built a horseshoe.
+##
+## ---- WHY THIS AND NOT A MANUAL WRAP ----
+##
+## Pasture3DRidge appends `pts[0]` to its own polyline, and copying that here would have been wrong.
+## `Curve3D.closed` already bakes the closing segment: on a 4-point 300 m square, `tessellate()` goes from
+## 4 points to 5 — the last exactly equal to the first — and `get_baked_length()` from 300 m to 400 m. So
+## the wrap arrives through `_plan_points`'s existing `tessellate()` call, and appending a point on top of
+## it would give the road TWO closing edges and a zero-length segment between them. Ridge wraps manually
+## because it reads control points rather than a tessellation; a road does not.
+##
+## ---- WHAT CLOSING MOVES ----
+##
+## The total arc length, by the seam distance — and with it every Pasture3DRoadSegment range, every
+## junction arc length and every Pasture3DRoadRoute waypoint, because all of them are measured along this
+## polyline. That is correct rather than a side effect: the road really did get longer.
+## `_get_configuration_warnings` already surfaces segments left out of range via `s.range_warnings(total)`.
+func _apply_closed_to_splines() -> void:
+	for path: Path3D in _get_splines():
+		if path != null and path.curve != null:
+			path.curve.closed = closed
 
 # ---- Inspector proxies (§5.3) -------------------------------------------------------------------
 #
@@ -146,6 +180,10 @@ func _ready() -> void:
 		if s != null and not s.changed.is_connected(_on_road_changed):
 			s.changed.connect(_on_road_changed)
 	_rewire_content_sources()
+	# A scene saved before the setter wrote through, or saved by a build where it did not, has
+	# `closed == true` on the brush and `closed == false` on every curve. Reconcile on load rather than
+	# waiting for the user to toggle the box twice.
+	_apply_closed_to_splines()
 
 
 ## A reparent EXITS and re-enters the tree, and `_ready` only runs once — so this is where a brush
@@ -1119,6 +1157,18 @@ func graph_path() -> Pasture3DGraphPath:
 	path.points = plan
 	path.half_widths = halves
 	path.heights = heights
+	# A closed road's plan already ENDS at its start, because `Curve3D.closed` bakes the wrap. Handing
+	# that to a Pasture3DGraphPath with `closed = true` would close it a second time — the resource
+	# repeats `points[0]` itself — so the duplicate vertex is dropped and the flag carries the seam
+	# instead. Told rather than implied, because `closed` is what makes `inside()` answerable, which is
+	# how a ring road's interior becomes usable as a graph mask.
+	if closed:
+		path.closed = true
+		var n := plan.size()
+		if n >= 2 and plan[n - 1].is_equal_approx(plan[0]):
+			path.points = plan.slice(0, n - 1)
+			path.half_widths = halves.slice(0, n - 1)
+			path.heights = heights.slice(0, n - 1)
 
 	# ---- THE GRADING BLOCK, VERBATIM ---------------------------------------------------------------
 	#

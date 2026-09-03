@@ -1,8 +1,9 @@
 # Pasture3D Road — Staleness Remediation & Cost Reduction
 
 **Document:** `PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md`
-**Status:** **S1, S2 and S3 BUILT 2026-09-03** (`RoadStaleGate` [SA]–[SG] pass, controls verified;
-30 assertions; 13 road gates and 5 graph gates green). **S4–S12 PROPOSED, not started.** Check the symbol and the branch before planning from this header; it
+**Status:** **Phase 1 complete — S1, S2, S3 and S4 BUILT 2026-09-03** (`RoadStaleGate` [SA]–[SH] pass,
+controls verified; 36 assertions; 14 road gates and 5 graph gates green).
+**S6–S12 (cost) PROPOSED, not started.** Check the symbol and the branch before planning from this header; it
 will go stale before the work does.
 **Target:** `Pasture3DRoadBrush` and its integration with the modifier stack, the road network resolve
 loop, and the terrain node graph.
@@ -303,7 +304,7 @@ whichever one an edit touches, and half the cases would pass without the digest 
 
 ---
 
-### S4 — `closed` closes nothing but the gizmo
+### S4 — `closed` closes nothing but the gizmo — **BUILT**
 
 **Where:** `pasture3d_road_brush.gd:54` and `:840`.
 
@@ -318,8 +319,26 @@ road with a gap at the seam.
 reads the brush flag directly, which is why the gizmo alone obeys it.
 
 **Fix.** In the `closed` setter, write `curve.closed` through to every child spline and call
-`update_gizmos()` — the two things `Pasture3DRidge.closed` already does (`pasture3d_ridge.gd:74-79`). Wrap
-the polyline in `_plan_points()` when `closed`.
+`update_gizmos()` — the two things `Pasture3DRidge.closed` already does (`pasture3d_ridge.gd:74-79`).
+
+**Do NOT wrap the polyline in `_plan_points()`. The first draft of this section said to, and it was
+wrong.** `Curve3D.closed` already bakes the closing segment: measured on a 4-point 300 m square,
+`tessellate()` goes from 4 points to 5 — the last exactly equal to the first — and `get_baked_length()`
+from 300.000 m to 399.999 m. So the wrap arrives through the `tessellate()` call `_plan_points` already
+makes, and appending `pts[0]` on top of it would give the road **two** closing edges with a zero-length
+segment between them. Ridge wraps manually because it reads control points rather than a tessellation; a
+road does not, and copying Ridge here would have doubled the seam. `[SH] no double wrap` is the criterion
+that refuses it.
+
+**`_ready` reconciles.** A scene saved with `closed == true` on the brush and `closed == false` on every
+curve — which is every scene saved before this fix — needs `_apply_closed_to_splines()` on load, or the
+user has to toggle the box twice to see a ring.
+
+**`graph_path()` carries the seam as the flag, not as a vertex.** The plan already ends at its start, so
+handing it to a `Pasture3DGraphPath` with `closed = true` would close it a second time — the resource
+repeats `points[0]` itself. The duplicate vertex (and its half-width and height) is dropped and the flag
+set instead. Told rather than implied, because `closed` is what makes `inside()` answerable, which is how
+a ring road's interior becomes usable as a graph mask.
 
 **What must not break.** Closing a road **changes its total arc length**, which moves every
 `Pasture3DRoadSegment` range, every junction arc length and every `Pasture3DRoadRoute` waypoint. That is
@@ -327,7 +346,14 @@ correct — the road really did get longer — but it must be stated, and `_get_
 already surfaces out-of-range segments via `s.range_warnings(total)`. `closed` is in
 `road_content_signature()` (S1), so the bake follows.
 
-**Gate:** `[SH]` — `RoadModelGate`.
+**Gate:** `[SH]` — `RoadStaleGate`, not `RoadModelGate` as the draft said: `RoadModelGate` was being
+edited concurrently by the bench-gate data-directory work, and a criterion is not worth a merge conflict.
+
+Six assertions. None of them reads `_is_closed()`, because **the flag was never the broken part** — it
+returned `closed` correctly throughout, which is exactly why the gizmo drew a ring over a horseshoe. They
+read the curve, the plan, the plan's length, the absence of a doubled wrap, the graph path, and the
+revert. The fixture is three sides of a square so the seam is a long unambiguous distance; a nearly-closed
+shape would let the length criterion pass on a fixture that was already a ring.
 
 ---
 

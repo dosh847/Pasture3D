@@ -1,7 +1,7 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
 # RoadStaleGate — road content that the terrain never hears about.
-# PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md §3, S1 ([SA] [SB] [SC] [SF] [SG]), S2 ([SD]) and S3 ([SE]).
+# PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md §3, S1 ([SA] [SB] [SC] [SF] [SG]), S2 ([SD]), S3 ([SE]) and S4 ([SH]).
 #
 # ---- WHAT THIS GATE IS ABOUT ----
 #
@@ -68,7 +68,7 @@ var _fail: int = 0
 
 
 func _ready() -> void:
-	print("=== RoadStaleGate: road content the terrain never hears about (S1-S3) ===\n")
+	print("=== RoadStaleGate: road content the terrain never hears about (S1-S4) ===\n")
 	_sa_junction_pins_reach_the_key()
 	_sb_corridor_widening_converges()
 	_sc_no_spurious_first_bake_rebake()
@@ -76,6 +76,7 @@ func _ready() -> void:
 	_se_cross_section_edits_reach_the_graph()
 	_sf_signature_is_stable_with_no_edit()
 	_sg_chunk_host_shares_the_road_type_reading()
+	_sh_closed_roads_actually_close()
 	print("\n=== %s (%d failures) ===\n" % [
 		"ROAD STALE PASS" if _fail == 0 else "ROAD STALE FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
@@ -563,3 +564,128 @@ func _sg_chunk_host_shares_the_road_type_reading() -> void:
 			and is_equal_approx(batter_half, before_half),
 			"a cut_batter edit moves the grade signature and leaves the mesher's half width at %.2f m"
 			% batter_half)
+
+
+# ---- [SH] --------------------------------------------------------------------------------------
+
+## Ticking `closed` closes the road, not only the gizmo.
+##
+## ---- WHY ASSERTING THE FLAG WOULD PROVE NOTHING ----
+##
+## `_is_closed()` returned `closed` correctly the whole time the bug existed. The flag was never the
+## broken part: `_new_spline` wrote `curve.closed` at CREATION, when `closed` was still false, and the
+## setter never revisited it — so the gizmo, which reads the brush flag directly, drew a ring while the
+## grader, the mesher, the arc-length space, the junction detector and the graph path all saw a horseshoe.
+## A criterion that read `brush._is_closed()` would have passed throughout. So this reads the three things
+## that were actually wrong: the curve, the plan, and the path handed to the graph.
+##
+## ---- THE LENGTH IS THE POINT, NOT A SIDE EFFECT ----
+##
+## Closing lengthens the road by the seam distance, and every Pasture3DRoadSegment range, junction arc
+## length and route waypoint is measured along that polyline. The criterion asserts the growth is the
+## SEAM specifically — not merely that something got longer — because a plan that had been wrapped twice
+## would also be longer, and would be wrong.
+func _sh_closed_roads_actually_close() -> void:
+	print("[SH] closing a road closes the plan, not just the gizmo")
+	var fx := _ring_fixture()
+	var brush: CountingRoadBrush = fx["brush"]
+	var curve: Curve3D = (brush.get_child(0) as Path3D).curve
+
+	var open_plan := brush._plan_points()
+	var open_len := _polyline_length(open_plan)
+	var seam := open_plan[open_plan.size() - 1].distance_to(open_plan[0])
+
+	brush.closed = true
+
+	var shut_plan := brush._plan_points()
+	var shut_len := _polyline_length(shut_plan)
+
+	_check("[SH] curve", curve.closed,
+			"the setter wrote through to the child spline's Curve3D")
+	_check("[SH] plan", shut_plan.size() > open_plan.size()
+			and shut_plan[shut_plan.size() - 1].is_equal_approx(shut_plan[0]),
+			"the plan now ends where it starts (%d -> %d vertices)"
+			% [open_plan.size(), shut_plan.size()])
+	_check("[SH] length", absf((shut_len - open_len) - seam) < 0.5,
+			"arc length grew by the seam and nothing more: %.2f m + %.2f m -> %.2f m"
+			% [open_len, seam, shut_len])
+
+	# The control that a manual wrap would fail. `Curve3D.closed` already bakes the closing segment, so
+	# appending points[0] on top of it — which is what Pasture3DRidge does, and what the plan for this fix
+	# originally said to copy — would give the road TWO closing edges and a zero-length segment between
+	# them. That doubles the seam in the length above and leaves a degenerate segment for the grader.
+	var dup := 0
+	for i in range(1, shut_plan.size()):
+		if shut_plan[i].is_equal_approx(shut_plan[i - 1]):
+			dup += 1
+	_check("[SH] no double wrap", dup == 0,
+			"%d zero-length segment(s) in the closed plan" % dup)
+
+	# And the graph's view. The plan already ends at its start, so the resource must carry the seam as the
+	# FLAG with the duplicate vertex dropped — closing it a second time would repeat points[0] again.
+	brush.modifiers[0].last_alignment = _alignment_standing_clear(shut_plan.size(), 0.0)
+	var gp := brush.graph_path()
+	if gp.points.size() < 2:
+		_check("[SH] graph", false, "the road built no graph path to check")
+	else:
+		var tail_dup: bool = gp.points[gp.points.size() - 1].is_equal_approx(gp.points[0])
+		_check("[SH] graph", gp.closed and not tail_dup
+				and gp.half_widths.size() == gp.points.size(),
+				"the graph path carries the seam as a flag, not a repeated vertex "
+				+ "(closed=%s, %d points, %d half widths)"
+				% [str(gp.closed), gp.points.size(), gp.half_widths.size()])
+
+	# Untick: all of it reverts, or "closing works" is passed by a road that was always closed.
+	brush.closed = false
+	_check("[SH] control", not curve.closed
+			and brush._plan_points().size() == open_plan.size(),
+			"unticking reopens the curve and the plan")
+	fx["terrain"].queue_free()
+
+
+## Three sides of a square, so the seam is a long, unambiguous distance and the open plan is plainly not
+## a ring. A nearly-closed shape would make [SH] length pass on a fixture that was already closed.
+func _ring_fixture() -> Dictionary:
+	var terrain := Pasture3D.new()
+	terrain.region_size = 256
+	terrain.vertex_spacing = 1.0
+	terrain.data_directory = SCRATCH_DATA
+	add_child(terrain)
+	terrain.data.add_region_blank(Vector2i(0, 0))
+	terrain.data.ensure_layer_stack()
+
+	var net := Pasture3DRoadNetwork.new()
+	terrain.add_child(net)
+	var t := Pasture3DRoadType.new()
+	t.type_name = "ring"
+	t.lane_count = 2
+	t.lane_width = 3.5
+	net.road_types = [t]
+
+	var brush := CountingRoadBrush.new()
+	brush.name = "Ring"
+	net.add_child(brush)
+	brush.terrain = terrain
+	brush.snap_to_surface = false
+	brush.road_road_type = t
+
+	var path := Path3D.new()
+	var curve := Curve3D.new()
+	curve.add_point(Vector3(60.0, 0.0, 60.0))
+	curve.add_point(Vector3(180.0, 0.0, 60.0))
+	curve.add_point(Vector3(180.0, 0.0, 180.0))
+	curve.add_point(Vector3(60.0, 0.0, 180.0))
+	path.curve = curve
+	brush.add_child(path)
+
+	var road_mod := Pasture3DNodeRoad.new()
+	road_mod.alignment_step = 4.0
+	brush.modifiers = [road_mod]
+	return {"terrain": terrain, "net": net, "brush": brush}
+
+
+func _polyline_length(p_pts: PackedVector2Array) -> float:
+	var total := 0.0
+	for i in range(1, p_pts.size()):
+		total += p_pts[i].distance_to(p_pts[i - 1])
+	return total
