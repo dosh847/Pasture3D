@@ -2,8 +2,9 @@
 
 **Document:** `PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md`
 **Status:** **Phase 1 complete — S1, S2, S3 and S4 BUILT 2026-09-03** (`RoadStaleGate` [SA]–[SH] pass,
-controls verified; 36 assertions). **S6 and S7 BUILT 2026-09-03** (`RoadCostGate` [CA]–[CC] passes,
-eight controls verified to fail; all 18 asserting road gates green). **S8–S12 PROPOSED, not started.** Check the symbol and the branch before planning from this header; it
+controls verified; 36 assertions). **S6, S7 and S8 BUILT 2026-09-03** (`RoadCostGate` [CA]–[CD]
+passes, twelve controls verified to fail; all 19 asserting road gates green). **S9–S12 PROPOSED, not
+started.** Check the symbol and the branch before planning from this header; it
 will go stale before the work does.
 **Target:** `Pasture3DRoadBrush` and its integration with the modifier stack, the road network resolve
 loop, and the terrain node graph.
@@ -528,10 +529,16 @@ the one that hurts — `Pasture3DRoadChunkHost.rebuild`'s digest (`:158`), which
 every resolve**, purely to decide that nothing changed. On a twenty-road network that is half a million
 String formats per spline drag.
 
-**Fix.** Replace the per-point formatting with an incremental numeric hash over the packed array — the
-same `hash()` over `PackedVector2Array` the stamp key already relies on — combined with the scalar terms.
-Keep the digest a `String` in the stored field so `input_digest` stays compatible with saved alignments;
-only the derivation changes.
+**Fix (BUILT).** One `hash()` over an array holding the packed plan and the seven scalar terms, still
+returned as a `String` so `input_digest`'s stored type is unchanged. The per-point loop, the join and the
+~500 KB intermediate are gone.
+
+**One behavioural change, and it is the safe direction.** `"%.3f"` quantised positions to a millimetre and
+the scalars to four or five places, so a change below those thresholds was invisible to the guard. Hashing
+the values does not quantise, so the digest can now only invalidate MORE often, never less — which is the
+only direction a staleness guard may move, since the failure it exists to prevent is a road rebuilt
+confidently in the wrong place. No tolerance is needed in its place: the plan comes from `tessellate()`
+over the same curve, so an unchanged road produces identical bits.
 
 **What must not break.** The function's own header states the property that matters: **the digest must be
 computed the same way when storing and when checking.** Both callers already go through this one
@@ -541,7 +548,18 @@ derivation invalidates every alignment saved by an older build; those roads corr
 bake" rather than being restored wrong, which is the designed behaviour of `restorable_alignment` and
 should be stated in the changelog rather than worked around.
 
-**Gate:** `[CD]`.
+**Gate:** `[CD]` — `project/bench/RoadCostGate.gd`. The cost here is structural (a per-point loop replaced
+by one `hash()`), and a structural change has no honest counter — the only measurement that would show it
+is a clock, and a clock on this machine measures whatever else is running. So `[CD]` asserts what could
+actually go wrong: determinism, the round trip through `restorable_alignment`, and each of the seven inputs
+named separately.
+
+`[CD] unquantised` is what makes it more than a restatement — a 0.1 mm move must invalidate the stored
+profile. That is a case the old derivation provably could not see, so it is the assertion that the loop is
+really gone rather than merely rearranged. Four controls run and verified to fail: `smooth_radius` dropped
+from the digest; the plan term reduced to its size; **the old `%.3f` implementation restored verbatim**
+(fails `[CD] unquantised` and nothing else); and a digest that also hashes the brush name and surface id,
+which restores nothing ever and turns every scene open into "your roads need a bake".
 
 ---
 

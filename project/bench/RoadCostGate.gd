@@ -33,6 +33,7 @@ func _ready() -> void:
 	_ca_the_plan_is_tessellated_once()
 	_cb_the_runtime_is_baked_on_purpose()
 	_cc_only_changed_layers_repaint()
+	_cd_the_alignment_digest_is_cheap_and_complete()
 	print("\n=== %s (%d failures) ===\n" % [
 		"ROAD COST PASS" if _fail == 0 else "ROAD COST FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
@@ -418,3 +419,117 @@ func _network_fixture() -> Dictionary:
 	for b in roads + shared:
 		b._refresh_owner(b._layer_owner, false, [])
 	return {"terrain": terrain, "net": net, "type": t, "roads": roads, "shared": shared}
+
+
+# ---- [CD] --------------------------------------------------------------------------------------
+
+## The alignment digest sees everything it saw before, and one thing it could not.
+##
+## ---- WHAT IT COST ----
+##
+## `alignment_digest` formatted every tessellated plan point with `"%.3f,%.3f"`, joined the lot and hashed
+## the resulting string. A 5 km road is ~25 000 points, so that is 25 000 `String` formats, a
+## 25 000-element join and a hash of ~500 KB — per call. It is called from `_paint_flat_footprint`,
+## `grade_surface`, `restorable_alignment` and `Pasture3DRoadChunkHost.rebuild`, and the last of those runs
+## for EVERY road on EVERY resolve, purely to decide that nothing had changed.
+##
+## ---- WHY THIS CRITERION IS MOSTLY ABOUT CORRECTNESS ----
+##
+## The cost here is structural — a per-point loop replaced by one `hash()` over the packed array — and a
+## structural change has no honest counter to report; the only measurement that would show it is a clock,
+## and a clock on this machine measures whatever else is running. So what is asserted is the thing that
+## could actually go wrong. `alignment_digest`'s own header states it: the digest must be computed the same
+## way when STORING and when CHECKING, because a staleness test that passes when it should fail rebuilds a
+## road confidently in the wrong place. So [CD] round-trips it, then names every input separately.
+##
+## ---- THE ONE BEHAVIOURAL CHANGE, ASSERTED RATHER THAN HOPED FOR ----
+##
+## `"%.3f"` quantised positions to a millimetre and the scalar terms to four or five places, so changes
+## below those thresholds were invisible to the guard. Hashing the values does not quantise. That can only
+## make the digest invalidate MORE often, never less, which is the safe direction for a guard and the only
+## direction that is — and `[CD] unquantised` is what pins it, because it is a case the old derivation
+## provably could not see.
+func _cd_the_alignment_digest_is_cheap_and_complete() -> void:
+	print("\n[CD] the alignment digest is derived numerically and still sees every input")
+	var fx := _fixture()
+	var brush: Pasture3DRoadBrush = fx["brush"]
+	var path: Path3D = fx["path"]
+	var mod: Pasture3DNodeRoad = brush.modifiers[0]
+	var t: Pasture3DRoadType = brush.resolved_road_type()
+
+	# Determinism first: everything below is meaningless if two calls on an untouched road disagree.
+	var base := brush.alignment_digest()
+	_check("[CD] stable", base == brush.alignment_digest() and not base.is_empty(),
+			"two calls on an untouched road agree (%s)" % base)
+
+	# The round trip. Store a profile stamped with the digest, then ask whether it is still an answer to
+	# the road as it stands — this is the only path `restore_built_output` trusts on scene load.
+	mod.last_alignment = _stamped_alignment(brush, mod)
+	_check("[CD] round trip", brush.restorable_alignment() != null,
+			"a profile stamped by this derivation is accepted by it")
+
+	# Every input, named separately. A digest missing one of these is a road restored from a profile that
+	# is no longer an answer to it, and nothing downstream can tell.
+	var cases: Array = [
+		["plan", func() -> void:
+				path.curve.set_point_position(1, Vector3(210.0, 0.0, 75.0))],
+		["road moved", func() -> void: path.position += Vector3(0.0, 0.0, 12.0)],
+		["alignment_step", func() -> void: mod.alignment_step = 7.0],
+		["smooth_radius", func() -> void: mod.smooth_radius = 25.0],
+		["follow_terrain", func() -> void: brush.road_follow_terrain = 1],
+		["max_grade", func() -> void: t.max_grade = 0.11],
+		["design_speed", func() -> void: t.design_speed = 31.0],
+	]
+	for c in cases:
+		var before := brush.alignment_digest()
+		(c[1] as Callable).call()
+		_check("[CD] %s" % c[0], brush.alignment_digest() != before,
+				"the stored profile is rejected once this input moves")
+
+	# ...and the stale profile from before all of that is now correctly refused.
+	_check("[CD] rejects", brush.restorable_alignment() == null,
+			"the profile stamped before those edits is no longer accepted")
+
+	# The change the removed formatting makes. `"%.3f"` rounded to a millimetre, so a tenth of one was
+	# invisible to the guard; hashing the values is not quantised. This case is here because it is the one
+	# the old derivation provably could not see, which makes it the assertion that the loop is really gone.
+	mod.last_alignment = _stamped_alignment(brush, mod)
+	var sub_mm := brush.alignment_digest()
+	path.curve.set_point_position(1, path.curve.get_point_position(1) + Vector3(0.0001, 0.0, 0.0))
+	_check("[CD] unquantised", brush.alignment_digest() != sub_mm
+			and brush.restorable_alignment() == null,
+			"a 0.1 mm move invalidates the stored profile")
+
+	# The control. A property the vertical profile is not a function of must NOT invalidate it, or [CD] is
+	# passed by a digest that changes on everything — which restores nothing, ever, and turns every scene
+	# open into "your roads need a bake".
+	mod.last_alignment = _stamped_alignment(brush, mod)
+	brush.name = "RenamedInTheInspector"
+	brush.road_surface_id = &"gravel"
+	_check("[CD] control", brush.restorable_alignment() != null,
+			"a rename and a surface change leave the stored profile restorable")
+	fx["terrain"].queue_free()
+
+
+## A minimal solved profile carrying the digest of the road as it stands. `restorable_alignment` needs
+## a non-empty alignment with a non-empty `input_digest`; the heights themselves are not read by [CD].
+func _stamped_alignment(p_brush: Pasture3DRoadBrush, p_mod: Pasture3DNodeRoad) -> Pasture3DRoadAlignment:
+	var a := Pasture3DRoadAlignment.new()
+	a.ds = p_mod.alignment_step
+	a.s0 = 0.0
+	var n := 8
+	a.z = _filled(n, 10.0)
+	a.ground = _filled(n, 10.0)
+	a.curvature = _filled(n, 0.0)
+	a.bank = _filled(n, 0.0)
+	a.pinned = PackedInt32Array()
+	a.pinned.resize(n)
+	a.input_digest = p_brush.alignment_digest(p_mod)
+	return a
+
+
+func _filled(p_n: int, p_v: float) -> PackedFloat32Array:
+	var a := PackedFloat32Array()
+	a.resize(p_n)
+	a.fill(p_v)
+	return a

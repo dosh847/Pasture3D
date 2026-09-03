@@ -1221,19 +1221,27 @@ func alignment_digest(p_mod: Pasture3DNodeRoad = null) -> String:
 		return ""
 	var plan := _plan_points()
 	var t := resolved_road_type()
-	var parts := PackedStringArray()
-	parts.append("n=%d" % plan.size())
-	for p in plan:
-		parts.append("%.3f,%.3f" % [p.x, p.y])
-	parts.append("ds=%.4f" % mod.alignment_step)
-	# P9b. Without this the profile is cached against a key that cannot see the slider, so dragging
-	# smooth_radius leaves the road exactly as it was and looks like the pass does nothing.
-	parts.append("smooth=%.4f" % mod.smooth_radius)
-	parts.append("drape=%s" % str(resolved_follow_terrain()))
-	parts.append("grade=%.5f" % (t.max_grade if t != null else -1.0))
-	parts.append("speed=%.3f" % (t.design_speed if t != null else -1.0))
-	parts.append("pins=%s" % junction_digest())
-	return str(hash("|".join(parts)))
+	# Hashed as a packed array, not formatted point by point. A 5 km road tessellates to ~25 000 points,
+	# and the previous derivation did 25 000 `String` formats, a 25 000-element join and a hash of the
+	# ~500 KB result — per call, from four call sites, one of which (`Pasture3DRoadChunkHost.rebuild`)
+	# runs for every road on every resolve purely to decide that nothing had changed.
+	#
+	# The terms are unquantised now, where the formats rounded positions to a millimetre and the scalars
+	# to four or five places. That is the safe direction for a staleness guard and the only direction that
+	# is: it can now only invalidate MORE often, never less, and a guard that misses a change rebuilds a
+	# road confidently in the wrong place. Nothing here needs a tolerance — the plan comes from
+	# `tessellate()` over the same curve, so an unchanged road produces identical bits.
+	return str(hash([
+		plan,
+		mod.alignment_step,
+		# P9b. Without this the profile is cached against a key that cannot see the slider, so dragging
+		# smooth_radius leaves the road exactly as it was and looks like the pass does nothing.
+		mod.smooth_radius,
+		resolved_follow_terrain(),
+		t.max_grade if t != null else -1.0,
+		t.design_speed if t != null else -1.0,
+		junction_digest(),
+	]))
 
 
 ## This road's stored profile if it is still an answer to the road as it stands now, else null.
