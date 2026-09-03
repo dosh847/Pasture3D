@@ -1,8 +1,8 @@
 # Pasture3D Road — Staleness Remediation & Cost Reduction
 
 **Document:** `PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md`
-**Status:** **S1 BUILT 2026-09-03** (`RoadStaleGate` [SA] [SB] [SC] [SF] [SG] pass, controls verified).
-**S2–S12 PROPOSED, not started.** Check the symbol and the branch before planning from this header; it
+**Status:** **S1 and S2 BUILT 2026-09-03** (`RoadStaleGate` [SA]–[SD] [SF] [SG] pass, controls verified;
+17 assertions, 13 road gates green). **S3–S12 PROPOSED, not started.** Check the symbol and the branch before planning from this header; it
 will go stale before the work does.
 **Target:** `Pasture3DRoadBrush` and its integration with the modifier stack, the road network resolve
 loop, and the terrain node graph.
@@ -188,7 +188,7 @@ the gate is the reader.
 
 ---
 
-### S2 — Road, group, network and road-type edits never schedule a bake
+### S2 — Road, group, network and road-type edits never schedule a bake — **BUILT**
 
 **Where:** `pasture3d_road_brush.gd:145`; `pasture3d_road_group.gd:86`; `pasture3d_road_network.gd:268`;
 and the absent connection to `Pasture3DRoadType.changed`.
@@ -227,10 +227,26 @@ unrelated methods on other classes.
    cache key anyway — it detaches on undo, where the value returns but the counter does not.
 
 **What must not break.** A network-level edit must schedule **one** bake per affected brush, not one per
-brush per property touched — `_arm_refresh_timer` already coalesces within `REFRESH_DELAY`, so this falls
-out, but the gate must assert it rather than assume it.
+brush per property touched. `[SD]` asserts `== 1` rather than `>= 1`: the brush attaches to its group AND
+its network AND its road type, and if any two of those paths carried the same edit, one property change
+would buy two full-layer bakes on a shared layer. `>= 1` would not notice.
 
-**Gate:** `[SD]` — `RoadStaleGate`.
+**What the build added that the plan did not have.** The group, the network and the road type cannot
+connect at a setter the way `road_defaults` and `segments` do — the first two are found by walking
+parents and the third is **resolved through the chain**, so any of them can be replaced without a setter
+on the brush firing. So there is a `_rewire_content_sources()` that re-derives all three and is called
+from `_ready`, from `NOTIFICATION_ENTER_TREE` (a reparent exits and re-enters the tree, and `_ready` runs
+once — the base class uses the same notification to re-join the brush group, for the same reason) and
+from `_on_road_changed` itself, *before* the refresh, because the thing that changed may have been the
+road type. `[SD] rewire` gates that last case: after switching types the brush must follow the new
+resource and stop hearing the old one.
+
+**A gate was asserting the bug.** `RoadModelGate` had a control reading `grp.content_key` and checking it
+had moved. It passed throughout — while a group defaults edit reached no brush and re-baked no terrain.
+A counter moving is not a consumer being told, and the control could not tell the two apart. It now
+counts `content_changed` at a real listener.
+
+**Gate:** `[SD]` — `RoadStaleGate`, five sources asserted separately plus a control and the re-wire.
 
 ---
 

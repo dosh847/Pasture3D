@@ -1,7 +1,7 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
-# RoadStaleGate — the brush stamp key is blind to road content.
-# PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md §3 S1, criteria [SA] [SB] [SC] [SF] [SG].
+# RoadStaleGate — road content that the terrain never hears about.
+# PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md §3, S1 ([SA] [SB] [SC] [SF] [SG]) and S2 ([SD]).
 #
 # ---- WHAT THIS GATE IS ABOUT ----
 #
@@ -42,14 +42,37 @@ const TERM_NAMES: PackedStringArray = [
 const TERM_JUNCTION: int = 8
 const TERM_PADDING: int = 9
 
+## A road brush that counts the re-bakes it asks for.
+##
+## `_schedule_refresh` gates on `_can_auto_refresh()`, which requires `Engine.is_editor_hint()` — false
+## headless — so watching `_full_dirty` would see nothing whichever way the wiring behaved, and [SD]
+## would pass on the unwired code it exists to catch. See [[SC]] above, which was caught doing exactly
+## that. Counting the CALL observes the decision; `super()` keeps the real behaviour underneath.
+class CountingRoadBrush extends Pasture3DRoadBrush:
+	var refreshes: int = 0
+
+	func _schedule_refresh() -> void:
+		refreshes += 1
+		super()
+
+
+## Where the fixtures' terrains keep their regions.
+##
+## OUTSIDE THE REPO, deliberately. A Pasture3D with no `data_directory` set falls back to the demo's, so
+## a fixture that calls `add_region_blank` writes a blank region into `project/demo/data/SimplePasture`
+## and the on-quit save then rewrites — and on some runs deletes — the demo's real region files. This gate
+## did exactly that on its first runs. `user://` is per-machine scratch that no commit can pick up.
+const SCRATCH_DATA := "user://road_stale_gate"
+
 var _fail: int = 0
 
 
 func _ready() -> void:
-	print("=== RoadStaleGate: the stamp key and road content (spec S1) ===\n")
+	print("=== RoadStaleGate: road content the terrain never hears about (S1, S2) ===\n")
 	_sa_junction_pins_reach_the_key()
 	_sb_corridor_widening_converges()
 	_sc_no_spurious_first_bake_rebake()
+	_sd_every_edit_schedules_a_bake()
 	_sf_signature_is_stable_with_no_edit()
 	_sg_chunk_host_shares_the_road_type_reading()
 	print("\n=== %s (%d failures) ===\n" % [
@@ -87,6 +110,7 @@ func _crossing_fixture() -> Dictionary:
 	var terrain := Pasture3D.new()
 	terrain.region_size = 256
 	terrain.vertex_spacing = 1.0
+	terrain.data_directory = SCRATCH_DATA
 	add_child(terrain)
 	var data: Pasture3DData = terrain.data
 	data.add_region_blank(Vector2i(0, 0))
@@ -109,7 +133,7 @@ func _crossing_fixture() -> Dictionary:
 	var brushes: Array = []
 	for spec in [[Vector3(40.0, 0.0, 128.0), Vector3(200.0, 0.0, 128.0), "EW"],
 			[Vector3(128.0, 0.0, 40.0), Vector3(128.0, 0.0, 200.0), "NS"]]:
-		var brush := Pasture3DRoadBrush.new()
+		var brush := CountingRoadBrush.new()
 		brush.name = String(spec[2])
 		net.add_child(brush)
 		brush.terrain = terrain
@@ -161,7 +185,7 @@ func _alignment_standing_clear(p_n: int, p_offset: float) -> Pasture3DRoadAlignm
 func _sa_junction_pins_reach_the_key() -> void:
 	print("[SA] junction pins move the stamp key")
 	var fx := _crossing_fixture()
-	var brush: Pasture3DRoadBrush = fx["brushes"][1]
+	var brush: CountingRoadBrush = fx["brushes"][1]
 	var path: Path3D = brush.get_child(0)
 
 	var before_sig := brush.road_content_signature()
@@ -169,7 +193,7 @@ func _sa_junction_pins_reach_the_key() -> void:
 	var before_digest := brush.junction_digest()
 
 	# Both roads need a solved alignment before they are detectable as crossing.
-	for b: Pasture3DRoadBrush in fx["brushes"]:
+	for b: CountingRoadBrush in fx["brushes"]:
 		var m: Pasture3DNodeRoad = b.modifiers[0]
 		m.last_alignment = _alignment_standing_clear(90, 0.0)
 	fx["net"].resolve_junctions()
@@ -206,7 +230,7 @@ func _sa_junction_pins_reach_the_key() -> void:
 func _sb_corridor_widening_converges() -> void:
 	print("[SB] the corridor widens once and then settles")
 	var fx := _crossing_fixture()
-	var brush: Pasture3DRoadBrush = fx["brushes"][0]
+	var brush: CountingRoadBrush = fx["brushes"][0]
 	var path: Path3D = brush.get_child(0)
 	var mod: Pasture3DNodeRoad = brush.modifiers[0]
 
@@ -251,7 +275,7 @@ func _sb_corridor_widening_converges() -> void:
 func _sc_no_spurious_first_bake_rebake() -> void:
 	print("[SC] a first bake that was wide enough asks for nothing")
 	var fx := _crossing_fixture()
-	var brush: Pasture3DRoadBrush = fx["brushes"][0]
+	var brush: CountingRoadBrush = fx["brushes"][0]
 	var mod: Pasture3DNodeRoad = brush.modifiers[0]
 
 	# Exactly what a bake does: capture the padding it is about to commit to, solve, then ask.
@@ -271,6 +295,121 @@ func _sc_no_spurious_first_bake_rebake() -> void:
 	_check("[SC] control", fired, "a road that outgrew its bake still scheduled one")
 	fx["terrain"].queue_free()
 
+# ---- [SD] --------------------------------------------------------------------------------------
+
+## A road brush under a group under a network, so all four levels of the resolve chain (§5.3) exist.
+##
+## `_crossing_fixture` parents its brushes straight under the network, which is legal and is the case
+## [SA] and [SB] want. [SD] needs the group level too, because a group's defaults reach a brush through
+## a DIFFERENT connection than the network's and wiring one is not wiring the other.
+func _chained_fixture() -> Dictionary:
+	var terrain := Pasture3D.new()
+	terrain.region_size = 256
+	terrain.vertex_spacing = 1.0
+	terrain.data_directory = SCRATCH_DATA
+	add_child(terrain)
+	terrain.data.add_region_blank(Vector2i(0, 0))
+	terrain.data.ensure_layer_stack()
+
+	var net := Pasture3DRoadNetwork.new()
+	terrain.add_child(net)
+	var t := Pasture3DRoadType.new()
+	t.type_name = "chained"
+	t.lane_count = 2
+	t.lane_width = 3.5
+	net.road_types = [t]
+
+	var grp := Pasture3DRoadGroup.new()
+	net.add_child(grp)
+
+	var brush := CountingRoadBrush.new()
+	brush.name = "Chained"
+	grp.add_child(brush)
+	brush.terrain = terrain
+	brush.snap_to_surface = false
+	brush.road_road_type = t
+
+	var path := Path3D.new()
+	var curve := Curve3D.new()
+	curve.add_point(Vector3(40.0, 0.0, 128.0))
+	curve.add_point(Vector3(200.0, 0.0, 128.0))
+	path.curve = curve
+	brush.add_child(path)
+
+	var seg := Pasture3DRoadSegment.new()
+	seg.from_distance = 20.0
+	seg.to_distance = 60.0
+	brush.segments = [seg]
+
+	var road_mod := Pasture3DNodeRoad.new()
+	road_mod.alignment_step = 2.0
+	brush.modifiers = [road_mod]
+	return {"terrain": terrain, "net": net, "group": grp, "brush": brush, "type": t, "segment": seg}
+
+
+## Each of the five levels that can change a resolved value schedules exactly one bake.
+##
+## ---- WHY FIVE SEPARATE ASSERTIONS AND NOT ONE LOOP ----
+##
+## A single combined criterion passes when four of the five are wired and one is not, which is exactly
+## the state the code was in: `road_defaults` and `segments` connected at their setters and reached
+## `_on_road_changed`, which incremented a counter nobody read. The group and the network incremented
+## counters of their own that reached no child at all, and nothing anywhere connected to
+## `Pasture3DRoadType.changed` — so editing `lane_width` on the type resource re-baked nothing, on any
+## brush using it. Naming the five is what makes a partial wiring fail loudly.
+##
+## ---- WHY EXACTLY ONE, NOT AT LEAST ONE ----
+##
+## The brush attaches to its group AND its network AND its road type. If any two of those paths carried
+## the same edit, one property change would schedule two full-layer bakes, and on a shared layer that is
+## the whole cost of the edit paid twice. `== 1` is what refuses a double-wire; `>= 1` would not notice.
+func _sd_every_edit_schedules_a_bake() -> void:
+	print("[SD] every level of the resolve chain schedules a bake")
+	var fx := _chained_fixture()
+	var brush: CountingRoadBrush = fx["brush"]
+	var grp: Pasture3DRoadGroup = fx["group"]
+	var net: Pasture3DRoadNetwork = fx["net"]
+	var t: Pasture3DRoadType = fx["type"]
+	var seg: Pasture3DRoadSegment = fx["segment"]
+
+	var edits: Array = [
+		["brush override", func() -> void: brush.road_lane_count = 6],
+		["segment", func() -> void: seg.is_bridge = true],
+		["group defaults", func() -> void: grp.road_defaults.lane_count = 4],
+		["network defaults", func() -> void: net.road_defaults.speed_limit = 22.0],
+		["road type", func() -> void: t.lane_width = 7.0],
+	]
+	for e in edits:
+		brush.refreshes = 0
+		(e[1] as Callable).call()
+		_check("[SD] %s" % e[0], brush.refreshes == 1,
+				"scheduled %d bake(s)" % brush.refreshes)
+
+	# The control. An edit to a road type this brush does NOT resolve must reach it zero times, or [SD]
+	# is passed by a brush that re-bakes on every resource in the scene — which is not wiring, it is a
+	# broadcast, and on a shared layer it costs more than the bug did.
+	var other := Pasture3DRoadType.new()
+	other.type_name = "unrelated"
+	brush.refreshes = 0
+	other.lane_width = 9.0
+	_check("[SD] control", brush.refreshes == 0,
+			"an unrelated road type scheduled %d bake(s)" % brush.refreshes)
+
+	# And the re-wire: switching to that type must move the brush's attention to it. Without this, a
+	# brush keeps listening to the type it no longer uses and stops hearing the one it does — the failure
+	# the group and network connections cannot have, because those are found by walking parents.
+	net.road_types = [t, other]
+	brush.road_road_type = other
+	brush.refreshes = 0
+	other.lane_width = 11.0
+	var followed := brush.refreshes
+	brush.refreshes = 0
+	t.lane_width = 3.5
+	var let_go := brush.refreshes
+	_check("[SD] rewire", followed == 1 and let_go == 0,
+			"after switching types the brush follows the new one (%d) and drops the old (%d)"
+			% [followed, let_go])
+	fx["terrain"].queue_free()
 
 # ---- [SF] --------------------------------------------------------------------------------------
 
@@ -283,7 +422,7 @@ func _sc_no_spurious_first_bake_rebake() -> void:
 func _sf_signature_is_stable_with_no_edit() -> void:
 	print("[SF] the signature repeats when nothing changed")
 	var fx := _crossing_fixture()
-	var brush: Pasture3DRoadBrush = fx["brushes"][0]
+	var brush: CountingRoadBrush = fx["brushes"][0]
 	var path: Path3D = brush.get_child(0)
 	var mod: Pasture3DNodeRoad = brush.modifiers[0]
 

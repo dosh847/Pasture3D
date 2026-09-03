@@ -243,10 +243,15 @@ func _configure_host(p_host: Pasture3DRoadChunkHost) -> void:
 ## it connects here, and Pasture3D still never decides what to do about it.
 signal signals_changed(junction: Pasture3DRoadJunction)
 
-## Bumped whenever anything that could change a resolved value changes. Brushes and (later) the
-## intersection resolver key their staleness on it, so a catalogue edit invalidates the right caches
-## without anyone diffing the catalogue.
-var content_key: int = 0
+## Emitted when anything that could change a child brush's RESOLVED value changes — the catalogue, the
+## defaults, the layer names. Child road brushes connect and schedule a re-bake.
+##
+## This replaces a `content_key: int` that was incremented here and read NOWHERE. A change count could
+## not have served as a cache key even if something had read it: it detaches on undo, where the value
+## comes back and the counter does not. What consumers actually needed was to be TOLD, which is a signal,
+## and what the stamp key needed was the content itself, which is
+## `Pasture3DRoadBrush.road_content_signature()`.
+signal content_changed
 
 
 func _init() -> void:
@@ -266,8 +271,8 @@ func _ready() -> void:
 
 
 func _bump() -> void:
-	content_key += 1
 	update_configuration_warnings()
+	content_changed.emit()
 
 
 ## The nearest Pasture3DRoadNetwork at or above `p_node`, or null. The lookup every level of the

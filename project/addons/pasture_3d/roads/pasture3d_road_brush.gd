@@ -125,9 +125,11 @@ const PAD_QUANTUM: float = 0.5
 ## see `junction_digest`. Not saved — a reload re-bakes and re-resolves anyway.
 var last_junction_digest: String = ""
 
-## Bumped whenever a resolved value could have changed. The staleness key P2's grading modifier and P4's
-## intersection resolver will fold into their caches.
-var content_key: int = 0
+## The upstream emitters `_on_road_changed` is currently attached to — this brush's group, its network and
+## its resolved road type. Held so they can be disconnected again: the group and network are found by
+## walking parents and the road type is RESOLVED, so all three can change without this node being
+## touched, and a connection to the old one would go on firing while the new one stayed silent.
+var _content_sources: Array[Object] = []
 
 
 func _init() -> void:
@@ -143,11 +145,85 @@ func _ready() -> void:
 	for s: Pasture3DRoadSegment in segments:
 		if s != null and not s.changed.is_connected(_on_road_changed):
 			s.changed.connect(_on_road_changed)
+	_rewire_content_sources()
 
 
+## A reparent EXITS and re-enters the tree, and `_ready` only runs once — so this is where a brush
+## dragged from one group to another picks up its new group's and network's defaults. The base class
+## uses the same notification to re-join the brush group, and for the same reason.
+func _notification(p_what: int) -> void:
+	super(p_what)
+	if p_what == NOTIFICATION_ENTER_TREE:
+		_rewire_content_sources()
+
+
+## Attach `_on_road_changed` to the levels of the resolve chain this brush does not own.
+##
+## Segments and `road_defaults` connect at their setters, because this node holds them. The GROUP, the
+## NETWORK and the ROAD TYPE do not work that way: the first two are found by walking parents and the
+## third is resolved through the chain, so any of them can be replaced without a setter on this node
+## firing. Re-derived on every call rather than diffed, because the cheap way to be correct here is to
+## not try to remember which one changed.
+func _rewire_content_sources() -> void:
+	var wanted: Array[Object] = []
+	var grp := road_group()
+	if grp != null:
+		wanted.append(grp)
+	var net := road_network()
+	if net != null:
+		wanted.append(net)
+	var t := resolved_road_type()
+	if t != null:
+		wanted.append(t)
+
+	for src: Object in _content_sources:
+		if is_instance_valid(src) and not wanted.has(src):
+			_disconnect_content(src)
+	for src: Object in wanted:
+		_connect_content(src)
+	_content_sources = wanted
+
+
+## `content_changed` on a group or a network, `changed` on a road type — the resource signal, because a
+## Pasture3DRoadType is a Resource shared between every brush that uses it, and editing `lane_width` on
+## it has to reach all of them.
+func _content_signal(p_src: Object) -> StringName:
+	return &"changed" if p_src is Pasture3DRoadType else &"content_changed"
+
+
+func _connect_content(p_src: Object) -> void:
+	var sig := _content_signal(p_src)
+	if not p_src.is_connected(sig, _on_road_changed):
+		p_src.connect(sig, _on_road_changed)
+
+
+func _disconnect_content(p_src: Object) -> void:
+	var sig := _content_signal(p_src)
+	if p_src.is_connected(sig, _on_road_changed):
+		p_src.disconnect(sig, _on_road_changed)
+
+
+## Something that could change a RESOLVED value moved: this brush's overrides, one of its segments, its
+## group's or network's defaults or catalogue, or the road type resource itself.
+##
+## ---- WHY THIS SCHEDULES A BAKE ----
+##
+## It used to increment a `content_key` nobody read and update the configuration warnings, and that was
+## all. So changing lane count from 2 to 6, picking a different road type, flipping Follow Terrain,
+## marking a segment as a bridge or editing `lane_width` on the type did nothing to the terrain: the old
+## corridor stayed until an unrelated edit forced a bake. Every sibling brush already does the
+## equivalent — Pasture3DRidge.width schedules a refresh from its setter.
+##
+## Safe during `_init` and scene load: `_schedule_refresh` gates on `_can_auto_refresh()`, which requires
+## the node to be inside the tree.
+##
+## The re-wire comes FIRST because the thing that changed may have been the road type itself — a brush
+## that switched types has to stop listening to the old resource and start listening to the new one, and
+## doing it after the refresh would leave one edit's worth of silence.
 func _on_road_changed() -> void:
-	content_key += 1
+	_rewire_content_sources()
 	update_configuration_warnings()
+	_schedule_refresh()
 
 
 # ---- The resolve chain (§5.3) -------------------------------------------------------------------
@@ -911,8 +987,8 @@ func _spline_length() -> float:
 # ---- JUNCTIONS (P4a) --------------------------------------------------------------------------------
 
 ## This road's identity in the junction records. The node's path relative to its network, so it survives
-## reparenting inside the network, a scene reload and a re-resolve — unlike `content_key`, which is a
-## change counter and would detach every override the moment anything was edited.
+## reparenting inside the network, a scene reload and a re-resolve — unlike a change counter, which would
+## detach every override the moment anything was edited.
 func road_key() -> String:
 	var net := road_network()
 	if net == null:

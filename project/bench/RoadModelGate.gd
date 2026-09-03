@@ -318,13 +318,17 @@ func _f_group_edit_moves_only_the_undisagreeing() -> void:
 	if not ok:
 		_fail += 1; print("    !! a group edit did not move exactly the un-overridden child")
 
-	# CONTROL: the group's content_key moves, so a later phase's cache has something to key on.
-	var key_before := grp.content_key
+	# CONTROL: the group ANNOUNCES the edit, so its brushes have something to react to.
+	#
+	# This used to read a `content_key: int` the group incremented and nobody read — which passed while
+	# a group defaults edit reached no brush and re-baked no terrain, because a counter moving is not the
+	# same as a consumer being told (S2). It is now the signal, counted at a real listener.
+	var heard := [0]
+	grp.content_changed.connect(func() -> void: heard[0] += 1)
 	grp.road_defaults.lane_count = 8
-	var key_after := grp.content_key
-	print("    control: group content_key %d -> %d" % [key_before, key_after])
-	if key_after <= key_before:
-		_fail += 1; print("    !! a defaults edit did not bump the group's content_key")
+	print("    control: group content_changed fired %d time(s)" % heard[0])
+	if heard[0] < 1:
+		_fail += 1; print("    !! a defaults edit did not announce itself to the group's listeners")
 	_teardown(fx)
 
 

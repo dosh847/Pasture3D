@@ -69,8 +69,15 @@ const PAINT_LAYER_MAPTYPE: int = 1 # Pasture3DData.MapType.TYPE_CONTROL
 			road_defaults.changed.connect(_bump)
 		_bump()
 
-## Bumped when anything that could change a child's resolved value changes.
-var content_key: int = 0
+## Emitted when anything that could change a child brush's RESOLVED value changes — the catalogue, the
+## defaults, the layer names. Child road brushes connect and schedule a re-bake.
+##
+## This replaces a `content_key: int` that was incremented here and read NOWHERE. A change count could
+## not have served as a cache key even if something had read it: it detaches on undo, where the value
+## comes back and the counter does not. What consumers actually needed was to be TOLD, which is a signal,
+## and what the stamp key needed was the content itself, which is
+## `Pasture3DRoadBrush.road_content_signature()`.
+signal content_changed
 
 
 func _init() -> void:
@@ -84,8 +91,8 @@ func _ready() -> void:
 
 
 func _bump() -> void:
-	content_key += 1
 	update_configuration_warnings()
+	content_changed.emit()
 
 
 ## The nearest Pasture3DRoadGroup at or above `p_node`, or null. A group is OPTIONAL — a brush parented
