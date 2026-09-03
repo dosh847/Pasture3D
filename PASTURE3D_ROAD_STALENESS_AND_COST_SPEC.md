@@ -1,8 +1,8 @@
 # Pasture3D Road — Staleness Remediation & Cost Reduction
 
 **Document:** `PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md`
-**Status:** **S1 and S2 BUILT 2026-09-03** (`RoadStaleGate` [SA]–[SD] [SF] [SG] pass, controls verified;
-17 assertions, 13 road gates green). **S3–S12 PROPOSED, not started.** Check the symbol and the branch before planning from this header; it
+**Status:** **S1, S2 and S3 BUILT 2026-09-03** (`RoadStaleGate` [SA]–[SG] pass, controls verified;
+30 assertions; 13 road gates and 5 graph gates green). **S4–S12 PROPOSED, not started.** Check the symbol and the branch before planning from this header; it
 will go stale before the work does.
 **Target:** `Pasture3DRoadBrush` and its integration with the modifier stack, the road network resolve
 loop, and the terrain node graph.
@@ -250,7 +250,7 @@ counts `content_changed` at a real listener.
 
 ---
 
-### S3 — `_assign` compares three of eleven fields, so cross-section edits never reach the graph
+### S3 — `_assign` compares three of eleven fields, so cross-section edits never reach the graph — **BUILT**
 
 **Where:** `pasture3d_road_network.gd:756-763`.
 
@@ -269,9 +269,20 @@ setter that emits `changed` (`pasture3d_graph_path.gd:110-126`), so the node's r
 every downstream cache stays warm on stale input.
 
 **Fix.** Give `Pasture3DGraphPath` a `content_digest() -> int` covering **every** field a consumer reads
-— the three geometry arrays, all five sample arrays, the three cross-section scalars and `closed` — and
-make `_assign` compare that. Do the same in `Pasture3DGraphSources._assign` (`:113-119`), which today
-compares only `closed` and `points` and has the identical hole for a shape's outline.
+— the three geometry arrays, all five sample arrays, the three cross-section scalars, `closed` **and the
+`alignment`** — and make `_assign` compare that. Do the same in `Pasture3DGraphSources._assign`
+(`:113-119`), which today compares only `closed` and `points` and has the identical hole for a shape's
+outline.
+
+**The alignment was not in the plan and belongs in the digest.** The draft listed thirteen fields and
+omitted `alignment`, on the reasoning that `heights` covers elevation. It does not: `heights` is per
+*vertex*, the alignment is per *sample*, and `Pasture3DRoadGrader` grades from the alignment. A re-solved
+profile with unchanged plan geometry — exactly what a `max_grade` or `smooth_radius` edit produces — would
+have been discarded. `Pasture3DRoadAlignment.content_digest()` is new for this, and covers the solved
+profile (`ds`, `s0`, `z`, `ground`, `curvature`, `bank`, `pinned`) but **not** the diagnostics: two
+alignments with identical geometry and different `cut_volume` reports grade to the same terrain, and
+including them would invalidate a downstream cache over a number nothing downstream reads. `input_digest`
+is excluded for a sharper reason — a digest of a digest of the inputs is not a digest of the result.
 
 **What must not break.** The narrowness is not an accident, it is an over-correction: `RoadGraphGate [G]`
 asserts *cache preservation on an identical re-resolve*, and assigning unconditionally would bump the node
@@ -279,7 +290,16 @@ revision on every bake and re-solve every downstream erosion from scratch. So th
 everything, cheaply** — never "assign always". The digest must be computed from the packed arrays'
 existing hashing, not by iterating them in GDScript, or S3 hands back the cost S6 is about to remove.
 
-**Gate:** `[SE]` — `RoadStaleGate`, alongside the existing `RoadGraphGate [G]`.
+**Gate:** `[SE]` — `RoadStaleGate`, eight cross-section fields asserted separately.
+
+**The control is the opposite property, not a broken variant.** `[SE] identical` asserts that two paths
+built from the same road still compare equal — `RoadGraphGate [G]`'s rule, restated *inside* this
+criterion so a future "fix" cannot satisfy [SE] by assigning unconditionally and throwing [G] away. The
+second control is `source_label`: a field no query reads must not invalidate anything downstream, or a
+rename in the inspector re-solves every erosion below the node.
+
+The fixture populates every array with non-degenerate values. Arrays left empty hash equal to each other
+whichever one an edit touches, and half the cases would pass without the digest covering anything.
 
 ---
 

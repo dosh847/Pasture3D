@@ -126,6 +126,40 @@ extends Resource
 @export var fill_batter: float = 0.6
 
 
+## Everything a consumer of this path reads, as one int.
+##
+## ---- WHY THIS EXISTS ----
+##
+## `Pasture3DRoadNetwork._assign` decides whether a rebuilt path differs from the one a Road Source
+## already holds. It used to compare `points`, `half_widths` and `heights` — three of the thirteen fields
+## below. A cross-section edit changes NONE of those: `crown` and the batters are not geometry, and
+## `sample_suppress` / `sample_skip` do not move the solved profile. So setting `crown_override`,
+## `cut_batter_override`, `fill_batter_override` or `verge_override` on a Pasture3DNodeRoad, or marking a
+## segment as a bridge, moved the brush's own grading step and never reached the graph's. Two roads,
+## differing by centimetres in the corners, from one spline — which is the exact failure the header of
+## this file says the PATH port exists to prevent.
+##
+## Nothing else rescued it: the `sample_*` arrays and the three cross-section scalars are plain `@export`
+## vars with no setter that emits `changed`, so the node's revision never bumped and every downstream
+## cache stayed warm on stale input.
+##
+## ---- WHY NOT JUST ASSIGN ALWAYS ----
+##
+## Because the narrowness was an OVER-correction, not an oversight. Assigning unconditionally emits
+## `changed`, bumps the node's revision and re-solves every downstream erosion from scratch on every
+## bake — `RoadGraphGate [G]` exists to refuse exactly that. So the rule is compare EVERYTHING, cheaply:
+## `hash()` over a packed array is one native pass, not a GDScript loop.
+##
+## `source_label` is excluded because no query reads it; it is a label for the inspector.
+func content_digest() -> int:
+	return hash([
+		points, half_widths, heights, closed,
+		alignment.content_digest() if alignment != null else 0,
+		sample_half_widths, sample_shoulders, sample_verges, sample_suppress, sample_skip,
+		crown, cut_batter, fill_batter,
+	])
+
+
 ## True when this path carries enough to be graded, not merely measured.
 ##
 ## The one question a Road Grade node has to ask. Answering it with a null check on the alignment alone

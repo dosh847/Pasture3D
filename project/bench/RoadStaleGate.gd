@@ -1,7 +1,7 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
 # RoadStaleGate — road content that the terrain never hears about.
-# PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md §3, S1 ([SA] [SB] [SC] [SF] [SG]) and S2 ([SD]).
+# PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md §3, S1 ([SA] [SB] [SC] [SF] [SG]), S2 ([SD]) and S3 ([SE]).
 #
 # ---- WHAT THIS GATE IS ABOUT ----
 #
@@ -68,11 +68,12 @@ var _fail: int = 0
 
 
 func _ready() -> void:
-	print("=== RoadStaleGate: road content the terrain never hears about (S1, S2) ===\n")
+	print("=== RoadStaleGate: road content the terrain never hears about (S1-S3) ===\n")
 	_sa_junction_pins_reach_the_key()
 	_sb_corridor_widening_converges()
 	_sc_no_spurious_first_bake_rebake()
 	_sd_every_edit_schedules_a_bake()
+	_se_cross_section_edits_reach_the_graph()
 	_sf_signature_is_stable_with_no_edit()
 	_sg_chunk_host_shares_the_road_type_reading()
 	print("\n=== %s (%d failures) ===\n" % [
@@ -410,6 +411,90 @@ func _sd_every_edit_schedules_a_bake() -> void:
 			"after switching types the brush follows the new one (%d) and drops the old (%d)"
 			% [followed, let_go])
 	fx["terrain"].queue_free()
+# ---- [SE] --------------------------------------------------------------------------------------
+
+## A cross-section edit reaches the graph, and an identical re-resolve still does not.
+##
+## ---- THE TWO HALVES ARE IN TENSION, WHICH IS WHY THEY ARE ONE CRITERION ----
+##
+## `Pasture3DRoadNetwork._assign` compared `points`, `half_widths` and `heights` — three of the thirteen
+## fields a `Pasture3DGraphPath` carries. A cross-section edit changes none of them: crown and the batters
+## are not geometry, and `sample_suppress` / `sample_skip` do not move the solved profile. So the rebuilt
+## path was discarded and the Road Grade node kept grading to the old cross-section while the brush's own
+## grading step used the new one — two roads, differing by centimetres in the corners, from one spline.
+##
+## But the narrowness was an OVER-correction, not an oversight, and "assign always" is not the fix.
+## Assigning unconditionally emits `changed`, bumps the node's revision and re-solves every downstream
+## erosion from scratch on every bake; `RoadGraphGate [G]` exists to refuse that. So the control here is
+## not a broken variant of the scenario — it is the OPPOSITE property, restated inside this criterion so
+## that a future "fix" cannot satisfy [SE] by throwing [G] away.
+func _se_cross_section_edits_reach_the_graph() -> void:
+	print("[SE] a cross-section edit reaches the graph, an identical rebuild does not")
+
+	# Two paths built from the same road, differing in ONE cross-section field at a time. Built directly
+	# rather than through a resolve: `_assign`'s decision is a function of the two paths, and driving a
+	# whole network to produce them would test the resolve loop instead of the comparison.
+	var base := _sample_path()
+	var same := _sample_path()
+	_check("[SE] identical", base.content_digest() == same.content_digest(),
+			"two paths built from the same road compare equal, so [G]'s cache survives")
+
+	var cases: Array = [
+		["crown", func(p: Pasture3DGraphPath) -> void: p.crown = 0.09],
+		["cut_batter", func(p: Pasture3DGraphPath) -> void: p.cut_batter = 2.0],
+		["fill_batter", func(p: Pasture3DGraphPath) -> void: p.fill_batter = 0.3],
+		["verges", func(p: Pasture3DGraphPath) -> void: p.sample_verges = _filled(8, 6.0)],
+		["shoulders", func(p: Pasture3DGraphPath) -> void: p.sample_shoulders = _filled(8, 1.5)],
+		["suppress (bridge)", func(p: Pasture3DGraphPath) -> void:
+				var b := PackedByteArray(); b.resize(8); b[4] = 1; p.sample_suppress = b],
+		["skip (junction)", func(p: Pasture3DGraphPath) -> void:
+				var b := PackedByteArray(); b.resize(8); b[2] = 1; p.sample_skip = b],
+		["alignment", func(p: Pasture3DGraphPath) -> void:
+				p.alignment = _alignment_standing_clear(8, 5.0)],
+	]
+	for c in cases:
+		var edited := _sample_path()
+		(c[1] as Callable).call(edited)
+		_check("[SE] %s" % c[0], edited.content_digest() != base.content_digest(),
+				"the rebuilt path is seen as different, so Road Grade is handed it")
+
+	# The control. `source_label` is a name for the inspector and no query reads it, so it must NOT count
+	# as a change — a digest that moved on it would re-solve every downstream erosion over a rename, which
+	# is [G]'s failure rather than [SE]'s.
+	var relabelled := _sample_path()
+	relabelled.source_label = "renamed in the inspector"
+	_check("[SE] control", relabelled.content_digest() == base.content_digest(),
+			"a field no query reads does not invalidate anything downstream")
+
+
+## A path with every field a Road Grade node reads, populated and non-degenerate.
+##
+## Non-degenerate matters: arrays left empty would hash equal to each other no matter which one an edit
+## touched, and half the cases above would pass without the digest covering anything.
+func _sample_path() -> Pasture3DGraphPath:
+	var p := Pasture3DGraphPath.new()
+	var pts := PackedVector2Array()
+	for i in 8:
+		pts.append(Vector2(float(i) * 10.0, 0.0))
+	p.points = pts
+	p.half_widths = _filled(8, 4.0)
+	p.heights = _filled(8, 2.0)
+	p.sample_half_widths = _filled(8, 4.0)
+	p.sample_shoulders = _filled(8, 0.5)
+	p.sample_verges = _filled(8, 4.0)
+	p.sample_suppress = PackedByteArray()
+	p.sample_suppress.resize(8)
+	p.sample_skip = PackedByteArray()
+	p.sample_skip.resize(8)
+	p.alignment = _alignment_standing_clear(8, 0.0)
+	return p
+
+
+func _filled(p_n: int, p_v: float) -> PackedFloat32Array:
+	var a := PackedFloat32Array()
+	a.resize(p_n)
+	a.fill(p_v)
+	return a
 
 # ---- [SF] --------------------------------------------------------------------------------------
 

@@ -758,13 +758,18 @@ func resolve_graph_paths(p_graph: Pasture3DTerrainGraph, p_default: Node = null)
 ## scratch whenever anything in the scene was baked, and the cache would look broken rather than bypassed.
 ## Compared by CONTENT, because the path is rebuilt from the road each time and is a different object even
 ## when the road has not moved.
+##
+## Through `content_digest()`, which covers every field a consumer reads. This used to compare `points`,
+## `half_widths` and `heights` and nothing else, so a cross-section edit — crown, either batter, the
+## verge, a segment marked as a bridge — rebuilt the path, found the three geometry arrays unchanged,
+## discarded it, and left the graph grading to the old profile while the brush graded to the new one.
+## See `Pasture3DGraphPath.content_digest`.
 func _assign(p_src: Pasture3DGraphNodeRoadSource, p_path: Pasture3DGraphPath) -> void:
 	if p_path == null:
 		return
 	var old := p_src.path
-	if old != null and old.points == p_path.points and old.half_widths == p_path.half_widths:
-		if old.heights == p_path.heights:
-			return
+	if old != null and old.content_digest() == p_path.content_digest():
+		return
 	p_src.path = p_path
 
 

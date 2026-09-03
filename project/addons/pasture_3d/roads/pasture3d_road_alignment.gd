@@ -164,3 +164,13 @@ func structure_intervals(p_bridge_threshold: float = 6.0, p_tunnel_threshold: fl
 	if open >= 0:
 		out.append([s0 + float(open) * ds, s0 + float(n - 1) * ds, open_bridge])
 	return out
+## Everything a consumer of this alignment reads, as one int. Used by `Pasture3DGraphPath.content_digest`
+## to decide whether a rebuilt path actually differs from the one a Road Source already holds.
+##
+## The SOLVED profile, not the diagnostics. `max_grade_used`, `peak_grade`, the volumes, `pin_error` and
+## `feasible` are reports ABOUT this solve; two alignments with identical geometry and different volume
+## reports grade to the same terrain, and including them would invalidate a downstream cache over a
+## number nothing downstream reads. `input_digest` is likewise excluded — it identifies the INPUTS, and a
+## digest of a digest of the inputs is not a digest of the result.
+func content_digest() -> int:
+	return hash([ds, s0, z, ground, curvature, bank, pinned])

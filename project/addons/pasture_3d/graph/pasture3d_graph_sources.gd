@@ -110,10 +110,14 @@ static func _terrain_of(p_host: Node) -> Node:
 ## the node's revision, which invalidates every downstream cache — so a graph with a shape in it would
 ## re-solve from scratch on every bake and the cache would look broken rather than bypassed. This is the
 ## same rule Pasture3DRoadNetwork._assign follows, and it has its own control in the gate.
+##
+## Through `content_digest()` for the same reason the road's does: comparing `closed` and `points` alone
+## left the identical hole here — a shape whose half-widths or heights moved rebuilt its outline, matched
+## on the two fields tested, and was thrown away.
 static func _assign(p_src: Pasture3DGraphNodeShapeSource, p_path: Pasture3DGraphPath) -> void:
 	if p_path == null:
 		return
 	var cur := p_src.path
-	if cur != null and cur.closed == p_path.closed and cur.points == p_path.points:
+	if cur != null and cur.content_digest() == p_path.content_digest():
 		return
 	p_src.path = p_path
