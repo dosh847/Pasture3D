@@ -1870,18 +1870,31 @@ func pick_road_screen_distance(camera: Camera3D, screen_pos: Vector2, margin_px:
 			# FOV: the corridor-aware margin it feeds was correct only at the default FOV and the
 			# viewport height that constant happened to have been fitted to, and silently wrong at any
 			# other — a wide-FOV viewport picked a corridor several times too wide.
+			#
+			# ---- INSIDE THE RIBBON IS A HIT, NOT A WIDER NEAR MISS ----
+			#
+			# This used to widen the ACCEPT threshold to `maxf(margin_px, half_w * ppm)` and then return
+			# the raw pixel distance. `_pick_brush_screen` passes its own `radius` as `margin_px` and then
+			# rejects any returned `d` greater than that same radius — so every hit the widening admitted
+			# above `margin_px` was thrown straight away again, and the corridor-aware margin changed no
+			# outcome whatsoever. It read as a feature and was dead code.
+			#
+			# The intent behind it is real: a 30 m carriageway should be pickable anywhere across its
+			# width, not only within 24 px of its centreline. So the corridor now decides WHAT THE
+			# DISTANCE IS rather than what the threshold is — inside the ribbon the cursor is ON the road,
+			# which is distance zero, exactly as the ground raymarch below already reports it. That
+			# survives the caller's filter, where a widened threshold could not.
 			var mid := (w1 + w2) * 0.5
 			var cam_dist := camera.global_position.distance_to(mid)
-			var effective_margin := maxf(margin_px, half_w * _pixels_per_metre(camera, cam_dist))
+			if d <= half_w * _pixels_per_metre(camera, cam_dist):
+				d = 0.0
 
-			if d <= effective_margin and d < best_d:
+			if d <= margin_px and d < best_d:
 				best_d = d
 
 	# 2. Ground raymarch intersection check against road plan
 	if is_inf(best_d) and terrain != null and is_instance_valid(terrain):
-		var ray_from := camera.project_ray_origin(screen_pos)
-		var ray_dir := camera.project_ray_normal(screen_pos)
-		var hit: Vector3 = terrain.get_intersection(ray_from, ray_dir, false)
+		var hit: Vector3 = _pick_ground_hit(camera, screen_pos)
 		if hit.z < 3.4e38 and not is_nan(hit.y):
 			var plan := _plan_points()
 			if plan.size() >= 2:
@@ -1908,6 +1921,36 @@ func pick_brush_screen_distance(camera: Camera3D, screen_pos: Vector2, margin_px
 	if pick_point_screen(camera, screen_pos, margin_px)[0] != null:
 		return POINT_PICK_DISTANCE
 	return maxf(pick_road_screen_distance(camera, screen_pos, margin_px), SURFACE_PICK_FLOOR)
+
+
+## ---- ONE RAYMARCH PER CLICK, NOT ONE PER ROAD ----
+##
+## `terrain.get_intersection` is a CPU raymarch through the heightmap. `_pick_brush_screen` loops every
+## node in the `pasture3d_brush` group and asks each one for its distance, so a network of twenty roads
+## whose screen-space rungs all miss ran twenty raymarches against THE SAME RAY, on every Select-Brush
+## click, Ctrl-click and sculpt click.
+##
+## The ray is the whole key: two roads answering the same pick are handed the same `camera` and the same
+## `screen_pos`, so they derive the same origin and direction, and a raymarch is a pure function of that
+## and the terrain. Hence a memo rather than a parameter — the caller needs no change, and the sculpt
+## path gets the same saving as the plugin's picker.
+##
+## The frame number bounds it. Terrain can be deformed under a stationary cursor, and a ray that has not
+## moved would otherwise answer from a heightfield that no longer exists; the pick loop this exists for
+## runs entirely inside one frame, so one frame is exactly as long as the answer is wanted.
+static var _pick_hit_key: Array = []
+static var _pick_hit: Vector3 = Vector3.ZERO
+
+
+func _pick_ground_hit(p_camera: Camera3D, p_screen_pos: Vector2) -> Vector3:
+	var ray_from := p_camera.project_ray_origin(p_screen_pos)
+	var ray_dir := p_camera.project_ray_normal(p_screen_pos)
+	var key: Array = [terrain.get_instance_id(), ray_from, ray_dir, Engine.get_process_frames()]
+	if key == _pick_hit_key:
+		return _pick_hit
+	_pick_hit = terrain.get_intersection(ray_from, ray_dir, false)
+	_pick_hit_key = key
+	return _pick_hit
 
 
 ## Pixels per world metre for a point `p_dist` metres in front of `p_camera`.

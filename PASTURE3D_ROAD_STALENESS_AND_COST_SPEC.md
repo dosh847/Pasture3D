@@ -381,7 +381,7 @@ These differ, and the difference is deliberate.
 | 6 | **S11** — `corridor_half_width` memo | O(alignment) per editor click per road | 6th |
 | 7 | **S12** — pick path | One CPU raymarch per road per click | 7th |
 
-**S6 lands first despite ranking second** because it has no semantic surface at all, and because it is
+**S6-S12 BUILT 2026-09-03** (RoadCostGate [CA]-[CG] and RoadBrushPickGate [RE]-[RF] pass, thirty controls verified to fail; all 19 asserting road gates green). The spec is complete.
 what makes S7 measurable: with the tessellation cached, the remaining cost of the resolve loop is the
 work itself rather than the re-derivation, so a counter on `build_run()` calls means something.
 
@@ -734,6 +734,29 @@ arrangement is the one thing it must not stay** — a widened margin that the ca
 feature and is dead code.
 
 **Gate:** extend `RoadBrushPickGate` rather than adding a gate; the fixture is already there.
+
+**(BUILT)** The raymarch is memoised on the brush class rather than hoisted into `_pick_brush_screen`:
+`_pick_ground_hit` keys a static cache on the terrain id, the ray origin, the ray direction and
+`Engine.get_process_frames()`. The ray IS the whole key -- every brush answering one pick is handed the
+same `camera` and `screen_pos` -- so the caller needs no new parameter and the sculpt-click path gets the
+same saving as the plugin's picker. The frame number bounds it, because a stationary cursor over terrain
+being sculpted would otherwise be answered from a heightfield that no longer exists.
+
+**Correction to the fix as written.** "Pass the world point down" is not available: `pick_brush_screen_distance`
+overrides a base-class method, and GDScript rejects an override that adds a parameter. A memo was the only
+shape that left both call paths alone.
+
+**Correction to the margin choice.** Neither of the two options the spec offered was taken. Passing the
+enforced radius down changes nothing (the caller already passes `radius` as `margin_px`), and dropping the
+widening outright discards its real intent -- a 30 m carriageway should be pickable across its width. So the
+corridor now decides WHAT THE DISTANCE IS rather than what the threshold is: inside the ribbon, `d = 0.0`,
+which is the answer the ground raymarch below it already gives. That survives the caller's filter, where a
+widened threshold provably could not.
+
+**Gate note.** `[RE]` cannot count `get_intersection` -- GDScript may not shadow a native method, so there is
+no CountingTerrain to write. It poisons the cached value instead, leaving the key alone: a second road that
+comes back with a sentinel the terrain could never return did not march. `[RF]`'s pre-fix control reports
+`133.45 px, which the caller accepts at radius 24.0` -- the dead margin, stated in its own numbers.
 
 ---
 
