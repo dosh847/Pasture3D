@@ -481,9 +481,20 @@ func _forward_brush_input(p_camera: Camera3D, p_event: InputEvent, p_brush: Past
 
 	if not (p_event is InputEventMouseButton) or not p_event.is_pressed():
 		return AFTER_GUI_INPUT_PASS
-	var terr: Pasture3D = p_brush.terrain
-	if not is_instance_valid(terr) or terr.data == null:
-		return AFTER_GUI_INPUT_PASS
+
+	# ---- THE TERRAIN GATE BELONGS TO THE ADD PATH, NOT TO ALL OF THEM ----
+	#
+	# This used to bail out here when `p_brush.terrain` was null or dataless, which killed EVERY point
+	# interaction — double-click, right-click remove, and the Delete key — while the gizmo went on drawing
+	# the handles. Points you can see and cannot touch.
+	#
+	# Only the Ctrl-click ADD needs a terrain, because only it raycasts the surface to decide where the new
+	# point goes. Toggling a tangent and removing a point are pure curve edits and want nothing from it.
+	#
+	# `terrain` is auto-assigned from the first Pasture3D ANCESTOR (`_terrain_ancestor`), so a brush that
+	# is not parented under the terrain never gets one. A road authored under a Pasture3DRoadNetwork that
+	# sits beside the terrain rather than inside it is exactly that case, which is why this read as "road
+	# spline points stopped working" while mounds and ridges were fine.
 
 	# Mouse position in the camera's (possibly half-resolution) viewport space, matching the sculpt path.
 	var vp: SubViewport = p_camera.get_parent()
@@ -508,6 +519,10 @@ func _forward_brush_input(p_camera: Camera3D, p_event: InputEvent, p_brush: Past
 
 	var add_mod: bool = p_event.meta_pressed if _use_meta else p_event.ctrl_pressed
 	if p_event.get_button_index() == MOUSE_BUTTON_LEFT and add_mod:
+		# The one branch that needs a surface to hit — see the note above.
+		var terr: Pasture3D = p_brush.terrain
+		if not is_instance_valid(terr) or terr.data == null:
+			return AFTER_GUI_INPUT_PASS
 		var from: Vector3 = p_camera.project_ray_origin(mouse_pos)
 		var dir: Vector3 = p_camera.project_ray_normal(mouse_pos)
 		# CPU raymarch (false): the GPU path is stale on a one-shot click (renders + reads a SubViewport

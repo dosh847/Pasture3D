@@ -1151,6 +1151,12 @@ func ensure_chunk_host() -> Pasture3DRoadChunkHost:
 			return child
 	var host := Pasture3DRoadChunkHost.new()
 	host.name = "Chunks"
+	# Built output, not a spline and not part of the footprint — so adding it must NOT read as a
+	# structural edit. Without this, `_on_child_changed` schedules a FULL-layer rebake the first time the
+	# host is created, and the host is created lazily from the gizmo's `_redraw`: the first time a road's
+	# gizmo drew, it re-baked the whole layer. Every other brush that adds a bookkeeping child says so the
+	# same way (see Pasture3DTerrainBrush.INTERNAL_CHILD_META).
+	host.set_meta(INTERNAL_CHILD_META, true)
 	add_child(host)
 	# Not owned by the edited scene: chunks are BUILT output, rebuilt from the spline and the alignment at
 	# every bake. Saving them would put a few thousand vertices per road into the .tscn and reload them
@@ -1363,8 +1369,20 @@ func pick_road_screen_distance(camera: Camera3D, screen_pos: Vector2, margin_px:
 	return best_d
 
 
+## ---- A CONTROL POINT BEATS THE SURFACE THAT OWNS IT ----
+##
+## This used to be `return pick_road_screen_distance(...)`, which measures the RIBBON and never tests the
+## control points at all — throwing away the one thing the base class does first. `_pick_brush_screen`
+## then compared a road's ribbon distance (0.0 anywhere on the road) against every other brush's, so
+## clicking a control point of THIS road while ANOTHER road's ribbon ran under the cursor selected the
+## other road and the point you were aiming at was never editable. Crossing roads and parallel roads are
+## the common case, not the corner one.
+##
+## So: our own points first, exactly as the base does, and only then the ribbon.
 func pick_brush_screen_distance(camera: Camera3D, screen_pos: Vector2, margin_px: float = 24.0) -> float:
-	return pick_road_screen_distance(camera, screen_pos, margin_px)
+	if pick_point_screen(camera, screen_pos, margin_px)[0] != null:
+		return POINT_PICK_DISTANCE
+	return maxf(pick_road_screen_distance(camera, screen_pos, margin_px), SURFACE_PICK_FLOOR)
 
 
 ## Pixels per world metre for a point `p_dist` metres in front of `p_camera`.

@@ -53,6 +53,20 @@ const BRUSH_GROUP: StringName = &"pasture3d_brush"
 ## (Sim's Generated folder, its water-feature overlay) says so with this.
 const INTERNAL_CHILD_META: StringName = &"_brush_internal_child"
 
+## ---- THE TWO RUNGS OF `pick_brush_screen_distance` ----
+##
+## `Pasture3DEditorPlugin._pick_brush_screen` compares one distance across EVERY brush in the scene and
+## takes the smallest, so the scale has to mean the same thing everywhere. It has two rungs:
+##
+## `POINT_PICK_DISTANCE` — the cursor is on a CONTROL POINT of this brush. A point is a more specific
+## target than the surface it belongs to, so it must beat any surface hit, including one at zero pixels.
+## `SURFACE_PICK_FLOOR` — the least a SURFACE hit (spline line, ribbon, origin marker) may report, so
+## that a surface directly under the cursor still loses to somebody's control point. Without the floor a
+## road ribbon answered 0.0 anywhere along the road and tied with every point in the scene, and the tie
+## went to whichever brush the group happened to list first.
+const POINT_PICK_DISTANCE: float = 0.0
+const SURFACE_PICK_FLOOR: float = 1.0
+
 # Debounce for auto-refresh while dragging spline handles (seconds).
 const REFRESH_DELAY: float = 0.1
 
@@ -2633,9 +2647,10 @@ func pick_point_screen(camera: Camera3D, screen_pos: Vector2, radius: float) -> 
 ## Distance in screen pixels from `screen_pos` to this brush, or INF if not within `margin_px`.
 func pick_brush_screen_distance(camera: Camera3D, screen_pos: Vector2, margin_px: float = 24.0) -> float:
 	var best_d := INF
+	# A control point beats any surface — see POINT_PICK_DISTANCE.
 	var pt_hit := pick_point_screen(camera, screen_pos, margin_px)
 	if pt_hit[0] != null:
-		return 0.0
+		return POINT_PICK_DISTANCE
 
 	for s in _get_splines():
 		if s == null or s.curve == null:
@@ -2663,7 +2678,8 @@ func pick_brush_screen_distance(camera: Camera3D, screen_pos: Vector2, margin_px
 		if od <= margin_px and od < best_d:
 			best_d = od
 
-	return best_d
+	# Everything above this line is a SURFACE hit, so it is floored — see SURFACE_PICK_FLOOR.
+	return best_d if best_d == INF else maxf(best_d, SURFACE_PICK_FLOOR)
 
 
 ## Insert a point at `world` on the nearest loop's nearest segment (undoable). The curve change drives
