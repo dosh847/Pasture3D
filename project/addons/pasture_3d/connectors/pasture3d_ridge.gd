@@ -272,7 +272,7 @@ func _brush_param_signature() -> Array:
 		super._brush_param_signature(),
 		crest_height, width, flank_mode, slope_angle, blend_mode, invert,
 		falloff, follow_spline_height, noise_strength, smooth_passes,
-		profile.get_baked_points() if profile != null else [],
-		width_curve.get_baked_points() if width_curve != null else []
+		_curve_signature(profile),
+		_curve_signature(width_curve)
 	]
 

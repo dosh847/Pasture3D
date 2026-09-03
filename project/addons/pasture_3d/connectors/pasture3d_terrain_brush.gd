@@ -1628,6 +1628,18 @@ func _brush_param_signature() -> Array:
 	return [snap_to_surface, surface_offset, force_gdscript_raster, _effective_modifier_margin()]
 
 
+## Stable, hashable signature of a 1D Curve for stamp-cache invalidation.
+## Curve (unlike Curve2D/Curve3D) does not have get_baked_points().
+static func _curve_signature(c: Curve, samples: int = 32) -> Array:
+	if c == null:
+		return []
+	var sig: Array = [c.min_value, c.max_value, c.get_point_count()]
+	for i in range(samples + 1):
+		sig.append(c.sample_baked(float(i) / float(samples)))
+	return sig
+
+
+
 func _modifier_signature() -> Array:
 	var sig := []
 	if _supports_modifiers():

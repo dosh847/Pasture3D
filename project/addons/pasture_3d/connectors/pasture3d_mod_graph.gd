@@ -278,7 +278,7 @@ func _validate_property(property: Dictionary) -> void:
 
 func content_key() -> int:
 	var ck := graph.content_key() if graph != null else 0
-	var curve_pts: PackedVector2Array = custom_falloff_curve.get_baked_points() if custom_falloff_curve != null else PackedVector2Array()
+	var curve_pts := Pasture3DTerrainBrush._curve_signature(custom_falloff_curve)
 	return hash([ck, strength, enabled, int(feather_mode), custom_falloff_width, curve_pts])
 
 

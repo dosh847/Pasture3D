@@ -294,5 +294,5 @@ func _brush_param_signature() -> Array:
 		super._brush_param_signature(),
 		blend_mode, relative_to_terrain,
 		falloff_width, edge_offset, smooth_passes,
-		falloff_curve.get_baked_points() if falloff_curve != null else []
+		_curve_signature(falloff_curve)
 	]

@@ -280,8 +280,8 @@ func _brush_param_signature() -> Array:
 		super._brush_param_signature(),
 		depth, bed_half_width, flat_bed, flank_mode, slope_angle, blend_mode,
 		bank_width, falloff, follow_spline_height, noise_strength, smooth_passes,
-		bank_profile.get_baked_points() if bank_profile != null else [],
-		width_curve.get_baked_points() if width_curve != null else []
+		_curve_signature(bank_profile),
+		_curve_signature(width_curve)
 	]
 
 
