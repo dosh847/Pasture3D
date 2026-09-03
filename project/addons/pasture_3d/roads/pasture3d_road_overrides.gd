@@ -131,3 +131,19 @@ func is_empty() -> bool:
 		if not is_unset(get(f)):
 			return false
 	return true
+## This level's opinions, as a plain Array, for the brush stamp key.
+##
+## Feeds `Pasture3DRoadBrush.road_content_signature`. Sentinels are included rather than skipped: a
+## field returning to INHERIT is as much a change to the resolved road as setting it was, and a
+## signature that only listed the fields with opinions could not tell the two apart.
+##
+## `road_type` contributes its GRADING SIGNATURE rather than its identity, so editing lane_width on a
+## shared road type invalidates every brush using it. An instance id would be stable across exactly the
+## edits that change the corridor — the failure the chunk host's digest already had to be rescued from.
+## `speed_limit` is signed even though it moves no vertex, because it is the one field here cheap enough
+## that leaving it out would only create a second rule to remember.
+func signature() -> Array:
+	return [
+		road_type.grading_signature() if road_type != null else null,
+		lane_count, traffic_flow, String(surface_id), speed_limit, follow_terrain,
+	]

@@ -237,9 +237,4 @@ func modifier_warnings(p_host) -> PackedStringArray:
 
 ## Worst height the last bake put between the road and the ground, metres. 0 when nothing is baked.
 func _deepest_structure() -> float:
-	if last_alignment == null:
-		return 0.0
-	var worst := 0.0
-	for i in last_alignment.count():
-		worst = maxf(worst, absf(last_alignment.offset_at(i)))
-	return worst
+	return last_alignment.deepest_structure() if last_alignment != null else 0.0

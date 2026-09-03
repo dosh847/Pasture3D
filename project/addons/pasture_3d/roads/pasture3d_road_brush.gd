@@ -54,7 +54,42 @@ extends Pasture3DTerrainBrush
 @export var closed: bool = false:
 	set(v):
 		closed = v
+		_apply_closed_to_splines()
+		_invalidate_plan()
 		_schedule_refresh()
+		if is_inside_tree():
+			update_gizmos() # redraw the last->first segment
+
+
+## Write `closed` through to every child spline's Curve3D.
+##
+## ---- WHY THE FLAG ALONE CLOSED NOTHING ----
+##
+## `_new_spline` sets `curve.closed` from `_is_closed()` at CREATION time, when `closed` is still false,
+## and the setter never revisited it. `brush_handles._is_closed` reads the brush flag directly, so the
+## GIZMO drew the last->first segment — and the grader, the mesher, the arc-length space, the junction
+## detector and the graph path all still saw an open road with a gap at the seam. Ticking the box drew a
+## ring and built a horseshoe.
+##
+## ---- WHY THIS AND NOT A MANUAL WRAP ----
+##
+## Pasture3DRidge appends `pts[0]` to its own polyline, and copying that here would have been wrong.
+## `Curve3D.closed` already bakes the closing segment: on a 4-point 300 m square, `tessellate()` goes from
+## 4 points to 5 — the last exactly equal to the first — and `get_baked_length()` from 300 m to 400 m. So
+## the wrap arrives through `_plan_points`'s existing `tessellate()` call, and appending a point on top of
+## it would give the road TWO closing edges and a zero-length segment between them. Ridge wraps manually
+## because it reads control points rather than a tessellation; a road does not.
+##
+## ---- WHAT CLOSING MOVES ----
+##
+## The total arc length, by the seam distance — and with it every Pasture3DRoadSegment range, every
+## junction arc length and every Pasture3DRoadRoute waypoint, because all of them are measured along this
+## polyline. That is correct rather than a side effect: the road really did get longer.
+## `_get_configuration_warnings` already surfaces segments left out of range via `s.range_warnings(total)`.
+func _apply_closed_to_splines() -> void:
+	for path: Path3D in _get_splines():
+		if path != null and path.curve != null:
+			path.curve.closed = closed
 
 # ---- Inspector proxies (§5.3) -------------------------------------------------------------------
 #
@@ -113,18 +148,34 @@ func _get_override(p_field: StringName, p_unset: Variant) -> Variant:
 	return road_defaults.get(p_field) if road_defaults != null else p_unset
 
 
-## Re-bake guard for the corridor-width feedback in `grade_surface`. Not saved: it is true only for the
-## duration of one widening pass.
-var _widening: bool = false
-var _last_corridor_half: float = 0.0
+## Corridor half-widths are compared, and signed into the stamp key, at this granularity in metres.
+##
+## QUANTISED BECAUSE A RAW FLOAT IN A HASH KEY IS NOT A KEY. `_padding()` derives from the worst offset
+## the last bake produced, so it wobbles in the last decimal place across otherwise identical bakes; a
+## key carrying that never hits, and the stamp cache the road most needs would be permanently cold. Half
+## a metre is the band the previous `_last_corridor_half + 0.5` test was already expressing.
+const PAD_QUANTUM: float = 0.5
 
 ## The junction demands the last bake actually used. Compared against a fresh digest after each resolve;
 ## see `junction_digest`. Not saved — a reload re-bakes and re-resolves anyway.
 var last_junction_digest: String = ""
 
-## Bumped whenever a resolved value could have changed. The staleness key P2's grading modifier and P4's
-## intersection resolver will fold into their caches.
-var content_key: int = 0
+## The plan polyline and its arc lengths, and the token they were built against. Not saved: derived
+## output, rebuilt on demand, and a token holding instance ids would be meaningless after a reload.
+var _plan_cache: PackedVector2Array = PackedVector2Array()
+var _plan_cum_cache: PackedFloat32Array = PackedFloat32Array()
+var _plan_token_cache: Array = []
+var _plan_revision: int = 0
+
+## How many times the plan has actually been tessellated. Read by RoadCostGate [CA]; a counter rather
+## than a timer, so the criterion is deterministic and does not depend on what else the machine is doing.
+var plan_builds: int = 0
+
+## The upstream emitters `_on_road_changed` is currently attached to — this brush's group, its network and
+## its resolved road type. Held so they can be disconnected again: the group and network are found by
+## walking parents and the road type is RESOLVED, so all three can change without this node being
+## touched, and a connection to the old one would go on firing while the new one stayed silent.
+var _content_sources: Array[Object] = []
 
 
 func _init() -> void:
@@ -140,11 +191,89 @@ func _ready() -> void:
 	for s: Pasture3DRoadSegment in segments:
 		if s != null and not s.changed.is_connected(_on_road_changed):
 			s.changed.connect(_on_road_changed)
+	_rewire_content_sources()
+	# A scene saved before the setter wrote through, or saved by a build where it did not, has
+	# `closed == true` on the brush and `closed == false` on every curve. Reconcile on load rather than
+	# waiting for the user to toggle the box twice.
+	_apply_closed_to_splines()
 
 
+## A reparent EXITS and re-enters the tree, and `_ready` only runs once — so this is where a brush
+## dragged from one group to another picks up its new group's and network's defaults. The base class
+## uses the same notification to re-join the brush group, and for the same reason.
+func _notification(p_what: int) -> void:
+	super(p_what)
+	if p_what == NOTIFICATION_ENTER_TREE:
+		_rewire_content_sources()
+
+
+## Attach `_on_road_changed` to the levels of the resolve chain this brush does not own.
+##
+## Segments and `road_defaults` connect at their setters, because this node holds them. The GROUP, the
+## NETWORK and the ROAD TYPE do not work that way: the first two are found by walking parents and the
+## third is resolved through the chain, so any of them can be replaced without a setter on this node
+## firing. Re-derived on every call rather than diffed, because the cheap way to be correct here is to
+## not try to remember which one changed.
+func _rewire_content_sources() -> void:
+	var wanted: Array[Object] = []
+	var grp := road_group()
+	if grp != null:
+		wanted.append(grp)
+	var net := road_network()
+	if net != null:
+		wanted.append(net)
+	var t := resolved_road_type()
+	if t != null:
+		wanted.append(t)
+
+	for src: Object in _content_sources:
+		if is_instance_valid(src) and not wanted.has(src):
+			_disconnect_content(src)
+	for src: Object in wanted:
+		_connect_content(src)
+	_content_sources = wanted
+
+
+## `content_changed` on a group or a network, `changed` on a road type — the resource signal, because a
+## Pasture3DRoadType is a Resource shared between every brush that uses it, and editing `lane_width` on
+## it has to reach all of them.
+func _content_signal(p_src: Object) -> StringName:
+	return &"changed" if p_src is Pasture3DRoadType else &"content_changed"
+
+
+func _connect_content(p_src: Object) -> void:
+	var sig := _content_signal(p_src)
+	if not p_src.is_connected(sig, _on_road_changed):
+		p_src.connect(sig, _on_road_changed)
+
+
+func _disconnect_content(p_src: Object) -> void:
+	var sig := _content_signal(p_src)
+	if p_src.is_connected(sig, _on_road_changed):
+		p_src.disconnect(sig, _on_road_changed)
+
+
+## Something that could change a RESOLVED value moved: this brush's overrides, one of its segments, its
+## group's or network's defaults or catalogue, or the road type resource itself.
+##
+## ---- WHY THIS SCHEDULES A BAKE ----
+##
+## It used to increment a `content_key` nobody read and update the configuration warnings, and that was
+## all. So changing lane count from 2 to 6, picking a different road type, flipping Follow Terrain,
+## marking a segment as a bridge or editing `lane_width` on the type did nothing to the terrain: the old
+## corridor stayed until an unrelated edit forced a bake. Every sibling brush already does the
+## equivalent — Pasture3DRidge.width schedules a refresh from its setter.
+##
+## Safe during `_init` and scene load: `_schedule_refresh` gates on `_can_auto_refresh()`, which requires
+## the node to be inside the tree.
+##
+## The re-wire comes FIRST because the thing that changed may have been the road type itself — a brush
+## that switched types has to stop listening to the old resource and start listening to the new one, and
+## doing it after the refresh would leave one edit's worth of silence.
 func _on_road_changed() -> void:
-	content_key += 1
+	_rewire_content_sources()
 	update_configuration_warnings()
+	_schedule_refresh()
 
 
 # ---- The resolve chain (§5.3) -------------------------------------------------------------------
@@ -159,6 +288,20 @@ func road_network() -> Pasture3DRoadNetwork:
 	return Pasture3DRoadNetwork.find_for(get_parent())
 
 
+## The chain BELOW the segment: this brush, its group, its network. Constant over one grading pass, which
+## is what lets a five-thousand-sample loop build it once instead of five thousand times.
+##
+## The group and the network are passed in rather than found here, because `road_group()` and
+## `road_network()` each walk the parent chain to the scene root and the callers need them anyway.
+func _chain_tail(p_grp: Pasture3DRoadGroup, p_net: Pasture3DRoadNetwork) -> Array:
+	var chain: Array = [road_defaults]
+	if p_grp != null:
+		chain.append(p_grp.road_defaults)
+	if p_net != null:
+		chain.append(p_net.road_defaults)
+	return chain
+
+
 ## The override levels, NEAREST FIRST, optionally including the segment covering `p_distance` metres
 ## along the spline. The one place the hierarchy's order is written down: everything that resolves a
 ## road value goes through here rather than walking parents itself.
@@ -168,13 +311,7 @@ func resolve_chain(p_distance: float = NAN) -> Array:
 		var seg := segment_at(p_distance)
 		if seg != null:
 			chain.append(seg)
-	chain.append(road_defaults)
-	var grp := road_group()
-	if grp != null:
-		chain.append(grp.road_defaults)
-	var net := road_network()
-	if net != null:
-		chain.append(net.road_defaults)
+	chain.append_array(_chain_tail(road_group(), road_network()))
 	return chain
 
 
@@ -188,17 +325,25 @@ func resolved(p_field: StringName, p_distance: float = NAN) -> Variant:
 ## group offers, so a freshly placed brush under a configured network builds something rather than
 ## nothing.
 func resolved_road_type(p_distance: float = NAN) -> Pasture3DRoadType:
-	var t: Variant = resolved(&"road_type", p_distance)
+	return _type_in(resolve_chain(p_distance), road_group(), road_network())
+
+
+## The same ladder over a chain that has ALREADY been built, with the group and network already found.
+##
+## Split out so a loop over five thousand samples can build the chain once and vary only its segment term;
+## `resolved_road_type` is this function with the walk done per call, which is the only difference. Two
+## copies of the fallback order would drift at the first catalogue change and the symptom would be a road
+## graded to one type by the brush and another by the graph — see `grading_profile`'s header.
+func _type_in(p_chain: Array, p_grp: Pasture3DRoadGroup, p_net: Pasture3DRoadNetwork) -> Pasture3DRoadType:
+	var t: Variant = Pasture3DRoadOverrides.resolve(p_chain, &"road_type")
 	if t != null:
 		return t as Pasture3DRoadType
-	var grp := road_group()
-	if grp != null:
-		var avail := grp.available_road_types()
+	if p_grp != null:
+		var avail := p_grp.available_road_types()
 		if not avail.is_empty():
 			return avail[0]
-	var net := road_network()
-	if net != null:
-		var types := net.valid_road_types()
+	if p_net != null:
+		var types := p_net.valid_road_types()
 		if not types.is_empty():
 			return types[0]
 	return null
@@ -207,10 +352,15 @@ func resolved_road_type(p_distance: float = NAN) -> Pasture3DRoadType:
 ## Lanes in force at `p_distance`, falling through to the road type's own default — the last link in
 ## the chain, and the reason a type carries real values rather than sentinels.
 func resolved_lane_count(p_distance: float = NAN) -> int:
-	var v: Variant = resolved(&"lane_count", p_distance)
+	return _lanes_in(resolve_chain(p_distance), road_group(), road_network())
+
+
+## `resolved_lane_count` over a prebuilt chain. See `_type_in`.
+func _lanes_in(p_chain: Array, p_grp: Pasture3DRoadGroup, p_net: Pasture3DRoadNetwork) -> int:
+	var v: Variant = Pasture3DRoadOverrides.resolve(p_chain, &"lane_count")
 	if v != null:
 		return int(v)
-	var t := resolved_road_type(p_distance)
+	var t := _type_in(p_chain, p_grp, p_net)
 	return t.lane_count if t != null else 2
 
 
@@ -263,6 +413,38 @@ func segment_at(p_distance: float) -> Pasture3DRoadSegment:
 		if s != null and s.covers(p_distance):
 			found = s
 	return found
+
+
+## The segments that exist, in array order. Null entries are a normal intermediate inspector state.
+func _live_segments() -> Array:
+	var out: Array = []
+	for seg: Pasture3DRoadSegment in segments:
+		if seg != null:
+			out.append(seg)
+	return out
+
+
+## Which segment governs each distance in `p_at`, as an index into `p_segs`, or -1 for none.
+##
+## Replaces calling `segment_at` once per sample, which re-scanned the whole segment list every time. The
+## distances must be ASCENDING, which both callers' are — `i * ds` by construction and `cum` because it is
+## a cumulative length.
+##
+## Exactly `segment_at`'s answer, not an approximation of it. `covers` is half-open `[from, to)`, so the
+## governed indices are precisely `bsearch(from) .. bsearch(to)` with both searches taken before equal
+## elements; and filling in ARRAY ORDER reproduces "the last matching segment wins", which is the rule an
+## overlapping short bridge inside a long gravel stretch depends on.
+func _segment_owners(p_at: PackedFloat32Array, p_segs: Array) -> PackedInt32Array:
+	var owner := PackedInt32Array()
+	owner.resize(p_at.size())
+	owner.fill(-1)
+	for k in p_segs.size():
+		var seg: Pasture3DRoadSegment = p_segs[k]
+		var lo: int = p_at.bsearch(seg.from_distance, true)
+		var hi: int = mini(p_at.bsearch(seg.to_distance, true), owner.size())
+		for i in range(lo, hi):
+			owner[i] = k
+	return owner
 
 
 ## True when `p_distance` is carried on a bridge. Read by P2's grader (do not cut the terrain here) and
@@ -365,6 +547,9 @@ func _paint_flat_footprint(path: Path3D) -> void:
 	var plan := _plan_points()
 	if plan.size() < 2:
 		return
+	# The corridor this bake is ABOUT to commit to, captured before the grid is snapped and before the
+	# solve replaces `last_alignment`. `_rebake_if_corridor_outgrew` compares against it afterwards.
+	var used_pad := _padding()
 	var vs: float = terrain.vertex_spacing
 	var b := _snapped_bounds(_spline_footprint_aabb(path), vs)
 	var min_x: float = b[0]
@@ -380,7 +565,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 	# Native rasteriser: when available, solve alignment and grade directly in C++
 	var road_mod := road_modifier()
 	if _native_raster("stamp_road_line") and road_mod != null and _road_native_is_complete():
-		var cum := Pasture3DRoadGrader.cumulative_length(plan)
+		var cum := _plan_cum()
 		var total: float = cum[cum.size() - 1]
 		var ds: float = maxf(road_mod.alignment_step, 0.05)
 		var n_s := maxi(int(ceil(total / ds)) + 1, 2)
@@ -416,13 +601,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 		alignment.input_digest = alignment_digest(road_mod)
 		road_mod.last_alignment = alignment
 
-		if not _widening:
-			var needed := corridor_half_width()
-			if needed > _last_corridor_half + 0.5:
-				_last_corridor_half = needed
-				_widening = true
-				_schedule_refresh()
-				(func() -> void: _widening = false).call_deferred()
+		_rebake_if_corridor_outgrew(used_pad)
 
 		var out := {}
 		var params := {
@@ -494,7 +673,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 			jnet.request_resolve()
 		return
 
-	var cum := Pasture3DRoadGrader.cumulative_length(plan)
+	var cum := _plan_cum()
 
 	var extent := _extent_key(min_x, min_z, vs, gw, gh)
 	var stack := _compile_modifiers(extent, 1.0, 1.0)
@@ -525,15 +704,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 	amp.fill(NAN)
 	profile.resize(n)
 	profile.fill(0.0)
-	for iz in range(iz0, iz1 + 1):
-		var wz := min_z + float(iz) * vs
-		var row := iz * gw
-		for ix in range(ix0, ix1 + 1):
-			var wx := min_x + float(ix) * vs
-			var hit := Pasture3DRoadGrader.nearest_on_plan(plan, cum, Vector2(wx, wz))
-			if float(hit[0]) <= reach:
-				amp[row + ix] = 0.0
-				profile[row + ix] = 1.0
+	_mark_corridor(amp, profile, plan, cum, reach, min_x, min_z, vs, gw, ix0, ix1, iz0, iz1)
 
 	var vals := PackedFloat32Array()
 	vals.resize(n)
@@ -567,6 +738,77 @@ func _paint_flat_footprint(path: Path3D) -> void:
 				var wv := vals[row + ix]
 				if is_finite(wv):
 					_paint_height(Vector3(min_x + ix * vs, 0.0, z), wv, 0.0)
+
+## Mark the cells inside the corridor: `amp = 0` and `profile = 1` where the plan is within `p_reach`.
+##
+## ---- WHAT IT COST ----
+##
+## This is the pre-pass the GDScript footprint branch runs, and that branch is taken whenever
+## `_road_native_is_complete()` is false — which is to say whenever the stack is anything other than
+## exactly one road modifier, which is precisely the §8 workflow the road-in-a-graph design exists for
+## (Road + Graph, Road + Erosion). A 5 km road with a 50 m corridor at `vs = 1` is ~250 000 cells, and each
+## cell ran an interpreted `nearest_on_plan` over ~25 000 plan segments. AABB-rejected per segment, but
+## still per segment, and still in GDScript.
+##
+## `Pasture3DUtil.path_query_grid` answers the whole grid in C++ against a bucket index, and its
+## `distance` is the same unsigned distance to the polyline that `nearest_on_plan` returns — computed the
+## same way, clamped identically, and independent of the widths the geometry also carries. Only `s` and `t`
+## depend on those, and neither is read here.
+##
+## ---- WHY THE GDSCRIPT LOOP STAYS ----
+##
+## Not as dead code: `[CF] parity` drives it through `p_native = false` and compares it cell for cell
+## against the native answer, and it is the real fallback when the extension is not built. A definition
+## that lives only in a test drifts from the thing it defines.
+##
+## ---- THE ONE THING THAT WOULD SILENTLY DIFFER ----
+##
+## `path_query_grid` samples CELL CENTRES over the rect it is given, and this grid is vertex-centred at
+## `min_x + ix * vs`. So the rect is offset by half a cell in each axis, which puts the native sample
+## exactly on the GDScript one. Get that wrong and every road shifts by half a vertex — a whole-road error
+## small enough to read as "the corridor looks a bit off", which is why `[CF] parity` compares the two
+## implementations cell for cell rather than counting how many cells each marked.
+func _mark_corridor(r_amp: PackedFloat64Array, r_profile: PackedFloat64Array,
+		p_plan: PackedVector2Array, p_cum: PackedFloat32Array, p_reach: float,
+		p_min_x: float, p_min_z: float, p_vs: float, p_gw: int,
+		p_ix0: int, p_ix1: int, p_iz0: int, p_iz1: int, p_native: bool = true) -> void:
+	var cw := p_ix1 - p_ix0 + 1
+	var ch := p_iz1 - p_iz0 + 1
+	if cw < 1 or ch < 1:
+		return
+	# `p_native` is false only from `RoadCostGate [CF]`, which drives BOTH branches of this function and
+	# compares them cell for cell. A parity gate that reimplemented the fallback would be comparing the
+	# native path against the gate rather than against the code that actually runs when the extension is
+	# not built, which is the case the fallback exists for.
+	if p_native and ClassDB.class_has_method("Pasture3DUtil", "path_query_grid"):
+		# Only the CLIPPED sub-grid, so a dirty-rect bake still pays for the rect it dirtied.
+		var x0 := p_min_x + float(p_ix0) * p_vs
+		var z0 := p_min_z + float(p_iz0) * p_vs
+		var rect := Rect2(x0 - 0.5 * p_vs, z0 - 0.5 * p_vs, float(cw) * p_vs, float(ch) * p_vs)
+		# `max_distance` 0 disables the clamp. Passing `reach` here would clamp every far cell TO reach and
+		# `<= reach` would then be true for the whole grid — the road paved over its own bounding box.
+		var q: Dictionary = Pasture3DUtil.path_query_grid(p_plan, PackedFloat32Array(), cw, ch, rect,
+				1.0e9, 0.0)
+		if bool(q.get("ok", false)):
+			var dist: PackedFloat32Array = q["distance"]
+			for jz in ch:
+				var row := (p_iz0 + jz) * p_gw
+				var qrow := jz * cw
+				for jx in cw:
+					if dist[qrow + jx] <= p_reach:
+						r_amp[row + p_ix0 + jx] = 0.0
+						r_profile[row + p_ix0 + jx] = 1.0
+			return
+	for iz in range(p_iz0, p_iz1 + 1):
+		var wz := p_min_z + float(iz) * p_vs
+		var row2 := iz * p_gw
+		for ix in range(p_ix0, p_ix1 + 1):
+			var wx := p_min_x + float(ix) * p_vs
+			var hit := Pasture3DRoadGrader.nearest_on_plan(p_plan, p_cum, Vector2(wx, wz))
+			if float(hit[0]) <= p_reach:
+				r_amp[row2 + ix] = 0.0
+				r_profile[row2 + ix] = 1.0
+
 
 # ---- Grading (P2) -------------------------------------------------------------------------------
 
@@ -602,18 +844,58 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 	verge.resize(p_n_s); verge.fill(def_verge)
 	suppress.resize(p_n_s); suppress.fill(0)
 
-	if not segments.is_empty() or road_defaults != null:
+	# ---- WHY THE UNIFORM FILL ABOVE IS USUALLY THE WHOLE ANSWER -------------------------------------
+	#
+	# The guard here used to read `not segments.is_empty() or road_defaults != null`, and `_init` creates a
+	# `Pasture3DRoadOverrides` unconditionally — so `road_defaults` is NEVER null, the fast path was dead,
+	# and every road ran the loop. The correct question is not "does this road have overrides" but "does
+	# anything in the chain VARY along it", and the segment is the only term that can: the brush, group and
+	# network levels are constant over one call, and `verge_override` is one number. So the test is
+	# `segments`, and a road without any takes the fill and stops.
+	var segs := _live_segments()
+	if not segs.is_empty():
+		# Resolved ONCE PER SEGMENT, not once per sample. Each sample used to call `resolved_road_type`,
+		# `resolved_lane_count` (which calls `resolved_road_type` again) and `is_bridge_at`, each of which
+		# allocated a chain Array and walked the parent list to the scene root through `find_for` — about
+		# six ancestor walks and three allocations per sample, five thousand times on a 5 km road.
+		var at := PackedFloat32Array()
+		at.resize(p_n_s)
 		for i in p_n_s:
-			var s := float(i) * p_ds
-			var ti := resolved_road_type(s)
-			var tt: Pasture3DRoadType = ti if ti != null else t
-			half[i] = tt.half_width(resolved_lane_count(s)) if tt != null else 3.5
-			shoulder[i] = tt.shoulder_width if tt != null else 0.5
+			at[i] = float(i) * p_ds
+		var owner := _segment_owners(at, segs)
+		var grp := road_group()
+		var net := road_network()
+		var tail := _chain_tail(grp, net)
+		var seg_half := PackedFloat32Array()
+		var seg_shoulder := PackedFloat32Array()
+		var seg_verge := PackedFloat32Array()
+		var seg_bridge := PackedByteArray()
+		seg_half.resize(segs.size())
+		seg_shoulder.resize(segs.size())
+		seg_verge.resize(segs.size())
+		seg_bridge.resize(segs.size())
+		for k in segs.size():
+			var seg: Pasture3DRoadSegment = segs[k]
+			var chain: Array = [seg] + tail
+			var tt: Pasture3DRoadType = _type_in(chain, grp, net)
+			if tt == null:
+				tt = t
+			seg_half[k] = tt.half_width(_lanes_in(chain, grp, net)) if tt != null else 3.5
+			seg_shoulder[k] = tt.shoulder_width if tt != null else 0.5
 			if p_mod != null and p_mod.verge_override >= 0.0:
-				verge[i] = p_mod.verge_override
+				seg_verge[k] = p_mod.verge_override
 			else:
-				verge[i] = tt.verge_width if tt != null else 4.0
-			suppress[i] = 1 if is_bridge_at(s) else 0
+				seg_verge[k] = tt.verge_width if tt != null else 4.0
+			seg_bridge[k] = 1 if seg.is_bridge else 0
+		for i in p_n_s:
+			var k := owner[i]
+			# -1 is "no segment here", and the uniform fill is already exactly right for those samples.
+			if k < 0:
+				continue
+			half[i] = seg_half[k]
+			shoulder[i] = seg_shoulder[k]
+			verge[i] = seg_verge[k]
+			suppress[i] = seg_bridge[k]
 
 	# ---- WHAT THE JUNCTIONS ASK OF THIS ROAD (§6) ---------------------------------------------------
 	#
@@ -667,7 +949,10 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	var plan := _plan_points()
 	if plan.size() < 2:
 		return {}
-	var cum := Pasture3DRoadGrader.cumulative_length(plan)
+	# The corridor the caller sized the grid it handed us with, captured before the solve below replaces
+	# `p_mod.last_alignment` and with it the depth `corridor_half_width` reads.
+	var used_pad := _padding()
+	var cum := _plan_cum()
 	var total: float = cum[cum.size() - 1]
 	var ds: float = maxf(p_mod.alignment_step, 0.05)
 	var n_s := maxi(int(ceil(total / ds)) + 1, 2)
@@ -715,21 +1000,7 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	alignment.input_digest = alignment_digest(p_mod)
 	p_mod.last_alignment = alignment
 
-	# ---- THE CORRIDOR WIDTH DEPENDS ON A RESULT THE BAKE HAS TO PRODUCE FIRST -----------------------
-	#
-	# How far the batter reaches is (how deep the cut is) / (batter slope), and how deep the cut is only
-	# becomes known once the alignment has been solved — which happens here, inside the bake that already
-	# committed to a footprint width. So the FIRST bake of a deep cutting is necessarily too narrow, and
-	# without this it would sit there with a wall down each side until something happened to refresh it
-	# again. One re-bake, guarded so it cannot recurse: the second pass has `_deepest_structure` and gets
-	# the width right.
-	if not _widening:
-		var needed := corridor_half_width()
-		if needed > _last_corridor_half + 0.5:
-			_last_corridor_half = needed
-			_widening = true
-			_schedule_refresh()
-			(func() -> void: _widening = false).call_deferred()
+	_rebake_if_corridor_outgrew(used_pad)
 
 	var res := Pasture3DRoadGrader.grade(p_z, p_gw, p_gh, p_min_x, p_min_z, p_vs, plan, alignment,
 			half, shoulder, verge, suppress, {
@@ -820,6 +1091,38 @@ func paint_surface() -> int:
 	return cells.size()
 
 
+## Everything `paint_surface` would write, hashed. `0` means it would write nothing.
+##
+## ---- WHY THIS IS DERIVED FROM THE MASK AND NOT FROM THE ROAD ----
+##
+## `Pasture3DRoadNetwork.paint_roads` uses this to skip roads that would repaint themselves identically.
+## The obvious signature — `road_content_signature()` — is the WRONG one, and would have been a stale
+## paint rather than a saved one: the cover mask is produced by the grade, and the grade reads the ground.
+## Move a mound under a road that nobody edited and its corridor changes shape while every property on it
+## stays exactly as it was. So this hashes the mask the paint actually consumes.
+##
+## Nothing here is guessed. `paint_surface` reads six things out of `last_masks` and two ids, and this
+## lists those eight; a term the paint does not read would make roads repaint for no reason, and a term
+## it reads that is missing here is a road left painted where it no longer is.
+func paint_signature() -> int:
+	var mod := road_modifier()
+	if mod == null or mod.last_masks.is_empty() or terrain == null or terrain.data == null:
+		return 0
+	var masks: Dictionary = mod.last_masks
+	var cover: PackedFloat32Array = masks.get("surface", PackedFloat32Array())
+	if cover.is_empty():
+		return 0
+	var t := resolved_road_type()
+	if t == null or t.surface_layer_id < 0:
+		return 0
+	return hash([
+		cover,
+		masks.get("gw", 0), masks.get("gh", 0),
+		masks.get("min_x", 0.0), masks.get("min_z", 0.0), masks.get("vs", 1.0),
+		t.surface_layer_id, paint_layer_id(),
+	])
+
+
 ## The reserved control layer this road paints into: its group's, or the network's own when the road has
 ## no group. Negative when there is nowhere to paint.
 ##
@@ -838,6 +1141,42 @@ func paint_layer_id() -> int:
 ## concatenated in child order, which is also the order arc length runs in — the same order segments
 ## are measured against, so a segment range means the same thing here as it does in the inspector.
 func _plan_points() -> PackedVector2Array:
+	_ensure_plan()
+	return _plan_cache
+
+
+## The arc length at each plan vertex. Cached WITH the plan, because it is derived from it and every
+## caller that wanted one wanted the other.
+func _plan_cum() -> PackedFloat32Array:
+	_ensure_plan()
+	return _plan_cum_cache
+
+
+## Rebuild the plan and its arc lengths if anything they depend on has moved.
+##
+## ---- WHY A VERIFIED TOKEN AND NOT PURE EVENT-DRIVEN INVALIDATION ----
+##
+## The plan is GLOBAL-space: it multiplies each tessellated point by `path.global_transform`. A child
+## Path3D can be dragged on its own, and the brush is not notified when it is — `NOTIFICATION_TRANSFORM_
+## CHANGED` fires on the node that moved. So there is no signal to hang that case on, and a cache that
+## trusted signals alone would grade a road along a centreline it no longer has. That is strictly worse
+## than the cost being removed, so the transforms are CHECKED rather than subscribed to.
+##
+## The two halves of the token cover different things and neither is redundant:
+##
+##   * `_plan_revision` is bumped by the things that have a signal and no cheap value — a curve's points
+##     being edited, a spline being added or removed, `closed` being toggled. Comparing curve CONTENT
+##     instead would mean hashing the very tessellation this cache exists to avoid producing.
+##   * The spline ids and their global transforms are read directly, because they are a handful of
+##     matrix reads against a tessellation of ~25 000 points on a 5 km road. Cheap enough to verify every
+##     call, which removes the whole class of missed-invalidation bugs for the case that has no signal.
+##
+## `closed` is in the token as well as bumping the revision: the setter can be reached during a load
+## before this node is in the tree, and a token that only remembered a bump would miss it.
+func _ensure_plan() -> void:
+	var token := _plan_token()
+	if not _plan_token_cache.is_empty() and _plan_token_cache == token:
+		return
 	var out := PackedVector2Array()
 	for path: Path3D in _get_splines():
 		if path == null or path.curve == null or path.curve.point_count < 2:
@@ -846,7 +1185,56 @@ func _plan_points() -> PackedVector2Array:
 		for p in path.curve.tessellate():
 			var w: Vector3 = xf * p
 			out.append(Vector2(w.x, w.z))
-	return out
+	_plan_cache = out
+	_plan_cum_cache = Pasture3DRoadGrader.cumulative_length(out)
+	_plan_token_cache = token
+	plan_builds += 1
+
+
+func _plan_token() -> Array:
+	var token: Array = [_plan_revision, closed]
+	for path: Path3D in _get_splines():
+		if path == null:
+			continue
+		token.append(path.get_instance_id())
+		token.append(path.global_transform)
+		# The curve's IDENTITY, not just its size. A Curve3D swapped for another with the same point count
+		# is a different road, and the swap arrives through `curve_changed`, which the base gates on the
+		# editor. Reading the id makes the token notice it whether or not a signal ever arrives.
+		token.append(path.curve.get_instance_id() if path.curve != null else 0)
+		token.append(path.curve.point_count if path.curve != null else -1)
+	return token
+
+
+## Something the token cannot see for itself has changed. Cheap: the next `_plan_points` rebuilds.
+func _invalidate_plan() -> void:
+	_plan_revision += 1
+
+
+## Also invalidate the plan when a curve's points are edited or its Curve3D is swapped.
+##
+## One connection covers both: Path3D re-emits `curve_changed` for its own `changed`, so a point edit and
+## a whole-resource swap arrive the same way and no connection has to be moved when the curve is replaced.
+## `RoadCostGate [CA] edit after swap` is what holds that — it edits a point on a REPLACED curve, without
+## changing the point count, so neither the token nor a stale resource connection could carry it.
+##
+## The base connects both of those to `_schedule_spline_refresh` / `_on_path_curve_changed`, but BOTH of
+## those early-return on `_can_auto_refresh()`, which requires `Engine.is_editor_hint()`. Hanging plan
+## invalidation off them would leave a headless bake, a gate and a shipped game caching a plan for a
+## spline that had moved. The invalidator is connected here instead, ungated.
+func _connect_spline(path: Path3D) -> void:
+	super(path)
+	if not is_instance_valid(path):
+		return
+	if not path.curve_changed.is_connected(_invalidate_plan):
+		path.curve_changed.connect(_invalidate_plan)
+
+
+## A spline was added or removed. The token covers the ids, but this also runs when a Path3D that is
+## already in the list gains a curve, so bump as well as re-derive.
+func _on_child_changed(node: Node) -> void:
+	_invalidate_plan()
+	super(node)
 
 
 ## The point `p_s` metres along the plan polyline. Delegated: the grader owns the definition, because the
@@ -922,8 +1310,8 @@ func _spline_length() -> float:
 # ---- JUNCTIONS (P4a) --------------------------------------------------------------------------------
 
 ## This road's identity in the junction records. The node's path relative to its network, so it survives
-## reparenting inside the network, a scene reload and a re-resolve — unlike `content_key`, which is a
-## change counter and would detach every override the moment anything was edited.
+## reparenting inside the network, a scene reload and a re-resolve — unlike a change counter, which would
+## detach every override the moment anything was edited.
 func road_key() -> String:
 	var net := road_network()
 	if net == null:
@@ -963,7 +1351,7 @@ func build_run() -> Dictionary:
 	return {
 		"key": road_key(),
 		"plan": plan,
-		"cum": Pasture3DRoadGrader.cumulative_length(plan),
+		"cum": _plan_cum(),
 		"alignment": alignment,
 		"bridge": bridge,
 		"priority": t.priority,
@@ -989,19 +1377,27 @@ func alignment_digest(p_mod: Pasture3DNodeRoad = null) -> String:
 		return ""
 	var plan := _plan_points()
 	var t := resolved_road_type()
-	var parts := PackedStringArray()
-	parts.append("n=%d" % plan.size())
-	for p in plan:
-		parts.append("%.3f,%.3f" % [p.x, p.y])
-	parts.append("ds=%.4f" % mod.alignment_step)
-	# P9b. Without this the profile is cached against a key that cannot see the slider, so dragging
-	# smooth_radius leaves the road exactly as it was and looks like the pass does nothing.
-	parts.append("smooth=%.4f" % mod.smooth_radius)
-	parts.append("drape=%s" % str(resolved_follow_terrain()))
-	parts.append("grade=%.5f" % (t.max_grade if t != null else -1.0))
-	parts.append("speed=%.3f" % (t.design_speed if t != null else -1.0))
-	parts.append("pins=%s" % junction_digest())
-	return str(hash("|".join(parts)))
+	# Hashed as a packed array, not formatted point by point. A 5 km road tessellates to ~25 000 points,
+	# and the previous derivation did 25 000 `String` formats, a 25 000-element join and a hash of the
+	# ~500 KB result — per call, from four call sites, one of which (`Pasture3DRoadChunkHost.rebuild`)
+	# runs for every road on every resolve purely to decide that nothing had changed.
+	#
+	# The terms are unquantised now, where the formats rounded positions to a millimetre and the scalars
+	# to four or five places. That is the safe direction for a staleness guard and the only direction that
+	# is: it can now only invalidate MORE often, never less, and a guard that misses a change rebuilds a
+	# road confidently in the wrong place. Nothing here needs a tolerance — the plan comes from
+	# `tessellate()` over the same curve, so an unchanged road produces identical bits.
+	return str(hash([
+		plan,
+		mod.alignment_step,
+		# P9b. Without this the profile is cached against a key that cannot see the slider, so dragging
+		# smooth_radius leaves the road exactly as it was and looks like the pass does nothing.
+		mod.smooth_radius,
+		resolved_follow_terrain(),
+		t.max_grade if t != null else -1.0,
+		t.design_speed if t != null else -1.0,
+		junction_digest(),
+	]))
 
 
 ## This road's stored profile if it is still an answer to the road as it stands now, else null.
@@ -1045,15 +1441,42 @@ func graph_path() -> Pasture3DGraphPath:
 	var heights := PackedFloat32Array()
 	halves.resize(plan.size())
 	heights.resize(plan.size())
+	# The same per-segment resolve `grading_profile` uses, for the same reason and over up to 25 000 plan
+	# vertices rather than 5 000 alignment samples. Fixing the grader and leaving this loop walking the
+	# parent chain per vertex is the asymmetry `grading_profile` was factored out to prevent.
+	var grp := road_group()
+	var net := road_network()
+	var segs := _live_segments()
+	var owner := _segment_owners(cum, segs)
+	var seg_half := PackedFloat32Array()
+	seg_half.resize(segs.size())
+	var tail := _chain_tail(grp, net)
+	for k in segs.size():
+		var chain: Array = [segs[k]] + tail
+		var tt: Pasture3DRoadType = _type_in(chain, grp, net)
+		if tt == null:
+			tt = t
+		seg_half[k] = tt.half_width(_lanes_in(chain, grp, net)) if tt != null else 1.0
+	var def_half: float = t.half_width(_lanes_in(tail, grp, net)) if t != null else 1.0
 	for i in plan.size():
-		var s: float = cum[i]
-		var ti := resolved_road_type(s)
-		var tt: Pasture3DRoadType = ti if ti != null else t
-		halves[i] = tt.half_width(resolved_lane_count(s)) if tt != null else 1.0
-		heights[i] = alignment.height_at(s)
+		var k := owner[i]
+		halves[i] = seg_half[k] if k >= 0 else def_half
+		heights[i] = alignment.height_at(cum[i])
 	path.points = plan
 	path.half_widths = halves
 	path.heights = heights
+	# A closed road's plan already ENDS at its start, because `Curve3D.closed` bakes the wrap. Handing
+	# that to a Pasture3DGraphPath with `closed = true` would close it a second time — the resource
+	# repeats `points[0]` itself — so the duplicate vertex is dropped and the flag carries the seam
+	# instead. Told rather than implied, because `closed` is what makes `inside()` answerable, which is
+	# how a ring road's interior becomes usable as a graph mask.
+	if closed:
+		path.closed = true
+		var n := plan.size()
+		if n >= 2 and plan[n - 1].is_equal_approx(plan[0]):
+			path.points = plan.slice(0, n - 1)
+			path.half_widths = halves.slice(0, n - 1)
+			path.heights = heights.slice(0, n - 1)
 
 	# ---- THE GRADING BLOCK, VERBATIM ---------------------------------------------------------------
 	#
@@ -1151,6 +1574,12 @@ func ensure_chunk_host() -> Pasture3DRoadChunkHost:
 			return child
 	var host := Pasture3DRoadChunkHost.new()
 	host.name = "Chunks"
+	# Built output, not a spline and not part of the footprint — so adding it must NOT read as a
+	# structural edit. Without this, `_on_child_changed` schedules a FULL-layer rebake the first time the
+	# host is created, and the host is created lazily from the gizmo's `_redraw`: the first time a road's
+	# gizmo drew, it re-baked the whole layer. Every other brush that adds a bookkeeping child says so the
+	# same way (see Pasture3DTerrainBrush.INTERNAL_CHILD_META).
+	host.set_meta(INTERNAL_CHILD_META, true)
 	add_child(host)
 	# Not owned by the edited scene: chunks are BUILT output, rebuilt from the spline and the alignment at
 	# every bake. Saving them would put a few thousand vertices per road into the .tscn and reload them
@@ -1228,6 +1657,108 @@ func schedule_junction_rebake() -> void:
 	_schedule_refresh()
 
 
+## ---- THE CORRIDOR WIDTH DEPENDS ON A RESULT THE BAKE HAS TO PRODUCE FIRST ----------------------
+##
+## How far the batter reaches is (how deep the cut is) / (batter slope), and how deep the cut is only
+## becomes known once the alignment has been SOLVED — which happens inside a bake that already committed
+## to a footprint width. So the first bake of a deep cutting is necessarily too narrow, and without a
+## second pass it sits there with a sheer wall down each side until something else happens to refresh it.
+##
+## ---- WHY THIS COMPARES AGAINST THE BAKE, AND NOT AGAINST A REMEMBERED HIGH-WATER MARK ----
+##
+## The previous form kept `_widening: bool` and `_last_corridor_half: float`, and neither did its job.
+##
+## The flag was inert. It was cleared by `call_deferred`, at the end of the frame, while
+## `_schedule_refresh` arms a REFRESH_DELAY timer — so it was always false again long before the bake it
+## was guarding ran, and the recursion it was written to stop was never stopped by it. Termination
+## rested entirely on the float.
+##
+## And the float was unsaved and initialised to 0.0, while `corridor_half_width` returns at least
+## `allowance / batter` — 12 / 0.6 = 20 m with default batters. So on the first bake after every scene
+## load, undo and plugin reload, every road brush on the layer saw `20.0 > 0.0 + 0.5`, scheduled a
+## redundant refresh, and each of those ran `_refresh_owner` over the whole shared layer. N roads meant
+## N full-layer re-bakes before anything had changed.
+##
+## Comparing against the padding THIS bake actually used has no persistent state, no flag and no
+## first-bake special case: the question "is the corridor now wider than the one I just rasterised?"
+## answers itself from the bake, and answers NO on a road that was already wide enough.
+##
+## It terminates because the re-bake solves the SAME alignment — the alignment is sampled along the plan
+## at `alignment_step` and does not depend on the grid width — so the third pass reads the same depth as
+## the second and the comparison comes back equal. The quantisation is what makes "equal" reachable at
+## all; see PAD_QUANTUM.
+## Returns whether it asked, so the DECISION is observable without observing the scheduling.
+## `_schedule_refresh` early-returns unless `Engine.is_editor_hint()`, so a gate that watched `_full_dirty`
+## would see nothing headless and pass whether this function was right or wrong — measuring nothing and
+## measuring well would look identical. The caller ignores the value; the gate is the reader.
+func _rebake_if_corridor_outgrew(p_used_pad: float) -> bool:
+	if snappedf(_padding(), PAD_QUANTUM) <= snappedf(p_used_pad, PAD_QUANTUM):
+		return false
+	_schedule_refresh()
+	return true
+
+
+## Everything a road's baked surface depends on that is NOT its spline geometry and NOT the road
+## modifier's own parameters, which `_compute_stamp_key` already covers through `path.curve` and
+## `_modifier_signature()`.
+##
+## ---- WHAT THIS FIXES ----
+##
+## The stamp key used to see a road's geometry and its modifier params and nothing else. A road's baked
+## surface also depends on the resolve chain (§5.3), its segments, its junction pins and the corridor
+## width the bake committed to — so `_paint_into` recomputed an identical key after any of those moved,
+## hit `_stamp_cache`, and replayed the block solved from the OLD values. `_paint_spline` never ran, so
+## the alignment was never re-solved either.
+##
+## That made three separate features silently do nothing:
+##
+##   * `schedule_junction_rebake` advanced `last_junction_digest` and asked for a refresh that came back
+##     a cache hit, so the pins never reached the terrain — and because the digest had already been
+##     advanced, the next resolve did not ask again. A minor road stayed at the height it wanted before
+##     it was asked to meet the major road.
+##   * The corridor-widening re-bake landed on the same hit, so the wider footprint was never rasterised
+##     and the sheer wall stayed. See `_rebake_if_corridor_outgrew`.
+##   * Every road-content edit — lane count, road type, follow_terrain, a segment, a group or network
+##     default — was discarded.
+##
+## The failure was INTERMITTENT, which is why it read as "roads sometimes don't take" rather than as a
+## cache defect: `_refresh_owner` runs `_apply_surface_snap` before `_paint_into`, and road brushes
+## default `snap_to_surface = true`, so when the previous bake moved the ground under a control point the
+## snap moved its Y, `get_baked_points()` changed, and the key changed BY ACCIDENT. On flat ground it did
+## not. Any gate covering this has to assert the cache decision, not the height field, or it can pass for
+## the wrong reason.
+##
+## ---- WHY A LIST OF NAMED INPUTS ----
+##
+## Same trade the chunk host's digest already makes (pasture3d_road_chunk_host.gd:138): a generic hash
+## over every exported property would churn on inputs the height bake never reads and force a full
+## re-rasterise on edits that move no vertex. Naming them means adding an input the GRADER reads is a
+## change that visibly has to be made here too.
+##
+## ONE definition, TWO readers — this and `Pasture3DRoadChunkHost.rebuild`'s digest, which signs the
+## MESHER's inputs and shares the road type's cross-section terms through `grading_signature()`.
+func road_content_signature() -> Array:
+	var t := resolved_road_type()
+	var segs: Array = []
+	for seg: Pasture3DRoadSegment in segments:
+		segs.append(seg.signature() if seg != null else null)
+	return [
+		closed,
+		resolved_lane_count(), resolved_follow_terrain(), resolved_one_way(),
+		String(resolved_surface_id()),
+		t.grading_signature() if t != null else null,
+		# The brush's own level of the chain. The group's and the network's reach us through the
+		# resolved_* calls above, which is why they are not signed separately.
+		road_defaults.signature() if road_defaults != null else null,
+		segs,
+		junction_digest(),
+		snappedf(_padding(), PAD_QUANTUM),
+	]
+
+
+func _brush_param_signature() -> Array:
+	return [super._brush_param_signature(), road_content_signature()]
+
 ## The world XZ point `p_s` metres along this road's plan. The junction gizmo's way of asking where an
 ## approach actually is, without reaching into the brush's private plan arrays.
 ## How long this road is, metres — the solved alignment's length, or NAN before the first bake.
@@ -1246,7 +1777,7 @@ func point_at_arc(p_s: float) -> Vector2:
 	var plan := _plan_points()
 	if plan.size() < 2:
 		return Vector2.ZERO
-	return _plan_point_at(plan, Pasture3DRoadGrader.cumulative_length(plan), p_s)
+	return _plan_point_at(plan, _plan_cum(), p_s)
 
 
 ## Plan direction at `p_s`, normalised, in the direction of INCREASING arc length.
@@ -1259,7 +1790,7 @@ func tangent_at_arc(p_s: float, p_h: float = 0.5) -> Vector2:
 	var plan := _plan_points()
 	if plan.size() < 2:
 		return Vector2.RIGHT
-	var cum := Pasture3DRoadGrader.cumulative_length(plan)
+	var cum := _plan_cum()
 	var total: float = cum[cum.size() - 1]
 	var a := _plan_point_at(plan, cum, clampf(p_s - p_h, 0.0, total))
 	var b := _plan_point_at(plan, cum, clampf(p_s + p_h, 0.0, total))
@@ -1339,22 +1870,35 @@ func pick_road_screen_distance(camera: Camera3D, screen_pos: Vector2, margin_px:
 			# FOV: the corridor-aware margin it feeds was correct only at the default FOV and the
 			# viewport height that constant happened to have been fitted to, and silently wrong at any
 			# other — a wide-FOV viewport picked a corridor several times too wide.
+			#
+			# ---- INSIDE THE RIBBON IS A HIT, NOT A WIDER NEAR MISS ----
+			#
+			# This used to widen the ACCEPT threshold to `maxf(margin_px, half_w * ppm)` and then return
+			# the raw pixel distance. `_pick_brush_screen` passes its own `radius` as `margin_px` and then
+			# rejects any returned `d` greater than that same radius — so every hit the widening admitted
+			# above `margin_px` was thrown straight away again, and the corridor-aware margin changed no
+			# outcome whatsoever. It read as a feature and was dead code.
+			#
+			# The intent behind it is real: a 30 m carriageway should be pickable anywhere across its
+			# width, not only within 24 px of its centreline. So the corridor now decides WHAT THE
+			# DISTANCE IS rather than what the threshold is — inside the ribbon the cursor is ON the road,
+			# which is distance zero, exactly as the ground raymarch below already reports it. That
+			# survives the caller's filter, where a widened threshold could not.
 			var mid := (w1 + w2) * 0.5
 			var cam_dist := camera.global_position.distance_to(mid)
-			var effective_margin := maxf(margin_px, half_w * _pixels_per_metre(camera, cam_dist))
+			if d <= half_w * _pixels_per_metre(camera, cam_dist):
+				d = 0.0
 
-			if d <= effective_margin and d < best_d:
+			if d <= margin_px and d < best_d:
 				best_d = d
 
 	# 2. Ground raymarch intersection check against road plan
 	if is_inf(best_d) and terrain != null and is_instance_valid(terrain):
-		var ray_from := camera.project_ray_origin(screen_pos)
-		var ray_dir := camera.project_ray_normal(screen_pos)
-		var hit: Vector3 = terrain.get_intersection(ray_from, ray_dir, false)
+		var hit: Vector3 = _pick_ground_hit(camera, screen_pos)
 		if hit.z < 3.4e38 and not is_nan(hit.y):
 			var plan := _plan_points()
 			if plan.size() >= 2:
-				var cum := Pasture3DRoadGrader.cumulative_length(plan)
+				var cum := _plan_cum()
 				var hit_p := Vector2(hit.x, hit.z)
 				var nearest := Pasture3DRoadGrader.nearest_on_plan(plan, cum, hit_p)
 				if float(nearest[0]) <= half_w:
@@ -1363,8 +1907,50 @@ func pick_road_screen_distance(camera: Camera3D, screen_pos: Vector2, margin_px:
 	return best_d
 
 
+## ---- A CONTROL POINT BEATS THE SURFACE THAT OWNS IT ----
+##
+## This used to be `return pick_road_screen_distance(...)`, which measures the RIBBON and never tests the
+## control points at all — throwing away the one thing the base class does first. `_pick_brush_screen`
+## then compared a road's ribbon distance (0.0 anywhere on the road) against every other brush's, so
+## clicking a control point of THIS road while ANOTHER road's ribbon ran under the cursor selected the
+## other road and the point you were aiming at was never editable. Crossing roads and parallel roads are
+## the common case, not the corner one.
+##
+## So: our own points first, exactly as the base does, and only then the ribbon.
 func pick_brush_screen_distance(camera: Camera3D, screen_pos: Vector2, margin_px: float = 24.0) -> float:
-	return pick_road_screen_distance(camera, screen_pos, margin_px)
+	if pick_point_screen(camera, screen_pos, margin_px)[0] != null:
+		return POINT_PICK_DISTANCE
+	return maxf(pick_road_screen_distance(camera, screen_pos, margin_px), SURFACE_PICK_FLOOR)
+
+
+## ---- ONE RAYMARCH PER CLICK, NOT ONE PER ROAD ----
+##
+## `terrain.get_intersection` is a CPU raymarch through the heightmap. `_pick_brush_screen` loops every
+## node in the `pasture3d_brush` group and asks each one for its distance, so a network of twenty roads
+## whose screen-space rungs all miss ran twenty raymarches against THE SAME RAY, on every Select-Brush
+## click, Ctrl-click and sculpt click.
+##
+## The ray is the whole key: two roads answering the same pick are handed the same `camera` and the same
+## `screen_pos`, so they derive the same origin and direction, and a raymarch is a pure function of that
+## and the terrain. Hence a memo rather than a parameter — the caller needs no change, and the sculpt
+## path gets the same saving as the plugin's picker.
+##
+## The frame number bounds it. Terrain can be deformed under a stationary cursor, and a ray that has not
+## moved would otherwise answer from a heightfield that no longer exists; the pick loop this exists for
+## runs entirely inside one frame, so one frame is exactly as long as the answer is wanted.
+static var _pick_hit_key: Array = []
+static var _pick_hit: Vector3 = Vector3.ZERO
+
+
+func _pick_ground_hit(p_camera: Camera3D, p_screen_pos: Vector2) -> Vector3:
+	var ray_from := p_camera.project_ray_origin(p_screen_pos)
+	var ray_dir := p_camera.project_ray_normal(p_screen_pos)
+	var key: Array = [terrain.get_instance_id(), ray_from, ray_dir, Engine.get_process_frames()]
+	if key == _pick_hit_key:
+		return _pick_hit
+	_pick_hit = terrain.get_intersection(ray_from, ray_dir, false)
+	_pick_hit_key = key
+	return _pick_hit
 
 
 ## Pixels per world metre for a point `p_dist` metres in front of `p_camera`.

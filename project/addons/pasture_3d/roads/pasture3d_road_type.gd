@@ -175,3 +175,26 @@ func half_width(p_lane_count: int = -1) -> float:
 ## brush has to reserve, and the outer edge of the rally corridor.
 func disturbed_width(p_lane_count: int = -1) -> float:
 	return (half_width(p_lane_count) + shoulder_width + verge_width) * 2.0
+## Every property of this type that moves the BAKED TERRAIN HEIGHT, and nothing else.
+##
+## Read by `Pasture3DRoadBrush.road_content_signature`, which feeds the brush stamp key. Before this
+## existed the stamp key could not see the road type at all: editing lane_width or cut_batter changed
+## the corridor the grader wanted and the cached block replayed the old one, so the terrain kept the
+## previous cross-section until an unrelated edit happened to move a control point.
+##
+## It names its inputs one at a time rather than hashing every exported property, for the reason the
+## chunk host already gives at pasture3d_road_chunk_host.gd:138 — a generic hash churns on properties
+## the height bake never reads (type_name, priority, divider_type, the prop_* fields, surface_id,
+## surface_layer_id, surface_material), forcing a full re-rasterise on edits that move no vertex. The
+## cost of listing them is that adding an input the GRADER reads is a change that visibly has to be
+## made here too, which is the trade this cache exists to make.
+##
+## The alignment terms (max_grade, max_superelevation, design_speed) ARE included even though
+## `alignment_digest` already covers them, because that digest guards the stored profile and is not
+## part of the stamp key. A cross-check that lives somewhere else is not a key.
+func grading_signature() -> Array:
+	return [
+		lane_width, lane_count, shoulder_width, crown, verge_width,
+		cut_batter, fill_batter,
+		max_grade, max_superelevation, design_speed,
+	]

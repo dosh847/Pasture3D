@@ -243,10 +243,15 @@ func _configure_host(p_host: Pasture3DRoadChunkHost) -> void:
 ## it connects here, and Pasture3D still never decides what to do about it.
 signal signals_changed(junction: Pasture3DRoadJunction)
 
-## Bumped whenever anything that could change a resolved value changes. Brushes and (later) the
-## intersection resolver key their staleness on it, so a catalogue edit invalidates the right caches
-## without anyone diffing the catalogue.
-var content_key: int = 0
+## Emitted when anything that could change a child brush's RESOLVED value changes — the catalogue, the
+## defaults, the layer names. Child road brushes connect and schedule a re-bake.
+##
+## This replaces a `content_key: int` that was incremented here and read NOWHERE. A change count could
+## not have served as a cache key even if something had read it: it detaches on undo, where the value
+## comes back and the counter does not. What consumers actually needed was to be TOLD, which is a signal,
+## and what the stamp key needed was the content itself, which is
+## `Pasture3DRoadBrush.road_content_signature()`.
+signal content_changed
 
 
 func _init() -> void:
@@ -266,8 +271,8 @@ func _ready() -> void:
 
 
 func _bump() -> void:
-	content_key += 1
 	update_configuration_warnings()
+	content_changed.emit()
 
 
 ## The nearest Pasture3DRoadNetwork at or above `p_node`, or null. The lookup every level of the
@@ -295,6 +300,9 @@ func _get_configuration_warnings() -> PackedStringArray:
 	var out := PackedStringArray()
 	if valid_road_types().is_empty():
 		out.append("No road types in the catalogue. Add a Pasture3DRoadType so brushes have something to build.")
+	if runtime != null and runtime_digest != _runtime_content_digest():
+		out.append("The baked runtime is out of date — the roads have changed since it was built. "
+				+ "Press Bake Runtime.")
 	return out
 
 
@@ -350,7 +358,9 @@ func resolve_junctions() -> void:
 			b.schedule_junction_rebake()
 	paint_roads(brushes)
 	build_chunks(brushes)
-	build_runtime(brushes)
+	# `build_runtime` deliberately does NOT run here — see `bake_runtime`. A resolve happens on every
+	# control-point drag; the runtime is a deliverable, and baking it here assigned three @export
+	# properties and dirtied the scene every time the mouse moved.
 	# The junction gizmo draws from these records, and nothing else tells the editor they moved.
 	update_gizmos()
 
@@ -753,13 +763,18 @@ func resolve_graph_paths(p_graph: Pasture3DTerrainGraph, p_default: Node = null)
 ## scratch whenever anything in the scene was baked, and the cache would look broken rather than bypassed.
 ## Compared by CONTENT, because the path is rebuilt from the road each time and is a different object even
 ## when the road has not moved.
+##
+## Through `content_digest()`, which covers every field a consumer reads. This used to compare `points`,
+## `half_widths` and `heights` and nothing else, so a cross-section edit — crown, either batter, the
+## verge, a segment marked as a bridge — rebuilt the path, found the three geometry arrays unchanged,
+## discarded it, and left the graph grading to the old profile while the brush graded to the new one.
+## See `Pasture3DGraphPath.content_digest`.
 func _assign(p_src: Pasture3DGraphNodeRoadSource, p_path: Pasture3DGraphPath) -> void:
 	if p_path == null:
 		return
 	var old := p_src.path
-	if old != null and old.points == p_path.points and old.half_widths == p_path.half_widths:
-		if old.heights == p_path.heights:
-			return
+	if old != null and old.content_digest() == p_path.content_digest():
+		return
 	p_src.path = p_path
 
 
@@ -811,6 +826,63 @@ func _clear_paint_layers(p_brushes: Array) -> void:
 ## The baked runtime (§9.1). Exported so it saves with the scene and can be handed to a game, which then
 ## needs neither this node nor a terrain to read it.
 @export var runtime: Pasture3DRoadRuntime
+
+## What the roads looked like when `runtime` was last baked. Exported so the staleness warning survives a
+## reload — a runtime saved stale is still stale when the scene comes back.
+##
+## It moves ONLY inside `bake_runtime`, which is the property that makes this safe to export: a drag
+## re-resolves and re-paints and touches nothing here, so the scene is not dirtied by a mouse move.
+@export var runtime_digest: int = 0
+
+## Bake the runtime deliverable. The explicit action, because it is no longer on the resolve path.
+##
+## ---- WHY THIS IS A BUTTON AND NOT A CONSEQUENCE ----
+##
+## `build_runtime` ran at the end of every `resolve_junctions`, and a resolve runs on every control-point
+## drag. It re-ran `build_run()` on every road in the network, plus `surface_intervals()` and
+## `corridor_half_width()` per road, and then assigned `runtime`, `run_ids` and `next_run_id` — all
+## `@export`. Dragging one point marked the scene modified and rebuilt a game-facing resource nineteen
+## roads did not ask for.
+##
+## The runtime's own header says what it is for: a resource a GAME loads, with no editor and no terrain.
+## That is a thing you bake when you are done, not a live derivative of the cursor. Nothing else rebuilds
+## it — Bake All Brushes walks the EROSION registry and never sees a road — so the configuration warning
+## above is the whole safety net, and it is why `runtime_digest` is exported rather than kept in memory.
+@export_tool_button("Bake Runtime") var _bake_runtime_btn = bake_runtime
+
+
+## Resolve, then bake the runtime, then record what it was baked from. Returns the run count.
+func bake_runtime() -> int:
+	# Directly, not `request_resolve`: that defers, and the runtime must be built from the resolve that
+	# this press asked for rather than from whatever the last frame happened to leave behind.
+	resolve_junctions()
+	var n := build_runtime(road_brushes())
+	runtime_digest = _runtime_content_digest()
+	update_configuration_warnings()
+	if Engine.is_editor_hint():
+		print("[Pasture3D] road runtime baked: %d run(s), %d link(s)"
+				% [n, runtime.links.size() if runtime != null else 0])
+	return n
+
+
+## Everything the baked runtime is a function of, hashed.
+##
+## The roads' content and their junctions, NOT their solved heightfields: a run carries the alignment, and
+## the alignment is a function of the content signature and the terrain under it. This will therefore miss
+## "the ground moved under a road that did not change" — which is why it drives a WARNING and not a
+## refusal, and why the button is always available whether or not the digest says it is needed.
+func _runtime_content_digest() -> int:
+	var parts: Array = []
+	for b in road_brushes():
+		if b == null:
+			continue
+		parts.append(b.road_key())
+		parts.append(b.road_content_signature() if b.has_method("road_content_signature") else null)
+	for j in junctions:
+		if j == null or not j.detected:
+			continue
+		parts.append([j.center, j.road_keys, j.arc_lengths])
+	return hash(parts)
 
 
 ## Bake the resolved network into a resource a GAME can load — no editor plugin, no terrain (§9.1).
@@ -963,6 +1035,86 @@ func paint_order(p_brushes: Array) -> Array:
 	return ordered
 
 
+## What each road's paint looked like last time this pass ran: `road_key -> {sig, layer, box}`.
+##
+## NOT exported, deliberately. Recording it in the scene would dirty it on every drag, which is a quarter
+## of what S7 is removing; and the cost of being wrong is one extra full repaint on the first resolve
+## after a load, which is the pass that used to run every time anyway.
+var _painted: Dictionary = {}
+
+
+func _paint_layer_key(p_brush) -> String:
+	if p_brush == null or p_brush.terrain == null:
+		return ""
+	return "%d:%d" % [p_brush.terrain.get_instance_id(), p_brush.paint_layer_id()]
+
+
+## The roads that must repaint, in paint order — CLOSED OVER SHARED LAYERS.
+##
+## ---- WHY A DIRTY ROAD DRAGS ITS NEIGHBOURS IN ----
+##
+## `_clear_paint_layers` clears one box per LAYER over the union of the roads on it, and it must stay that
+## way: `clear_layer_in_area` drops whole tiles, so clearing per road takes a neighbour's cells with it at
+## a shared tile boundary, and only a road painted afterwards puts them back. That reasoning is why the
+## unit of invalidation here is the layer and not the road. Repainting only the road that moved would
+## clear its whole layer's box and leave every other road on that layer erased.
+##
+## So: find the roads whose paint would differ, take the layers they sit on, and repaint every road on
+## those layers. A twenty-road network with each group on its own layer pays for one group; a twenty-road
+## network sharing one layer pays for all twenty, correctly, and gains nothing — which is the honest
+## answer for that scene rather than a faster wrong one.
+func _paint_dirty_set(p_ordered: Array) -> Array:
+	var dirty_layers := {}
+	var live := {}
+	for b in p_ordered:
+		var key: String = b.road_key()
+		live[key] = true
+		var prev: Dictionary = _painted.get(key, {})
+		if prev.is_empty() or int(prev["sig"]) != b.paint_signature() 				or String(prev["layer"]) != _paint_layer_key(b):
+			dirty_layers[_paint_layer_key(b)] = true
+			# A road that MOVED between layers leaves cells behind on the old one, so that layer is dirty
+			# too even if nothing else on it changed.
+			if not prev.is_empty():
+				dirty_layers[String(prev["layer"])] = true
+	# A road that was deleted or unparented since the last pass. Its cells are still on the terrain and no
+	# live road will clear them, so its layer is dirty and `_clear_departed_roads` clears its last box.
+	for key in _painted.keys():
+		if not live.has(key):
+			dirty_layers[String(_painted[key]["layer"])] = true
+	if dirty_layers.is_empty():
+		return []
+	var out: Array = []
+	for b in p_ordered:
+		if dirty_layers.has(_paint_layer_key(b)):
+			out.append(b)
+	return out
+
+
+## Clear the last known footprint of roads that are no longer in the network, and forget them.
+##
+## Without this, deleting a road left its carriageway painted across the landscape permanently: the clear
+## is computed from the roads that ARE here, so nothing ever covered the one that left. The full repaint
+## did not fix this either — it is a pre-existing hole that only becomes reachable once the clear is
+## scoped, so it is closed here rather than inherited.
+func _clear_departed_roads(p_terrains: Dictionary) -> void:
+	var live := {}
+	for b in road_brushes():
+		if b != null:
+			live[b.road_key()] = true
+	for key in _painted.keys():
+		if live.has(key):
+			continue
+		var rec: Dictionary = _painted[key]
+		var box: AABB = rec["box"]
+		var bits: PackedStringArray = String(rec["layer"]).split(":")
+		if box.size != Vector3.ZERO and bits.size() == 2:
+			var t: Object = instance_from_id(int(bits[0]))
+			if t is Pasture3D and t.data != null and t.data.has_method("clear_layer_in_area") 					and int(bits[1]) >= 0:
+				t.data.clear_layer_in_area(int(bits[1]), box, false)
+				p_terrains[t.get_instance_id()] = t
+		_painted.erase(key)
+
+
 ## Paint every road's surface into its reserved layer, LOWEST PRIORITY FIRST.
 ##
 ## The order is the whole point of doing this here rather than in each brush's bake. Where two roads
@@ -976,8 +1128,15 @@ func paint_roads(p_brushes: Array = []) -> int:
 	if brushes.is_empty():
 		return 0
 	var ordered := paint_order(brushes)
+	var repaint := _paint_dirty_set(ordered)
 	var written := 0
 	var terrains := {}
+	# BEFORE the early return. A road that was the only one on its layer leaves an empty repaint set and
+	# a painted carriageway behind it, so the departure clear cannot sit on the repainting path.
+	_clear_departed_roads(terrains)
+	if repaint.is_empty():
+		_composite(terrains)
+		return 0
 	# CLEAR BEFORE PAINTING. Nothing else does it: the height layer is reconciled by the terrain brush on
 	# every bake, but the paint layer is written here and would otherwise keep every cell any road has ever
 	# covered — so moving a road left its old carriageway painted across the landscape behind it, with the
@@ -985,15 +1144,23 @@ func paint_roads(p_brushes: Array = []) -> int:
 	# because the whole pass repaints all of them: clearing per road would drop a neighbour's cells at a
 	# shared tile boundary (clear_layer_in_area drops WHOLE tiles) and only the road painted afterwards
 	# would put them back.
-	_clear_paint_layers(ordered)
-	for b in ordered:
+	_clear_paint_layers(repaint)
+	for b in repaint:
 		written += b.paint_surface()
+		_painted[b.road_key()] = {
+			"sig": b.paint_signature(), "layer": _paint_layer_key(b), "box": b.paint_bounds(),
+		}
 		if b.terrain != null:
 			terrains[b.terrain.get_instance_id()] = b.terrain
 	# One composite for the whole pass. Each road painted with `composite` off, so an overlap is
 	# composited once rather than once per road that touched it.
-	if written > 0:
-		for t in terrains.values():
-			if t.data != null and t.data.has_method("composite_regions"):
-				t.data.composite_regions()
+	_composite(terrains)
 	return written
+
+
+## Push every terrain this pass touched. Separate because a pass that only CLEARED — every road on a
+## layer deleted — wrote no cells and still has to composite, or the cleared paint stays on screen.
+func _composite(p_terrains: Dictionary) -> void:
+	for t in p_terrains.values():
+		if t.data != null and t.data.has_method("composite_regions"):
+			t.data.composite_regions()

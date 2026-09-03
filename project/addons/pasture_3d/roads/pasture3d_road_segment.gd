@@ -102,3 +102,15 @@ func range_warnings(p_spline_length: float = NAN) -> PackedStringArray:
 		out.append("Segment '%s' starts at %.1f m, past the end of the spline (%.1f m)."
 				% [resource_name if not resource_name.is_empty() else "Segment", from_distance, p_spline_length])
 	return out
+
+
+## The range and the structure flags on top of the override fields the base already signs.
+##
+## A segment is an override that applies over an arc-length RANGE, so both ends belong in the signature
+## as much as the values do: sliding a bridge along the road changes no field value and changes the
+## terrain everywhere it moved from and everywhere it moved to.
+##
+## `label` is deliberately absent — it is PROPERTY_USAGE_EDITOR and a view onto `resource_name`, so it
+## moves no vertex and including it would invalidate every cached block on a rename.
+func signature() -> Array:
+	return [super.signature(), from_distance, to_distance, is_bridge, suppress_paint]
