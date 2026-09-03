@@ -288,6 +288,20 @@ func road_network() -> Pasture3DRoadNetwork:
 	return Pasture3DRoadNetwork.find_for(get_parent())
 
 
+## The chain BELOW the segment: this brush, its group, its network. Constant over one grading pass, which
+## is what lets a five-thousand-sample loop build it once instead of five thousand times.
+##
+## The group and the network are passed in rather than found here, because `road_group()` and
+## `road_network()` each walk the parent chain to the scene root and the callers need them anyway.
+func _chain_tail(p_grp: Pasture3DRoadGroup, p_net: Pasture3DRoadNetwork) -> Array:
+	var chain: Array = [road_defaults]
+	if p_grp != null:
+		chain.append(p_grp.road_defaults)
+	if p_net != null:
+		chain.append(p_net.road_defaults)
+	return chain
+
+
 ## The override levels, NEAREST FIRST, optionally including the segment covering `p_distance` metres
 ## along the spline. The one place the hierarchy's order is written down: everything that resolves a
 ## road value goes through here rather than walking parents itself.
@@ -297,13 +311,7 @@ func resolve_chain(p_distance: float = NAN) -> Array:
 		var seg := segment_at(p_distance)
 		if seg != null:
 			chain.append(seg)
-	chain.append(road_defaults)
-	var grp := road_group()
-	if grp != null:
-		chain.append(grp.road_defaults)
-	var net := road_network()
-	if net != null:
-		chain.append(net.road_defaults)
+	chain.append_array(_chain_tail(road_group(), road_network()))
 	return chain
 
 
@@ -317,17 +325,25 @@ func resolved(p_field: StringName, p_distance: float = NAN) -> Variant:
 ## group offers, so a freshly placed brush under a configured network builds something rather than
 ## nothing.
 func resolved_road_type(p_distance: float = NAN) -> Pasture3DRoadType:
-	var t: Variant = resolved(&"road_type", p_distance)
+	return _type_in(resolve_chain(p_distance), road_group(), road_network())
+
+
+## The same ladder over a chain that has ALREADY been built, with the group and network already found.
+##
+## Split out so a loop over five thousand samples can build the chain once and vary only its segment term;
+## `resolved_road_type` is this function with the walk done per call, which is the only difference. Two
+## copies of the fallback order would drift at the first catalogue change and the symptom would be a road
+## graded to one type by the brush and another by the graph — see `grading_profile`'s header.
+func _type_in(p_chain: Array, p_grp: Pasture3DRoadGroup, p_net: Pasture3DRoadNetwork) -> Pasture3DRoadType:
+	var t: Variant = Pasture3DRoadOverrides.resolve(p_chain, &"road_type")
 	if t != null:
 		return t as Pasture3DRoadType
-	var grp := road_group()
-	if grp != null:
-		var avail := grp.available_road_types()
+	if p_grp != null:
+		var avail := p_grp.available_road_types()
 		if not avail.is_empty():
 			return avail[0]
-	var net := road_network()
-	if net != null:
-		var types := net.valid_road_types()
+	if p_net != null:
+		var types := p_net.valid_road_types()
 		if not types.is_empty():
 			return types[0]
 	return null
@@ -336,10 +352,15 @@ func resolved_road_type(p_distance: float = NAN) -> Pasture3DRoadType:
 ## Lanes in force at `p_distance`, falling through to the road type's own default — the last link in
 ## the chain, and the reason a type carries real values rather than sentinels.
 func resolved_lane_count(p_distance: float = NAN) -> int:
-	var v: Variant = resolved(&"lane_count", p_distance)
+	return _lanes_in(resolve_chain(p_distance), road_group(), road_network())
+
+
+## `resolved_lane_count` over a prebuilt chain. See `_type_in`.
+func _lanes_in(p_chain: Array, p_grp: Pasture3DRoadGroup, p_net: Pasture3DRoadNetwork) -> int:
+	var v: Variant = Pasture3DRoadOverrides.resolve(p_chain, &"lane_count")
 	if v != null:
 		return int(v)
-	var t := resolved_road_type(p_distance)
+	var t := _type_in(p_chain, p_grp, p_net)
 	return t.lane_count if t != null else 2
 
 
@@ -392,6 +413,38 @@ func segment_at(p_distance: float) -> Pasture3DRoadSegment:
 		if s != null and s.covers(p_distance):
 			found = s
 	return found
+
+
+## The segments that exist, in array order. Null entries are a normal intermediate inspector state.
+func _live_segments() -> Array:
+	var out: Array = []
+	for seg: Pasture3DRoadSegment in segments:
+		if seg != null:
+			out.append(seg)
+	return out
+
+
+## Which segment governs each distance in `p_at`, as an index into `p_segs`, or -1 for none.
+##
+## Replaces calling `segment_at` once per sample, which re-scanned the whole segment list every time. The
+## distances must be ASCENDING, which both callers' are — `i * ds` by construction and `cum` because it is
+## a cumulative length.
+##
+## Exactly `segment_at`'s answer, not an approximation of it. `covers` is half-open `[from, to)`, so the
+## governed indices are precisely `bsearch(from) .. bsearch(to)` with both searches taken before equal
+## elements; and filling in ARRAY ORDER reproduces "the last matching segment wins", which is the rule an
+## overlapping short bridge inside a long gravel stretch depends on.
+func _segment_owners(p_at: PackedFloat32Array, p_segs: Array) -> PackedInt32Array:
+	var owner := PackedInt32Array()
+	owner.resize(p_at.size())
+	owner.fill(-1)
+	for k in p_segs.size():
+		var seg: Pasture3DRoadSegment = p_segs[k]
+		var lo: int = p_at.bsearch(seg.from_distance, true)
+		var hi: int = mini(p_at.bsearch(seg.to_distance, true), owner.size())
+		for i in range(lo, hi):
+			owner[i] = k
+	return owner
 
 
 ## True when `p_distance` is carried on a bridge. Read by P2's grader (do not cut the terrain here) and
@@ -728,18 +781,58 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 	verge.resize(p_n_s); verge.fill(def_verge)
 	suppress.resize(p_n_s); suppress.fill(0)
 
-	if not segments.is_empty() or road_defaults != null:
+	# ---- WHY THE UNIFORM FILL ABOVE IS USUALLY THE WHOLE ANSWER -------------------------------------
+	#
+	# The guard here used to read `not segments.is_empty() or road_defaults != null`, and `_init` creates a
+	# `Pasture3DRoadOverrides` unconditionally — so `road_defaults` is NEVER null, the fast path was dead,
+	# and every road ran the loop. The correct question is not "does this road have overrides" but "does
+	# anything in the chain VARY along it", and the segment is the only term that can: the brush, group and
+	# network levels are constant over one call, and `verge_override` is one number. So the test is
+	# `segments`, and a road without any takes the fill and stops.
+	var segs := _live_segments()
+	if not segs.is_empty():
+		# Resolved ONCE PER SEGMENT, not once per sample. Each sample used to call `resolved_road_type`,
+		# `resolved_lane_count` (which calls `resolved_road_type` again) and `is_bridge_at`, each of which
+		# allocated a chain Array and walked the parent list to the scene root through `find_for` — about
+		# six ancestor walks and three allocations per sample, five thousand times on a 5 km road.
+		var at := PackedFloat32Array()
+		at.resize(p_n_s)
 		for i in p_n_s:
-			var s := float(i) * p_ds
-			var ti := resolved_road_type(s)
-			var tt: Pasture3DRoadType = ti if ti != null else t
-			half[i] = tt.half_width(resolved_lane_count(s)) if tt != null else 3.5
-			shoulder[i] = tt.shoulder_width if tt != null else 0.5
+			at[i] = float(i) * p_ds
+		var owner := _segment_owners(at, segs)
+		var grp := road_group()
+		var net := road_network()
+		var tail := _chain_tail(grp, net)
+		var seg_half := PackedFloat32Array()
+		var seg_shoulder := PackedFloat32Array()
+		var seg_verge := PackedFloat32Array()
+		var seg_bridge := PackedByteArray()
+		seg_half.resize(segs.size())
+		seg_shoulder.resize(segs.size())
+		seg_verge.resize(segs.size())
+		seg_bridge.resize(segs.size())
+		for k in segs.size():
+			var seg: Pasture3DRoadSegment = segs[k]
+			var chain: Array = [seg] + tail
+			var tt: Pasture3DRoadType = _type_in(chain, grp, net)
+			if tt == null:
+				tt = t
+			seg_half[k] = tt.half_width(_lanes_in(chain, grp, net)) if tt != null else 3.5
+			seg_shoulder[k] = tt.shoulder_width if tt != null else 0.5
 			if p_mod != null and p_mod.verge_override >= 0.0:
-				verge[i] = p_mod.verge_override
+				seg_verge[k] = p_mod.verge_override
 			else:
-				verge[i] = tt.verge_width if tt != null else 4.0
-			suppress[i] = 1 if is_bridge_at(s) else 0
+				seg_verge[k] = tt.verge_width if tt != null else 4.0
+			seg_bridge[k] = 1 if seg.is_bridge else 0
+		for i in p_n_s:
+			var k := owner[i]
+			# -1 is "no segment here", and the uniform fill is already exactly right for those samples.
+			if k < 0:
+				continue
+			half[i] = seg_half[k]
+			shoulder[i] = seg_shoulder[k]
+			verge[i] = seg_verge[k]
+			suppress[i] = seg_bridge[k]
 
 	# ---- WHAT THE JUNCTIONS ASK OF THIS ROAD (§6) ---------------------------------------------------
 	#
@@ -1285,12 +1378,27 @@ func graph_path() -> Pasture3DGraphPath:
 	var heights := PackedFloat32Array()
 	halves.resize(plan.size())
 	heights.resize(plan.size())
+	# The same per-segment resolve `grading_profile` uses, for the same reason and over up to 25 000 plan
+	# vertices rather than 5 000 alignment samples. Fixing the grader and leaving this loop walking the
+	# parent chain per vertex is the asymmetry `grading_profile` was factored out to prevent.
+	var grp := road_group()
+	var net := road_network()
+	var segs := _live_segments()
+	var owner := _segment_owners(cum, segs)
+	var seg_half := PackedFloat32Array()
+	seg_half.resize(segs.size())
+	var tail := _chain_tail(grp, net)
+	for k in segs.size():
+		var chain: Array = [segs[k]] + tail
+		var tt: Pasture3DRoadType = _type_in(chain, grp, net)
+		if tt == null:
+			tt = t
+		seg_half[k] = tt.half_width(_lanes_in(chain, grp, net)) if tt != null else 1.0
+	var def_half: float = t.half_width(_lanes_in(tail, grp, net)) if t != null else 1.0
 	for i in plan.size():
-		var s: float = cum[i]
-		var ti := resolved_road_type(s)
-		var tt: Pasture3DRoadType = ti if ti != null else t
-		halves[i] = tt.half_width(resolved_lane_count(s)) if tt != null else 1.0
-		heights[i] = alignment.height_at(s)
+		var k := owner[i]
+		halves[i] = seg_half[k] if k >= 0 else def_half
+		heights[i] = alignment.height_at(cum[i])
 	path.points = plan
 	path.half_widths = halves
 	path.heights = heights

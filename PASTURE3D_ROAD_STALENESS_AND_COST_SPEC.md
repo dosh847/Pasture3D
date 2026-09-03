@@ -2,8 +2,8 @@
 
 **Document:** `PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md`
 **Status:** **Phase 1 complete — S1, S2, S3 and S4 BUILT 2026-09-03** (`RoadStaleGate` [SA]–[SH] pass,
-controls verified; 36 assertions). **S6, S7 and S8 BUILT 2026-09-03** (`RoadCostGate` [CA]–[CD]
-passes, twelve controls verified to fail; all 19 asserting road gates green). **S9–S12 PROPOSED, not
+controls verified; 36 assertions). **S6–S9 BUILT 2026-09-03** (`RoadCostGate` [CA]–[CE] passes,
+seventeen controls verified to fail; all 19 asserting road gates green). **S10–S12 PROPOSED, not
 started.** Check the symbol and the branch before planning from this header; it
 will go stale before the work does.
 **Target:** `Pasture3DRoadBrush` and its integration with the modifier stack, the road network resolve
@@ -577,7 +577,7 @@ which walk the parent chain to the scene root. Roughly six ancestor walks, three
 four `segment_at` scans **per sample**, and `grading_profile` is called from `_paint_flat_footprint`,
 `grade_surface` and `graph_path`.
 
-**Fix.**
+**Fix (BUILT). All three items, plus the `graph_path` symmetry.**
 
 1. Hoist the group and the network out of the loop. They cannot change during one `grading_profile` call,
    so `resolve_chain` should take them as arguments — or, better, `grading_profile` should build the
@@ -588,11 +588,37 @@ four `segment_at` scans **per sample**, and `grading_profile` is called from `_p
 3. Walk the segments once to build a piecewise map from sample index to the covering segment, instead of
    re-scanning `segments` per sample from `segment_at`.
 
-**What must not break.** `graph_path()` (`:1048-1053`) has the same shape over `plan.size()` — up to
-25 000 vertices — and must get the same treatment, or S9 fixes the brush's grader and leaves the graph's
-paying full price. That asymmetry is the failure mode `grading_profile` was factored out to prevent.
+**What must not break.** `graph_path()` has the same shape over `plan.size()` — up to 25 000 vertices —
+and got the same treatment. **Built as described:** `_chain_tail(grp, net)` builds the non-segment chain
+once; the guard is now `segments`, not `road_defaults != null`; `_segment_owners` maps distance to segment
+in one pass; and the cross-section is resolved once per SEGMENT, with the loop reduced to an array read.
 
-**Gate:** `[CE]`.
+**A note on how the exactness is held.** `_segment_owners` does not re-implement `covers`. `covers` is
+half-open `[from, to)`, so the governed indices are exactly `bsearch(from) .. bsearch(to)` with both
+searches taken before equal elements, and filling in array order reproduces "the last matching segment
+wins" — the rule a short bridge overlapping a long gravel stretch depends on. Both are gated
+(`[CE] half open`, `[CE] last wins`) because a range fill is precisely where an off-by-one lands, and a
+one-sample error is invisible.
+
+**The fallback ladders now have one definition each.** `resolved_road_type` and `resolved_lane_count` are
+`_type_in` / `_lanes_in` with the parent walk done per call. Two copies of the fallback order would drift
+at the first catalogue change, and the symptom would be a road graded to one type by the brush and another
+by the graph — which is the thing `grading_profile` was factored out to prevent.
+
+**Gate:** `[CE]` — `project/bench/RoadCostGate.gd`, counting the two `find_for` ancestor walks. Measured:
+**16 010 walks for 2 000 samples before, 12 after**, and 64 010 at 8 000 samples before versus the same 12
+— the point being that it is now flat in the sample count, which an absolute bound would not show.
+
+`[CE] oracle` is the criterion that matters: the whole profile recomputed sample by sample through the
+public `resolved_*` API and compared element for element, because every part of this fix is a rearrangement
+of *where* a value is computed and so the way it fails is silently different numbers. Five controls run and
+verified to fail: the old per-sample loop restored in `grading_profile`; the old per-vertex loop restored
+in `graph_path`; the segment fill reversed so the first match wins; the range fill made inclusive of
+`to_distance`; and the fast path taken even when segments exist.
+
+**The gate also gained a `CRITERIA` roll-call**, after a script error inside `[CE]` aborted the function
+and `RoadCostGate` printed PASS anyway. A criterion that is never reported now counts as a failure —
+`RoadGraphGate._account_for_silent_criteria` is the pattern this follows.
 
 ---
 

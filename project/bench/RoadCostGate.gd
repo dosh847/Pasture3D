@@ -25,7 +25,23 @@ extends Node
 ## then rewrites the demo's real region files. See RoadStaleGate for the same note.
 const SCRATCH_DATA := "user://road_cost_gate"
 
+## Every criterion this gate is supposed to report. A run that ends without one of these did not pass it,
+## it never reached it — a script error inside a criterion aborts that function and `_ready` carries on to
+## print a verdict. Registering them up front is what turns that silence into a failure.
+const CRITERIA: PackedStringArray = [
+	"[CA]", "[CA] curve edit", "[CA] child transform", "[CA] curve swap", "[CA] edit after swap",
+	"[CA] closed", "[CA] new spline", "[CA] correct", "[CA] arc lengths",
+	"[CB]", "[CB] action", "[CB] staleness", "[CB] control",
+	"[CC] first pass", "[CC]", "[CC] scoped", "[CC] shared layer", "[CC] mask",
+	"[CD] stable", "[CD] round trip", "[CD] plan", "[CD] road moved", "[CD] alignment_step",
+	"[CD] smooth_radius", "[CD] follow_terrain", "[CD] max_grade", "[CD] design_speed",
+	"[CD] rejects", "[CD] unquantised", "[CD] control",
+	"[CE] no segments", "[CE] flat in samples", "[CE] graph_path", "[CE] oracle",
+	"[CE] last wins", "[CE] half open",
+]
+
 var _fail: int = 0
+var _reported: Dictionary = {}
 
 
 func _ready() -> void:
@@ -34,12 +50,14 @@ func _ready() -> void:
 	_cb_the_runtime_is_baked_on_purpose()
 	_cc_only_changed_layers_repaint()
 	_cd_the_alignment_digest_is_cheap_and_complete()
+	_ce_the_cross_section_resolves_per_segment()
 	print("\n=== %s (%d failures) ===\n" % [
 		"ROAD COST PASS" if _fail == 0 else "ROAD COST FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
 
 func _check(p_name: String, p_ok: bool, p_detail: String) -> void:
+	_reported[p_name] = true
 	if not p_ok:
 		_fail += 1
 	print("%s %s: %s" % ["    " if p_ok else "!!  ", p_name, p_detail])
@@ -533,3 +551,215 @@ func _filled(p_n: int, p_v: float) -> PackedFloat32Array:
 	a.resize(p_n)
 	a.fill(p_v)
 	return a
+
+
+# ---- [CE] --------------------------------------------------------------------------------------
+
+## Counts the two ancestor walks, which are what the per-sample resolve actually cost.
+class WalkCountingBrush extends Pasture3DRoadBrush:
+	var walks: int = 0
+
+	func road_group() -> Pasture3DRoadGroup:
+		walks += 1
+		return super()
+
+	func road_network() -> Pasture3DRoadNetwork:
+		walks += 1
+		return super()
+
+
+## The cross-section is resolved once per segment, not once per sample — and answers the same numbers.
+##
+## ---- WHAT IT COST ----
+##
+## `_init` creates a `Pasture3DRoadOverrides` unconditionally, so `road_defaults != null` was ALWAYS true
+## and the `not segments.is_empty() or road_defaults != null` guard never once took the fast path. Every
+## road ran the loop, and every iteration called `resolved_road_type(s)`, `resolved_lane_count(s)` — which
+## calls `resolved_road_type` again — and `is_bridge_at(s)`. Each of those allocated a chain `Array` and
+## walked the parent list to the scene root twice, through `Pasture3DRoadGroup.find_for` and
+## `Pasture3DRoadNetwork.find_for`. That is roughly six ancestor walks and three allocations per sample,
+## five thousand times on a 5 km road, from three callers.
+##
+## ---- WHY THE ORACLE IS THE CRITERION AND THE COUNT IS THE HEADLINE ----
+##
+## A profile resolved once per segment is only worth having if it is the same profile. Everything about
+## this fix is a rearrangement of WHERE a value is computed, so the way it fails is silently different
+## numbers — a road a few centimetres wider along one segment, which looks like a road. So `[CE] oracle`
+## computes the whole profile the old way, sample by sample through the public `resolved_*` API, and
+## demands equality across every element of all four arrays. The counts are what make it a cost fix; the
+## oracle is what makes it a safe one.
+func _ce_the_cross_section_resolves_per_segment() -> void:
+	print("\n[CE] the cross-section resolves once per segment, not once per sample")
+	var fx := _profile_fixture()
+	var brush: WalkCountingBrush = fx["brush"]
+	var mod: Pasture3DNodeRoad = brush.modifiers[0]
+	var n := 2000
+	var ds := 0.25
+
+	# A road with no segments: nothing in the chain varies along it, so the uniform fill IS the answer.
+	brush.segments = [] as Array[Pasture3DRoadSegment]
+	brush.walks = 0
+	var plain := brush.grading_profile(mod, ds, n)
+	var plain_walks := brush.walks
+	_check("[CE] no segments", plain_walks < 20,
+			"%d ancestor walk(s) for %d samples" % [plain_walks, n])
+
+	# ...and with segments, the walks are a function of the SEGMENT count, not the sample count.
+	var back: Array[Pasture3DRoadSegment] = fx["segments"]
+	brush.segments = back
+	brush.walks = 0
+	var shaped := brush.grading_profile(mod, ds, n)
+	var few := brush.walks
+	brush.walks = 0
+	brush.grading_profile(mod, ds, n * 4)
+	var many := brush.walks
+	_check("[CE] flat in samples", few == many and few < 40,
+			"%d walk(s) at %d samples, %d at %d" % [few, n, many, n * 4])
+
+	# `graph_path` had the same loop over up to 25 000 plan vertices. Fixing the grader and leaving this
+	# one walking the tree per vertex is the asymmetry `grading_profile` exists to prevent.
+	brush.walks = 0
+	var gp := brush.graph_path()
+	var small_walks := brush.walks
+	var small := gp.points.size()
+	# Lengthen the spline so the plan carries several times the vertices, and demand the SAME walk count.
+	# An absolute bound would be satisfied by a loop that walks the tree twice per vertex on a fixture
+	# whose curve happens to tessellate to thirty points; only holding it flat as the plan grows says
+	# anything about the loop.
+	var curve: Curve3D = (brush.get_child(0) as Path3D).curve
+	for k in 6:
+		curve.add_point(Vector3(230.0 + float(k + 1) * 60.0, 0.0, 70.0 + float(k % 2) * 50.0),
+				Vector3(-25.0, 0.0, 0.0), Vector3(25.0, 0.0, 0.0))
+	brush._refresh_owner(brush._layer_owner, false, [])
+	brush.walks = 0
+	var gp_big := brush.graph_path()
+	_check("[CE] graph_path", small_walks == brush.walks and gp_big.points.size() > small * 2
+			and gp_big.half_widths.size() == gp_big.points.size(),
+			"%d walk(s) for %d plan vertices, %d for %d"
+			% [small_walks, small, brush.walks, gp_big.points.size()])
+
+	# The oracle. The whole profile, recomputed sample by sample through the public API the loop used to
+	# call, and compared element for element.
+	var want := _profile_oracle(brush, mod, ds, n)
+	var same := _same_profile(shaped, want)
+	_check("[CE] oracle", same == "",
+			"the per-segment profile matches a per-sample one over %d samples%s"
+			% [n, "" if same == "" else " — " + same])
+
+	# The rule the fill order carries. Segments may overlap and the LAST one in the array wins, which is
+	# what lets a short bridge sit inside a long gravel stretch. Filling per segment instead of testing per
+	# sample preserves that only because the fill runs in array order, and nothing else says so.
+	var inner: Pasture3DRoadSegment = fx["inner"]
+	var at_inner := int(((inner.from_distance + inner.to_distance) * 0.5) / ds)
+	_check("[CE] last wins", shaped["suppress"][at_inner] == 1,
+			"the later, overlapping bridge segment governs its own range")
+
+	# `covers` is half-open [from, to), so two abutting segments must not both claim the boundary. A
+	# range fill is exactly where an off-by-one would land, and it would be invisible: one sample wide.
+	var outer: Pasture3DRoadSegment = fx["outer"]
+	var past := int(outer.to_distance / ds)
+	_check("[CE] half open", shaped["half"][past] == plain["half"][past],
+			"the sample exactly at a segment's to_distance is outside it")
+	fx["terrain"].queue_free()
+
+
+## The profile as the old loop derived it: once per sample, through the public resolvers.
+func _profile_oracle(p_brush: Pasture3DRoadBrush, p_mod: Pasture3DNodeRoad, p_ds: float,
+		p_n: int) -> Dictionary:
+	var t := p_brush.resolved_road_type()
+	var half := PackedFloat32Array()
+	var shoulder := PackedFloat32Array()
+	var verge := PackedFloat32Array()
+	var suppress := PackedByteArray()
+	half.resize(p_n)
+	shoulder.resize(p_n)
+	verge.resize(p_n)
+	suppress.resize(p_n)
+	for i in p_n:
+		var s := float(i) * p_ds
+		var ti := p_brush.resolved_road_type(s)
+		var tt: Pasture3DRoadType = ti if ti != null else t
+		half[i] = tt.half_width(p_brush.resolved_lane_count(s)) if tt != null else 3.5
+		shoulder[i] = tt.shoulder_width if tt != null else 0.5
+		if p_mod != null and p_mod.verge_override >= 0.0:
+			verge[i] = p_mod.verge_override
+		else:
+			verge[i] = tt.verge_width if tt != null else 4.0
+		suppress[i] = 1 if p_brush.is_bridge_at(s) else 0
+	return {"half": half, "shoulder": shoulder, "verge": verge, "suppress": suppress}
+
+
+## "" when the four arrays agree everywhere, else the first disagreement — named, because "the profiles
+## differ" over two thousand samples is not something anyone can act on.
+func _same_profile(p_got: Dictionary, p_want: Dictionary) -> String:
+	for key in ["half", "shoulder", "verge", "suppress"]:
+		var a = p_got[key]
+		var b = p_want[key]
+		if a.size() != b.size():
+			return "%s: %d vs %d elements" % [key, a.size(), b.size()]
+		for i in a.size():
+			if absf(float(a[i]) - float(b[i])) > 0.0001:
+				return "%s[%d]: %s vs %s" % [key, i, str(a[i]), str(b[i])]
+	return ""
+
+
+## A road with two OVERLAPPING segments: a long one that widens the road, and a short bridge inside it.
+## The overlap is what makes `[CE] last wins` a real case, and the long one's `to_distance` is what
+## `[CE] half open` lands on.
+func _profile_fixture() -> Dictionary:
+	var terrain := Pasture3D.new()
+	terrain.region_size = 256
+	terrain.vertex_spacing = 1.0
+	terrain.data_directory = SCRATCH_DATA
+	add_child(terrain)
+	terrain.data.add_region_blank(Vector2i(0, 0))
+	terrain.data.ensure_layer_stack()
+
+	var net := Pasture3DRoadNetwork.new()
+	terrain.add_child(net)
+	var t := Pasture3DRoadType.new()
+	t.type_name = "profile"
+	t.lane_count = 2
+	t.lane_width = 3.5
+	t.shoulder_width = 0.5
+	t.verge_width = 4.0
+	net.road_types = [t]
+
+	var grp := Pasture3DRoadGroup.new()
+	net.add_child(grp)
+
+	var brush := WalkCountingBrush.new()
+	brush.name = "Profile"
+	grp.add_child(brush)
+	brush.terrain = terrain
+	brush.snap_to_surface = false
+	brush.road_road_type = t
+
+	var path := Path3D.new()
+	# CURVED, with real tangents. A straight polyline tessellates to its three control points, and
+	# `[CE] graph_path` — a loop over plan VERTICES — would then be asserted over three of them, which is
+	# a criterion that passes whatever the loop does.
+	var c := Curve3D.new()
+	c.add_point(Vector3(20.0, 0.0, 60.0), Vector3.ZERO, Vector3(40.0, 0.0, 0.0))
+	c.add_point(Vector3(120.0, 0.0, 150.0), Vector3(-40.0, 0.0, -30.0), Vector3(40.0, 0.0, 30.0))
+	c.add_point(Vector3(230.0, 0.0, 70.0), Vector3(-40.0, 0.0, 30.0), Vector3.ZERO)
+	path.curve = c
+	brush.add_child(path)
+
+	var outer := Pasture3DRoadSegment.new()
+	outer.from_distance = 40.0
+	outer.to_distance = 160.0
+	outer.lane_count = 6            # a different cross-section over its range
+	var inner := Pasture3DRoadSegment.new()
+	inner.from_distance = 80.0      # INSIDE outer, and later in the array, so it wins there
+	inner.to_distance = 110.0
+	inner.is_bridge = true
+	var typed: Array[Pasture3DRoadSegment] = [outer, inner]
+	brush.segments = typed
+
+	var mod := Pasture3DNodeRoad.new()
+	mod.alignment_step = 0.25
+	brush.modifiers = [mod]
+	brush._refresh_owner(brush._layer_owner, false, [])
+	return {"terrain": terrain, "net": net, "brush": brush, "type": t,
+			"segments": typed, "outer": outer, "inner": inner}
