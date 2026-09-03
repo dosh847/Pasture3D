@@ -2,8 +2,8 @@
 
 **Document:** `PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md`
 **Status:** **Phase 1 complete — S1, S2, S3 and S4 BUILT 2026-09-03** (`RoadStaleGate` [SA]–[SH] pass,
-controls verified; 36 assertions). **S6–S9 BUILT 2026-09-03** (`RoadCostGate` [CA]–[CE] passes,
-seventeen controls verified to fail; all 19 asserting road gates green). **S10–S12 PROPOSED, not
+controls verified; 36 assertions). **S6–S10 BUILT 2026-09-03** (`RoadCostGate` [CA]–[CF] passes,
+twenty-one controls verified to fail; all 19 asserting road gates green). **S11–S12 PROPOSED, not
 started.** Check the symbol and the branch before planning from this header; it
 will go stale before the work does.
 **Target:** `Pasture3DRoadBrush` and its integration with the modifier stack, the road network resolve
@@ -634,17 +634,36 @@ unclipped grid is ~250 000 cells, and each cell runs an interpreted loop over ~2
 the road step inside `_run_modifier_stack` then calls the **native** grader, which recomputes the same
 nearest-point query in C++ against a spatial index.
 
-**Fix.** Bind the corridor-containment pre-pass natively. `Pasture3DPathGeom` already exists and
-`stamp_road_line` already builds one for exactly this (`src/pasture_3d_brush_raster.cpp:2099-2119`); the
+**Fix (BUILT). No new binding was needed — the entry point already existed.** This section said "the
 missing piece is a `Pasture3DUtil` entry that returns the containment mask for a grid without writing to a
-layer. Fall back to the current loop only when the symbol is absent, in line with the project's usual
-native/GDScript arrangement.
+layer". `Pasture3DUtil.path_query_grid` is that entry, bound since the graph's Path Distance work: it
+builds a `Pasture3DPathGeom`, queries a whole grid against its bucket index on the thread pool, and returns
+`{distance, s, t, ok}` without touching a layer.
 
-**What must not break.** The GDScript loop stays as the oracle, not as dead code — `RoadNativeParityGate`
-needs a reference implementation, and a definition that lives only in a test drifts from the thing it
-defines.
+Its `distance` is the same unsigned distance to the polyline that `nearest_on_plan` returns — same clamped
+projection, same union over segments — and it does not depend on the per-vertex widths the geometry also
+carries; only `s` and `t` do, and the pre-pass reads neither. The documented tie rule (lower segment index
+wins) moves `s`, never `distance`, so it cannot reach this comparison either. So the work was calling it,
+not writing it. Extracted as `Pasture3DRoadBrush._mark_corridor`, and only the CLIPPED sub-grid is queried,
+so a dirty-rect bake still pays for the rect it dirtied.
 
-**Gate:** `[CF]`.
+**The one thing that silently differs.** `path_query_grid` samples CELL CENTRES over the rect it is given;
+this grid is vertex-centred at `min_x + ix * vs`. The rect is therefore offset by half a cell in each axis.
+Without that, every road shifts by half a vertex — the same number of cells marked, all in the wrong place.
+
+**What must not break.** The GDScript loop stays, and it is reached rather than merely retained:
+`_mark_corridor` takes a `p_native` flag that `[CF] parity` sets false, so the gate drives BOTH branches of
+the production function and compares them. A parity gate that reimplemented the fallback would be comparing
+the native path against the gate, not against the code that runs when the extension is not built — which is
+the only case the fallback exists for.
+
+**Gate:** `[CF]` — `project/bench/RoadCostGate.gd`. Cell-for-cell parity over 52 000 cells, clipped and
+unclipped, with `[CF] covers` and `[CF] clip respected` guarding against the comparison going vacuous
+(a corridor that marked nothing, or a "clip" that clipped nothing, would make every other half agree
+trivially). Four controls run and verified to fail: **the half-cell rect offset dropped** — which changes no
+count and every cell, and is the reason this criterion compares rather than counts; `max_distance` set to
+`reach`, so the clamp marks the whole grid; the query rows mapped back without the clip offset; and the
+whole grid queried in place of the sub-rect.
 
 ---
 

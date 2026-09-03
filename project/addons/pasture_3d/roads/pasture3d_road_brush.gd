@@ -704,15 +704,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 	amp.fill(NAN)
 	profile.resize(n)
 	profile.fill(0.0)
-	for iz in range(iz0, iz1 + 1):
-		var wz := min_z + float(iz) * vs
-		var row := iz * gw
-		for ix in range(ix0, ix1 + 1):
-			var wx := min_x + float(ix) * vs
-			var hit := Pasture3DRoadGrader.nearest_on_plan(plan, cum, Vector2(wx, wz))
-			if float(hit[0]) <= reach:
-				amp[row + ix] = 0.0
-				profile[row + ix] = 1.0
+	_mark_corridor(amp, profile, plan, cum, reach, min_x, min_z, vs, gw, ix0, ix1, iz0, iz1)
 
 	var vals := PackedFloat32Array()
 	vals.resize(n)
@@ -746,6 +738,77 @@ func _paint_flat_footprint(path: Path3D) -> void:
 				var wv := vals[row + ix]
 				if is_finite(wv):
 					_paint_height(Vector3(min_x + ix * vs, 0.0, z), wv, 0.0)
+
+## Mark the cells inside the corridor: `amp = 0` and `profile = 1` where the plan is within `p_reach`.
+##
+## ---- WHAT IT COST ----
+##
+## This is the pre-pass the GDScript footprint branch runs, and that branch is taken whenever
+## `_road_native_is_complete()` is false — which is to say whenever the stack is anything other than
+## exactly one road modifier, which is precisely the §8 workflow the road-in-a-graph design exists for
+## (Road + Graph, Road + Erosion). A 5 km road with a 50 m corridor at `vs = 1` is ~250 000 cells, and each
+## cell ran an interpreted `nearest_on_plan` over ~25 000 plan segments. AABB-rejected per segment, but
+## still per segment, and still in GDScript.
+##
+## `Pasture3DUtil.path_query_grid` answers the whole grid in C++ against a bucket index, and its
+## `distance` is the same unsigned distance to the polyline that `nearest_on_plan` returns — computed the
+## same way, clamped identically, and independent of the widths the geometry also carries. Only `s` and `t`
+## depend on those, and neither is read here.
+##
+## ---- WHY THE GDSCRIPT LOOP STAYS ----
+##
+## Not as dead code: `[CF] parity` drives it through `p_native = false` and compares it cell for cell
+## against the native answer, and it is the real fallback when the extension is not built. A definition
+## that lives only in a test drifts from the thing it defines.
+##
+## ---- THE ONE THING THAT WOULD SILENTLY DIFFER ----
+##
+## `path_query_grid` samples CELL CENTRES over the rect it is given, and this grid is vertex-centred at
+## `min_x + ix * vs`. So the rect is offset by half a cell in each axis, which puts the native sample
+## exactly on the GDScript one. Get that wrong and every road shifts by half a vertex — a whole-road error
+## small enough to read as "the corridor looks a bit off", which is why `[CF] parity` compares the two
+## implementations cell for cell rather than counting how many cells each marked.
+func _mark_corridor(r_amp: PackedFloat64Array, r_profile: PackedFloat64Array,
+		p_plan: PackedVector2Array, p_cum: PackedFloat32Array, p_reach: float,
+		p_min_x: float, p_min_z: float, p_vs: float, p_gw: int,
+		p_ix0: int, p_ix1: int, p_iz0: int, p_iz1: int, p_native: bool = true) -> void:
+	var cw := p_ix1 - p_ix0 + 1
+	var ch := p_iz1 - p_iz0 + 1
+	if cw < 1 or ch < 1:
+		return
+	# `p_native` is false only from `RoadCostGate [CF]`, which drives BOTH branches of this function and
+	# compares them cell for cell. A parity gate that reimplemented the fallback would be comparing the
+	# native path against the gate rather than against the code that actually runs when the extension is
+	# not built, which is the case the fallback exists for.
+	if p_native and ClassDB.class_has_method("Pasture3DUtil", "path_query_grid"):
+		# Only the CLIPPED sub-grid, so a dirty-rect bake still pays for the rect it dirtied.
+		var x0 := p_min_x + float(p_ix0) * p_vs
+		var z0 := p_min_z + float(p_iz0) * p_vs
+		var rect := Rect2(x0 - 0.5 * p_vs, z0 - 0.5 * p_vs, float(cw) * p_vs, float(ch) * p_vs)
+		# `max_distance` 0 disables the clamp. Passing `reach` here would clamp every far cell TO reach and
+		# `<= reach` would then be true for the whole grid — the road paved over its own bounding box.
+		var q: Dictionary = Pasture3DUtil.path_query_grid(p_plan, PackedFloat32Array(), cw, ch, rect,
+				1.0e9, 0.0)
+		if bool(q.get("ok", false)):
+			var dist: PackedFloat32Array = q["distance"]
+			for jz in ch:
+				var row := (p_iz0 + jz) * p_gw
+				var qrow := jz * cw
+				for jx in cw:
+					if dist[qrow + jx] <= p_reach:
+						r_amp[row + p_ix0 + jx] = 0.0
+						r_profile[row + p_ix0 + jx] = 1.0
+			return
+	for iz in range(p_iz0, p_iz1 + 1):
+		var wz := p_min_z + float(iz) * p_vs
+		var row2 := iz * p_gw
+		for ix in range(p_ix0, p_ix1 + 1):
+			var wx := p_min_x + float(ix) * p_vs
+			var hit := Pasture3DRoadGrader.nearest_on_plan(p_plan, p_cum, Vector2(wx, wz))
+			if float(hit[0]) <= p_reach:
+				r_amp[row2 + ix] = 0.0
+				r_profile[row2 + ix] = 1.0
+
 
 # ---- Grading (P2) -------------------------------------------------------------------------------
 

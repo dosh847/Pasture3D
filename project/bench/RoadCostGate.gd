@@ -38,6 +38,7 @@ const CRITERIA: PackedStringArray = [
 	"[CD] rejects", "[CD] unquantised", "[CD] control",
 	"[CE] no segments", "[CE] flat in samples", "[CE] graph_path", "[CE] oracle",
 	"[CE] last wins", "[CE] half open",
+	"[CF] covers", "[CF] parity", "[CF] clipped", "[CF] clip respected",
 ]
 
 var _fail: int = 0
@@ -51,6 +52,7 @@ func _ready() -> void:
 	_cc_only_changed_layers_repaint()
 	_cd_the_alignment_digest_is_cheap_and_complete()
 	_ce_the_cross_section_resolves_per_segment()
+	_cf_the_corridor_prepass_is_native()
 	print("\n=== %s (%d failures) ===\n" % [
 		"ROAD COST PASS" if _fail == 0 else "ROAD COST FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
@@ -763,3 +765,120 @@ func _profile_fixture() -> Dictionary:
 	brush._refresh_owner(brush._layer_owner, false, [])
 	return {"terrain": terrain, "net": net, "brush": brush, "type": t,
 			"segments": typed, "outer": outer, "inner": inner}
+
+
+# ---- [CF] --------------------------------------------------------------------------------------
+
+## The corridor pre-pass is answered natively, and answers the same cells.
+##
+## ---- WHAT IT COST ----
+##
+## The GDScript footprint branch runs whenever `_road_native_is_complete()` is false — whenever the stack
+## is anything but exactly one road modifier, which is precisely the §8 workflow the road-in-a-graph design
+## exists for (Road + Graph, Road + Erosion). A 5 km road with a 50 m corridor at `vs = 1` is ~250 000
+## cells, and every cell ran an interpreted `nearest_on_plan` over ~25 000 plan segments. The result set
+## `amp = 0` / `profile = 1`, and the road step then called the native grader, which recomputed the same
+## nearest-point query in C++ against a spatial index.
+##
+## ---- WHY PARITY IS THE CRITERION AND A COUNT WOULD NOT DO ----
+##
+## `Pasture3DUtil.path_query_grid` samples CELL CENTRES over the rect it is handed, and this grid is
+## vertex-centred at `min_x + ix * vs`. The rect therefore has to be offset by half a cell in each axis.
+## Get that wrong and every road shifts by half a vertex — the same number of cells marked, all of them in
+## the wrong place, which reads as "the corridor looks slightly off" and survives any criterion that counts
+## rather than compares. So `[CF] parity` compares the two implementations CELL FOR CELL, and it drives
+## both through the production function rather than reimplementing the fallback here.
+func _cf_the_corridor_prepass_is_native() -> void:
+	print("\n[CF] the corridor pre-pass is native, and marks the same cells")
+	var fx := _profile_fixture()
+	var brush: Pasture3DRoadBrush = fx["brush"]
+	var plan := brush._plan_points()
+	var cum := brush._plan_cum()
+	if plan.size() < 8:
+		_check("[CF] parity", false, "the fixture produced only %d plan vertices" % plan.size())
+		fx["terrain"].queue_free()
+		return
+
+	var vs := 1.0
+	var min_x := 0.0
+	var min_z := 0.0
+	var gw := 260
+	var gh := 200
+	var reach := brush.corridor_half_width()
+
+	var native := _corridor(brush, plan, cum, reach, min_x, min_z, vs, gw, gh, 0, gw - 1, 0, gh - 1, true)
+	var script_ := _corridor(brush, plan, cum, reach, min_x, min_z, vs, gw, gh, 0, gw - 1, 0, gh - 1, false)
+
+	var marked := 0
+	for v in native["profile"]:
+		if v > 0.5:
+			marked += 1
+	# A corridor that marked nothing, or the whole grid, would make every comparison below vacuous.
+	_check("[CF] covers", marked > 200 and marked < gw * gh / 2,
+			"%d of %d cells are inside the corridor (reach %.2f m)" % [marked, gw * gh, reach])
+
+	var diff := _first_difference(native, script_)
+	_check("[CF] parity", diff == "",
+			"the native and GDScript pre-passes agree over %d cells%s"
+			% [gw * gh, "" if diff == "" else " — " + diff])
+
+	# The clip. A dirty-rect bake asks for a sub-grid, and the native call is handed that sub-rect rather
+	# than the whole grid — so the index arithmetic mapping the query's rows back into the full grid is new
+	# code, and an off-by-one there writes the corridor into the wrong rows.
+	var ix0 := 60
+	var ix1 := 190
+	var iz0 := 40
+	var iz1 := 150
+	var n_clip := _corridor(brush, plan, cum, reach, min_x, min_z, vs, gw, gh, ix0, ix1, iz0, iz1, true)
+	var s_clip := _corridor(brush, plan, cum, reach, min_x, min_z, vs, gw, gh, ix0, ix1, iz0, iz1, false)
+	var cdiff := _first_difference(n_clip, s_clip)
+	_check("[CF] clipped", cdiff == "",
+			"a clipped sub-grid agrees too%s" % ["" if cdiff == "" else " — " + cdiff])
+
+	# ...and the clip really clipped, or [CF] clipped is two full grids agreeing with each other.
+	var outside := 0
+	for iz in gh:
+		for ix in gw:
+			if (ix < ix0 or ix > ix1 or iz < iz0 or iz > iz1) \
+					and n_clip["profile"][iz * gw + ix] > 0.5:
+				outside += 1
+	var inside_marked := 0
+	for iz in range(iz0, iz1 + 1):
+		for ix in range(ix0, ix1 + 1):
+			if n_clip["profile"][iz * gw + ix] > 0.5:
+				inside_marked += 1
+	_check("[CF] clip respected", outside == 0 and inside_marked > 100 and inside_marked < marked,
+			"%d cell(s) marked outside the clip, %d inside it, %d unclipped"
+			% [outside, inside_marked, marked])
+	fx["terrain"].queue_free()
+
+
+## One run of the production pre-pass over a fresh pair of buffers.
+func _corridor(p_brush: Pasture3DRoadBrush, p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
+		p_reach: float, p_min_x: float, p_min_z: float, p_vs: float, p_gw: int, p_gh: int,
+		p_ix0: int, p_ix1: int, p_iz0: int, p_iz1: int, p_native: bool) -> Dictionary:
+	var amp := PackedFloat64Array()
+	var profile := PackedFloat64Array()
+	amp.resize(p_gw * p_gh)
+	amp.fill(NAN)
+	profile.resize(p_gw * p_gh)
+	profile.fill(0.0)
+	p_brush._mark_corridor(amp, profile, p_plan, p_cum, p_reach, p_min_x, p_min_z, p_vs, p_gw,
+			p_ix0, p_ix1, p_iz0, p_iz1, p_native)
+	return {"amp": amp, "profile": profile}
+
+
+## "" when both buffers agree everywhere, else the first cell that differs — named, because "they differ"
+## over fifty thousand cells is not something anyone can act on. A half-cell offset shows up here as a
+## single column index, which is what makes the misalignment legible rather than merely detected.
+func _first_difference(p_a: Dictionary, p_b: Dictionary) -> String:
+	var pa: PackedFloat64Array = p_a["profile"]
+	var pb: PackedFloat64Array = p_b["profile"]
+	var aa: PackedFloat64Array = p_a["amp"]
+	var ab: PackedFloat64Array = p_b["amp"]
+	for i in pa.size():
+		if pa[i] != pb[i]:
+			return "profile[%d]: %s vs %s" % [i, str(pa[i]), str(pb[i])]
+		if is_nan(aa[i]) != is_nan(ab[i]):
+			return "amp[%d]: %s vs %s" % [i, str(aa[i]), str(ab[i])]
+	return ""
