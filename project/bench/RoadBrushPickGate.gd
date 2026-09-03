@@ -21,6 +21,12 @@
 #      auto-assigned from the first Pasture3D ANCESTOR, so a road under a Pasture3DRoadNetwork that sits
 #      beside the terrain rather than inside it never has one — points drawn, none of them editable.
 #
+# [RD] ...and once they WERE editable, DRAGGING one crashed. Lifting that gate let the drag reach
+#      `brush_gizmo._set_subgizmo_transform`, which asks `_base_height_below` for the ground under the
+#      new position whenever `snap_to_surface` is on — and that helper dereferenced `terrain.data` with
+#      no guard, on a brush that by construction has no terrain. The caller was already written for a
+#      non-finite answer; the helper simply never gave it one. A regression created by the [RC] fix.
+#
 # WHAT THIS GATE CANNOT SAY. [RC] measures the brush-side CAPABILITY the plugin was refusing to use, not
 # the plugin branch itself: `_forward_brush_input` needs `EditorInterface` and a viewport camera, so the
 # editor-only half of that fix is covered by reading and a parse-check, nothing more. Said here rather
@@ -33,7 +39,7 @@
 @tool
 extends Node
 
-const EXPECTED: int = 3
+const EXPECTED: int = 4
 
 var _fail: int = 0
 var _completed: int = 0
@@ -47,6 +53,7 @@ func _ready() -> void:
 	_ra_point_beats_ribbon()
 	_rb_chunk_host_is_not_a_structural_edit()
 	_rc_point_edits_need_no_terrain()
+	_rd_snap_query_survives_no_terrain()
 	var ok := _fail == 0 and _completed == EXPECTED
 	print("\n=== %s (%d failures, %d/%d criteria reported) ===\n" % [
 		"ROAD BRUSH PICK PASS" if ok else "ROAD BRUSH PICK FAIL", _fail, _completed, EXPECTED])
@@ -173,4 +180,49 @@ func _rc_point_edits_need_no_terrain() -> void:
 	road.editor_smooth_point(path, 1)
 	_check("CONTROL: and toggles back to a corner", path.curve.get_point_out(1).length() <= 0.02,
 			"out tangent %.2f m" % path.curve.get_point_out(1).length())
+	_completed += 1
+
+
+# ---- [RD] the surface-snap query answers instead of crashing ------------------------------------
+
+func _rd_snap_query_survives_no_terrain() -> void:
+	print("
+[RD] asking a terrain-less brush for the ground under a point answers NAN")
+	var r := _road("RoadE", [Vector3(-20, 0, 0), Vector3(20, 0, 0)])
+	var road: Node3D = r[0]
+	road.snap_to_surface = true
+	_check("FIXTURE: no terrain, snapping on", not is_instance_valid(road.terrain) and road.snap_to_surface,
+			"terrain = %s, snap = %s" % [road.terrain, road.snap_to_surface])
+
+	# This is the exact call brush_gizmo._set_subgizmo_transform makes on every drag frame. Before the
+	# guard it raised on terrain.data; the criterion is that it RETURNS, and returns the one value the
+	# caller tests for.
+	var h: float = road._base_height_below(Vector3(0.0, 0.0, 0.0))
+	_check("the query returns non-finite rather than raising", not is_finite(h), "h = %s" % h)
+	var g: PackedFloat32Array = road._base_below_grid(-32.0, -32.0, 1.0, 8, 8)
+	_check("and the grid form returns empty", g.is_empty(), "%d samples" % g.size())
+
+	# THE CONTROL. Under a REAL terrain the same call must produce a real height — otherwise "answers
+	# NAN" passes on a build where the helper is simply broken for everyone, and every snapping brush in
+	# the project would silently stop snapping while this gate stayed green.
+	var terr := Pasture3D.new()
+	terr.name = "TerrainForRD"
+	# data_directory AFTER add_child: Pasture3D::_initialize() is gated on being inside the tree. An
+	# EMPTY scratch directory on purpose — pointing at res://demo/data made the run re-save nine region
+	# files, and a gate that dirties the repo to measure something is not a gate. All this needs is for
+	# `data` to exist, plus one blank region so there is a surface to sample at the origin.
+	_root.add_child(terr)
+	# Made first, or the region scan logs "Cannot open directory" before finding nothing.
+	DirAccess.make_dir_recursive_absolute("user://rd_gate_scratch")
+	terr.data_directory = "user://rd_gate_scratch"
+	terr.data.add_region_blank(Vector2i.ZERO)
+	var r2 := Pasture3DRoadBrush.new()
+	r2.name = "RoadF"
+	terr.add_child(r2)
+	# Assigned by hand: `_auto_assign_terrain` is `Engine.is_editor_hint()`-gated, so parenting alone
+	# binds nothing headless. That is a fixture detail, not the thing under test.
+	r2.terrain = terr
+	var h2: float = r2._base_height_below(Vector3(0.0, 0.0, 0.0))
+	_check("CONTROL: with a terrain the same query is finite",
+			is_instance_valid(r2.terrain) and is_finite(h2), "terrain = %s, h = %s" % [r2.terrain, h2])
 	_completed += 1

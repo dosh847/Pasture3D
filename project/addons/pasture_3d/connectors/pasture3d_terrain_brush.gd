@@ -3653,6 +3653,8 @@ func _road_native_is_complete() -> bool:
 ## other / their own layer. Empty when there's no lower layer or the API is absent → the rasteriser then
 ## falls back to the live height (only where no lower layer covers, i.e. no terrain → nothing painted).
 func _base_below_grid(min_x: float, min_z: float, vs: float, gw: int, gh: int) -> PackedFloat32Array:
+	if not is_configured():
+		return PackedFloat32Array()
 	if _layer_id > 0 and terrain.data.has_method("composite_height_below"):
 		return terrain.data.composite_height_below(_layer_id, min_x, min_z, vs, gw, gh)
 	return PackedFloat32Array()
@@ -3660,7 +3662,14 @@ func _base_below_grid(min_x: float, min_z: float, vs: float, gw: int, gh: int) -
 
 ## Height of the layers below this brush's, at a world position (snap + the GDScript fallback rasteriser).
 ## Falls back to the full composited height where no lower layer covers (or the API is absent).
+## Answers NAN when there is no terrain at all. A brush parented outside the Pasture3D node never gets
+## one (see _terrain_ancestor), and its points are still editable — dragging one with snap_to_surface on
+## reaches here from brush_gizmo._set_subgizmo_transform. Both editor callers (that one and
+## editor_plugin's Ctrl-click add) already test is_finite; every other caller runs inside a bake, which
+## does not start without is_configured, so NAN cannot reach it.
 func _base_height_below(pos: Vector3) -> float:
+	if not is_configured():
+		return NAN
 	if _layer_id > 0 and terrain.data.has_method("get_height_below"):
 		var h: float = terrain.data.get_height_below(_layer_id, pos)
 		if is_finite(h):
