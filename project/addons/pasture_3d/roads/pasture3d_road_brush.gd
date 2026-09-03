@@ -935,6 +935,38 @@ func paint_surface() -> int:
 	return cells.size()
 
 
+## Everything `paint_surface` would write, hashed. `0` means it would write nothing.
+##
+## ---- WHY THIS IS DERIVED FROM THE MASK AND NOT FROM THE ROAD ----
+##
+## `Pasture3DRoadNetwork.paint_roads` uses this to skip roads that would repaint themselves identically.
+## The obvious signature — `road_content_signature()` — is the WRONG one, and would have been a stale
+## paint rather than a saved one: the cover mask is produced by the grade, and the grade reads the ground.
+## Move a mound under a road that nobody edited and its corridor changes shape while every property on it
+## stays exactly as it was. So this hashes the mask the paint actually consumes.
+##
+## Nothing here is guessed. `paint_surface` reads six things out of `last_masks` and two ids, and this
+## lists those eight; a term the paint does not read would make roads repaint for no reason, and a term
+## it reads that is missing here is a road left painted where it no longer is.
+func paint_signature() -> int:
+	var mod := road_modifier()
+	if mod == null or mod.last_masks.is_empty() or terrain == null or terrain.data == null:
+		return 0
+	var masks: Dictionary = mod.last_masks
+	var cover: PackedFloat32Array = masks.get("surface", PackedFloat32Array())
+	if cover.is_empty():
+		return 0
+	var t := resolved_road_type()
+	if t == null or t.surface_layer_id < 0:
+		return 0
+	return hash([
+		cover,
+		masks.get("gw", 0), masks.get("gh", 0),
+		masks.get("min_x", 0.0), masks.get("min_z", 0.0), masks.get("vs", 1.0),
+		t.surface_layer_id, paint_layer_id(),
+	])
+
+
 ## The reserved control layer this road paints into: its group's, or the network's own when the road has
 ## no group. Negative when there is nowhere to paint.
 ##

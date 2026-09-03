@@ -31,6 +31,8 @@ var _fail: int = 0
 func _ready() -> void:
 	print("=== RoadCostGate: redundant work, counted (spec §4) ===\n")
 	_ca_the_plan_is_tessellated_once()
+	_cb_the_runtime_is_baked_on_purpose()
+	_cc_only_changed_layers_repaint()
 	print("\n=== %s (%d failures) ===\n" % [
 		"ROAD COST PASS" if _fail == 0 else "ROAD COST FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
@@ -191,3 +193,228 @@ func _fixture() -> Dictionary:
 	road_mod.alignment_step = 4.0
 	brush.modifiers = [road_mod]
 	return {"terrain": terrain, "net": net, "brush": brush, "path": path}
+
+
+# ---- [CB] --------------------------------------------------------------------------------------
+
+## Counts `build_runtime` so [CB] can say WHO baked it rather than whether one exists.
+class CountingNetwork extends Pasture3DRoadNetwork:
+	var runtime_builds: int = 0
+
+	func build_runtime(p_brushes: Array = []) -> int:
+		runtime_builds += 1
+		return super(p_brushes)
+
+
+## A control-point drag does not rebuild the game-facing runtime; pressing Bake Runtime does.
+##
+## ---- WHAT IT COST ----
+##
+## `build_runtime` sat at the end of `resolve_junctions`, and a resolve runs on every drag. It called
+## `build_run()` on every road in the network — a fourth time per resolve — plus `surface_intervals()` and
+## `corridor_half_width()` per road, and then assigned `runtime`, `run_ids` and `next_run_id`, all
+## `@export`. Moving one control point rebuilt a deliverable for nineteen roads that had not moved AND
+## marked the scene modified.
+##
+## ---- WHY THE COUNT ALONE IS NOT THE CRITERION ----
+##
+## Deleting the call passes "a drag does not bake the runtime" perfectly and ships a runtime that can
+## never be rebuilt. So the same criterion asserts the button still works, that the runtime it produces
+## has the roads in it, and that a network whose roads have changed since the bake SAYS SO — the
+## configuration warning is the entire safety net now, because Bake All Brushes walks the erosion registry
+## and has never seen a road.
+func _cb_the_runtime_is_baked_on_purpose() -> void:
+	print("\n[CB] the runtime is baked by an action, not by a drag")
+	var fx := _network_fixture()
+	var net: CountingNetwork = fx["net"]
+	var roads: Array = fx["roads"]
+
+	net.runtime_builds = 0
+	net.resolve_junctions()
+	_check("[CB]", net.runtime_builds == 0 and net.runtime == null,
+			"a resolve built the runtime %d time(s)" % net.runtime_builds)
+
+	# It is still buildable, and it still contains the roads. "Never baked" passes the half above.
+	net.runtime_builds = 0
+	var runs := net.bake_runtime()
+	_check("[CB] action", net.runtime_builds == 1 and net.runtime != null and runs == 4,
+			"Bake Runtime built %d run(s) from 4 road(s)" % runs)
+
+	# Clean immediately after the bake...
+	var clean_stale := _mentions_stale(net._get_configuration_warnings())
+	# ...and stale once a road changes, which is the only thing standing between a user and a silently
+	# out-of-date deliverable now that nothing rebuilds it for them.
+	roads[0].road_lane_count = 5
+	var dirty_stale := _mentions_stale(net._get_configuration_warnings())
+	_check("[CB] staleness", not clean_stale and dirty_stale,
+			"warned after the bake: %s; after a road changed: %s" % [str(clean_stale), str(dirty_stale)])
+
+	# And a resolve does not quietly clear the warning by re-baking behind the user's back.
+	net.runtime_builds = 0
+	net.resolve_junctions()
+	_check("[CB] control", net.runtime_builds == 0
+			and _mentions_stale(net._get_configuration_warnings()),
+			"a resolve after the edit built %d runtime(s) and left the warning up" % net.runtime_builds)
+	fx["terrain"].queue_free()
+
+
+func _mentions_stale(p_warnings: PackedStringArray) -> bool:
+	for w in p_warnings:
+		if w.contains("Bake Runtime"):
+			return true
+	return false
+
+
+# ---- [CC] --------------------------------------------------------------------------------------
+
+## Counts `paint_surface` so [CC] can say which roads repainted, not just that the paint is right.
+class CountingRoadBrush extends Pasture3DRoadBrush:
+	var paints: int = 0
+
+	func paint_surface() -> int:
+		paints += 1
+		return super()
+
+
+## A resolve repaints the roads whose paint would differ, and the roads sharing their layer — not all of
+## them, and not fewer.
+##
+## ---- WHAT IT COST ----
+##
+## `paint_roads` cleared and repainted EVERY road on every resolve, and a resolve runs on every drag.
+## `clear_layer_in_area` works at whole-tile granularity over the union of a layer's roads, so a
+## twenty-road network re-wrote twenty corridors because one control point moved.
+##
+## ---- WHY THE UNIT IS THE LAYER AND NOT THE ROAD ----
+##
+## The clear must stay per layer over a union — clearing per road drops a neighbour's cells at a shared
+## tile boundary, because whole tiles go. So scoping the repaint to "the road that moved" would clear its
+## layer's whole box and leave every other road on that layer erased. The dirty set is therefore closed
+## over shared layers, and `[CC] shared layer` is the assertion that it is: two roads in ONE group repaint
+## together even when only one of them changed. Getting this wrong is not a slow road, it is a missing one.
+func _cc_only_changed_layers_repaint() -> void:
+	print("\n[CC] a resolve repaints the layers that changed, and no others")
+	var fx := _network_fixture()
+	var net: CountingNetwork = fx["net"]
+	var roads: Array = fx["roads"]
+	var shared: Array = fx["shared"]
+	var all: Array = roads + shared
+
+	net.resolve_junctions()  # first pass: nothing is painted yet, so everything paints
+	_check("[CC] first pass", _paints(all) == 4,
+			"%d of 4 road(s) painted on the first resolve" % _paints(all))
+
+	# Nothing changed. This is the drag that used to cost a full repaint.
+	_reset_paints(all)
+	net.resolve_junctions()
+	_check("[CC]", _paints(all) == 0,
+			"an unchanged resolve repainted %d road(s)" % _paints(all))
+
+	# One road on its own layer changes. Only it repaints.
+	_reset_paints(all)
+	_move_road(roads[0])
+	net.resolve_junctions()
+	_check("[CC] scoped", roads[0].paints == 1 and roads[1].paints == 0 and _paints(shared) == 0,
+			"road 0 painted %d, road 1 painted %d, the shared-layer pair painted %d"
+			% [roads[0].paints, roads[1].paints, _paints(shared)])
+
+	# One road of a SHARED-layer pair changes. BOTH repaint, because the clear takes the whole layer.
+	_reset_paints(all)
+	_move_road(shared[0])
+	net.resolve_junctions()
+	_check("[CC] shared layer", shared[0].paints == 1 and shared[1].paints == 1,
+			"the edited road painted %d and its layer-mate painted %d"
+			% [shared[0].paints, shared[1].paints])
+
+	# The case a content signature would have missed, and the reason `paint_signature` reads the mask.
+	# The cover mask is produced by the grade, and the grade reads the ground: move a mound under a road
+	# and its corridor changes shape while every property on the road stays exactly as it was. Mutating
+	# the mask directly is that case, without the mound.
+	_reset_paints(all)
+	var mod: Pasture3DNodeRoad = roads[1].road_modifier()
+	var cover: PackedFloat32Array = mod.last_masks["surface"]
+	cover[int(cover.size() / 2)] = 1.0 - cover[int(cover.size() / 2)]
+	mod.last_masks["surface"] = cover
+	net.resolve_junctions()
+	_check("[CC] mask", roads[1].paints == 1,
+			"a road whose cover mask changed with no property edit painted %d time(s)"
+			% roads[1].paints)
+	fx["terrain"].queue_free()
+
+
+func _paints(p_roads: Array) -> int:
+	var n := 0
+	for b in p_roads:
+		n += b.paints
+	return n
+
+
+func _reset_paints(p_roads: Array) -> void:
+	for b in p_roads:
+		b.paints = 0
+
+
+## Move a road and re-bake it, so its cover mask is genuinely different rather than merely re-declared.
+func _move_road(p_brush) -> void:
+	var path: Path3D = p_brush.get_child(0)
+	path.curve.set_point_position(1, path.curve.get_point_position(1) + Vector3(0.0, 0.0, 6.0))
+	p_brush._refresh_owner(p_brush._layer_owner, false, [])
+
+
+## Four roads: two alone on their own group layers, two SHARING one. The share is what makes
+## `[CC] shared layer` a real case — with every road on its own layer the closure over layers is the
+## identity, and a scoping bug that ignored it would pass.
+func _network_fixture() -> Dictionary:
+	var terrain := Pasture3D.new()
+	terrain.region_size = 256
+	terrain.vertex_spacing = 1.0
+	terrain.data_directory = SCRATCH_DATA
+	add_child(terrain)
+	terrain.data.add_region_blank(Vector2i(0, 0))
+	terrain.data.ensure_layer_stack()
+
+	var net := CountingNetwork.new()
+	terrain.add_child(net)
+	var t := Pasture3DRoadType.new()
+	t.type_name = "cost"
+	t.lane_count = 2
+	t.lane_width = 3.5
+	t.surface_layer_id = 1  # >= 0, or paint_surface returns before it writes anything (§4.4)
+	net.road_types = [t]
+
+	var groups: Array = []
+	for i in 3:
+		var grp := Pasture3DRoadGroup.new()
+		grp.name = "G%d" % i
+		net.add_child(grp)
+		groups.append(grp)
+
+	var roads: Array = []
+	var shared: Array = []
+	for i in 4:
+		# Roads 2 and 3 both go in group 2, so they share one paint layer.
+		var grp: Pasture3DRoadGroup = groups[mini(i, 2)]
+		var b := CountingRoadBrush.new()
+		b.name = "R%d" % i
+		grp.add_child(b)
+		b.terrain = terrain
+		b.snap_to_surface = false
+		b.road_road_type = t
+		var path := Path3D.new()
+		var c := Curve3D.new()
+		var z := 40.0 + float(i) * 40.0
+		c.add_point(Vector3(30.0, 0.0, z))
+		c.add_point(Vector3(120.0, 0.0, z))
+		c.add_point(Vector3(210.0, 0.0, z))
+		path.curve = c
+		b.add_child(path)
+		var mod := Pasture3DNodeRoad.new()
+		mod.alignment_step = 4.0
+		b.modifiers = [mod]
+		if i < 2:
+			roads.append(b)
+		else:
+			shared.append(b)
+	for b in roads + shared:
+		b._refresh_owner(b._layer_owner, false, [])
+	return {"terrain": terrain, "net": net, "type": t, "roads": roads, "shared": shared}

@@ -2,8 +2,8 @@
 
 **Document:** `PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md`
 **Status:** **Phase 1 complete — S1, S2, S3 and S4 BUILT 2026-09-03** (`RoadStaleGate` [SA]–[SH] pass,
-controls verified; 36 assertions). **S6 BUILT 2026-09-03** (`RoadCostGate` [CA] passes, three controls
-verified to fail; all 17 asserting road gates green). **S7–S12 PROPOSED, not started.** Check the symbol and the branch before planning from this header; it
+controls verified; 36 assertions). **S6 and S7 BUILT 2026-09-03** (`RoadCostGate` [CA]–[CC] passes,
+eight controls verified to fail; all 18 asserting road gates green). **S8–S12 PROPOSED, not started.** Check the symbol and the branch before planning from this header; it
 will go stale before the work does.
 **Target:** `Pasture3DRoadBrush` and its integration with the modifier stack, the road network resolve
 loop, and the terrain node graph.
@@ -465,19 +465,43 @@ Nineteen roads that did not move pay in full for the one that did.
 
 **Fix, in the order the risk rises.**
 
-1. **Stop re-baking `runtime` on every resolve.** The baked runtime is a *deliverable*, not a live
-   derivative — its own header says it exists so a game can load it without the editor. Move
-   `build_runtime` off `resolve_junctions` onto an explicit "Bake Runtime" action plus the existing Bake
-   All path, and leave a staleness warning behind. This alone removes a quarter of the work and stops the
-   scene being dirtied by a mouse drag.
-2. **Make `paint_roads` and `build_chunks` incremental.** Both already have the information: the chunk
-   host has a per-road digest, and `paint_roads` clears per shared layer over the union of the roads on
-   it. Restrict the union to roads whose `road_content_signature()` or junction participation changed.
-   The clear must still be per *layer* over a union, not per road — the existing comment at `:981-987`
-   explains why clearing per road drops a neighbour's cells at a shared tile boundary, and that reasoning
-   survives.
-3. **Keep the resolve itself whole.** Junction detection is a fact about pairs; scoping it to "roads near
-   the edited one" is a correctness risk for a cost that S6 and S8 largely remove.
+1. **Stop re-baking `runtime` on every resolve. (BUILT.)** `build_runtime` is off `resolve_junctions` and
+   behind an `@export_tool_button("Bake Runtime")` calling `Pasture3DRoadNetwork.bake_runtime()`, which
+   resolves, builds, and records `runtime_digest`. A `_get_configuration_warnings` entry reports staleness.
+
+   **Correction: "plus the existing Bake All path" does not exist.** `Pasture3DSimManager.bake_all_brushes`
+   walks the *erosion* registry (`resolved_eroding_brushes`) and has never seen a road, so there was no
+   Bake All path to hang this on. Nothing rebuilds the runtime implicitly any more, which is why the
+   staleness warning is load-bearing rather than a courtesy, and why `runtime_digest` is `@export`ed — a
+   runtime saved stale is still stale when the scene comes back. It moves *only* inside `bake_runtime`, so
+   a drag still dirties nothing.
+
+2. **Make `paint_roads` incremental. (BUILT.)** `_paint_dirty_set` compares each road's `paint_signature()`
+   against `_painted` and repaints the roads on the **layers** that changed.
+
+   **Correction: `road_content_signature()` is the wrong signature here** — it was the one this section
+   proposed, and it would have shipped a stale paint rather than a saved one. The cover mask is produced
+   by the grade and the grade reads the ground, so a mound moved under a road changes its corridor while
+   every property on the road stays identical. `Pasture3DRoadBrush.paint_signature()` therefore hashes
+   what `paint_surface` actually consumes: the cover mask, the five grid terms beside it in `last_masks`,
+   and the two layer ids. Gated as `[CC] mask`.
+
+   The layer closure is not an optimisation detail. Scoping the repaint to the road that moved would clear
+   its layer's whole box — `clear_layer_in_area` drops whole tiles — and leave every other road on that
+   layer erased, so a dirty road drags its layer-mates in. `[CC] shared layer` is that, on a fixture with
+   two roads in one group.
+
+   **A pre-existing hole closed on the way past.** The clear is computed from the roads that are *here*,
+   so a deleted road's carriageway stayed painted on the terrain forever. A full repaint never fixed it
+   either, but scoping the clear makes it reachable, so `_clear_departed_roads` now clears a departed
+   road's last known box on its last known layer.
+
+   **`build_chunks` needed nothing.** It is already incremental: `Pasture3DRoadChunkHost` keys on its own
+   digest and reports `last_rebuilt`, and the gate's second resolve shows it caching. That is the one of
+   the three caches in §2 that was correct all along.
+
+3. **Keep the resolve itself whole. (Unchanged.)** Junction detection is a fact about pairs; scoping it to
+   "roads near the edited one" is a correctness risk for a cost that S6 and S8 largely remove.
 
 **What must not break — read `PASTURE3D_ROAD_PERF_REGRESSION_SPEC.md` R5 before touching this.** The
 previous attempt at this coalescing consulted `Input.is_mouse_button_pressed` inside the bake kernels and
@@ -486,7 +510,10 @@ at all, and `RoadJunctionGate [U]` has a criterion asserting that. **No fix in t
 reintroduce one.** Coalescing belongs inside `request_resolve`, where it applies to every caller and does
 not consult global state; the scoping proposed above is content-addressed, not input-addressed.
 
-**Gate:** `[CB]`, `[CC]`.
+**Gate:** `[CB]`, `[CC]` — `project/bench/RoadCostGate.gd`. Five controls run and verified to fail:
+`build_runtime` back on the resolve path; a `runtime_digest` that never moves; repainting unconditionally;
+scoping the repaint to the road instead of its layer; and `paint_signature` derived from the road's content
+instead of its mask. R5 re-checked: zero `Input.` references remain anywhere under `roads/`.
 
 ---
 
