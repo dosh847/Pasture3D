@@ -154,6 +154,13 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 	# `_region_metres` rather than `terrain.region_size`: chunk_spans cuts on region boundaries, and the
 	# boundary it actually cuts on is region_size * vertex_spacing, so the metres are the mesh input and
 	# the region count alone would miss a vertex_spacing change.
+	#
+	# The cross-section terms come through `half_width(resolved_lane_count())` rather than by reading
+	# lane_width and lane_count separately, so this digest and the brush's `road_content_signature` share
+	# ONE reading of the road type's geometry. They are still two lists, deliberately: the mesher reads
+	# surface_material and depth_lift, which move no terrain vertex, and the height bake reads the batters
+	# and max_grade, which move no ribbon vertex. Collapsing them into one would make each rebuild on the
+	# other's edits — the churn the paragraph above exists to avoid.
 	var digest := "%s|%s|%.4f|%s|%s|%s|%.4f|%.4f|%.4f|%.4f|%s" % [
 		p_brush.alignment_digest(),
 		p_brush.junction_digest(),

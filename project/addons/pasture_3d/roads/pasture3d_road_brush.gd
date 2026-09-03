@@ -113,10 +113,13 @@ func _get_override(p_field: StringName, p_unset: Variant) -> Variant:
 	return road_defaults.get(p_field) if road_defaults != null else p_unset
 
 
-## Re-bake guard for the corridor-width feedback in `grade_surface`. Not saved: it is true only for the
-## duration of one widening pass.
-var _widening: bool = false
-var _last_corridor_half: float = 0.0
+## Corridor half-widths are compared, and signed into the stamp key, at this granularity in metres.
+##
+## QUANTISED BECAUSE A RAW FLOAT IN A HASH KEY IS NOT A KEY. `_padding()` derives from the worst offset
+## the last bake produced, so it wobbles in the last decimal place across otherwise identical bakes; a
+## key carrying that never hits, and the stamp cache the road most needs would be permanently cold. Half
+## a metre is the band the previous `_last_corridor_half + 0.5` test was already expressing.
+const PAD_QUANTUM: float = 0.5
 
 ## The junction demands the last bake actually used. Compared against a fresh digest after each resolve;
 ## see `junction_digest`. Not saved — a reload re-bakes and re-resolves anyway.
@@ -365,6 +368,9 @@ func _paint_flat_footprint(path: Path3D) -> void:
 	var plan := _plan_points()
 	if plan.size() < 2:
 		return
+	# The corridor this bake is ABOUT to commit to, captured before the grid is snapped and before the
+	# solve replaces `last_alignment`. `_rebake_if_corridor_outgrew` compares against it afterwards.
+	var used_pad := _padding()
 	var vs: float = terrain.vertex_spacing
 	var b := _snapped_bounds(_spline_footprint_aabb(path), vs)
 	var min_x: float = b[0]
@@ -416,13 +422,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 		alignment.input_digest = alignment_digest(road_mod)
 		road_mod.last_alignment = alignment
 
-		if not _widening:
-			var needed := corridor_half_width()
-			if needed > _last_corridor_half + 0.5:
-				_last_corridor_half = needed
-				_widening = true
-				_schedule_refresh()
-				(func() -> void: _widening = false).call_deferred()
+		_rebake_if_corridor_outgrew(used_pad)
 
 		var out := {}
 		var params := {
@@ -667,6 +667,9 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	var plan := _plan_points()
 	if plan.size() < 2:
 		return {}
+	# The corridor the caller sized the grid it handed us with, captured before the solve below replaces
+	# `p_mod.last_alignment` and with it the depth `corridor_half_width` reads.
+	var used_pad := _padding()
 	var cum := Pasture3DRoadGrader.cumulative_length(plan)
 	var total: float = cum[cum.size() - 1]
 	var ds: float = maxf(p_mod.alignment_step, 0.05)
@@ -715,21 +718,7 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	alignment.input_digest = alignment_digest(p_mod)
 	p_mod.last_alignment = alignment
 
-	# ---- THE CORRIDOR WIDTH DEPENDS ON A RESULT THE BAKE HAS TO PRODUCE FIRST -----------------------
-	#
-	# How far the batter reaches is (how deep the cut is) / (batter slope), and how deep the cut is only
-	# becomes known once the alignment has been solved — which happens here, inside the bake that already
-	# committed to a footprint width. So the FIRST bake of a deep cutting is necessarily too narrow, and
-	# without this it would sit there with a wall down each side until something happened to refresh it
-	# again. One re-bake, guarded so it cannot recurse: the second pass has `_deepest_structure` and gets
-	# the width right.
-	if not _widening:
-		var needed := corridor_half_width()
-		if needed > _last_corridor_half + 0.5:
-			_last_corridor_half = needed
-			_widening = true
-			_schedule_refresh()
-			(func() -> void: _widening = false).call_deferred()
+	_rebake_if_corridor_outgrew(used_pad)
 
 	var res := Pasture3DRoadGrader.grade(p_z, p_gw, p_gh, p_min_x, p_min_z, p_vs, plan, alignment,
 			half, shoulder, verge, suppress, {
@@ -1233,6 +1222,108 @@ func schedule_junction_rebake() -> void:
 	last_junction_digest = junction_digest()
 	_schedule_refresh()
 
+
+## ---- THE CORRIDOR WIDTH DEPENDS ON A RESULT THE BAKE HAS TO PRODUCE FIRST ----------------------
+##
+## How far the batter reaches is (how deep the cut is) / (batter slope), and how deep the cut is only
+## becomes known once the alignment has been SOLVED — which happens inside a bake that already committed
+## to a footprint width. So the first bake of a deep cutting is necessarily too narrow, and without a
+## second pass it sits there with a sheer wall down each side until something else happens to refresh it.
+##
+## ---- WHY THIS COMPARES AGAINST THE BAKE, AND NOT AGAINST A REMEMBERED HIGH-WATER MARK ----
+##
+## The previous form kept `_widening: bool` and `_last_corridor_half: float`, and neither did its job.
+##
+## The flag was inert. It was cleared by `call_deferred`, at the end of the frame, while
+## `_schedule_refresh` arms a REFRESH_DELAY timer — so it was always false again long before the bake it
+## was guarding ran, and the recursion it was written to stop was never stopped by it. Termination
+## rested entirely on the float.
+##
+## And the float was unsaved and initialised to 0.0, while `corridor_half_width` returns at least
+## `allowance / batter` — 12 / 0.6 = 20 m with default batters. So on the first bake after every scene
+## load, undo and plugin reload, every road brush on the layer saw `20.0 > 0.0 + 0.5`, scheduled a
+## redundant refresh, and each of those ran `_refresh_owner` over the whole shared layer. N roads meant
+## N full-layer re-bakes before anything had changed.
+##
+## Comparing against the padding THIS bake actually used has no persistent state, no flag and no
+## first-bake special case: the question "is the corridor now wider than the one I just rasterised?"
+## answers itself from the bake, and answers NO on a road that was already wide enough.
+##
+## It terminates because the re-bake solves the SAME alignment — the alignment is sampled along the plan
+## at `alignment_step` and does not depend on the grid width — so the third pass reads the same depth as
+## the second and the comparison comes back equal. The quantisation is what makes "equal" reachable at
+## all; see PAD_QUANTUM.
+## Returns whether it asked, so the DECISION is observable without observing the scheduling.
+## `_schedule_refresh` early-returns unless `Engine.is_editor_hint()`, so a gate that watched `_full_dirty`
+## would see nothing headless and pass whether this function was right or wrong — measuring nothing and
+## measuring well would look identical. The caller ignores the value; the gate is the reader.
+func _rebake_if_corridor_outgrew(p_used_pad: float) -> bool:
+	if snappedf(_padding(), PAD_QUANTUM) <= snappedf(p_used_pad, PAD_QUANTUM):
+		return false
+	_schedule_refresh()
+	return true
+
+
+## Everything a road's baked surface depends on that is NOT its spline geometry and NOT the road
+## modifier's own parameters, which `_compute_stamp_key` already covers through `path.curve` and
+## `_modifier_signature()`.
+##
+## ---- WHAT THIS FIXES ----
+##
+## The stamp key used to see a road's geometry and its modifier params and nothing else. A road's baked
+## surface also depends on the resolve chain (§5.3), its segments, its junction pins and the corridor
+## width the bake committed to — so `_paint_into` recomputed an identical key after any of those moved,
+## hit `_stamp_cache`, and replayed the block solved from the OLD values. `_paint_spline` never ran, so
+## the alignment was never re-solved either.
+##
+## That made three separate features silently do nothing:
+##
+##   * `schedule_junction_rebake` advanced `last_junction_digest` and asked for a refresh that came back
+##     a cache hit, so the pins never reached the terrain — and because the digest had already been
+##     advanced, the next resolve did not ask again. A minor road stayed at the height it wanted before
+##     it was asked to meet the major road.
+##   * The corridor-widening re-bake landed on the same hit, so the wider footprint was never rasterised
+##     and the sheer wall stayed. See `_rebake_if_corridor_outgrew`.
+##   * Every road-content edit — lane count, road type, follow_terrain, a segment, a group or network
+##     default — was discarded.
+##
+## The failure was INTERMITTENT, which is why it read as "roads sometimes don't take" rather than as a
+## cache defect: `_refresh_owner` runs `_apply_surface_snap` before `_paint_into`, and road brushes
+## default `snap_to_surface = true`, so when the previous bake moved the ground under a control point the
+## snap moved its Y, `get_baked_points()` changed, and the key changed BY ACCIDENT. On flat ground it did
+## not. Any gate covering this has to assert the cache decision, not the height field, or it can pass for
+## the wrong reason.
+##
+## ---- WHY A LIST OF NAMED INPUTS ----
+##
+## Same trade the chunk host's digest already makes (pasture3d_road_chunk_host.gd:138): a generic hash
+## over every exported property would churn on inputs the height bake never reads and force a full
+## re-rasterise on edits that move no vertex. Naming them means adding an input the GRADER reads is a
+## change that visibly has to be made here too.
+##
+## ONE definition, TWO readers — this and `Pasture3DRoadChunkHost.rebuild`'s digest, which signs the
+## MESHER's inputs and shares the road type's cross-section terms through `grading_signature()`.
+func road_content_signature() -> Array:
+	var t := resolved_road_type()
+	var segs: Array = []
+	for seg: Pasture3DRoadSegment in segments:
+		segs.append(seg.signature() if seg != null else null)
+	return [
+		closed,
+		resolved_lane_count(), resolved_follow_terrain(), resolved_one_way(),
+		String(resolved_surface_id()),
+		t.grading_signature() if t != null else null,
+		# The brush's own level of the chain. The group's and the network's reach us through the
+		# resolved_* calls above, which is why they are not signed separately.
+		road_defaults.signature() if road_defaults != null else null,
+		segs,
+		junction_digest(),
+		snappedf(_padding(), PAD_QUANTUM),
+	]
+
+
+func _brush_param_signature() -> Array:
+	return [super._brush_param_signature(), road_content_signature()]
 
 ## The world XZ point `p_s` metres along this road's plan. The junction gizmo's way of asking where an
 ## approach actually is, without reaching into the brush's private plan arrays.
