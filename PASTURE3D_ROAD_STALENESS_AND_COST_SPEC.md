@@ -2,8 +2,8 @@
 
 **Document:** `PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md`
 **Status:** **Phase 1 complete — S1, S2, S3 and S4 BUILT 2026-09-03** (`RoadStaleGate` [SA]–[SH] pass,
-controls verified; 36 assertions; 14 road gates and 5 graph gates green).
-**S6–S12 (cost) PROPOSED, not started.** Check the symbol and the branch before planning from this header; it
+controls verified; 36 assertions). **S6 BUILT 2026-09-03** (`RoadCostGate` [CA] passes, three controls
+verified to fail; all 17 asserting road gates green). **S7–S12 PROPOSED, not started.** Check the symbol and the branch before planning from this header; it
 will go stale before the work does.
 **Target:** `Pasture3DRoadBrush` and its integration with the modifier stack, the road network resolve
 loop, and the terrain node graph.
@@ -409,17 +409,38 @@ child splines, with no memoisation. Callers: `_paint_flat_footprint`, `grade_sur
 participant, and each of those re-runs `_plan_points()` **and** `Pasture3DRoadGrader.cumulative_length()`
 from scratch.
 
-**Fix.** Memoise the pair `(plan, cum)` behind a revision counter, invalidated from the hooks that already
-exist: `_on_path_curve_changed` (`:597`), `_schedule_transform_refresh` (`:808`), `_on_child_changed`
-(`:609`), and the `closed` setter (S4). Cache `cum` with the plan — it is derived from it and is recomputed
-just as often. Publish `point_at_arc` / `tangent_at_arc` off the cached pair rather than rebuilding it.
+**Fix (BUILT).** `(plan, cum)` are memoised together behind `_plan_cache` / `_plan_cum_cache`, guarded by a
+**verified token** rather than by signals alone: `_plan_token()` re-reads the spline ids, their
+`global_transform`s, and each curve's instance id and point count on every call, and `_plan_revision`
+(bumped by `_invalidate_plan`) carries the changes a token cannot see. All 7 `cumulative_length(plan)` call
+sites now read `_plan_cum()`.
+
+**Correction to this section as written.** Two of the four hooks it named cannot be used. `_on_path_curve_changed`
+and `_schedule_transform_refresh` both early-return on `_can_auto_refresh()`, which requires
+`Engine.is_editor_hint()` — hanging plan invalidation off them would leave a headless bake, a gate and a
+shipped game caching a plan for a spline that had moved. Invalidation is connected in an overridden
+`_connect_spline()` instead, ungated.
+
+**And the hook it did not name.** `_plan_points()` is GLOBAL-space, so it depends on each spline's
+`global_transform` — and a child `Path3D` dragged on its own sends the brush no notification at all;
+`NOTIFICATION_TRANSFORM_CHANGED` fires on the node that moved. No signal exists to hang this on, which is
+why the token reads the transforms rather than subscribing to them. `[CA] child transform` is that case.
+
+**One connection, not two.** `Path3D` re-emits `curve_changed` for its own `Curve3D`'s `changed`, so a
+point edit and a whole-resource swap arrive the same way and nothing has to be re-connected when the curve
+is replaced. A first draft connected `path.curve.changed` separately and re-attached it on swap; `[CA] edit
+after swap` — a point *moved* on a replaced curve, so the point count is unchanged — showed the extra
+connection made no difference, and it was removed.
 
 **What must not break.** The invalidation must be conservative: a missed invalidation here is a road
 graded along a centreline it no longer has, which is strictly worse than the cost being removed. The
 revision must also cover a spline being *added or removed*, not only edited — `_on_child_changed` is the
 hook, and `Pasture3DRoadChunkHost` is already exempt from it via `INTERNAL_CHILD_META`.
 
-**Gate:** `[CA]`.
+**Gate:** `[CA]` — `project/bench/RoadCostGate.gd`. Three controls run and verified to fail: reverting the
+memo raises the count from 1 to 18; a cache that never invalidates fails all six invalidation cases and
+`[CA] correct`; removing the `curve_changed` connection fails `curve edit` and `edit after swap` while the
+token still catches the swap itself.
 
 ---
 

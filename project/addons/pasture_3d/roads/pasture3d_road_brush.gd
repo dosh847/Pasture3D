@@ -55,6 +55,7 @@ extends Pasture3DTerrainBrush
 	set(v):
 		closed = v
 		_apply_closed_to_splines()
+		_invalidate_plan()
 		_schedule_refresh()
 		if is_inside_tree():
 			update_gizmos() # redraw the last->first segment
@@ -158,6 +159,17 @@ const PAD_QUANTUM: float = 0.5
 ## The junction demands the last bake actually used. Compared against a fresh digest after each resolve;
 ## see `junction_digest`. Not saved — a reload re-bakes and re-resolves anyway.
 var last_junction_digest: String = ""
+
+## The plan polyline and its arc lengths, and the token they were built against. Not saved: derived
+## output, rebuilt on demand, and a token holding instance ids would be meaningless after a reload.
+var _plan_cache: PackedVector2Array = PackedVector2Array()
+var _plan_cum_cache: PackedFloat32Array = PackedFloat32Array()
+var _plan_token_cache: Array = []
+var _plan_revision: int = 0
+
+## How many times the plan has actually been tessellated. Read by RoadCostGate [CA]; a counter rather
+## than a timer, so the criterion is deterministic and does not depend on what else the machine is doing.
+var plan_builds: int = 0
 
 ## The upstream emitters `_on_road_changed` is currently attached to — this brush's group, its network and
 ## its resolved road type. Held so they can be disconnected again: the group and network are found by
@@ -500,7 +512,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 	# Native rasteriser: when available, solve alignment and grade directly in C++
 	var road_mod := road_modifier()
 	if _native_raster("stamp_road_line") and road_mod != null and _road_native_is_complete():
-		var cum := Pasture3DRoadGrader.cumulative_length(plan)
+		var cum := _plan_cum()
 		var total: float = cum[cum.size() - 1]
 		var ds: float = maxf(road_mod.alignment_step, 0.05)
 		var n_s := maxi(int(ceil(total / ds)) + 1, 2)
@@ -608,7 +620,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 			jnet.request_resolve()
 		return
 
-	var cum := Pasture3DRoadGrader.cumulative_length(plan)
+	var cum := _plan_cum()
 
 	var extent := _extent_key(min_x, min_z, vs, gw, gh)
 	var stack := _compile_modifiers(extent, 1.0, 1.0)
@@ -784,7 +796,7 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	# The corridor the caller sized the grid it handed us with, captured before the solve below replaces
 	# `p_mod.last_alignment` and with it the depth `corridor_half_width` reads.
 	var used_pad := _padding()
-	var cum := Pasture3DRoadGrader.cumulative_length(plan)
+	var cum := _plan_cum()
 	var total: float = cum[cum.size() - 1]
 	var ds: float = maxf(p_mod.alignment_step, 0.05)
 	var n_s := maxi(int(ceil(total / ds)) + 1, 2)
@@ -941,6 +953,42 @@ func paint_layer_id() -> int:
 ## concatenated in child order, which is also the order arc length runs in — the same order segments
 ## are measured against, so a segment range means the same thing here as it does in the inspector.
 func _plan_points() -> PackedVector2Array:
+	_ensure_plan()
+	return _plan_cache
+
+
+## The arc length at each plan vertex. Cached WITH the plan, because it is derived from it and every
+## caller that wanted one wanted the other.
+func _plan_cum() -> PackedFloat32Array:
+	_ensure_plan()
+	return _plan_cum_cache
+
+
+## Rebuild the plan and its arc lengths if anything they depend on has moved.
+##
+## ---- WHY A VERIFIED TOKEN AND NOT PURE EVENT-DRIVEN INVALIDATION ----
+##
+## The plan is GLOBAL-space: it multiplies each tessellated point by `path.global_transform`. A child
+## Path3D can be dragged on its own, and the brush is not notified when it is — `NOTIFICATION_TRANSFORM_
+## CHANGED` fires on the node that moved. So there is no signal to hang that case on, and a cache that
+## trusted signals alone would grade a road along a centreline it no longer has. That is strictly worse
+## than the cost being removed, so the transforms are CHECKED rather than subscribed to.
+##
+## The two halves of the token cover different things and neither is redundant:
+##
+##   * `_plan_revision` is bumped by the things that have a signal and no cheap value — a curve's points
+##     being edited, a spline being added or removed, `closed` being toggled. Comparing curve CONTENT
+##     instead would mean hashing the very tessellation this cache exists to avoid producing.
+##   * The spline ids and their global transforms are read directly, because they are a handful of
+##     matrix reads against a tessellation of ~25 000 points on a 5 km road. Cheap enough to verify every
+##     call, which removes the whole class of missed-invalidation bugs for the case that has no signal.
+##
+## `closed` is in the token as well as bumping the revision: the setter can be reached during a load
+## before this node is in the tree, and a token that only remembered a bump would miss it.
+func _ensure_plan() -> void:
+	var token := _plan_token()
+	if not _plan_token_cache.is_empty() and _plan_token_cache == token:
+		return
 	var out := PackedVector2Array()
 	for path: Path3D in _get_splines():
 		if path == null or path.curve == null or path.curve.point_count < 2:
@@ -949,7 +997,56 @@ func _plan_points() -> PackedVector2Array:
 		for p in path.curve.tessellate():
 			var w: Vector3 = xf * p
 			out.append(Vector2(w.x, w.z))
-	return out
+	_plan_cache = out
+	_plan_cum_cache = Pasture3DRoadGrader.cumulative_length(out)
+	_plan_token_cache = token
+	plan_builds += 1
+
+
+func _plan_token() -> Array:
+	var token: Array = [_plan_revision, closed]
+	for path: Path3D in _get_splines():
+		if path == null:
+			continue
+		token.append(path.get_instance_id())
+		token.append(path.global_transform)
+		# The curve's IDENTITY, not just its size. A Curve3D swapped for another with the same point count
+		# is a different road, and the swap arrives through `curve_changed`, which the base gates on the
+		# editor. Reading the id makes the token notice it whether or not a signal ever arrives.
+		token.append(path.curve.get_instance_id() if path.curve != null else 0)
+		token.append(path.curve.point_count if path.curve != null else -1)
+	return token
+
+
+## Something the token cannot see for itself has changed. Cheap: the next `_plan_points` rebuilds.
+func _invalidate_plan() -> void:
+	_plan_revision += 1
+
+
+## Also invalidate the plan when a curve's points are edited or its Curve3D is swapped.
+##
+## One connection covers both: Path3D re-emits `curve_changed` for its own `changed`, so a point edit and
+## a whole-resource swap arrive the same way and no connection has to be moved when the curve is replaced.
+## `RoadCostGate [CA] edit after swap` is what holds that — it edits a point on a REPLACED curve, without
+## changing the point count, so neither the token nor a stale resource connection could carry it.
+##
+## The base connects both of those to `_schedule_spline_refresh` / `_on_path_curve_changed`, but BOTH of
+## those early-return on `_can_auto_refresh()`, which requires `Engine.is_editor_hint()`. Hanging plan
+## invalidation off them would leave a headless bake, a gate and a shipped game caching a plan for a
+## spline that had moved. The invalidator is connected here instead, ungated.
+func _connect_spline(path: Path3D) -> void:
+	super(path)
+	if not is_instance_valid(path):
+		return
+	if not path.curve_changed.is_connected(_invalidate_plan):
+		path.curve_changed.connect(_invalidate_plan)
+
+
+## A spline was added or removed. The token covers the ids, but this also runs when a Path3D that is
+## already in the list gains a curve, so bump as well as re-derive.
+func _on_child_changed(node: Node) -> void:
+	_invalidate_plan()
+	super(node)
 
 
 ## The point `p_s` metres along the plan polyline. Delegated: the grader owns the definition, because the
@@ -1066,7 +1163,7 @@ func build_run() -> Dictionary:
 	return {
 		"key": road_key(),
 		"plan": plan,
-		"cum": Pasture3DRoadGrader.cumulative_length(plan),
+		"cum": _plan_cum(),
 		"alignment": alignment,
 		"bridge": bridge,
 		"priority": t.priority,
@@ -1469,7 +1566,7 @@ func point_at_arc(p_s: float) -> Vector2:
 	var plan := _plan_points()
 	if plan.size() < 2:
 		return Vector2.ZERO
-	return _plan_point_at(plan, Pasture3DRoadGrader.cumulative_length(plan), p_s)
+	return _plan_point_at(plan, _plan_cum(), p_s)
 
 
 ## Plan direction at `p_s`, normalised, in the direction of INCREASING arc length.
@@ -1482,7 +1579,7 @@ func tangent_at_arc(p_s: float, p_h: float = 0.5) -> Vector2:
 	var plan := _plan_points()
 	if plan.size() < 2:
 		return Vector2.RIGHT
-	var cum := Pasture3DRoadGrader.cumulative_length(plan)
+	var cum := _plan_cum()
 	var total: float = cum[cum.size() - 1]
 	var a := _plan_point_at(plan, cum, clampf(p_s - p_h, 0.0, total))
 	var b := _plan_point_at(plan, cum, clampf(p_s + p_h, 0.0, total))
@@ -1577,7 +1674,7 @@ func pick_road_screen_distance(camera: Camera3D, screen_pos: Vector2, margin_px:
 		if hit.z < 3.4e38 and not is_nan(hit.y):
 			var plan := _plan_points()
 			if plan.size() >= 2:
-				var cum := Pasture3DRoadGrader.cumulative_length(plan)
+				var cum := _plan_cum()
 				var hit_p := Vector2(hit.x, hit.z)
 				var nearest := Pasture3DRoadGrader.nearest_on_plan(plan, cum, hit_p)
 				if float(nearest[0]) <= half_w:
