@@ -2,9 +2,8 @@
 
 **Document:** `PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md`
 **Status:** **Phase 1 complete — S1, S2, S3 and S4 BUILT 2026-09-03** (`RoadStaleGate` [SA]–[SH] pass,
-controls verified; 36 assertions). **S6–S10 BUILT 2026-09-03** (`RoadCostGate` [CA]–[CF] passes,
-twenty-one controls verified to fail; all 19 asserting road gates green). **S11–S12 PROPOSED, not
-started.** Check the symbol and the branch before planning from this header; it
+controls verified; 36 assertions). **S6–S11 BUILT 2026-09-03** (`RoadCostGate` [CA]–[CG] passes,
+twenty-six controls verified to fail; all 19 asserting road gates green). **S12 PROPOSED, not started.** Check the symbol and the branch before planning from this header; it
 will go stale before the work does.
 **Target:** `Pasture3DRoadBrush` and its integration with the modifier stack, the road network resolve
 loop, and the terrain node graph.
@@ -678,15 +677,37 @@ it once per active road modifier and is itself called from `_padding()`, `paint_
 twice, `grade_surface`, and `pick_road_screen_distance` — the last **once per road brush on every editor
 click**.
 
-**Fix.** Memoise `_deepest_structure()` on `Pasture3DNodeRoad` against the alignment's `input_digest`,
-which already identifies the profile uniquely and is set whenever the alignment is replaced. Compute it
-once, in the solve, and store it.
+**Fix (BUILT), but NOT where or how this section said.** The memo is on `Pasture3DRoadAlignment` as
+`deepest_structure()`, invalidated by the `z` and `ground` setters.
+
+**Correction: `input_digest` is the wrong key, and this is the second time it has been.** It identifies
+what a profile was solved FROM, not what the profile IS. Edit the solved heights without changing the
+inputs — which the smoothing re-projection and any future post-pass do — and a digest-keyed memo answers
+with the old allowance. The corridor exists to be wide enough for the earthworks, so a stale allowance is
+not a slow road, it is batters cut off at a sheer wall. It also keys on the empty string for every
+alignment solved before that field existed, making them all cache-equal to each other. Run as control
+CG-4: the spec's own design fails `[CG] edited in place`.
+
+**Correction: a plain `@export var` assignment in GDScript emits no `changed`.** The first build hung the
+reset off `Resource.changed`, which reads as obviously right and never fires. `[CG] edited in place` caught
+it; the reset is on the two setters instead. Run as control CG-3.
+
+**And it is not stored in the solve.** Storing a derived value beside its inputs is a second place for them
+to disagree, and the lazy memo costs the same after the first read.
 
 **Note the interaction with S1.** Once `snappedf(_padding(), PAD_QUANTUM)` is in the stamp key, this value
 is read on every key computation, so memoising it stops being an optimisation and starts being a
 requirement.
 
-**Gate:** `[CG]`.
+**Gate:** `[CG]` — `project/bench/RoadCostGate.gd`, counting `offset_at` calls. The scan is still expressed
+through `offset_at` rather than reading `z[i] - ground[i]`, which is both the definition of the quantity
+and what makes a per-sample counter possible at all. Measured: **41 calls scanned 16 400 samples before,
+400 after**, and ten stamp-key computations scanned 4 000 before, 0 after — the S1 interaction above, where
+the cache-hit path was paying a full alignment scan to discover it was the cache-hit path.
+
+Five controls run and verified to fail: no memo; a memo never invalidated; invalidation off `changed`;
+**invalidation keyed on `input_digest` as this section proposed**; and a scan returning the first offset
+instead of the worst.
 
 ---
 

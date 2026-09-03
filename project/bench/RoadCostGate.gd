@@ -39,6 +39,8 @@ const CRITERIA: PackedStringArray = [
 	"[CE] no segments", "[CE] flat in samples", "[CE] graph_path", "[CE] oracle",
 	"[CE] last wins", "[CE] half open",
 	"[CF] covers", "[CF] parity", "[CF] clipped", "[CF] clip respected",
+	"[CG]", "[CG] stamp key", "[CG] correct", "[CG] replaced", "[CG] edited in place",
+	"[CG] resettles",
 ]
 
 var _fail: int = 0
@@ -53,6 +55,7 @@ func _ready() -> void:
 	_cd_the_alignment_digest_is_cheap_and_complete()
 	_ce_the_cross_section_resolves_per_segment()
 	_cf_the_corridor_prepass_is_native()
+	_cg_the_corridor_allowance_is_scanned_once()
 	print("\n=== %s (%d failures) ===\n" % [
 		"ROAD COST PASS" if _fail == 0 else "ROAD COST FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
@@ -882,3 +885,131 @@ func _first_difference(p_a: Dictionary, p_b: Dictionary) -> String:
 		if is_nan(aa[i]) != is_nan(ab[i]):
 			return "amp[%d]: %s vs %s" % [i, str(aa[i]), str(ab[i])]
 	return ""
+
+
+# ---- [CG] --------------------------------------------------------------------------------------
+
+## Counts the alignment scan by counting the thing the scan is made of.
+##
+## `deepest_structure` is still expressed through `offset_at` — that is the definition of the quantity —
+## which is exactly what makes a per-sample counter possible. A memo that read `z[i] - ground[i]` directly
+## would be invisible to this and the criterion would be measuring nothing.
+class CountingAlignment extends Pasture3DRoadAlignment:
+	var samples: int = 0
+
+	func offset_at(p_i: int) -> float:
+		samples += 1
+		return super(p_i)
+
+
+## The corridor allowance is scanned once per profile, not once per caller.
+##
+## ---- WHAT IT COST ----
+##
+## `_deepest_structure` looped the whole alignment — 10 000 iterations on a 10 km road — with no memo
+## against the profile it had just scanned. `corridor_half_width` calls it once per active road modifier,
+## and is itself called from `_padding`, `paint_bounds` (per road inside `_clear_paint_layers` on every
+## resolve), `build_runtime`, `_paint_flat_footprint` twice, `grade_surface`, and
+## `pick_road_screen_distance` — the last once per road brush on every editor click.
+##
+## ---- WHY THIS ONE STOPPED BEING OPTIONAL ----
+##
+## S1 put `snappedf(_padding(), PAD_QUANTUM)` into the stamp key. The key is computed to decide whether a
+## bake can be replayed from cache, so the cheap path through the cache was paying a full alignment scan
+## to find out that it was the cheap path. `[CG] stamp key` is that specific case.
+##
+## ---- WHAT A MEMO HERE COULD GET WRONG ----
+##
+## The corridor exists to be wide enough for the earthworks; too narrow and the batters are cut off at a
+## sheer wall. A stale allowance is therefore not a slow road, it is a road with a cliff beside it. So the
+## invalidation is asserted twice over — a replaced profile and a profile EDITED IN PLACE, which is the
+## case a memo keyed on the alignment's `input_digest` would have missed, since editing `z` does not
+## change what the profile was solved from.
+func _cg_the_corridor_allowance_is_scanned_once() -> void:
+	print("\n[CG] the corridor allowance is scanned once per profile")
+	var fx := _profile_fixture()
+	var brush: Pasture3DRoadBrush = fx["brush"]
+	var mod: Pasture3DNodeRoad = brush.modifiers[0]
+	var align := _counting_alignment(400, 20.0)
+	mod.last_alignment = align
+
+	align.samples = 0
+	var first := brush.corridor_half_width()
+	var one := align.samples
+	for i in 20:
+		brush.corridor_half_width()
+		brush._padding()
+	_check("[CG]", align.samples == one and one >= 400,
+			"%d sample(s) for the first call, %d after 41 more" % [one, align.samples])
+
+	# The stamp key reads `_padding()`, so before the memo the cache-hit path paid a full alignment scan
+	# to discover it was the cache-hit path.
+	align.samples = 0
+	for i in 10:
+		brush._compute_stamp_key(brush.get_child(0) as Path3D)
+	_check("[CG] stamp key", align.samples == 0,
+			"ten stamp-key computations scanned %d sample(s)" % align.samples)
+
+	# The value is right, which every count above would be equally happy without.
+	var want := 0.0
+	for i in align.count():
+		want = maxf(want, absf(align.z[i] - align.ground[i]))
+	_check("[CG] correct", absf(align.deepest_structure() - want) < 0.0001,
+			"the memoised allowance is %.3f m, the profile's worst offset is %.3f m"
+			% [align.deepest_structure(), want])
+
+	# A REPLACED profile. The obvious invalidation, and the one a memo on the modifier would also get.
+	# Past `structure_threshold` AND past the 12 m floor, or `corridor_half_width` returns the same
+	# allowance for both profiles and `[CG] replaced` compares a constant with itself.
+	var deeper := _counting_alignment(400, 60.0)
+	mod.last_alignment = deeper
+	var replaced := brush.corridor_half_width()
+	_check("[CG] replaced", replaced > first,
+			"a deeper profile widens the corridor: %.2f m -> %.2f m" % [first, replaced])
+
+	# A profile EDITED IN PLACE. This is the one that separates a memo hanging off `changed` from a memo
+	# keyed on `input_digest`: editing the solved heights does not change what the profile was solved
+	# FROM, so a digest-keyed memo would answer with the old allowance and the batters would be cut off.
+	var before_edit := deeper.deepest_structure()
+	var z := deeper.z
+	z[10] = deeper.ground[10] + 140.0
+	deeper.samples = 0
+	deeper.z = z
+	var after_edit := deeper.deepest_structure()
+	var rescan := deeper.samples
+	_check("[CG] edited in place", after_edit > before_edit + 50.0 and rescan >= deeper.count(),
+			"editing the solved heights re-scanned %d sample(s): %.2f m -> %.2f m"
+			% [rescan, before_edit, after_edit])
+
+	# ...and having re-scanned ONCE, it settles again rather than scanning per call forever. Counted from
+	# after that scan, so this cannot be passed by the memo the previous assertion just repopulated.
+	deeper.samples = 0
+	for i in 10:
+		brush.corridor_half_width()
+	_check("[CG] resettles", deeper.samples == 0,
+			"%d sample(s) for ten calls after the re-scan" % deeper.samples)
+	fx["terrain"].queue_free()
+
+
+## A profile whose worst offset is `p_depth` metres, deep enough to move `corridor_half_width` off its
+## 12 m floor — otherwise every criterion above compares two identical numbers.
+func _counting_alignment(p_n: int, p_depth: float) -> CountingAlignment:
+	var a := CountingAlignment.new()
+	a.ds = 1.0
+	a.s0 = 0.0
+	var z := PackedFloat32Array()
+	var ground := PackedFloat32Array()
+	z.resize(p_n)
+	ground.resize(p_n)
+	for i in p_n:
+		ground[i] = 10.0
+		# One deep sample, the rest shallow: the quantity is a MAXIMUM, so a uniformly deep profile would
+		# pass a memo that returned the first sample instead of the worst.
+		z[i] = 10.0 + (p_depth if i == p_n / 3 else 0.25)
+	a.z = z
+	a.ground = ground
+	a.curvature = _filled(p_n, 0.0)
+	a.bank = _filled(p_n, 0.0)
+	a.pinned = PackedInt32Array()
+	a.input_digest = "fixed"  # deliberately CONSTANT across every profile this gate builds
+	return a

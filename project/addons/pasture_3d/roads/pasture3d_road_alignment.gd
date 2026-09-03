@@ -33,10 +33,16 @@ extends Resource
 ## Arc length of the first sample, metres from the start of the run.
 @export var s0: float = 0.0
 ## Solved road surface height at each sample, metres. The answer this whole class exists to carry.
-@export var z: PackedFloat32Array = PackedFloat32Array()
+@export var z: PackedFloat32Array = PackedFloat32Array():
+	set(v):
+		z = v
+		_deepest = -1.0
 ## Terrain height under each sample, metres — kept so cut/fill can be re-derived and so a later phase
 ## can grade the ground toward `z` without re-sampling the heightmap.
-@export var ground: PackedFloat32Array = PackedFloat32Array()
+@export var ground: PackedFloat32Array = PackedFloat32Array():
+	set(v):
+		ground = v
+		_deepest = -1.0
 ## Signed plan curvature at each sample, 1/metres. Positive turns left. Drives banking, and is the
 ## corner-severity input for pace notes.
 @export var curvature: PackedFloat32Array = PackedFloat32Array()
@@ -67,6 +73,48 @@ extends Resource
 ## around, duplicated or saved cannot become separated from the statement of what it is an answer to.
 ## Empty means "solved before this existed", which is treated as unusable rather than as matching.
 @export var input_digest: String = ""
+
+
+## Worst structure height this profile carries, memoised. -1 means "not computed since the last change".
+##
+## Not exported: it is derived from `z` and `ground`, and a derived value saved beside its inputs is a
+## second place for them to disagree.
+var _deepest: float = -1.0
+
+
+## Worst height between the road and the ground anywhere on this profile, metres. Cut or fill, whichever
+## is deeper — it is the allowance the corridor has to be wide enough to hold.
+##
+## ---- WHY THIS IS MEMOISED AND WHY IT LIVES HERE ----
+##
+## `Pasture3DNodeRoad._deepest_structure` scanned the whole alignment on every call — 10 000 iterations on
+## a 10 km road — with no memo against the profile it had just scanned. `Pasture3DRoadBrush.corridor_half_width`
+## calls it once per active road modifier, and that is called from `_padding`, `paint_bounds` (per road
+## inside `_clear_paint_layers` on every resolve), `build_runtime`, `_paint_flat_footprint` twice,
+## `grade_surface`, and `pick_road_screen_distance` — the last once per road brush on every editor click.
+## Since S1 put `snappedf(_padding(), PAD_QUANTUM)` in the stamp key it is also read on every key
+## computation, which is what turned memoising it from an optimisation into a requirement.
+##
+## It lives on the alignment rather than on the modifier because it is a fact about the PROFILE, and being
+## here is what lets the two fields it reads invalidate it directly. A memo on the modifier keyed on
+## `input_digest` — which is what the spec proposed — would go stale the moment a profile was edited
+## without its INPUTS changing, and would key on the empty string for every alignment solved before that
+## field existed.
+##
+## The reset hangs off the `z` and `ground` setters and NOT off `changed`: a plain `@export var` assignment
+## in GDScript emits no `changed` at all, so a memo invalidated that way is a memo that is never
+## invalidated. `[CG] edited in place` is what caught that, and it is what keeps catching it.
+##
+## Still expressed through `offset_at`, deliberately. That is the definition of the quantity, and reading
+## `z[i] - ground[i]` here instead would put a second copy of it beside the first — including the
+## out-of-range rule, which `offset_at` answers as 0.
+func deepest_structure() -> float:
+	if _deepest < 0.0:
+		var worst := 0.0
+		for i in count():
+			worst = maxf(worst, absf(offset_at(i)))
+		_deepest = worst
+	return _deepest
 
 
 ## Number of samples.
