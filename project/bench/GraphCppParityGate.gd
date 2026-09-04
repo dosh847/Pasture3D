@@ -30,6 +30,7 @@ func _ready() -> void:
 	_c_grid_node_refuses_to_lower()
 	_d_unwired_input_reads_zero()
 	_e_terrace_matches_native()
+	_f_the_mask_port_is_the_declared_one()
 	print("\n=== %s (%d failures) ===\n" % ["GRAPH CPP PARITY PASS" if _fail == 0 else "GRAPH CPP PARITY FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -152,7 +153,78 @@ func _e_terrace_matches_native() -> void:
 		_fail += 1; print("    !! whole-graph native and oracle disagree on Terrace op")
 
 
+# --- F. A grid op reads its mask from the port the NODE declares (P2 §2.1) -----------------------------
+#
+# Six ops used to take their secondary GRID operand from `in1` unconditionally. That is Mudslide's mask
+# port and nobody else's: Contrast declares `amount` on port 1 and `mask` on port 2, so the native and GPU
+# evaluators bound a driving SCALAR as a per-cell mask and never read the real mask at all. Both halves
+# failed together, which is why no gate caught it -- a graph with only a mask wired looked like a graph
+# with nothing wired, and a graph with only a driven amount looked masked.
+#
+# So this criterion has to assert BOTH directions, and the second one is the one that would have caught it.
+func _f_the_mask_port_is_the_declared_one() -> void:
+	print("[F] Contrast reads its mask from port 2 and its amount from port 1")
+	# Explicit window, not auto: an auto window is a function of the input's own extremes, so the two
+	# variants below would normalise differently and the comparison would be measuring the window.
+	var masked := _contrast_graph(true, true)
+	var gd := _oracle(masked)
+	var nat := Pasture3DUtil.graph_eval_grid(masked.compile_graph_program(), GW, GH, RECT, PackedFloat32Array())
+	var d := _max_abs_diff(gd, nat)
+	print("    mask + driven amount   max |native - gdscript| = %.7f (want < %.6f)" % [d, EPS])
+	if d > EPS:
+		_fail += 1; print("    !! native and oracle disagree with a mask on port 2")
+
+	# THE INVERSE. No mask is wired here, only the driver on `amount` -- and that driver is a NOISE node,
+	# not a Const, on purpose: a Const folds into the driven-parameter table and never occupies an input
+	# slot, so `in1` would be -1 and the misread this asserts against could not even occur. A grid node
+	# leaves a real slot on port 1, which is what the old code bound as the mask.
+	var unmasked := _contrast_graph(false, true)
+	var gd_u := _oracle(unmasked)
+	var nat_u := Pasture3DUtil.graph_eval_grid(unmasked.compile_graph_program(), GW, GH, RECT, PackedFloat32Array())
+	var d_u := _max_abs_diff(gd_u, nat_u)
+	print("    driven amount, NO mask max |native - gdscript| = %.7f (want < %.6f)" % [d_u, EPS])
+	if d_u > EPS:
+		_fail += 1; print("    !! the native path is treating the `amount` input as a mask")
+
+	# CONTROL: the mask is actually read. If it were ignored the masked and unmasked fields would be the
+	# same field, and both comparisons above would pass with the mask dropped on the floor.
+	var moved := _max_abs_diff(nat, nat_u)
+	print("    control: wiring the mask moves the native field by %.4f m (want > 0.05)" % moved)
+	if moved <= 0.05:
+		_fail += 1; print("    !! control dead — the mask changed nothing, so F proves nothing")
+
+
+## 0 noise -> 3 contrast port 0; 1 noise -> port 1 (`amount`, read as a SCALAR from cell 0); 2 noise -> port 2 (`mask`,
+## a GRID) when p_mask. output 3.
+func _contrast_graph(p_mask: bool, p_drive_amount: bool) -> Pasture3DTerrainGraph:
+	var ct := Pasture3DGraphNodeRegistry.create(&"contrast")
+	ct.set("explicit_window", true)
+	ct.set("range_min", -30.0)
+	ct.set("range_max", 30.0)
+	var nodes: Array[Pasture3DGraphNode] = [
+		_noise(_make_noise(17, 0.045), 22.0), _noise(_make_noise(21, 0.03), 2.0),
+		_noise(_make_noise(4, 0.02), 0.5), ct]
+	var conns: Array = [[0, 0, 3, 0]]
+	if p_drive_amount:
+		conns.append([1, 0, 3, 1])
+	if p_mask:
+		conns.append([2, 0, 3, 2])
+	return _graph(nodes, conns, 3)
+
+
 # ---- helpers ----------------------------------------------------------------------------------------
+
+## The GDScript ORACLE, and the toggle is not optional. Pasture3DTerrainGraph.evaluate() delegates to the
+## native whole-graph evaluator whenever the graph is native_supported, so a bare evaluate() compared
+## against graph_eval_grid compares the native path to ITSELF and passes no matter how wrong it is.
+## force_gdscript_evaluation is what makes the reference an actual reference.
+func _oracle(p_g: Pasture3DTerrainGraph) -> PackedFloat32Array:
+	var prev: bool = p_g.force_gdscript_evaluation
+	p_g.force_gdscript_evaluation = true
+	var out := p_g.evaluate(GW, GH, RECT)
+	p_g.force_gdscript_evaluation = prev
+	return out
+
 
 func _native(p_g: Pasture3DTerrainGraph) -> PackedFloat32Array:
 	var prog: Dictionary = p_g.compile_cell_program()

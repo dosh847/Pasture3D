@@ -225,6 +225,17 @@ struct GraphProgram {
 	// Channels above 0 are allocated ONLY when some operand reads them: a solve nobody asked a question
 	// of costs what it always did.
 	PackedInt32Array out_count;
+	// Which INPUT PORT carries each slot's secondary GRID operand -- the mask, the noise field, the
+	// per-cell weight -- or -1 when the op has none.
+	//
+	// Six ops used to read that grid from `in1` unconditionally, which was right only for Mudslide.
+	// Contrast declares its mask on port 2 and its `amount` SCALAR on port 1, so `in1` gave the native
+	// kernel a driving constant to use as a per-cell mask while the real mask went unread -- both halves
+	// wrong at once, and nothing refused the graph. The port is not knowable here (the native side cannot
+	// see a node's input_names), so the node answers it: Pasture3DGraphNode.aux_grid_port. Empty on a
+	// program compiled before this existed, which reads as -1 everywhere -- i.e. no secondary grid, which
+	// is a mask ignored rather than a scalar misread as one.
+	PackedInt32Array aux_port;
 	PackedInt32Array in0_port; // which channel of in0's slot this operand reads; 0 when absent
 	PackedInt32Array in1_port;
 	PackedInt32Array in2_port;

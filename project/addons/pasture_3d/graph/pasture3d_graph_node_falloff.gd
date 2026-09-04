@@ -85,6 +85,11 @@ func input_names() -> PackedStringArray:
 	return PackedStringArray(["in", "strength", "radius", "noise"])
 
 
+func aux_grid_port() -> int:
+	return 3 # "noise" -- a distance-perturbation field, not a mask
+
+
+
 func input_port_types() -> PackedInt32Array:
 	return PackedInt32Array([
 		PortType.HEIGHT,

@@ -1075,6 +1075,11 @@ func compile_graph_program(p_root_node: int = -1) -> Dictionary:
 	# in0..in3 reads. Emitted for every program, not only ones that use them, so the native side never has
 	# to guess whether a missing array means "one channel" or "an older compiler".
 	var out_count := PackedInt32Array()
+	# Which INPUT PORT carries each slot's secondary GRID operand (mask / noise / per-cell weight), or -1.
+	# The native and GPU evaluators cannot see a node's port list, so they used to hardcode `in1` for every
+	# op that has one -- correct for Mudslide and wrong for the other five. The node answers this itself
+	# (Pasture3DGraphNode.aux_grid_port), so a new node declares it beside its own input_names().
+	var aux_port := PackedInt32Array()
 	var in0_port := PackedInt32Array()
 	var in1_port := PackedInt32Array()
 	var in2_port := PackedInt32Array()
@@ -1116,6 +1121,7 @@ func compile_graph_program(p_root_node: int = -1) -> Dictionary:
 		in2.append(int(slot_of[s2]) if s2 >= 0 else -1)
 		in3.append(int(slot_of[s3]) if s3 >= 0 else -1)
 		out_count.append(native_out_count(ni))
+		aux_port.append(node.aux_grid_port())
 		var iports: Array = input_ports_of.get(ni, [])
 		in0_port.append(int(iports[0]) if iports.size() > 0 and s0 >= 0 else 0)
 		in1_port.append(int(iports[1]) if iports.size() > 1 and s1 >= 0 else 0)
@@ -1142,7 +1148,7 @@ func compile_graph_program(p_root_node: int = -1) -> Dictionary:
 		"params_i": params_i, "params_j": params_j, "params_k": params_k, "params_l": params_l,
 		"params_m": params_m, "params_n": params_n, "params_o": params_o, "params_p": params_p,
 		"in0": in0, "in1": in1, "in2": in2, "in3": in3,
-		"out_count": out_count,
+		"out_count": out_count, "aux_port": aux_port,
 		"in0_port": in0_port, "in1_port": in1_port, "in2_port": in2_port, "in3_port": in3_port,
 		"in_g": _geo["in_g"], "geom": _geo["geom"],
 		"pmap0": pmap0, "pmap1": pmap1, "pmap2": pmap2, "pmap3": pmap3,
@@ -1194,7 +1200,10 @@ const PARAM_PORT_MAP := {
 		&"contrast": [-1, 1, -1],
 		&"transform": [-1, -1, 2, 3, 7],
 		&"distance_transform": [-1, 0],
-		&"expand_shrink": [-1, 1, -1],
+		# Port 2 is `amount`, which the node reads as a SCALAR (p_inputs[2][0]) -- it is not a grid. The
+		# missing entry made a driven amount reach the GDScript path and not the native one, and it made
+		# the port look like a secondary grid to anything deriving that from this table.
+		&"expand_shrink": [-1, 1, 4],
 		&"relative_elevation": [-1, 0],
 		&"smooth_fill": [-1, 1, 2, -1],
 		&"recast_cliff": [-1, 0, 2, -1],
@@ -1593,6 +1602,11 @@ func compile_graph_program_multi(p_roots: Array) -> Dictionary:
 	var pdrv_param := PackedInt32Array()
 	var pdrv_src := PackedInt32Array()
 	var out_count := PackedInt32Array()
+	# Which INPUT PORT carries each slot's secondary GRID operand (mask / noise / per-cell weight), or -1.
+	# The native and GPU evaluators cannot see a node's port list, so they used to hardcode `in1` for every
+	# op that has one -- correct for Mudslide and wrong for the other five. The node answers this itself
+	# (Pasture3DGraphNode.aux_grid_port), so a new node declares it beside its own input_names().
+	var aux_port := PackedInt32Array()
 	var in0_port := PackedInt32Array()
 	var in1_port := PackedInt32Array()
 	var in2_port := PackedInt32Array()
@@ -1625,6 +1639,7 @@ func compile_graph_program_multi(p_roots: Array) -> Dictionary:
 		in2.append(int(slot_of[s2]) if s2 >= 0 else -1)
 		in3.append(int(slot_of[s3]) if s3 >= 0 else -1)
 		out_count.append(native_out_count(ni))
+		aux_port.append(node.aux_grid_port())
 		var iports: Array = input_ports_of.get(ni, [])
 		in0_port.append(int(iports[0]) if iports.size() > 0 and s0 >= 0 else 0)
 		in1_port.append(int(iports[1]) if iports.size() > 1 and s1 >= 0 else 0)
@@ -1656,7 +1671,7 @@ func compile_graph_program_multi(p_roots: Array) -> Dictionary:
 			"params_i": params_i, "params_j": params_j, "params_k": params_k, "params_l": params_l,
 			"params_m": params_m, "params_n": params_n, "params_o": params_o, "params_p": params_p,
 			"in0": in0, "in1": in1, "in2": in2, "in3": in3,
-			"out_count": out_count,
+			"out_count": out_count, "aux_port": aux_port,
 			"in0_port": in0_port, "in1_port": in1_port, "in2_port": in2_port, "in3_port": in3_port,
 			"in_g": _geo["in_g"], "geom": _geo["geom"],
 		"pmap0": pmap0, "pmap1": pmap1, "pmap2": pmap2, "pmap3": pmap3,

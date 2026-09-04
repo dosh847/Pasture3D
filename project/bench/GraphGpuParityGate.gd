@@ -301,14 +301,12 @@ func _j_hydraulic_matches_the_cpu() -> void:
 		print("    !! the GPU hydraulic solver did not run, so this proves nothing")
 		return
 	var cpu := _hyd_cpu_full(surf)
-	# The SEDIMENT channel is deliberately not compared, and the reason is a defect rather than tolerance.
-	# The CPU routing loop ends with `next_sediment[i] = sed_c` -- an ASSIGNMENT, which clobbers whatever
-	# earlier-processed neighbours scattered into this cell, while the sibling line for water is a
-	# subtraction that accumulates. The amount lost therefore depends on raster order, and the GPU's gather
-	# (which cannot lose it) can never reproduce it. The GDScript oracle has the same assignment, so the two
-	# reference paths agree with each other and this is not a GPU bug. It is filed as its own item in
-	# PASTURE3D_PIPELINE_REMEDIATION_SPEC.md; when it lands, add "sediment" to this list.
-	for ch in ["height", "flow"]:
+	# SEDIMENT is compared. It used to be excluded: the CPU routing loop ended with an ASSIGNMENT
+	# `next_sediment[i] = sed_c`, clobbering whatever earlier-processed neighbours had scattered into this
+	# cell, so the amount lost depended on raster order and the GPU's gather could never reproduce it. Both
+	# reference paths now += the delta instead, which is what the GPU always did. This comparison is the
+	# thing that proves that fix: it fails on the assignment and passes on the accumulation.
+	for ch in ["height", "flow", "sediment"]:
 		var d := _maxdiff(gpu.get(ch, PackedFloat32Array()), cpu.get(ch, PackedFloat32Array()))
 		print("    %-9s GPU vs CPU = %.7f (want < %.6f)" % [ch, d, HYD_TOL])
 		if d > HYD_TOL:

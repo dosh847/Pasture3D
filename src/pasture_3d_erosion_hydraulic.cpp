@@ -86,6 +86,14 @@ ErosionHydraulicResult godot::erosion_hydraulic_solve(const PackedFloat32Array &
 			}
 		}
 
+		// The routing sweep below SCATTERS into flow_accum (`flow_accum[ni] += moved_w`) and also READS it
+		// for the carrying-capacity term. Reading the live array made the capacity at a cell depend on
+		// whether its upstream neighbour happened to be visited first -- raster order deciding how much
+		// sediment a cell could hold. Read the snapshot instead: the sweep sees the flow accumulated up to
+		// the START of this iteration, which is the model the GPU's two-phase split already implements
+		// (it folds inbound flux in a separate gather pass) and is why sediment diverged even after the
+		// scatter fix. Same reasoning as next_water/next_sediment; this array was simply missed.
+		const std::vector<float> flow_accum_in = flow_accum;
 		std::vector<float> next_water = water;
 		std::vector<float> next_sediment = sediment;
 		std::vector<float> next_height = height;
@@ -133,7 +141,7 @@ ErosionHydraulicResult godot::erosion_hydraulic_solve(const PackedFloat32Array &
 				if (total_diff > 0.0) {
 					const double eff_slope = std::max(max_slope, p_min_slope);
 					const double vel = std::sqrt(std::clamp(eff_slope * cell_dist, 0.05, 50.0));
-					const double flow_factor = std::log(1.0 + (double)flow_accum[i] * 10.0) + 1.0;
+					const double flow_factor = std::log(1.0 + (double)flow_accum_in[i] * 10.0) + 1.0;
 					const double cap = p_cap * eff_slope * vel * w_c * flow_factor * 0.5;
 
 					double sed_c = (double)sediment[i];
@@ -165,7 +173,13 @@ ErosionHydraulicResult godot::erosion_hydraulic_solve(const PackedFloat32Array &
 							sed_c = std::max(sed_c - moved_s, 0.0);
 						}
 					}
-					next_sediment[i] = (float)sed_c;
+					// += the DELTA, not = the retained amount. next_sediment[i] starts at sediment[i] and
+					// neighbours scatter into it with +=, so an assignment here threw away every grain an
+					// already-visited upstream neighbour had deposited on this cell -- a scan-order-dependent
+					// loss that no other channel showed, because water and flow_accum both accumulate. The
+					// GPU has always been right about this: it keeps the retained amount and the inbound
+					// flux in separate buffers and sums them in its gather phase.
+					next_sediment[i] = (float)((double)next_sediment[i] + (sed_c - (double)sediment[i]));
 				}
 			}
 		}

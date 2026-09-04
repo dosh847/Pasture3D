@@ -100,6 +100,11 @@ func input_names() -> PackedStringArray:
 	return PackedStringArray(["in", "mask", "amount"])
 
 
+func aux_grid_port() -> int:
+	return 1 # "mask"
+
+
+
 func input_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.FLOAT])
 

@@ -322,6 +322,9 @@ measuring the CPU and reporting green.
 
 ## P2 — The native CPU path produces wrong output
 
+**STATUS: LANDED 2026-09-04** on `fix/graph-gpu-cpu-divergence`, gated by `GraphCppParityGate` criterion
+F and by the new `BrushRasterGuardGate`, each with a control run that fails on the reverted fix.
+
 Independent of P1. Grouped because all four live in the native rasteriser/evaluator and share the
 "native disagrees with the GDScript oracle" gate shape.
 
@@ -358,6 +361,14 @@ program from the node's own port list, so the native side reads `in[grid_port[s]
 hardcoded `in1`. This is a partial, contained down-payment on P6 §6.1 and is worth taking here
 because it is what makes the fix stick.
 
+**Landed as:** a per-node virtual `Pasture3DGraphNode.aux_grid_port()`, declared beside `input_names()` in
+each of the six nodes, compiled into a new `aux_port` program array and read by one `aux_src` / `aux_grid_of`
+accessor on each of the two evaluators. Deliberately NOT a central table: that would have been another
+instance of §6.1's five-tables problem, and a new node would have to find it. An older program without the
+array reads as -1 everywhere, i.e. no secondary grid — a mask ignored, never a scalar misread as one.
+En route this exposed a second gap: `PARAM_PORT_MAP[&"expand_shrink"]` was missing port 2 -> param 4, so a
+driven `amount` reached the GDScript path and not the native one.
+
 ### 2.2 Splat paints holes and navigation bits where no control map exists
 
 [pasture_3d_brush_raster.cpp:2517](src/pasture_3d_brush_raster.cpp:2517) uses `get_control`'s
@@ -385,6 +396,13 @@ same normalisation.
 **Fix.** Add the same normalisation. Then **hoist it into `get_control`'s callers as a shared
 helper** (`control_or_default(pos)`) — there are now two known sites and the guard has already been
 missed once. Applies whether `preserve_base` is true or false, since `cur & 0x6` is unconditional.
+
+**Landed as:** `Pasture3DData::control_or_default`, an inline sibling of `get_control` in
+`pasture_3d_data.h`. Both known call sites use it and the road path's inline guard is deleted rather than
+left duplicated. Then a third finding: the same read-modify-write shape appears in the whole
+`set_control_base_id` / `_overlay_id` / `_blend` / `_angle` / `_scale` / `_hole` / `_navigation` / `_auto`
+family — every GETTER guarded the sentinel and not one SETTER did, so setting any single field on a
+region with no control map set every other field at once. All eight now go through the helper.
 
 ### 2.3 Field modifiers see NaN outside the clip rect
 
@@ -418,6 +436,12 @@ the true clip only when writing into the layer. Two consequences to honour:
   a field modifier is a global operator and pretending otherwise is what produced the seam. Log at
   `log_bake_timing` when the margin swallows the rect, so the cost is visible rather than mysterious.
 
+**Landed as:** a `has_field_step` scan of the built modifier list and a `pre_clip` flag that the PRE-PASS
+uses in place of `has_clip`; the write loop still narrows to the rect. Not the widen-by-the-margin the spec
+anticipated — a drainage network is global, not local, so a margin-width skirt would have moved the seam
+rather than removed it. With the pre-pass unclipped the bake is clip-independent, which is the actual
+invariant wanted, and gate [C] measures exactly 0.000000 m along the clip wall against 0.70 m before.
+
 ### 2.4 Two smaller native defects, same files
 
 - **`stamp_plow_loop` indexes `p_src_data` unvalidated.**
@@ -436,6 +460,48 @@ the true clip only when writing into the layer. Two consequences to honour:
   propagates through `nan_blur` (INF is not NaN, so it is *averaged into its neighbours*) into the
   layer. Same mismatch at 1436, 1464 and 1563. Make the native side test `std::isfinite`.
 
+**Landed as:** a length check that refuses a `data_w`/`data_h` pair the caller's array cannot back (the
+existing `CLAMP` protected the indices against everything except the declaration itself being wrong), and
+`isnan` -> `!isfinite` at the four folding sites the spec named **plus** the five per-cell write guards and
+the plow's amplitude test — which is where an infinity actually reaches the terrain, and which only showed
+up because the gate failed on its first run.
+
+### 2.5 Gate — `GraphCppParityGate` + `BrushStackGate`
+
+| Criterion | Control that must fail |
+|---|---|
+| Contrast with a Falloff on `mask` matches the GDScript oracle | Revert §2.1 → native ignores the mask. Also assert the *inverse*: a `Const` on `amount` must **not** act as a mask. |
+| Splat over a region with no control map sets no hole and no nav bit | Revert §2.2 → every cell is a hole. Build the fixture by creating a region and *not* creating its control map. |
+| A one-point spline drag on a Mound with an Erosion modifier matches the full bake inside the rect | Revert §2.3 → a seam at the tile-snapped clip edge. **This is the criterion most likely to be written so it cannot fail** — assert on the *height field along the clip boundary*, not on a whole-grid mean, which averages the seam away. |
+| A relief op producing ±INF writes nothing, matching the oracle | Revert §2.4 → an infinite height, then INF smeared by `nan_blur`. |
+
+**As landed.** The first criterion is `GraphCppParityGate` **[F]**; the other three are a new headless gate,
+`bench/BrushRasterGuardGate.tscn`, built on an in-memory terrain with no `data_directory` so a run cannot
+touch demo data. Four notes on what the writing of it turned up:
+
+1. **`evaluate()` is not an oracle.** `Pasture3DTerrainGraph.evaluate()` delegates to the native
+   whole-graph evaluator whenever the graph is `native_supported`, so comparing it against
+   `graph_eval_grid` compares the native path to ITSELF. [F] sets `force_gdscript_evaluation` for the
+   reference call; without it the criterion passed with the bug still in. Criteria A–E of that gate compare
+   the cell-lowered path against the whole-graph native one and are left as they are — a real comparison,
+   but not the one their header claims, and forcing the folded path there costs minutes per run.
+
+2. **The `amount` driver has to be a grid node.** A `Const` folds into the driven-parameter table and never
+   occupies an input slot, so `in1` is -1 and the misread cannot occur. The spec's suggested `Const` on
+   `amount` would have produced a criterion that could not fail; [F] drives it from a Noise instead.
+
+3. **The §2.2 fixture needs the control map ABSENT.** `add_region_blankp` ships a zeroed control map, so
+   the sentinel never appears. The gate fills it with `COLOR_NAN` — exactly the state `get_control` tests
+   for — and asserts the fixture reads `0xFFFFFFFF` before painting, so a future change that makes blank
+   regions carry control cannot silently turn the criterion into a no-op.
+
+4. **§2.4's real site was not where the spec pointed.** The `isnan`/`isfinite` mismatch in the modifier-stack
+   folding was real but unreachable from a plow: the infinity arrives through the point loop and the
+   per-cell write guard. The gate found this by failing on the first run after the spec's fix was applied.
+
+The control runs, each with the single fix reverted and everything else in place: [A] paints a hole and a
+nav bit and `get_height` goes NaN; [B] writes `inf` into the terrain; [C] opens a **0.70 m** seam along the
+clip wall; [F] diverges from the oracle by 7.5 m with a mask wired and 13.9 m with only the amount driven.
 ### 2.6 The hydraulic solver's sediment scatter is clobbered by an assignment (**found while gating P1**)
 
 `pasture_3d_erosion_hydraulic.cpp`'s routing loop scatters into its neighbours —
@@ -468,14 +534,19 @@ GDScript oracle, together, in one change. Then add `sediment` back to gate crite
 **Do not fix one and not the other.** The two are the parity pair, and splitting them turns a shared defect
 into a divergence.
 
-### 2.5 Gate — `GraphCppParityGate` + `BrushStackGate`
+**Landed as:** exactly that, in both files — but as `next_sediment[i] += sed_c - sediment[i]`, the DELTA
+rather than the retained amount. `next_sediment` starts as a copy of `sediment`, so a bare `+=` would have
+double-counted the cell's own starting load on top of the neighbours' contributions.
 
-| Criterion | Control that must fail |
-|---|---|
-| Contrast with a Falloff on `mask` matches the GDScript oracle | Revert §2.1 → native ignores the mask. Also assert the *inverse*: a `Const` on `amount` must **not** act as a mask. |
-| Splat over a region with no control map sets no hole and no nav bit | Revert §2.2 → every cell is a hole. Build the fixture by creating a region and *not* creating its control map. |
-| A one-point spline drag on a Mound with an Erosion modifier matches the full bake inside the rect | Revert §2.3 → a seam at the tile-snapped clip edge. **This is the criterion most likely to be written so it cannot fail** — assert on the *height field along the clip boundary*, not on a whole-grid mean, which averages the seam away. |
-| A relief op producing ±INF writes nothing, matching the oracle | Revert §2.4 → an infinite height, then INF smeared by `nan_blur`. |
+**And a sibling the fix exposed.** With the scatter corrected, criterion J's sediment channel improved from
+0.42 to 0.017 and still failed its 3e-3 bar. The remainder was a second order-dependence in the same loop:
+the routing sweep SCATTERS into `flow_accum` (`flow_accum[ni] += moved_w`) and also READS it, for the
+carrying-capacity term. Reading the live array made a cell's capacity depend on whether its upstream
+neighbour happened to be visited first. Both reference paths now read a snapshot taken at the start of the
+iteration — `flow_accum_in`, the twin of `next_water`/`next_sediment`, which this array had simply been
+left out of — which is the model the GPU's two-phase split already implements. After it, J reports
+height 1e-6, flow 2e-7, sediment 2e-6, against 3e-3.
+
 
 ---
 

@@ -201,6 +201,10 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 				flow_accum[i] += p_rain
 
 		var next_water := water.duplicate()
+		# The routing sweep both scatters into and reads flow_accum, so it reads a SNAPSHOT -- see the note
+		# on the native kernel's twin of this line. Reading the live array made carrying capacity depend on
+		# raster order.
+		var flow_accum_in := flow_accum.duplicate()
 		var next_sediment := sediment.duplicate()
 		var next_height := height.duplicate()
 
@@ -240,7 +244,7 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 				if total_diff > 0.0:
 					var eff_slope: float = maxf(max_slope, p_min_slope)
 					var vel: float = sqrt(clampf(eff_slope * cell_dist, 0.05, 50.0))
-					var flow_factor: float = log(1.0 + flow_accum[i] * 10.0) + 1.0
+					var flow_factor: float = log(1.0 + flow_accum_in[i] * 10.0) + 1.0
 					var cap: float = p_cap * eff_slope * vel * w_c * flow_factor * 0.5
 
 					var sed_c: float = sediment[i]
@@ -270,7 +274,10 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 							flow_accum[ni] += moved_w
 							sed_c = maxf(sed_c - moved_s, 0.0)
 
-					next_sediment[i] = sed_c
+					# += the DELTA, not = the retained amount -- see the note on the native kernel's twin of
+					# this line. next_sediment starts as a copy of sediment and neighbours scatter into it,
+					# so assigning here discarded upstream deposits made earlier in the same scan.
+					next_sediment[i] += sed_c - sediment[i]
 
 		for i in range(n):
 			if is_finite(next_height[i]):

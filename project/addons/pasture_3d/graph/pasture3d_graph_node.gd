@@ -261,6 +261,20 @@ func input_names() -> PackedStringArray:
 	return PackedStringArray(["in"])
 
 
+## Which INPUT PORT carries this node's secondary GRID operand -- the mask, the noise field, the per-cell
+## weight -- or -1 when it has none.
+##
+## A node with a grid on a port other than 0 has to say so HERE, next to input_names(), because the native
+## and GPU evaluators cannot see the port list. They used to hardcode `in1` for all of them, which was right
+## only for Mudslide: Contrast read its "amount" scalar as a per-cell mask, Falloff read "strength", and
+## SmoothFill and RecastCliff read "radius" and "talus". Both halves failed at once -- the real mask was
+## ignored AND a driving constant acted as one -- and nothing refused the graph.
+##
+## Port 0 is the primary input and is never the answer; -1 means the op has no secondary grid.
+func aux_grid_port() -> int:
+	return -1
+
+
 ## The value an UNWIRED input port reads. A HEIGHT port reads 0 (a missing height adds nothing); a MASK
 ## port reads 1.0 (a missing gate is fully open, so an unwired mask input is a no-op rather than a hard 0
 ## that would zero the node out). Nodes with a mask/weight input override this per port.

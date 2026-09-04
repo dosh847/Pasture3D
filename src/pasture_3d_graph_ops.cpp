@@ -296,6 +296,7 @@ bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 	if (p_prog.has("in2")) r_out.in2 = p_prog["in2"];
 	if (p_prog.has("in3")) r_out.in3 = p_prog["in3"];
 	if (p_prog.has("out_count")) r_out.out_count = p_prog["out_count"];
+	if (p_prog.has("aux_port")) r_out.aux_port = p_prog["aux_port"];
 	if (p_prog.has("in0_port")) r_out.in0_port = p_prog["in0_port"];
 	if (p_prog.has("in1_port")) r_out.in1_port = p_prog["in1_port"];
 	if (p_prog.has("in2_port")) r_out.in2_port = p_prog["in2_port"];
@@ -423,6 +424,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 	// before P2b. Checked as a whole array rather than per slot so a half-written program cannot be
 	// half-believed.
 	const int32_t *out_count = p_prog.out_count.size() == p_prog.count ? p_prog.out_count.ptr() : nullptr;
+	const int32_t *aux_port = p_prog.aux_port.size() == p_prog.count ? p_prog.aux_port.ptr() : nullptr;
 	const int32_t *in_port_arr[4] = {
 		p_prog.in0_port.size() == p_prog.count ? p_prog.in0_port.ptr() : nullptr,
 		p_prog.in1_port.size() == p_prog.count ? p_prog.in1_port.ptr() : nullptr,
@@ -580,6 +582,25 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 			for (int i = 0; i < n; i++) w[i] = 0.f;
 		}
 		return arr;
+	};
+
+	// This slot's secondary GRID operand, read from the port the NODE declares rather than from a
+	// hardcoded `in1`. Returns an empty array when the port is unwired or the op has none, which every
+	// caller already reads as "no mask" / "no perturbation".
+	auto aux_grid_of = [&](int p_slot) -> PackedFloat32Array {
+		if (aux_port == nullptr) {
+			return PackedFloat32Array();
+		}
+		const int port = aux_port[p_slot];
+		if (port < 1 || port > 3) {
+			return PackedFloat32Array();
+		}
+		const int32_t *srcs[4] = { in0, in1, in2, in3 };
+		const int32_t *arr = srcs[port];
+		if (arr == nullptr || arr[p_slot] < 0) {
+			return PackedFloat32Array();
+		}
+		return get_grid_packed(arr[p_slot], chan_of(port, p_slot));
 	};
 
 	// 3. Sequential evaluation of nodes in topological order
@@ -846,9 +867,10 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 			case GRAPH_OP_FALLOFF: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
-				// in1 is the optional distance-perturbation grid; an unwired port passes an empty array,
-				// which falloff_grid reads as "no perturbation" rather than as zeros.
-				PackedFloat32Array nz_arr = (in1[s] >= 0) ? get_grid_packed(in1[s], c_in1) : PackedFloat32Array();
+				// The optional distance-perturbation grid, on the port the node declares (3, "noise"). It
+				// used to be read from in1, which is the "strength" SCALAR port: a Const driving strength
+				// was consumed as a per-cell perturbation field and the wired noise was ignored.
+				PackedFloat32Array nz_arr = aux_grid_of(s);
 				PackedFloat32Array res = falloff_grid(in_arr, nz_arr, p_gw, p_gh, p_rect, (int)P[0],
 						P[1], P[2], P[3], P[4], P[5],
 						P[6] > 0.5f, P[7]);
@@ -857,7 +879,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 			case GRAPH_OP_CONTRAST: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
-				PackedFloat32Array msk_arr = (in1[s] >= 0) ? get_grid_packed(in1[s], c_in1) : PackedFloat32Array();
+				PackedFloat32Array msk_arr = aux_grid_of(s);
 				PackedFloat32Array res = contrast_grid(in_arr, msk_arr, (int)P[0], P[1],
 						P[2], P[3], P[4], P[5] > 0.5f);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
@@ -885,7 +907,10 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 			case GRAPH_OP_EXPAND_SHRINK: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
-				PackedFloat32Array msk_arr = (in1[s] >= 0) ? get_grid_packed(in1[s], c_in1) : PackedFloat32Array();
+				// ExpandShrink has NO mask port -- its three ports are in / radius / amount, and both of the
+				// latter are scalars. in1 here was the radius, handed to the kernel as a per-cell blend
+				// weight. aux_grid_of answers empty for it, which the kernel reads as "fully applied".
+				PackedFloat32Array msk_arr = aux_grid_of(s);
 				PackedFloat32Array res = expand_shrink_solve(in_arr, msk_arr, p_gw, p_gh, p_rect,
 						(int)P[0], P[1], (int)P[2], (int)P[3], P[4]);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
@@ -900,7 +925,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 			case GRAPH_OP_SMOOTH_FILL: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
-				PackedFloat32Array msk_arr = (in1[s] >= 0) ? get_grid_packed(in1[s], c_in1) : PackedFloat32Array();
+				PackedFloat32Array msk_arr = aux_grid_of(s);
 				// The deposition channel is dropped here. This evaluator produces ONE grid per slot; a
 				// graph that wires the deposition port is routed to the multi-channel path instead, so
 				// nothing is lost by not computing it.
@@ -911,7 +936,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 			case GRAPH_OP_RECAST_CLIFF: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
-				PackedFloat32Array msk_arr = (in1[s] >= 0) ? get_grid_packed(in1[s], c_in1) : PackedFloat32Array();
+				PackedFloat32Array msk_arr = aux_grid_of(s);
 				PackedFloat32Array res = recast_cliff_solve(in_arr, msk_arr, p_gw, p_gh, p_rect,
 						P[0], P[1], P[2], P[3], P[4], P[5],
 						P[6]);
@@ -920,7 +945,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 			case GRAPH_OP_WARP_DOWNSLOPE: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
-				PackedFloat32Array msk_arr = (in1[s] >= 0) ? get_grid_packed(in1[s], c_in1) : PackedFloat32Array();
+				PackedFloat32Array msk_arr = aux_grid_of(s);
 				PackedFloat32Array res = warp_downslope_solve(in_arr, msk_arr, p_gw, p_gh, p_rect,
 						P[0], P[1], P[2] > 0.5f, P[3]);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
@@ -942,7 +967,9 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 			case GRAPH_OP_MUDSLIDE: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
-				PackedFloat32Array msk_arr = (in1[s] >= 0) ? get_grid_packed(in1[s], c_in1) : PackedFloat32Array();
+				// Mudslide is the one op whose mask really is on port 1, so this reads the same buffer it
+				// always did -- through the declared port rather than by coincidence.
+				PackedFloat32Array msk_arr = aux_grid_of(s);
 				PackedFloat32Array res = mudslide_solve(in_arr, msk_arr, p_gw, p_gh, p_rect, P[0],
 						P[1], P[2], P[3], P[4], P[5], nullptr, nullptr);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);

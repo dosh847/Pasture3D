@@ -1329,6 +1329,22 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	const double cz0 = p_clip.position.z;
 	const double cz1 = p_clip.position.z + p_clip.size.z;
 
+	// A FIELD modifier reads the WHOLE grid, so the pre-pass that fills that grid cannot be clipped to the
+	// dirty rect the way the write loop can. Clipping it left every cell outside the rect at NaN and a
+	// field step then saw a brush that stops at the rect edge: an erosion pass computed its drainage
+	// network against a cliff that only exists because of which cells happened to be dirty, so the same
+	// brush baked to different terrain depending on what the user had touched last. Widening by the
+	// modifier margin would not be enough -- a drainage network is global, not local -- so the pre-pass
+	// simply ignores the clip when a field step is present, and only the WRITE loop narrows back to it.
+	bool has_field_step = false;
+	for (const BrushModStep &st : steps) {
+		if (st.field) {
+			has_field_step = true;
+			break;
+		}
+	}
+	const bool pre_clip = has_clip && !has_field_step;
+
 	// Rasterise the brush's own profile into its own grids first, then run the modifier list over them.
 	// The split is not a tidier spelling of one fused loop: a FIELD modifier reads the whole grid, so the
 	// profile has to be finished before any modifier can look at it.
@@ -1370,14 +1386,14 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	};
 	for (int iz = 0; iz < gh; iz++) {
 		const double z = min_z + iz * vs;
-		if (has_clip && (z < cz0 || z >= cz1)) {
+		if (pre_clip && (z < cz0 || z >= cz1)) {
 			continue;
 		}
 		const int row = iz * gw;
 		for (int ix = 0; ix < gw; ix++) {
 			const double signed_d = (double)field[row + ix] + edge_offset;
 			const double x = min_x + ix * vs;
-			if (has_clip && (x < cx0 || x >= cx1)) {
+			if (pre_clip && (x < cx0 || x >= cx1)) {
 				continue;
 			}
 			if (signed_d <= 0.0) {
@@ -1433,8 +1449,8 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 			// the ones this brush built. Taken from `amp` rather than `vals` for exactly that reason.
 			if (in_vals) {
 				for (size_t k = 0; k < n; k++) {
-					amp[k] = std::isnan(vals[k]) ? NAN
-												 : (add ? (double)vals[k] : (double)vals[k] - (double)basey[k]);
+					amp[k] = !std::isfinite(vals[k]) ? NAN
+													: (add ? (double)vals[k] : (double)vals[k] - (double)basey[k]);
 				}
 				in_vals = false;
 			}
@@ -1461,7 +1477,7 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 			}
 			if (in_vals) {
 				for (size_t k = 0; k < n; k++) {
-					amp[k] = std::isnan(vals[k]) ? NAN : (add ? (double)vals[k] : (double)vals[k] - (double)basey[k]);
+					amp[k] = !std::isfinite(vals[k]) ? NAN : (add ? (double)vals[k] : (double)vals[k] - (double)basey[k]);
 				}
 				in_vals = false;
 			}
@@ -1512,7 +1528,7 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 		}
 		if (!in_vals) {
 			for (size_t k = 0; k < n; k++) {
-				vals[k] = std::isnan(amp[k]) ? (float)NAN : (float)(add ? amp[k] : (double)basey[k] + amp[k]);
+				vals[k] = !std::isfinite(amp[k]) ? (float)NAN : (float)(add ? amp[k] : (double)basey[k] + amp[k]);
 			}
 			in_vals = true;
 		}
@@ -1560,7 +1576,7 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	}
 	if (!in_vals) {
 		for (size_t k = 0; k < n; k++) {
-			vals[k] = std::isnan(amp[k]) ? (float)NAN : (float)(add ? amp[k] : (double)basey[k] + amp[k]);
+			vals[k] = !std::isfinite(amp[k]) ? (float)NAN : (float)(add ? amp[k] : (double)basey[k] + amp[k]);
 		}
 	}
 
@@ -1570,7 +1586,7 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	// untouched skirt zone leaves the surrounding terrain exactly as it was.
 	if (margin_active) {
 		for (size_t k = 0; k < n; k++) {
-			if (!margin_mask[k] || std::isnan(vals[k])) {
+			if (!margin_mask[k] || !std::isfinite(vals[k])) {
 				continue;
 			}
 			const double moved = add ? (double)vals[k] : (double)vals[k] - (double)basey[k];
@@ -1592,7 +1608,11 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 			const int row = iz * gw;
 			for (int ix = 0; ix < gw; ix++) {
 				const float v = vals[row + ix];
-				if (std::isnan(v)) { continue; }
+				// !isfinite, not isnan. NAN is the buffer's "this cell writes nothing" sentinel, but an
+				// INFINITY is just as unwritable and is not NaN, so it used to pass this test and reach
+				// the terrain -- where nan_blur then smeared it across the neighbourhood. Matches the
+				// GDScript oracle, which asks is_finite.
+				if (!std::isfinite(v)) { continue; }
 				const double x = min_x + ix * vs;
 				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
 				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
@@ -1810,7 +1830,11 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 			const int row = iz * gw;
 			for (int ix = 0; ix < gw; ix++) {
 				const float v = vals[row + ix];
-				if (std::isnan(v)) { continue; }
+				// !isfinite, not isnan. NAN is the buffer's "this cell writes nothing" sentinel, but an
+				// INFINITY is just as unwritable and is not NaN, so it used to pass this test and reach
+				// the terrain -- where nan_blur then smeared it across the neighbourhood. Matches the
+				// GDScript oracle, which asks is_finite.
+				if (!std::isfinite(v)) { continue; }
 				const double x = min_x + ix * vs;
 				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
 				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
@@ -2016,7 +2040,11 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 			const int row = iz * gw;
 			for (int ix = 0; ix < gw; ix++) {
 				const float v = vals[row + ix];
-				if (std::isnan(v)) { continue; }
+				// !isfinite, not isnan. NAN is the buffer's "this cell writes nothing" sentinel, but an
+				// INFINITY is just as unwritable and is not NaN, so it used to pass this test and reach
+				// the terrain -- where nan_blur then smeared it across the neighbourhood. Matches the
+				// GDScript oracle, which asks is_finite.
+				if (!std::isfinite(v)) { continue; }
 				const double x = min_x + ix * vs;
 				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
 				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
@@ -2161,7 +2189,11 @@ void Pasture3DData::stamp_road_line(const int p_layer_id, const PackedVector2Arr
 			const int row = iz * gw;
 			for (int ix = 0; ix < gw; ix++) {
 				const float v = vals[row + ix];
-				if (std::isnan(v)) { continue; }
+				// !isfinite, not isnan. NAN is the buffer's "this cell writes nothing" sentinel, but an
+				// INFINITY is just as unwritable and is not NaN, so it used to pass this test and reach
+				// the terrain -- where nan_blur then smeared it across the neighbourhood. Matches the
+				// GDScript oracle, which asks is_finite.
+				if (!std::isfinite(v)) { continue; }
 				const double x = min_x + (double)ix * vs;
 				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
 				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
@@ -2378,7 +2410,10 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 				}
 				amp = height_scale * (sv - height_offset) * mask * src_strength;
 			}
-			if (std::fabs(amp) < 0.0001) {
+			// An INF or NaN amplitude is not a small write, it is a NO write: a relief op that overflowed
+			// or divided by zero must leave the ground alone rather than stamp an infinity. The batched
+			// apply path takes the buffer wholesale, so this is the only place to stop it.
+			if (!std::isfinite(amp) || std::fabs(amp) < 0.0001) {
 				continue;
 			}
 			const Vector3 pos(x, 0.0, z);
@@ -2405,7 +2440,11 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 			const int row = iz * gw;
 			for (int ix = 0; ix < gw; ix++) {
 				const float v = vals[row + ix];
-				if (std::isnan(v)) { continue; }
+				// !isfinite, not isnan. NAN is the buffer's "this cell writes nothing" sentinel, but an
+				// INFINITY is just as unwritable and is not NaN, so it used to pass this test and reach
+				// the terrain -- where nan_blur then smeared it across the neighbourhood. Matches the
+				// GDScript oracle, which asks is_finite.
+				if (!std::isfinite(v)) { continue; }
 				const double x = min_x + ix * vs;
 				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
 				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
@@ -2502,7 +2541,11 @@ void Pasture3DData::stamp_splat_loop(const int p_layer_id, const PackedVector2Ar
 				continue;
 			}
 			const Vector3 pos(x, 0.0, z);
-			const uint32_t cur = get_control(pos);
+			// control_or_default, not get_control: over a region whose control map has not been created
+			// yet the raw answer is UINT32_MAX, and the `cur & 0x6` below would then carry the hole and
+			// navigation bits into every painted cell while get_base(cur) returned texture 31. The road
+			// sibling below has always normalised this; the splat path had not.
+			const uint32_t cur = control_or_default(pos);
 			const uint8_t base_id = preserve_base ? get_base(cur) : (uint8_t)material;
 			const uint32_t ctrl = enc_base(base_id) | enc_overlay((uint8_t)material) | enc_blend((uint8_t)blend_int) | uv_bits | (cur & 0x6);
 			if (batched) {
@@ -2551,17 +2594,10 @@ int Pasture3DData::stamp_road_surface_control(const int p_layer_id, const Packed
 			}
 			const double x = p_min_x + (double)ix * p_vs;
 			const Vector3 pos((float)x, 0.0f, (float)z);
-			uint32_t cur = get_control(pos);
-			// UINT32_MAX is get_control's "no region, deleted region, or no control map" answer — it is
-			// not a control word. Decoded, it yields base id 31 (0xFFFFFFFF >> 27 & 0x1F) and both
-			// preserve bits set, so a road over a region whose control map has not been created yet
-			// would paint the LAST texture slot and turn navigation on, and read as a wrong texture id
-			// rather than as a road that painted where there was no data. This is the same -1 -> 0
-			// normalisation Pasture3DRoadPaint.surface_control's caller does in GDScript; the two paths
-			// have to agree because either can be the one that paints a given cell.
-			if (cur == UINT32_MAX) {
-				cur = 0u;
-			}
+			// The same -1 -> 0 normalisation Pasture3DRoadPaint.surface_control's caller does in GDScript;
+			// the two paths have to agree because either can be the one that paints a given cell. It lives
+			// in control_or_default now, because the splat rasteriser needed it too and did not have it.
+			const uint32_t cur = control_or_default(pos);
 			const uint8_t base_id = p_preserve_base ? get_base(cur) : (uint8_t)p_texture_id;
 			const int blend_int = (int)std::lround(std::clamp(cover, 0.0f, 1.0f) * 255.0f);
 			const uint32_t ctrl = enc_base(base_id) | enc_overlay((uint8_t)p_texture_id) | enc_blend((uint8_t)blend_int) | (cur & 0x6);

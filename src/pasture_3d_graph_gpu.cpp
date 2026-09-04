@@ -1250,6 +1250,24 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 	// The mask port. Nullptr on a program compiled before in2 existed, which reads as "no mask wired"
 	// — the same answer that program got before, rather than an out-of-bounds read.
 	const int32_t *in2 = p_prog.in2.size() == p_prog.count ? p_prog.in2.ptr() : nullptr;
+	const int32_t *in3 = p_prog.in3.size() == p_prog.count ? p_prog.in3.ptr() : nullptr;
+	const int32_t *aux_port = p_prog.aux_port.size() == p_prog.count ? p_prog.aux_port.ptr() : nullptr;
+	// This slot's secondary GRID operand (mask / noise / per-cell weight), read from the port the NODE
+	// declares rather than from a hardcoded `in1`. Six ops used to take it from in1, which is a SCALAR
+	// port on five of them -- so a Const driving Contrast's amount was bound as a per-cell mask while the
+	// real mask on port 2 went unread. -1 means the op has no secondary grid, or the wire is absent.
+	auto aux_src = [&](int p_slot) -> int {
+		if (aux_port == nullptr) {
+			return -1;
+		}
+		const int port = aux_port[p_slot];
+		if (port < 1 || port > 3) {
+			return -1;
+		}
+		const int32_t *srcs[4] = { in0, in1, in2, in3 };
+		const int32_t *arr = srcs[port];
+		return (arr != nullptr && arr[p_slot] >= 0) ? (int)arr[p_slot] : -1;
+	};
 
 	std::vector<RID> slot_buf(p_prog.count);
 	std::vector<GraphDispatch> plan;
@@ -1485,7 +1503,7 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				// perturbation — the same defined 0 the CPU kernel uses for a missing grid.
 				const RID out = empty_buf();
 				GraphDispatch d{ out, in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf,
-					in1[s] >= 0 ? slot_buf[in1[s]] : zero_buf, zero_buf, GKM_FALLOFF, (int)P[0] };
+					aux_src(s) >= 0 ? slot_buf[aux_src(s)] : zero_buf, zero_buf, GKM_FALLOFF, (int)P[0] };
 				d.f0 = P[1]; // centre x
 				d.f1 = P[2]; // centre z
 				d.f2 = P[3]; // radius
@@ -1526,13 +1544,13 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 
 				const RID out = empty_buf();
 				GraphDispatch d{ out, src,
-					in1[s] >= 0 ? slot_buf[in1[s]] : zero_buf, window, GKM_CONTRAST, (int)P[0] };
+					aux_src(s) >= 0 ? slot_buf[aux_src(s)] : zero_buf, window, GKM_CONTRAST, (int)P[0] };
 				d.f0 = std::max(P[1], 0.001f); // amount
 				d.f1 = P[2]; // range_min
 				d.f2 = P[3]; // range_max
 				d.f3 = std::clamp(P[4], 0.0f, 1.0f); // mask_amount
 				d.f6 = explicit_window ? 1.0f : 0.0f;
-				d.f7 = (in1[s] >= 0) ? 1.0f : 0.0f; // mask wired?
+				d.f7 = (aux_src(s) >= 0) ? 1.0f : 0.0f; // mask wired?
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;
@@ -1665,9 +1683,12 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				}
 
 				const RID out = empty_buf();
-				GraphDispatch bd{ out, src, cur, in1[s] >= 0 ? slot_buf[in1[s]] : zero_buf, GKM_MORPH_BLEND, 0 };
+				// ExpandShrink has NO mask port -- in / radius / amount, both of the latter scalars. This
+				// used to bind in1, the RADIUS grid, as the blend mask. aux_src answers -1 for this op.
+				GraphDispatch bd{ out, src, cur, aux_src(s) >= 0 ? slot_buf[aux_src(s)] : zero_buf,
+						GKM_MORPH_BLEND, 0 };
 				bd.f0 = amount;
-				bd.f1 = (in1[s] >= 0) ? 1.0f : 0.0f; // is a mask actually wired?
+				bd.f1 = (aux_src(s) >= 0) ? 1.0f : 0.0f; // is a mask actually wired?
 				plan.push_back(bd);
 				slot_buf[s] = out;
 			} break;
@@ -1713,11 +1734,11 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				}
 				const RID blurred = blur_plan(src, radius_m);
 				const RID out = empty_buf();
-				GraphDispatch d{ out, src, blurred, in1[s] >= 0 ? slot_buf[in1[s]] : zero_buf, GKM_SMOOTH_FILL,
+				GraphDispatch d{ out, src, blurred, aux_src(s) >= 0 ? slot_buf[aux_src(s)] : zero_buf, GKM_SMOOTH_FILL,
 					(int)P[0] };
 				d.f0 = std::max(P[2], 0.0f); // k
 				d.f1 = amount;
-				d.f2 = (in1[s] >= 0) ? 1.0f : 0.0f;
+				d.f2 = (aux_src(s) >= 0) ? 1.0f : 0.0f;
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;
@@ -1734,7 +1755,7 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				}
 				const RID blurred = blur_plan(src, (double)P[1]);
 				const RID out = empty_buf();
-				GraphDispatch d{ out, src, blurred, in1[s] >= 0 ? slot_buf[in1[s]] : zero_buf, GKM_RECAST_CLIFF, 0 };
+				GraphDispatch d{ out, src, blurred, aux_src(s) >= 0 ? slot_buf[aux_src(s)] : zero_buf, GKM_RECAST_CLIFF, 0 };
 				const double kPi = 3.14159265358979323846;
 				d.f0 = (float)std::tan((double)P[0] * kPi / 180.0); // tan(talus)
 				d.f1 = amplitude;
@@ -1744,7 +1765,7 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 						: -1.0f; // direction, or omnidirectional
 				d.f4 = (float)(std::max((double)P[5], 0.0) * kPi / 180.0); // spread
 				d.f5 = amount;
-				d.f6 = (in1[s] >= 0) ? 1.0f : 0.0f;
+				d.f6 = (aux_src(s) >= 0) ? 1.0f : 0.0f;
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;
@@ -1763,12 +1784,12 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				// RecastCliff use, so "radius" means one thing across all three.
 				const RID smoothed = blur_plan(src, (double)P[1]);
 				const RID out = empty_buf();
-				GraphDispatch d{ out, src, smoothed, in1[s] >= 0 ? slot_buf[in1[s]] : zero_buf, GKM_WARP_DOWNSLOPE, 0 };
+				GraphDispatch d{ out, src, smoothed, aux_src(s) >= 0 ? slot_buf[aux_src(s)] : zero_buf, GKM_WARP_DOWNSLOPE, 0 };
 				// Sample UPHILL so the surface moves downhill — a resample is a backward map. Matches the
 				// `sign` in warp_downslope_solve; flipping one without the other is a silent CPU/GPU split.
 				d.f0 = (P[2] > 0.5f) ? -disp : disp;
 				d.f1 = amount;
-				d.f2 = (in1[s] >= 0) ? 1.0f : 0.0f;
+				d.f2 = (aux_src(s) >= 0) ? 1.0f : 0.0f;
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;
@@ -1832,7 +1853,7 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				// bytes), and deciding that needs a reduction over the whole buffer that this single-pass
 				// plan cannot do — a per-cell test would mean something different. Declining is honest;
 				// silently disagreeing with the CPU on a mask that happens to be blank is not.
-				if (in1[s] >= 0) {
+				if (aux_src(s) >= 0) {
 					return fail();
 				}
 				const RID mask = zero_buf;
@@ -1843,7 +1864,7 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 					GraphDispatch init{ cur_m, src, mask, zero_buf, GKM_MUDSLIDE_INIT, 0 };
 					init.f0 = tan_repose;
 					init.f1 = (float)depth_m;
-					init.f2 = (in1[s] >= 0) ? 1.0f : 0.0f;
+					init.f2 = (aux_src(s) >= 0) ? 1.0f : 0.0f;
 					plan.push_back(init);
 				}
 				for (int sw = 0; sw < sweeps; sw++) {
