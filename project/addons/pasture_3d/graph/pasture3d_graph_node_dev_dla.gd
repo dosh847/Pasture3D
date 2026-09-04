@@ -80,6 +80,11 @@ const ReliefDLA = preload("res://addons/pasture_3d/connectors/pasture3d_relief_d
 
 ## This solve is heavy enough that FROZEN is the right default; the base defaults to LIVE.
 func _init() -> void:
+	# `super()` is not optional. Pasture3DGraphNode._init connects `changed` to the revision bump, and a
+	# subclass `_init` that does not chain silently drops that connection — every parameter on this node,
+	# `muted` included, then becomes invisible to invalidation and it serves its first grid forever.
+	# GraphNodeParamGate names each one that stops bumping.
+	super()
 	evaluation = Evaluation.FROZEN
 
 

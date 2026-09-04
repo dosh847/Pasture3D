@@ -1,6 +1,7 @@
 // Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 
 #include "pasture_3d_geological_primitive.h"
+#include "pasture_3d_util.h"
 #include "pasture_3d_graph_ops.h"
 #include "pasture_3d_thread_pool.h"
 
@@ -11,12 +12,10 @@ using namespace godot;
 
 namespace {
 
+// The one definition lives in pasture_3d_util.h. This forwarder keeps the call sites below unchanged
+// while removing the sixth copy of a guard that returned a metres threshold as a 0..1 weight.
 inline double smoothstep(double p_from, double p_to, double p_weight) {
-	if (std::abs(p_from - p_to) <= 1e-7) {
-		return p_from;
-	}
-	const double x = std::clamp((p_weight - p_from) / (p_to - p_from), 0.0, 1.0);
-	return x * x * (3.0 - 2.0 * x);
+	return ::smoothstep_d(p_from, p_to, p_weight);
 }
 
 inline double profile_at(int p_type, double d, double norm_x, double p_height, double p_steepness) {

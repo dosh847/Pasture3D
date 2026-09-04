@@ -160,6 +160,12 @@ void graph_cell_to_world(int p_ix, int p_iz, int p_gw, int p_gh, const Rect2 &p_
 	r_wz = (double)p_rect.position.y + ((double)p_iz + 0.5) * dz;
 }
 
+// NaN-aware separable 3-tap blur, in place. Non-finite cells contribute nothing, so the blur never
+// bleeds a feature outward past its footprint; `p_passes <= 0` is the identity and allocates nothing.
+//
+// `isfinite`, not `isnan`: the GDScript oracle this must match byte-for-byte
+// (Pasture3DGraphOps.blur_nan) tests `is_finite`, so an INFINITE cell was dropped there and averaged in
+// here — the §2.4 mismatch, in the one kernel both the graph's Smooth node and every height brush run.
 void graph_nan_blur(std::vector<float> &r_vals, int p_gw, int p_gh, int p_passes) {
 	if (p_passes <= 0) {
 		return;
@@ -172,10 +178,10 @@ void graph_nan_blur(std::vector<float> &r_vals, int p_gw, int p_gh, int p_passes
 				const int row = iz * p_gw;
 				for (int ix = 0; ix < p_gw; ix++) {
 					const float v = r_vals[row + ix];
-					if (std::isnan(v)) { tmp[row + ix] = (float)NAN; continue; }
+					if (!std::isfinite(v)) { tmp[row + ix] = (float)NAN; continue; }
 					float sum = 0.5f * v, weight = 0.5f;
-					if (ix > 0 && !std::isnan(r_vals[row + ix - 1])) { sum += 0.25f * r_vals[row + ix - 1]; weight += 0.25f; }
-					if (ix < p_gw - 1 && !std::isnan(r_vals[row + ix + 1])) { sum += 0.25f * r_vals[row + ix + 1]; weight += 0.25f; }
+					if (ix > 0 && std::isfinite(r_vals[row + ix - 1])) { sum += 0.25f * r_vals[row + ix - 1]; weight += 0.25f; }
+					if (ix < p_gw - 1 && std::isfinite(r_vals[row + ix + 1])) { sum += 0.25f * r_vals[row + ix + 1]; weight += 0.25f; }
 					tmp[row + ix] = sum / weight;
 				}
 			}
@@ -186,10 +192,10 @@ void graph_nan_blur(std::vector<float> &r_vals, int p_gw, int p_gh, int p_passes
 				const int row = iz * p_gw;
 				for (int ix = 0; ix < p_gw; ix++) {
 					const float v = tmp[row + ix];
-					if (std::isnan(v)) { r_vals[row + ix] = (float)NAN; continue; }
+					if (!std::isfinite(v)) { r_vals[row + ix] = (float)NAN; continue; }
 					float sum = 0.5f * v, weight = 0.5f;
-					if (iz > 0 && !std::isnan(tmp[(iz - 1) * p_gw + ix])) { sum += 0.25f * tmp[(iz - 1) * p_gw + ix]; weight += 0.25f; }
-					if (iz < p_gh - 1 && !std::isnan(tmp[(iz + 1) * p_gw + ix])) { sum += 0.25f * tmp[(iz + 1) * p_gw + ix]; weight += 0.25f; }
+					if (iz > 0 && std::isfinite(tmp[(iz - 1) * p_gw + ix])) { sum += 0.25f * tmp[(iz - 1) * p_gw + ix]; weight += 0.25f; }
+					if (iz < p_gh - 1 && std::isfinite(tmp[(iz + 1) * p_gw + ix])) { sum += 0.25f * tmp[(iz + 1) * p_gw + ix]; weight += 0.25f; }
 					r_vals[row + ix] = sum / weight;
 				}
 			}

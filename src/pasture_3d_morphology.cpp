@@ -202,8 +202,14 @@ PackedFloat32Array godot::expand_shrink_solve(const PackedFloat32Array &p_surfac
 	// Metres to cells. Rounding to NEAREST rather than truncating keeps the grown distance within half a
 	// cell of the requested world radius at any resolution; truncation biases every radius downward and
 	// makes the metric-invariance criterion fail by a systematic cell, not by rounding.
-	const int wx = (dx > 0.0) ? (int)std::lround(p_radius_m / dx) : 0;
-	const int wz = (dz > 0.0) ? (int)std::lround(p_radius_m / dz) : 0;
+	//
+	// Then clamped to the grid. `radius` is `@export_range(..., "or_greater")` and its setter only does
+	// `maxf(v, 0.0)`, so 5000 on a 1 m/cell grid asked for 10001 full-grid line passes per iteration,
+	// up to 64 iterations, each allocating a grid-sized buffer: the editor hung with no warning. A
+	// structuring element wider than the grid cannot change the answer — every cell already sees every
+	// other cell — so the clamp costs no result, only the hang.
+	const int wx = (dx > 0.0) ? std::min((int)std::lround(p_radius_m / dx), p_gw) : 0;
+	const int wz = (dz > 0.0) ? std::min((int)std::lround(p_radius_m / dz), p_gh) : 0;
 
 	if (amount <= 0.0 || iterations <= 0 || (wx <= 0 && wz <= 0)) {
 		std::copy(src_f, src_f + n, dst_f);

@@ -1303,8 +1303,63 @@ and the eval body.
 
 ## P7 — Dead code, config, hygiene and cost
 
+**STATUS: LANDED 2026-09-04** on `fix/graph-gpu-cpu-divergence`, except the two items named below.
+
 Do these opportunistically alongside whichever phase touches the file. None changes behaviour except
 §7.2 and §7.3.
+
+**Landed as**
+
+- **§7.1** — every listed symbol deleted after re-verifying it dead by `grep` across `project/`, `src/`,
+  `doc/`, `tools/` including `project/bench/`, and for dynamic `call("...")` dispatch. Two additions the
+  audit turned up: `_cross` (the only caller of the dead `_cross_lut`, so dead with it) and the untyped
+  `create_owned_layer` fallback branch, whose typed sibling is bound in the same `_bind_methods` and so
+  always wins. `_layers_api_available`'s two call sites became `is_configured()`, which is the same fact
+  it was computing.
+- **§7.2** — `GPU_RASTER_THRESHOLD_DEFAULT` / `GRAPH_GPU_THRESHOLD_DEFAULT` are now named constants on
+  `Pasture3DData`, read by BOTH the getter and the Project Settings registration, so the 16x
+  disagreement cannot come back as a typo. `graph_gpu_threshold` is registered beside its sibling and is
+  additionally bound to GDScript as `Pasture3DUtil.graph_gpu_threshold()` — without a reader,
+  `GraphWorkerThreadGate` could not assert the off-main refusal it now checks. Expand/Shrink clamps
+  `wx`/`wz` to the grid. The DLA `_mark_stale` comment describes the code that is there.
+- **§7.3** — `smoothstep` is one definition (`::smoothstep_d` in `pasture_3d_util.h`, with the correct
+  degenerate case taken from the one copy that had it right); the six anonymous-namespace copies and
+  `relief_smoothstep` are forwarders. The `t*t*(3-2t)` sites left open-coded are NOT copies of
+  smoothstep — each applies the Hermite polynomial to a parameter it has already clamped itself — and
+  the three inside `pasture_3d_graph_gpu.cpp` are GLSL source strings. `nan_blur` is down from four
+  copies to the intended two: the brush rasteriser's six call sites now use `graph_nan_blur` (which is
+  threaded, where the copy they used was not), and `Pasture3DTerrainBrush._blur_grid` forwards to
+  `Pasture3DGraphOps.blur_nan`. `graph_nan_blur` tests `isfinite` rather than `isnan`, which is what its
+  GDScript oracle always did — the §2.4 mismatch, in the one kernel both paths run.
+- **§7.4** — `GraphWorkerThreadGate` rewritten with a failure counter and a non-zero exit. The rewrite
+  found that its old graph was never wired at all: it called `graph.connect_nodes(...)`, which does not
+  exist on `Pasture3DTerrainGraph`, so the call errored and what it timed was an unwired generator with
+  no solver in it. It now checks the SUPPORTED worker route (compile on main, `graph_eval_grid` on the
+  worker) against the main thread cell for cell, asserts that `evaluate()` itself refuses off-thread,
+  and waits with a deadline — a deadlock is the regression it is named for, and a gate that waits
+  forever on one reports nothing. `GraphNodeEditorUIGate` feeds every input port from its own Noise
+  source instead of skipping any node with inputs, and fails if it evaluated fewer nodes than the
+  registry holds.
+- **§7.5** — the `ptr()` hoist in `relief_eval`; `native_supported()` memoised per `[root, revision]`;
+  `_modifier_signature()` hoisted to once per bake and the spline footprint built once per spline
+  instead of twice; `output_index()` hoisted out of the editor's per-node loop and its
+  `has_node`/`get_node` pair collapsed; an LRU byte budget on `mod_graph`'s cache, which had no eviction
+  at all; and `_emit_baked` served from the tools the paint loop already selected.
+
+**Deliberately not done, and why**
+
+- **Memoising `compile_graph_program`'s RESULT.** A compiled program copies the nodes' values into flat
+  arrays. Memoising those bytes is the failure this project has already paid for once — a source that
+  mutates without announcing it leaves the program silently stale. `native_supported` is memoised
+  instead: it derives a bool from structure, and has no copy that can go stale.
+- **Folding `compile_graph_program_multi` into `compile_graph_program`.** A real refactor of two 200-line
+  functions and the 16-array parameter schema, not a hygiene fix. It belongs in its own change with its
+  own parity gate.
+- **The `materialize` fold.** The unused local and the unreachable `p_materialize` branch in
+  `_append_input_signature` are deleted, and the plan is left built (it is topology-only and cached) with
+  a note saying the cell-node fold is not wired. Wiring it is a redesign of `evaluate`.
+- **The `mound.gd` / `plow.gd` field-derivation hoist.** Both files carry uncommitted work in the
+  working tree; moving code inside them would collide with it.
 
 ### 7.1 Delete (pre-stack code is deleted, not shimmed)
 

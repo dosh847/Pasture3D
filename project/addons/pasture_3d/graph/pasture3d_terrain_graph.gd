@@ -89,6 +89,7 @@ var _fold_cache: Dictionary = {}    # root:int -> Dictionary (fold plan)
 func _invalidate_topology_cache() -> void:
 	_order_cache.clear()
 	_fold_cache.clear()
+	_native_ok_cache.clear()
 
 
 ## Clears all cached output grid buffers across every node in the graph.
@@ -388,15 +389,6 @@ func set_output(p_index: int) -> void:
 		output_node = p_index
 
 
-## Returns all connections touching `p_index` ([from, from_port, to, to_port]).
-func get_node_connections(p_index: int) -> Array:
-	var result: Array = []
-	for c in connections:
-		if int(c[0]) == p_index or int(c[2]) == p_index:
-			result.append(c)
-	return result
-
-
 ## Serializes a subset of nodes and their internal connecting wires into a clipboard dictionary.
 func serialize_subgraph(p_indices: Array) -> Dictionary:
 	var valid_indices: Array[int] = []
@@ -576,7 +568,7 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 				var single_output: bool = nodes[out].output_count() <= 1
 				if (p_root_node < 0 or p_root_node == output_index()) and single_output:
 					var plan_n: Dictionary = _fold_plan(out)
-					nodes[out].store_cache(field, {}, _compute_node_inputs_hash(out, p_gw, p_gh, p_rect, p_mask, p_input, plan_n["inputs_of"], plan_n["input_ports_of"], {}, _content_sig(p_input), _content_sig(p_mask)), _global_access_tick)
+					nodes[out].store_cache(field, {}, _compute_node_inputs_hash(out, p_gw, p_gh, p_rect, p_mask, p_input, plan_n["inputs_of"], plan_n["input_ports_of"], _content_sig(p_input), _content_sig(p_mask)), _global_access_tick)
 				return field
 
 	# 2. GDScript Folded / Multi-Channel Evaluation Reference Path
@@ -586,7 +578,13 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 		return Pasture3DGraphOps.zeros(n)
 	var inputs_of: Dictionary = plan["inputs_of"]
 	var input_ports_of: Dictionary = plan["input_ports_of"]
-	var materialize: Dictionary = plan["materialize"]
+	# `plan["materialize"]` is deliberately NOT read here. The documented cell-node fold — evaluate a
+	# non-grid node per cell instead of allocating a grid for it — is not wired up: this loop materialises
+	# every node, and `{}` was already being passed everywhere the plan would have been consumed, so the
+	# local below it was dead. Leaving the plan built and unused is cheap (it is topology-only and
+	# `_fold_cache`d) and it is what a future fold would consume; reading it into a variable nobody uses
+	# only made the fold look implemented. See PASTURE3D_TERRAIN_GRAPH_SPEC.md, "cell-node fold", and
+	# §4.1 — every node materialising a grid is what makes that ceiling arrive sooner.
 
 	_global_access_tick += 1
 	# Once per evaluate, not once per node: every node's signature folds in the same two arrays.
@@ -602,7 +600,7 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 	var aux := {}   # node index -> { output_port >= 1 : grid } for multi-output solver channels
 	for ni in order:
 		var node: Pasture3DGraphNode = nodes[ni]
-		var inputs_hash: int = _compute_node_inputs_hash(ni, p_gw, p_gh, p_rect, p_mask, p_input, inputs_of, input_ports_of, {}, surf_sig, mask_sig)
+		var inputs_hash: int = _compute_node_inputs_hash(ni, p_gw, p_gh, p_rect, p_mask, p_input, inputs_of, input_ports_of, surf_sig, mask_sig)
 
 		# Cache hit check: if clean and matching size, serve cached grid in 0.0 ms
 		if not node.is_dirty(inputs_hash) and node.get_cached_grid().size() == n:
@@ -764,7 +762,7 @@ func _content_sig(p_arr) -> int:
 
 
 ## Computes a signature hash representing node inputs, wiring, and spatial evaluation context.
-func _compute_node_inputs_hash(p_ni: int, p_gw: int, p_gh: int, p_rect: Rect2, p_mask, p_input, p_inputs_of: Dictionary, p_input_ports_of: Dictionary, p_materialize: Dictionary = {}, p_surf_sig: int = 0, p_mask_sig: int = 0) -> int:
+func _compute_node_inputs_hash(p_ni: int, p_gw: int, p_gh: int, p_rect: Rect2, p_mask, p_input, p_inputs_of: Dictionary, p_input_ports_of: Dictionary, p_surf_sig: int = 0, p_mask_sig: int = 0) -> int:
 	var node: Pasture3DGraphNode = nodes[p_ni]
 	var sig: Array = [
 		p_gw,
@@ -796,11 +794,11 @@ func _compute_node_inputs_hash(p_ni: int, p_gw: int, p_gh: int, p_rect: Rect2, p
 			sig.append(-1)
 			sig.append(node.input_unwired_default(p))
 		else:
-			_append_input_signature(s, sp, sig, p_inputs_of, p_input_ports_of, p_materialize)
+			_append_input_signature(s, sp, sig)
 	return hash(sig)
 
 
-func _append_input_signature(p_s: int, p_sp: int, p_sig: Array, p_inputs_of: Dictionary, p_input_ports_of: Dictionary, p_materialize: Dictionary) -> void:
+func _append_input_signature(p_s: int, p_sp: int, p_sig: Array) -> void:
 	if p_s < 0 or p_s >= nodes.size() or nodes[p_s] == null:
 		p_sig.append(-1)
 		return
@@ -809,20 +807,11 @@ func _append_input_signature(p_s: int, p_sp: int, p_sig: Array, p_inputs_of: Dic
 	p_sig.append(p_sp)
 	p_sig.append(src_node.muted)
 	p_sig.append(src_node._dirty_revision)
-	if p_materialize.get(p_s, true):
-		p_sig.append(src_node._inputs_hash)
-	else:
-		# Folded upstream node: recurse into its inputs
-		var srcs: Array = p_inputs_of.get(p_s, [])
-		var ports: Array = p_input_ports_of.get(p_s, [])
-		for p in range(srcs.size()):
-			var sub_s: int = srcs[p]
-			var sub_sp: int = ports[p]
-			if sub_s < 0 or sub_s >= nodes.size() or nodes[sub_s] == null:
-				p_sig.append(-1)
-				p_sig.append(src_node.input_unwired_default(p))
-			else:
-				_append_input_signature(sub_s, sub_sp, p_sig, p_inputs_of, p_input_ports_of, p_materialize)
+	# Every node materialises (see `evaluate`), so the source's own `_inputs_hash` is always the right
+	# signature. This used to branch on a `p_materialize` dictionary that every caller passed as `{}`,
+	# whose `else` recursed into the folded node's inputs — unreachable code for the fold that was never
+	# wired. It comes back with the fold, not before it.
+	p_sig.append(src_node._inputs_hash)
 
 
 func _cell_value_fast(p_ni: int, p_cell: int, p_wx: float, p_wz: float, p_grids: Dictionary, p_aux: Dictionary,
@@ -1605,12 +1594,39 @@ func _compile_geometry(p_order: Array, p_inputs_of: Dictionary) -> Dictionary:
 var force_gdscript_evaluation := false
 
 
+## Memoised per [root, revision]. The answer is a function of TOPOLOGY, the op set, and mute state, all of
+## which bump `_revision` when they change on a node that feeds the output — and a node that does not feed
+## the output is not in `order`, so it cannot change the answer either.
+##
+## Deliberately NOT extended to memoise `compile_graph_program`'s RESULT. A compiled program copies the
+## nodes' values into flat arrays; memoising those bytes means a source that mutates without announcing
+## it leaves the program silently stale, which is a failure mode this project has already paid for once.
+## This cache holds a bool derived from structure, which has no such copy to go stale.
+var _native_ok_cache: Dictionary = {}   # [root, revision] -> bool
+
+
 func native_supported(p_root_node: int = -1) -> bool:
 	if force_gdscript_evaluation:
 		return false
 	var out := p_root_node if (p_root_node >= 0 and p_root_node < nodes.size()) else output_index()
 	if out < 0 or out >= nodes.size() or nodes[out] == null:
 		return false
+	# A 5-spline brush with a graph modifier asked this question five times per bake, each answer an
+	# O(E*V) walk with an `Array.has()` scan inside it, for five identical answers.
+	var ck := [out, _revision]
+	if _native_ok_cache.has(ck):
+		return _native_ok_cache[ck]
+	var ok := _native_supported_uncached(out)
+	# One entry per revision, and a revision is only reachable while it is current — so the dictionary
+	# would grow one entry per edit for the resource's lifetime. It answers exactly one revision at a
+	# time, so clearing it is free.
+	_native_ok_cache.clear()
+	_native_ok_cache[ck] = ok
+	return ok
+
+
+func _native_supported_uncached(p_out: int) -> bool:
+	var out := p_out
 	var order := _eval_order(out)
 	if order.is_empty():
 		return false

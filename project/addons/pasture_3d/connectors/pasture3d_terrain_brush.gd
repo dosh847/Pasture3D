@@ -137,7 +137,6 @@ var _layer_id: int = -1               # Reserved layer index for the current pai
 var _blend: int = BLEND_REPLACE       # Blend mode used by _paint_height for the current paint
 var _last_paint_aabb: Dictionary = {} # spline instance_id -> world AABB last painted (idempotent clear)
 var _timer: SceneTreeTimer = null
-var _dirty: bool = false
 var _full_dirty: bool = false   # A queued refresh needs the whole layer (param/transform/structural change)
 var _dirty_splines: Dictionary = {} # Path3D instance_id -> true: splines whose curve changed (partial redraw)
 var _moved_node: bool = false   # A queued refresh is a node-transform move (dirty-rect, but re-snap all points)
@@ -943,7 +942,6 @@ func _schedule_spline_refresh(path: Path3D) -> void:
 
 
 func _arm_refresh_timer() -> void:
-	_dirty = true
 	if is_instance_valid(_timer):
 		return
 	# Never arm a timer while detached (scene load / tree churn): the timer would fire and bake a node
@@ -976,8 +974,6 @@ func _on_refresh_timer() -> void:
 		# Still dragging — repaint once on release rather than every frame (keep accumulated dirty state).
 		_arm_refresh_timer()
 		return
-	if not _dirty:
-		return
 	# §14. A deferred solve is in flight and the main thread is yielding frames — which is exactly when a
 	# timer gets to fire. Baking now would find no cache and solve SYNCHRONOUSLY, putting back the freeze
 	# the driver exists to remove, on top of a bake the driver is about to redo anyway. Keep the dirty
@@ -993,7 +989,6 @@ func _on_refresh_timer() -> void:
 	# does not bake.
 	if not Engine.is_editor_hint() or not is_inside_tree() or not is_configured():
 		return
-	_dirty = false
 	# Snapshot + clear the queued dirty state so a refresh that re-enters scheduling is coherent.
 	var full := _full_dirty
 	var splines := _dirty_splines
@@ -1052,7 +1047,7 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 		return
 	var sibs := _tools_on_owner(owner)
 	var layer_id := _ensure_layer_for(owner, owner == _layer_owner)
-	var can_undo := record_undo and _layers_api_available() and layer_id >= 0
+	var can_undo := record_undo and is_configured() and layer_id >= 0
 	var ur: EditorUndoRedoManager = _editor_undo() if can_undo else null
 	var before: Dictionary = _snapshot_owner(owner) if (ur != null) else {}
 
@@ -1207,7 +1202,7 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 	# and the multi-minute solve the user was abandoning ran to completion. A phase must never clear a
 	# cancel it did not set.
 	_cancel = false
-	var can_undo := p_record_undo and _layers_api_available()
+	var can_undo := p_record_undo and is_configured()
 	var before: Dictionary = _snapshot_owner(p_owner) if can_undo else {}
 
 	# ---- Phase A: grow every outstanding relief field & collect graph solves
@@ -1631,9 +1626,14 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 				_apply_surface_snap_points(sp, idxs)
 	var t_snap := Time.get_ticks_usec()
 	var painted := 0
+	# The tools that actually painted, accumulated as we go. `_emit_baked` below used to re-run the group
+	# scan AND `_overlaps_box` — a walk over every baked point of every spline on the layer — twenty lines
+	# after this loop had already established exactly the same answer.
+	var painted_tools: Array = []
 	for s in _tools_on_owner(owner):
 		if not s._overlaps_box(clip_box):
 			continue
+		painted_tools.append(s)
 		s._clip_aabb = clip_box
 		s._defer_composite = true # write samples only; we composite the whole box once below
 		s._paint_into(layer_id, blend)
@@ -1655,7 +1655,7 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 	update_gizmos() # re-float the origin marker onto the new surface height
 	# Only the tools that were actually repainted inside the box: the rest of the layer's
 	# height is untouched, so waking their listeners would be a rebuild for nothing.
-	_emit_baked(_tools_on_owner(owner).filter(func(s): return s._overlaps_box(clip_box)))
+	_emit_baked(painted_tools)
 	# §18: a spline drag takes THIS path, not the full refresh, and moving the loop moves the preview's
 	# area mask — so the overlay has to follow the handle rather than waiting for the next full bake.
 	_queue_mask_preview()
@@ -1747,12 +1747,20 @@ func _paint_into(layer_id: int, blend: int) -> void:
 	_layer_id = layer_id
 	_blend = blend
 	var clipping := _clip_aabb.size != Vector3.ZERO
+	# The modifier signature is spline-INVARIANT — it walks the stack, not the curve — and it was rebuilt
+	# inside `_compute_stamp_key` once per spline. Held for the duration of this bake instead, and dropped
+	# at the end so nothing can serve it across a stack edit.
+	_sig_memo = _modifier_signature()
 	for path in _get_splines():
 		if not _spline_paintable(path):
 			continue
+		# One footprint per spline. It used to be built here for the clip test and AGAIN below for the
+		# paint record — the same walk over every baked point, twice, for a value that cannot change in
+		# between.
+		var fp := _spline_footprint_aabb(path)
 		# Dirty-rect repaint: a spline that doesn't touch the box contributes nothing inside it — skip its
 		# whole rasterise (its cached footprint outside the box is untouched and stays valid).
-		if clipping and not _spline_footprint_aabb(path).intersects(_clip_aabb):
+		if clipping and not fp.intersects(_clip_aabb):
 			continue
 		var sid: int = path.get_instance_id()
 		var skey: int = _compute_stamp_key(path)
@@ -1763,7 +1771,10 @@ func _paint_into(layer_id: int, blend: int) -> void:
 			continue
 		_paint_spline(path)
 		if layer_id >= 0:
-			_last_paint_aabb[path.get_instance_id()] = _spline_footprint_aabb(path)
+			# NOT `fp`: `_paint_spline` may move the surface the footprint is measured against, and the
+			# recorded box is what a later clear must cover.
+			_last_paint_aabb[sid] = _spline_footprint_aabb(path)
+	_sig_memo = []
 
 
 ## ---- Brush Stamp Caching ----
@@ -1801,7 +1812,13 @@ static func _curve_signature(c: Curve, samples: int = 32) -> Array:
 
 
 
+## Held for the length of one `_paint_into` only — see there. Empty means "not in a bake, compute it".
+var _sig_memo: Array = []
+
+
 func _modifier_signature() -> Array:
+	if not _sig_memo.is_empty():
+		return _sig_memo
 	var sig := []
 	if _supports_modifiers():
 		for m in modifiers:
@@ -2271,12 +2288,6 @@ func _owns_mask_preview() -> bool:
 
 ## ---- Layer resolution / identity ----
 
-func _layers_api_available() -> bool:
-	return terrain != null and terrain.data != null \
-		and terrain.data.has_method("create_owned_layer") and terrain.data.has_method("find_layer_by_owner") \
-		and terrain.data.has_method("get_layer_stack") and terrain.data.has_method("composite_region")
-
-
 ## Resolve (or create) the tool layer for `owner`. When `sync_blend`, push this node's blend_mode onto
 ## the layer so changing blend_mode re-bakes (a shared layer has one blend — last refresher wins).
 ## Returns the layer index, or -1 on builds/terrains without the layers Tool API (destructive fallback).
@@ -2288,8 +2299,6 @@ func _ensure_layer_for(owner: String, sync_blend: bool) -> int:
 	var id: int = -1
 	if terrain.data.has_method("create_owned_layer_typed"):
 		id = terrain.data.create_owned_layer_typed(owner, nm, _get_blend_mode(), mt)
-	elif mt == PASTURE_3D_MAPTYPE_HEIGHT and terrain.data.has_method("create_owned_layer"):
-		id = terrain.data.create_owned_layer(owner, nm, _get_blend_mode())
 	if id < 0:
 		return -1
 	var layer := _layer_at(id)
@@ -2504,12 +2513,6 @@ func _paint_control(world_pos: Vector3, control: int, weight: float) -> void:
 		return
 	terrain.data.set_control_on_layer(_layer_id, world_pos, control, weight, not _defer_composite)
 
-
-## Write an albedo+coverage colour into the layer (alpha-over composite).
-func _paint_color(world_pos: Vector3, color: Color, weight: float) -> void:
-	if not _clip_contains(world_pos):
-		return
-	terrain.data.set_color_on_layer(_layer_id, world_pos, color, weight, not _defer_composite)
 
 
 func _seed_cache() -> void:
@@ -3687,13 +3690,6 @@ func _ramp(c: Curve, x: float) -> float:
 	return smoothstep(0.0, 1.0, x)
 
 
-## Crest cross-section: 1 at the centre (t=0) falling to 0 at the edge (t=1). Default = rounded cosine.
-func _cross(c: Curve, t: float) -> float:
-	t = clampf(t, 0.0, 1.0)
-	if c:
-		return c.sample_baked(t)
-	return 0.5 + 0.5 * cos(t * PI)
-
 
 ## Number of samples in a profile LUT handed to the native rasteriser.
 const RAMP_LUT_N: int = 256
@@ -3708,53 +3704,14 @@ func _ramp_lut(c: Curve) -> PackedFloat32Array:
 	return lut
 
 
-## NaN-aware separable 3-tap Gaussian blur of a packed grid (returns the blurred copy — PackedFloat32Array
-## is copy-on-write, so callers must reassign: `vals = _blur_grid(vals, gw, gh, passes)`). Cells holding NAN
-## are skipped (no contribution) so the blur never bleeds a feature past its footprint. No-op (returns the
-## input untouched) when passes <= 0 — an unused smoother costs nothing. Mirrors the C++ nan_blur exactly
-## so the GDScript reference stays an exact A/B oracle of the native path.
+## NaN-aware separable 3-tap blur (returns the blurred copy — PackedFloat32Array is copy-on-write, so
+## callers must reassign: `vals = _blur_grid(vals, gw, gh, passes)`).
+##
+## Forwards to Pasture3DGraphOps.blur_nan, which held a BYTE-IDENTICAL copy of the loop that used to live
+## here. Two GDScript copies plus two C++ copies made four implementations of one kernel; the intended
+## native+oracle duality is two, and this is the oracle half.
 func _blur_grid(vals: PackedFloat32Array, gw: int, gh: int, passes: int) -> PackedFloat32Array:
-	if passes <= 0:
-		return vals
-	var tmp := PackedFloat32Array()
-	tmp.resize(gw * gh)
-	for _pass in range(passes):
-		# Horizontal: vals -> tmp
-		for iz in range(gh):
-			var row := iz * gw
-			for ix in range(gw):
-				var v: float = vals[row + ix]
-				if not is_finite(v):
-					tmp[row + ix] = NAN
-					continue
-				var s := 0.5 * v
-				var wt := 0.5
-				if ix > 0 and is_finite(vals[row + ix - 1]): s += 0.25 * vals[row + ix - 1]; wt += 0.25
-				if ix < gw - 1 and is_finite(vals[row + ix + 1]): s += 0.25 * vals[row + ix + 1]; wt += 0.25
-				tmp[row + ix] = s / wt
-		# Vertical: tmp -> vals
-		for iz in range(gh):
-			var row := iz * gw
-			for ix in range(gw):
-				var v: float = tmp[row + ix]
-				if not is_finite(v):
-					vals[row + ix] = NAN
-					continue
-				var s := 0.5 * v
-				var wt := 0.5
-				if iz > 0 and is_finite(tmp[(iz - 1) * gw + ix]): s += 0.25 * tmp[(iz - 1) * gw + ix]; wt += 0.25
-				if iz < gh - 1 and is_finite(tmp[(iz + 1) * gw + ix]): s += 0.25 * tmp[(iz + 1) * gw + ix]; wt += 0.25
-				vals[row + ix] = s / wt
-	return vals
-
-
-## Bake `_cross(c, t)` to a LUT (cosine default) for the polyline rasterisers.
-func _cross_lut(c: Curve) -> PackedFloat32Array:
-	var lut := PackedFloat32Array()
-	lut.resize(RAMP_LUT_N)
-	for i in range(RAMP_LUT_N):
-		lut[i] = _cross(c, float(i) / float(RAMP_LUT_N - 1))
-	return lut
+	return Pasture3DGraphOps.blur_nan(vals, gw, gh, passes)
 
 
 ## Ridge cross-section, corrected convention: 1 at the centre (d=0) → 0 at the skirt edge (d=1), but a
@@ -5409,45 +5366,6 @@ func _decimate(pts: PackedVector2Array, step: float) -> PackedVector2Array:
 	return out
 
 
-## Two-pass chamfer distance transform, in place. Each cell ends up holding (approximately) the
-## Euclidean distance to the nearest zero-seeded cell, in metres (orthogonal step `a`, diagonal `b`).
-## O(cells) — replaces the per-pixel-per-edge distance loop. (Refs: chamfer DT / SDF literature.)
-func _chamfer(arr: PackedFloat32Array, gw: int, gh: int, a: float, b: float) -> void:
-	for iz in range(gh):
-		var row := iz * gw
-		for ix in range(gw):
-			var i := row + ix
-			var d := arr[i]
-			if iz > 0:
-				var up := i - gw
-				if arr[up] + a < d:
-					d = arr[up] + a
-				if ix > 0 and arr[up - 1] + b < d:
-					d = arr[up - 1] + b
-				if ix < gw - 1 and arr[up + 1] + b < d:
-					d = arr[up + 1] + b
-			if ix > 0 and arr[i - 1] + a < d:
-				d = arr[i - 1] + a
-			arr[i] = d
-	for iz in range(gh - 1, -1, -1):
-		var row := iz * gw
-		for ix in range(gw - 1, -1, -1):
-			var i := row + ix
-			var d := arr[i]
-			if iz < gh - 1:
-				var dn := i + gw
-				if arr[dn] + a < d:
-					d = arr[dn] + a
-				if ix < gw - 1 and arr[dn + 1] + b < d:
-					d = arr[dn + 1] + b
-				if ix > 0 and arr[dn - 1] + b < d:
-					d = arr[dn - 1] + b
-			if ix < gw - 1 and arr[i + 1] + a < d:
-				d = arr[i + 1] + a
-			arr[i] = d
-
-
-## Signed distance field of a closed world polygon over a grid: positive inside, negative outside, in
 ## Exact analytic signed distance field of a closed world-space polygon over the grid. Positive inside,
 ## negative outside, in metres. Returns [PackedFloat32Array field, float max_inside_distance]. Inside is
 ## determined via exact scanline fill, and Euclidean boundary distances are evaluated analytically per cell,

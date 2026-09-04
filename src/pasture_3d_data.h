@@ -24,6 +24,12 @@ class Pasture3DData : public Object {
 public: // Constants
 	static inline const real_t CURRENT_DATA_VERSION = 0.93f; // Current Data format version
 	static inline const int REGION_MAP_SIZE = 32;
+	// The GPU crossover defaults, in cells. Public and named so the READER (_gpu_raster_threshold,
+	// graph_gpu_threshold) and the Project Settings REGISTRATION cannot disagree — they did, by 16x,
+	// for the whole life of the GPU rasteriser, and every stamp between 256^2 and 1024^2 quietly took
+	// the CPU path as a result.
+	static inline const int GPU_RASTER_THRESHOLD_DEFAULT = 65536;  // 256^2
+	static inline const int GRAPH_GPU_THRESHOLD_DEFAULT = 65536;   // 256^2
 	static inline const Vector2i REGION_MAP_VSIZE = V2I(REGION_MAP_SIZE);
 
 	enum HeightFilter {
@@ -102,6 +108,8 @@ private:
 	// Project-setting threshold (cells) at/above which a stamp box uses the GPU path. 0 disables GPU;
 	// 1 forces GPU-always (testing). Reads `pasture_3d/performance/gpu_raster_threshold`.
 	int _gpu_raster_threshold() const;
+	// Register one performance threshold in Project Settings, if it is not registered already.
+	static void _register_threshold(class ProjectSettings *p_ps, const String &p_name, const int p_default);
 
 	// Functions
 	void _clear();

@@ -55,27 +55,52 @@ func _ready() -> void:
 		editor._populate_node_slots_and_controls(gn, 0, node)
 		gn.free()
 
-	# Test evaluating each node standalone
-	print("\nTesting standalone evaluate for all generator nodes...")
+	# Evaluate EVERY node standalone, not only the zero-input generators.
+	#
+	# This loop used to `continue` on `input_count() > 0`, so filters, combiners and every solver were
+	# skipped while the docstring above claimed "ALL registered graph nodes" — a gate that could not fail
+	# on the majority of the thing it names (§7.4). Each input port is now fed by its own Noise source, so
+	# a node that needs a surface gets one.
+	print("
+Testing standalone evaluate for all nodes...")
 	var gw: int = 32
 	var gh: int = 32
 	var rect := Rect2(-50.0, -50.0, 100.0, 100.0)
+	var evaluated: int = 0
 
 	for entry in entries:
 		var op_name: StringName = entry.get("op", &"")
 		var node = Pasture3DGraphNodeRegistry.create(op_name)
-		if node == null or node.input_count() > 0:
-			continue # skip filter/combiner/solvers that need inputs
+		if node == null:
+			continue
 
 		var test_graph := Pasture3DTerrainGraph.new()
 		var out_node := Pasture3DGraphNodeOutput.new()
 		test_graph.nodes = [node, out_node]
 		test_graph.connections = [PackedInt32Array([0, 0, 1, 0])]
+		# One source per input port. A shared source would be legal too, but a distinct node per port
+		# means a combiner that reads the WRONG port still gets a finite surface rather than an error
+		# that masks the real one.
+		for port in range(node.input_count()):
+			var src := Pasture3DGraphNodeNoise.new()
+			src.amplitude = 20.0
+			var si: int = test_graph.nodes.size()
+			test_graph.nodes.append(src)
+			test_graph.connections.append(PackedInt32Array([si, 0, 0, port]))
 
 		var res: PackedFloat32Array = test_graph.evaluate(gw, gh, rect)
+		evaluated += 1
 		if res.size() != gw * gh:
-			print("     !! FAIL: evaluate failed for node '%s'" % op_name)
+			print("     !! FAIL: evaluate failed for node '%s' (%d cells, expected %d)"
+					% [op_name, res.size(), gw * gh])
 			failures += 1
+
+	# A gate that quietly evaluated nothing must not read as a pass. This is the check the `continue`
+	# above defeated for years.
+	print("  evaluated %d of %d registered nodes" % [evaluated, entries.size()])
+	if evaluated < entries.size():
+		print("     !! FAIL: %d node(s) were never evaluated" % (entries.size() - evaluated))
+		failures += 1
 
 	if failures == 0:
 		print("\n=== GRAPH NODE EDITOR UI GATE PASS (0 failures) ===\n")

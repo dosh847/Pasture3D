@@ -2027,8 +2027,13 @@ PackedFloat32Array Pasture3DUtil::sample_brush_input(const int p_w, const int p_
 // Protected Functions
 ///////////////////////////
 
+int Pasture3DUtil::gd_graph_gpu_threshold() {
+	return graph_gpu_threshold();
+}
+
 void Pasture3DUtil::_bind_methods() {
 	// Control map converters
+	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("graph_gpu_threshold"), &gd_graph_gpu_threshold);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("as_float", "value"), &as_float);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("as_uint", "value"), &as_uint);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("get_base", "pixel"), &gd_get_base);

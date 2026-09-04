@@ -148,25 +148,29 @@ func _on_graph_changed() -> void:
 func _refresh_nodes_state() -> void:
 	if graph == null or _graphedit == null:
 		return
+	# `output_index()` is O(V) with a virtual `op()` dispatch per node, and it was called INSIDE this
+	# loop — 1,600 dispatches per `changed` on a 40-node graph, i.e. per slider tick. It cannot change
+	# while the loop runs, so it is one call.
+	var out_index := graph.output_index()
 	for i in range(graph.nodes.size()):
 		var node: Pasture3DGraphNode = graph.nodes[i]
 		if node == null:
 			continue
-		var gn_name := "n%d" % i
-		if _graphedit.has_node(gn_name):
-			var gn: GraphNode = _graphedit.get_node(gn_name) as GraphNode
-			if gn != null:
-				var is_out := i == graph.output_index()
-				var is_solo := graph.output_override == i
-				gn.title = node.display_name() + ("  ★ SOLO" if is_solo else ("  ● OUT" if is_out else ""))
-				if is_solo:
-					gn.modulate = Color(1.0, 0.9, 0.5)
-				elif is_out:
-					gn.modulate = Color(0.8, 1.0, 0.85)
-				elif node.muted:
-					gn.modulate = Color(0.65, 0.65, 0.7, 0.6)
-				else:
-					gn.modulate = Color.WHITE
+		# One lookup, not a `has_node` followed by a `get_node` that repeats the same path resolution.
+		var gn: GraphNode = _graphedit.get_node_or_null("n%d" % i) as GraphNode
+		if gn == null:
+			continue
+		var is_out := i == out_index
+		var is_solo := graph.output_override == i
+		gn.title = node.display_name() + ("  ★ SOLO" if is_solo else ("  ● OUT" if is_out else ""))
+		if is_solo:
+			gn.modulate = Color(1.0, 0.9, 0.5)
+		elif is_out:
+			gn.modulate = Color(0.8, 1.0, 0.85)
+		elif node.muted:
+			gn.modulate = Color(0.65, 0.65, 0.7, 0.6)
+		else:
+			gn.modulate = Color.WHITE
 
 
 func _auto_fit_node_range(p_index: int) -> void:
@@ -1089,13 +1093,6 @@ func _add_inline_node_controls(p_gn: GraphNode, p_index: int, p_node: Pasture3DG
 			)
 			btn_row.add_child(auto_btn)
 			p_gn.add_child(btn_row)
-
-
-func _graph_has_sink() -> bool:
-	for nd in graph.nodes:
-		if nd != null and nd.op() == &"output":
-			return true
-	return false
 
 
 func _graph_label() -> String:

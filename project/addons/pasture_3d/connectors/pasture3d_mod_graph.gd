@@ -97,6 +97,8 @@ enum FeatherMode {
 # signal. The host (Pasture3DTerrainBrush._compile_modifiers / _commit_modifier_caches) drives all of it;
 # these methods are the storage it calls, the same contract the erosion modifier uses.
 var _cache: Dictionary = {}
+## Monotonic counter stamped onto an entry each time it is stored or served — the LRU order.
+var _access_tick: int = 0
 var _stale: bool = false
 
 ## Working input surface captured during brush rasterisation, used to render live 2D previews in Graph Editor
@@ -181,6 +183,10 @@ const ORIGIN_TOLERANCE_CELLS := 2
 ## further away, or any change of dimensions, is a miss.
 func cache_for(p_extent: String) -> Dictionary:
 	if _cache.has(p_extent):
+		# Serving IS an access. Without this the tick would only record when an entry was solved, so an
+		# extent that keeps being served would age out under an extent that keeps being re-solved.
+		_cache[p_extent]["tick"] = _access_tick
+		_access_tick += 1
 		return _cache[p_extent]
 	if evaluation != Evaluation.FROZEN or _cache.is_empty():
 		return {}
@@ -249,12 +255,38 @@ static func _shift_grid(p_src: PackedFloat32Array, p_gw: int, p_gh: int, p_dx: i
 	return out
 
 
+## The cache's byte budget. A drag mints a NEW extent key on every tick — the footprint's world origin
+## moves — and nothing ever removed one, so a minute of dragging a 512^2 loop retained a fresh ~1 MB grid
+## per tick for the lifetime of the resource. Mirrors Pasture3DTerrainGraph.max_cache_bytes in intent;
+## the number is per-modifier rather than per-graph because a brush holds one of these per Graph step.
+const MAX_CACHE_BYTES := 64 * 1024 * 1024
+
+
 func store_cache(p_extent: String, p_entry: Dictionary) -> void:
 	var parts := p_extent.split(",")
 	if parts.size() >= 4:
 		p_entry["gw"] = parts[2].to_int()
 		p_entry["gh"] = parts[3].to_int()
+	p_entry["tick"] = _access_tick
+	_access_tick += 1
 	_cache[p_extent] = p_entry
+	_evict_if_needed()
+
+
+## Drop least-recently-served entries until the cache is inside its budget. THE ENTRY JUST STORED IS
+## NEVER DROPPED: it is the one the caller is about to read back, and a budget smaller than a single grid
+## would otherwise evict it and turn every bake into a miss. That leaves the budget advisory for one
+## oversized grid, which is the right trade — a cache that cannot hold the current solve is worse than
+## one that is briefly over.
+func _evict_if_needed() -> void:
+	if cache_bytes() <= MAX_CACHE_BYTES:
+		return
+	var keys: Array = _cache.keys()
+	keys.sort_custom(func(a, b): return int(_cache[a].get("tick", 0)) < int(_cache[b].get("tick", 0)))
+	for k in keys:
+		if _cache.size() <= 1 or cache_bytes() <= MAX_CACHE_BYTES:
+			return
+		_cache.erase(k)
 
 
 ## Record whether the last bake served a cache the graph has since changed under. Set DURING a bake, so it

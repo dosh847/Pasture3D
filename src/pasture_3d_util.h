@@ -129,6 +129,12 @@ public:
 	static PackedFloat32Array graph_eval_grid_gpu(const Dictionary &p_program, const int p_gw, const int p_gh,
 			const Rect2 &p_rect, const PackedFloat32Array &p_input);
 
+	// The cell-count crossover at or above which the graph takes the GPU route, AS THE CALLING THREAD
+	// SEES IT — 0 off the main thread, because RenderingDevice is main-thread only. Bound so
+	// GraphWorkerThreadGate can assert that refusal instead of assuming it, and so an operator can read
+	// back the `pasture_3d/performance/graph_gpu_threshold` setting GraphGpuBenchGate tells them to set.
+	static int gd_graph_gpu_threshold();
+
 	// Stream-power fluvial erosion for the graph-native Erosion SOLVER node. A thin binding over the native
 	// erosion_solve (the same solver the brush erosion modifier and Pasture3DSim run — one implementation),
 	// so the GDScript Erosion node can solve without reimplementing it. `p_z` is the absolute surface
@@ -570,9 +576,29 @@ inline Rect2 aabb2rect(const AABB &p_aabb) {
 }
 
 // Functions to match GLSL when needing to duplicate shader code CPU side.
+//
+// THE DEGENERATE CASE. `low == high` is a step, so the answer is 0 below the edge and 1 at or above it.
+// This guard used to be absent here (a divide by zero, giving inf/NaN out of a function documented to
+// return 0..1) while six byte-identical anonymous-namespace copies across the solvers returned `p_from`
+// — a threshold in METRES handed back as a 0..1 weight, which is wrong in a different way. Only
+// relief_ops.cpp's copy had it right. This is now the single definition; the copies call it.
 inline real_t smoothstep(const real_t p_low, const real_t p_high, const real_t p_value) {
+	if (Math::is_equal_approx(p_low, p_high)) {
+		return p_value < p_low ? 0.f : 1.f;
+	}
 	real_t t = CLAMP((p_value - p_low) / (p_high - p_low), 0.f, 1.f);
 	return t * t * (3.f - 2.f * t);
+}
+
+// Double-precision smoothstep, same contract. The solvers work in double all the way through so their
+// results can be compared bit-for-bit against the GDScript oracle; taking a real_t detour would put a
+// float rounding step in the middle of that.
+inline double smoothstep_d(const double p_low, const double p_high, const double p_value) {
+	if (Math::is_equal_approx(p_low, p_high)) {
+		return p_value < p_low ? 0.0 : 1.0;
+	}
+	const double t = CLAMP((p_value - p_low) / (p_high - p_low), 0.0, 1.0);
+	return t * t * (3.0 - 2.0 * t);
 }
 
 inline Vector2 smoothstep(const real_t p_low, const real_t p_high, const Vector2 &p_value) {

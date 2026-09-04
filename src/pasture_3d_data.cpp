@@ -40,13 +40,12 @@ void Pasture3DData::_clear() {
 // --- GPU rasteriser plumbing (PASTURE3D_BRUSH_GPU_RASTER_SPEC.md) ---
 
 int Pasture3DData::_gpu_raster_threshold() const {
-	// Default ~256x256 cells; below it the C++ path wins (no readback latency). 0 disables GPU.
+	// Below it the C++ path wins (no readback latency). 0 disables GPU, 1 forces GPU-always (A/B).
 	ProjectSettings *ps = ProjectSettings::get_singleton();
-	const int dflt = 65536; // ~256^2; crossover where GPU beats CPU rasterization
 	if (!ps) {
-		return dflt;
+		return GPU_RASTER_THRESHOLD_DEFAULT;
 	}
-	return (int)ps->get_setting("pasture_3d/performance/gpu_raster_threshold", dflt);
+	return (int)ps->get_setting("pasture_3d/performance/gpu_raster_threshold", GPU_RASTER_THRESHOLD_DEFAULT);
 }
 
 Pasture3DGPURaster *Pasture3DData::_ensure_gpu_raster() {
@@ -289,19 +288,35 @@ void Pasture3DData::initialize(Pasture3D *p_terrain) {
 	_region_size = _terrain->get_region_size();
 	_region_sizev = V2I(_region_size);
 
-	// Register the GPU-raster threshold setting once so it is discoverable/tunable in Project Settings
-	// (spec §5.1). Default ~256x256 cells; 0 disables GPU, 1 forces GPU-always (A/B testing). Idempotent.
+	// Register the two performance thresholds once so they are discoverable/tunable in Project Settings
+	// (spec §5.1). Idempotent.
+	//
+	// The registered VALUE is the same constant the reader defaults to. It used to be 1048576 (1024^2)
+	// while `_gpu_raster_threshold()` and both comments said ~256x256 — a 16x disagreement, so every
+	// stamp between 256^2 and 1024^2 silently took the CPU path and the perf spec's crossover claim was
+	// not what shipped. A registered default that differs from the code's own is a lie the UI tells.
+	//
+	// graph_gpu_threshold was read by pasture_3d_graph_gpu.cpp and registered NOWHERE, so it never
+	// appeared in the Project Settings UI at all — and GraphGpuBenchGate tells the operator to set it
+	// there. A setting the code reads must be a setting the user can see.
 	ProjectSettings *ps = ProjectSettings::get_singleton();
-	if (ps && !ps->has_setting("pasture_3d/performance/gpu_raster_threshold")) {
-		ps->set_setting("pasture_3d/performance/gpu_raster_threshold", 1048576);
-		ps->set_initial_value("pasture_3d/performance/gpu_raster_threshold", 1048576);
-		Dictionary info;
-		info["name"] = "pasture_3d/performance/gpu_raster_threshold";
-		info["type"] = Variant::INT;
-		info["hint"] = PROPERTY_HINT_RANGE;
-		info["hint_string"] = "0,16777216,1";
-		ps->add_property_info(info);
+	_register_threshold(ps, "pasture_3d/performance/gpu_raster_threshold", GPU_RASTER_THRESHOLD_DEFAULT);
+	_register_threshold(ps, "pasture_3d/performance/graph_gpu_threshold", GRAPH_GPU_THRESHOLD_DEFAULT);
+}
+
+// One threshold setting: value, initial value and range hint, only if it is not already there.
+void Pasture3DData::_register_threshold(ProjectSettings *p_ps, const String &p_name, const int p_default) {
+	if (!p_ps || p_ps->has_setting(p_name)) {
+		return;
 	}
+	p_ps->set_setting(p_name, p_default);
+	p_ps->set_initial_value(p_name, p_default);
+	Dictionary info;
+	info["name"] = p_name;
+	info["type"] = Variant::INT;
+	info["hint"] = PROPERTY_HINT_RANGE;
+	info["hint_string"] = "0,16777216,1";
+	p_ps->add_property_info(info);
 }
 
 void Pasture3DData::set_region_locations(const TypedArray<Vector2i> &p_locations) {

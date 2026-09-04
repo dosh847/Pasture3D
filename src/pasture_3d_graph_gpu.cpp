@@ -1,4 +1,5 @@
 #include "pasture_3d_graph_gpu.h"
+#include "pasture_3d_data.h"
 
 #include <godot_cpp/classes/fast_noise_lite.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
@@ -2276,7 +2277,9 @@ int graph_gpu_threshold() {
 	if (!Thread::is_main_thread()) {
 		return 0; // GPU compute (RenderingDevice) cannot run on worker threads
 	}
-	const int dflt = 65536; // 256x256
+	// Pasture3DData registers this key with the SAME constant, so the value the UI shows and the value
+	// this reader falls back to are one number in one place.
+	const int dflt = Pasture3DData::GRAPH_GPU_THRESHOLD_DEFAULT;
 	ProjectSettings *ps = ProjectSettings::get_singleton();
 	if (!ps) {
 		return dflt;

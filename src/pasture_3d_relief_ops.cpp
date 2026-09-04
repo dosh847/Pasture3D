@@ -6,6 +6,7 @@
 // them numerically. If you change one, change the other in the same commit.
 
 #include "pasture_3d_relief_ops.h"
+#include "pasture_3d_util.h"
 
 #include <godot_cpp/core/math.hpp>
 
@@ -37,12 +38,11 @@ inline double relief_bilinear(const float *p_src, int p_w, int p_h, double p_fu,
 	return a * (1.0 - ty) + b * ty;
 }
 
+// This copy had the degenerate case right when the other seven did not, so its behaviour is the one
+// ::smoothstep_d (pasture_3d_util.h) now implements for everybody. Kept as a forwarder under its own name because the
+// name is what the oracle-parity comments in this file refer to.
 inline double relief_smoothstep(double p_from, double p_to, double p_x) {
-	if (Math::is_equal_approx(p_from, p_to)) {
-		return p_x < p_from ? 0.0 : 1.0;
-	}
-	const double t = CLAMP((p_x - p_from) / (p_to - p_from), 0.0, 1.0);
-	return t * t * (3.0 - 2.0 * t);
+	return ::smoothstep_d(p_from, p_to, p_x);
 }
 
 // Mirrors GDScript lerpf. Written out rather than using Math::lerp so the operation order — and so the
@@ -755,11 +755,17 @@ double godot::relief_eval(const ReliefProgram &p_prog, double u, double v, doubl
 	// no scoped warp in it. See RELIEF_DOMAIN_MAX_DEPTH.
 	double dom[RELIEF_DOMAIN_MAX_DEPTH * 4];
 	int dom_depth = 0;
+	// Hoisted once per cell. `PackedInt32Array::operator[]` and `PackedFloat32Array::operator[]` are
+	// out-of-line calls through a GDExtension function pointer, and this loop performed ~25 of them per
+	// op-eval — inside the per-cell stack loop, so the call overhead was paid width*height*ops times.
+	// graph_eval_grid_core already does exactly this.
+	const int32_t *ops = p_prog.ops.ptr();
+	const float *params = p_prog.params.ptr();
 	for (int i = 0; i < p_prog.count; i++) {
 		const int o = i * RELIEF_OP_STRIDE;
-		const int op = p_prog.ops[o];
-		const int blend = p_prog.ops[o + 1];
-		const int flags = p_prog.ops[o + 3];
+		const int op = ops[o];
+		const int blend = ops[o + 1];
+		const int flags = ops[o + 3];
 		const int p = i * RELIEF_PARAM_STRIDE;
 
 		// Terrain-aware gate for this op, if any. A GENERATOR scales its contribution by it, a DOMAIN op
@@ -767,15 +773,15 @@ double godot::relief_eval(const ReliefProgram &p_prog, double u, double v, doubl
 		// accumulator — so `sel == 0` always means "this op did nothing", smoothly, whatever its category.
 		// TWO gates, multiplied: the op's own (SCREE's slope band) and its material's `selector`. Both
 		// read the same cell, so the product is "in the band AND on the slope". See RELIEF_OP_GATE_2.
-		const int sid = p_prog.ops[o + 2];
-		const int sid2 = p_prog.ops[o + RELIEF_OP_GATE_2];
+		const int sid = ops[o + 2];
+		const int sid2 = ops[o + RELIEF_OP_GATE_2];
 		double sel = sid >= 0 ? relief_selector_value(p_prog.selectors, sid, p_ground) : 1.0;
 		if (sid2 >= 0) {
 			sel *= relief_selector_value(p_prog.selectors, sid2, p_ground);
 		}
 		// ...and the op's own gain, which is how a stack layer's `strength` reaches every category of op
 		// rather than only its generators. See RELIEF_OP_GAIN.
-		sel *= (double)p_prog.params[p + RELIEF_OP_GAIN];
+		sel *= (double)params[p + RELIEF_OP_GAIN];
 
 		// --- DOMAIN BRACKET: saves and restores the sample point around one stack layer (§16.4).
 		if (op == RELIEF_OP_DOMAIN_PUSH) {
@@ -808,7 +814,7 @@ double godot::relief_eval(const ReliefProgram &p_prog, double u, double v, doubl
 			if (p_prog.noise_a[i].is_null() || p_prog.noise_b[i].is_null()) {
 				continue;
 			}
-			const double amp = (double)p_prog.params[p] * sel;
+			const double amp = (double)params[p] * sel;
 			const double du = (double)p_prog.noise_a[i]->get_noise_2d(u, v) * amp;
 			const double dv = (double)p_prog.noise_b[i]->get_noise_2d(u, v) * amp;
 			u += du;
@@ -826,12 +832,12 @@ double godot::relief_eval(const ReliefProgram &p_prog, double u, double v, doubl
 				continue;
 			}
 			double tx = relief_band_coord(band_source, acc, p_ground, p_prog.params, p);
-			const double jit = (double)p_prog.params[p + 2];
+			const double jit = (double)params[p + 2];
 			if (jit != 0.0) {
 				tx = CLAMP(tx + (double)p_prog.noise_a[i]->get_noise_2d(u, v) * jit, 0.0, 1.0);
 			}
 			acc = relief_lerp(acc,
-					relief_band(tx, (double)p_prog.params[p], (double)p_prog.params[p + 1]) * 2.0 - 1.0,
+					relief_band(tx, (double)params[p], (double)params[p + 1]) * 2.0 - 1.0,
 					sel);
 			continue;
 		}
@@ -842,10 +848,10 @@ double godot::relief_eval(const ReliefProgram &p_prog, double u, double v, doubl
 			// Bands are horizontal in the banded coordinate, then tilted by a linear ramp across the
 			// ground (dip, in normalised units per 100 m) and broken up laterally so they are not dead
 			// straight.
-			const double dipdir = (double)p_prog.params[p + 3];
-			const double tilt = (double)p_prog.params[p + 2] *
+			const double dipdir = (double)params[p + 3];
+			const double tilt = (double)params[p + 2] *
 							(u * std::cos(dipdir) + v * std::sin(dipdir)) * 0.01 +
-					(double)p_prog.noise_a[i]->get_noise_2d(u, v) * (double)p_prog.params[p + 5];
+					(double)p_prog.noise_a[i]->get_noise_2d(u, v) * (double)params[p + 5];
 			// The ACCUMULATOR path folds dip and break-up in BEFORE the -1..1 -> 0..1 remap, exactly as it
 			// always did — that expression is what gate BP holds to the byte. The other band sources are
 			// already in 0..1, so the same tilt is halved to land at the same visual magnitude rather
@@ -858,13 +864,13 @@ double godot::relief_eval(const ReliefProgram &p_prog, double u, double v, doubl
 						0.0, 1.0);
 			}
 			acc = relief_lerp(acc,
-					relief_band(w, (double)p_prog.params[p], (double)p_prog.params[p + 1]) * 2.0 - 1.0,
+					relief_band(w, (double)params[p], (double)params[p + 1]) * 2.0 - 1.0,
 					sel);
 			continue;
 		}
 		if (op == RELIEF_OP_CURVE) {
 			acc = relief_lerp(acc,
-					relief_sample_lut(p_prog.luts, (int)p_prog.params[p],
+					relief_sample_lut(p_prog.luts, (int)params[p],
 							CLAMP(acc * 0.5 + 0.5, 0.0, 1.0)) *
 									2.0 -
 							1.0,
@@ -885,12 +891,12 @@ double godot::relief_eval(const ReliefProgram &p_prog, double u, double v, doubl
 				if (op == RELIEF_OP_BILLOW) {
 					raw = std::fabs(raw) * 2.0 - 1.0;
 				} else if (op == RELIEF_OP_RIDGED) {
-					const double sharp = (double)p_prog.params[p + 6];
+					const double sharp = (double)params[p + 6];
 					if (sharp != 1.0 && sharp > 0.0) {
 						raw = relief_sign(raw) * std::pow(std::fabs(raw), sharp);
 					}
 				}
-				val = raw * (double)p_prog.params[p];
+				val = raw * (double)params[p];
 			} break;
 			case RELIEF_OP_DUNES:
 				if (p_prog.noise_a[i].is_null()) {
@@ -910,8 +916,8 @@ double godot::relief_eval(const ReliefProgram &p_prog, double u, double v, doubl
 			case RELIEF_OP_DLA:
 				// Loop-normalised, exactly like CRATER: the cluster maps once onto the oriented rectangle.
 				val = relief_sample_field(p_prog.fields, p_prog.field_meta,
-							   (int)p_prog.params[p + RELIEF_DLA_FIELD_SLOT], nu, nv) *
-						(double)p_prog.params[p];
+							   (int)params[p + RELIEF_DLA_FIELD_SLOT], nu, nv) *
+						(double)params[p];
 				break;
 			case RELIEF_OP_SCREE:
 				if (p_prog.noise_a[i].is_null()) {
