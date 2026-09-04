@@ -263,7 +263,10 @@ func _gate_cq_dendritic() -> void:
 # CONTROLS. Three. The spec's — point the oracle at a field grown at a DIFFERENT RESOLUTION, and
 # confirm the same comparison reports a large gap, because a parity test between two readers that both
 # silently returned zero would pass. Then the fixture must be deforming the ground by far more than the
-# tolerance. And the reference op, which is what turns "1e-5 is small" from an opinion into a comparison.
+# tolerance. And the reference op, held to the same tolerance as the DLA.
+#
+# The relative figures above are what was measured when the two readers still differed; they now agree
+# exactly, so both read 0.0 and the desync control is the one carrying the "this comparison works" load.
 func _gate_cr_parity() -> void:
 	print("
 [CR] the native op and the GDScript oracle read the same field (tol %.6f m):" % PARITY_TOL)
@@ -309,10 +312,14 @@ func _gate_cr_parity() -> void:
 	var ref_rel := (ref_full - dome_only) / loud
 	print("    CONTROL at %.0f m: DLA %.9f of amplitude, a shipped FBM %.9f (ratio %.2fx)"
 			% [loud, dla_rel, ref_rel, dla_rel / maxf(ref_rel, 1.0e-12)])
-	if ref_rel <= 0.0:
+	# This used to require the reference op to show SOME residual, on the reasoning that a comparison
+	# reporting zero must be reporting nothing. It is not: both readers now agree exactly, for the DLA and
+	# for a shipped FBM alike, and the desync control below is what proves the comparison can still see a
+	# gap. So the reference is held to the same standard as the subject rather than to a floor.
+	if ref_rel * loud > PARITY_TOL:
 		_fail += 1
-		print("    !! the reference op shows no residual at all; there is nothing to compare against")
-	elif dla_rel > ref_rel * 3.0:
+		print("    !! the shipped reference op is itself outside tolerance; the DLA figure means nothing")
+	elif dla_rel > maxf(ref_rel, PARITY_TOL / loud) * 3.0:
 		_fail += 1
 		print("    !! the DLA's residual is a different order from a point-evaluated op's; this is not
 "

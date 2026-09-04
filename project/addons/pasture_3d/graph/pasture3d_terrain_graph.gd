@@ -25,6 +25,13 @@ const FrameDataScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_f
 ## Emitted when graph topology (nodes added/removed, frames, positions) changes for UI canvas synchronization.
 signal structure_changed()
 
+## One node's parameters changed, whatever that node is wired to. `changed` is the BAKE signal and stays
+## gated on "does this reach the output"; this one is the EDITOR signal, and the editor's node previews
+## need it precisely for the nodes `changed` filters out — the branch you are still building, and every
+## node in a graph that has no output selected yet. Carries the node's index in `nodes`, or -1 if the
+## emitter is not in the array.
+signal node_changed(index: int)
+
 ## The nodes. Order here is authoring order only — evaluation order is derived from `connections`.
 @export var nodes: Array[Pasture3DGraphNode] = []:
 	set(v):
@@ -164,11 +171,17 @@ func _on_node_changed(p_node: Pasture3DGraphNode = null) -> void:
 	# A node the graph does not contain cannot feed the output — that is provable, not a guess, so it
 	# defaults to false. It used to default to true, which meant a node left wired by the dead disconnect
 	# branch above unconditionally re-baked the terrain after being removed.
+	# The editor hears about every edit; only the bake is filtered. GraphEditModelGate [E].
+	node_changed.emit(n_idx)
+
 	var affects_output := p_node == null
 	if n_idx >= 0:
 		var out_idx := output_index()
-		if out_idx >= 0:
-			affects_output = get_downstream_nodes(n_idx).has(out_idx)
+		# No output at all is the graph being authored, not a node proven irrelevant: there is nothing for
+		# the edit to be downstream OF, and nothing baked for a spurious re-bake to cost. Treating that as
+		# "does not affect the output" left `_revision` — and so every cache keyed on `content_key()` —
+		# frozen for the whole time a graph had no output node.
+		affects_output = get_downstream_nodes(n_idx).has(out_idx) if out_idx >= 0 else true
 
 	if affects_output:
 		emit_changed()

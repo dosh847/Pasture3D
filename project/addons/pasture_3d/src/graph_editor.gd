@@ -109,6 +109,10 @@ func edit_graph(p_graph: Pasture3DTerrainGraph, p_mod: Pasture3DNodeGraph = null
 			graph.changed.connect(_on_graph_changed)
 		if graph.has_signal(&"structure_changed") and not graph.structure_changed.is_connected(_on_graph_changed):
 			graph.structure_changed.connect(_on_graph_changed)
+		# Previews, and only previews. A node that does not feed the output never reaches `changed`, so
+		# without this its open thumbnail kept showing the value it had before you started tuning it.
+		if graph.has_signal(&"node_changed") and not graph.node_changed.is_connected(_on_node_param_changed):
+			graph.node_changed.connect(_on_node_param_changed)
 	_last_structure_hash = _structure_hash()
 	_rebuild()
 
@@ -128,6 +132,10 @@ func _structure_hash() -> int:
 			var conn_hash := int(c[0]) | (int(c[1]) << 8) | (int(c[2]) << 16) | (int(c[3]) << 24)
 			h = h ^ (conn_hash * 2654435761)
 	return h
+
+
+func _on_node_param_changed(_p_index: int) -> void:
+	_schedule_preview_refresh()
 
 
 func _on_graph_changed() -> void:
