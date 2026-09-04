@@ -82,6 +82,22 @@ func op() -> StringName:
 	return &"shape_source"
 
 
+# ---- The road nodes (P2c). Their geometry does not ride in these params: it goes in the
+# program's geometry table and `in_g` names an entry, because a polyline is neither a float
+# nor an index into the scratch arena (§4.1).
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	# A PATH producer still fills a grid slot, with zeros — the same 0.0 its eval_cell
+	# returns. The slot exists so nothing that indexes by node has to special-case it.
+	#
+	# Both source kinds lower identically and share this case, because by the time a path is
+	# in the geometry table there IS no difference: a ring is a ring, and `closed` rides on
+	# the entry. The two nodes differ only in what they name and who resolves them.
+	p[0] = 0.0
+	return {"params": p}
+
+
 func role() -> Role:
 	return Role.GENERATOR
 

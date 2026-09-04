@@ -70,13 +70,17 @@ func _init() -> void:
 	
 	# Get the Godot Editor window. Structure is root:Window/EditorNode/Base Control
 	godot_editor_window = EditorInterface.get_base_control().get_parent().get_parent()
-	godot_editor_window.focus_entered.connect(_on_godot_focus_entered)
-	EditorInterface.get_inspector().mouse_entered.connect(func(): mouse_in_main = false)
 
 
 func _enter_tree() -> void:
 	if debug:
 		print("Pasture3DEditorPlugin: _enter_tree")
+	# Both of these are disconnected in _exit_tree, so both are connected here rather than in _init: the
+	# editor window and the inspector both OUTLIVE the plugin, so a connect that happens once per instance
+	# against a disconnect that happens once per tree exit leaves focus handling dead after the first exit,
+	# and leaves a lambda bound to a discarded plugin behind on every addon disable/enable or script reload.
+	godot_editor_window.focus_entered.connect(_on_godot_focus_entered)
+	EditorInterface.get_inspector().mouse_entered.connect(_on_inspector_mouse_entered)
 	editor = Pasture3DEditor.new()
 	setup_editor_settings()
 	ui = Pasture3DUI.new()
@@ -184,10 +188,17 @@ func _exit_tree() -> void:
 
 	scene_changed.disconnect(_on_scene_changed)
 	godot_editor_window.focus_entered.disconnect(_on_godot_focus_entered)
+	var insp := EditorInterface.get_inspector()
+	if insp != null and insp.mouse_entered.is_connected(_on_inspector_mouse_entered):
+		insp.mouse_entered.disconnect(_on_inspector_mouse_entered)
 
 
 func get_graph_editor() -> Pasture3DGraphEditor:
 	return graph_editor
+
+
+func _on_inspector_mouse_entered() -> void:
+	mouse_in_main = false
 
 
 func _on_godot_focus_entered() -> void:

@@ -12,9 +12,8 @@
 #   port 1  "deposition"  MASK    where material LANDED, normalised 0..1 (see deposition_divisor())
 @tool
 class_name Pasture3DGraphNodeMudslide
-extends Pasture3DGraphNode
+extends Pasture3DGraphSolverNode
 
-enum Evaluation { LIVE, FROZEN }
 
 @export_group("Material")
 ## Below this slope material comes to rest, so this is where deposition comes from — there is no separate
@@ -62,26 +61,41 @@ enum Evaluation { LIVE, FROZEN }
 		_param_changed()
 
 @export_group("Evaluation")
-## FROZEN (the default) sweeps once and serves the cache until Bake Mudslide, flagging itself stale when the
-## input or its parameters changed since. The sweep count scales with Travel Distance over the cell size, so
-## on a fine grid this is a real solve and not something to re-run on every evaluation.
-@export var evaluation: Evaluation = Evaluation.FROZEN:
-	set(v):
-		evaluation = v
-		emit_changed()
 
 @export_tool_button("Bake Mudslide") var _bake_btn = clear_cache
 
 # ---- Runtime freeze state (not serialised — the caches rebuild on demand) ----
-var _cache: Dictionary = {}
-var _cache_key: int = 0
-var _dirty_since_bake: bool = false
-var _stale: bool = false
 var _deposition_divisor: float = 1.0
+
+
+## This solve is heavy enough that FROZEN is the right default; the base defaults to LIVE.
+func _init() -> void:
+	evaluation = Evaluation.FROZEN
+
+
+## Names this node's own Bake button, for the freeze warning.
+func bake_label() -> String:
+	return "Bake Mudslide"
 
 
 func op() -> StringName:
 	return &"mudslide"
+
+
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = talus_angle_deg
+	p[1] = depth
+	p[2] = travel_distance
+	p[3] = depth_exponent
+	p[4] = viscosity_power
+	p[5] = amount
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, -1, 5])
 
 
 func role() -> Role:
@@ -102,7 +116,6 @@ func input_names() -> PackedStringArray:
 
 func aux_grid_port() -> int:
 	return 1 # "mask"
-
 
 
 func input_port_types() -> PackedInt32Array:
@@ -127,25 +140,10 @@ func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.HEIGHT, PortType.MASK])
 
 
-## FROZEN means this node serves its own cache, which only the GDScript evaluator can do. See
-## Pasture3DGraphNode.blocks_native().
-func blocks_native() -> bool:
-	return evaluation == Evaluation.FROZEN
-
-
 ## The METRES the normalised deposition channel was divided by. A 0..1 channel is meaningless without it, so
 ## it is readable rather than printed — a downstream Remap can put the channel back into metres.
 func deposition_divisor() -> float:
 	return _deposition_divisor
-
-
-func clear_cache() -> void:
-	if _cache.is_empty() and not _stale and not _dirty_since_bake:
-		return
-	_cache.clear()
-	_dirty_since_bake = false
-	_stale = false
-	emit_changed()
 
 
 func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> Array:
@@ -154,24 +152,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	var mask: PackedFloat32Array = (p_inputs[1] as PackedFloat32Array) if (p_inputs.size() > 1 and p_inputs[1] is PackedFloat32Array and p_inputs[1].size() == n) else PackedFloat32Array()
 	var amt: float = float(p_inputs[2][0]) if (p_inputs.size() > 2 and p_inputs[2] is PackedFloat32Array and p_inputs[2].size() > 0) else amount
 
-	if evaluation == Evaluation.FROZEN:
-		var key := _input_hash(surface, mask, p_gw, p_gh)
-		if not _cache.is_empty():
-			if _dirty_since_bake or key != _cache_key:
-				_set_stale(true)
-			return _cache[_cache_key]
-		var solved := _solve(surface, mask, p_gw, p_gh, p_rect, amt)
-		_cache = {}
-		_cache_key = key
-		_cache[key] = solved
-		_dirty_since_bake = false
-		_set_stale(false)
-		return solved
-
-	if not _cache.is_empty():
-		_cache.clear()
-	_set_stale(false)
-	return _solve(surface, mask, p_gw, p_gh, p_rect, amt)
+	return solve_cached(_input_hash(surface, mask, p_gw, p_gh), func(): return _solve(surface, mask, p_gw, p_gh, p_rect, amt))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -179,10 +160,7 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> 
 
 
 func node_warnings() -> PackedStringArray:
-	var w := PackedStringArray()
-	if _stale:
-		w.append("%s is FROZEN and its input or parameters changed since the bake — it is showing the "
-			% display_name() + "slide it solved for the old shape. Press Bake Mudslide to re-solve.")
+	var w := super()
 	if is_zero_approx(depth) or is_zero_approx(travel_distance) or is_zero_approx(amount):
 		w.append("%s: Depth, Travel Distance or Amount is 0, so no material moves." % display_name())
 	return w
@@ -206,23 +184,11 @@ func _solve(p_surface: PackedFloat32Array, p_mask: PackedFloat32Array, p_gw: int
 
 
 func _param_changed() -> void:
-	if not _cache.is_empty():
-		_dirty_since_bake = true
+	mark_dirty_since_bake()
 	emit_changed()
 
 
-func _set_stale(p_stale: bool) -> void:
-	if _stale == p_stale:
-		return
-	_stale = p_stale
-	if Engine.is_editor_hint():
-		emit_changed.call_deferred()
-
-
 func _input_hash(p_surface: PackedFloat32Array, p_mask: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
-	# The MASK is in the key as well as the surface: this node's whole point is that the author chooses where
-	# the material sits, so a mask that moved is a different slide even on identical ground.
-	var h := hash(p_gw) ^ (hash(p_gh) << 1)
-	h = h ^ hash(p_surface)
-	h = h ^ (hash(p_mask) << 3)
-	return h
+	# The MASK is in the key as well as the surface: this node's whole point is that the author chooses
+	# where the material sits, so a mask that moved is a different slide even on identical ground.
+	return solver_cache_key(p_gw, p_gh, [p_surface, p_mask])

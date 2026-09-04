@@ -44,6 +44,17 @@ func op() -> StringName:
 	return &"road_grade"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = amount
+	return {"params": p}
+
+
+func native_out_count() -> int:
+	return 6 # height, roadbed, cut, fill, verge, structure
+
+
 func role() -> Role:
 	return Role.SOLVER
 

@@ -157,6 +157,9 @@ static var _show_all_labels: bool = false
 ## Shared across every brush: the "Toggle Tangents" button flips this so the gizmo (brush_gizmo.gd) draws
 ## every loop point's tangent handles instead of just the selected point's.
 static var _show_all_tangents: bool = false
+## Reentrancy guard: true while ANY brush is programmatically snapping curve points to the surface.
+## Prevents brushes that share a Curve3D resource from ping-ponging re-bakes off each other's snaps.
+static var _snap_in_progress: bool = false
 
 
 func _init() -> void:
@@ -330,7 +333,45 @@ var _graph_defer: bool = false
 var _pending_graph: Array = []
 ## Guards the three-pass driver against re-entry — a refresh scheduled by pass 1 must not start a second
 ## driver on top of this one. `_running` is not enough: a Pasture3DSim uses that for its own solve.
-var _erosion_running: bool = false
+##
+## DERIVED, not stored, and that is the fix rather than a tidier spelling. As a bare bool every write
+## lived inside `_bake_deferred`, so either teardown path — EXIT_TREE, PREDELETE — left it set with no
+## owner to clear it: `_on_refresh_timer` then re-armed and returned forever, and the brush silently
+## stopped responding to spline drags for the rest of the session. Reading it off the run that owns it
+## makes that desynchronisation unrepresentable; `_end_deferred_run` is the only way back to false.
+## Set by `_join_worker` so a `_solve_on_worker` that is resumed AFTER the join can tell that its task
+## was already waited for, rather than polling an id that no longer exists.
+var _joined: bool = false
+var _deferred_run: int = 0
+var _erosion_running: bool:
+	get:
+		return _deferred_run != 0
+
+
+## Claim the driver. Returns 0 when one is already running, otherwise this run's id.
+func _begin_deferred_run() -> int:
+	if _deferred_run != 0:
+		return 0
+	_deferred_run_seq += 1
+	_deferred_run = _deferred_run_seq
+	return _deferred_run
+
+
+## Release the driver, and with it every phase flag the run set. Safe to call when nothing is running,
+## and safe to call from teardown: `p_run` of 0 means "whatever is running", which is what a notification
+## wants, while a driver passing its own id cannot end a run that already ended and was replaced.
+func _end_deferred_run(p_run: int = 0) -> void:
+	if _deferred_run == 0 or (p_run != 0 and p_run != _deferred_run):
+		return
+	_deferred_run = 0
+	# The three phase flags belong to the run, not to the frame. Left set by an abort they make every
+	# later synchronous bake behave as though a driver were about to redo it, and nothing ever does.
+	_erosion_defer = false
+	_growth_defer = false
+	_graph_defer = false
+
+
+var _deferred_run_seq: int = 0
 
 
 ## Run `p_states` to completion on a worker, yielding frames here until it finishes. Returns false when
@@ -345,15 +386,33 @@ var _erosion_running: bool = false
 ## dispatcher on which subclass it happened to be, declared on a base class that should not know.
 func _solve_on_worker(p_states: Array, p_label: String, p_progress: Callable,
 		p_chunk: Callable) -> bool:
+	_joined = false
 	_task_id = WorkerThreadPool.add_task(_worker_body.bind(p_states, p_chunk), true, p_label)
-	while not WorkerThreadPool.is_task_completed(_task_id):
+	# `_task_id != -1` is not decoration. `_join_worker` runs from EXIT_TREE and PREDELETE and ends by
+	# clearing the id, and this coroutine is suspended on `process_frame` when it does. On a REPARENT
+	# (EXIT_TREE then ENTER_TREE in one frame) the resumed loop used to call `is_task_completed(-1)`,
+	# which errors and returns false — one error per frame, forever, and this function never returned.
+	# `_joined` is what separates "somebody joined the task for us" from "it was never started", which
+	# the id alone cannot say.
+	while _task_id != -1 and not WorkerThreadPool.is_task_completed(_task_id):
 		# Teardown is watched from HERE rather than from the worker: `is_inside_tree` is a scene-tree
 		# query and the worker must not make one. The worker only ever READS `_cancel`.
 		if not is_inside_tree() or not is_configured():
 			_cancel = true
 		if p_progress.is_valid():
 			p_progress.call()
-		await get_tree().process_frame
+		# A detached node has no tree to yield on, and awaiting a null tree's signal kills the coroutine
+		# outright — taking the driver's cleanup with it. Leave through the cancelled path instead.
+		var tree := get_tree()
+		if tree == null:
+			_cancel = true
+			break
+		await tree.process_frame
+	if _joined:
+		# Already waited for, and the id is gone; joining again would wait on -1.
+		return false
+	if _task_id == -1:
+		return false
 	# Always join, even when cancelled: `is_task_completed` false plus a cancel flag still leaves a task
 	# holding this node's arrays, and freeing the node under it is the crash §20.4 is about.
 	WorkerThreadPool.wait_for_task_completion(_task_id)
@@ -365,6 +424,14 @@ func _solve_on_worker(p_states: Array, p_label: String, p_progress: Callable,
 ## warning (§20.4). It reads `_cancel` and calls the chunk, and that is deliberately all it does.
 func _worker_body(p_states: Array, p_chunk: Callable) -> void:
 	for st in p_states:
+		# Tested at the TOP of the state loop, not only inside the chunk loop. All three of the brush's
+		# own chunk callables return true on their first call, so the inner body never ran and `_cancel`
+		# was never read: Cancel could not abandon BETWEEN grids, and the user waited out every remaining
+		# grid to be handed nothing. The results were never wrong — the driver still honours `_cancel`
+		# through `return not _cancel` — but the header's "Cancel lands on a chunk boundary" was false
+		# for exactly the callables that matter here.
+		if _cancel:
+			return
 		while not p_chunk.call(st):
 			if _cancel:
 				return
@@ -377,11 +444,19 @@ func _worker_body(p_states: Array, p_chunk: Callable) -> void:
 ## and none exists on the synchronous path. The node leaving the tree, the scene closing, the editor
 ## reloading a @tool script — all of them free the arrays the task is halfway through.
 func _join_worker() -> void:
+	# §3.3: the driver may be suspended inside `_bake_deferred` with no way to reach its own cleanup —
+	# this IS the teardown, and it owns ending the run. Done first, and unconditionally, so a join that
+	# finds no task still clears a flag an earlier abort stranded.
+	_end_deferred_run()
 	if _task_id == -1:
 		return
 	_cancel = true
 	WorkerThreadPool.wait_for_task_completion(_task_id)
 	_task_id = -1
+	# Tells `_solve_on_worker`, which is suspended on a frame it will never be resumed on in the detached
+	# case and WILL be resumed on in the reparent case, that the task it is polling has already been
+	# waited for. Without it the resumed loop polls a cleared id forever.
+	_joined = true
 	_running = false
 
 
@@ -405,9 +480,11 @@ func _notification(what: int) -> void:
 		remove_from_group(BRUSH_GROUP)
 		# Before anything else: the task is holding this node's arrays.
 		_join_worker()
+		_cancel_refresh_timer()
 		_clear_mask_preview() # §18.5: a preview owned by a node that has left the scene is orphaned
 	elif what == NOTIFICATION_PREDELETE:
 		_join_worker()
+		_cancel_refresh_timer()
 		# Freed while still attached (e.g. queue_free in the editor): lift our contribution off the layer
 		# so we don't strand a baked footprint. The is_inside_tree() guard inside _detach_from_current
 		# makes a node already removed from the tree (editor delete keeps it in undo history; placement
@@ -576,6 +653,22 @@ func _get_splines() -> Array:
 	return out
 
 
+## Per-Path3D receiver for its Curve3D's `changed`. See `_connect_spline` for why this is an object and
+## not a bound Callable.
+class _SplineRelay extends RefCounted:
+	var brush: Pasture3DTerrainBrush
+	var path: Path3D
+	var curve: Curve3D
+
+	func on_changed() -> void:
+		if is_instance_valid(brush) and is_instance_valid(path):
+			brush._schedule_spline_refresh(path)
+
+
+## Path3D instance id -> _SplineRelay. Retains the relays; see `_connect_spline`.
+var _spline_relays: Dictionary = {}
+
+
 func _connect_spline(path: Path3D) -> void:
 	# React to the Path3D swapping its Curve3D resource itself (Make Unique / assigning a new curve) so we
 	# rebind to the new curve and the shared-curve warning re-evaluates. Idempotent (bound Callable compares
@@ -585,11 +678,31 @@ func _connect_spline(path: Path3D) -> void:
 		path.curve_changed.connect(pc)
 	if path.curve == null:
 		return
-	# Bind the owning Path3D so a curve edit schedules a per-spline (dirty-rect) redraw, not a whole-layer
-	# one. The bound Callable compares equal across calls (same method + bind), so this stays idempotent.
-	var cb := _schedule_spline_refresh.bind(path)
-	if not path.curve.changed.is_connected(cb):
-		path.curve.changed.connect(cb)
+	# One relay OBJECT per Path3D, rather than one bound Callable per Path3D.
+	#
+	# `CallableCustomBind` equality compares the base callable and the bind COUNT, not the bind VALUES —
+	# which is exactly what makes the `curve_changed` connect above idempotent, and exactly what broke this
+	# one. Godot shares a Curve3D between duplicated Path3Ds by default (the brush warns about it at ~530),
+	# so for a Ctrl+D'd spline B, `is_connected(_schedule_spline_refresh.bind(B))` compared equal to A's
+	# entry on the SAME curve and B was never connected: dragging the shared curve marked only A dirty, and
+	# B — if it sat outside A's dirty box — kept its old stamp on the terrain.
+	#
+	# Two relays are two different objects, so their Callables are genuinely unequal and both connections
+	# live. Relays are retained here because a signal does not keep a RefCounted receiver alive.
+	var pid := path.get_instance_id()
+	var relay: _SplineRelay = _spline_relays.get(pid)
+	if relay != null and relay.curve != path.curve:
+		if is_instance_valid(relay.curve) and relay.curve.changed.is_connected(relay.on_changed):
+			relay.curve.changed.disconnect(relay.on_changed)
+		relay = null
+	if relay == null:
+		relay = _SplineRelay.new()
+		relay.brush = self
+		relay.path = path
+		relay.curve = path.curve
+		_spline_relays[pid] = relay
+	if not path.curve.changed.is_connected(relay.on_changed):
+		path.curve.changed.connect(relay.on_changed)
 
 
 ## The Path3D swapped its Curve3D resource (e.g. Make Unique). Rebind to the new curve's change signal,
@@ -789,7 +902,7 @@ func _rebind(old_owner: String) -> void:
 
 ## True when auto-refresh may queue work: not mid-programmatic-edit, enabled, in the editor and tree.
 func _can_auto_refresh() -> bool:
-	return not _suspend_auto and auto_refresh and Engine.is_editor_hint() and is_inside_tree()
+	return not _suspend_auto and not _snap_in_progress and auto_refresh and Engine.is_editor_hint() and is_inside_tree()
 
 
 ## Whole-layer refresh scheduler — for param / transform / structural changes (anything that isn't a
@@ -843,6 +956,20 @@ func _arm_refresh_timer() -> void:
 	_timer.timeout.connect(_on_refresh_timer)
 
 
+## Drop a pending refresh. `_arm_refresh_timer` refuses to arm while detached, but nothing cancelled a
+## timer that was ALREADY armed when the node left the tree — and a SceneTreeTimer holds its connection
+## regardless of what happens to the node. The tick then reached `_on_refresh_timer` on a detached node,
+## whose `_tools_on_owner` group scan is wrapped in `if is_inside_tree()` and so returned only `[self]`:
+## `clear_layer_in_area` wiped the recorded box and NO layer-mate was repainted, punching a permanent
+## hole in a neighbouring brush sharing that layer. Deleting a brush within REFRESH_DELAY of editing a
+## spline was enough. The dirty state is deliberately left standing: re-entering the tree re-arms.
+func _cancel_refresh_timer() -> void:
+	if is_instance_valid(_timer):
+		if _timer.timeout.is_connected(_on_refresh_timer):
+			_timer.timeout.disconnect(_on_refresh_timer)
+	_timer = null
+
+
 func _on_refresh_timer() -> void:
 	_timer = null
 	if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
@@ -858,16 +985,22 @@ func _on_refresh_timer() -> void:
 	if _erosion_running:
 		_arm_refresh_timer()
 		return
+	# EVERY guard first, and only then the snapshot. `is_inside_tree()` is the one the bake actually
+	# depends on and the one that was missing: `is_configured()` is only `is_instance_valid(terrain) and
+	# terrain.data != null`, which a detached node passes. And the snapshot used to sit ABOVE these
+	# returns, so a tick the guards rejected had already discarded the queued dirty state — the edit that
+	# armed the timer was forgotten rather than deferred. Nothing may clear dirty state on a path that
+	# does not bake.
+	if not Engine.is_editor_hint() or not is_inside_tree() or not is_configured():
+		return
 	_dirty = false
-	# Snapshot + clear the queued dirty state up front so a refresh that re-enters scheduling is coherent.
+	# Snapshot + clear the queued dirty state so a refresh that re-enters scheduling is coherent.
 	var full := _full_dirty
 	var splines := _dirty_splines
 	var moved_node := _moved_node
 	_full_dirty = false
 	_dirty_splines = {}
 	_moved_node = false
-	if not Engine.is_editor_hint() or not is_configured():
-		return
 	var bake: Callable = (_refresh_owner.bind(_layer_owner, false, []) if full or splines.is_empty()
 			else _refresh_owner_rect.bind(_layer_owner, splines, moved_node))
 	# §14. Both bake paths go through the same driver, because either can be the one that has no cache
@@ -1066,9 +1199,14 @@ func _has_graph_modifier() -> bool:
 ## take "before" from pass 3, which is the un-eroded terrain pass 1 left — so Ctrl+Z would restore the
 ## intermediate state rather than the one the user was looking at.
 func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> void:
-	if _erosion_running:
+	var run := _begin_deferred_run()
+	if run == 0:
 		return
-	_erosion_running = true
+	# §3.5: the cancel is reset ONCE, here, at the top of the driver that owns it. It used to be cleared
+	# at the top of each phase, so a Cancel pressed during the graph phase was erased by the erosion phase
+	# and the multi-minute solve the user was abandoning ran to completion. A phase must never clear a
+	# cancel it did not set.
+	_cancel = false
 	var can_undo := p_record_undo and _layers_api_available()
 	var before: Dictionary = _snapshot_owner(p_owner) if can_undo else {}
 
@@ -1095,7 +1233,7 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 		if grows.is_empty():
 			break
 		if not await _grow_pending(grows):
-			_erosion_running = false
+			_end_deferred_run(run)
 			_commit_deferred_undo(p_owner, before, can_undo)
 			print("%s: growth cancelled — the brush is showing the mountain it already had." % name)
 			return
@@ -1103,19 +1241,27 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 	# ---- Phase B: solve pending graphs on worker thread
 	if not pending_graph.is_empty():
 		var ok_graph := await _solve_graph_pending(pending_graph)
-		if ok_graph:
-			for st: Dictionary in pending_graph:
-				if st.has("zo"):
-					(st["mod"] as Pasture3DNodeGraph).store_cache(st["extent"], {
-						"key": st["key"],
-						"grid": st["zo"],
-					})
+		if not ok_graph:
+			# §3.5. This used to fall through with no else and no return: nothing was stored, the erosion
+			# phase reset the cancel and solved to completion, and the final bake then re-evaluated the
+			# WHOLE graph on the main thread — the exact freeze Cancel was pressed to abandon, with
+			# nothing said. Same shape as the growth phase above, and said out loud for the same reason.
+			_end_deferred_run(run)
+			_commit_deferred_undo(p_owner, before, can_undo)
+			print("%s: graph evaluation cancelled — the brush is showing its un-graphed shape." % name)
+			return
+		for st: Dictionary in pending_graph:
+			if st.has("zo"):
+				(st["mod"] as Pasture3DNodeGraph).store_cache(st["extent"], {
+					"key": st["key"],
+					"grid": st["zo"],
+				})
 
 	# ---- Phase C: the erosion solve, against the surface phase A & B finished.
 	if pending_erosion.is_empty():
 		if not pending_graph.is_empty():
 			p_bake.call()
-		_erosion_running = false
+		_end_deferred_run(run)
 		_commit_deferred_undo(p_owner, before, can_undo)
 		return
 
@@ -1124,7 +1270,7 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 		for st: Dictionary in pending_erosion:
 			_store_solved_erosion(st)
 	p_bake.call()
-	_erosion_running = false
+	_end_deferred_run(run)
 	_commit_deferred_undo(p_owner, before, can_undo)
 	if not ok:
 		# The layer holds the UN-ERODED shape now, which is what pass 1 painted. Said out loud rather
@@ -1177,7 +1323,6 @@ func _grow_pending(p_mats: Array) -> bool:
 		states.append({"mat": m, "done": 0})
 	print("%s: growing %d relief field(s) — the mountain appears when it lands…" % [name, states.size()])
 	var t0 := Time.get_ticks_msec()
-	_cancel = false
 	_running = true
 	var last_bucket := -1
 	var ok: bool = await _solve_on_worker(states, "%s: growing relief" % name,
@@ -1226,7 +1371,6 @@ func _grow_one(p_state: Dictionary) -> bool:
 func _solve_graph_pending(p_pending: Array) -> bool:
 	print("%s: evaluating terrain graph on %d grid(s)…" % [name, p_pending.size()])
 	var t0 := Time.get_ticks_msec()
-	_cancel = false
 	_running = true
 	var ok: bool = await _solve_on_worker(p_pending, "%s: evaluating graph" % name,
 			Callable(), _graph_solve_one)
@@ -1236,11 +1380,25 @@ func _solve_graph_pending(p_pending: Array) -> bool:
 	return ok
 
 
+## RUNS ON A WORKER THREAD. It may touch nothing but the state dictionary and the stateless native entry
+## point — the same contract graph_editor.gd already works to: compile on the main thread, solve here.
+##
+## This used to call `Pasture3DTerrainGraph.evaluate()`, which MUTATES the shared graph resource on both
+## of its routes — `store_cache`, `_global_access_tick += 1`, `node._last_access_tick`,
+## `_evict_cache_if_needed()`. The driver exists precisely so the main thread keeps running, so with the
+## Terrain Graph dock open on the same resource the user adding or deleting a node wrote `graph.nodes`
+## from the main thread underneath this loop's read of it: concurrent refcount traffic on the same Array
+## and Dictionary, which is an out-of-range index, a corrupted cache grid, or an editor crash. Reachable
+## without the dock too, whenever a second brush bakes synchronously against a graph modifier that
+## references the same resource.
+##
+## `graph_eval_grid` is a free function over a compiled program: it holds no reference to the resource
+## and cannot write to it, which is what makes this thread-safe by construction rather than by timing.
 func _graph_solve_one(p_state: Dictionary) -> bool:
 	if int(p_state.get("done", 0)) > 0:
 		return true
-	var g: Pasture3DTerrainGraph = p_state["graph"]
-	p_state["zo"] = g.evaluate(p_state["gw"], p_state["gh"], p_state["rect"], null, p_state["z"])
+	p_state["zo"] = Pasture3DUtil.graph_eval_grid(p_state["prog"], p_state["gw"], p_state["gh"],
+			p_state["rect"], p_state["z"])
 	p_state["done"] = 1
 	return true
 
@@ -1270,7 +1428,6 @@ func _solve_erosion_pending(p_pending: Array) -> bool:
 	print("%s: solving erosion on %d grid(s), %d cells, %d iteration(s)…"
 			% [name, p_pending.size(), cells, iters])
 	var t0 := Time.get_ticks_msec()
-	_cancel = false
 	_running = true
 	var last_pct := -1
 	var ok: bool = await _solve_on_worker(p_pending, "%s: eroding" % name,
@@ -1615,6 +1772,10 @@ func _compute_stamp_key(path: Path3D) -> int:
 	if not is_instance_valid(path) or path.curve == null:
 		return 0
 	return hash([
+		# Plain global_transform. This read `global_transform if is_inside_tree() else transform` to
+		# silence the detached-node error the timer defect above produced — which never prevented the
+		# detached bake and did make one brush compute two different stamp keys depending on tree state.
+		# With the timer cancelled and the tick guarded, the detached branch is unreachable.
 		global_transform,
 		path.curve.get_baked_points(),
 		_brush_param_signature(),
@@ -2135,6 +2296,10 @@ func _ensure_layer_for(owner: String, sync_blend: bool) -> int:
 	# Owner is keyed by name only, so a same-named layer of another map type would be reused — warn.
 	if layer and layer.has_method("get_map_type") and layer.get_map_type() != mt:
 		push_warning("Pasture3D brush '%s': layer '%s' already exists with a different map type — give this tool a unique layer name." % [name, nm])
+		# ...and then refuse it. Returning the id anyway wrote float heights into a CONTROL layer. -1 is
+		# the destructive-fallback path this function's docstring already defines, and every caller
+		# already branches on it.
+		return -1
 	if sync_blend and layer and layer.has_method("get_blend_mode") and layer.get_blend_mode() != _get_blend_mode():
 		layer.set_blend_mode(_get_blend_mode())
 	return id
@@ -2473,10 +2638,12 @@ func _copy_tiles(tiles: Dictionary) -> Dictionary:
 ## terrain following it live in a single, auto_refresh-independent undo action.
 func _set_curve_points_and_repaint(points: Array) -> void:
 	_suspend_auto = true
+	_snap_in_progress = true
 	for e in points:
 		var c: Curve3D = e[0]
 		if c:
 			c.set_point_position(e[1], e[2])
+	_snap_in_progress = false
 	_suspend_auto = false
 	if Engine.is_editor_hint() and is_configured():
 		refresh()
@@ -2512,8 +2679,10 @@ func _apply_surface_snap() -> void:
 	if new_pts.is_empty():
 		return
 	_suspend_auto = true
+	_snap_in_progress = true
 	for e in new_pts:
 		e[0].set_point_position(e[1], e[2])
+	_snap_in_progress = false
 	_suspend_auto = false
 
 
@@ -2529,6 +2698,7 @@ func _apply_surface_snap_points(path: Path3D, indices: PackedInt32Array) -> void
 	var xf: Transform3D = path.global_transform
 	var inv := xf.affine_inverse()
 	_suspend_auto = true
+	_snap_in_progress = true
 	for idx in indices:
 		if idx < 0 or idx >= c.point_count:
 			continue
@@ -2541,6 +2711,7 @@ func _apply_surface_snap_points(path: Path3D, indices: PackedInt32Array) -> void
 		var new_local: Vector3 = inv * world
 		if not new_local.is_equal_approx(local):
 			c.set_point_position(idx, new_local)
+	_snap_in_progress = false
 	_suspend_auto = false
 
 
@@ -3622,16 +3793,8 @@ func _stack_forces_gdscript() -> bool:
 	if not _supports_modifiers():
 		return false
 	for m in modifiers:
-		if m != null and m.is_active() and m.op() == &"graph":
-			if m.graph == null or not m.graph.native_supported():
-				return true
-		# A road grader takes the GDScript path when the native stamp_road_line is absent, and also when
-		# it is not the whole answer for this stack — see _road_native_is_complete().
-		if m != null and m.is_active() and m.op() == &"road":
-			if terrain == null or terrain.data == null or not terrain.data.has_method("stamp_road_line"):
-				return true
-			if not _road_native_is_complete():
-				return true
+		if m != null and m.is_active() and m.forces_gdscript(self):
+			return true
 	return false
 
 
@@ -4045,9 +4208,16 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 	for m in modifiers:
 		if m == null or not m.is_active():
 			continue
+		# ONE dictionary, read two ways: the native rasteriser reads the keys it knows through
+		# `out["list"]` and ignores the rest (it looks every key up by name and never enumerates them),
+		# while `_run_modifier_stack` reads `mod` / `grid` / `defer` / `out` through `out["gd"]`. It used
+		# to be two dicts built side by side from the same modifier, which is how `defer` came to be
+		# written to one and read from the other — see §3.6: a frozen erosion solved synchronously on the
+		# main thread because the GDScript path's `p_step.get("defer", false)` was always false.
 		var blk: Dictionary = m.to_params()
 		blk["op"] = m.op()
-		var step := {"mod": m, "op": m.op(), "grid": m.needs_grid()}
+		blk["mod"] = m
+		blk["grid"] = m.needs_grid()
 		if m._supports_freezing():
 			# `out` is a plain Dictionary handed BOTH ways: the rasteriser writes the solve into it and
 			# `_commit_modifier_caches` reads it back after the bake. Dictionaries are reference types,
@@ -4063,9 +4233,18 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 			blk["cache_wet"] = entry.get("wet", PackedFloat32Array())
 			# §14. Pass 1 of the deferred driver: hand the surface back instead of solving it. Only
 			# meaningful on a FROZEN step, because the cache is how the answer gets delivered.
+			# This key only ever reached the native block — so on the GDScript path
+			# `_apply_erosion_step`'s `p_step.get("defer", false)` was always false and a frozen erosion
+			# solved SYNCHRONOUSLY on the main thread, with
+			# `_pending_erosion` left empty so the driver's phase C had nothing to do. That path is not
+			# hypothetical: `force_gdscript_raster` is an @export, and `_stack_forces_gdscript()` selects
+			# it for a graph with an unsupported op or a road grader beside any other modifier. It also
+			# made `bake_without_erosion()`'s `_erosion_suppress` a no-op there, so "Clear Simulation On
+			# All Brushes" cleared every cache and then re-eroded on the spot.
+			#
+			# There is now one dictionary, so there is nowhere for the two to drift apart.
 			blk["defer"] = _erosion_suppress or (_erosion_defer and bool(blk["frozen"]))
 			blk["out"] = slot
-			step["out"] = slot
 		if m is Pasture3DNodeGraph and m.graph != null:
 			# The native rasteriser needs the whole-graph program (Pasture3DUtil.graph_eval_grid reads it),
 			# the amount, and the two freeze inputs its key folds in — reads_input decides whether the input
@@ -4119,17 +4298,14 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 			# position in the list. `capture` splits the point run there, which costs one grid conversion --
 			# only for a stack that has one, and only while it is switched on.
 			if wants_seed:
-				var slot := {}
 				blk["capture"] = true
-				blk["out"] = slot
-				step["capture"] = true
-				step["out"] = slot
-			step["sel_base"] = base
-			step["sel_count"] = int(mat_sel.size() / stride)
+				blk["out"] = {}
+			blk["sel_base"] = base
+			blk["sel_count"] = int(mat_sel.size() / stride)
 			if out["sim"] == null:
 				out["sim"] = _relief_sim_result(m.material)
 		out["list"].append(blk)
-		out["gd"].append(step)
+		out["gd"].append(blk)
 	out["op_selectors"] = sel
 	out["count"] = out["list"].size()
 	return out
@@ -4150,37 +4326,31 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 			continue
 		var out: Dictionary = step["out"]
 		var m = step["mod"]
-		if out.has("surface") and not p_frame.is_empty():
+		if out.has("surface") and not p_frame.is_empty() and m != null and m.wants_seed_surface():
 			# The frame travels with the grid because the two are different rectangles: the grid is the
 			# spline's axis-aligned bounding box, the field is the loop's ORIENTED rect, and on a rotated
 			# loop a plain rescale between them would shear the ridges off their own crest lines.
-			var surf := {"surface": out["surface"], "gw": out.get("gw", 0), "gh": out.get("gh", 0),
-					"frame": p_frame}
-			reseeded = m.material.set_seed_surface(surf) or reseeded
+			reseeded = m.take_seed_surface({"surface": out["surface"], "gw": out.get("gw", 0),
+					"gh": out.get("gh", 0), "frame": p_frame}) or reseeded
 		if out.has("pending"):
 			# §14 pass 1. Nothing was solved; the surface that WOULD have been is waiting here, with the
 			# key it will be stored under. Recorded rather than solved because this is still the bake.
-			if m is Pasture3DNodeErosion:
-				_pending_erosion.append({
-					"mod": m, "extent": p_extent,
-					"z0": out["pending"], "z": out["pending"], "key": int(out["pending_key"]),
-					"gw": int(out["pending_gw"]), "gh": int(out["pending_gh"]),
-					"iterations": maxi(m.iterations, 1), "done": 0, "failed": false,
-					"want_diagnostics": m.publish_fields, "res": {},
-					"params": m.to_params(), "erod": PackedFloat32Array(),
-				})
-			elif m is Pasture3DNodeGraph and m.graph != null:
-				_pending_graph.append({
-					"mod": m,
-					"graph": m.graph,
-					"gw": int(out["pending_gw"]),
-					"gh": int(out["pending_gh"]),
-					"rect": out.get("pending_rect", m.last_rect),
-					"z": out["pending"],
-					"key": int(out["pending_key"]),
-					"extent": p_extent,
-					"done": 0,
-				})
+			#
+			# The entry is built BY the modifier and filed under the queue it names. This used to be
+			# `if m is Pasture3DNodeErosion` / `elif m is Pasture3DNodeGraph` — a type switch inside a
+			# loop that is otherwise generic, five lines above a `has_method` check doing the same job the
+			# other way. A third deferring modifier matched neither branch and was dropped in silence: it
+			# would set `pending`, nothing would queue it, and phase C would finish with a surface that
+			# was never solved.
+			var entry: Dictionary = m.make_pending(out, p_extent)
+			if not entry.is_empty():
+				var queues := _pending_queues()
+				var queue: StringName = m.pending_queue()
+				if queues.has(queue):
+					queues[queue].append(entry)
+				else:
+					push_error("Pasture3D: %s deferred a solve to the unknown queue '%s', so it will "
+							% [m.display_name(), queue] + "never be solved.")
 		if out.has("grid"):
 			m.store_cache(p_extent, {
 				"key": out["key"], "grid": out["grid"],
@@ -4198,8 +4368,16 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 	# stamped the previous shape. Either way the answer is one more bake, which converges because the
 	# captured surface EXCLUDES the material that reads it -- the second pass captures the same grid, the
 	# hash matches, and nothing more is scheduled.
-	if reseeded:
+	if reseeded and not _erosion_running and not _growth_defer:
 		_schedule_refresh()
+
+
+## The deferred queues by name, so `_commit_modifier_caches` can file an entry without knowing the
+## modifier's class. Built per call rather than held, because the driver REASSIGNS both lists to fresh
+## arrays when it takes a batch — a dictionary cached once would go on appending to the arrays the
+## previous batch left behind, and those entries would never be solved.
+func _pending_queues() -> Dictionary:
+	return {&"erosion": _pending_erosion, &"graph": _pending_graph}
 
 
 ## Run the compiled stack over the GDScript-side grids. The oracle for the native path in
@@ -4223,6 +4401,7 @@ func _run_modifier_stack(p_steps: Array, p_amp: PackedFloat64Array, p_profile: P
 	var n: int = int(p_ctx["gw"]) * int(p_ctx["gh"])
 	var add: bool = p_ctx["add"]
 	p_ctx["basey"] = p_basey # a field modifier may need the absolute surface, not the delta
+	p_ctx["host"] = self # `apply_field` runs on the node; the solves themselves stay here
 
 	# ---- The Modifier Margin, applied ONCE, HERE (PASTURE3D_BRUSH_EROSION_SPEC.md §6.8.1) --------------
 	#
@@ -4451,18 +4630,17 @@ func _eval_relief_step(p_step: Dictionary, p_x: float, p_z: float, p_fi: int, p_
 			host_measured.slice(lo, hi) if not host_measured.is_empty() else [])
 
 
-## One grid node over the whole grid.
+## One grid node over the whole grid, run by the node itself.
+##
+## This was a hardcoded `if`-chain on `p_step["op"]` — smooth / erosion / graph / road — falling through
+## to `return p_vals`. A new grid modifier that forgot to edit the chain did NOTHING, with no error: the
+## brush painted, the stack listed the step, and its pass never ran. The same op-string set was
+## re-enumerated for the native-bail decision, so the list of grid ops and the list of ops that can bail
+## were two lists that had to agree. Both now live on `Pasture3DNode` — `apply_field` and
+## `forces_gdscript` — where a subclass that does not override them has SAID it has no grid pass.
 func _apply_field_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 		p_ctx: Dictionary) -> PackedFloat32Array:
-	if p_step["op"] == &"smooth":
-		return _blur_grid(p_vals, p_ctx["gw"], p_ctx["gh"], p_step["mod"].passes)
-	if p_step["op"] == &"erosion":
-		return _apply_erosion_step(p_step, p_vals, p_ctx)
-	if p_step["op"] == &"graph":
-		return _apply_graph_step(p_step, p_vals, p_ctx)
-	if p_step["op"] == &"road":
-		return _apply_road_step(p_step, p_vals, p_ctx)
-	return p_vals
+	return p_step["mod"].apply_field(p_step, p_vals, p_ctx)
 
 
 ## One Pasture3DNodeRoad over the whole grid: solve the run's vertical alignment, then grade the working
@@ -4625,7 +4803,12 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 		return p_vals
 
 	# Deferred driver pass 1: queue the solve for worker thread and return current surface
-	if (bool(p_step.get("defer", false)) or _graph_defer) and frozen:
+	# Compiled on the main thread, and the deferral is conditional on it: a graph the native evaluator
+	# cannot run has no program, and the only other way to solve it is `evaluate()`, which may not be
+	# called off the main thread. Such a graph falls through to the synchronous MISS path below — slower,
+	# and correct — rather than being handed to a worker that would have to touch the resource.
+	var prog: Dictionary = g.compile_graph_program() if g.native_supported() else {}
+	if (bool(p_step.get("defer", false)) or _graph_defer) and frozen and not prog.is_empty():
 		out_slot["pending"] = z.duplicate()
 		out_slot["pending_key"] = key
 		out_slot["pending_gw"] = gw
@@ -4635,7 +4818,7 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 		out_slot["served"] = true
 		_pending_graph.append({
 			"mod": m,
-			"graph": g,
+			"prog": prog,
 			"gw": gw,
 			"gh": gh,
 			"rect": rect,

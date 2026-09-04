@@ -159,81 +159,93 @@ func has_cache() -> bool:
 	return not _cache.is_empty()
 
 
+## How far a frozen solve may be re-projected, in cells. Two cells is the bounding-box rounding the
+## footprint picks up while a spline is dragged; it is NOT a licence to serve another loop's grid.
+const ORIGIN_TOLERANCE_CELLS := 2
+
+
+## The frozen solve for this bake grid, or `{}` for a miss.
+##
+## THE ORIGIN IS PART OF THE KEY. `_extent_key` is "ox,oz,gw,gh" with the first two fields the loop's
+## world origin in cells, and the fallback this replaces parsed only fields 2 and 3 — so any cached entry
+## of the right SIZE was served for any PLACE. Two same-sized loops under one Mound with a frozen Graph
+## modifier: loop A caches at "0,0,200,200", loop B misses at "640,640,200,200" and was handed A's grid.
+## Nothing warned, because for a pure generator graph the key is `g.content_key()`, which does not change
+## when the loop moves. The second branch was worse still: it stretched the nearest-sized grid to fit,
+## which is a resize, not a translation.
+##
+## What survives is the case that fallback was actually written for — the ±1..2 cell jitter in a
+## footprint's bounding box while a spline is being dragged. That is a TRANSLATION of the same grid, so
+## it is served by shifting whole cells (both grids share `vertex_spacing`, so the lattices align and no
+## interpolation is needed), clamping the one- or two-cell band that falls off the source edge. Anything
+## further away, or any change of dimensions, is a miss.
 func cache_for(p_extent: String) -> Dictionary:
 	if _cache.has(p_extent):
 		return _cache[p_extent]
-	if evaluation == Evaluation.FROZEN and not _cache.is_empty():
-		var parts := p_extent.split(",")
-		if parts.size() >= 4:
-			var gw := parts[2].to_int()
-			var gh := parts[3].to_int()
-			var n := gw * gh
-			# 1. Exact dimension match
-			for k in _cache:
-				var entry: Dictionary = _cache[k]
-				var g: PackedFloat32Array = entry.get("grid", PackedFloat32Array())
-				if g.size() == n and entry.get("gw", gw) == gw and entry.get("gh", gh) == gh:
-					_cache[p_extent] = entry
-					return entry
-			# 2. Resample from nearest cached entry (handles ±1..2 cell bounding-box rounding during drag)
-			var best_entry: Dictionary = {}
-			var min_diff := 999999
-			for k in _cache:
-				var entry: Dictionary = _cache[k]
-				var g: PackedFloat32Array = entry.get("grid", PackedFloat32Array())
-				if g.is_empty():
-					continue
-				var egw: int = entry.get("gw", 0)
-				var egh: int = entry.get("gh", 0)
-				if egw > 0 and egh > 0 and g.size() == egw * egh:
-					var diff := absi(egw - gw) + absi(egh - gh)
-					if diff < min_diff:
-						min_diff = diff
-						best_entry = entry
-			if not best_entry.is_empty():
-				var src_g: PackedFloat32Array = best_entry["grid"]
-				var src_w: int = best_entry["gw"]
-				var src_h: int = best_entry["gh"]
-				var resampled := _resample_grid(src_g, src_w, src_h, gw, gh)
-				var new_entry := {
-					"key": best_entry.get("key", 0),
-					"grid": resampled,
-					"gw": gw,
-					"gh": gh,
-				}
-				_cache[p_extent] = new_entry
-				return new_entry
-	return {}
+	if evaluation != Evaluation.FROZEN or _cache.is_empty():
+		return {}
+	var want := _parse_extent(p_extent)
+	if want.is_empty():
+		return {}
+	var best: Dictionary = {}
+	var best_shift := ORIGIN_TOLERANCE_CELLS + 1
+	for k: String in _cache:
+		var have := _parse_extent(k)
+		if have.is_empty() or have["gw"] != want["gw"] or have["gh"] != want["gh"]:
+			continue
+		var entry: Dictionary = _cache[k]
+		var g: PackedFloat32Array = entry.get("grid", PackedFloat32Array())
+		if g.size() != want["gw"] * want["gh"]:
+			continue
+		var shift: int = maxi(absi(have["ox"] - want["ox"]), absi(have["oz"] - want["oz"]))
+		if shift < best_shift:
+			best_shift = shift
+			best = {"entry": entry, "dx": want["ox"] - have["ox"], "dz": want["oz"] - have["oz"]}
+	if best.is_empty():
+		return {}
+	var src: Dictionary = best["entry"]
+	if best["dx"] == 0 and best["dz"] == 0:
+		# Same place, different key text (a floating-point origin that rounds to the same cell). Nothing
+		# to re-project, so this one may be memoised under the new key.
+		_cache[p_extent] = src
+		return src
+	# Deliberately NOT written back under `p_extent`. Memoising a re-projection makes it the source for
+	# the next one, so a spline dragged two cells at a time would walk the borrowed grid arbitrarily far
+	# from where it was solved, one tolerated step after another. Each shift is measured from the entry
+	# that was actually solved.
+	return {
+		"key": src.get("key", 0),
+		"grid": _shift_grid(src["grid"], want["gw"], want["gh"], best["dx"], best["dz"]),
+		"gw": want["gw"],
+		"gh": want["gh"],
+	}
 
 
-static func _resample_grid(p_src: PackedFloat32Array, p_src_w: int, p_src_h: int, p_dst_w: int, p_dst_h: int) -> PackedFloat32Array:
+## "ox,oz,gw,gh" -> {ox, oz, gw, gh}, or {} if the string is not one. Written once because `cache_for`
+## has to parse BOTH sides of the comparison, and parsing them by different rules is how the origin got
+## dropped from one of them.
+static func _parse_extent(p_extent: String) -> Dictionary:
+	var parts := p_extent.split(",")
+	if parts.size() < 4:
+		return {}
+	return {
+		"ox": parts[0].to_int(), "oz": parts[1].to_int(),
+		"gw": parts[2].to_int(), "gh": parts[3].to_int(),
+	}
+
+
+## Translate a grid by whole cells. `p_dx`/`p_dz` are how far the DESTINATION origin is past the
+## source's, so destination cell (ix, iz) reads source cell (ix + dx, iz + dz); the band that falls off
+## the edge clamps to the nearest source cell rather than inventing a value.
+static func _shift_grid(p_src: PackedFloat32Array, p_gw: int, p_gh: int, p_dx: int, p_dz: int) -> PackedFloat32Array:
 	var out := PackedFloat32Array()
-	var n_dst: int = p_dst_w * p_dst_h
-	out.resize(n_dst)
-	if p_src.is_empty() or p_src_w <= 0 or p_src_h <= 0:
-		return out
-	for iz in range(p_dst_h):
-		var src_z: float = (float(iz) / float(maxi(p_dst_h - 1, 1))) * float(p_src_h - 1)
-		var z0 := int(floorf(src_z))
-		var z1 := mini(z0 + 1, p_src_h - 1)
-		var tz := src_z - float(z0)
-		var row := iz * p_dst_w
-		for ix in range(p_dst_w):
-			var src_x: float = (float(ix) / float(maxi(p_dst_w - 1, 1))) * float(p_src_w - 1)
-			var x0 := int(floorf(src_x))
-			var x1 := mini(x0 + 1, p_src_w - 1)
-			var tx := src_x - float(x0)
-			var v00: float = p_src[z0 * p_src_w + x0]
-			var v10: float = p_src[z0 * p_src_w + x1]
-			var v01: float = p_src[z1 * p_src_w + x0]
-			var v11: float = p_src[z1 * p_src_w + x1]
-			if is_nan(v00): v00 = 0.0
-			if is_nan(v10): v10 = 0.0
-			if is_nan(v01): v01 = 0.0
-			if is_nan(v11): v11 = 0.0
-			var v0: float = lerpf(v00, v10, tx)
-			var v1: float = lerpf(v01, v11, tx)
-			out[row + ix] = lerpf(v0, v1, tz)
+	out.resize(p_gw * p_gh)
+	for iz in range(p_gh):
+		var sz: int = clampi(iz + p_dz, 0, p_gh - 1)
+		var srow: int = sz * p_gw
+		var drow: int = iz * p_gw
+		for ix in range(p_gw):
+			out[drow + ix] = p_src[srow + clampi(ix + p_dx, 0, p_gw - 1)]
 	return out
 
 
@@ -251,8 +263,6 @@ func set_stale(p_stale: bool) -> void:
 	if _stale == p_stale:
 		return
 	_stale = p_stale
-	if Engine.is_editor_hint():
-		emit_changed.call_deferred()
 
 
 func op() -> StringName:
@@ -299,3 +309,39 @@ func modifier_warnings(_p_host) -> PackedStringArray:
 			% [display_name(), cache_bytes() / 1048576.0])
 	w.append_array(graph.graph_warnings(true))
 	return w
+
+
+## Pasture3DNode.apply_field(). See Pasture3DNodeErosion.apply_field for why the body stays on the host.
+func apply_field(p_step: Dictionary, p_vals: PackedFloat32Array, p_ctx: Dictionary) -> PackedFloat32Array:
+	return p_ctx["host"]._apply_graph_step(p_step, p_vals, p_ctx)
+
+
+## Pasture3DNode.forces_gdscript(). The native evaluator runs a graph only when it implements every node
+## in it; an unsupported op would otherwise be dropped in silence.
+func forces_gdscript(_p_host) -> bool:
+	return graph == null or not graph.native_supported()
+
+
+## Pasture3DNode.make_pending().
+##
+## The program is COMPILED HERE, on the main thread, and the worker gets the program rather than the
+## resource. The native path only defers a graph it could compile, so this is never empty in practice;
+## the guard is what makes that a fact instead of an assumption.
+func make_pending(p_out: Dictionary, p_extent: String) -> Dictionary:
+	if not p_out.has("pending") or graph == null:
+		return {}
+	return {
+		"mod": self,
+		"prog": graph.compile_graph_program(),
+		"gw": int(p_out["pending_gw"]),
+		"gh": int(p_out["pending_gh"]),
+		"rect": p_out.get("pending_rect", last_rect),
+		"z": p_out["pending"],
+		"key": int(p_out["pending_key"]),
+		"extent": p_extent,
+		"done": 0,
+	}
+
+
+func pending_queue() -> StringName:
+	return &"graph"

@@ -9,9 +9,21 @@
 class_name Pasture3DGraphNodeDevWaterMask
 extends Pasture3DGraphNode
 
-@export var depth_threshold: float = 0.01
-@export var shore_width: float = 8.0
-@export var shore_falloff: int = 1 ## Matches Pasture3DGraphNodeWaterMask.ShoreFalloff.
+@export var depth_threshold: float = 0.01:
+	set(v):
+		depth_threshold = v
+		_param_changed()
+
+@export var shore_width: float = 8.0:
+	set(v):
+		shore_width = v
+		_param_changed()
+
+## Matches Pasture3DGraphNodeWaterMask.ShoreFalloff.
+@export var shore_falloff: int = 1:
+	set(v):
+		shore_falloff = v
+		_param_changed()
 
 
 func op() -> StringName:

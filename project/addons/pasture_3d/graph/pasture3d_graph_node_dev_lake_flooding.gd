@@ -4,9 +4,8 @@
 # Used for algorithm prototyping, A/B testing, and automated headless CI parity verification.
 @tool
 class_name Pasture3DGraphNodeDevLakeFlooding
-extends Pasture3DGraphNode
+extends Pasture3DGraphSolverNode
 
-enum Evaluation { LIVE, FROZEN }
 enum FloodMode { SPILLWAY_BASIN, GLOBAL_ELEVATION }
 
 @export_group("Simulation")
@@ -15,7 +14,7 @@ enum FloodMode { SPILLWAY_BASIN, GLOBAL_ELEVATION }
 		flood_mode = v
 		_param_changed()
 
-@export_range(-1000.0, 5000.0, 0.5) var water_elevation: float = 50.0:
+@export_range(-1000.0, 5000.0, 0.5) var water_elevation: float = 10.0:
 	set(v):
 		water_elevation = v
 		_param_changed()
@@ -25,25 +24,22 @@ enum FloodMode { SPILLWAY_BASIN, GLOBAL_ELEVATION }
 		flood_percent = clampf(v, 0.0, 1.0)
 		_param_changed()
 
-@export_range(0.1, 50.0, 0.5) var shoreline_width: float = 5.0:
+@export_range(0.1, 50.0, 0.5) var shoreline_width: float = 4.0:
 	set(v):
 		shoreline_width = maxf(v, 0.1)
 		_param_changed()
 
 @export_group("Evaluation")
-@export var evaluation: Evaluation = Evaluation.LIVE:
-	set(v):
-		evaluation = v
-		emit_changed()
 
 @export_tool_button("Bake Lakes") var _bake_btn = clear_cache
 
-var _cache: Dictionary = {}
-var _cache_key: int = 0
-var _dirty_since_bake: bool = false
-var _stale: bool = false
 var _last_lake_polys: Array[PackedVector2Array] = []
 var _last_water_level: float = 0.0
+
+
+## Names this node's own Bake button, for the freeze warning.
+func bake_label() -> String:
+	return "Bake Lakes"
 
 
 func op() -> StringName:
@@ -82,15 +78,6 @@ func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.MASK])
 
 
-func clear_cache() -> void:
-	if _cache.is_empty() and not _stale and not _dirty_since_bake:
-		return
-	_cache.clear()
-	_dirty_since_bake = false
-	_stale = false
-	emit_changed()
-
-
 func _param_changed() -> void:
 	_dirty_since_bake = true
 	emit_changed()
@@ -104,24 +91,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	else:
 		in_grid = Pasture3DGraphOps.zeros(n)
 
-	if evaluation == Evaluation.FROZEN:
-		var key := _grid_hash(in_grid)
-		if not _cache.is_empty():
-			if _dirty_since_bake or key != _cache_key:
-				_stale = true
-			return _cache[_cache_key]
-		var solved := _solve_gdscript(in_grid, p_gw, p_gh, p_rect)
-		_cache = {}
-		_cache_key = key
-		_cache[key] = solved
-		_dirty_since_bake = false
-		_stale = false
-		return solved
-
-	if not _cache.is_empty():
-		_cache.clear()
-	_stale = false
-	return _solve_gdscript(in_grid, p_gw, p_gh, p_rect)
+	return solve_cached(_grid_hash(in_grid, p_gw, p_gh), func(): return _solve_gdscript(in_grid, p_gw, p_gh, p_rect))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -198,8 +168,5 @@ func _extract_lake_contours(p_depth: PackedFloat32Array, p_gw: int, p_gh: int, p
 		_last_lake_polys.append(boundary_pts)
 
 
-func _grid_hash(arr: PackedFloat32Array) -> int:
-	var h: int = arr.size()
-	for i in range(0, arr.size(), maxi(1, arr.size() / 32)):
-		h = (h * 31) ^ int(arr[i] * 1000.0)
-	return h
+func _grid_hash(arr: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
+	return solver_cache_key(p_gw, p_gh, [arr])

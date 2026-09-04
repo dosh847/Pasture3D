@@ -61,6 +61,27 @@ func op() -> StringName:
 	return &"mask"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	# The property is exported as `property`, not `mode`, and `strength` is params_g. Reading
+	# the wrong name silently lowered SLOPE for every mask, and leaving strength at its 0
+	# default made mask_grid lerp all the way back to "ungated" — so a native-path Mask
+	# returned 1.0 everywhere while the node's own eval_grid returned the right field.
+	p[0] = float(property)
+	p[1] = band_min
+	p[2] = band_max
+	p[3] = falloff_lo
+	p[4] = falloff_hi
+	p[5] = 1.0 if bool(invert) else 0.0
+	p[6] = strength
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 1, 2, 3, 4, 6])
+
+
 func role() -> Role:
 	return Role.FILTER
 

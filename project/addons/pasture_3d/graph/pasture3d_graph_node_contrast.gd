@@ -73,6 +73,22 @@ func op() -> StringName:
 	return &"contrast"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = float(mode)
+	p[1] = amount
+	p[2] = range_min
+	p[3] = range_max
+	p[4] = mask_amount
+	p[5] = 1.0 if bool(explicit_window) else 0.0
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 1, -1])
+
+
 func role() -> Role:
 	return Role.FILTER
 

@@ -72,6 +72,24 @@ func op() -> StringName:
 	return &"noise_jordan"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = amplitude
+	p[1] = frequency
+	p[2] = float(octaves)
+	p[3] = gain
+	p[4] = lacunarity
+	p[5] = warp_strength
+	p[6] = damp_strength
+	p[7] = float(seed)
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([0, 5, 6, 3, 1])
+
+
 func role() -> Role:
 	return Role.GENERATOR
 

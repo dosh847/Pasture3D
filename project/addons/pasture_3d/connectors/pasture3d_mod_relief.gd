@@ -77,8 +77,6 @@ func set_stale(p_stale: bool) -> void:
 	if _stale == p_stale:
 		return
 	_stale = p_stale
-	if Engine.is_editor_hint():
-		emit_changed.call_deferred()
 
 
 func op() -> StringName:
@@ -108,3 +106,25 @@ func modifier_warnings(p_host) -> PackedStringArray:
 	if p_host != null and material != null:
 		w.append_array(p_host._relief_warnings(material))
 	return w
+
+
+## Pasture3DNode.wants_seed_surface(). A material that has to be BUILT from the stack above it asks for
+## the working surface at its own position in the list.
+##
+## Asked through the material's own virtual, not through `has_method`: the duck-typed version answered
+## "did this class implement it", which is false for a STACK holding a seeded DLA — so a stacked DLA's
+## Ridge Seeding compiled to nothing, was dropped as a no-op, and never got a capture.
+func wants_seed_surface() -> bool:
+	return material != null and material.wants_seed_surface()
+
+
+## Pasture3DNode.take_seed_surface().
+func take_seed_surface(p_surface: Dictionary) -> bool:
+	return material != null and material.set_seed_surface(p_surface)
+
+
+## The stamp cache's key for this step. Without it `_modifier_signature()` fell back to 0 and only
+## `to_params()`'s two strengths distinguished one material from another — see
+## Pasture3DReliefMaterial.content_key().
+func content_key() -> int:
+	return material.content_key() if material != null else 0

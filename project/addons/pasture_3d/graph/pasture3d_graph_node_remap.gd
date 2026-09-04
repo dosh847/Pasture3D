@@ -65,6 +65,22 @@ func op() -> StringName:
 	return &"remap"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = in_min
+	p[1] = in_max
+	p[2] = out_min
+	p[3] = out_max
+	p[4] = 1.0 if bool(clamp_output) else 0.0
+	p[5] = soft_knee
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 0, 1, 2, 3])
+
+
 func role() -> Role:
 	return Role.FILTER
 

@@ -5,9 +5,8 @@
 
 @tool
 class_name Pasture3DGraphNodeDevHydraulicSaleve
-extends Pasture3DGraphNode
+extends Pasture3DGraphSolverNode
 
-enum Evaluation { LIVE, FROZEN }
 
 @export_group("Simulation")
 @export_range(1, 100, 1, "or_greater") var iterations: int = 25:
@@ -97,17 +96,13 @@ enum Evaluation { LIVE, FROZEN }
 		_param_changed()
 
 @export_group("Evaluation")
-@export var evaluation: Evaluation = Evaluation.LIVE:
-	set(v):
-		evaluation = v
-		emit_changed()
 
 @export_tool_button("Bake Salève Erosion") var _bake_btn = clear_cache
 
-var _cache: Dictionary = {}
-var _cache_key: int = 0
-var _dirty_since_bake: bool = false
-var _stale: bool = false
+
+## Names this node's own Bake button, for the freeze warning.
+func bake_label() -> String:
+	return "Bake Salève Erosion"
 
 
 func op() -> StringName:
@@ -164,19 +159,8 @@ func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.MASK])
 
 
-func clear_cache() -> void:
-	if _cache.is_empty() and not _stale and not _dirty_since_bake:
-		return
-	_cache.clear()
-	_dirty_since_bake = false
-	_stale = false
-	emit_changed()
-
-
 func node_warnings() -> PackedStringArray:
-	var w := PackedStringArray()
-	if _stale:
-		w.append("%s is FROZEN and input or parameters changed. Press Bake to re-solve." % display_name())
+	var w := super()
 	return w
 
 
@@ -212,7 +196,12 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 		"mix_factor": mix_factor,
 	}
 
-	return solve_gd(surface, p_gw, p_gh, p_rect, p)
+	# This node offered FROZEN, a Bake button and a stale flag over a cache that was never written:
+	# the solve ran on every evaluation whatever the setting said, and `_param_changed` set `_stale`
+	# on a freeze that did not exist. The freeze was UI. It is now the same one every other solver
+	# uses.
+	return solve_cached(solver_cache_key(p_gw, p_gh, [surface, dx_in, dy_in, mask_in]),
+			func(): return solve_gd(surface, p_gw, p_gh, p_rect, p))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -482,6 +471,5 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 
 
 func _param_changed() -> void:
-	if not _cache.is_empty():
-		_dirty_since_bake = true
+	mark_dirty_since_bake()
 	emit_changed()

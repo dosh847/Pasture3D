@@ -21,6 +21,13 @@ func op() -> StringName:
 	return &"smooth"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = float(passes)
+	return {"params": p}
+
+
 func role() -> Role:
 	return Role.FILTER
 

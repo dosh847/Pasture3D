@@ -83,6 +83,31 @@ func op() -> StringName:
 	return &"curve"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	var lut := PackedFloat32Array()
+	# Every name here was wrong: the node's are input_min/input_max/output_min/output_max/amount.
+	# `clamp_output` does not exist at all, and `bool(null)` THREW — so compiling any graph
+	# containing a Curve node raised "Nonexistent 'bool' constructor" rather than merely
+	# producing a wrong surface. The fifth argument of curve_grid() is the blend amount.
+	p[0] = input_min
+	p[1] = input_max
+	p[2] = output_min
+	p[3] = output_max
+	p[4] = amount
+	var c: Curve = curve
+	if c != null:
+		lut.resize(256)
+		for li in range(256):
+			lut[li] = c.sample_baked(float(li) / 255.0)
+	return {"params": p, "lut": lut}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 0, 1, 2, 3, 4])
+
+
 func role() -> Role:
 	return Role.FILTER
 

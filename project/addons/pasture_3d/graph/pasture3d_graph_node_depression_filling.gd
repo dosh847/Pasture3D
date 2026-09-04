@@ -36,6 +36,19 @@ func op() -> StringName:
 	return &"depression_filling"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = epsilon_slope
+	p[1] = fill_depth_limit
+	p[2] = amount
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 1, -1])
+
+
 func role() -> Role:
 	return Role.FILTER
 

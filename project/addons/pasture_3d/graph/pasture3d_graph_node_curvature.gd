@@ -35,6 +35,21 @@ func op() -> StringName:
 	return &"curvature"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	# `feature` and `strength` are not properties of the node; it has `mode`, `radius`, `contrast`,
+	# which is also curvature_solve()'s argument order.
+	p[0] = float(mode)
+	p[1] = float(radius)
+	p[2] = contrast
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 1, 2])
+
+
 func role() -> Role:
 	return Role.FILTER
 

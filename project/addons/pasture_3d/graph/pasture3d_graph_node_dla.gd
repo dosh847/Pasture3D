@@ -34,11 +34,10 @@
 # defaults to FROZEN with the same per-solver cache/stale/Bake as Erosion. In memory only.
 @tool
 class_name Pasture3DGraphNodeDLA
-extends Pasture3DGraphNode
+extends Pasture3DGraphSolverNode
 
 const ReliefDLA = preload("res://addons/pasture_3d/connectors/pasture3d_relief_dla.gd")
 
-enum Evaluation { LIVE, FROZEN }
 
 ## The massif's height, in metres — the amplitude of the finished mountain. The grown field is normalised
 ## [0,1], so this is a straight multiplier on it.
@@ -118,21 +117,37 @@ enum Evaluation { LIVE, FROZEN }
 		_param_changed()
 
 @export_group("Evaluation")
-## FROZEN (the default) grows once and serves the cache until Bake Mountain, raising a stale warning when a
-## growth input changed. Growth is expensive; LIVE regrows on EVERY evaluation and is only for a small
-## Resolution where a regrow is cheap enough to watch.
-@export var evaluation: Evaluation = Evaluation.FROZEN:
-	set(v):
-		evaluation = v
-		emit_changed()
 
 @export_tool_button("Bake Mountain") var _bake_btn = clear_cache
 
 # ---- Runtime freeze state (not serialised — the caches rebuild on demand) ----
-var _cache: Dictionary = {}        # input-hash -> [height, mask]
-var _cache_key: int = 0
-var _dirty_since_bake: bool = false
-var _stale: bool = false
+
+
+## This solve is heavy enough that FROZEN is the right default; the base defaults to LIVE.
+func _init() -> void:
+	evaluation = Evaluation.FROZEN
+
+
+## Names this node's own Bake button, for the freeze warning.
+func bake_label() -> String:
+	return "Bake Mountain"
+
+
+## The amplitude this evaluation was asked for, which may come from a wired port rather than the export.
+var _wired_amplitude: float = 0.0
+
+
+## A cached massif rescales exactly, so a change of amplitude alone does not need a re-growth: the DLA
+## shape is amplitude-independent and the height is linear in it. Every other solver serves its cache
+## unchanged, which is why this is a hook and not a branch in the shared freeze.
+func _on_cache_hit(p_cached: Variant) -> Variant:
+	var cached: Array = p_cached
+	var scaled_h := (cached[0] as PackedFloat32Array).duplicate()
+	if not is_equal_approx(_wired_amplitude, amplitude) and amplitude > 0.0:
+		var scale := _wired_amplitude / amplitude
+		for i in range(scaled_h.size()):
+			scaled_h[i] *= scale
+	return [scaled_h, cached[1]]
 
 
 func op() -> StringName:
@@ -185,27 +200,8 @@ func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.HEIGHT, PortType.MASK])
 
 
-## FROZEN means this node serves its own cache, which only the GDScript evaluator can do. See
-## Pasture3DGraphNode.blocks_native().
-func blocks_native() -> bool:
-	return evaluation == Evaluation.FROZEN
-
-
-## Drop the grown mountain so the next evaluation regrows. The explicit Bake.
-func clear_cache() -> void:
-	if _cache.is_empty() and not _stale and not _dirty_since_bake:
-		return
-	_cache.clear()
-	_dirty_since_bake = false
-	_stale = false
-	emit_changed()
-
-
 func node_warnings() -> PackedStringArray:
-	var w := PackedStringArray()
-	if _stale:
-		w.append("%s is FROZEN and a growth input changed since the bake — it is showing the mountain it "
-			% display_name() + "grew for the old settings. Press Bake Mountain to regrow.")
+	var w := super()
 	if amplitude <= 0.0:
 		w.append("%s has zero amplitude, so it deposits no height." % display_name())
 	return w
@@ -220,30 +216,10 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	if surface.size() != n:
 		surface = Pasture3DGraphOps.zeros(n)
 
-	if evaluation == Evaluation.FROZEN:
-		var key := _surface_hash(surface, p_gw, p_gh)
-		if not _cache.is_empty():
-			if _dirty_since_bake or key != _cache_key:
-				_set_stale(true)
-			var base_cached: Array = _cache[_cache_key]
-			var scaled_h := (base_cached[0] as PackedFloat32Array).duplicate()
-			if not is_equal_approx(a, amplitude) and amplitude > 0.0:
-				var scale := a / amplitude
-				for i in range(scaled_h.size()): scaled_h[i] *= scale
-			return [scaled_h, base_cached[1]]
-		var solved := _solve(surface, p_gw, p_gh, p_rect)
-		_cache = {}
-		_cache_key = key
-		_cache[key] = solved
-		_dirty_since_bake = false
-		_set_stale(false)
-		return solved
-
-	# LIVE
-	if not _cache.is_empty():
-		_cache.clear()
-	_set_stale(false)
-	return _solve(surface, p_gw, p_gh, p_rect)
+	# The wired amplitude is read on the way IN rather than passed through, because `_on_cache_hit` below
+	# needs it and the base's freeze knows nothing about this node's ports.
+	_wired_amplitude = a
+	return solve_cached(_surface_hash(surface, p_gw, p_gh), func(): return _solve(surface, p_gw, p_gh, p_rect))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -253,17 +229,8 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> 
 # ---- Internals -------------------------------------------------------------------------------------
 
 func _param_changed() -> void:
-	if not _cache.is_empty():
-		_dirty_since_bake = true
+	mark_dirty_since_bake()
 	emit_changed()
-
-
-func _set_stale(p_stale: bool) -> void:
-	if _stale == p_stale:
-		return
-	_stale = p_stale
-	if Engine.is_editor_hint():
-		emit_changed.call_deferred()
 
 
 ## Grow the cluster and sample the field onto the output grid. The growth itself runs on a configured
@@ -371,6 +338,4 @@ func _bilinear01(g: PackedFloat32Array, w: int, h: int, fx: float, fy: float) ->
 
 ## A cheap order-sensitive hash of the surface, the freeze staleness key.
 func _surface_hash(p_surface: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
-	var h := hash(p_gw) ^ (hash(p_gh) << 1)
-	h = h ^ hash(p_surface)
-	return h
+	return solver_cache_key(p_gw, p_gh, [p_surface])

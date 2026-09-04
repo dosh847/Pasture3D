@@ -16,6 +16,14 @@ func op() -> StringName:
 	return &"const_color"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	var cc: Color = value if value is Color else Color.WHITE
+	p[0] = cc.get_luminance()
+	return {"params": p}
+
+
 func role() -> Role:
 	return Role.GENERATOR
 

@@ -35,6 +35,18 @@ func op() -> StringName:
 	return &"flooding_uniform_level"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = water_level
+	p[1] = 1.0 if bool(clamp_terrain) else 0.0
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 0])
+
+
 func role() -> Role:
 	return Role.FILTER
 

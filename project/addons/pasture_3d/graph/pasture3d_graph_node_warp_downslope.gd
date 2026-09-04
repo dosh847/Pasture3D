@@ -42,6 +42,20 @@ func op() -> StringName:
 	return &"warp_downslope"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = displacement
+	p[1] = radius
+	p[2] = 1.0 if bool(reverse) else 0.0
+	p[3] = amount
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 3, -1])
+
+
 func role() -> Role:
 	return Role.FILTER
 

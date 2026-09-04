@@ -109,6 +109,26 @@ func op() -> StringName:
 	return &"strata"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	# `wavelength` and `dip_direction_deg` are not properties of the node (they are `band_height`
+	# and `dip_direction_degrees`), and the surviving values sat in the wrong argument slots.
+	p[0] = band_height
+	p[1] = hardness
+	p[2] = amount
+	p[3] = dip
+	p[4] = dip_direction_degrees
+	p[5] = break_amount
+	p[6] = break_size
+	p[7] = float(seed)
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 0, 1, 3, 4, 2])
+
+
 func role() -> Role:
 	return Role.FILTER
 

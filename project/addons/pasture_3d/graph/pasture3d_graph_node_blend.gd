@@ -31,6 +31,13 @@ func op() -> StringName:
 	return &"blend"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = float(mode)
+	return {"params": p}
+
+
 func role() -> Role:
 	return Role.COMBINER
 

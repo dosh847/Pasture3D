@@ -6,21 +6,24 @@
 class_name Pasture3DGraphNodeDevWarp
 extends Pasture3DGraphNode
 
-enum WarpType { SIMPLE, FRACTAL }
+# Spelled and numbered exactly as Pasture3DGraphNodeWarp spells them. The twin used to call value 0
+# SIMPLE while production called it SIMPLEX, so the two enums were a silent renaming of the same wire
+# value and no default could be stated in terms both would accept.
+enum WarpType { SIMPLEX = 0, FRACTAL = 1 }
 
-@export var warp_type: WarpType = WarpType.FRACTAL:
+@export var warp_type: WarpType = WarpType.SIMPLEX:
 	set(v):
 		warp_type = v
 		_dirty = true
 		emit_changed()
 
-@export_range(0.0001, 0.1, 0.0005, "exp") var frequency: float = 0.005:
+@export_range(0.0001, 0.1, 0.0005, "exp") var frequency: float = 0.01:
 	set(v):
 		frequency = maxf(v, 0.00001)
 		_dirty = true
 		emit_changed()
 
-@export_range(0.0, 200.0, 0.5) var strength: float = 25.0:
+@export_range(0.0, 200.0, 0.5) var strength: float = 20.0:
 	set(v):
 		strength = maxf(v, 0.0)
 		emit_changed()
@@ -31,7 +34,7 @@ enum WarpType { SIMPLE, FRACTAL }
 		_dirty = true
 		emit_changed()
 
-@export_range(0.0, 500.0, 1.0) var amplitude: float = 50.0:
+@export_range(0.0, 500.0, 1.0) var amplitude: float = 15.0:
 	set(v):
 		amplitude = maxf(v, 0.0)
 		emit_changed()

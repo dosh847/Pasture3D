@@ -67,6 +67,26 @@ func op() -> StringName:
 	return &"transform"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	var toff: Vector2 = offset if offset != null else Vector2.ZERO
+	var tpiv: Vector2 = pivot if pivot != null else Vector2.ZERO
+	p[0] = toff.x
+	p[1] = toff.y
+	p[2] = rotation_deg
+	p[3] = scale
+	p[4] = tpiv.x
+	p[5] = tpiv.y
+	p[6] = float(edge_mode)
+	p[7] = amount
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, -1, 2, 3, 7])
+
+
 func role() -> Role:
 	return Role.FILTER
 

@@ -206,7 +206,7 @@ func _e_driven_params_all_generators() -> void:
 		agree = maxf(agree, absf(uf[i] - hi[i]))
 	_assert(agree <= maxf(1e-2, 1e-3 * moved), "port 4 agrees across evaluators (max |native - unfolded| %.4f)" % agree)
 
-	# CONTROL: a port >= 4 that PARAM_PORT_MAP does not map is a grid input with nowhere to go, and must
+	# CONTROL: a port >= 4 that `native_param_ports()` does not map is a grid input with nowhere to go, and must
 	# still decline. terrain_bus_merge's port 4 carries a `flow` channel, not a scalar. Without this the
 	# relaxation above would read as "port >= 4 is fine now", which is not what was built.
 	var gb := Pasture3DTerrainGraph.new()

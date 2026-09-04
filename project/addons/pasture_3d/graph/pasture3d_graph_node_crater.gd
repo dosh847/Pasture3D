@@ -57,6 +57,27 @@ func op() -> StringName:
 	return &"crater"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	# `radius` and `center_offset` are not properties of Pasture3DGraphNodeCrater, so `_f` fell
+	# through to its defaults and the native path baked a fixed amplitude of 25.0 and a fixed
+	# terrace_steps of 0 into EVERY crater, whatever the node was set to. The names below are
+	# the node's own, and the order is crater_grid()'s signature.
+	p[0] = amplitude
+	p[1] = floor_depth
+	p[2] = rim_height
+	p[3] = rim_width
+	p[4] = ejecta_falloff
+	p[5] = floor_flatness
+	p[6] = float(terrace_steps)
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([0, 1, 2, 3])
+
+
 func role() -> Role:
 	return Role.GENERATOR
 

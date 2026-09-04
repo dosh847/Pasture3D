@@ -552,6 +552,10 @@ height 1e-6, flow 2e-7, sediment 2e-6, against 3e-3.
 
 ## P3 — The deferred bake driver hangs, freezes, or damages a neighbour
 
+**STATUS: LANDED 2026-09-04** — all six fixes as one change, gated by `BrushDeferredDriverGate`
+(`project/bench/BrushDeferredDriverGate.tscn`, 0 failures; every criterion verified red under a revert
+of its own fix, with its control staying green).
+
 Five defects in one subsystem — the `_bake_deferred` / `_solve_on_worker` driver in
 `pasture3d_terrain_brush.gd`. Grouped because they interlock: §3.2's abort is what makes §3.3's flag
 stick, and both are reached through the same teardown path. **Fix them as one change**; fixing any
@@ -719,6 +723,31 @@ the immediate fix should be written so it does not obstruct it.
 
 ### 3.7 Gate — `BrushDeferredDriverGate` (new)
 
+**As landed.** Five criteria (A–E), each with a control, all green; a single run with all five fixes
+reverted at once produced 7 failures spread across A, B, C, D and E, and no control moved. Four things
+the plan above did not anticipate:
+
+1. **The teardown criterion could not be "a later refresh bakes."** `_on_refresh_timer` opens with
+   `Engine.is_editor_hint()`, which is false in a headless run, so the path that actually bakes is
+   unreachable — this is the same wall §3.4's criterion hits. [B] therefore asserts on the driver's own
+   state (`_erosion_running` false, all three phase flags clear, and the run *claimable again* via
+   `_begin_deferred_run`), which is the decision the refresh would have read. [E] keeps a control by
+   moving it to the §14 branch, which IS reachable and has an observable effect: with a run in flight
+   the tick re-arms a real `SceneTreeTimer`. Without that, "the edit survived" would pass equally well
+   for a function that returned on its first line.
+2. **§3.5's cancel is not separately observable headless** — the graph phase needs a real solve and a
+   frame loop. [C] gates the mechanism instead: `_worker_body` with three states and a chunk callable
+   that sets `_cancel` while state 0 is being worked. Reverting the top-of-loop test works all three,
+   which is exactly the defect (the chunk callables all return true on their first call, so the inner
+   test was never read).
+3. **`frozen` is not a property.** The compile reads `m.evaluation == Pasture3DNode.Evaluation.FROZEN`;
+   a fixture setting `ero.frozen = true` fails at runtime rather than compiling an unfrozen step, so it
+   would have looked like a gate bug rather than a wrong fixture.
+4. **A GDScript lambda captures by value.** [A]'s first draft assigned `evaluate()`'s result to a
+   captured local inside the worker and read an empty array back — which passes the "returns zeros"
+   assertion for the wrong reason, and would have kept passing with the guard deleted. The result comes
+   back through an `Array` box now.
+
 Headless gates **cannot see scheduling** — `_schedule_refresh` is editor-only — so assert on the
 returned decision, not on `_full_dirty`. Criteria:
 
@@ -735,6 +764,11 @@ returned decision, not on `_full_dirty`. Criteria:
 ---
 
 ## P4 — Caches serve data from another node, place, or parameter value
+
+**STATUS: LANDED 2026-09-04** — gated by `GraphNodeCachingGate` (extended with criteria F–I) and the
+new `GraphNodeParamGate`. Both green; F, G, H and I each verified red under a revert of their own fix
+with their controls unmoved, and the param sweep verified red by stripping the setters back off one dev
+class.
 
 Independent of P1–P3. Grouped because all four are the same failure shape — **a cache key that omits
 something the cached value depends on** — and because the last of them is the general fix.
@@ -765,6 +799,13 @@ The 20: `dla`, `erosion`, `erosion_hydraulic`, `erosion_thermal`, `hydraulic_par
 method `clear_cache()` to a `final`-by-convention entry point that calls a `_clear_solver_cache()`
 hook, so a subclass overrides the hook and cannot skip the base work. This is the cheapest half of
 P6 §6.3 and should land here.
+
+**Landed as:** only the second half. Asking every override to call `super` and ALSO adding the hook
+would leave the first rule to be remembered forever with nothing enforcing it, so the twenty overrides
+were renamed `clear_cache()` → `_clear_solver_cache()` outright and the base `clear_cache()` now does
+the buffer reset and then calls the hook. No caller changed: the twenty `@export_tool_button` "Bake"
+buttons, the graph editor's canvas action, and `_evict_cache_if_needed` all still call `clear_cache()`
+and now get both halves. The overrides keep their early-out and their `emit_changed()` unaltered.
 
 ### 4.2 The graph modifier serves another location's grid
 
@@ -797,6 +838,26 @@ does this.
 **world origin within a tolerance**, and re-project by stored world bounds rather than stretching by
 dimension. Store `min_x`, `min_z`, `vs` in the entry so re-projection is possible at all.
 
+**Landed as:** the tolerance was kept, and no new fields were needed — the extent key already IS
+`ox,oz,gw,gh` in cells, so both sides of the comparison now parse through one `_parse_extent` helper
+(they used to parse by different rules, which is how the origin got dropped from one of them). A
+candidate must match `gw`/`gh` exactly and sit within `ORIGIN_TOLERANCE_CELLS` (2) of the asking origin;
+the re-projection is then a whole-cell `_shift_grid`, not a resize, because both grids share
+`vertex_spacing` and their lattices already align. `_resample_grid` is deleted along with the branch
+that was its only caller.
+
+Two things worth keeping:
+
+1. **A re-projected entry is deliberately NOT written back under the asking key.** Memoising it makes it
+   the source for the next re-projection, so a spline dragged two cells at a time would walk the
+   borrowed grid arbitrarily far from where it was solved, one individually-tolerable step after
+   another. Every shift is measured from the entry that was actually solved. (An entry whose origin
+   rounds to the same cell IS memoised — there is nothing to re-project.)
+2. The old exact-dimension branch was looser still than the section above describes. Graph entries are
+   stored as `{key, grid}`, so `entry.get("gw", gw) == gw` compared `gw` against a default of `gw` and
+   was trivially true; only `store_cache`'s later stamping of `gw`/`gh` from the key gave it any teeth
+   at all.
+
 ### 4.3 Dev node parameter edits never invalidate anything
 
 `_compute_node_inputs_hash`
@@ -822,6 +883,21 @@ will recur. Add a `GraphNodeParamGate` that reflects over every registered node 
 `@export` property in place, and asserts `_dirty_revision` moved — a class that forgets a setter then
 fails at gate time rather than at bake time.
 
+**Landed as written**, plus a base `_param_changed()` — it did not exist, solver nodes each declared
+their own and the eight dev classes had nowhere to call — and 46 setters across the eight classes. The
+reflection gate then found one thing no amount of reading those eight would have:
+
+> **`const_curve` overrode `_init()` without calling `super()`.** The base `_init` is the ONLY place
+> `changed` is wired to `_on_node_changed_bump_revision`, so this node emitted `changed` correctly from
+> every setter AND from its curve's own signal, and `_dirty_revision` still never moved. It was
+> permanently clean and served its first grid forever — the same symptom as the eight, from an
+> unrelated cause, in a node nobody had flagged. Fixed with `super()`.
+
+Sweep numbers: 690 properties mutated across the whole registry, 0 failures. Presentation state
+(`graph_position`, `collapsed`, `preview_on`, `label`) is excluded by name and with a reason — a node
+moved on the canvas must NOT re-bake the terrain, so a bump there would be the defect. `muted` is not
+excluded: it changes the result, and it invalidates through `_compute_node_inputs_hash` as well.
+
 ### 4.4 Two more keys that omit their dependencies
 
 - **The native path stores the output node's cache with an empty `inputs_of`.**
@@ -842,6 +918,15 @@ fails at gate time rather than at bake time.
   unchanged so nothing re-bakes and nothing warns. `mod_noise.gd:17-22` and `mod_relief.gd:28-33`
   both connect/disconnect their sub-resource's `changed` to `_touch` — copy that.
 
+  **Landed as:** the maps yes, the aux no — because the native call returns port 0 and nothing else,
+  so there is no real `aux` to pass. `{}` does not mean "unknown" to `get_cached_aux()`; it means "there
+  are none". The branch therefore **declines to store a multi-output node at all**
+  (`output_count() <= 1` guards the store), so the clobber is unrepresentable rather than merely
+  corrected, and the next evaluate recomputes — slower and true. The maps come from `_fold_plan(out)`,
+  which is topology-only and served from `_fold_cache`, so asking for it costs nothing after the first
+  call. Criterion [I] measures the map half; the aux half has no criterion, because the state it would
+  assert on can no longer be reached.
+
 > **Also fix here, since it is the same review's finding and the same file:** the 20 solver nodes of
 > §4.1 use **four incompatible key rules**. Ten use `hash(gw) ^ (hash(gh) << 1) ^ hash(surface)`;
 > `mudslide.gd:217` folds the mask; `erosion_thermal.gd:180` takes a hardness array; and
@@ -859,9 +944,37 @@ fails at gate time rather than at bake time.
 | Every registered node class: mutating each `@export` bumps `_dirty_revision` | Revert §4.3 → the eight dev classes fail. This gate is the general control. |
 | Lake Flooding frozen at 512×128 does not serve its 128×512 cache | Revert §4.4 → it does. |
 
+**As landed.** `GraphNodeCachingGate` grew criteria **[F]** (§4.1), **[G]** (§4.2), **[H]** (§4.4 keys)
+and **[I]** (§4.4 native store); `GraphNodeParamGate` is new and covers §4.3. Four notes:
+
+- **The existing [E] could never have caught §4.1.** Its fixture is Noise / Smooth / Terrace, none of
+  which override `clear_cache()` — the defect lived only in the twenty that did. [F] uses an Erosion
+  node and asserts the *number* `get_cache_size_bytes()` reports, before and after.
+- **[H] tests `solver_cache_key` rather than Lake Flooding.** The four incompatible key rules were
+  unified onto one base helper taking the dimensions plus the grids a solve actually depends on, so the
+  claim now belongs to the helper. Each node keeps its own dependency SET — Mudslide still folds its
+  mask, Thermal its hardness — because that variation was correct; it was the rule for turning the set
+  into a key that was not.
+- **[G] carries three assertions the one-line criterion above does not:** that the miss is not written
+  back into the cache, that the ±2-cell drag case is served as a whole-cell SHIFT (checked against
+  named source cells, so a stretch fails), and that a dimension change is a miss.
+- **`GraphNodeParamGate` needed its own "the sweep is capable of failing" section**, because [A] passing
+  proves the registry is clean and not that the sweep would notice if it were not. It also puts a floor
+  under how many properties it actually moved (690 against a floor of 120): a skip list that grew until
+  it swallowed the registry would otherwise report zero failures for the worst possible reason.
+
+**Pre-existing, and not a P4 regression:** `GraphHydraulicAccelerationGate` [A2] is red. P2's §2.6 fix
+improved it by roughly 1600× — reverting the GDScript twin to its pre-P2 state moves the 15-iteration
+height divergence from 0.00079 m back to 1.28 m — but the residual is still over the gate's 0.0002 m
+tolerance. It was failing before P2 and it is failing less now.
+
 ---
 
 ## P5 — Editor lifetime, signals and undo
+
+**STATUS: LANDED 2026-09-04** — gated by the new `GraphEditorLifetimeGate` (criteria B-G; there is no A,
+see below). Green, with B, C, D, F and G each verified red under a revert of their own fix and their
+controls unmoved.
 
 Lower severity: annoyance, leaks and spurious work, not wrong terrain. Independent of P1–P4.
 
@@ -886,6 +999,21 @@ convention. **Fix:** hold `var cb := _on_node_changed.bind(n)` in a local and us
 `affects_output` to **false** when `n_idx == -1` — that case is provably "changes nothing the bake
 would see".
 
+**Landed as:** the second half, which is a real defect and is gated as **[B]**. The first half is **not a
+defect on this engine version**, and the gate has no criterion for it:
+
+> `Signal.is_connected` matches on object + method and **ignores the binds**. Probing the unbound
+> `_on_node_changed` therefore DID find the bound entry, so the disconnect branch worked and nothing was
+> re-connected twice — no ERR_INVALID_PARAMETER, no node left wired after removal. Measured directly on
+> 4.7: connect `h.bind(self)`, then `is_connected(h)` is `true` while `h.bind(self) == h` is `false`.
+> Callable `==` and `Signal.is_connected` use different rules.
+
+The `var cb := ...` edit landed anyway, as clarity — the two rules being different is exactly the sort of
+thing worth not relying on — but it fixes nothing, so it gets no criterion. The same reading IS right
+about `_connect_spline` in §5.4, where the object and method are identical and only the bind differs;
+that one is gated as [F]. A criterion that cannot fail is not a criterion, so [A] was written, run
+against a revert, found green, and deleted.
+
 ### 5.2 `_init`'s self-capturing lambda (**PLAUSIBLE — verify before claiming a leak**)
 
 [terrain_graph.gd:205](project/addons/pasture_3d/graph/pasture3d_terrain_graph.gd:205) —
@@ -901,6 +1029,11 @@ report it as a confirmed leak. The fix is trivial and correct either way: give t
 does. If someone wants the confirmation, `Performance.get_monitor(OBJECT_COUNT)` across repeated
 scene reloads will show it.
 
+**Landed as written** (a `_bump_revision()` method), and the leak is still not claimed. **[C]** asserts
+the shape — that `changed` carries the named method and no self-bound lambda — because the shape is what
+regresses; its control emits `changed` and requires `content_key()` to move, so [C] cannot be satisfied by
+deleting the connection.
+
 ### 5.3 A null node in the eval order crashes instead of degrading
 
 `_eval_order`'s ancestor walk ([~1981](project/addons/pasture_3d/graph/pasture3d_terrain_graph.gd:1981))
@@ -912,6 +1045,11 @@ a connection from the output** (a `.tres` whose node script failed to load — a
 dev-flag scripts absent from a build). `_eval_order_multi` (1484) has the identical gap.
 
 **Fix.** Null-check in both walks and degrade to the flat zero field `evaluate` already promises.
+
+**Landed as written**, in both `_eval_order` and `_eval_order_multi`. Gated as **[D]**, whose control
+runs the same fixture with the node present and requires a non-flat field first — otherwise "all zeros"
+is what this graph does anyway and the criterion measures nothing. Under a revert [D] does not merely
+fail, it prints the `input_count` on `Nil` crash the section describes.
 
 ### 5.4 Three smaller editor defects
 
@@ -944,14 +1082,53 @@ dev-flag scripts absent from a build). `_eval_order_multi` (1484) has the identi
   instance. Also note the `focus_entered` connect is in `_init` while its disconnect is in
   `_exit_tree`, so focus handling is dead after the first tree exit — move both to `_enter_tree`.
 
+  **Landed as written** — both connects moved to `_enter_tree`, the lambda replaced with a named
+  `_on_inspector_mouse_entered`, and a matching disconnect added to `_exit_tree`. **No criterion:**
+  `EditorInterface.get_inspector()` does not exist outside the editor, so a headless gate would assert on
+  an absent object. Named in the gate header rather than left as a silent gap.
+
+  **Landed as written.** Gated as **[G]**, with the good case first: a fresh height layer must resolve to
+  a real id before a CONTROL layer under the same owner is required to resolve to -1, or [G] cannot tell
+  "refused the wrong type" from "this brush cannot resolve a layer at all".
+
+  **Landed as** one relay OBJECT per Path3D rather than one bound Callable per Path3D — two relays are
+  two different objects, so their Callables are unequal under both rules. Gated as **[F]**, counting
+  DISTINCT receivers on the shared curve (the brush also connects on child entry, so the absolute count
+  has a baseline), with a control that re-connects both splines and requires the total not to move —
+  bind-count equality was also what kept `_connect_spline` idempotent, and it is called again from
+  `_on_path_curve_changed` and on every tree entry.
+
+  **Landed as written.** Gated as **[E]**, and not through the editor: `EditorUndoRedoManager` is not
+  reachable headless, so [E] asserts the claim the undo action rests on — restoring `nodes`,
+  `connections` and `output_node` alone does NOT bring the soloed node back, and adding `output_override`
+  does. The first of those two is the control: if a three-property undo already restored the output, the
+  fourth property would be untested.
+
 ---
 
 ## P6 — The structural debt that caused P1, P2 and P4
+
+**STATUS: ALL OF P6 LANDED 2026-09-04** on `fix/graph-gpu-cpu-divergence`. Gated by three new gates — `GraphOpVocabularyGate`, `GraphSlotWidgetGate`, `GraphDevTwinGate` —
+plus `GraphSolverFreezeGate`, which is the only one not fully green; see 6.3 below for the single
+criterion it holds open and why that finding is deliberately not fixed here.
+
 
 **Land last.** Each item below is the general form of a bug already fixed above; doing these first
 would rebase every earlier phase, and doing them never means the same bugs return.
 
 ### 6.1 The op vocabulary lives in five host-side tables
+
+**Landed as** `Pasture3DUtil.graph_op_ids()` (a bound Dictionary of op tag -> `GraphCellOpType`, the enum
+itself staying the single source) plus three new overrides on `Pasture3DGraphNode` — `native_lower()`,
+`native_param_ports()`, `native_out_count()`. All five host tables are deleted; `_lower_node_op` is two
+lookups. The 59 translated arms were checked against a pre-refactor capture of every op's marshalled
+block, and separately against the arms' own source, because a runtime snapshot only exercises defaults
+and would hide a swap between two properties that share one.
+
+Not done as specified: the spec asked to make mute "op 12 and op 3 — pick one". They are two honest
+vocabularies, not a drift. The cell kernel implements only ops 1-4 and has no passthrough, so a muted
+cell node lowers as BLEND-add-zero while a muted grid node lowers as OUTPUT. Both now name themselves
+through `op_ids()` rather than as literals.
 
 `Pasture3DGraphNode` subclasses own an op but declare **none** of its wiring. Instead, five tables in
 `pasture3d_terrain_graph.gd` restate it, keyed by op string:
@@ -981,6 +1158,11 @@ op `12` at line 1244 and op `3` at 953 — two literals for one concept; pick on
 
 ### 6.2 Nine `Pasture3DGraphGPU` singletons, each with its own RenderingDevice
 
+**Landed as** one `graph_gpu()` accessor and one `dispatch_or_cpu()` routing template in
+`src/pasture_3d_graph_gpu.cpp`. A scene touching the seven geo primitives plus hydraulic plus the graph
+paid nine `create_local_rendering_device()` calls and nine grid-shader compiles, seven never dispatched,
+each holding VRAM until static destruction — which runs after `RenderingServer` may already be gone.
+
 `grep -c "static Pasture3DGraphGPU s_gpu" src/pasture_3d_graph_gpu.cpp` → **9** (lines 2089, 2102,
 2116, 2166, 2212, 2261, 2313, 2360, 2406), each a function-local static. Only line 2116 carries the
 comment justifying *one*: "persistent: the local RD + shader compile once across calls."
@@ -998,6 +1180,30 @@ plus one `dispatch_or_cpu(...)` wrapper holding the routing rule. The class is a
 initialised and stateless between calls, so nothing else changes.
 
 ### 6.3 Twenty solver nodes hand-roll a parallel cache
+
+**Landed as** `Pasture3DGraphSolverNode`, an intermediate class between `Pasture3DGraphNode` and the
+twenty leaves, holding the enum, the `evaluation` export, the four state vars, `blocks_native()`,
+`_clear_solver_cache()`, `_set_stale()`, the stale warning and the hit-miss flow as
+`solve_cached(key, solve)`. A leaf now writes two things: its own dependency set, and its solve. Net
+-582 lines across 21 files. `_on_cache_hit()` is the one hook, and DLA is its only user — a cached massif
+rescales exactly with amplitude, so a change of amplitude alone does not need a re-growth.
+
+`GraphSolverFreezeGate` measures it: [A] the protocol is declared once, [B] FROZEN holds its solve across
+a change LIVE provably responds to and Bake picks it up, [C] a stale freeze says so, [D] FROZEN blocks
+native and LIVE does not, [E] a node offering the freeze has a solve to freeze. Before the refactor
+[A] failed on 20 files with 0 inheriting, [C] could not run at all, and [D] failed on nine.
+
+**[E] is still failing, and is left failing on purpose.** `[Dev/GD] Particle Erosion` and `[Dev/GD]
+Stream-Log Erosion` define a `solve_oracle` and never wire it to `eval_grid`, so dropping either into a
+graph passes the input straight through: the node does nothing, and its Evaluation group, FROZEN switch
+and Bake button are decoration over a solve that never runs. They also expose almost no parameters
+(`seed`, and nothing at all), so wiring them means inventing an export surface for two nodes and
+deciding whether they should be palette nodes or gate-only oracles. That is a bigger question than 6.3
+and is not this section's to answer. [B] and [C] skip them and [E] names them, so one defect is reported
+once.
+
+Also found and fixed in passing: `[Dev/GD] Salève Erosion` had the same hollow freeze, but it does have
+its own `eval_grid_channels`, so it is now wired to the shared cache.
 
 Beyond §4.1's missing `super()`: `enum Evaluation { LIVE, FROZEN }` plus `_cache` / `_cache_key` /
 `_stale` / `_dirty_since_bake` / `_set_stale` / `clear_cache` / `blocks_native` and an identical
@@ -1026,7 +1232,31 @@ keyed by the canonical `_compute_node_inputs_hash`. The subclass then supplies o
   above. Fold it into the protocol: `m.wants_seed_surface()` / `m.take_seed_surface(out)`, default
   false/no-op.
 
+**Landed as** six virtuals on `Pasture3DNode` (`pasture3d_brush_modifier.gd`) — `apply_field`,
+`forces_gdscript`, `make_pending`, `pending_queue`, `wants_seed_surface`, `take_seed_surface` — each
+defaulting to the behaviour a modifier that does not override it has *said* it wants. `_apply_field_step`
+is now one line, `_stack_forces_gdscript` one loop, and `_commit_modifier_caches` files an entry under the
+queue the modifier names, with a `push_error` when that name is unknown: the one thing the old type switch
+could not do was complain. `blk` and `step` are one dictionary (the native rasteriser looks every key up
+by name and never enumerates, so the extra keys are inert on that side).
+
+The two queues were KEPT rather than merged into one `_pending`: merging would restructure the deferred
+driver's phase C, which steps erosion and graph work differently, and that is not what this section is
+about. `_pending_queues()` is a function and not a held dictionary, because the driver reassigns both
+lists to fresh arrays when it takes a batch.
+
+Gated by `BrushGenericDispatchGate` — [A] and [B] use modifier classes defined inside the gate, which the
+brush cannot possibly have a branch for, and which under the old code would both have been ignored in
+silence.
+
 ### 6.5 `_append_slot_inline_widget` restates every `@export_range`
+
+**Landed as** a `SLOT_SPINS` table naming only which property each port edits, plus `_spin_from_hint()`
+reading the range from the property's own `@export_range` at build time. 99 insertions, 437 deletions.
+A property with no hint gets an unbounded box, not an invented limit. Measured across the 41 pairs that
+could be compared automatically, 37 had drifted and 16 were the destructive kind. Gated by
+`GraphSlotWidgetGate`, whose [C] rides the spec's own example: warp `frequency` 0.3 survives display and
+write-back, where the old hardcoded 0.1 cap rewrote it.
 
 [graph_editor.gd:878-1420](project/addons/pasture_3d/src/graph_editor.gd:878) is 542 lines of 91
 near-identical SpinBox blocks hardcoding min/max/step that the nodes already declare. They have
@@ -1042,6 +1272,22 @@ authored at frequency 0.3 displays as 0.1 and is **written back as 0.1** on any 
 parameters (`p_index`, `p_port_name`) are never read and go with it.
 
 ### 6.6 Dev/production node pairs have drifted
+
+**Landed as** the parameter half only: 18 defaults across 8 pairs were aligned to production, gated by
+`GraphDevTwinGate` [A] (221 shared parameters, 32 pairs). [B] asserts the twins are still two
+implementations, because the cheapest way to pass [A] would be to make the dev class extend the
+production one — which would delete the oracle while turning the gate green.
+
+The blocking find was not a default at all: `[Dev/GD] Warp` called enum value 0 `SIMPLE` where production
+calls it `SIMPLEX`. The two enums were a silent renaming of the same wire value, so no shared default
+could even be written down. Renamed with explicit values.
+
+**Not done: the structural half.** The spec also asks for a shared per-op base holding the exports and
+the params dict, with the dev subclass overriding only `op()`, `display_name()`, `category()` and the
+eval body. Not attempted, for the same reason [B] exists: the risk is that the twin inherits
+production's `eval_grid` and the oracle quietly stops being a second implementation. Worth doing, but it
+needs the base to be shaped so that inheriting the evaluation is unrepresentable rather than merely
+discouraged.
 
 The 32 `[Dev/GD]` pairs duplicate ~90 lines of port metadata and parameter marshalling each. The
 spec's separation covers the **execution**, not the port schema or the params dict — and 7 pairs have

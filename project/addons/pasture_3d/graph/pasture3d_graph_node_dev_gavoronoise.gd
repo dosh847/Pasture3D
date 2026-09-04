@@ -17,16 +17,55 @@ extends Pasture3DGraphNode
 
 const U32 := 0xffffffff
 
-@export var amplitude: float = 60.0
-@export var frequency: float = 0.002
-@export var octaves: int = 4
-@export var seed: int = 0
-@export var angle_deg: float = 0.0
-@export_range(0.0, 1.0, 0.01) var angle_spread: float = 1.0
-@export var slope_strength: float = 1.0
-@export var branch_strength: float = 2.0
-@export_range(0.0, 1.0, 0.01) var z_cut_min: float = 0.2
-@export_range(0.0, 1.0, 0.01) var z_cut_max: float = 1.0
+@export var amplitude: float = 60.0:
+	set(v):
+		amplitude = v
+		_param_changed()
+
+@export var frequency: float = 0.002:
+	set(v):
+		frequency = v
+		_param_changed()
+
+@export var octaves: int = 4:
+	set(v):
+		octaves = v
+		_param_changed()
+
+@export var seed: int = 0:
+	set(v):
+		seed = v
+		_param_changed()
+
+@export var angle_deg: float = 0.0:
+	set(v):
+		angle_deg = v
+		_param_changed()
+
+@export_range(0.0, 1.0, 0.01) var angle_spread: float = 1.0:
+	set(v):
+		angle_spread = v
+		_param_changed()
+
+@export var slope_strength: float = 1.0:
+	set(v):
+		slope_strength = v
+		_param_changed()
+
+@export var branch_strength: float = 2.0:
+	set(v):
+		branch_strength = v
+		_param_changed()
+
+@export_range(0.0, 1.0, 0.01) var z_cut_min: float = 0.2:
+	set(v):
+		z_cut_min = v
+		_param_changed()
+
+@export_range(0.0, 1.0, 0.01) var z_cut_max: float = 1.0:
+	set(v):
+		z_cut_max = v
+		_param_changed()
 
 
 func op() -> StringName:

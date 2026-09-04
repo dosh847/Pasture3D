@@ -85,6 +85,26 @@ func op() -> StringName:
 	return &"gavoronoise"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = amplitude
+	p[1] = frequency
+	p[2] = float(octaves)
+	p[3] = float(seed)
+	p[4] = angle_deg
+	p[5] = angle_spread
+	p[6] = slope_strength
+	p[7] = branch_strength
+	p[9] = z_cut_min
+	p[10] = z_cut_max
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([0, 4, 1])
+
+
 func role() -> Role:
 	return Role.GENERATOR
 

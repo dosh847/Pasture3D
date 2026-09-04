@@ -70,6 +70,23 @@ func op() -> StringName:
 	return &"mountain_range_radial"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = float(seed)
+	p[1] = elevation
+	p[2] = kw_x
+	p[3] = kw_y
+	p[4] = half_width
+	p[5] = angle_spread_ratio
+	p[6] = core_size_ratio
+	p[7] = float(octaves)
+	p[8] = weight
+	p[9] = persistence
+	p[10] = lacunarity
+	return {"params": p}
+
+
 func display_name() -> String:
 	return "Mountain Range (Radial)"
 

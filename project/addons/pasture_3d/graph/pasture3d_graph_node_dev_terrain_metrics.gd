@@ -14,24 +14,63 @@ extends Pasture3DGraphNode
 
 enum Which { RELATIVE_ELEVATION, SMOOTH_FILL, RECAST_CLIFF }
 
-@export var which: Which = Which.RELATIVE_ELEVATION
+@export var which: Which = Which.RELATIVE_ELEVATION:
+	set(v):
+		which = v
+		_param_changed()
 
 ## RelativeElevation.
-@export var radius: float = 200.0
-@export var output_units: int = 0
+@export var radius: float = 200.0:
+	set(v):
+		radius = v
+		_param_changed()
+
+@export var output_units: int = 0:
+	set(v):
+		output_units = v
+		_param_changed()
 
 ## SmoothFill.
-@export var mode: int = 0
-@export var k: float = 0.1
+@export var mode: int = 0:
+	set(v):
+		mode = v
+		_param_changed()
+
+@export var k: float = 0.1:
+	set(v):
+		k = v
+		_param_changed()
 
 ## RecastCliff.
-@export var talus_angle_deg: float = 40.0
-@export var amplitude: float = 10.0
-@export var gain: float = 2.0
-@export var direction_deg: float = -1.0
-@export var direction_spread_deg: float = 60.0
+@export var talus_angle_deg: float = 40.0:
+	set(v):
+		talus_angle_deg = v
+		_param_changed()
 
-@export_range(0.0, 1.0, 0.01) var amount: float = 1.0
+@export var amplitude: float = 10.0:
+	set(v):
+		amplitude = v
+		_param_changed()
+
+@export var gain: float = 2.0:
+	set(v):
+		gain = v
+		_param_changed()
+
+@export var direction_deg: float = -1.0:
+	set(v):
+		direction_deg = v
+		_param_changed()
+
+@export var direction_spread_deg: float = 60.0:
+	set(v):
+		direction_spread_deg = v
+		_param_changed()
+
+@export_range(0.0, 1.0, 0.01) var amount: float = 1.0:
+	set(v):
+		amount = v
+		_param_changed()
 
 ## SmoothFill's second channel, filled in by solve(). Normalised, like the native node's.
 var last_deposition: PackedFloat32Array = PackedFloat32Array()

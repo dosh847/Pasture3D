@@ -26,11 +26,10 @@
 # erosion modifier's cache.
 @tool
 class_name Pasture3DGraphNodeScree
-extends Pasture3DGraphNode
+extends Pasture3DGraphSolverNode
 
 const ReliefMaterial = preload("res://addons/pasture_3d/connectors/pasture3d_relief_material.gd")
 
-enum Evaluation { LIVE, FROZEN }
 
 ## Size of the rubble texture, in metres. Scree is a thin skin over the rock beneath it.
 @export_range(0.0, 20.0, 0.01, "or_greater") var amplitude: float = 2.0:
@@ -70,28 +69,39 @@ enum Evaluation { LIVE, FROZEN }
 		_param_changed()
 
 @export_group("Evaluation")
-## LIVE re-solves on every evaluation; FROZEN solves once and serves the cache until Bake Scree, raising a
-## stale warning when the surface or params changed since. Scree is cheap, so LIVE is the sensible default;
-## FROZEN is the pattern the heavier solvers use.
-@export var evaluation: Evaluation = Evaluation.LIVE:
-	set(v):
-		evaluation = v
-		emit_changed()
 
 @export_tool_button("Bake Scree") var _bake_btn = clear_cache
 
 # ---- Runtime freeze state (not serialised — the caches rebuild on demand) ----
-var _cache: Dictionary = {}        # input-hash -> [height_grid, shed_grid]
-var _cache_key: int = 0            # the input hash the cache was solved for
-var _dirty_since_bake: bool = false
-var _stale: bool = false
 # Grain noise, rebuilt only when grain_size / seed change.
 var _noise: FastNoiseLite = null
 var _noise_dirty: bool = true
 
 
+## Names this node's own Bake button, for the freeze warning.
+func bake_label() -> String:
+	return "Bake Scree"
+
+
 func op() -> StringName:
 	return &"scree"
+
+
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = amplitude
+	p[1] = grain_size
+	p[2] = downslope_streak
+	p[3] = toe_deposition
+	p[4] = min_slope_degrees
+	p[5] = slope_falloff_degrees
+	p[6] = float(seed)
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 0, 1, 4])
 
 
 func role() -> Role:
@@ -140,27 +150,8 @@ func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.HEIGHT, PortType.MASK])
 
 
-## FROZEN means this node serves its own cache, which only the GDScript evaluator can do. See
-## Pasture3DGraphNode.blocks_native().
-func blocks_native() -> bool:
-	return evaluation == Evaluation.FROZEN
-
-
-## Drop the cached solve, so the next evaluation re-solves. This is the explicit Bake.
-func clear_cache() -> void:
-	if _cache.is_empty() and not _stale and not _dirty_since_bake:
-		return
-	_cache.clear()
-	_dirty_since_bake = false
-	_stale = false
-	emit_changed()
-
-
 func node_warnings() -> PackedStringArray:
-	var w := PackedStringArray()
-	if _stale:
-		w.append("%s is FROZEN and the surface or its parameters changed since the bake — it is showing "
-			% display_name() + "the scree it solved for the old shape. Press Bake Scree to re-solve.")
+	var w := super()
 	if amplitude <= 0.0 and toe_deposition <= 0.0:
 		w.append("%s: both Amplitude and Toe Deposition are 0, so no talus accumulates." % display_name())
 	return w
@@ -177,25 +168,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	if surface.size() != n:
 		surface = Pasture3DGraphOps.zeros(n)
 
-	if evaluation == Evaluation.FROZEN:
-		var key := _surface_hash(surface, p_gw, p_gh)
-		if not _cache.is_empty():
-			if _dirty_since_bake or key != _cache_key:
-				_set_stale(true)
-			return _cache[_cache_key]
-		var solved := _solve_dynamic(surface, p_gw, p_gh, p_rect, a, gs, ms)
-		_cache = {}
-		_cache_key = key
-		_cache[key] = solved
-		_dirty_since_bake = false
-		_set_stale(false)
-		return solved
-
-	# LIVE
-	if not _cache.is_empty():
-		_cache.clear()
-	_set_stale(false)
-	return _solve_dynamic(surface, p_gw, p_gh, p_rect, a, gs, ms)
+	return solve_cached(_surface_hash(surface, p_gw, p_gh), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, a, gs, ms))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -207,18 +180,8 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> 
 
 func _param_changed() -> void:
 	_noise_dirty = true
-	if not _cache.is_empty():
-		_dirty_since_bake = true
+	mark_dirty_since_bake()
 	emit_changed()
-
-
-func _set_stale(p_stale: bool) -> void:
-	if _stale == p_stale:
-		return
-	_stale = p_stale
-	# The warning list changed; refresh it without re-solving (this runs DURING a bake).
-	if Engine.is_editor_hint():
-		emit_changed.call_deferred()
 
 
 func _wobble() -> FastNoiseLite:
@@ -306,6 +269,4 @@ func cell_to_world_local(p_ix: int, p_iz: int, p_gw: int, p_gh: int, p_rect: Rec
 ## A cheap order-sensitive hash of the surface, the freeze staleness key: a different upstream surface
 ## produces a different key, so a frozen solve knows it is looking at new ground.
 func _surface_hash(p_surface: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
-	var h := hash(p_gw) ^ (hash(p_gh) << 1)
-	h = h ^ hash(p_surface)
-	return h
+	return solver_cache_key(p_gw, p_gh, [p_surface])

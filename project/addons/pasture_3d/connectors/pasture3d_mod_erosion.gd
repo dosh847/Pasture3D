@@ -71,11 +71,26 @@ extends Pasture3DNode
 @export_group("Erodability")
 ## Optional hardness map across the brush's footprint: dark erodes less, light erodes more. Sampled by
 ## luminance and remapped into `erodability_range`. Unassigned = uniform rock.
+## Reassignment used to be the only thing that dropped the LUT, so a texture EDITED IN PLACE — a
+## NoiseTexture2D whose frequency moved, or a PNG reimported from disk — left `_lut_cache` holding the
+## first bake's hardness and `_lut()` short-circuits on any non-empty cache. Nothing re-baked and nothing
+## warned either, because `to_params()["erodability_lut"]` was unchanged too. Following the sub-resource's
+## own `changed`, as `Pasture3DNodeNoise.noise` and `Pasture3DNodeRelief` both already do, is the fix.
 @export var erodability_map: Texture2D:
 	set(v):
+		if erodability_map != null and erodability_map.changed.is_connected(_on_erodability_changed):
+			erodability_map.changed.disconnect(_on_erodability_changed)
 		erodability_map = v
-		_lut_cache = []
-		_touch()
+		if erodability_map != null and not erodability_map.changed.is_connected(_on_erodability_changed):
+			erodability_map.changed.connect(_on_erodability_changed)
+		_on_erodability_changed()
+
+
+## The map's own content moved. Drop the memoised LUT — `_lut()` will not re-read the texture while the
+## cache is non-empty — and invalidate, exactly as a reassignment does.
+func _on_erodability_changed() -> void:
+	_lut_cache = []
+	_touch()
 
 ## What black and white in the map mean, as multipliers on `erosion_rate`.
 @export var erodability_range: Vector2 = Vector2(0.25, 2.0):
@@ -181,9 +196,6 @@ func set_stale(p_stale: bool) -> void:
 	if _stale == p_stale:
 		return
 	_stale = p_stale
-	# The warning list is the only thing that changed, and it is safe to refresh from here.
-	if Engine.is_editor_hint():
-		emit_changed.call_deferred()
 
 
 func op() -> StringName:
@@ -244,3 +256,27 @@ func _lut() -> Array:
 	if _lut_cache.is_empty():
 		_lut_cache = Pasture3DSimBase.erodability_lut(erodability_map)
 	return _lut_cache
+
+
+## Pasture3DNode.apply_field(). The solve stays on the host: it reads the brush's suppress/defer state and
+## writes into the same slot the native rasteriser uses, so there is one implementation, not two.
+func apply_field(p_step: Dictionary, p_vals: PackedFloat32Array, p_ctx: Dictionary) -> PackedFloat32Array:
+	return p_ctx["host"]._apply_erosion_step(p_step, p_vals, p_ctx)
+
+
+## Pasture3DNode.make_pending(). Pass 1 recorded a surface instead of solving it; this is the work order.
+func make_pending(p_out: Dictionary, p_extent: String) -> Dictionary:
+	if not p_out.has("pending"):
+		return {}
+	return {
+		"mod": self, "extent": p_extent,
+		"z0": p_out["pending"], "z": p_out["pending"], "key": int(p_out["pending_key"]),
+		"gw": int(p_out["pending_gw"]), "gh": int(p_out["pending_gh"]),
+		"iterations": maxi(iterations, 1), "done": 0, "failed": false,
+		"want_diagnostics": publish_fields, "res": {},
+		"params": to_params(), "erod": PackedFloat32Array(),
+	}
+
+
+func pending_queue() -> StringName:
+	return &"erosion"

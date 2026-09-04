@@ -12,11 +12,33 @@
 class_name Pasture3DGraphNodeDevExpandShrink
 extends Pasture3DGraphNode
 
-@export var mode: int = 0 ## Matches Pasture3DGraphNodeExpandShrink.Mode.
-@export var radius: float = 5.0 ## Metres.
-@export var kernel: int = 0 ## Matches Pasture3DGraphNodeExpandShrink.Kernel.
-@export_range(1, 16, 1) var iterations: int = 1
-@export_range(0.0, 1.0, 0.01) var amount: float = 1.0
+## Matches Pasture3DGraphNodeExpandShrink.Mode.
+@export var mode: int = 0:
+	set(v):
+		mode = v
+		_param_changed()
+
+## Metres.
+@export var radius: float = 5.0:
+	set(v):
+		radius = v
+		_param_changed()
+
+## Matches Pasture3DGraphNodeExpandShrink.Kernel.
+@export var kernel: int = 0:
+	set(v):
+		kernel = v
+		_param_changed()
+
+@export_range(1, 16, 1) var iterations: int = 1:
+	set(v):
+		iterations = v
+		_param_changed()
+
+@export_range(0.0, 1.0, 0.01) var amount: float = 1.0:
+	set(v):
+		amount = v
+		_param_changed()
 
 
 func op() -> StringName:

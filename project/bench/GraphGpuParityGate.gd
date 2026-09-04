@@ -446,7 +446,7 @@ func _const(p_value: float) -> Pasture3DGraphNodeConst:
 
 
 func _flood_graph(p_level: float) -> Pasture3DTerrainGraph:
-	# The Const drives water_level through port 1 (PARAM_PORT_MAP flooding_uniform_level -> [-1, 0]). The
+	# The Const drives water_level through port 1 (flooding_uniform_level.native_param_ports() -> [-1, 0]). The
 	# node's own inspector value is parked far away on purpose: if the wire is ignored, the field floods to
 	# THAT and the criterion fails loudly rather than by a plausible amount.
 	var fl := Pasture3DGraphNodeFloodingUniformLevel.new()

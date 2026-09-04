@@ -38,6 +38,19 @@ func op() -> StringName:
 	return &"water_mask"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = depth_threshold
+	p[1] = shore_width
+	p[2] = float(shore_falloff)
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 1])
+
+
 func role() -> Role:
 	return Role.FILTER
 

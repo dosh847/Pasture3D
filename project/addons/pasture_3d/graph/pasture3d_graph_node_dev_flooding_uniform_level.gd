@@ -9,8 +9,15 @@
 class_name Pasture3DGraphNodeDevFloodingUniformLevel
 extends Pasture3DGraphNode
 
-@export var water_level: float = 0.0
-@export var clamp_terrain: bool = true
+@export var water_level: float = 0.0:
+	set(v):
+		water_level = v
+		_param_changed()
+
+@export var clamp_terrain: bool = true:
+	set(v):
+		clamp_terrain = v
+		_param_changed()
 
 
 func op() -> StringName:

@@ -72,6 +72,21 @@ func op() -> StringName:
 	return &"distance_transform"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = threshold
+	p[1] = float(direction)
+	p[2] = float(metric)
+	p[3] = float(output_units)
+	p[4] = max_distance
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 0])
+
+
 func role() -> Role:
 	return Role.FILTER
 

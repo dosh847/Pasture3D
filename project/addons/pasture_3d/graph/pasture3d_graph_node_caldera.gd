@@ -50,6 +50,19 @@ func op() -> StringName:
 	return &"caldera"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = elevation
+	p[1] = radius
+	p[2] = sigma_inner
+	p[3] = sigma_outer
+	p[4] = z_bottom
+	p[5] = noise_r_amp
+	p[6] = noise_z_ratio
+	return {"params": p}
+
+
 func display_name() -> String:
 	return "Caldera"
 

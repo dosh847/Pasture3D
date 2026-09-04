@@ -11,7 +11,7 @@ extends Pasture3DGraphNode
 		talus_angle_deg = clampf(v, 5.0, 85.0)
 		emit_changed()
 
-@export_range(1, 64, 1) var iterations: int = 12:
+@export_range(1, 64, 1) var iterations: int = 16:
 	set(v):
 		iterations = maxi(v, 1)
 		emit_changed()

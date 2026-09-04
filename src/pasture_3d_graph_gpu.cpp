@@ -2284,30 +2284,46 @@ int graph_gpu_threshold() {
 	return (int)ps->get_setting("pasture_3d/performance/graph_gpu_threshold", dflt);
 }
 
-PackedFloat32Array graph_eval_grid_best(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect,
-		const PackedFloat32Array &p_input) {
+// One device, one shader compile, for every GPU-backed solver in this file.
+//
+// Every dispatch site below used to hold its own `static Pasture3DGraphGPU s_gpu`, so a scene touching
+// the seven geo primitives plus hydraulic plus the graph paid NINE `create_local_rendering_device()`
+// calls and nine full grid-shader compiles - seven of them never dispatched, each holding its own VRAM
+// until static destruction, which runs after `RenderingServer` may already be gone. The class is lazily
+// initialised and carries no state between calls, so sharing one changes nothing but the count.
+static Pasture3DGraphGPU &graph_gpu() {
+	static Pasture3DGraphGPU s_gpu;
+	return s_gpu;
+}
+
+// The "try GPU above the threshold, else CPU" policy, once. It used to be written out nine times, so a
+// new bail condition was a nine-site edit and a site missed out of that nine was silent.
+template <typename T, typename TGpu, typename TCpu>
+static T dispatch_or_cpu(int p_gw, int p_gh, TGpu p_gpu, TCpu p_cpu) {
 	const int threshold = graph_gpu_threshold();
 	if (threshold > 0 && (int64_t)p_gw * p_gh >= (int64_t)threshold) {
-		static Pasture3DGraphGPU s_gpu;
-		PackedFloat32Array out;
-		if (s_gpu.eval_grid(p_prog, p_gw, p_gh, p_rect, p_input, out)) {
+		T out;
+		if (p_gpu(out)) {
 			return out;
 		}
 	}
-	return graph_eval_grid(p_prog, p_gw, p_gh, p_rect, p_input);
+	return p_cpu();
+}
+
+PackedFloat32Array graph_eval_grid_best(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect,
+		const PackedFloat32Array &p_input) {
+	return dispatch_or_cpu<PackedFloat32Array>(
+			p_gw, p_gh,
+			[&](PackedFloat32Array &r_out) { return graph_gpu().eval_grid(p_prog, p_gw, p_gh, p_rect, p_input, r_out); },
+			[&]() { return graph_eval_grid(p_prog, p_gw, p_gh, p_rect, p_input); });
 }
 
 ErosionHydraulicResult erosion_hydraulic_solve_best(const PackedFloat32Array &p_surface,
 		int p_gw, int p_gh, const Rect2 &p_rect, const ErosionHydraulicParams &p_params) {
-	const int threshold = graph_gpu_threshold();
-	if (threshold > 0 && (int64_t)p_gw * p_gh >= (int64_t)threshold) {
-		static Pasture3DGraphGPU s_gpu;
-		ErosionHydraulicResult res;
-		if (s_gpu.eval_hydraulic(p_surface, p_gw, p_gh, p_rect, p_params, res)) {
-			return res;
-		}
-	}
-	return erosion_hydraulic_solve(p_surface, p_gw, p_gh, p_rect, p_params);
+	return dispatch_or_cpu<ErosionHydraulicResult>(
+			p_gw, p_gh,
+			[&](ErosionHydraulicResult &r_res) { return graph_gpu().eval_hydraulic(p_surface, p_gw, p_gh, p_rect, p_params, r_res); },
+			[&]() { return erosion_hydraulic_solve(p_surface, p_gw, p_gh, p_rect, p_params); });
 }
 
 bool mountain_cone_eval_gpu(int p_gw, int p_gh, const Rect2 &p_rect, const MountainConeParams &p_params,
@@ -2315,7 +2331,7 @@ bool mountain_cone_eval_gpu(int p_gw, int p_gh, const Rect2 &p_rect, const Mount
 	if (p_gw < 1 || p_gh < 1) {
 		return false;
 	}
-	static Pasture3DGraphGPU s_gpu; // persistent: the local RD + shader compile once across calls
+	Pasture3DGraphGPU &s_gpu = graph_gpu();
 
 	// Fill the GPU param block exactly as mountain_cone_solve derives its host-side constants, so the two
 	// paths agree to GPU-float tolerance. octaves is Nyquist-capped identically (shared header helper).
@@ -2352,20 +2368,16 @@ bool mountain_cone_eval_gpu(int p_gw, int p_gh, const Rect2 &p_rect, const Mount
 
 PackedFloat32Array mountain_cone_solve_best(int p_gw, int p_gh, const Rect2 &p_rect,
 		const MountainConeParams &p_params) {
-	const int threshold = graph_gpu_threshold();
-	if (threshold > 0 && (int64_t)p_gw * p_gh >= (int64_t)threshold) {
-		PackedFloat32Array out;
-		if (mountain_cone_eval_gpu(p_gw, p_gh, p_rect, p_params, out)) {
-			return out;
-		}
-	}
-	return mountain_cone_solve(p_gw, p_gh, p_rect, p_params);
+	return dispatch_or_cpu<PackedFloat32Array>(
+			p_gw, p_gh,
+			[&](PackedFloat32Array &r_out) { return mountain_cone_eval_gpu(p_gw, p_gh, p_rect, p_params, r_out); },
+			[&]() { return mountain_cone_solve(p_gw, p_gh, p_rect, p_params); });
 }
 
 bool mountain_inselberg_eval_gpu(int p_gw, int p_gh, const Rect2 &p_rect, const MountainInselbergParams &p_params,
 		PackedFloat32Array &r_out) {
 	if (p_gw < 1 || p_gh < 1) return false;
-	static Pasture3DGraphGPU s_gpu;
+	Pasture3DGraphGPU &s_gpu = graph_gpu();
 
 	const float scale = p_params.scale;
 	const float kw = 2.6f / scale;
@@ -2398,20 +2410,16 @@ bool mountain_inselberg_eval_gpu(int p_gw, int p_gh, const Rect2 &p_rect, const 
 
 PackedFloat32Array mountain_inselberg_solve_best(int p_gw, int p_gh, const Rect2 &p_rect,
 		const MountainInselbergParams &p_params) {
-	const int threshold = graph_gpu_threshold();
-	if (threshold > 0 && (int64_t)p_gw * p_gh >= (int64_t)threshold) {
-		PackedFloat32Array out;
-		if (mountain_inselberg_eval_gpu(p_gw, p_gh, p_rect, p_params, out)) {
-			return out;
-		}
-	}
-	return mountain_inselberg_solve(p_gw, p_gh, p_rect, p_params);
+	return dispatch_or_cpu<PackedFloat32Array>(
+			p_gw, p_gh,
+			[&](PackedFloat32Array &r_out) { return mountain_inselberg_eval_gpu(p_gw, p_gh, p_rect, p_params, r_out); },
+			[&]() { return mountain_inselberg_solve(p_gw, p_gh, p_rect, p_params); });
 }
 
 bool mountain_range_radial_eval_gpu(int p_gw, int p_gh, const Rect2 &p_rect, const MountainRangeRadialParams &p_params,
 		Array &r_out) {
 	if (p_gw < 1 || p_gh < 1) return false;
-	static Pasture3DGraphGPU s_gpu;
+	Pasture3DGraphGPU &s_gpu = graph_gpu();
 
 	const float lacunarity = p_params.lacunarity;
 	const int n = p_gw * p_gh;
@@ -2447,20 +2455,16 @@ bool mountain_range_radial_eval_gpu(int p_gw, int p_gh, const Rect2 &p_rect, con
 
 Array mountain_range_radial_solve_best(int p_gw, int p_gh, const Rect2 &p_rect,
 		const MountainRangeRadialParams &p_params) {
-	const int threshold = graph_gpu_threshold();
-	if (threshold > 0 && (int64_t)p_gw * p_gh >= (int64_t)threshold) {
-		Array out;
-		if (mountain_range_radial_eval_gpu(p_gw, p_gh, p_rect, p_params, out)) {
-			return out;
-		}
-	}
-	return mountain_range_radial_solve(p_gw, p_gh, p_rect, p_params);
+	return dispatch_or_cpu<Array>(
+			p_gw, p_gh,
+			[&](Array &r_out) { return mountain_range_radial_eval_gpu(p_gw, p_gh, p_rect, p_params, r_out); },
+			[&]() { return mountain_range_radial_solve(p_gw, p_gh, p_rect, p_params); });
 }
 
 bool mountain_tibesti_eval_gpu(int p_gw, int p_gh, const Rect2 &p_rect, const MountainTibestiParams &p_params,
 		PackedFloat32Array &r_out) {
 	if (p_gw < 1 || p_gh < 1) return false;
-	static Pasture3DGraphGPU s_gpu;
+	Pasture3DGraphGPU &s_gpu = graph_gpu();
 
 	const float scale = p_params.scale;
 	const float kw_base = p_params.peak_kw / scale;
@@ -2499,20 +2503,16 @@ bool mountain_tibesti_eval_gpu(int p_gw, int p_gh, const Rect2 &p_rect, const Mo
 
 PackedFloat32Array mountain_tibesti_solve_best(int p_gw, int p_gh, const Rect2 &p_rect,
 		const MountainTibestiParams &p_params) {
-	const int threshold = graph_gpu_threshold();
-	if (threshold > 0 && (int64_t)p_gw * p_gh >= (int64_t)threshold) {
-		PackedFloat32Array out;
-		if (mountain_tibesti_eval_gpu(p_gw, p_gh, p_rect, p_params, out)) {
-			return out;
-		}
-	}
-	return mountain_tibesti_solve(p_gw, p_gh, p_rect, p_params);
+	return dispatch_or_cpu<PackedFloat32Array>(
+			p_gw, p_gh,
+			[&](PackedFloat32Array &r_out) { return mountain_tibesti_eval_gpu(p_gw, p_gh, p_rect, p_params, r_out); },
+			[&]() { return mountain_tibesti_solve(p_gw, p_gh, p_rect, p_params); });
 }
 
 bool mountain_stump_eval_gpu(int p_gw, int p_gh, const Rect2 &p_rect, const MountainStumpParams &p_params,
 		PackedFloat32Array &r_out) {
 	if (p_gw < 1 || p_gh < 1) return false;
-	static Pasture3DGraphGPU s_gpu;
+	Pasture3DGraphGPU &s_gpu = graph_gpu();
 
 	const float scale = p_params.scale;
 	const float kw = p_params.peak_kw / scale;
@@ -2546,20 +2546,16 @@ bool mountain_stump_eval_gpu(int p_gw, int p_gh, const Rect2 &p_rect, const Moun
 
 PackedFloat32Array mountain_stump_solve_best(int p_gw, int p_gh, const Rect2 &p_rect,
 		const MountainStumpParams &p_params) {
-	const int threshold = graph_gpu_threshold();
-	if (threshold > 0 && (int64_t)p_gw * p_gh >= (int64_t)threshold) {
-		PackedFloat32Array out;
-		if (mountain_stump_eval_gpu(p_gw, p_gh, p_rect, p_params, out)) {
-			return out;
-		}
-	}
-	return mountain_stump_solve(p_gw, p_gh, p_rect, p_params);
+	return dispatch_or_cpu<PackedFloat32Array>(
+			p_gw, p_gh,
+			[&](PackedFloat32Array &r_out) { return mountain_stump_eval_gpu(p_gw, p_gh, p_rect, p_params, r_out); },
+			[&]() { return mountain_stump_solve(p_gw, p_gh, p_rect, p_params); });
 }
 
 bool shattered_peak_eval_gpu(int p_gw, int p_gh, const Rect2 &p_rect, const ShatteredPeakParams &p_params,
 		PackedFloat32Array &r_out) {
 	if (p_gw < 1 || p_gh < 1) return false;
-	static Pasture3DGraphGPU s_gpu;
+	Pasture3DGraphGPU &s_gpu = graph_gpu();
 
 	const float scale = p_params.scale;
 	const float kw = p_params.peak_kw / scale;
@@ -2592,20 +2588,16 @@ bool shattered_peak_eval_gpu(int p_gw, int p_gh, const Rect2 &p_rect, const Shat
 
 PackedFloat32Array shattered_peak_solve_best(int p_gw, int p_gh, const Rect2 &p_rect,
 		const ShatteredPeakParams &p_params) {
-	const int threshold = graph_gpu_threshold();
-	if (threshold > 0 && (int64_t)p_gw * p_gh >= (int64_t)threshold) {
-		PackedFloat32Array out;
-		if (shattered_peak_eval_gpu(p_gw, p_gh, p_rect, p_params, out)) {
-			return out;
-		}
-	}
-	return shattered_peak_solve(p_gw, p_gh, p_rect, p_params);
+	return dispatch_or_cpu<PackedFloat32Array>(
+			p_gw, p_gh,
+			[&](PackedFloat32Array &r_out) { return shattered_peak_eval_gpu(p_gw, p_gh, p_rect, p_params, r_out); },
+			[&]() { return shattered_peak_solve(p_gw, p_gh, p_rect, p_params); });
 }
 
 bool caldera_eval_gpu(int p_gw, int p_gh, const Rect2 &p_rect, const CalderaParams &p_params,
 		PackedFloat32Array &r_out) {
 	if (p_gw < 1 || p_gh < 1) return false;
-	static Pasture3DGraphGPU s_gpu;
+	Pasture3DGraphGPU &s_gpu = graph_gpu();
 
 	const int n = p_gw * p_gh;
 
@@ -2628,14 +2620,10 @@ bool caldera_eval_gpu(int p_gw, int p_gh, const Rect2 &p_rect, const CalderaPara
 
 PackedFloat32Array caldera_solve_best(int p_gw, int p_gh, const Rect2 &p_rect,
 		const CalderaParams &p_params) {
-	const int threshold = graph_gpu_threshold();
-	if (threshold > 0 && (int64_t)p_gw * p_gh >= (int64_t)threshold) {
-		PackedFloat32Array out;
-		if (caldera_eval_gpu(p_gw, p_gh, p_rect, p_params, out)) {
-			return out;
-		}
-	}
-	return caldera_solve(p_gw, p_gh, p_rect, p_params);
+	return dispatch_or_cpu<PackedFloat32Array>(
+			p_gw, p_gh,
+			[&](PackedFloat32Array &r_out) { return caldera_eval_gpu(p_gw, p_gh, p_rect, p_params, r_out); },
+			[&]() { return caldera_solve(p_gw, p_gh, p_rect, p_params); });
 }
 
 } // namespace godot

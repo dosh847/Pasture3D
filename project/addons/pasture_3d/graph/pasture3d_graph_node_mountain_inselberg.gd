@@ -73,6 +73,21 @@ func op() -> StringName:
 	return &"mountain_inselberg"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = float(seed)
+	p[1] = elevation
+	p[2] = scale
+	p[3] = float(octaves)
+	p[4] = rugosity
+	p[5] = angle
+	p[6] = gamma
+	p[7] = bulk_amp
+	p[8] = base_noise_amp
+	return {"params": p}
+
+
 func display_name() -> String:
 	return "Mountain Inselberg"
 

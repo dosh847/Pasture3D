@@ -66,6 +66,25 @@ func op() -> StringName:
 	return &"warp"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	# Was misaligned twice over: it read `gain` and `lacunarity`, which Pasture3DGraphNodeWarp
+	# does not have, and it put `strength` in the slot warp_solve_grid() reads as the noise TYPE.
+	p[0] = float(warp_type)
+	p[1] = frequency
+	p[2] = strength
+	p[3] = float(octaves)
+	p[4] = amplitude
+	p[5] = roughness
+	p[6] = float(seed)
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 2, 4, 1])
+
+
 func role() -> Role:
 	return Role.FILTER
 

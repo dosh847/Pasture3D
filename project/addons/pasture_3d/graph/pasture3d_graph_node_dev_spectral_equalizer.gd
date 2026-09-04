@@ -16,7 +16,7 @@ extends Pasture3DGraphNode
 		meso_gain = maxf(v, 0.0)
 		emit_changed()
 
-@export_range(0.0, 3.0, 0.05) var micro_gain: float = 1.0:
+@export_range(0.0, 3.0, 0.05) var micro_gain: float = 1.5:
 	set(v):
 		micro_gain = maxf(v, 0.0)
 		emit_changed()

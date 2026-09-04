@@ -5,9 +5,8 @@
 # Used for algorithm prototyping, A/B testing, and automated headless CI parity verification.
 @tool
 class_name Pasture3DGraphNodeDevHydraulicParticle
-extends Pasture3DGraphNode
+extends Pasture3DGraphSolverNode
 
-enum Evaluation { LIVE, FROZEN }
 
 @export_group("Simulation")
 ## Total number of raindrops / particles simulated across the terrain footprint.
@@ -83,17 +82,13 @@ enum Evaluation { LIVE, FROZEN }
 		_param_changed()
 
 @export_group("Evaluation")
-@export var evaluation: Evaluation = Evaluation.LIVE:
-	set(v):
-		evaluation = v
-		emit_changed()
 
 @export_tool_button("Bake Particle Erosion") var _bake_btn = clear_cache
 
-var _cache: Dictionary = {}
-var _cache_key: int = 0
-var _dirty_since_bake: bool = false
-var _stale: bool = false
+
+## Names this node's own Bake button, for the freeze warning.
+func bake_label() -> String:
+	return "Bake Particle Erosion"
 
 
 func op() -> StringName:
@@ -137,16 +132,7 @@ func output_port_types() -> PackedInt32Array:
 
 
 func _param_changed() -> void:
-	if evaluation == Evaluation.FROZEN:
-		_stale = true
-	emit_changed()
-
-
-func clear_cache() -> void:
-	_cache.clear()
-	_cache_key = 0
-	_dirty_since_bake = false
-	_stale = false
+	mark_dirty_since_bake()
 	emit_changed()
 
 

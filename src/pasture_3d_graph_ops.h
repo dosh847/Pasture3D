@@ -257,7 +257,7 @@ struct GraphProgram {
 	std::vector<GraphGeomEntry> geom;
 	// Which of the 16 params slots each of in0..in3 OVERRIDES when that port is wired, or -1 when the port
 	// is not a scalar parameter. Without this the evaluator read parameters from the program alone and
-	// ignored every wire into a parameter port. See PARAM_PORT_MAP in pasture3d_terrain_graph.gd.
+	// ignored every wire into a parameter port. See Pasture3DGraphNode.native_param_ports().
 	PackedInt32Array pmap0;
 	PackedInt32Array pmap1;
 	PackedInt32Array pmap2;
