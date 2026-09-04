@@ -62,6 +62,27 @@ grid (reads neighbours). Renamed off "point" and "field", both of which were ove
 - **cell node** — per-cell, no neighbours; a maximal run of them folds into one loop.
 - **grid node** — needs the whole grid (a blur, an erosion solve).
 - `is_field_operator()` → **`needs_grid()`**.
+
+### mask — a 0..1 weight, and what a non-finite cell in one means
+A mask grid is a weight, clamped to 0..1 at the point of use. Two conventions are ratified here because
+the three evaluators disagreed about them and produced different terrain for the same graph:
+
+- **An unwired mask port is a filled 1.0.** The op runs at full strength. This was already the behaviour
+  of every path; it is written down because the next rule depends on it.
+- **A non-finite mask cell (NaN or Inf) means "no opinion", and reads as 1.0 -- the same answer an
+  unwired port gives.** It does NOT propagate into the output.
+
+The second rule settles a real divergence. `std::clamp` and GDScript's `clampf` both use a three-way
+comparison, so `clamp(NaN, 0, 1)` is NaN; the native CPU kernel and the GDScript Blend node therefore
+returned NaN for a NaN mask cell -- a hole punched in otherwise-finite terrain -- while the GPU kernel
+guarded with `isnan` and left the cell fully blended. NaN is the brush-loop mask value and survives
+Smooth, Terrace and the morphology ops, so this was reachable from ordinary graphs, and which answer you
+got depended on `graph_gpu_threshold()`.
+
+The GPU's answer was ratified rather than the CPU's: a mask says how much of an op to apply, and a cell
+where that question has no answer should not decide the terrain is missing. Propagating NaN is the
+correct behaviour for a HEIGHT grid (where NaN means "no data" and every op forwards it) and the wrong
+behaviour for a WEIGHT grid. All three Blend paths now implement the 1.0 reading.
 - Prose "POINT / FIELD operator" → "cell / grid node".
 
 ---

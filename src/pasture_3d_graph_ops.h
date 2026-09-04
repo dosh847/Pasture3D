@@ -24,6 +24,7 @@
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/rect2.hpp>
 
+#include <functional>
 #include <vector>
 
 namespace godot {
@@ -266,6 +267,25 @@ struct GraphProgram {
 
 // Read a program dictionary from Pasture3DTerrainGraph.compile_graph_program.
 bool graph_build(const Dictionary &p_prog, GraphProgram &r_out);
+
+// One slot's sixteen scalar parameters, with every DRIVEN parameter applied.
+//
+// A wire into a parameter port overrides the value baked at compile time with cell 0 of the driving
+// node's output. Both the in-slot table (pmap0..3, riding in0..in3) and the flat overflow table
+// (pdrv_node/param/src, for ports >= 4) are walked here.
+//
+// This lives in one function because it was previously open-coded in the CPU evaluator ONLY: the GPU
+// evaluator read p_prog.params*[s] straight through and silently ignored every driven parameter, so the
+// same graph flooded to 120 m below the GPU threshold and to whatever the inspector held above it. Two
+// evaluators resolving parameters two ways is the bug; a shared function is the fix.
+//
+// p_fetch supplies a driving value: given the driving slot and channel, it writes cell 0 of that grid to
+// r_value and returns true, or returns false if the value cannot be produced (in which case the baked
+// value stands). The CPU passes a scratch-pool lookup; the GPU flushes its plan and reads the buffer
+// back. r_PH[k] says whether slot k has a value at all -- several ops fall back when a program omits a
+// higher params array, and an override counts as present.
+void graph_resolve_op_params(const GraphProgram &p_prog, int p_slot, float r_P[16], bool r_PH[16],
+		const std::function<bool(int p_src, int p_chan, float &r_value)> &p_fetch);
 
 // Evaluate the whole graph to a p_gw*p_gh row-major field over p_rect using scratch arena memory reuse.
 PackedFloat32Array graph_eval_grid(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect,

@@ -197,6 +197,77 @@ void graph_nan_blur(std::vector<float> &r_vals, int p_gw, int p_gh, int p_passes
 	}
 }
 
+void graph_resolve_op_params(const GraphProgram &p_prog, int p_slot, float r_P[16], bool r_PH[16],
+		const std::function<bool(int p_src, int p_chan, float &r_value)> &p_fetch) {
+	const int s = p_slot;
+	const int count = p_prog.count;
+	auto at = [&](const PackedFloat32Array &p_arr) -> float {
+		return p_arr.size() == count ? p_arr[s] : 0.f;
+	};
+	auto has = [&](const PackedFloat32Array &p_arr) -> bool {
+		return p_arr.size() == count;
+	};
+	const PackedFloat32Array *pv[16] = { &p_prog.params, &p_prog.params_b, &p_prog.params_c,
+		&p_prog.params_d, &p_prog.params_e, &p_prog.params_f, &p_prog.params_g, &p_prog.params_h,
+		&p_prog.params_i, &p_prog.params_j, &p_prog.params_k, &p_prog.params_l, &p_prog.params_m,
+		&p_prog.params_n, &p_prog.params_o, &p_prog.params_p };
+	for (int k = 0; k < 16; k++) {
+		r_P[k] = at(*pv[k]);
+		r_PH[k] = has(*pv[k]);
+	}
+	// params (slot 0) is mandatory: a program without it is not a program, and the ops that read P[0]
+	// have no fallback to fall back to.
+	r_PH[0] = true;
+
+	const PackedInt32Array *pmaps[4] = { &p_prog.pmap0, &p_prog.pmap1, &p_prog.pmap2, &p_prog.pmap3 };
+	const PackedInt32Array *ins[4] = { &p_prog.in0, &p_prog.in1, &p_prog.in2, &p_prog.in3 };
+	const PackedInt32Array *ports[4] = { &p_prog.in0_port, &p_prog.in1_port, &p_prog.in2_port,
+		&p_prog.in3_port };
+	for (int k = 0; k < 4; k++) {
+		if (pmaps[k]->size() != count || ins[k]->size() != count) {
+			continue;
+		}
+		const int slot = (*pmaps[k])[s];
+		const int src = (*ins[k])[s];
+		if (slot < 0 || slot >= 16 || src < 0 || src >= count) {
+			continue;
+		}
+		// The driving CHANNEL, not just the driving slot: a scalar can be driven off a solver's secondary
+		// output the same as a grid can, and reading cell 0 of the wrong buffer is a parameter that is
+		// wrong by a plausible amount rather than obviously.
+		int chan = 0;
+		if (ports[k]->size() == count && (*ports[k])[s] > 0) {
+			chan = (*ports[k])[s];
+		}
+		float v = 0.f;
+		if (p_fetch(src, chan, v)) {
+			r_P[slot] = v;
+			r_PH[slot] = true;
+		}
+	}
+	// The same override for ports >= 4, which carry no in-slot. Read from cell 0 exactly as above, so a
+	// parameter driven through port 5 is indistinguishable from one driven through port 1.
+	const int n_pdrv = p_prog.pdrv_node.size();
+	for (int k = 0; k < n_pdrv; k++) {
+		if (p_prog.pdrv_node[k] != s) {
+			continue;
+		}
+		const int slot = p_prog.pdrv_param[k];
+		const int src = p_prog.pdrv_src[k];
+		if (slot < 0 || slot >= 16 || src < 0 || src >= count) {
+			continue;
+		}
+		// Always channel 0. The overflow table carries no channel, and rather than widen it for a case
+		// nobody has yet wired, the compiler refuses to lower a secondary-channel wire into a port >= 4 at
+		// all -- see native_supported. A refusal is recoverable; a silently wrong parameter is not.
+		float v = 0.f;
+		if (p_fetch(src, 0, v)) {
+			r_P[slot] = v;
+			r_PH[slot] = true;
+		}
+	}
+}
+
 bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 	r_out = GraphProgram();
 	if (!p_prog.has("ops") || !p_prog.has("params") || !p_prog.has("in0") ||
@@ -511,18 +582,6 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 		return arr;
 	};
 
-	const int32_t *pmap_arr[4] = {
-		p_prog.pmap0.size() == p_prog.count ? p_prog.pmap0.ptr() : nullptr,
-		p_prog.pmap1.size() == p_prog.count ? p_prog.pmap1.ptr() : nullptr,
-		p_prog.pmap2.size() == p_prog.count ? p_prog.pmap2.ptr() : nullptr,
-		p_prog.pmap3.size() == p_prog.count ? p_prog.pmap3.ptr() : nullptr,
-	};
-	const int32_t *in_arr[4] = { in0, in1, in2, in3 };
-	const int n_pdrv = p_prog.pdrv_node.size();
-	const int32_t *pdrv_node = n_pdrv ? p_prog.pdrv_node.ptr() : nullptr;
-	const int32_t *pdrv_param = n_pdrv ? p_prog.pdrv_param.ptr() : nullptr;
-	const int32_t *pdrv_src = n_pdrv ? p_prog.pdrv_src.ptr() : nullptr;
-
 	// 3. Sequential evaluation of nodes in topological order
 	for (int s = 0; s < p_prog.count; s++) {
 		int out_b = acquire_buffer();
@@ -566,69 +625,23 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 		// This slot's sixteen parameters, resolved. Every op below reads P[] rather than the program's
 		// params arrays directly, because a parameter can be DRIVEN: a wire into a parameter port overrides
-		// the value baked at compile time with the driving node's output. Doing it once here, generically,
-		// is deliberate — the previous attempt patched the generators case by case and silently missed
-		// four of them, which is the same way this bug arrived in the first place.
+		// the value baked at compile time with the driving node's output. Doing it once, generically, is
+		// deliberate -- the previous attempt patched the generators case by case and silently missed four of
+		// them, which is the same way this bug arrived in the first place.
 		//
-		// A driven parameter is read from cell 0 of the source grid. That is not a shortcut: it is the
-		// convention the GDScript nodes' eval_grid already uses (`p_inputs[k][0]`), and the two evaluators
-		// have to agree exactly or the parity gates are comparing different graphs.
-		float P[16] = {
-			params[s], params_b ? params_b[s] : 0.f, params_c ? params_c[s] : 0.f,
-			params_d ? params_d[s] : 0.f, params_e ? params_e[s] : 0.f, params_f ? params_f[s] : 0.f,
-			params_g ? params_g[s] : 0.f, params_h ? params_h[s] : 0.f, params_i ? params_i[s] : 0.f,
-			params_j ? params_j[s] : 0.f, params_k ? params_k[s] : 0.f, params_l ? params_l[s] : 0.f,
-			params_m ? params_m[s] : 0.f, params_n ? params_n[s] : 0.f, params_o ? params_o[s] : 0.f,
-			params_p ? params_p[s] : 0.f
-		};
-		// Whether each slot has a value at all. A program may omit the higher params arrays; several ops
-		// have their own fallback for that case, and those fallbacks have to survive this rewrite. An
-		// override counts as present.
-		bool PH[16] = {
-			true, params_b != nullptr, params_c != nullptr, params_d != nullptr, params_e != nullptr,
-			params_f != nullptr, params_g != nullptr, params_h != nullptr, params_i != nullptr,
-			params_j != nullptr, params_k != nullptr, params_l != nullptr, params_m != nullptr,
-			params_n != nullptr, params_o != nullptr, params_p != nullptr
-		};
-		for (int k = 0; k < 4; k++) {
-			if (!pmap_arr[k] || !in_arr[k]) {
-				continue;
+		// The walk itself lives in graph_resolve_op_params so the GPU evaluator resolves parameters through
+		// the same code rather than its own; a driven parameter is read from cell 0 of the source grid, which
+		// is the convention the GDScript nodes' eval_grid already uses (`p_inputs[k][0]`).
+		float P[16];
+		bool PH[16];
+		graph_resolve_op_params(p_prog, s, P, PH, [&](int p_src, int p_chan, float &r_value) -> bool {
+			const float *b = buf_of(p_src, p_chan);
+			if (b == nullptr) {
+				return false;
 			}
-			const int slot = pmap_arr[k][s];
-			const int src = in_arr[k][s];
-			if (slot < 0 || slot >= 16 || src < 0 || src >= p_prog.count) {
-				continue;
-			}
-			// The driving CHANNEL, not just the driving slot: a scalar can be driven off a solver's
-			// secondary output the same as a grid can, and reading cell 0 of the wrong buffer is a
-			// parameter that is wrong by a plausible amount rather than obviously.
-			const float *b = buf_of(src, chan_of(k, s));
-			if (b) {
-				P[slot] = b[0];
-				PH[slot] = true;
-			}
-		}
-		// The same override for ports >= 4, which carry no in-slot. Read from cell 0 exactly as above, so
-		// a parameter driven through port 5 is indistinguishable from one driven through port 1.
-		for (int k = 0; k < n_pdrv; k++) {
-			if (pdrv_node[k] != s) {
-				continue;
-			}
-			const int slot = pdrv_param[k];
-			const int src = pdrv_src[k];
-			if (slot < 0 || slot >= 16 || src < 0 || src >= p_prog.count) {
-				continue;
-			}
-			// Always channel 0. The overflow table carries no channel, and rather than widen it for a
-			// case nobody has yet wired, the compiler refuses to lower a secondary-channel wire into a
-			// port >= 4 at all — see native_supported. A refusal is recoverable; a silently wrong
-			// parameter is not.
-			const float *b = buf_of(src, 0);
-			if (b) {
-				P[slot] = b[0];
-				PH[slot] = true;
-			}
-		}
+			r_value = b[0];
+			return true;
+		});
 
 		switch (ops[s]) {
 			case GRAPH_OP_INPUT: {
@@ -687,8 +700,18 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 							default: val = a; break;
 						}
 						if (gc) {
-							const double mask_val = std::clamp((double)gc[i], 0.0, 1.0);
-							val = a + (val - a) * mask_val;
+							// A NON-FINITE MASK CELL IS "NO OPINION", NOT A HOLE. std::clamp uses a
+							// three-way comparison, so clamp(NaN, 0, 1) is NaN and the cell used to come
+							// out NaN -- a hole punched in otherwise-finite terrain, and one the GPU
+							// kernel did not punch because it guards with isnan. NaN is the brush-loop
+							// mask value and survives Smooth, Terrace and the morphology ops, so it
+							// reaches here in ordinary graphs. An ABSENT mask already means 1.0 in this
+							// vocabulary (the unwired port is a filled 1.0), so an unreadable mask cell
+							// means 1.0 too. See PASTURE3D_NODE_VOCABULARY.md.
+							if (std::isfinite(gc[i])) {
+								const double mask_val = std::clamp((double)gc[i], 0.0, 1.0);
+								val = a + (val - a) * mask_val;
+							}
 						}
 						g_ptr[i] = (float)val;
 					}

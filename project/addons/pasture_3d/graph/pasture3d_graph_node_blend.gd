@@ -68,4 +68,9 @@ func eval_cell(_p_wx: float, _p_wz: float, p_inputs: PackedFloat32Array) -> floa
 		# a masked ADD keeps the base underneath, which is not "use the eroded hillside off the road".
 		Mode.MIX: blended = b
 	# A gates how much of the combine replaces the base. m == 1 (the unwired default) is the plain blend.
+	# A non-finite mask cell is "no opinion", which means 1.0 -- the same answer an unwired port gives.
+	# clampf uses the same three-way comparison as std::clamp, so clampf(NAN, 0, 1) is NAN and this used
+	# to return NAN: a hole in the terrain. See PASTURE3D_NODE_VOCABULARY.md.
+	if not is_finite(m):
+		return blended
 	return lerpf(a, blended, clampf(m, 0.0, 1.0))
