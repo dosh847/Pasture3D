@@ -2073,12 +2073,12 @@ bool Pasture3DGraphGPU::eval_hydraulic(const PackedFloat32Array &p_surface, int 
 	push.encode_float(16, dx);
 	push.encode_float(20, dz);
 	push.encode_float(24, cell_dist);
-	push.encode_float(28, p_params.rain_rate);
-	push.encode_float(32, p_params.evaporation_rate);
-	push.encode_float(36, p_params.sediment_capacity);
-	push.encode_float(40, p_params.erosion_speed);
-	push.encode_float(44, p_params.deposition_speed);
-	push.encode_float(48, p_params.min_slope);
+	push.encode_float(28, (float)p_params.rain_rate);
+	push.encode_float(32, (float)p_params.evaporation_rate);
+	push.encode_float(36, (float)p_params.sediment_capacity);
+	push.encode_float(40, (float)p_params.erosion_speed);
+	push.encode_float(44, (float)p_params.deposition_speed);
+	push.encode_float(48, (float)p_params.min_slope);
 	push.encode_float(52, 1.0f); // max_flow (temp)
 	push.encode_float(56, 1.0f); // max_sed (temp)
 	push.encode_float(60, 0.0f); // pad1

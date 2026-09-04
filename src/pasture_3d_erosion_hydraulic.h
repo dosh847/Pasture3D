@@ -17,13 +17,20 @@
 namespace godot {
 
 struct ErosionHydraulicParams {
+	// DOUBLE, not float. The solver computes in double and rounds only where it writes a grid, so it can
+	// match the GDScript oracle exactly -- but the oracle's parameters are Variant doubles, and storing
+	// them as float here made every inexact one (0.05, 0.02, 0.4, 0.01) arrive ~1e-9 off. One iteration
+	// still agreed bit-for-bit; by the second the water grid differed by a float32 ULP, and the
+	// `sed_c < cap` branch turns a ULP into a whole erode-or-deposit decision. That amplified to 8e-4 m
+	// by iteration 15 -- GraphHydraulicAccelerationGate [A2]. The graph path is unaffected: its params
+	// come from a float32 program, and a float widened to double is the same number.
 	int iterations = 25;
-	float rain_rate = 0.05f;
-	float evaporation_rate = 0.02f;
-	float sediment_capacity = 8.0f;
-	float erosion_speed = 0.5f;
-	float deposition_speed = 0.4f;
-	float min_slope = 0.01f;
+	double rain_rate = 0.05;
+	double evaporation_rate = 0.02;
+	double sediment_capacity = 8.0;
+	double erosion_speed = 0.5;
+	double deposition_speed = 0.4;
+	double min_slope = 0.01;
 
 	static ErosionHydraulicParams from_dict(const Dictionary &p_dict);
 };

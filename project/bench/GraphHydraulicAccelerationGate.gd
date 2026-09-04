@@ -6,7 +6,12 @@
 extends Node
 
 const EPS_SINGLE_PASS := 2.0e-6 # bit-level parity on single pass
-const EPS_MULTI_PASS := 2.0e-4  # iterative float32 accumulation over 15 passes
+# The multi-pass budget is the SINGLE-pass budget. The native kernel computes in double and rounds only
+# where it writes a grid, exactly as the oracle does, so iterating it cannot introduce error the first pass
+# did not have: 15 passes are bit-identical, not merely close. The old 2.0e-4 was sized for a drift whose
+# real cause was the params struct storing float where the oracle had doubles; at that width the criterion
+# could not have caught the 8e-4 it eventually reported until it was already four times over budget.
+const EPS_MULTI_PASS := EPS_SINGLE_PASS
 const GPU_TOL := 1.0e-2        # GPU float math vs CPU double/float intermediates
 
 var _fail := 0
@@ -94,6 +99,16 @@ func _test_a_native_parity() -> void:
 	if diff_h15 > EPS_MULTI_PASS or diff_s15 > EPS_MULTI_PASS or diff_f15 > EPS_MULTI_PASS:
 		_fail += 1
 		print("    !! C++ native multi-pass diverged beyond iterative tolerance")
+
+	# CONTROL. At this width the comparison passes on identical arrays, so it has to be shown that it is
+	# still reading them — a diff that returned 0.0 unconditionally would look like perfect parity.
+	var bent: PackedFloat32Array = cpp_res15["height"].duplicate()
+	bent[bent.size() / 2] += 1.0e-4
+	if _max_abs_diff(gd_res15[0], bent) <= EPS_MULTI_PASS:
+		_fail += 1
+		print("    !! control failed: a 1e-4 m error in one cell is NOT detected at this tolerance")
+	else:
+		print("    control: a 1e-4 m error in one cell IS detected at this tolerance")
 
 	# Control checks: surface must have changed and channels must have values
 	var eroded_cut := _max_abs_diff(surf, cpp_res15["height"])

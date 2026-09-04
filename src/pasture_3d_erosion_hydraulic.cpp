@@ -15,22 +15,22 @@ ErosionHydraulicParams ErosionHydraulicParams::from_dict(const Dictionary &p_dic
 		p.iterations = std::max(1, (int)p_dict["iterations"]);
 	}
 	if (p_dict.has("rain_rate")) {
-		p.rain_rate = std::max(0.0f, (float)p_dict["rain_rate"]);
+		p.rain_rate = std::max(0.0, (double)p_dict["rain_rate"]);
 	}
 	if (p_dict.has("evaporation_rate")) {
-		p.evaporation_rate = std::clamp((float)p_dict["evaporation_rate"], 0.0f, 1.0f);
+		p.evaporation_rate = std::clamp((double)p_dict["evaporation_rate"], 0.0, 1.0);
 	}
 	if (p_dict.has("sediment_capacity")) {
-		p.sediment_capacity = std::max(0.0f, (float)p_dict["sediment_capacity"]);
+		p.sediment_capacity = std::max(0.0, (double)p_dict["sediment_capacity"]);
 	}
 	if (p_dict.has("erosion_speed")) {
-		p.erosion_speed = std::clamp((float)p_dict["erosion_speed"], 0.0f, 1.0f);
+		p.erosion_speed = std::clamp((double)p_dict["erosion_speed"], 0.0, 1.0);
 	}
 	if (p_dict.has("deposition_speed")) {
-		p.deposition_speed = std::clamp((float)p_dict["deposition_speed"], 0.0f, 1.0f);
+		p.deposition_speed = std::clamp((double)p_dict["deposition_speed"], 0.0, 1.0);
 	}
 	if (p_dict.has("min_slope")) {
-		p.min_slope = std::max(0.0f, (float)p_dict["min_slope"]);
+		p.min_slope = std::max(0.0, (double)p_dict["min_slope"]);
 	}
 	return p;
 }
