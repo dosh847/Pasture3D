@@ -107,6 +107,40 @@ func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.MASK])
 
 
+## The oracle is what this node IS, so it has to be what this node RUNS. Without these two, the class
+## inherits Pasture3DGraphNode.eval_grid, which hands the first input straight back — the FROZEN/LIVE
+## toggle, the bake button and the cache would all be decoration over a node that never solves, and
+## GraphSolverFreezeGate [E] names exactly that. Mirrors the production twin's shape.
+func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> Array:
+	var n := p_gw * p_gh
+	var surface: PackedFloat32Array = (p_inputs[0] as PackedFloat32Array) 			if (p_inputs.size() > 0 and p_inputs[0] is PackedFloat32Array) else Pasture3DGraphOps.zeros(n)
+	var mask_in: PackedFloat32Array = (p_inputs[1] as PackedFloat32Array) 			if (p_inputs.size() > 1 and p_inputs[1] is PackedFloat32Array) else PackedFloat32Array()
+	if surface.size() != n:
+		surface = Pasture3DGraphOps.zeros(n)
+	return solve_cached(solver_cache_key(p_gw, p_gh, [surface, mask_in]),
+			func(): return solve_oracle(surface, p_gw, p_gh, p_rect, _params_for_oracle(mask_in)))
+
+
+func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
+	return eval_grid_channels(p_inputs, p_gw, p_gh, p_mask, p_rect)[0]
+
+
+## Every key the oracle reads, so a parameter edit reaches the solve. Keys are the oracle's own
+## `p_params.get(...)` names; a typo here is a silently ignored slider.
+func _params_for_oracle(p_mask: PackedFloat32Array) -> Dictionary:
+	return {
+		"iterations": iterations,
+		"incision_rate": incision_rate,
+		"area_exponent": area_exponent,
+		"slope_exponent": slope_exponent,
+		"min_catchment": min_catchment,
+		"bank_smoothing": bank_smoothing,
+		"peak_preservation": peak_preservation,
+		"gradient_power": gradient_power,
+		"mask": p_mask,
+	}
+
+
 func _param_changed() -> void:
 	mark_dirty_since_bake()
 	emit_changed()
