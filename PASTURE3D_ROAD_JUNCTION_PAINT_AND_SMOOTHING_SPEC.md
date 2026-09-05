@@ -2,7 +2,10 @@
 
 **Document:** `PASTURE3D_ROAD_JUNCTION_PAINT_AND_SMOOTHING_SPEC.md`
 **Status:** **P9b BUILT** 2026-09-02 (gate `RoadSmoothGate`, green native and forced-GDScript).
-**P9a not started.**
+**P9a-0 BUILT 2026-09-04** (§2.2: the junction surface is a polygon, and every road is trimmed to it).
+Gates `RoadJunctionPolygonGate` (A–G, the planar kernel) and `RoadJunctionGate` (E, J, L, the wiring);
+criterion M is in the polygon gate. Four mutations, all caught — see §2.6.
+**The rest of P9a (markings inside the junction) not started.**
 **P9a-orphans BUILT 2026-09-04** (gate `RoadJunctionOrphanGate`, 7 criteria, 4 mutations) — see §2.6.
 **Revised 2026-09-04** — P9a was scoped as markings drawn *on top of* the existing apron disc. Review
 against the author's expectation ("a polygon built to connect with the ribbons of every road that
@@ -36,8 +39,8 @@ Read before proposing anything, because most of this feature is already sitting 
 |---|---|---|
 | Lane connectors | `Pasture3DRoadLaneConnector.curve` | **Solved.** A `Curve3D` per legal path through the junction, in WORLD space, tangent-continuous with both lanes at its ends. Carries `turn`, the signed angle, and `allowed_override`. |
 | Stop lines | `Pasture3DRoadStopLine` | **Solved.** One per incoming lane: world `point`, `heading` into the junction, `width`, and the arc length. `endpoints()` already returns the two ends of the painted bar. |
-| The junction surface | `Pasture3DRoadMesher.build_apron` | **Built, and the wrong shape** — see §2.2. A triangle fan over the footprint *disc*, sampling the graded ground rather than sitting at `junction.elevation`. The ground-sampling is right and is kept; the disc is not. |
-| Trimming the approaches | `Pasture3DRoadBrush.junction_skips`, `grade_surface` | **Built, and exempts the major road** — see §2.2. Only minor arms stop at the footprint. |
+| The junction surface | `Pasture3DRoadMesher.plan_footprint` / `.build_footprint` | **Built as a polygon** (P9a-0, 2026-09-04). A triangle fan over the arms' cut ends with kerb returns at the corners, sampling the graded ground rather than sitting at `junction.elevation`. Replaced `build_apron`'s disc; the ground-sampling was right and was kept verbatim. |
+| Trimming the approaches | `Pasture3DRoadBrush.junction_skips`, `grade_surface` | **Built; every arm is trimmed** (P9a-0, 2026-09-04). The `is_major` exemption is retired in both consumers, and the trim now carries the kerb-return allowance as well as the clearance term. |
 | Road markings | `Pasture3DRoadMarkings.plan` / `.build` | **Built, but only along roads.** `plan()` answers in the grader's `u` (signed metres across, positive right); the host calls it per chunk, and `Pasture3DRoadMesher.chunk_spans` explicitly **removes everything inside a junction footprint**. |
 
 So there are two gaps, not one. **Inside a footprint there is a bare grey disc**: the carriageway's edge
@@ -90,9 +93,24 @@ major one.** That is the substantive behaviour change in P9a-0, and it retires t
 
 | Retired | Where | Why it goes |
 |---|---|---|
-| The `is_major` exemption in the grading skip | `pasture3d_road_brush.gd`, `grade_surface` | Every arm now stops at the polygon boundary. |
-| The `is_major` exemption in `junction_skips()` | `pasture3d_road_brush.gd` | Mirrors the grader; must change with it or the mesh and the ground disagree about where the road is — the failure its own comment warns about. |
-| `_apron_radius()` entirely | `pasture3d_road_network.gd` | It exists only to make a disc reach a cut face. There is no disc. |
+| The `is_major` exemption in the grading skip | `pasture3d_road_brush.gd`, `grade_surface` | Every arm now stops at the polygon boundary. **Retired 2026-09-04.** |
+| The `is_major` exemption in `junction_skips()` | `pasture3d_road_brush.gd` | Mirrors the grader; must change with it or the mesh and the ground disagree about where the road is — the failure its own comment warns about. **Retired 2026-09-04.** |
+| `_apron_radius()` entirely | `pasture3d_road_network.gd` | It exists only to make a disc reach a cut face. There is no disc. **Deleted 2026-09-04.** |
+
+**These two exemptions had to be gated separately.** They are a matched pair, so the obvious assumption
+is that one criterion covers both — and the build proved otherwise. Reverting only the `junction_skips`
+half failed criterion L on the ribbon-gap assertion; reverting only the `grade_surface` half passed it
+outright, because nothing read the grader's own `skip` mask. L now asserts both consumers, and the
+grader half is read as the `skip` that `grading_profile` *returns* rather than as the guard that
+produces it. See [[component-gates-miss-wiring]]: a value that lives in two places is fixed in neither
+until both are asserted.
+
+**The trim-back is now two terms, and E and F turn the second one off.** A trim is the clearance
+`other_half / sin θ` plus the kerb-return allowance `radius / tan(φ/2)`. Criteria E and F were written
+for the closed form and would have measured the sum, unable to say which term was wrong; they now
+resolve with `default_corner_radius` at zero and assert the clearance alone, and E asserts the allowance
+separately at a square crossing, where `tan(45°) = 1` makes it exactly the radius — a figure the gate
+states in advance instead of recomputing the code under test.
 
 **What does NOT change: the major road still decides the height.** `build_apron`'s ground-sampling
 argument is untouched, and is the reason the polygon is not flat at `junction.elevation` either. The
@@ -251,6 +269,31 @@ disc is restored.
 Keep a synthetic 45/135-degree rig as well, but only for criterion J's convex-hull fallback: no junction
 in the project crosses acutely enough to make two cut faces overlap, so that path is the one branch real
 data does not reach.
+
+#### The junction polygon — **BUILT 2026-09-04**, gates `RoadJunctionPolygonGate` + `RoadJunctionGate`
+
+Split across two gates on purpose. `plan_footprint` is pure planar geometry, so A–G and M are decidable
+from numbers with no terrain, no brushes and no bake — they run in under a second and say exactly which
+number is wrong. J and L need a real network to prove the wiring, so they live in `RoadJunctionGate`
+beside the fixture that already exists there. A single gate would have made the planar claims pay for a
+terrain they do not need, and would have let a wiring failure read as a geometry failure.
+
+The corner radius resolution (M) is asserted three ways, not two. Priority decides; a tie **that
+disagrees** falls to the network default; and a tie **that agrees** keeps the roads' shared value. The
+third is the one that is easy to leave out, and without it the criterion passes on an implementation
+that ignores `corner_radius` whenever two priorities match. Each case is resolved twice with the runs
+reversed, because the tie must not be answered by scene order — see §2.2.3.
+
+| # | Mutation | Caught by |
+|---|---|---|
+| 1 | Restore the `is_major` exemption in `junction_skips()` only | L — the major road's ribbon gap goes empty |
+| 2 | Restore the `is_major` exemption in `grade_surface` only | L — the grader's returned `skip` is clear at the junction cell. **Passed before L was extended to read it**, which is what put the second half in. |
+| 3 | Drop the fillet allowance from the trim-backs (`trims[gi] += 0.0 * allow[gi]`) | E — the kerb return buys itself no room, and its own control fires too |
+| 4 | Resolve a disagreeing tie by first-seen instead of the default | M — wrong value, and it changes when the roads are reversed |
+
+The gap J was written for is still measurable: at the crossing fixture the cut corners sit 0.770 m
+outside the disc that used to be the surface. J states that number as its control, so a regression to a
+disc fails rather than quietly re-opening the hole.
 
 #### Orphaned junction records — **BUILT 2026-09-04**, gate `RoadJunctionOrphanGate`
 

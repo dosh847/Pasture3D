@@ -25,6 +25,7 @@ func _ready() -> void:
 	await _h_a_placed_road_resolves_its_junctions()
 	_i_no_bake_kernel_reads_input_state()
 	await _j_the_apron_covers_every_trimmed_end()
+	await _l_the_major_road_is_trimmed_too()
 	print("\n=== %s (%d failures) ===\n" % ["ROAD JUNCTION PASS" if _fail == 0 else "ROAD JUNCTION FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -243,14 +244,20 @@ func _d_an_override_survives_an_unrelated_edit() -> void:
 
 # ---- E ------------------------------------------------------------------------------------------
 
+## THE KERB RETURN IS TURNED OFF HERE, deliberately. A trim-back is now two terms — the clearance
+## `other_half / sin θ` and the room a kerb return needs, `radius / tan(φ/2)` — and a criterion that
+## measured their sum could not say which one was wrong. So E and F resolve with `default_corner_radius`
+## at zero and assert the clearance alone; the second term is asserted on its own below, as the exact
+## amount it adds.
 func _e_the_trim_back_leaves_no_gap_and_no_overlap() -> void:
 	print("[E] the trim-back lands each approach exactly on the other road's edge (the mesher's bar)")
+	var square := {"default_corner_radius": 0.0}
 	# Square crossing, different widths, so a solver that used its OWN width instead of the other road's
 	# would land in a visibly wrong place.
 	var w_ew := 6.0
 	var w_ns := 3.0
 	var js := Pasture3DRoadJunctionSolver.resolve([
-		_east_west("ew", 10, w_ew), _north_south("ns", 5, w_ns)])
+		_east_west("ew", 10, w_ew), _north_south("ns", 5, w_ns)], [], square)
 	var j: Pasture3DRoadJunction = js[0]
 	var t_ew := j.trim_back_for("ew")
 	var t_ns := j.trim_back_for("ns")
@@ -284,11 +291,39 @@ func _e_the_trim_back_leaves_no_gap_and_no_overlap() -> void:
 	if absf(j.trim_back_for("ew") - (t_ew + 25.0 - j.radius)) > 1e-3:
 		_fail += 1; print("    !! a widened footprint did not push its approaches back")
 
+	# THE KERB RETURN IS PAID FOR IN TRIM-BACK, and this is where that is asserted. A return is a corner
+	# of the GAP between two arms, not of the pavement, so rounding it ADDS pavement and its tangent
+	# points sit `r / tan(φ/2)` back along each road. Nothing draws it unless the arms were pushed back
+	# that far first, which is why the solver adds it here rather than the mesher assuming it.
+	#
+	# At a square crossing every corner is 90°, so tan(45°) = 1 and the allowance is exactly the radius —
+	# a number this criterion can name in advance rather than recomputing the code under test.
+	var r := 5.0
+	var rounded := Pasture3DRoadJunctionSolver.resolve([
+		_east_west("ew", 10, w_ew), _north_south("ns", 5, w_ns)],
+		[], {"default_corner_radius": r})
+	var jr: Pasture3DRoadJunction = rounded[0]
+	print("    a %.1f m kerb return -> EW trims back %.3f (want %.3f = %.3f + %.1f), corner radius %.3f"
+			% [r, jr.trim_back_for("ew"), t_ew + r, t_ew, r, jr.corner_radius])
+	if absf(jr.trim_back_for("ew") - (t_ew + r)) > 1e-3 			or absf(jr.trim_back_for("ns") - (t_ns + r)) > 1e-3:
+		_fail += 1; print("    !! a kerb return did not buy itself room in the trim-back")
+	if absf(jr.corner_radius - r) > 1e-3:
+		_fail += 1; print("    !! the junction did not adopt the resolved kerb radius")
+
+	# CONTROL: the square-corner junction above must NOT already have that room, or this is measuring
+	# nothing. It is the same fixture with the radius at zero, so the difference is the whole term.
+	print("    control: with no kerb return the same road trims back %.3f (want %.3f less)"
+			% [t_ew, r])
+	if absf(jr.trim_back_for("ew") - t_ew) < 1e-3:
+		_fail += 1; print("    !! the kerb return changed nothing, so this would pass unimplemented")
+
 
 # ---- F ------------------------------------------------------------------------------------------
 
 func _f_an_acute_crossing_trims_back_further() -> void:
 	print("[F] an acute crossing trims back further — 1/sin θ, not a fixed radius")
+	# Square corners only: see the note on E. The 1/sin θ law is the clearance term alone.
+	var square := {"default_corner_radius": 0.0}
 	var half := 4.0
 	var results: Array = []
 	for deg: float in [90.0, 45.0, 20.0]:
@@ -297,7 +332,7 @@ func _f_an_acute_crossing_trims_back_further() -> void:
 		var dir := Vector2(cos(rad), sin(rad))
 		var js := Pasture3DRoadJunctionSolver.resolve([
 			_east_west("ew", 10, half),
-			_run("x", PackedVector2Array([-dir * 150.0, dir * 150.0]), 5, half)])
+			_run("x", PackedVector2Array([-dir * 150.0, dir * 150.0]), 5, half)], [], square)
 		if js.size() != 1:
 			_fail += 1; print("    !! no junction at %.0f°" % deg); return
 		var want: float = half / sin(rad)
@@ -319,7 +354,7 @@ func _f_an_acute_crossing_trims_back_further() -> void:
 	var dir2 := Vector2(cos(rad2), sin(rad2))
 	var near := Pasture3DRoadJunctionSolver.resolve([
 		_east_west("ew", 10, half),
-		_run("x", PackedVector2Array([-dir2 * 150.0, dir2 * 150.0]), 5, half)])
+		_run("x", PackedVector2Array([-dir2 * 150.0, dir2 * 150.0]), 5, half)], [], square)
 	print("    control: a 2° crossing -> %d junction(s) (want 0, it is running alongside)" % near.size())
 	if near.size() != 0:
 		_fail += 1; print("    !! a near-parallel road produced a junction with a runaway footprint")
@@ -542,22 +577,25 @@ func _i_no_bake_kernel_reads_input_state() -> void:
 		print("    !! the scan matches nothing, so [I] would pass on any source at all")
 
 
-## [J] The junction apron reaches the CORNERS of every trimmed-back approach, not just the middle.
+## [L] The major road is trimmed back like every other arm, and its ribbon leaves a gap to match.
 ##
-## Reported from a live scene as "the intersection mesh only connects to one road". The apron disc was
-## sized `max(radius, widest_trim_back())`, and both of those are the largest TRIM-BACK — a distance
-## measured ALONG a centreline, so it lands on the MIDDLE of a cut end. A cut end is a full-width face:
-## its corners sit at `sqrt(trim^2 + half_width^2)` from the junction centre, which is strictly further.
-## The disc missed both, leaving a triangular gap at each side of every trimmed arm.
+## Until P9a-0 it was not. `grade_surface` skipped the trim for the major road and `junction_skips`
+## skipped its ribbon gap to agree, so the major road paved straight through the junction and only the
+## minor roads stopped. That is what made the footprint unbuildable as one polygon: a road with no cut
+## end has no cut corners for the boundary to pass through, and the surface had to overhang it or leave
+## it out.
 ##
-## It looked like a one-road bug because the MAJOR road is never trimmed — `_junction_gaps` skips it — so
-## its ribbon runs through and meets the apron at any radius. At a plain crossroads that is one connected
-## road and one detached one, which is exactly what was on screen.
+## ASSERTED ON THE BRUSH, NOT THE SOLVER. The solver always computed a trim-back for every participant,
+## the major one included — the exemption was in the two consumers. A criterion reading `trim_backs`
+## would therefore have passed unchanged on the bug it was written for, which is why it is not written
+## that way.
 ##
-## The CONTROL is the old expression. It has to come up SHORT here, or this criterion is asserting a
-## property the buggy code already had and would pass on the bug it was written for.
-func _j_the_apron_covers_every_trimmed_end() -> void:
-	print("[J] the apron disc covers the corners of every trimmed approach, not just the middle")
+## Both consumers are checked, because they were a matched pair and their agreement is the property that
+## matters: a ribbon that stops where the ground does not leaves a hole, and ground that stops where the
+## ribbon does not leaves a flap of road over open air. One of the two would be a regression the other
+## does not see.
+func _l_the_major_road_is_trimmed_too() -> void:
+	print("[L] the major road is trimmed like every other arm, in the grader and the ribbon alike")
 	var fx := _crossing_fixture()
 	var net: Pasture3DRoadNetwork = fx["net"]
 	for brush in fx["brushes"]:
@@ -565,40 +603,120 @@ func _j_the_apron_covers_every_trimmed_end() -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame
 
-	var by_key := {}
-	for b in net.road_brushes():
-		by_key[b.road_key()] = b
+	# CONTROL: there has to BE a major road among the brushes, or "the major road is trimmed" is a claim
+	# about nobody and the criterion is vacuous.
+	var majors := {}
+	for j in net.junctions:
+		if j.detected:
+			majors[j.major_key()] = true
+	if majors.is_empty():
+		_fail += 1
+		print("    !! no detected junction has a major road, so [L] is asserting nothing")
+
+	var checked := 0
+	for brush: Pasture3DRoadBrush in fx["brushes"]:
+		var key := brush.road_key()
+		if not majors.has(key):
+			continue
+		var gaps: Array = brush.junction_skips()
+		# The GRADER's own answer, read as the decision it returns rather than as the source of the
+		# guard that produces it. `grading_profile` is what `grade_surface` consults, and its `skip`
+		# mask is the ground the road does not write — so this is the same fact the ribbon gap above
+		# states, taken from the other consumer. M2 in the mutation table is a version where only this
+		# half was reverted, and the ribbon assertion alone did not see it.
+		var ds := 1.0
+		var run: Dictionary = brush.build_run()
+		var n_s: int = int(ceil(float(run["cum"][run["cum"].size() - 1]) / ds)) + 1
+		var prof: Dictionary = brush.grading_profile(null, ds, n_s)
+		var skip: PackedByteArray = prof["skip"]
+		checked += 1
+		print("    %s is the major road at a junction and leaves %d ribbon gap(s)" % [key, gaps.size()])
+		_check("L", not gaps.is_empty(),
+				"the major road %s must leave a ribbon gap at its junction" % key)
+		# And the grader has to agree, arm for arm: every gap the ribbon leaves is ground the grader
+		# skipped. Compared through the same trim-back both read, so a divergence in either shows here.
+		for j in net.junctions_for(key):
+			if not j.detected:
+				continue
+			var s: float = j.arc_length_for(key)
+			var trim: float = j.trim_back_for(key)
+			if not is_finite(s):
+				continue
+			_check("L", trim > 0.01, "%s has no trim-back at %s" % [key, j.id])
+			var covered := false
+			for g: Array in gaps:
+				if g[0] <= s - trim + 1e-3 and g[1] >= s + trim - 1e-3:
+					covered = true
+			_check("L", covered,
+					"the ribbon gap must cover [%.3f, %.3f], the span the grader skipped" 							% [s - trim, s + trim])
+			var mid := clampi(int(round(s / ds)), 0, skip.size() - 1)
+			_check("L", skip[mid] == 1,
+					"the grader must skip the junction cell at s = %.3f m on the major road" % s)
+
+	if checked == 0:
+		_fail += 1
+		print("    !! no brush in the fixture is a major road, so [L] asserted nothing")
+
+	(fx["terrain"] as Node).queue_free()
+
+
+## [J] The junction footprint contains the CORNERS of every trimmed-back approach, not just the middle.
+##
+## Reported from a live scene as "the intersection mesh only connects to one road". The apron was a DISC
+## sized `max(radius, widest_trim_back())`, and both of those are the largest TRIM-BACK — a distance
+## measured ALONG a centreline, so it lands on the MIDDLE of a cut end. A cut end is a full-width face:
+## its corners sit at `sqrt(trim^2 + half_width^2)` from the junction centre, which is strictly further.
+## The disc missed both, leaving a triangular gap at each side of every trimmed arm.
+##
+## The disc is gone (P9a-0) and the surface is now a polygon through the arms' cut ends, so this asserts
+## the property directly: every cut corner of every arm is inside the boundary. ALL arms, the major road
+## included — it is trimmed like the rest now, and an assertion that still exempted it would stop
+## covering the case that made the bug hard to see.
+##
+## The CONTROL is the old disc expression. It has to come up SHORT here, or this criterion is asserting a
+## property the buggy code already had and would pass on the bug it was written for.
+func _j_the_apron_covers_every_trimmed_end() -> void:
+	print("[J] the junction polygon contains the cut corners of every trimmed arm")
+	var fx := _crossing_fixture()
+	var net: Pasture3DRoadNetwork = fx["net"]
+	for brush in fx["brushes"]:
+		(brush as Pasture3DRoadBrush)._paint_into(fx["layer"], 0)
+	await get_tree().process_frame
+	await get_tree().process_frame
 
 	var checked := 0
 	var worst_short := 0.0
 	for j in net.junctions:
 		if not j.detected or j.radius <= 0.01:
 			continue
-		var apron_r: float = net._apron_radius(j, by_key)
+		var arms: Array = j.footprint_arms()
+		var poly := Pasture3DRoadMesher.plan_footprint(j.center, arms, j.effective_corner_radius())
+		_check("J", poly.size() >= 3, "junction %s produced no footprint polygon" % j.id)
+		if poly.size() < 3:
+			continue
+		# The old disc, for the control below.
 		var old_r: float = maxf(j.radius, j.widest_trim_back())
-		for i in j.road_keys.size():
-			var key := String(j.road_keys[i])
-			if j.is_major(key) or not by_key.has(key):
-				continue
-			var b = by_key[key]
-			var t: Pasture3DRoadType = b.resolved_road_type()
-			var hw: float = t.half_width(b.resolved_lane_count()) if t != null else 3.5
-			var trim: float = j.trim_backs[i] if i < j.trim_backs.size() else 0.0
-			var corner := sqrt(trim * trim + hw * hw)
-			checked += 1
-			print("    %s: trim %.3f m, half-width %.3f m -> corner at %.3f m; apron %.3f m (old %.3f m)"
-					% [key, trim, hw, corner, apron_r, old_r])
-			_check("J", apron_r >= corner - 1e-3,
-					"apron %.3f m must reach the cut corner at %.3f m" % [apron_r, corner])
-			worst_short = maxf(worst_short, corner - old_r)
+		for arm: Dictionary in arms:
+			var d: Vector2 = arm["dir"]
+			var trim: float = arm["trim"]
+			var hw: float = arm["half"]
+			var n := Vector2(-d.y, d.x)
+			for side in [1.0, -1.0]:
+				var corner: Vector2 = j.center + d * trim + n * (hw * side)
+				checked += 1
+				_check("J", Geometry2D.is_point_in_polygon(corner, poly),
+						"cut corner %.3f m from centre is outside the footprint" 								% j.center.distance_to(corner))
+				worst_short = maxf(worst_short, j.center.distance_to(corner) - old_r)
 
-	# Without at least one trimmed minor arm there was nothing to cover and [J] measured nothing.
+	# Without a trimmed arm there was nothing to cover and [J] measured nothing.
 	if checked == 0:
 		_fail += 1
-		print("    !! no trimmed minor arm in the fixture, so [J] asserted nothing")
+		print("    !! no trimmed arm in the fixture, so [J] asserted nothing")
+	else:
+		print("    %d cut corners checked against the footprint" % checked)
 
 	# CONTROL: the old radius must MISS. If it reaches, this fixture cannot tell the fix from the bug.
-	print("    control: the old radius falls %.3f m short of the furthest corner (want > 0)" % worst_short)
+	print("    control: the old disc falls %.3f m short of the furthest corner (want > 0)" % worst_short)
 	if worst_short <= 1e-3:
 		_fail += 1
 		print("    !! the old radius already covered every corner, so [J] would pass on the bug")

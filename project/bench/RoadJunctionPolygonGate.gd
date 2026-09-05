@@ -15,6 +15,8 @@
 #   E  a radius the trim cannot afford is clamped, never emitted as a reversed arc
 #   F  an acute crossing stays simple, which is where a self-intersection would appear if anywhere
 #   G  build_footprint fans the boundary with Godot's front face, visible from above
+#   M  the kerb radius comes from the highest-priority arm, ties fall to the network default, and neither
+#      answer depends on the order the roads appear in
 #
 # ---- A IS THE CRITERION THE FEATURE EXISTS FOR, AND IT CARRIES ITS OWN CONTROL ----
 #
@@ -52,6 +54,7 @@ func _ready() -> void:
 	_e_an_unaffordable_radius_is_clamped()
 	_f_an_acute_crossing_stays_simple()
 	_g_the_fan_faces_up()
+	_m_the_kerb_radius_follows_priority()
 	print("\n=== %s (%d failures) ===\n"
 			% ["ROAD JUNCTION POLYGON PASS" if _fail == 0 else "ROAD JUNCTION POLYGON FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
@@ -328,3 +331,76 @@ func _check(p_name: String, p_ok: bool, p_detail: String) -> void:
 	if not p_ok:
 		_fail += 1
 	print("    %s%s: %s" % ["" if p_ok else "!! ", p_name, p_detail])
+
+
+# ---- M ------------------------------------------------------------------------------------------
+
+## [M] The kerb radius is the highest-priority arm's, ties fall to the network default, and NEITHER
+## answer moves when the roads are reordered.
+##
+## The reorder half is the point. `major_index` is decided by walking the participants and keeping the
+## first strict winner, which for tied roads is whichever the solver reached first — scene order. That is
+## harmless for `elevation`, where tied roads sit at the same height, and not harmless here: a corner
+## radius is visible geometry, and resolving a tie by scene order would silently reshape an intersection
+## when an unrelated road was reparented. So the tie goes to the author's default instead, and this
+## criterion runs each case twice with the runs reversed to prove it.
+func _m_the_kerb_radius_follows_priority() -> void:
+	print("[M] the kerb radius follows priority, and ties fall to the network default")
+	var opts := {"default_corner_radius": 9.0}
+
+	# Priority decides: the 3.0 m road outranks the 12.0 m one, so 3.0 m wins — NOT the larger, and not
+	# the default.
+	var sharp := [_run("Major", Vector2(-60, 0), Vector2(60, 0), 4, 5.0, 3.0),
+			_run("Minor", Vector2(0, -60), Vector2(0, 60), 0, 4.0, 12.0)]
+	_radius_is("M", sharp, opts, 3.0, "the higher-priority road's 3.0 m")
+
+	# Tied and disagreeing: neither road's value, the default.
+	var tied := [_run("A", Vector2(-60, 0), Vector2(60, 0), 2, 5.0, 3.0),
+			_run("B", Vector2(0, -60), Vector2(0, 60), 2, 4.0, 12.0)]
+	_radius_is("M", tied, opts, 9.0, "the network default")
+
+	# Tied and AGREEING is not a tie to resolve: the roads have one answer between them and it stands,
+	# even though it is not the default. Without this the criterion would pass on an implementation that
+	# ignored corner_radius whenever two priorities matched.
+	var agree := [_run("A", Vector2(-60, 0), Vector2(60, 0), 2, 5.0, 4.5),
+			_run("B", Vector2(0, -60), Vector2(0, 60), 2, 4.0, 4.5)]
+	_radius_is("M", agree, opts, 4.5, "the value both roads agree on")
+
+
+## Resolves `p_runs` both ways round and asserts the junction's corner radius is `p_want` each time.
+func _radius_is(p_name: String, p_runs: Array, p_opts: Dictionary, p_want: float,
+		p_why: String) -> void:
+	var seen := PackedFloat32Array()
+	for order in [p_runs, [p_runs[1], p_runs[0]]]:
+		var js: Array = Pasture3DRoadJunctionSolver.resolve(order, [], p_opts)
+		if js.size() != 1:
+			_check(p_name, false, "one crossing expected, got %d" % js.size())
+			return
+		seen.append((js[0] as Pasture3DRoadJunction).corner_radius)
+	print("    %s -> %.3f m and %.3f m reversed (want %.3f m: %s)"
+			% [p_why, seen[0], seen[1], p_want, p_why])
+	_check(p_name, is_equal_approx(seen[0], p_want),
+			"corner radius %.4f m, want %.4f m (%s)" % [seen[0], p_want, p_why])
+	_check(p_name, is_equal_approx(seen[0], seen[1]),
+			"reordering the roads changed the radius: %.4f m -> %.4f m" % [seen[0], seen[1]])
+
+
+## A straight run for the solver: the minimum a `build_run` dictionary has to carry.
+func _run(p_key: String, p_from: Vector2, p_to: Vector2, p_priority: int, p_half: float,
+		p_corner: float) -> Dictionary:
+	var plan := PackedVector2Array()
+	var cum := PackedFloat32Array()
+	var n := int(p_from.distance_to(p_to))
+	var a := Pasture3DRoadAlignment.new()
+	a.ds = 1.0
+	var z := PackedFloat32Array()
+	for i in n + 1:
+		plan.append(p_from.lerp(p_to, float(i) / float(n)))
+		cum.append(float(i))
+		z.append(0.0)
+	a.z = z
+	a.ground = z
+	return {
+		"key": p_key, "plan": plan, "cum": cum, "alignment": a,
+		"priority": p_priority, "half_width": p_half, "corner_radius": p_corner,
+	}

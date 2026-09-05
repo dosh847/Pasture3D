@@ -226,6 +226,20 @@ func _configure_host(p_host: Pasture3DRoadChunkHost) -> void:
 		# reachable only by dragging the enum to a value that has no meaning at this level.
 		default_control = Pasture3DRoadJunction.ControlType.PRIORITY 				if v == Pasture3DRoadJunction.ControlType.INHERIT else v
 		_bump()
+## The kerb-return radius a junction uses when its participants cannot decide, metres.
+##
+## A junction takes the `corner_radius` of its HIGHEST-PRIORITY road, because a trunk road meeting a lane
+## should turn with the trunk road's sweep — the same field that already decides the junction's
+## elevation. This is the tie-break, and it exists because the alternative is scene order: `major_index`
+## resolves a priority tie by keeping whichever road the solver walked FIRST, which is tolerable for an
+## elevation (tied roads are at the same height anyway) and not for a corner radius, where it would give
+## the intersection a visibly different shape depending on node order and change it silently when an
+## unrelated road is reparented. So a tie is answered here, where it is authored, rather than incidentally.
+@export_range(0.0, 40.0, 0.1, "or_greater") var default_corner_radius: float = 6.0:
+	set(v):
+		default_corner_radius = maxf(v, 0.0)
+		_bump()
+
 ## Total signal cycle at a signalised junction, seconds. Split between the participating roads in
 ## proportion to their priority (§6.4).
 @export_range(10.0, 240.0, 1.0, "or_greater") var signal_cycle: float = 60.0:
@@ -349,7 +363,11 @@ func resolve_junctions() -> void:
 				runs.append(run)
 	# A road with no solved alignment yet contributes nothing, so a resolve that runs before the first
 	# bake finds nothing rather than finding wrong things.
-	junctions = _typed(Pasture3DRoadJunctionSolver.resolve(runs, junctions))
+	# `default_corner_radius` goes in as an OPTION rather than being read off this node by the solver,
+	# because the solver is static and knows nothing about the scene — the same reason cluster_radius is
+	# passed rather than fetched.
+	junctions = _typed(Pasture3DRoadJunctionSolver.resolve(runs, junctions,
+			{"default_corner_radius": default_corner_radius}))
 	# The lane graph is built from the RESOLVED junctions, so it runs after them and reads the trim-back
 	# they just decided: an arm sits exactly where the approach's grading stops.
 	_resolve_lane_graphs(brushes)
@@ -636,9 +654,13 @@ func paint_layer_owner() -> String:
 ## ground in there is real, graded road surface, so without this you see terrain through a hole at every
 ## crossroads.
 ##
-## The apron follows the MAJOR road, because the major road is what graded that ground: the grader skips
-## only the minor approaches. So the participant whose alignment the disc is built from is the same one
-## that paved it, and the two agree by construction rather than by tuning.
+## The surface is DRAPED on the major road, because the major road is what sets the junction's height:
+## the grader skips every approach now, but `elevation` is still the major road's own solved profile, so
+## the participant whose alignment the polygon is sampled from is the one whose height it has to match.
+## The two agree by construction rather than by tuning.
+##
+## The OUTLINE is not the major road's business. It is `plan_footprint` over the junction's arms, so it
+## reaches every cut end of every arm — including the major road's own, now that it is trimmed too.
 func build_junction_surfaces(p_brushes: Array = []) -> int:
 	var brushes: Array = p_brushes if not p_brushes.is_empty() else road_brushes()
 	var by_key := {}
@@ -656,12 +678,17 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 		if run.is_empty():
 			continue
 		var t: Pasture3DRoadType = b.resolved_road_type()
+		# A junction whose arms the solver could not describe (a pre-P9a-0 record loaded from disk, or a
+		# degenerate group) produces no polygon, and is SKIPPED rather than falling back to a disc. A
+		# silent fallback would hide exactly the case this replaced the disc for.
+		var boundary := Pasture3DRoadMesher.plan_footprint(j.center, j.footprint_arms(),
+				j.effective_corner_radius())
+		if boundary.size() < 3:
+			continue
 		aprons.append({
 			"id": j.id,
 			"center": j.center,
-			# The disc has to reach at least the trim-back the approaches stopped at, or the apron is
-			# smaller than the hole it exists to fill and leaves a ring of bare ground round itself.
-			"radius": _apron_radius(j, by_key),
+			"boundary": boundary,
 			"plan": run["plan"],
 			"cum": run["cum"],
 			"alignment": run["alignment"],
@@ -673,37 +700,6 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 		return 0
 	_configure_host(host)
 	return host.rebuild_aprons(aprons, ribbon_lift)
-
-
-## How far the apron disc has to reach to cover every trimmed-back approach.
-##
-## `radius` and `widest_trim_back()` are both the largest TRIM-BACK, and a trim-back is measured ALONG a
-## centreline: it is the distance to the MIDDLE of a cut end. But a cut end is a full-width face, so its
-## two corners sit at `sqrt(trim^2 + half_width^2)` from the centre. A disc of the trim-back reaches the
-## middle of that face and misses both corners, leaving a triangular gap at each side of every trimmed
-## arm.
-##
-## THIS ONLY SHOWS ON MINOR ROADS, which is what made it look like a different bug. The major road is
-## never trimmed (`Pasture3DRoadBrush._junction_gaps` skips it), so its ribbon runs straight through and
-## meets the apron whatever the radius is. At a plain crossroads — one major, one minor — the apron
-## therefore connects to exactly one road.
-##
-## The major is left out of the max for the same reason it has no gap: covering a cut it never makes
-## would only push the disc out past the graded corridor and float pavement over open ground.
-func _apron_radius(p_junction: Pasture3DRoadJunction, p_by_key: Dictionary) -> float:
-	var r: float = maxf(p_junction.radius, p_junction.widest_trim_back())
-	for i in p_junction.road_keys.size():
-		var key := String(p_junction.road_keys[i])
-		if p_junction.is_major(key):
-			continue
-		var b = p_by_key.get(key, null)
-		if b == null:
-			continue
-		var t: Pasture3DRoadType = b.resolved_road_type()
-		var hw: float = t.half_width(b.resolved_lane_count()) if t != null else 3.5
-		var trim: float = p_junction.trim_backs[i] if i < p_junction.trim_backs.size() else 0.0
-		r = maxf(r, sqrt(trim * trim + hw * hw))
-	return r
 
 
 ## Fill in every Road Source node in `p_graph` with the geometry of the road it names. Returns how many

@@ -903,8 +903,18 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 	# minor road has to arrive at the major road's height and P1 already honours pins exactly — and
 	# already reports a pin it cannot reach as an infeasible gradient breach, so an impossible junction
 	# surfaces through gated machinery instead of a new failure mode. The TRIM goes into the grading,
-	# because two roads writing the same cells is how a crossroads turns into a lumpy scar: the minor
-	# approach stops at the footprint and the major road, which keeps its own profile, paves through.
+	# because two roads writing the same cells is how a crossroads turns into a lumpy scar: EVERY approach
+	# stops at the footprint, and the junction surface — one polygon spanning the trimmed ends of all of
+	# them — is what covers the gap they leave.
+	#
+	# THE MAJOR ROAD IS TRIMMED TOO (P9a-0, retired 2026-09-04). It used to pave through on the argument
+	# that a crossroads should read as one road crossing another. But paving through means the major road
+	# writes its own cross-section across the whole footprint while the junction surface writes another
+	# over the same cells, so the two disagree wherever the junction is not exactly the major road's
+	# camber — which is everywhere it is not a right-angle crossing of equal widths. The major road keeps
+	# its right of way where right of way is actually decided: it still sets `elevation`, so the junction
+	# sits at ITS solved height and the minor roads bend to meet it. What it no longer gets is a second,
+	# geometric privilege that made the surface unbuildable as a single polygon.
 	var pins := {}
 	var skip := PackedByteArray()
 	skip.resize(p_n_s)
@@ -919,12 +929,11 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 			var ji := clampi(int(round(js / p_ds)), 0, p_n_s - 1)
 			if is_finite(jpin):
 				pins[ji] = jpin
-			if not j.is_major(jkey):
-				var trim: float = j.trim_back_for(jkey)
-				var lo := clampi(int(floor((js - trim) / p_ds)), 0, p_n_s - 1)
-				var hi := clampi(int(ceil((js + trim) / p_ds)), 0, p_n_s - 1)
-				for i in range(lo, hi + 1):
-					skip[i] = 1
+			var trim: float = j.trim_back_for(jkey)
+			var lo := clampi(int(floor((js - trim) / p_ds)), 0, p_n_s - 1)
+			var hi := clampi(int(ceil((js + trim) / p_ds)), 0, p_n_s - 1)
+			for i in range(lo, hi + 1):
+				skip[i] = 1
 	return {
 		"half": half, "shoulder": shoulder, "verge": verge, "suppress": suppress,
 		"pins": pins, "skip": skip,
@@ -1355,6 +1364,10 @@ func build_run() -> Dictionary:
 		"alignment": alignment,
 		"bridge": bridge,
 		"priority": t.priority,
+		# The kerb return the junction solver will use IF this road turns out to be the highest-priority one
+		# there. Published unconditionally because the solver cannot know which road wins until it has the
+		# whole group, and a run that withheld it would silently fall back to the network default.
+		"corner_radius": t.corner_radius,
 		"half_width": t.half_width(resolved_lane_count()),
 	}
 
@@ -1610,15 +1623,13 @@ func junction_skips() -> Array:
 	var key := road_key()
 	var out: Array = []
 	for j in net.junctions_for(key):
-		# MIRRORS THE GRADER EXACTLY (see grade_surface): only a road that is NOT the major one stops at
-		# the footprint. The major road keeps its own profile and paves straight through, which is what
-		# makes a crossroads look like one road crossing another rather than two roads meeting a patch.
+		# MIRRORS THE GRADER EXACTLY (see grade_surface): every arm stops at the footprint, the major road
+		# included, and the junction polygon covers what they leave.
 		#
 		# Getting this wrong is not a cosmetic difference. A ribbon that stops where the GROUND does not
 		# leaves a hole at every junction with graded road surface visible through it — the mesh and the
-		# terrain disagreeing about where the road is.
-		if j.is_major(key):
-			continue
+		# terrain disagreeing about where the road is. The exemption these two sites used to share was
+		# exactly that kind of pairing, and it is retired in BOTH or in neither.
 		var s: float = j.arc_length_for(key)
 		var trim: float = j.trim_back_for(key)
 		if not is_finite(s) or not is_finite(trim) or trim <= 0.0:

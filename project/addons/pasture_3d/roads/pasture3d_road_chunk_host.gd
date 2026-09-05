@@ -359,15 +359,15 @@ func _place_props(p_brush: Pasture3DRoadBrush, p_type: Pasture3DRoadType, p_tran
 ## several stop being separate. Put on the network's host, it is rebuilt once per resolve instead of once
 ## per participant, and there is no question of which road owns it.
 ##
-## Each apron carries one mesh repeated across the LOD slots. A disc of two dozen triangles has nothing
+## Each apron carries one mesh repeated across the LOD slots. A footprint of a few dozen triangles has nothing
 ## worth decimating, and sharing the resource costs nothing — what it buys is that aprons go through the
 ## same distance culling and the same far-hide as everything else, with no second code path.
 func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_LIFT) -> int:
 	_clear()
 	depth_lift = p_lift
 	for a: Dictionary in p_aprons:
-		var arrays := Pasture3DRoadMesher.build_apron(a["center"], float(a["radius"]), a["plan"],
-				a["cum"], a["alignment"], float(a["crown"]), 24, p_lift)
+		var arrays := Pasture3DRoadMesher.build_footprint(a["center"], a["boundary"], a["plan"],
+				a["cum"], a["alignment"], float(a["crown"]), p_lift)
 		if arrays.is_empty():
 			continue
 		var mesh := ArrayMesh.new()
@@ -385,8 +385,8 @@ func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_L
 			# above — that one carries the render lift. Without this the road has a hole in its collision
 			# at every junction: a raycast asking "am I on tarmac" answers yes along the road and no in the
 			# middle of the crossroads, which is exactly where a vehicle most needs the answer.
-			var solid := Pasture3DRoadMesher.build_apron(a["center"], float(a["radius"]), a["plan"],
-					a["cum"], a["alignment"], float(a["crown"]), 24, 0.0)
+			var solid := Pasture3DRoadMesher.build_footprint(a["center"], a["boundary"], a["plan"],
+					a["cum"], a["alignment"], float(a["crown"]), 0.0)
 			if not solid.is_empty():
 				_collider_from(mi, solid)
 		var meshes: Array = []

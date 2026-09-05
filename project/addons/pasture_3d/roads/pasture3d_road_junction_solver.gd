@@ -35,6 +35,11 @@ const DEFAULT_CLUSTER_RADIUS: float = 12.0
 ## lorry plus deck; below it, two roads at different heights would still collide.
 const DEFAULT_CLEARANCE: float = 5.5
 
+## A stub shorter than this is not an arm: a road whose end lands all but exactly on the junction has
+## nothing left to trim, and an arm of a few centimetres would give the footprint a cut face facing a
+## direction the road never actually runs in.
+const ARM_MIN_LENGTH: float = 0.5
+
 ## Angles shallower than this are treated as parallel — 1/sin θ has no useful value there, and two roads
 ## meeting at 2° are running alongside each other, not crossing.
 const MIN_CROSSING_ANGLE: float = 0.12 # radians, about 7°
@@ -120,7 +125,7 @@ static func resolve(p_runs: Array, p_existing: Array = [], p_opts: Dictionary = 
 
 	var out: Array = []
 	for g: Array in groups:
-		var j := _resolve_group(p_runs, crossings, g)
+		var j := _resolve_group(p_runs, crossings, g, p_opts)
 		if j == null:
 			continue
 		var prior := _match_prior(j, priors, taken, match_r)
@@ -142,6 +147,10 @@ static func resolve(p_runs: Array, p_existing: Array = [], p_opts: Dictionary = 
 			prior.arc_lengths = j.arc_lengths
 			prior.trim_backs = j.trim_backs
 			prior.radius = j.radius
+			prior.arm_dirs = j.arm_dirs
+			prior.arm_roads = j.arm_roads
+			prior.arm_halfs = j.arm_halfs
+			prior.corner_radius = j.corner_radius
 			prior.elevation = j.elevation
 			prior.major_index = j.major_index
 			prior.detected = true
@@ -251,7 +260,8 @@ static func _overlap_count(p_a: PackedStringArray, p_b: PackedStringArray) -> in
 
 
 ## Resolve one cluster of crossings into a junction.
-static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array) -> Pasture3DRoadJunction:
+static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
+		p_opts: Dictionary = {}) -> Pasture3DRoadJunction:
 	# Participants, and the arc length at which each enters. A road crossing the cluster twice keeps its
 	# FIRST arc length here; the second crossing is a separate cluster unless they are within the cluster
 	# radius, in which case they genuinely are one intersection.
@@ -295,17 +305,12 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array) ->
 			var other_w: float = float((p_runs[idx[gj]] as Dictionary).get("half_width", 4.0))
 			var s: float = sin(maxf(ang, MIN_CROSSING_ANGLE))
 			trims[gi] = maxf(trims[gi], other_w / s)
-	j.trim_backs = trims
-
-	# The footprint has to contain every trimmed end, so it is the largest of them.
-	var r := 0.0
-	for t in trims:
-		r = maxf(r, t)
-	j.radius = r
-
 	# PRIORITY DECIDES ELEVATION (§5.2). The junction sits at the major road's own solved height, so the
 	# road with right of way keeps the profile it solved and the minor roads bend to meet it. Averaging
 	# would put a dip or a hump in the major road, which is the one road that must not have one.
+	#
+	# Resolved BEFORE the trim-backs are finished, because priority also picks the kerb return below, and
+	# the kerb return is what the arms have to be trimmed back to make room for.
 	var best := 0
 	var best_priority := -2147483648
 	for gi in range(idx.size()):
@@ -317,7 +322,126 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array) ->
 	var major_run: Dictionary = p_runs[idx[best]]
 	var z := _height_of(major_run, arcs[best])
 	j.elevation = z if is_finite(z) else 0.0
+
+	# ---- THE ARMS (P9a-0) --------------------------------------------------------------------------
+	#
+	# An arm is not a participant. A road that CROSSES the junction leaves it in two directions and a road
+	# that ENDS here leaves it in one, so a plain crossroads of two roads has FOUR arms. Whether the road
+	# continues is read off the arc length against the run's own length rather than assumed, which is what
+	# makes a T-junction produce three arms and not four with one facing into nothing.
+	var dirs := PackedVector2Array()
+	var arm_roads := PackedInt32Array()
+	var halfs := PackedFloat32Array()
+	for gi in range(idx.size()):
+		var run: Dictionary = p_runs[idx[gi]]
+		var tang := _tangent_at(run, arcs[gi])
+		if tang.length_squared() < 0.5:
+			continue
+		var hw: float = float(run.get("half_width", 4.0))
+		var total := _run_length(run)
+		if total - arcs[gi] > ARM_MIN_LENGTH:
+			dirs.append(tang)
+			arm_roads.append(gi)
+			halfs.append(hw)
+		if arcs[gi] > ARM_MIN_LENGTH:
+			dirs.append(-tang)
+			arm_roads.append(gi)
+			halfs.append(hw)
+	j.arm_dirs = dirs
+	j.arm_roads = arm_roads
+	j.arm_halfs = halfs
+
+	# ---- THE KERB RETURN COSTS TRIM-BACK -----------------------------------------------------------
+	#
+	# The corner between two arms is a corner of the GAP between them, not of the pavement, so rounding it
+	# ADDS pavement and its tangent points sit `radius / tan(phi/2)` back along each road. A return can
+	# therefore only be drawn if the arms were trimmed that much further back to leave room — which is why
+	# a corner radius makes an intersection BIGGER rather than rounder in place, and why this is added to
+	# the trim-back here rather than handled in the mesher.
+	j.corner_radius = _corner_radius_for(p_runs, idx, best_priority, p_opts)
+	var allow := _fillet_allowances(dirs, arm_roads, idx.size(), j.effective_corner_radius())
+	for gi in range(idx.size()):
+		trims[gi] += allow[gi]
+	j.trim_backs = trims
+
+	# The footprint has to contain every trimmed end, so it is the largest of them.
+	var r := 0.0
+	for t in trims:
+		r = maxf(r, t)
+	j.radius = r
 	return j
+
+
+## The kerb-return radius this junction uses: the `corner_radius` of its highest-priority participants,
+## or the world default when they tie and disagree.
+##
+## THE TIE IS NOT RESOLVED BY `major_index`, deliberately. That falls to whichever road the solver walked
+## first, which is scene order — tolerable for an elevation, where tied roads are at the same height and
+## the choice is invisible, and not for a corner radius, where it would give the intersection a visibly
+## different shape depending on node order and change it silently when an unrelated road is reparented.
+## A tie is answered by a value the author set, or not at all.
+static func _corner_radius_for(p_runs: Array, p_idx: Array, p_best_priority: int,
+		p_opts: Dictionary) -> float:
+	var fallback: float = float(p_opts.get("default_corner_radius", 6.0))
+	var first := NAN
+	for gi in range(p_idx.size()):
+		var run: Dictionary = p_runs[p_idx[gi]]
+		if int(run.get("priority", 0)) != p_best_priority:
+			continue
+		var v: float = float(run.get("corner_radius", fallback))
+		if is_nan(first):
+			first = v
+		elif not is_equal_approx(first, v):
+			return fallback # tied on priority and disagreeing: the author's default decides
+	return fallback if is_nan(first) else first
+
+
+## How much further back each ROAD must be trimmed for its kerb returns to fit, parallel to the group's
+## participants.
+##
+## Per road rather than per arm because the grader takes ONE trim-back per road and applies it either
+## side of the crossing. So a road takes the largest allowance any of its arms needs: trimming one side
+## of a crossing further than the other would need a second number the grader has nowhere to put.
+static func _fillet_allowances(p_dirs: PackedVector2Array, p_arm_roads: PackedInt32Array,
+		p_road_count: int, p_radius: float) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	out.resize(p_road_count)
+	out.fill(0.0)
+	if p_radius <= 0.0 or p_dirs.size() < 2:
+		return out
+	var order: Array = []
+	for i in p_dirs.size():
+		order.append(i)
+	order.sort_custom(func(a, b): return p_dirs[a].angle() < p_dirs[b].angle())
+	for k in order.size():
+		var ia: int = order[k]
+		var ib: int = order[(k + 1) % order.size()]
+		if ia == ib:
+			continue
+		var phi := acos(clampf(p_dirs[ia].dot(p_dirs[ib]), -1.0, 1.0))
+		var a := Pasture3DRoadMesher.fillet_allowance(p_radius, phi)
+		out[p_arm_roads[ia]] = maxf(out[p_arm_roads[ia]], a)
+		out[p_arm_roads[ib]] = maxf(out[p_arm_roads[ib]], a)
+	return out
+
+
+## Unit direction of `p_run` at arc length `p_s`, in the direction of increasing arc length.
+static func _tangent_at(p_run: Dictionary, p_s: float) -> Vector2:
+	var plan: PackedVector2Array = p_run.get("plan", PackedVector2Array())
+	var cum: PackedFloat32Array = p_run.get("cum", PackedFloat32Array())
+	if plan.size() < 2 or cum.size() < plan.size():
+		return Vector2.ZERO
+	for i in range(plan.size() - 1):
+		if p_s <= cum[i + 1] or i == plan.size() - 2:
+			var d := plan[i + 1] - plan[i]
+			return d.normalized() if d.length_squared() > 1e-12 else Vector2.ZERO
+	return Vector2.ZERO
+
+
+## Total arc length of a run.
+static func _run_length(p_run: Dictionary) -> float:
+	var cum: PackedFloat32Array = p_run.get("cum", PackedFloat32Array())
+	return cum[cum.size() - 1] if cum.size() > 0 else 0.0
 
 
 ## The crossing angle recorded between two participants, or a right angle when they never crossed each
