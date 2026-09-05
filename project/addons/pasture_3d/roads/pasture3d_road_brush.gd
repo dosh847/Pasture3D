@@ -911,14 +911,25 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 	# stops at the footprint, and the junction surface — one polygon spanning the trimmed ends of all of
 	# them — is what covers the gap they leave.
 	#
-	# THE MAJOR ROAD IS TRIMMED TOO (P9a-0, retired 2026-09-04). It used to pave through on the argument
-	# that a crossroads should read as one road crossing another. But paving through means the major road
-	# writes its own cross-section across the whole footprint while the junction surface writes another
-	# over the same cells, so the two disagree wherever the junction is not exactly the major road's
-	# camber — which is everywhere it is not a right-angle crossing of equal widths. The major road keeps
-	# its right of way where right of way is actually decided: it still sets `elevation`, so the junction
-	# sits at ITS solved height and the minor roads bend to meet it. What it no longer gets is a second,
-	# geometric privilege that made the surface unbuildable as a single polygon.
+	# ---- THE MAJOR ROAD IS TRIMMED IN THE RIBBON AND NOT IN THE GROUND ----
+	#
+	# These are two consumers with two different owners, and collapsing them into one rule broke the
+	# junctions twice in opposite directions on 2026-09-04.
+	#
+	# The RIBBON: every arm stops at the footprint, the major road included, because the junction POLYGON
+	# covers what they leave. Mesh meets mesh, both at the junction's elevation, and a major road paving
+	# its own cross-section through while the polygon lays another over the same place is two surfaces
+	# disagreeing wherever the junction is not exactly the major road's camber. See `junction_skips`.
+	#
+	# The GROUND: the major road grades straight through, and MUST. Nothing else can. Every minor
+	# approach is skipped, so if the major road is skipped as well then no road writes the terrain inside
+	# a footprint at all — it keeps its raw height while the junction polygon sits at road level, and the
+	# hillside comes up through the intersection. That is what "the intersections are getting buried"
+	# was. It is also why `build_footprint` drapes the polygon on the MAJOR ROAD'S alignment: the polygon
+	# is drawn on the surface the major road graded, so the major road has to have graded it.
+	#
+	# Retiring the exemption in BOTH places was the error. The ribbon half was right and stays retired;
+	# this half is restored. Gate [L] asserts the split rather than either half alone.
 	var pins := {}
 	var skip := PackedByteArray()
 	skip.resize(p_n_s)
@@ -933,11 +944,12 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 			var ji := clampi(int(round(js / p_ds)), 0, p_n_s - 1)
 			if is_finite(jpin):
 				pins[ji] = jpin
-			var trim: float = j.trim_back_for(jkey)
-			var lo := clampi(int(floor((js - trim) / p_ds)), 0, p_n_s - 1)
-			var hi := clampi(int(ceil((js + trim) / p_ds)), 0, p_n_s - 1)
-			for i in range(lo, hi + 1):
-				skip[i] = 1
+			if not j.is_major(jkey):
+				var trim: float = j.trim_back_for(jkey)
+				var lo := clampi(int(floor((js - trim) / p_ds)), 0, p_n_s - 1)
+				var hi := clampi(int(ceil((js + trim) / p_ds)), 0, p_n_s - 1)
+				for i in range(lo, hi + 1):
+					skip[i] = 1
 	return {
 		"half": half, "shoulder": shoulder, "verge": verge, "suppress": suppress,
 		"pins": pins, "skip": skip,
@@ -1083,15 +1095,31 @@ func _foreign_formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: floa
 		var plan := b._plan_points()
 		if plan.size() < 2:
 			continue
+		# ---- A SKIPPED STRETCH IS NOT A FORMATION ----
+		#
+		# A road trimmed back from a junction footprint builds nothing there — that ground belongs to the
+		# junction. Protecting it anyway is worse than pointless: it stops the MAJOR road, the one road
+		# that does grade through a footprint, from reaching the ground beside the minor approach, and the
+		# raw hillside is then left standing right at the edge of the intersection.
+		var b_cum := b._plan_cum()
+		var b_total: float = b_cum[b_cum.size() - 1]
+		var b_ds := 1.0
+		var b_skip: PackedByteArray = b.grading_profile(null, b_ds,
+				maxi(int(ceil(b_total / b_ds)) + 1, 2))["skip"]
 		var r_cells := int(ceil(radius / p_vs))
 		var r2 := radius * radius
 		for i in range(plan.size() - 1):
 			var a := plan[i]
 			var c := plan[i + 1]
 			var seg := a.distance_to(c)
+			var s0: float = b_cum[i]
 			var steps := maxi(int(ceil(seg / PROTECT_STEP)), 1)
 			for k in range(steps + 1):
-				var at := a.lerp(c, float(k) / float(steps))
+				var f := float(k) / float(steps)
+				var si := clampi(int(round((s0 + seg * f) / b_ds)), 0, b_skip.size() - 1)
+				if not b_skip.is_empty() and b_skip[si] != 0:
+					continue
+				var at := a.lerp(c, f)
 				var cx := int(round((at.x - p_min_x) / p_vs))
 				var cz := int(round((at.y - p_min_z) / p_vs))
 				for iz in range(maxi(cz - r_cells, 0), mini(cz + r_cells + 1, p_gh)):

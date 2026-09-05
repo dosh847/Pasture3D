@@ -595,7 +595,7 @@ func _i_no_bake_kernel_reads_input_state() -> void:
 ## ribbon does not leaves a flap of road over open air. One of the two would be a regression the other
 ## does not see.
 func _l_the_major_road_is_trimmed_too() -> void:
-	print("[L] the major road is trimmed like every other arm, in the grader and the ribbon alike")
+	print("[L] the major road is trimmed in the RIBBON and grades through in the GROUND")
 	var fx := _crossing_fixture()
 	var net: Pasture3DRoadNetwork = fx["net"]
 	for brush in fx["brushes"]:
@@ -614,21 +614,44 @@ func _l_the_major_road_is_trimmed_too() -> void:
 		print("    !! no detected junction has a major road, so [L] is asserting nothing")
 
 	var checked := 0
+	var minors := 0
 	for brush: Pasture3DRoadBrush in fx["brushes"]:
 		var key := brush.road_key()
-		if not majors.has(key):
-			continue
 		var gaps: Array = brush.junction_skips()
-		# The GRADER's own answer, read as the decision it returns rather than as the source of the
-		# guard that produces it. `grading_profile` is what `grade_surface` consults, and its `skip`
-		# mask is the ground the road does not write — so this is the same fact the ribbon gap above
-		# states, taken from the other consumer. M2 in the mutation table is a version where only this
-		# half was reverted, and the ribbon assertion alone did not see it.
+		# The GRADER's own answer, read as the decision it returns rather than as the source of the guard
+		# that produces it. `grading_profile` is what `grade_surface` consults, and its `skip` mask is the
+		# ground the road does not write.
+		#
+		# It has to be read SEPARATELY from the ribbon gap, and asserted to say the OPPOSITE, because the
+		# two are different consumers with different owners. Both halves were once exempt together and
+		# then retired together, and each pairing broke the junctions in its own direction: exempt in the
+		# ribbon and the major road paves a second surface through the polygon; skipped in the ground and
+		# NOTHING grades inside a footprint, so the raw hillside stands up through the intersection. A
+		# criterion that reads one half and infers the other cannot see either failure.
 		var ds := 1.0
 		var run: Dictionary = brush.build_run()
 		var n_s: int = int(ceil(float(run["cum"][run["cum"].size() - 1]) / ds)) + 1
 		var prof: Dictionary = brush.grading_profile(null, ds, n_s)
 		var skip: PackedByteArray = prof["skip"]
+
+		# The MINOR half of the same split, and not an afterthought: without it "the major road grades
+		# through" is satisfied by a build in which no road is ever skipped, which is the lumpy scar the
+		# trim exists to prevent. Every arm still stops in the ribbon, major and minor alike.
+		if not majors.has(key):
+			minors += 1
+			_check("L", not gaps.is_empty(),
+					"the minor road %s must leave a ribbon gap at its junction" % key)
+			for j in net.junctions_for(key):
+				if not j.detected:
+					continue
+				var ms: float = j.arc_length_for(key)
+				if not is_finite(ms):
+					continue
+				var mi := clampi(int(round(ms / ds)), 0, skip.size() - 1)
+				_check("L", skip[mi] == 1,
+						"the grader must skip the junction cell at s = %.3f m on the minor road %s"
+						% [ms, key])
+			continue
 		checked += 1
 		print("    %s is the major road at a junction and leaves %d ribbon gap(s)" % [key, gaps.size()])
 		_check("L", not gaps.is_empty(),
@@ -650,12 +673,18 @@ func _l_the_major_road_is_trimmed_too() -> void:
 			_check("L", covered,
 					"the ribbon gap must cover [%.3f, %.3f], the span the grader skipped" 							% [s - trim, s + trim])
 			var mid := clampi(int(round(s / ds)), 0, skip.size() - 1)
-			_check("L", skip[mid] == 1,
-					"the grader must skip the junction cell at s = %.3f m on the major road" % s)
+			_check("L", skip[mid] == 0,
+					("the grader must NOT skip the junction cell at s = %.3f m on the major road — "
+					+ "nothing else grades inside a footprint, and the polygon is draped on this "
+					+ "road's own graded surface") % s)
 
+	print("    %d major road(s) and %d minor road(s) checked" % [checked, minors])
 	if checked == 0:
 		_fail += 1
 		print("    !! no brush in the fixture is a major road, so [L] asserted nothing")
+	if minors == 0:
+		_fail += 1
+		print("    !! no brush in the fixture is a minor road, so the other half of [L] is vacuous")
 
 	(fx["terrain"] as Node).queue_free()
 

@@ -46,7 +46,7 @@ Read before proposing anything, because most of this feature is already sitting 
 | Lane connectors | `Pasture3DRoadLaneConnector.curve` | **Solved.** A `Curve3D` per legal path through the junction, in WORLD space, tangent-continuous with both lanes at its ends. Carries `turn`, the signed angle, and `allowed_override`. |
 | Stop lines | `Pasture3DRoadStopLine` | **Solved.** One per incoming lane: world `point`, `heading` into the junction, `width`, and the arc length. `endpoints()` already returns the two ends of the painted bar. |
 | The junction surface | `Pasture3DRoadMesher.plan_footprint` / `.build_footprint` | **Built as a polygon** (P9a-0, 2026-09-04). A triangle fan over the arms' cut ends with kerb returns at the corners, sampling the graded ground rather than sitting at `junction.elevation`. Replaced `build_apron`'s disc; the ground-sampling was right and was kept verbatim. |
-| Trimming the approaches | `Pasture3DRoadBrush.junction_skips`, `grade_surface` | **Built; every arm is trimmed** (P9a-0, 2026-09-04). The `is_major` exemption is retired in both consumers, and the trim now carries the kerb-return allowance as well as the clearance term. |
+| Trimming the approaches | `Pasture3DRoadBrush.junction_skips`, `grade_surface` | **Built** (P9a-0, 2026-09-04). Every arm is trimmed IN THE RIBBON, the major road included; in the GROUND the major road still grades through — see §2.2.2, corrected 2026-09-04. The trim now carries the kerb-return allowance as well as the clearance term. |
 | Road markings | `Pasture3DRoadMarkings.plan` / `.build` | **Built, but only along roads.** `plan()` answers in the grader's `u` (signed metres across, positive right); the host calls it per chunk, and `Pasture3DRoadMesher.chunk_spans` explicitly **removes everything inside a junction footprint**. |
 
 So there are two gaps, not one. **Inside a footprint there is a bare grey disc**: the carriageway's edge
@@ -99,9 +99,21 @@ major one.** That is the substantive behaviour change in P9a-0, and it retires t
 
 | Retired | Where | Why it goes |
 |---|---|---|
-| The `is_major` exemption in the grading skip | `pasture3d_road_brush.gd`, `grade_surface` | Every arm now stops at the polygon boundary. **Retired 2026-09-04.** |
-| The `is_major` exemption in `junction_skips()` | `pasture3d_road_brush.gd` | Mirrors the grader; must change with it or the mesh and the ground disagree about where the road is — the failure its own comment warns about. **Retired 2026-09-04.** |
+| The `is_major` exemption in the grading skip | `pasture3d_road_brush.gd`, `grading_profile` | **KEPT — retiring this was wrong, corrected 2026-09-04 the same day.** Nothing else grades the ground inside a footprint: every minor approach is skipped, so with the major road skipped as well the terrain keeps its raw height while the polygon sits at road level, and the hillside comes up through the intersection. It is also why `build_footprint` drapes the polygon on the MAJOR ROAD'S alignment — the polygon is drawn on the surface the major road graded, so the major road has to have graded it. |
+| The `is_major` exemption in `junction_skips()` | `pasture3d_road_brush.gd` | **Retired 2026-09-04.** Every arm's ribbon stops at the footprint and the polygon covers what they leave: mesh meets mesh, both at the junction's elevation. |
 | `_apron_radius()` entirely | `pasture3d_road_network.gd` | It exists only to make a disc reach a cut face. There is no disc. **Deleted 2026-09-04.** |
+
+**THE TWO EXEMPTIONS ARE NOT A MATCHED PAIR.** This document said they were, twice — the comment in
+`junction_skips()` read "retired in BOTH or in neither" — and that framing broke the junctions in both
+directions on 2026-09-04, first by keeping them together and then by retiring them together. They are two
+consumers with two different owners:
+
+* the **ribbon** stops at the footprint for every arm, because the junction POLYGON covers what it leaves;
+* the **ground** inside the footprint is graded by the major road, because nothing else can.
+
+A rule that reads one and infers the other cannot see either failure. Criterion L asserts the split: the
+major road leaves a ribbon gap AND is not skipped in the grader, and the minor road leaves a ribbon gap
+AND is skipped. Both mutations fire (M16, M17 below).
 
 **These two exemptions had to be gated separately.** They are a matched pair, so the obvious assumption
 is that one criterion covers both — and the build proved otherwise. Reverting only the `junction_skips`
@@ -385,6 +397,13 @@ Each criterion now records that it RAN TO COMPLETION and the summary fails for a
 generalising to the other gates: `_fail == 0` is only trustworthy alongside "and every criterion
 finished". See [[bench-gate-practices]].
 
+#### The trim split — **CORRECTED 2026-09-04**, gate `RoadJunctionGate` [L]
+
+| # | Mutation | Caught by |
+|---|---|---|
+| 16 | Skip the major road in the ground again | L — the major half. This is the bug as reported: "the intersections are getting buried". |
+| 17 | Skip nobody in the ground | L — the minor half, which is what stops "the major road grades through" being satisfied by a build that trims no one |
+
 #### Connector ribbons and guides — **BUILT 2026-09-04**, gate `RoadJunctionPaintGate`
 
 | # | Mutation | Caught by |
@@ -470,7 +489,7 @@ testing that the override followed it, and reports "cannot tell a remap from luc
 | I | **(BUILT)** `GIVE_WAY` triangles appear only on arms that lose priority and whose `effective_control()` is not `SIGNALS`, with the **apex pointing away from the junction** and the row outside the crossing. | Switch the junction to `SIGNALS`: every triangle disappears. Raise the losing arm's `priority` above the other: they move to the other arm rather than vanishing. **Reverse the apex**: the road/no-road assertions cannot see orientation, and a correct row turned round aims the instruction at the traffic already leaving — that mutation survived until the apex check was added. |
 | J | **(P9a-0)** For a 4-arm 90-degree fixture, `plan_footprint` returns a boundary whose vertices are exactly the 8 cut-face corners plus 4 fillet arcs, in angular order, and the polygon is simple (no self-intersection) and closed. | Feed the 45-degree fixture, where `trim = w / sin 45` is larger: the boundary must still be simple. If the convex-hull fallback is missing this is where it self-intersects. |
 | K | **(P9a-0)** Every arm's cut face lies exactly on the polygon boundary — both corners of every arm are vertices of the returned boundary, to 1e-4 m. This is the whole claim of the feature: the surface MEETS the ribbons. | Revert `build_apron`'s disc: the corners now sit off the boundary by `sqrt(trim^2 + half_width^2) — trim`, which for the 8 m fixture is a number the gate can state in advance (about 1.66 m). A gate that cannot distinguish the disc from the polygon is measuring nothing. |
-| L | **(P9a-0)** The major road is trimmed like every other arm: `junction_skips()` returns a non-empty range for the major participant, and the grader's `skip` is set over it. | Restore the `is_major` exemption: the major's skip list goes empty and criterion K fails with it, because its cut face no longer exists to lie on the boundary. The two are one change and the gate must show that. |
+| L | **(P9a-0, corrected)** The major road is trimmed in the RIBBON and grades through in the GROUND, and the minor road does both. Four assertions, not two. | Both directions, and each needs its own: skip the major in the ground and the intersection is buried; skip nobody and the lumpy scar the trim exists to prevent comes back. |
 | N | **(P9a stop bars)** A `disabled` or undetected junction emits no primitives at all. | Remove the guard: a crossing the author marked as an overpass paints stop bars on a road with nothing crossing it. |
 | O | **(P9a stop bars)** `build_junction` puts every vertex on the surface its sampler describes, and falls back to the primitive's flat published height only when given none. | Make the builder ignore its sampler. The control is the fallback itself: build the same primitive both ways and the two answers must DIFFER, or the criterion cannot tell "the sampler was used" from "the sampler agreed". The sampler in the gate is a ramp, not a constant, so a builder that sampled once and reused the answer fails too. |
 | M | **(P9a-0)** The fillet radius equals the highest-priority arm's resolved `corner_radius`; when the top priority is tied, it equals the network default instead. | Give two tied arms different `corner_radius` values and **reorder them in the scene tree**: the resolved fillet must NOT change. If it does, the tie is falling through to `effective_major()` and scene order is deciding geometry. |
