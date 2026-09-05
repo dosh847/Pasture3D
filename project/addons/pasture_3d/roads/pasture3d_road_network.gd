@@ -655,18 +655,72 @@ func paint_layer_owner() -> String:
 ## which is two definitions that agreed only where the junction happened to be exactly that road's
 ## camber. Returns an empty Dictionary when the junction cannot be described.
 func junction_surface(p_junction: Pasture3DRoadJunction) -> Dictionary:
-	if p_junction == null or not p_junction.detected:
+	# DISABLED COUNTS AS ABSENT, here and not only in . This is the one definition of a
+	# junction's surface and it is now read by the exclusion mask as well as by the mesh, so a disabled
+	# junction that still answered would keep every road refusing to grade ground the author has just
+	# said is not an intersection -- the road would stop at a junction that is not drawn.
+	if p_junction == null or not p_junction.detected or p_junction.disabled:
 		return {}
 	var boundary := Pasture3DRoadMesher.plan_footprint(p_junction.center,
 			p_junction.footprint_arms(), p_junction.effective_corner_radius())
 	if boundary.size() < 3:
 		return {}
-	return {
+	var surf := {
 		"center": p_junction.center,
 		"center_h": p_junction.elevation,
 		"boundary": boundary,
 		"heights": Pasture3DRoadMesher.footprint_boundary_heights(p_junction.center, boundary,
 				_arm_faces(p_junction), p_junction.elevation),
+	}
+	surf.merge(_junction_batters(p_junction))
+	return surf
+
+
+## The earthwork the junction's own batter runs at: `{cut_batter, fill_batter, verge}`.
+##
+## ---- WHY THE JUNCTION NEEDS A BATTER OF ITS OWN ----
+##
+## The polygon is flat-ish at road level and everything outside it was left to the ROADS' batters, which
+## run from `edge_d` either side of a CENTRELINE. At the corner between two arms a cell is nine or ten
+## metres from both centrelines, so both roads' batters have already climbed the full depth of the
+## cutting by the time they reach the kerb — and the kerb is at road level. The result is a wall three or
+## four metres high standing on the edge of the intersection, which is the landscape covering the road.
+##
+## The junction's earthwork has to start where the junction's surface ends, so it runs from the POLYGON
+## EDGE outward, at the same slopes and by the same max/min meeting rule the road batter uses.
+##
+## ---- WHY THE SHALLOWEST SLOPE OF ANY PARTICIPANT ----
+##
+## Not the major road's. The batter has to be a property of the JUNCTION, settled the same way for every
+## road that grades it, or the intersection's earthwork depends on which road baked last — the fault
+## §2.2.3 removed from its surface, walked back in through its edges. The shallowest slope and the widest
+## verge are the choice that needs no tie-break: they are the same set whichever order the arms are
+## listed in, and they are the conservative answer, since a batter that is too shallow leaves gentle
+## ground and one that is too steep leaves a wall.
+func _junction_batters(p_junction: Pasture3DRoadJunction) -> Dictionary:
+	var by_key := {}
+	for b in road_brushes():
+		if b != null:
+			by_key[b.road_key()] = b
+	var cut := INF
+	var fill := INF
+	var verge := 0.0
+	for key in p_junction.road_keys:
+		var b: Pasture3DRoadBrush = by_key.get(key)
+		if b == null:
+			continue
+		var t := b.resolved_road_type()
+		if t == null:
+			continue
+		cut = minf(cut, t.cut_batter)
+		fill = minf(fill, t.fill_batter)
+		verge = maxf(verge, t.verge_width)
+	if not is_finite(cut):
+		return {"cut_batter": 1.0, "fill_batter": 0.6, "verge": 4.0}
+	return {
+		"cut_batter": maxf(cut, 0.01),
+		"fill_batter": maxf(fill, 0.01),
+		"verge": maxf(verge, 0.0),
 	}
 
 

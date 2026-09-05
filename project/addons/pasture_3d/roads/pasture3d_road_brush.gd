@@ -621,7 +621,11 @@ func _paint_flat_footprint(path: Path3D) -> void:
 				"crown": prof["crown"],
 				"cut_batter": prof["cut_batter"],
 				"fill_batter": prof["fill_batter"],
-				"skip": prof["skip"],
+				# See `grade_surface`: the ground refuses junction footprints per CELL, not the whole
+				# corridor width per arc length. A road WITH a junction never reaches here at all
+				# (`_road_native_is_complete`), but one without can still have its batter sweep across a
+				# neighbouring junction's footprint, so the mask is passed on both routes.
+				"exclude": _junction_exclusion_mask(gw, gh, min_x, min_z, vs),
 				# The same refusal the GDScript path passes, and it has to be passed HERE too because the
 				# kernel is the thing that honours it -- `stamp_road_line` forwards `opts` straight to
 				# `road_grade_grid_geom`. Without it this branch was the one the editor actually took, so
@@ -1000,7 +1004,6 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	var verge: PackedFloat32Array = prof["verge"]
 	var suppress: PackedByteArray = prof["suppress"]
 	var pins: Dictionary = prof["pins"]
-	var skip: PackedByteArray = prof["skip"]
 	# Recorded HERE and not in `grading_profile`, because it is a statement about a bake: "the pins this
 	# road last built itself with". `graph_path` asks for the same profile without baking anything, and
 	# crediting it with a rebake it did not do would stop the resolve loop asking for the one it needs.
@@ -1032,7 +1035,15 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 				"crown": prof["crown"],
 				"cut_batter": prof["cut_batter"],
 				"fill_batter": prof["fill_batter"],
-				"skip": skip,
+				# NO `skip` FOR THE GROUND. `skip` is per arc-length sample, so it refuses at every
+				# lateral distance out to the corridor reach, blanking a trim-length by reach-wide swath
+				# either side of every junction. `grade_junction_footprints` then fills only the polygon,
+				# which is about a carriageway wide, and the shoulder and batter alongside the
+				# intersection were left as raw hillside standing over the road. `exclude` refuses the
+				# footprint CELLS instead, so the corridor grades right up to the polygon's edge.
+				#
+				# `skip` is still what trims the RIBBON — see `junction_skips`. Two consumers, two shapes.
+				"exclude": _junction_exclusion_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs),
 				"protect": _foreign_formation_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs),
 			})
 	# The alignment this bake solved is what makes this road detectable, so the resolve is asked for
@@ -1092,13 +1103,9 @@ func _foreign_formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: floa
 	for b in net.road_brushes():
 		if b != null and b != self and b.road_key() != mine:
 			others.append(b)
-	# The footprints go in even when this road has no neighbours to protect against: the ground inside one
-	# belongs to the junction, and a batter from any road — including this one, approaching from outside
-	# the trim — would otherwise be laid over it after `grade_junction_footprints` wrote it.
-	out.resize(p_gw * p_gh)
-	_stamp_footprints(out, net, p_gw, p_gh, p_min_x, p_min_z, p_vs)
 	if others.is_empty():
 		return out
+	out.resize(p_gw * p_gh)
 	for b in others:
 		var radius := b.formation_half_width()
 		if radius <= 0.0:
@@ -1189,10 +1196,112 @@ func grade_junction_footprints(p_z: PackedFloat32Array, p_gw: int, p_gh: int, p_
 					continue
 				out[idx] = Pasture3DRoadMesher.footprint_height_at(at, centre, boundary, heights,
 						centre_h)
+		out = _batter_junction_footprint(out, surf, p_gw, p_gh, p_min_x, p_min_z, p_vs)
+	return out
+
+
+## The junction's own batter: the ground OUTSIDE the footprint, falling away from the polygon's edge.
+##
+## ---- WHAT WAS LEFT STANDING ----
+##
+## The polygon is at road level and everything outside it was the ROADS' to grade. A road batter runs
+## from `edge_d` either side of a CENTRELINE, so at the corner between two arms — nine or ten metres from
+## both centrelines — both roads' batters have already climbed the full depth of the cutting by the time
+## they reach the kerb. Measured on a crossing in a cutting: a 3.93 m step between two neighbouring cells
+## straddling the polygon edge, which is a wall the height of a house standing on the intersection.
+##
+## The junction's surface stops at the polygon, so its earthwork has to start there: the batter runs from
+## the polygon EDGE at `footprint_edge_at`'s interpolated height, which is the height the mesh is drawn
+## at, so the join has nothing to agree about.
+##
+## ---- THE MEET IS THE GRADER'S ----
+##
+## `maxf`/`minf` against the surface as it stands, not a solved crossing, exactly as
+## `Pasture3DRoadGrader.grade_reference` does it — so the batter simply stops having an effect past its
+## toe, at any terrain slope, with no seam to chase. And it composes with the corridor pass rather than
+## replacing it: where the road already cut deeper, the road's answer stands.
+##
+## Idempotent for the same reason the surface pass is: every number comes from `junction_surface`, so
+## every participant computes the same field and the order they bake in cannot be seen.
+func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_gw: int, p_gh: int,
+		p_min_x: float, p_min_z: float, p_vs: float) -> PackedFloat32Array:
+	var boundary: PackedVector2Array = p_surf["boundary"]
+	var heights: PackedFloat32Array = p_surf["heights"]
+	var cut_batter: float = maxf(float(p_surf.get("cut_batter", 1.0)), 0.01)
+	var fill_batter: float = maxf(float(p_surf.get("fill_batter", 0.6)), 0.01)
+	var verge: float = maxf(float(p_surf.get("verge", 4.0)), 0.0)
+
+	# How far out the batter can possibly reach: the deepest it has to climb, over the shallower slope,
+	# plus the verge. Computed rather than authored, for the reason the corridor's `reach` is — a capped
+	# run is a vertical wall that reports no error.
+	var lo := boundary[0]
+	var hi := boundary[0]
+	var z_lo: float = heights[0]
+	var z_hi: float = heights[0]
+	for i in boundary.size():
+		lo = Vector2(minf(lo.x, boundary[i].x), minf(lo.y, boundary[i].y))
+		hi = Vector2(maxf(hi.x, boundary[i].x), maxf(hi.y, boundary[i].y))
+		z_lo = minf(z_lo, heights[i])
+		z_hi = maxf(z_hi, heights[i])
+	var rise := 0.0
+	for idx in p_z.size():
+		var h: float = p_z[idx]
+		if is_finite(h):
+			rise = maxf(rise, maxf(h - z_lo, z_hi - h))
+	var reach: float = rise / minf(cut_batter, fill_batter) + verge
+
+	var ix0 := clampi(int(floor((lo.x - reach - p_min_x) / p_vs)), 0, p_gw - 1)
+	var ix1 := clampi(int(ceil((hi.x + reach - p_min_x) / p_vs)), 0, p_gw - 1)
+	var iz0 := clampi(int(floor((lo.y - reach - p_min_z) / p_vs)), 0, p_gh - 1)
+	var iz1 := clampi(int(ceil((hi.y + reach - p_min_z) / p_vs)), 0, p_gh - 1)
+	var out := p_z
+	for iz in range(iz0, iz1 + 1):
+		var row := iz * p_gw
+		var wz := p_min_z + float(iz) * p_vs
+		for ix in range(ix0, ix1 + 1):
+			var idx := row + ix
+			var ground: float = out[idx]
+			if not is_finite(ground):
+				continue
+			var at := Vector2(p_min_x + float(ix) * p_vs, wz)
+			if Geometry2D.is_point_in_polygon(at, boundary):
+				continue # the junction's surface, already written
+			var edge := Pasture3DRoadMesher.footprint_edge_at(at, boundary, heights)
+			if edge.is_empty():
+				continue
+			var beyond := float(edge[0])
+			if beyond > reach:
+				continue
+			var z_edge := float(edge[1])
+			if z_edge > ground:
+				out[idx] = maxf(ground, z_edge - beyond * fill_batter)
+			else:
+				out[idx] = minf(ground, z_edge + beyond * cut_batter)
 	return out
 
 
 ## Mark every detected junction footprint in the network into `p_into`.
+## The cells every junction footprint in the network owns, which no road may grade at any distance.
+##
+## Separate from `protect` because the two claims are different strengths and the grader honours them at
+## different places. `protect` says "another road's FORMATION is here", and a road's own carriageway
+## still grades through it — two carriageways genuinely overlapping is a junction. `exclude` says "this
+## is a junction", which is the case `protect` deliberately defers, and nothing grades through it.
+##
+## EVERY junction, not just this road's. A road that meets nothing can still run close enough to an
+## intersection for its batter to reach across the footprint, and it has no junction record to learn that
+## from. The footprint's own participants write it in `grade_junction_footprints`.
+func _junction_exclusion_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: float,
+		p_vs: float) -> PackedByteArray:
+	var out := PackedByteArray()
+	var net := road_network()
+	if net == null or p_gw <= 0 or p_gh <= 0 or p_vs <= 0.0:
+		return out
+	out.resize(p_gw * p_gh)
+	_stamp_footprints(out, net, p_gw, p_gh, p_min_x, p_min_z, p_vs)
+	return out
+
+
 func _stamp_footprints(p_into: PackedByteArray, p_net: Pasture3DRoadNetwork, p_gw: int, p_gh: int,
 		p_min_x: float, p_min_z: float, p_vs: float) -> void:
 	for j in p_net.junctions:

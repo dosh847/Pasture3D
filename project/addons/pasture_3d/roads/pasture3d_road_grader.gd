@@ -247,6 +247,25 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 	# refused. A cell inside this road's own formation still grades — two carriageways genuinely
 	# overlapping is a junction, and junctions are resolved by `skip` and the footprint polygon, not here.
 	var protect: PackedByteArray = p_opts.get("protect", PackedByteArray())
+	# ---- THE JUNCTION'S OWN GROUND, AND ONLY THAT ----
+	#
+	# `exclude` is the ground consumer's version of `skip`, and it is a different SHAPE on purpose.
+	#
+	# `skip` is per arc-length sample, so refusing on it refuses the cell at EVERY lateral distance out to
+	# `reach` — seventeen metres each side on a road in a cutting. A junction trims its approaches back by
+	# ~20 m, so that is a 40 m by 34 m swath of corridor that this road stops grading; and what then
+	# grades it is `grade_junction_footprints`, which writes only the cells INSIDE the footprint polygon.
+	# The polygon is about a carriageway wide. Everything between its edge and the corridor reach — the
+	# shoulder, verge and batter running alongside the intersection — was claimed by neither, and stayed
+	# raw hillside standing over the road. That is the ring-shaped gap around a junction.
+	#
+	# So the ground refuses by CELL, matching the polygon exactly: inside it the junction grades, outside
+	# it this road's corridor does, and the two partition the ground with no seam and no hole. `skip`
+	# keeps its per-sample shape for the RIBBON, which is a strip and is genuinely trimmed at an arc
+	# length — the same two-consumers split §6 already draws, applied one level down.
+	#
+	# Refused before `nearest_on_plan` because it needs nothing from it: whose cell this is, is settled.
+	var exclude: PackedByteArray = p_opts.get("exclude", PackedByteArray())
 	var cum := cumulative_length(p_plan)
 	var graded: PackedFloat32Array = out["height"]
 	var m_bed: PackedFloat32Array = out["roadbed"]
@@ -269,6 +288,8 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 			# NaN is the brush's "not my cell" marker, not a height. Writing a road through it would
 			# invent ground outside the loop.
 			if not is_finite(ground):
+				continue
+			if idx < exclude.size() and exclude[idx] != 0:
 				continue
 			var wx := p_min_x + float(ix) * p_vs
 

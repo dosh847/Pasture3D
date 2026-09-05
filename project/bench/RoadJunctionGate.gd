@@ -28,6 +28,7 @@ func _ready() -> void:
 	await _l_the_major_road_is_trimmed_too()
 	await _p_the_junction_grades_its_own_footprint()
 	await _q_a_junctioned_road_refuses_the_native_fast_path()
+	await _r_the_ground_beside_a_junction_is_graded()
 	print("\n=== %s (%d failures) ===\n" % ["ROAD JUNCTION PASS" if _fail == 0 else "ROAD JUNCTION FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -905,6 +906,133 @@ func _p_the_junction_grades_its_own_footprint() -> void:
 			"a cut face was read %.4f m from where its ribbon ends" % worst_ref)
 
 	(fx["terrain"] as Node).queue_free()
+
+
+## [R] The ground BESIDE a junction is graded — the corridor and the footprint leave no gap.
+##
+## `skip` is per arc-length SAMPLE, so refusing on it refuses the cell at every lateral distance out to
+## the corridor REACH — `edge_d + rise/slope + verge`, which for a road in a deep cutting is tens of
+## metres each side. A junction trims its approaches back by twenty-odd metres, so a swath forty metres
+## long and sixty wide stopped being graded. What then graded it was `grade_junction_footprints`, which
+## writes only the cells INSIDE the footprint polygon — about a carriageway wide.
+##
+## The difference is a ring around every intersection: the verge and batter alongside it, claimed by
+## neither, left as raw hillside standing over the road. Reported as "there is a gap between the roads
+## and junction where the grading doesn't reach and the landscape covers the road".
+##
+## ---- WHY A CLIFF AND NOT A HEIGHT ----
+##
+## Every other criterion here measures a height that WAS written, which is why they all passed while the
+## hole was beside them: the polygon met the ribbon exactly (P), the trims were right (E, L). A hole is
+## the absence of a write, so the thing to measure is the JOIN between what was written and what was not.
+##
+## A graded surface cannot step: a batter descends at `cut_batter`, so between two cells `p_vs` apart it
+## may fall at most `p_vs * batter`, and it meets the ground by `max` rather than at a solved crossing so
+## even the outer edge is continuous by construction. An ungraded cell next to a graded one steps by the
+## whole depth of the cutting. So the measure needs no reimplementation of the batter — it asks only that
+## the surface be a surface, which is a claim from outside the derivation chain.
+##
+## The fixture needs RELIEF, or there is nothing for a batter to cut and a hole is invisible: on the flat
+## the ungraded ground is already at road level. Half a metre per cell puts the crossing in a cutting
+## deep enough that the gap is metres, not millimetres.
+func _r_the_ground_beside_a_junction_is_graded() -> void:
+	print("[R] the ground beside a junction is graded, not left as hillside")
+	var fx := _crossing_fixture()
+	var net: Pasture3DRoadNetwork = fx["net"]
+	var gw := 96
+	var gh := 96
+	var min_x := 80.0
+	var min_z := 80.0
+	var vs := 1.0
+
+	var ground := PackedFloat32Array()
+	ground.resize(gw * gh)
+	for iz in gh:
+		for ix in gw:
+			ground[iz * gw + ix] = float(ix) * 0.5 + float(iz) * 0.2
+
+	_grade_into(fx["brushes"], ground, gw, gh, min_x, min_z, vs)
+	net.resolve_junctions()
+	await get_tree().process_frame
+	var z := _grade_into(fx["brushes"], ground, gw, gh, min_x, min_z, vs)
+
+	var j: Pasture3DRoadJunction = null
+	for cand in net.junctions:
+		if cand.detected:
+			j = cand
+	if j == null:
+		_fail += 1
+		print("    !! no junction resolved, so [R] measured nothing")
+		(fx["terrain"] as Node).queue_free()
+		return
+
+	var surf := net.junction_surface(j)
+	var boundary: PackedVector2Array = surf["boundary"]
+	var heights: PackedFloat32Array = surf["heights"]
+
+	# THE SCAN IS SCOPED TO THE JUNCTION, by distance to the footprint polygon.
+	#
+	# Not to the corridors: `corridor_half_width` is the DEEPEST reach the road could ever need, and a
+	# road only reaches that far where it is that deep. Scanning it swept in the corridor's outer rim
+	# twenty-five metres away, where a batter that has met the ground legitimately abuts hillside nobody
+	# graded. That is a real question and not this one — this criterion is about the ring at the kerb.
+	var near := PackedByteArray()
+	near.resize(gw * gh)
+	var band := 20.0
+	for iz in gh:
+		for ix in gw:
+			var at := Vector2(min_x + float(ix) * vs, min_z + float(iz) * vs)
+			var edge := Pasture3DRoadMesher.footprint_edge_at(at, boundary, heights)
+			if not edge.is_empty() and float(edge[0]) <= band:
+				near[iz * gw + ix] = 1
+
+	# What a graded surface may step between neighbouring cells: the steeper batter over one cell, plus
+	# the ground's own fall, plus a cell of slack. Read off the fixture rather than assumed.
+	var t: Pasture3DRoadType = (net.road_types[0] as Pasture3DRoadType)
+	var allow: float = vs * maxf(t.cut_batter, t.fill_batter) + vs * 0.5 + vs * 0.5
+	var worst := 0.0
+	var worst_at := Vector2i(-1, -1)
+	var pairs := 0
+	for iz in gh:
+		for ix in range(gw - 1):
+			var i0 := iz * gw + ix
+			var i1 := i0 + 1
+			if near[i0] == 0 or near[i1] == 0:
+				continue
+			if not is_finite(z[i0]) or not is_finite(z[i1]):
+				continue
+			pairs += 1
+			var step: float = absf(z[i1] - z[i0])
+			if step > worst:
+				worst = step
+				worst_at = Vector2i(ix, iz)
+	print("    %d adjacent pair(s) within %.0f m of the footprint; worst step %.4f m at %s (allow %.2f)"
+			% [pairs, band, worst, worst_at, allow])
+	_check("R", pairs > 0, "no pair fell beside the footprint, so [R] measured nothing")
+	_check("R", worst < allow,
+			"the graded surface steps %.4f m between neighbouring cells at %s — ground nobody graded, "
+			% [worst, worst_at] + "standing beside the junction")
+
+	(fx["terrain"] as Node).queue_free()
+
+
+## Grade `p_ground` with every brush in turn, chaining the surface, and answer the result. `_grade_all`
+## is this over its own fixed slope; this one takes the field, because [R] needs relief steep enough to
+## put the crossing in a cutting and the others must keep the field they were calibrated on.
+func _grade_into(p_brushes: Array, p_ground: PackedFloat32Array, p_gw: int, p_gh: int, p_min_x: float,
+		p_min_z: float, p_vs: float) -> PackedFloat32Array:
+	var z := p_ground.duplicate()
+	for b: Pasture3DRoadBrush in p_brushes:
+		var mod: Pasture3DNodeRoad = null
+		for m in b.modifiers:
+			if m is Pasture3DNodeRoad:
+				mod = m
+		if mod == null:
+			continue
+		var res := b.grade_surface(mod, z, p_gw, p_gh, p_min_x, p_min_z, p_vs)
+		if not res.is_empty():
+			z = res["height"]
+	return z
 
 
 ## [Q] A road that is in a junction does not take the native fast path.

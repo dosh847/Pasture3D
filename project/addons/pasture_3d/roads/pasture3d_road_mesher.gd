@@ -704,6 +704,55 @@ static func footprint_height_at(p_at: Vector2, p_center: Vector2, p_boundary: Pa
 	return p_center_h
 
 
+## Where a footprint's batter starts, as `[distance_to_the_polygon, height_to_start_from]`.
+##
+## A road batter runs from the edge of formation at `Pasture3DRoadGrader.surface_height`; the junction's
+## runs from the edge of its polygon, and that edge already HAS a height per vertex -- the arm-blended
+## one `footprint_boundary_heights` solved. So nothing is derived here, and the batter cannot start at a
+## different height from the one the mesh is drawn at.
+##
+## ---- WHY THE HEIGHT IS BLENDED AND THE DISTANCE IS NOT ----
+##
+## Taking the height at the NEAREST point is the obvious reading, and it puts a seam in the ground. Far
+## from a polygon the nearest feature is a CORNER, and which corner it is flips along the bisector
+## between them; two corners of a junction on a slope differ in height, so the batter jumped across that
+## line. Measured on a crossing in a cutting: neighbouring cells one metre apart started their batters
+## from 28.08 m and 32.48 m, and the 2.93 m wall between them ran diagonally out from the intersection --
+## a nearest-feature Voronoi seam, drawn in earth.
+##
+## So the height is an inverse-square blend over every EDGE, the same idiom -- and for the same reason --
+## that `footprint_boundary_heights` blends the arms: at the kerb the nearest edge's weight runs away
+## with it, so the join stays exact, and far out the corners average instead of competing.
+##
+## The DISTANCE stays the true nearest one. It is what the batter's run is measured along, and blending
+## that would move the toe rather than smooth it.
+static func footprint_edge_at(p_at: Vector2, p_boundary: PackedVector2Array,
+		p_heights: PackedFloat32Array) -> Array:
+	var n := p_boundary.size()
+	if n < 3 or p_heights.size() != n:
+		return []
+	var best := INF
+	var sum := 0.0
+	var wsum := 0.0
+	for i in n:
+		var a := p_boundary[i]
+		var b := p_boundary[(i + 1) % n]
+		var ab := b - a
+		var len2 := ab.length_squared()
+		var t: float = 0.0 if len2 <= 0.0 else clampf((p_at - a).dot(ab) / len2, 0.0, 1.0)
+		var h: float = lerpf(p_heights[i], p_heights[(i + 1) % n], t)
+		var d2 := p_at.distance_squared_to(a + ab * t)
+		best = minf(best, d2)
+		# Exactly on an edge: that edge IS the answer, and dividing by its zero distance is not.
+		if d2 <= 1e-8:
+			return [sqrt(best), h]
+		sum += h / d2
+		wsum += 1.0 / d2
+	if wsum <= 0.0:
+		return []
+	return [sqrt(best), sum / wsum]
+
+
 ## `[u, v, w]` for a point inside triangle `abc`, or empty when it is outside. A shared edge belongs to
 ## both triangles — the epsilon is inclusive — so a point exactly on a fan spoke gets an answer rather
 ## than falling through every triangle and landing on the centre height.
