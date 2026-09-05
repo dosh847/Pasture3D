@@ -691,7 +691,12 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 			"boundary": boundary,
 			# The junction's paint, planned here rather than in the host for the same reason the boundary
 			# is: the host does no lookups of its own, and the junction record is what the plan reads.
-			"markings": Pasture3DRoadJunctionMarkings.plan_junction(j),
+			#
+			# The ARMS are handed over as well, from the same `_arms_for` the lane solver was given, so a
+			# crossing and a give-way row are laid out on the arm the connectors were built from rather
+			# than on a second reconstruction of it.
+			"markings": Pasture3DRoadJunctionMarkings.plan_junction(j, _arms_for(j, by_key),
+					{"default_control": default_control}),
 			"plan": run["plan"],
 			"cum": run["cum"],
 			"alignment": run["alignment"],

@@ -5,8 +5,10 @@
 **P9a-0 BUILT 2026-09-04** (§2.2: the junction surface is a polygon, and every road is trimmed to it).
 Gates `RoadJunctionPolygonGate` (A–G, the planar kernel) and `RoadJunctionGate` (E, J, L, the wiring);
 criterion M is in the polygon gate. Four mutations, all caught — see §2.6.
-**P9a stop bars BUILT 2026-09-04** (`Pasture3DRoadJunctionMarkings`, gate `RoadJunctionPaintGate`,
-criteria A, B, N, O, four mutations). **Arm continuations, crosswalks and connector guides not started.**
+**P9a stop bars, crossings and give-way rows BUILT 2026-09-04** (`Pasture3DRoadJunctionMarkings`, gate
+`RoadJunctionPaintGate`, criteria A, B, H, I, N, O, ten mutations).
+**P9a ARM_CONTINUATION is RETIRED, not deferred — see §2.3.** **Connector ribbons and guides
+(§2.4) not started**, and are all that remain of P9a.
 **P9a-orphans BUILT 2026-09-04** (gate `RoadJunctionOrphanGate`, 7 criteria, 4 mutations) — see §2.6.
 **Revised 2026-09-04** — P9a was scoped as markings drawn *on top of* the existing apron disc. Review
 against the author's expectation ("a polygon built to connect with the ribbons of every road that
@@ -213,11 +215,34 @@ Three primitive kinds, and no more:
   takes an optional `Callable(Vector2) -> float`, and the host passes `Pasture3DRoadMesher.surface_height`,
   the same sample `build_footprint` takes for the surface. Paint and surface come from one sampler or
   they step apart wherever the road is not flat.
-- **`ARM_CONTINUATION`** — the arm's edge lines and divider, extended from the trim-back boundary to the
-  footprint edge, so the carriageway does not visually stop short. The offsets come from
-  `Pasture3DRoadMarkings.plan()` on that arm — **call it, do not reimplement it**, or the junction's
-  lines will drift from the road's the first time a divider type changes. The divider continuation stops
-  at the stop bar; edge lines run to the footprint.
+- **`ARM_CONTINUATION`** — ~~the arm's edge lines and divider, extended from the trim-back boundary to
+  the footprint edge~~ — **RETIRED 2026-09-04, because P9a-0 removed the gap it was for.**
+
+  The gap was the DISC's. A disc was sized by the WIDEST arm's trim, so every narrower arm's ribbon —
+  and its markings with it — stopped short of the surface edge by the difference, and a continuation was
+  needed to cover that. The polygon passes THROUGH each arm's own cut face, so each arm's ribbon now
+  ends exactly on the boundary. Measured on a crossroads of a 4-lane and a 1-lane road, whose trims
+  differ by 5.25 m: the gap is **0.0000 m** at the centreline and at the edge line, on all four arms.
+
+  This is worth stating rather than quietly dropping, because the spec's own build order (§4) predicted
+  that P9a-0 would *reposition* the markings items. For this one it did more than reposition it. The
+  interior of a real intersection is unmarked too, apart from the three kinds that remain, so continuing
+  lines across it would not be finishing this item — it would be inventing a different one.
+- **`CROSSWALK`** — **BUILT 2026-09-04.** Continental bars, running along the direction of traffic and
+  spread across the carriageway, set back beyond the stop bar. Two decisions worth recording. It spans
+  the **carriageway**, from `lanes[0].right_edge` to `lanes[-1].left_edge`, never `half_width()` — a
+  shoulder is not a lane and is not walked to, and the two agree on any road without a shoulder, which
+  is most fixtures (this is why gate H's control widens the shoulder alone). And the bar **count** grows
+  with the road rather than the bar width: a fixed count spread across any width makes a one-lane
+  crossing read as a few fat blocks and a four-lane one as pinstripes.
+
+- **`GIVE_WAY`** — **BUILT 2026-09-04.** A row of triangles across the carriageway of an arm whose
+  priority is below the junction's highest, apex pointing back at the approaching driver, set back
+  beyond the crossing. Suppressed entirely under `SIGNALS`: the lights say who goes, and a painted
+  triangle contradicting a green light is worse than no marking. An unknown priority reads as the
+  LOWEST, not the highest — a participant the junction has no record for must not silently acquire
+  right of way.
+
 - **`CONNECTOR_GUIDE`** — a dashed line along `connector.curve`, emitted only for connectors whose
   `turn` is `LEFT` or `RIGHT` **and** which cross opposing traffic (`junction.conflicts` already says
   which). A guide on every connector paints a junction solid white; the conflict list is what makes the
@@ -321,6 +346,24 @@ incoming lanes and therefore four bars. An outgoing lane has nothing to hold for
 tells traffic leaving the junction to stop in it. Its control is that both roads appear — four bars all
 on one road satisfies the count and means the kernel painted one road's two arms twice.
 
+#### Junction crossings and give-way rows — **BUILT 2026-09-04**, gate `RoadJunctionPaintGate`
+
+| # | Mutation | Caught by |
+|---|---|---|
+| 5 | Span the formation rather than the carriageway | H — 10.5 m of a 7.0 m carriageway |
+| 6 | Drop the crossing's setback so it overlaps the stop bar | H — the ordering along the approach |
+| 7 | Emit a give-way row on every arm | I — two yielding roads, and the major road among them |
+| 8 | Let signals stop suppressing give-way | I |
+| 9 | Point the give-way apex INTO the junction | I's apex check. **Survived the first round**, when I asserted only WHICH road carried a row. |
+| 10 | Drop the give-way setback so the row lands on the crossing | I's ordering check |
+
+**A gate can report PASS while measuring nothing, and this one did.** A typed-array assignment threw
+inside the fixture, three criteria returned before reaching an assertion, and the summary said PASS with
+zero failures — the engine error was the only sign, in a log nobody reads when the last line is green.
+Each criterion now records that it RAN TO COMPLETION and the summary fails for any that did not. Worth
+generalising to the other gates: `_fail == 0` is only trustworthy alongside "and every criterion
+finished". See [[bench-gate-practices]].
+
 #### Orphaned junction records — **BUILT 2026-09-04**, gate `RoadJunctionOrphanGate`
 
 Shipped ahead of P9a-0 because it is independent of the polygon and because the polygon could not be
@@ -380,8 +423,8 @@ testing that the override followed it, and reports "cannot tell a remap from luc
 | E | Guides are emitted only for turning connectors that appear in `junction.conflicts`. | A T-junction whose left turn conflicts with nothing emits no guide; adding the opposing arm makes one appear. |
 | F | `allowed_override = OFF` removes that connector's ribbon **and** its guide. | INHERIT restores both. |
 | G | A connector ribbon's ends are tangent-continuous with the arm ribbons they meet, compared for **exact** float equality at the shared arc length. | The P5b lesson: an accumulated `s` agrees to six decimals, passes any tolerance, and cracks. |
-| H | A crosswalk emits one ladder per arm, its bars spanning exactly that arm's carriageway (not its shoulders), sitting outside the stop bar. | Widen `shoulder_width` alone: the ladder must NOT change width. A ladder that grew is measuring `half_width` instead of the carriageway. |
-| I | `GIVE_WAY` triangles appear only on arms that lose priority and whose `effective_control()` is not `SIGNALS`. | Switch the junction to `SIGNALS`: every triangle disappears. Raise the losing arm's `priority` above the other: they move to the other arm rather than vanishing. |
+| H | **(BUILT)** A crosswalk emits one ladder per arm, its bars spanning exactly that arm's carriageway (not its shoulders), sitting outside the stop bar. | Widen `shoulder_width` alone: the ladder must NOT change width. A ladder that grew is measuring `half_width` instead of the carriageway. |
+| I | **(BUILT)** `GIVE_WAY` triangles appear only on arms that lose priority and whose `effective_control()` is not `SIGNALS`, with the **apex pointing away from the junction** and the row outside the crossing. | Switch the junction to `SIGNALS`: every triangle disappears. Raise the losing arm's `priority` above the other: they move to the other arm rather than vanishing. **Reverse the apex**: the road/no-road assertions cannot see orientation, and a correct row turned round aims the instruction at the traffic already leaving — that mutation survived until the apex check was added. |
 | J | **(P9a-0)** For a 4-arm 90-degree fixture, `plan_footprint` returns a boundary whose vertices are exactly the 8 cut-face corners plus 4 fillet arcs, in angular order, and the polygon is simple (no self-intersection) and closed. | Feed the 45-degree fixture, where `trim = w / sin 45` is larger: the boundary must still be simple. If the convex-hull fallback is missing this is where it self-intersects. |
 | K | **(P9a-0)** Every arm's cut face lies exactly on the polygon boundary — both corners of every arm are vertices of the returned boundary, to 1e-4 m. This is the whole claim of the feature: the surface MEETS the ribbons. | Revert `build_apron`'s disc: the corners now sit off the boundary by `sqrt(trim^2 + half_width^2) — trim`, which for the 8 m fixture is a number the gate can state in advance (about 1.66 m). A gate that cannot distinguish the disc from the polygon is measuring nothing. |
 | L | **(P9a-0)** The major road is trimmed like every other arm: `junction_skips()` returns a non-empty range for the major participant, and the grader's `skip` is set over it. | Restore the `is_major` exemption: the major's skip list goes empty and criterion K fails with it, because its cut face no longer exists to lie on the boundary. The two are one change and the gate must show that. |
@@ -539,9 +582,13 @@ nothing" from "measured well": a smoothing pass that did nothing at all would pa
    changes where the arms END — stop bars, continuations and guides are all positioned relative to that
    boundary. Building markings against the disc first means repositioning every one of them afterwards.
 3. **P9a stop bars**, which are nearly free — the data is published and `endpoints()` already exists.
-4. **P9a arm continuations**, which need the existing markings kernel called, not extended.
-5. **P9a crosswalks and give-way triangles** (§5 q3, now in scope — see below).
+   — **BUILT 2026-09-04.**
+4. ~~**P9a arm continuations**~~ — **RETIRED 2026-09-04.** Step 2 did not reposition this item, it
+   removed its reason to exist: the ribbon now ends exactly on the boundary, measured at 0.0000 m. See
+   §2.3.
+5. **P9a crosswalks and give-way triangles** (§5 q3, now in scope — see below). — **BUILT 2026-09-04.**
 6. **P9a connector ribbons and guides**, the largest piece and the only one with a geometry question.
+   — **NOT STARTED.** All that remains of P9a.
 
 ---
 

@@ -21,14 +21,46 @@
 class_name Pasture3DRoadJunctionMarkings
 extends RefCounted
 
-## What a primitive is. STOP_BAR is the only kind built so far; the spec's ARM_CONTINUATION and
-## CONNECTOR_GUIDE come next and share this plan/build split.
-enum Kind { STOP_BAR }
+## What a primitive is. CONNECTOR_GUIDE is still to come and shares this plan/build split.
+##
+## ---- ARM_CONTINUATION IS NOT HERE, AND IS NOT COMING ----
+##
+## The spec (2.3) specified it as the arm's edge lines and divider "extended from the trim-back boundary
+## to the footprint edge, so the carriageway does not visually stop short". That gap was the DISC's. A
+## disc was sized by the widest arm's trim, so every narrower arm's ribbon -- and its markings with it --
+## stopped short of the surface by the difference. P9a-0 replaced the disc with a polygon THROUGH the
+## arms' cut faces, so the ribbon now ends exactly on the boundary and there is nothing between them to
+## continue. Measured on a crossroads of a 4-lane and a 1-lane road, whose trims differ by 5.25 m: the
+## gap is 0.0000 m at the centreline and at the edge line, on all four arms.
+##
+## An intersection's interior is unmarked on a real road too, apart from the kinds below. Adding lines
+## across it would not be completing that feature, it would be inventing a different one.
+enum Kind { STOP_BAR, CROSSWALK, GIVE_WAY }
 
 ## How far a stop bar reaches ALONG the road, metres. A stop bar is a bar, not a line: it is wider than
 ## a lane line so that it reads as an instruction rather than as part of the lane structure, which is
 ## the same reason it is painted that way on a real road.
 const STOP_BAR_LENGTH: float = 0.5
+
+## The crossing, in metres. Continental ("zebra") bars: stripes running ALONG the direction of traffic
+## and spread ACROSS the carriageway, which is the pattern that stays readable when it is worn and when
+## a car is standing on half of it.
+##
+## `CROSSWALK_SETBACK` is the gap between the stop bar and the crossing -- the space a vehicle held at
+## the bar leaves clear for someone crossing. Without it the two markings touch and the bar reads as the
+## first stripe of the crossing.
+const CROSSWALK_SETBACK: float = 0.6
+const CROSSWALK_DEPTH: float = 2.5
+const CROSSWALK_BAR_WIDTH: float = 0.5
+const CROSSWALK_BAR_PITCH: float = 1.0
+
+## The give-way triangles, in metres. A row across the carriageway of an arm that must yield, apex
+## pointing back at the approaching driver.
+const GIVE_WAY_BASE: float = 0.5
+const GIVE_WAY_HEIGHT: float = 0.7
+const GIVE_WAY_PITCH: float = 1.2
+## Clear of the crossing, the way the crossing is clear of the stop bar.
+const GIVE_WAY_SETBACK: float = 0.6
 
 ## How far junction paint floats above the surface it is painted on. The road markings' own constant,
 ## reused rather than redeclared: a junction's paint and its approach's paint meet at the trim-back
@@ -54,7 +86,14 @@ const MARKING_LIFT: float = Pasture3DRoadMarkings.MARKING_LIFT
 ## Not "paints bars that mean nothing". `disabled` means the author has said this crossing is not a
 ## junction — an overpass, a road passing under another — and a stop bar there instructs a driver to
 ## halt on a road with nothing crossing it. The same rule the lane graph already follows.
-static func plan_junction(p_junction: Pasture3DRoadJunction) -> Array:
+## `p_arms` is the junction's arms as `Pasture3DRoadNetwork._arms_for` builds them --
+## `{key, end, point, y, distance, tangent, lanes}` -- the same input the lane solver takes. Reused
+## rather than re-derived: an arm's centreline point and its cross-section are exactly what a crossing
+## and a give-way row need, and computing them here would be a second opinion about where the arm is.
+##
+## Omitting it plans stop bars alone, which is what a caller with no lane data can honestly draw.
+static func plan_junction(p_junction: Pasture3DRoadJunction, p_arms: Array = [],
+		p_opts: Dictionary = {}) -> Array:
 	var out: Array = []
 	if p_junction == null or not p_junction.detected or p_junction.disabled:
 		return out
@@ -75,7 +114,137 @@ static func plan_junction(p_junction: Pasture3DRoadJunction) -> Array:
 			"road_key": sl.road_key,
 			"lane": sl.lane,
 		})
+	out.append_array(_plan_arm_paint(p_junction, p_arms, p_opts))
 	return out
+
+
+## The per-arm markings: the crossing every arm gets, and the give-way row only a yielding arm gets.
+##
+## ---- WHY THESE TWO ARE PLANNED TOGETHER ----
+##
+## They are laid out one after another along the same approach -- stop bar, then crossing, then
+## triangles -- and each is positioned relative to the one before it. Planned separately, each would
+## have to re-derive where the previous ended, and the first change to a setback would move one of them
+## through another. Here the offset simply accumulates.
+static func _plan_arm_paint(p_junction: Pasture3DRoadJunction, p_arms: Array,
+		p_opts: Dictionary) -> Array:
+	var out: Array = []
+	if p_arms.is_empty():
+		return out
+	var default_control: int = int(p_opts.get("default_control",
+			Pasture3DRoadJunction.ControlType.PRIORITY))
+	var signals: bool = p_junction.effective_control(default_control) \
+			== Pasture3DRoadJunction.ControlType.SIGNALS
+	var top := -2147483648
+	for pr in p_junction.priorities:
+		top = maxi(top, pr)
+
+	for arm: Dictionary in p_arms:
+		var lanes: Array = arm.get("lanes", [])
+		if lanes.size() < 1:
+			continue
+		var tangent: Vector2 = (arm.get("tangent", Vector2.RIGHT) as Vector2).normalized()
+		if tangent.length_squared() < 0.5:
+			continue
+		# INTO the junction: an arm at `s - trim` is approached with INCREASING arc length, one at
+		# `s + trim` with decreasing. Read off `end` rather than from the junction centre, which would be
+		# wrong the moment a road curves through the crossing.
+		var into := tangent if int(arm.get("end", 0)) \
+				== Pasture3DRoadLaneConnector.End.BEFORE else -tangent
+		var outward := -into
+		var across := Vector2(-into.y, into.x)
+		var origin: Vector2 = arm.get("point", Vector2.ZERO)
+		var y := float(arm.get("y", 0.0))
+		var key := String(arm.get("key", ""))
+
+		# THE CARRIAGEWAY, NOT THE FORMATION. A crossing spans the surface people walk over, which is the
+		# sealed lanes -- not the shoulders, which are not a lane and are not walked to. `half_width()`
+		# would include them, and a crossing that grew when a shoulder was widened would be measuring the
+		# wrong thing (spec gate H).
+		var right_edge := float(lanes[0]["right_edge"])
+		var left_edge := float(lanes[lanes.size() - 1]["left_edge"])
+		var span := absf(left_edge - right_edge)
+		if span <= 0.0:
+			continue
+		var mid_u := (left_edge + right_edge) * 0.5
+
+		# Walking OUTWARD from the boundary: stop bar, gap, crossing, gap, triangles.
+		var at := STOP_BAR_LENGTH + CROSSWALK_SETBACK
+		out.append_array(_crosswalk(origin, outward, across, mid_u, span, at, y, key))
+		at += CROSSWALK_DEPTH + GIVE_WAY_SETBACK
+
+		# GIVE WAY IS FOR ARMS THAT LOSE, AND ONLY WHERE PRIORITY IS WHAT DECIDES. Under signals nobody
+		# gives way by geometry -- the lights say who goes, and a painted triangle contradicting a green
+		# light is worse than no marking. An arm at the top priority is not yielding to anyone, so it gets
+		# none either.
+		if signals:
+			continue
+		if _priority_of(p_junction, key) >= top:
+			continue
+		out.append_array(_give_way(origin, outward, across, mid_u, span, at, y, key))
+	return out
+
+
+## One continental crossing: bars along the traffic direction, spread across the carriageway.
+##
+## The bars are CENTRED on the carriageway and the count is whatever fits at the pitch, so a wide road
+## gets more bars rather than wider ones. Spacing a fixed count across any width would make a one-lane
+## crossing read as a few fat blocks and a four-lane one as pinstripes.
+static func _crosswalk(p_origin: Vector2, p_outward: Vector2, p_across: Vector2, p_mid_u: float,
+		p_span: float, p_at: float, p_y: float, p_key: String) -> Array:
+	var out: Array = []
+	var n := int(floor(p_span / CROSSWALK_BAR_PITCH))
+	if n < 1:
+		return out
+	var used := float(n - 1) * CROSSWALK_BAR_PITCH
+	var first := p_mid_u - used * 0.5
+	for i in n:
+		var u := first + float(i) * CROSSWALK_BAR_PITCH
+		var c := p_origin + p_across * u + p_outward * p_at
+		var a := p_across * (CROSSWALK_BAR_WIDTH * 0.5)
+		var b := p_outward * CROSSWALK_DEPTH
+		out.append({
+			"kind": Kind.CROSSWALK,
+			"quad": PackedVector2Array([c - a, c + a, c + a + b, c - a + b]),
+			"y": p_y, "road_key": p_key, "lane": i,
+		})
+	return out
+
+
+## One row of give-way triangles, apex pointing back at the approaching driver.
+##
+## Apex OUTWARD, deliberately: the row is an instruction to the traffic facing it, and a triangle read
+## point-first is the shape that says "yield". Turned round it would aim the instruction at the traffic
+## already leaving the junction.
+static func _give_way(p_origin: Vector2, p_outward: Vector2, p_across: Vector2, p_mid_u: float,
+		p_span: float, p_at: float, p_y: float, p_key: String) -> Array:
+	var out: Array = []
+	var n := int(floor(p_span / GIVE_WAY_PITCH))
+	if n < 1:
+		return out
+	var used := float(n - 1) * GIVE_WAY_PITCH
+	var first := p_mid_u - used * 0.5
+	for i in n:
+		var u := first + float(i) * GIVE_WAY_PITCH
+		var base := p_origin + p_across * u + p_outward * p_at
+		var a := p_across * (GIVE_WAY_BASE * 0.5)
+		out.append({
+			"kind": Kind.GIVE_WAY,
+			# Wound like the stop bar's quad, so the fan in `build_junction` walks the same way round for
+			# a triangle as for a rectangle and neither needs a special case.
+			"quad": PackedVector2Array([base - a, base + a, base + p_outward * GIVE_WAY_HEIGHT]),
+			"y": p_y, "road_key": p_key, "lane": i,
+		})
+	return out
+
+
+## The resolved priority of one participant, or the lowest possible when the junction has not recorded
+## one -- an unknown priority must not silently read as the top one and suppress a give-way row.
+static func _priority_of(p_junction: Pasture3DRoadJunction, p_key: String) -> int:
+	for i in p_junction.road_keys.size():
+		if String(p_junction.road_keys[i]) == p_key:
+			return p_junction.priorities[i] if i < p_junction.priorities.size() else -2147483648
+	return -2147483648
 
 
 ## The primitives as triangles.
