@@ -27,6 +27,7 @@ func _ready() -> void:
 	await _j_the_apron_covers_every_trimmed_end()
 	await _l_the_major_road_is_trimmed_too()
 	await _p_the_junction_grades_its_own_footprint()
+	await _q_a_junctioned_road_refuses_the_native_fast_path()
 	print("\n=== %s (%d failures) ===\n" % ["ROAD JUNCTION PASS" if _fail == 0 else "ROAD JUNCTION FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -902,6 +903,58 @@ func _p_the_junction_grades_its_own_footprint() -> void:
 	_check("P", refs > 0, "no arm could be checked against its road, so the reference measured nothing")
 	_check("P", worst_ref < 0.05,
 			"a cut face was read %.4f m from where its ribbon ends" % worst_ref)
+
+	(fx["terrain"] as Node).queue_free()
+
+
+## [Q] A road that is in a junction does not take the native fast path.
+##
+## Every other criterion in this file measures `grade_surface`, and `grade_surface` is one of TWO paint
+## routes. The other is `Pasture3DData.stamp_road_line`, taken when `_road_native_is_complete()` says the
+## stack is nothing but the road grader — which, in a scene an author actually builds, is nearly always.
+## That call grades the corridor and writes it into the layer in one step, so `grade_junction_footprints`
+## never runs on it.
+##
+## So the whole of P was true and none of it reached the editor. The junction surface was drawn as a mesh
+## and the terrain under it was never graded to match, reported as "the junction grading does not look
+## like it is getting triggered". No criterion could have caught it, because a criterion that calls the
+## slow path directly cannot observe that the slow path is not the one being called. What has to be
+## asserted is the ROUTING DECISION itself.
+##
+## The control is the same brush with its junction records removed: it must go back to claiming the fast
+## path. Without that half, `return false` unconditionally would pass — and would cost every road in
+## every scene its rasteriser for no reason.
+func _q_a_junctioned_road_refuses_the_native_fast_path() -> void:
+	print("[Q] a road in a junction refuses the native fast path")
+	var fx := _crossing_fixture()
+	var net: Pasture3DRoadNetwork = fx["net"]
+	_grade_all(fx["brushes"], 96, 96, 80.0, 80.0, 1.0)
+	net.resolve_junctions()
+	await get_tree().process_frame
+
+	var checked := 0
+	var controls := 0
+	for b: Pasture3DRoadBrush in fx["brushes"]:
+		var key := b.road_key()
+		if net.junctions_for(key).is_empty():
+			continue
+		checked += 1
+		_check("Q", not b._road_native_is_complete(),
+				"%s is in a junction and still claims the native fast path" % key)
+
+	# THE CONTROL. Clear the network's junctions and ask again: the same brush, the same stack, and now
+	# nothing for the footprint pass to do, so the fast path must come back.
+	var saved := net.junctions.duplicate()
+	net.junctions.clear()
+	for b: Pasture3DRoadBrush in fx["brushes"]:
+		controls += 1
+		_check("Q", b._road_native_is_complete(),
+				"%s has no junction and still refuses the fast path" % b.road_key())
+	net.junctions.assign(saved)
+
+	print("    %d junctioned brush(es) and %d unjunctioned control(s) asked" % [checked, controls])
+	_check("Q", checked > 0, "no brush was in a junction, so [Q] measured nothing")
+	_check("Q", controls > 0, "the control measured nothing")
 
 	(fx["terrain"] as Node).queue_free()
 

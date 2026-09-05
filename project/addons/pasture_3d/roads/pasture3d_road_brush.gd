@@ -622,6 +622,13 @@ func _paint_flat_footprint(path: Path3D) -> void:
 				"cut_batter": prof["cut_batter"],
 				"fill_batter": prof["fill_batter"],
 				"skip": prof["skip"],
+				# The same refusal the GDScript path passes, and it has to be passed HERE too because the
+				# kernel is the thing that honours it -- `stamp_road_line` forwards `opts` straight to
+				# `road_grade_grid_geom`. Without it this branch was the one the editor actually took, so
+				# a road's batter kept regrading another road's carriageway in the only place anybody
+				# looks. The mask is not free (it stamps every other road's plan), but it is built once
+				# per bake and the alternative is a fast path that is fast and wrong.
+				"protect": _foreign_formation_mask(gw, gh, min_x, min_z, vs),
 			},
 			"reach": reach,
 			"blend": _blend,
