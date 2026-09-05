@@ -99,7 +99,13 @@ func _gate_a_compile() -> void:
 		for u in uniforms:
 			names.append(String(u["name"]))
 		var has_core: bool = names.has("absorption") and names.has("_waves")
-		var has_clipmap: bool = names.has("_target_pos")
+		# `_mesh_size`, not `_target_pos`. Both are declared inside the same `#ifdef WATER_CLIPMAP`, so
+		# either one answers "did the preprocessor keep the clipmap block", but `_target_pos` became an
+		# `instance uniform` when water got the split-screen clipmaps the terrain has always had (commit
+		# 3e150014) — and `get_shader_uniform_list()` does not report instance uniforms, so this criterion
+		# started reading a working shader as a broken one. `_mesh_size` is an ordinary uniform in that
+		# same block and is what the mesher writes, so the gating is still what is being tested.
+		var has_clipmap: bool = names.has("_mesh_size")
 		var expect_clipmap: bool = v.begins_with("water_ocean")
 		var ok: bool = has_core and (has_clipmap == expect_clipmap)
 		print("    %-26s %-4s  uniforms=%2d  clipmap_uniforms=%s (expected %s)" % [

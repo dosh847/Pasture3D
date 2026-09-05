@@ -28,6 +28,16 @@ var _fail := 0
 
 func _ready() -> void:
 	print("\n=== ocean wave-count warning reads the shader, not the filename ===\n")
+	# The header above says windowed, and criterion D exists to catch a headless run rather than let one
+	# pass vacuously. It does its job — but a sweep reads three red criteria as three defects, when the
+	# only fact established is that the renderer was never there. Refuse the run instead of failing it.
+	if DisplayServer.get_name() == "headless":
+		print("SKIPPED: needs a real renderer (shader_get_parameter_default is nil under the dummy one).")
+		print("Run windowed: Godot_console.exe --path project res://bench/WaterVariantWarningCheck.tscn")
+		print("")
+		print("=== VARIANT WARNING CHECK SKIPPED (headless) ===")
+		get_tree().quit(0)
+		return
 	_check_undersized("M_water_pond.tres", 2)
 	_check_river()
 	_check_matching()
