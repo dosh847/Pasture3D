@@ -5,7 +5,8 @@
 **P9a-0 BUILT 2026-09-04** (§2.2: the junction surface is a polygon, and every road is trimmed to it).
 Gates `RoadJunctionPolygonGate` (A–G, the planar kernel) and `RoadJunctionGate` (E, J, L, the wiring);
 criterion M is in the polygon gate. Four mutations, all caught — see §2.6.
-**The rest of P9a (markings inside the junction) not started.**
+**P9a stop bars BUILT 2026-09-04** (`Pasture3DRoadJunctionMarkings`, gate `RoadJunctionPaintGate`,
+criteria A, B, N, O, four mutations). **Arm continuations, crosswalks and connector guides not started.**
 **P9a-orphans BUILT 2026-09-04** (gate `RoadJunctionOrphanGate`, 7 criteria, 4 mutations) — see §2.6.
 **Revised 2026-09-04** — P9a was scoped as markings drawn *on top of* the existing apron disc. Review
 against the author's expectation ("a polygon built to connect with the ribbons of every road that
@@ -199,8 +200,19 @@ build_junction(primitives, ground_sampler)             # triangles
 
 Three primitive kinds, and no more:
 
-- **`STOP_BAR`** — straight from `junction.stop_lines`. Zero derivation: `endpoints()` already gives the
-  two ends and `width` gives the span. This is the cheapest of the three and the most visible.
+- **`STOP_BAR`** — **BUILT 2026-09-04.** Straight from `junction.stop_lines`. Zero derivation:
+  `endpoints()` already gives the two ends and `width` gives the span. This is the cheapest of the three
+  and the most visible.
+
+  Two things the build settled that the spec had not said. **The bar sits BEHIND the hold point**, not
+  centred on it: a driver whose nose is on `point` has the whole bar behind them, and painting half of
+  it inside the junction puts that half where it can no longer be read. And **the paint takes its height
+  from the surface, not from the stop line.** `stop_line.point` carries the road's centreline elevation,
+  which is a crown ABOVE the lane the bar is painted across — 0.05 m by default, ten times
+  `MARKING_LIFT` — so a bar built at the published height sinks into the road at its middle. The builder
+  takes an optional `Callable(Vector2) -> float`, and the host passes `Pasture3DRoadMesher.surface_height`,
+  the same sample `build_footprint` takes for the surface. Paint and surface come from one sampler or
+  they step apart wherever the road is not flat.
 - **`ARM_CONTINUATION`** — the arm's edge lines and divider, extended from the trim-back boundary to the
   footprint edge, so the carriageway does not visually stop short. The offsets come from
   `Pasture3DRoadMarkings.plan()` on that arm — **call it, do not reimplement it**, or the junction's
@@ -295,6 +307,20 @@ The gap J was written for is still measurable: at the crossing fixture the cut c
 outside the disc that used to be the surface. J states that number as its control, so a regression to a
 disc fails rather than quietly re-opening the hole.
 
+#### Junction stop bars — **BUILT 2026-09-04**, gate `RoadJunctionPaintGate`
+
+| # | Mutation | Caught by |
+|---|---|---|
+| 1 | Centre the bar on the hold point instead of setting it back | B — the midpoint is off by half the bar |
+| 2 | Drop the `detected` / `disabled` guard | N, both halves |
+| 3 | Builder ignores its sampler | O, and O's own control fires with it |
+| 4 | Run the bar ALONG the road rather than across it | B — four "behind the hold point" failures plus the perpendicularity check |
+
+A's real content is the COUNT, stated in advance from the fixture: two two-lane roads crossing give four
+incoming lanes and therefore four bars. An outgoing lane has nothing to hold for, and a bar across one
+tells traffic leaving the junction to stop in it. Its control is that both roads appear — four bars all
+on one road satisfies the count and means the kernel painted one road's two arms twice.
+
 #### Orphaned junction records — **BUILT 2026-09-04**, gate `RoadJunctionOrphanGate`
 
 Shipped ahead of P9a-0 because it is independent of the polygon and because the polygon could not be
@@ -359,6 +385,8 @@ testing that the override followed it, and reports "cannot tell a remap from luc
 | J | **(P9a-0)** For a 4-arm 90-degree fixture, `plan_footprint` returns a boundary whose vertices are exactly the 8 cut-face corners plus 4 fillet arcs, in angular order, and the polygon is simple (no self-intersection) and closed. | Feed the 45-degree fixture, where `trim = w / sin 45` is larger: the boundary must still be simple. If the convex-hull fallback is missing this is where it self-intersects. |
 | K | **(P9a-0)** Every arm's cut face lies exactly on the polygon boundary — both corners of every arm are vertices of the returned boundary, to 1e-4 m. This is the whole claim of the feature: the surface MEETS the ribbons. | Revert `build_apron`'s disc: the corners now sit off the boundary by `sqrt(trim^2 + half_width^2) — trim`, which for the 8 m fixture is a number the gate can state in advance (about 1.66 m). A gate that cannot distinguish the disc from the polygon is measuring nothing. |
 | L | **(P9a-0)** The major road is trimmed like every other arm: `junction_skips()` returns a non-empty range for the major participant, and the grader's `skip` is set over it. | Restore the `is_major` exemption: the major's skip list goes empty and criterion K fails with it, because its cut face no longer exists to lie on the boundary. The two are one change and the gate must show that. |
+| N | **(P9a stop bars)** A `disabled` or undetected junction emits no primitives at all. | Remove the guard: a crossing the author marked as an overpass paints stop bars on a road with nothing crossing it. |
+| O | **(P9a stop bars)** `build_junction` puts every vertex on the surface its sampler describes, and falls back to the primitive's flat published height only when given none. | Make the builder ignore its sampler. The control is the fallback itself: build the same primitive both ways and the two answers must DIFFER, or the criterion cannot tell "the sampler was used" from "the sampler agreed". The sampler in the gate is a ramp, not a constant, so a builder that sampled once and reused the answer fails too. |
 | M | **(P9a-0)** The fillet radius equals the highest-priority arm's resolved `corner_radius`; when the top priority is tied, it equals the network default instead. | Give two tied arms different `corner_radius` values and **reorder them in the scene tree**: the resolved fillet must NOT change. If it does, the tie is falling through to `effective_major()` and scene order is deciding geometry. |
 
 ---

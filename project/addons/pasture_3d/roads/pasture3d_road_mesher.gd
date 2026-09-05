@@ -344,6 +344,19 @@ static func build_apron(p_center: Vector2, p_radius: float, p_plan: PackedVector
 
 
 ## One apron vertex: world XZ `p_at`, lifted onto the major road's graded surface.
+## The height of the junction surface at one world XZ point — the same sample `build_footprint` takes
+## for every boundary vertex, exposed so junction PAINT can sit on the surface rather than beside it.
+##
+## Paint and surface have to come from one sampler. A stop bar built at the road's flat solved elevation
+## and a footprint built on the crowned, banked surface disagree by the crown, which is several times
+## MARKING_LIFT — so the bar would sink into the road it is painted on wherever the road is not flat.
+static func surface_height(p_at: Vector2, p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
+		p_alignment: Pasture3DRoadAlignment, p_crown: float) -> float:
+	if p_alignment == null or p_plan.size() < 2:
+		return NAN
+	return _apron_point(p_at, p_plan, p_cum, p_alignment, p_crown, 0.0).y
+
+
 static func _apron_point(p_at: Vector2, p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 		p_alignment: Pasture3DRoadAlignment, p_crown: float, p_lift: float) -> Vector3:
 	var hit := Pasture3DRoadGrader.nearest_on_plan(p_plan, p_cum, p_at)

@@ -689,6 +689,9 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 			"id": j.id,
 			"center": j.center,
 			"boundary": boundary,
+			# The junction's paint, planned here rather than in the host for the same reason the boundary
+			# is: the host does no lookups of its own, and the junction record is what the plan reads.
+			"markings": Pasture3DRoadJunctionMarkings.plan_junction(j),
 			"plan": run["plan"],
 			"cum": run["cum"],
 			"alignment": run["alignment"],

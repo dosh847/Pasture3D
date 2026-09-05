@@ -380,6 +380,7 @@ func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_L
 		mi.mesh = mesh
 		mi.top_level = true
 		add_child(mi)
+		_add_junction_markings(mi, a, p_lift)
 		if collision_enabled:
 			# Rebuilt at lift ZERO, like the ribbon's (see `_add_collider`), and NOT reused from the mesh
 			# above — that one carries the render lift. Without this the road has a hole in its collision
@@ -623,3 +624,35 @@ func pick_meshes(p_node: Node3D) -> Array[TriangleMesh]:
 		_pick_meshes = out
 		_pick_digest = key
 	return out
+
+
+## One junction's markings, as a child of its surface for the same reason a chunk's markings are a child
+## of the chunk: they share its transform, its visibility and its culling, and nothing has to keep a
+## second list in step with the first.
+##
+## THE HEIGHT COMES FROM THE SURFACE, not from the road's solved elevation. `Pasture3DRoadStopLine.point`
+## carries the road's centreline height, which is a crown above the lane the bar is painted across; a bar
+## built at that height floats at its middle and sinks at its ends, by several times MARKING_LIFT on any
+## road with a camber. So the same sampler `build_footprint` used for the surface answers here too, and
+## the paint sits on the geometry it was planned against by construction.
+func _add_junction_markings(p_parent: Node3D, p_apron: Dictionary, p_lift: float) -> void:
+	var prims: Array = p_apron.get("markings", [])
+	if prims.is_empty():
+		return
+	var plan: PackedVector2Array = p_apron["plan"]
+	var cum: PackedFloat32Array = p_apron["cum"]
+	var alignment: Pasture3DRoadAlignment = p_apron["alignment"]
+	var crown := float(p_apron["crown"])
+	var sampler := func(at: Vector2) -> float:
+		return Pasture3DRoadMesher.surface_height(at, plan, cum, alignment, crown)
+	var arrays := Pasture3DRoadJunctionMarkings.build_junction(prims, sampler, p_lift)
+	if arrays.is_empty():
+		return
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	if markings_material != null:
+		mesh.surface_set_material(0, markings_material)
+	var mi := MeshInstance3D.new()
+	mi.name = "Markings"
+	mi.mesh = mesh
+	p_parent.add_child(mi)
