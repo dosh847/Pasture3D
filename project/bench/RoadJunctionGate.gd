@@ -30,6 +30,7 @@ func _ready() -> void:
 	await _q_a_junctioned_road_refuses_the_native_fast_path()
 	await _r_the_ground_beside_a_junction_is_graded()
 	await _s_the_crossing_grades_the_same_in_either_order()
+	await _t_a_moved_junction_surface_asks_for_another_bake()
 	print("\n=== %s (%d failures) ===\n" % ["ROAD JUNCTION PASS" if _fail == 0 else "ROAD JUNCTION FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -956,6 +957,11 @@ func _r_the_ground_beside_a_junction_is_graded() -> void:
 	net.resolve_junctions()
 	await get_tree().process_frame
 	var z := _grade_into(fx["brushes"], ground, gw, gh, min_x, min_z, vs)
+	# ONE MORE TURN OF THE FIXED POINT. `bake -> resolve -> bake` leaves the junction's surface
+	# describing the alignment from before the last bake; the loop has to run until it stops moving.
+	net.resolve_junctions()
+	await get_tree().process_frame
+	z = _grade_into(fx["brushes"], ground, gw, gh, min_x, min_z, vs)
 
 	var j: Pasture3DRoadJunction = null
 	for cand in net.junctions:
@@ -1022,7 +1028,12 @@ func _r_the_ground_beside_a_junction_is_graded() -> void:
 ## put the crossing in a cutting and the others must keep the field they were calibrated on.
 func _grade_into(p_brushes: Array, p_ground: PackedFloat32Array, p_gw: int, p_gh: int, p_min_x: float,
 		p_min_z: float, p_vs: float) -> PackedFloat32Array:
-	var z := p_ground.duplicate()
+	# COMPOSITED, NOT CHAINED. Every road brush on a shared layer grades against
+	# `composite_height_below(layer)` -- the ground below the whole layer -- so no road has ever seen
+	# another road's earthwork as ground. Feeding one road's output to the next was convenient and
+	# wrong: it made a defect in the composite look like a defect in the grade, and hid a road's batter
+	# under whatever the next road happened to write over it.
+	var fields: Array = []
 	for b: Pasture3DRoadBrush in p_brushes:
 		var mod: Pasture3DNodeRoad = null
 		for m in b.modifiers:
@@ -1030,10 +1041,10 @@ func _grade_into(p_brushes: Array, p_ground: PackedFloat32Array, p_gw: int, p_gh
 				mod = m
 		if mod == null:
 			continue
-		var res := b.grade_surface(mod, z, p_gw, p_gh, p_min_x, p_min_z, p_vs)
+		var res := b.grade_surface(mod, p_ground.duplicate(), p_gw, p_gh, p_min_x, p_min_z, p_vs)
 		if not res.is_empty():
-			z = res["height"]
-	return z
+			fields.append(res["height"])
+	return _composite(p_ground, fields, p_gw * p_gh)
 
 
 ## [Q] A road that is in a junction does not take the native fast path.
@@ -1126,9 +1137,13 @@ func _s_the_crossing_grades_the_same_in_either_order() -> void:
 		for ix in gw:
 			ground[iz * gw + ix] = float(ix) * 0.5 + float(iz) * 0.2
 
-	_grade_into(fx["brushes"], ground, gw, gh, min_x, min_z, vs)
-	net.resolve_junctions()
-	await get_tree().process_frame
+	# Run the bake -> resolve fixed point out, the way [R] does: one turn leaves the junction's surface
+	# describing the alignment from before the last bake, and comparing two orders of a surface that has
+	# not settled measures the settling, not the ordering.
+	for _cyc in 2:
+		_grade_into(fx["brushes"], ground, gw, gh, min_x, min_z, vs)
+		net.resolve_junctions()
+		await get_tree().process_frame
 
 	# Each road against the SAME ground, exactly as the editor does it.
 	var fields: Array = []
@@ -1176,6 +1191,64 @@ func _s_the_crossing_grades_the_same_in_either_order() -> void:
 			"the terrain differs by %.4f m at %s depending on which road was written last"
 			% [worst, worst_at])
 
+	(fx["terrain"] as Node).queue_free()
+
+
+## [T] A resolve that moves the junction's SURFACE asks for another bake.
+##
+## The road system is a `bake -> resolve -> bake` fixed point, and the thing that decides whether another
+## turn is needed is `junction_digest`. It carried the pins -- arc length, pin height, trim -- and not the
+## surface, so after `bake -> resolve` the junction's cut-face cross-sections described the alignment from
+## BEFORE that bake and nothing asked for the pass that would settle them. The terrain stayed graded to a
+## surface metres from the roads meeting it while the apron mesh rebuilt to the fresh numbers, which is
+## the intersection standing over the road.
+##
+## Asserted on the DECISION, not on the scheduling: `_schedule_refresh` is editor-only and does nothing
+## headless, so a criterion that waited for a rebake would pass on a build that never asks for one. What
+## can be checked is that the digest a bake was credited with differs from the digest after the surface
+## moves.
+##
+## The control is a junction whose surface has NOT moved: the digest must be unchanged, or a digest that
+## simply hashed the clock would satisfy the first half and rebake the scene forever.
+func _t_a_moved_junction_surface_asks_for_another_bake() -> void:
+	print("[T] a resolve that moves the junction surface asks for another bake")
+	var fx := _crossing_fixture()
+	var net: Pasture3DRoadNetwork = fx["net"]
+	_grade_all(fx["brushes"], 96, 96, 80.0, 80.0, 1.0)
+	net.resolve_junctions()
+	await get_tree().process_frame
+
+	var j: Pasture3DRoadJunction = null
+	for cand in net.junctions:
+		if cand.detected:
+			j = cand
+	var b: Pasture3DRoadBrush = fx["brushes"][0]
+	if j == null or j.arm_z.is_empty():
+		_fail += 1
+		print("    !! no resolved junction with arms, so [T] measured nothing")
+		(fx["terrain"] as Node).queue_free()
+		return
+
+	var before := b.junction_digest()
+	# THE CONTROL FIRST: nothing has moved, so nothing may be asked for.
+	_check("T", b.junction_digest() == before,
+			"the digest changed with nothing moved -- every bake would ask for another")
+
+	# The surface moves the way a re-solved alignment moves it: one arm's cut face lifts.
+	var saved := j.arm_z.duplicate()
+	j.arm_z[0] = saved[0] + 2.0
+	_check("T", b.junction_digest() != before,
+			"an arm's cut face moved 2 m and the digest did not change -- nothing would rebake")
+	j.arm_z = saved.duplicate()
+	_check("T", b.junction_digest() == before, "restoring the arm did not restore the digest")
+
+	var elev := j.elevation
+	j.elevation = elev + 2.0
+	_check("T", b.junction_digest() != before,
+			"the junction elevation moved 2 m and the digest did not change")
+	j.elevation = elev
+
+	print("    digest tracks %d arm(s) and the elevation" % saved.size())
 	(fx["terrain"] as Node).queue_free()
 
 

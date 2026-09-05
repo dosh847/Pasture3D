@@ -204,14 +204,25 @@ func _configure_host(p_host: Pasture3DRoadChunkHost) -> void:
 	p_host.props_enabled = ribbon_props
 
 
-## Draw the junction RING in the viewport. The ring is the influence radius a junction was detected at,
-## which is the number you want while you are asking "did it find the crossing"; it is in the way while
-## you are looking at the pavement itself, because it is drawn at the junction elevation right across the
-## surface being judged. The spokes, connectors and conflict lines are unaffected -- they say things the
-## ring does not, and turning off the one you are not reading should not cost the others.
+## Draw the junction's footprint overlay in the viewport: the influence ring, the lane connectors, the
+## conflict marks and the stop lines. All of it is drawn at junction elevation right across the pavement,
+## which is the surface you are judging when you turn it off.
+##
+## The ARMS are not part of it. A spoke says where a road's grading stops, and that is the thing you are
+## still reading while you look at the ground -- so the spokes and their end markers stay whatever this
+## is set to.
 ##
 ## Editor-only, so it does not `_bump()`: nothing baked depends on it, and invalidating the network to
 ## redraw a gizmo would rebuild every ribbon in the scene to hide a circle.
+## Re-grade every road in this network: drop each one's cached grade and repaint, then resolve the
+## junctions once at the end.
+##
+## The per-road button reaches one road. A junction is a fact about two, and the fixed point that settles
+## its surface runs across the whole network, so "rebake everything and let it settle" is a thing you
+## want as one press rather than as four.
+@export_tool_button("Bake All Roads") var _bake_all_btn = bake_all_roads
+
+
 @export var show_junction_discs: bool = true:
 	set(v):
 		show_junction_discs = v
@@ -356,6 +367,25 @@ var _resolve_queued: bool = false
 
 ## Ask for a junction resolve at the end of the frame. Coalesced, so ten brushes finishing their bakes in
 ## one refresh produce one resolve rather than ten.
+## Re-grade every road brush in this network. Returns how many were baked.
+func bake_all_roads() -> int:
+	var n := 0
+	var missing := 0
+	for b in road_brushes():
+		if b == null:
+			continue
+		if b.bake_road():
+			n += 1
+		else:
+			missing += 1
+	request_resolve()
+	# Said out loud, because a road whose stack has no Road node bakes silently and looks like a road
+	# the button skipped -- and the button is pressed precisely when something is not updating.
+	print("[Pasture3D] baked %d road(s)%s" % [n,
+			"" if missing == 0 else "; %d had no Road modifier and were left alone" % missing])
+	return n
+
+
 func request_resolve() -> void:
 	if _resolve_queued:
 		return

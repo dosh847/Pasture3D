@@ -28,6 +28,15 @@ extends Pasture3DTerrainBrush
 ## leaves the union of discs scalloped by well under a cell at any vertex spacing the terrain can show.
 const PROTECT_STEP: float = 0.5
 
+## Re-grade this road now: drop the road modifier's cached grade and repaint.
+##
+## The same button the Road modifier carries, lifted to the top of the brush. It was three disclosure
+## triangles down -- Modifiers, the element, Output -- which is a long way to reach for the control you
+## press after every spline edit, and the road brush is the one brush whose stack is nearly always
+## exactly one node.
+@export_tool_button("Bake Road") var _bake_road_btn = bake_road
+
+
 @export_group("Road")
 ## What this brush overrides for its whole length. Sits between its segments and its group in the
 ## resolve chain (§5.3). Unset fields inherit; they are never copied down from the group.
@@ -1095,6 +1104,21 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 ## `PROTECT_STEP` metres is the formation with scalloping far below one cell.
 func _foreign_formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: float,
 		p_vs: float) -> PackedByteArray:
+	return _formation_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs, false)
+
+
+## Every road's formation in the network, this one INCLUDED. Same union, one road wider.
+##
+## The junction's batter needs this and `protect` must not have it: `protect` is a road refusing to
+## regrade ANOTHER road, and a road that refused its own formation would refuse to build itself. The
+## junction batter is neither road's, so it refuses them all.
+func _all_formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: float,
+		p_vs: float) -> PackedByteArray:
+	return _formation_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs, true)
+
+
+func _formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: float, p_vs: float,
+		p_include_self: bool) -> PackedByteArray:
 	var out := PackedByteArray()
 	var net := road_network()
 	if net == null or p_gw <= 0 or p_gh <= 0 or p_vs <= 0.0:
@@ -1102,7 +1126,9 @@ func _foreign_formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: floa
 	var mine := road_key()
 	var others: Array[Pasture3DRoadBrush] = []
 	for b in net.road_brushes():
-		if b != null and b != self and b.road_key() != mine:
+		if b == null:
+			continue
+		if p_include_self or (b != self and b.road_key() != mine):
 			others.append(b)
 	if others.is_empty():
 		return out
@@ -1272,6 +1298,8 @@ func grade_junction_footprints(p_z: PackedFloat32Array, p_gw: int, p_gh: int, p_
 	if net == null or p_vs <= 0.0:
 		return p_z
 	var out := p_z
+	# Built once for the whole pass, not once per junction: it walks every road's plan.
+	var formation := _all_formation_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs)
 	for j in net.junctions_for(road_key()):
 		var surf := net.junction_surface(j)
 		if surf.is_empty():
@@ -1302,7 +1330,8 @@ func grade_junction_footprints(p_z: PackedFloat32Array, p_gw: int, p_gh: int, p_
 					continue
 				out[idx] = Pasture3DRoadMesher.footprint_height_at(at, centre, boundary, heights,
 						centre_h)
-		out = _batter_junction_footprint(out, surf, p_gw, p_gh, p_min_x, p_min_z, p_vs, ground)
+		out = _batter_junction_footprint(out, surf, p_gw, p_gh, p_min_x, p_min_z, p_vs, ground,
+				formation)
 		if log_bake_timing:
 			_log_junction_datum(j, surf, out, p_gw, p_gh, p_min_x, p_min_z, p_vs)
 	return out
@@ -1375,8 +1404,8 @@ func _log_junction_datum(p_j: Pasture3DRoadJunction, p_surf: Dictionary, p_z: Pa
 ## Idempotent for the same reason the surface pass is: every number comes from `junction_surface`, so
 ## every participant computes the same field and the order they bake in cannot be seen.
 func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_gw: int, p_gh: int,
-		p_min_x: float, p_min_z: float, p_vs: float,
-		p_ground: PackedFloat32Array) -> PackedFloat32Array:
+		p_min_x: float, p_min_z: float, p_vs: float, p_ground: PackedFloat32Array,
+		p_formation: PackedByteArray) -> PackedFloat32Array:
 	var boundary: PackedVector2Array = p_surf["boundary"]
 	var heights: PackedFloat32Array = p_surf["heights"]
 	var cut_batter: float = maxf(float(p_surf.get("cut_batter", 1.0)), 0.01)
@@ -1419,6 +1448,20 @@ func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_g
 			# rather than one overwriting the other.
 			if not (is_finite(here) and is_finite(ground)):
 				continue
+			# ---- EARTHWORK NEVER OVERWRITES A CARRIAGEWAY ----
+			#
+			# The batter is bounded by the polygon on the inside and by nothing on the outside, so
+			# without this it ran straight out along every approach and pulled the road it was supposed
+			# to be joining back down to the raw hillside. That is the black collar the author saw
+			# around each intersection: the roads' grading looked like it stopped short of the
+			# intersection, when in fact the intersection had erased it.
+			#
+			# `protect` states this same rule for the corridor grader, one road at a time. The junction
+			# belongs to no road, so it refuses every road's formation including its own -- and the
+			# stretches trimmed back INTO the footprint are not in the mask, because a road builds
+			# nothing there and that ground is the junction's to grade.
+			if idx < p_formation.size() and p_formation[idx] != 0:
+				continue
 			var at := Vector2(p_min_x + float(ix) * p_vs, wz)
 			if Geometry2D.is_point_in_polygon(at, boundary):
 				continue # the junction's surface, already written
@@ -1431,14 +1474,17 @@ func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_g
 			var z_edge := float(edge[1])
 			var cand: float = (maxf(ground, z_edge - beyond * fill_batter) if z_edge > ground
 					else minf(ground, z_edge + beyond * cut_batter))
-			# WRITTEN, NOT COMBINED. Around a junction the junction's earthwork governs: `cand` is
-			# derived from the junction record and the pre-road ground and from nothing this road did,
-			# so every road that meets here computes the same number and the result no longer depends on
-			# which road ran the pass. Keeping the corridor's own value where it was the larger earthwork
-			# was tried first and put the wall back -- the road approaches in a deep cut, its cut is
-			# always the bigger movement, and the batter that has to carry the ground down to the
-			# intersection never gets to run.
-			out[idx] = cand
+			# COMBINED, by the same commutative rule `_merge_junction_earthwork` uses: the bigger
+			# earthwork governs. `cand` is derived from the junction record and the pre-road ground and
+			# from nothing this road did, so every road that meets here computes the same number -- and
+			# the corridor's own batter, where it was the larger movement, survives.
+			#
+			# Writing `cand` unconditionally was tried, and it erased the approaches: the corridor's
+			# batter alongside a road in a deep cut is a big movement, `cand` out there has already met
+			# the ground and is therefore equal to it, and overwriting one with the other put the raw
+			# hillside back over the road.
+			if absf(cand - ground) > absf(here - ground):
+				out[idx] = cand
 	return out
 
 
@@ -1791,6 +1837,18 @@ func road_key() -> String:
 
 
 ## The first active road modifier, or null. The alignment and the grading options live on it.
+## Drop every road modifier's cache on this brush and repaint. Answers whether it found one to bake, so
+## the network's Bake All can report a road whose stack has no road node rather than counting it.
+func bake_road() -> bool:
+	var found := false
+	for m in modifiers:
+		if m is Pasture3DNodeRoad:
+			(m as Pasture3DNodeRoad).clear_cache()
+			found = true
+	refresh(true)
+	return found
+
+
 func road_modifier() -> Pasture3DNodeRoad:
 	for m in modifiers:
 		if m is Pasture3DNodeRoad and m.is_active():
@@ -2119,8 +2177,20 @@ func junction_digest() -> String:
 	var key := road_key()
 	var parts := PackedStringArray()
 	for j in net.junctions_for(key):
-		parts.append("%s|%.3f|%.3f|%.3f" % [j.id, j.arc_length_for(key), j.pin_for(key),
-				j.trim_back_for(key)])
+		# ---- THE SURFACE IS PART OF THE DIGEST, NOT JUST THE PINS ----
+		#
+		# A bake solves an alignment; the resolve that follows records each arm's cut-face cross-section
+		# from it. So after `bake -> resolve` the junction's surface describes the alignment from BEFORE
+		# that bake, and the terrain has been graded to the one before that. With only the pins in the
+		# digest nothing noticed: the pins had not moved, no rebake was asked for, and the intersection
+		# was left graded to a surface metres away from the roads meeting it -- 4.4 m on the gate's own
+		# crossing, and the apron MESH meanwhile rebuilt to the fresh numbers, so the ground and the
+		# pavement disagreed by exactly the amount the last bake had moved the road.
+		#
+		# Including the surface closes the loop: a resolve that moved it schedules one more bake, and the
+		# fixed point is reached on the next pass rather than never.
+		parts.append("%s|%.3f|%.3f|%.3f|%.3f|%s|%s" % [j.id, j.arc_length_for(key), j.pin_for(key),
+				j.trim_back_for(key), j.elevation, j.arm_z, j.arm_banks])
 	parts.sort()
 	return "\n".join(parts)
 

@@ -138,6 +138,16 @@ func _redraw(p_gizmo: EditorNode3DGizmo) -> void:
 
 		if not j.detected or j.disabled:
 			continue
+		if not discs:
+			# EVERYTHING INSIDE THE FOOTPRINT GOES WITH THE RING. The lane connectors, the conflict marks
+			# and the stop lines are all drawn across the pavement at junction elevation, and they are
+			# the harder half to see past -- a ring is one line at the edge, the lane graph is a dozen
+			# curves over the exact surface being judged. Turning off the ring and leaving them was
+			# answering a different question from the one being asked.
+			#
+			# The arms stay: a spoke says where a road's grading stops, which is what you are checking
+			# when you are looking at the ground rather than at the junction.
+			continue
 		# The lane graph. Drawn after the arms so it reads on top of them, and only for a live junction:
 		# the connectors of a disabled junction are kept but are not paths anything may take.
 		for c in j.connectors:
