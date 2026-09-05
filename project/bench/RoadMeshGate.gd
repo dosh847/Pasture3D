@@ -38,6 +38,7 @@ func _ready() -> void:
 	_k_distance_is_measured_to_the_chunk_not_to_its_centre()
 	_l_a_tier_does_not_chatter_on_its_own_threshold()
 	_m_a_road_type_edit_rebuilds_the_ribbon()
+	_n_markings_are_drawn_at_tier_near_only()
 	print("\n=== %s (%d failures) ===\n" % ["ROAD MESH PASS" if _fail == 0 else "ROAD MESH FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -822,6 +823,69 @@ func _mesh_outer_edge(p_host: Pasture3DRoadChunkHost) -> float:
 ## exported property would pass the first criterion and destroy the cache: it would rebuild the mesh on
 ## every vertical-only edit, which is the cost the skip exists to avoid. So `surface_id` — physics only,
 ## no mesh input — must NOT rebuild, and that is asserted as hard as the rebuild is.
+## [N] Lane markings are drawn at tier NEAR and nowhere else.
+##
+## §10 and §2.5 of the junction paint spec both say markings are a NEAR-tier thing: a stripe is a few
+## centimetres wide, unreadable by MID, and beyond FAR the road is terrain paint with no mesh to put it
+## on. The host built them as a child of the chunk and never touched them again, so every stop bar,
+## crossing and centre line rendered at 600 m -- correct, invisible, and paid for every frame.
+##
+## ASSERTED IN TWO HALVES, because either alone passes on a broken host. The host has to STATE the tier
+## (`MARKINGS_MAX_LOD`, and it has to exclude something -- raised to 3 it hides nothing and the criterion
+## would still be satisfied by a host that never hid a marking), and the build has to RECORD the markings
+## node on the chunk, because the LOD swap has nothing to hide otherwise. That is the same two-halves
+## shape `RoadNetworkGate` [G] uses for host settings, and for the same reason: a rule nothing reads and
+## a reader with no rule look identical from either end.
+##
+## The visibility swap itself is driven from `_process`, which needs a camera and does nothing headless
+## (see [K] and [L], which test `lod_for` directly for the same reason). What is checkable is the
+## decision, so that is what is checked.
+func _n_markings_are_drawn_at_tier_near_only() -> void:
+	print("[N] markings are drawn at tier NEAR only")
+	var fx := _rebuild_fixture()
+	var brush: Pasture3DRoadBrush = fx["brush"]
+	var host: Pasture3DRoadChunkHost = fx["host"]
+	host.markings_enabled = true
+	var chunks := host.rebuild(brush)
+
+	# HALF ONE: the build records the node the LOD swap has to reach.
+	var with_marks := 0
+	for c in host._chunks:
+		if is_instance_valid(c.get("markings")):
+			with_marks += 1
+	print("    %d chunk(s) built, %d carrying a markings node" % [chunks, with_marks])
+	_check("N", chunks > 0, "nothing was built, so [N] measured nothing")
+	_check("N", with_marks > 0,
+			"no chunk carries its markings node, so the LOD swap has nothing to hide")
+
+	# CONTROL: with markings off there is nothing recorded, or the check above is satisfied by a field
+	# that is always filled in whatever the setting says.
+	host.markings_enabled = false
+	host.rebuild(brush)
+	var off_marks := 0
+	for c in host._chunks:
+		if is_instance_valid(c.get("markings")):
+			off_marks += 1
+	print("    control: markings off -> %d chunk(s) carry one (want 0)" % off_marks)
+	if off_marks != 0:
+		_fail += 1
+		print("!!  the markings node is recorded whether or not markings are enabled")
+
+	# HALF TWO: the tier the host names must actually exclude a tier the road reaches.
+	var max_lod: int = Pasture3DRoadChunkHost.MARKINGS_MAX_LOD
+	var near := host.lod_for(0.0, 0)
+	var mid := host.lod_for(host.lod_distances[host.lod_distances.size() - 1] + host.lod_hysteresis * 2.0, 0)
+	print("    MARKINGS_MAX_LOD %d; at the camera LOD %d, past the last threshold LOD %d"
+			% [max_lod, near, mid])
+	_check("N", near <= max_lod, "a chunk under the camera is at LOD %d, above the marking tier %d"
+			% [near, max_lod])
+	_check("N", mid > max_lod,
+			"the coarsest tier the road reaches is LOD %d, which the marking tier %d does not exclude -- "
+			% [mid, max_lod] + "markings would be drawn at every distance")
+
+	(fx["terrain"] as Node).queue_free()
+
+
 func _m_a_road_type_edit_rebuilds_the_ribbon() -> void:
 	print("[M] a road-type edit rebuilds the ribbon, and a non-mesh edit does not")
 	var fx := _rebuild_fixture()

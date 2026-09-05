@@ -3,8 +3,11 @@
 **Document:** `PASTURE3D_ROAD_STALENESS_AND_COST_SPEC.md`
 **Status:** **Phase 1 complete — S1, S2, S3 and S4 BUILT 2026-09-03** (`RoadStaleGate` [SA]–[SH] pass,
 controls verified; 36 assertions). **S6–S11 BUILT 2026-09-03** (`RoadCostGate` [CA]–[CG] passes,
-twenty-six controls verified to fail; all 19 asserting road gates green). **S12 PROPOSED, not started.** Check the symbol and the branch before planning from this header; it
-will go stale before the work does.
+twenty-six controls verified to fail; all 19 asserting road gates green). **S12 BUILT 2026-09-03**
+(`RoadBrushPickGate` [RE]-[RF]; thirty controls verified to fail) — **this document is complete.**
+Corrected 2026-09-05: the header said S12 was proposed and not started while §4.1 on line 384 recorded
+it as built, which is the staleness this very sentence warns about. Check the symbol and the branch
+before planning from this header; it will go stale before the work does.
 **Target:** `Pasture3DRoadBrush` and its integration with the modifier stack, the road network resolve
 loop, and the terrain node graph.
 **References:** `PASTURE3D_ROAD_SYSTEM_PROPOSAL.md` §5.3, §6, §8, §10;

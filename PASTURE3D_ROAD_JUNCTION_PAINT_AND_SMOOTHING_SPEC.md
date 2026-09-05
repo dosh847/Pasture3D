@@ -9,9 +9,11 @@ criterion M is in the polygon gate. Four mutations, all caught — see §2.6.
 (`Pasture3DRoadJunctionMarkings`, gate `RoadJunctionPaintGate`, criteria A, B, E, F, G, H, I, N, O,
 fifteen mutations). **P9a ARM_CONTINUATION is RETIRED, not deferred — see §2.3.**
 
-**Both features of this document are now built.** What is left is not a phase: LOD (§2.5) puts junction
-paint at tier NEAR only and the host currently builds it at every tier, and the connector overlay's
-overdraw (§2.4) has not been measured on a real scene.
+**Both features of this document are now built.** The §2.5 LOD gap closed 2026-09-05: markings are now
+hidden above `Pasture3DRoadChunkHost.MARKINGS_MAX_LOD` (tier NEAR), on the ribbon as well as the
+junction — the host built them as a child of the chunk and never touched them again, so every stop bar,
+crossing and centre line rendered at 600 m. Gate `RoadMeshGate` [N], two mutations. What is left is not
+a phase: the connector overlay's overdraw (§2.4) has not been measured on a real scene.
 **P9a-orphans BUILT 2026-09-04** (gate `RoadJunctionOrphanGate`, 7 criteria, 4 mutations) — see §2.6.
 **Revised 2026-09-04** — P9a was scoped as markings drawn *on top of* the existing apron disc. Review
 against the author's expectation ("a polygon built to connect with the ribbons of every road that
@@ -357,6 +359,16 @@ The cost is overdraw across the footprint, bounded by the number of connectors, 
 apron loop) and already owns the tier mapping. Junction paint is one more mesh per junction from the
 same loop, at **tier NEAR only**, matching P5c: markings are unreadable at MID and absent at FAR, where
 the road is terrain paint anyway.
+
+**Built 2026-09-05.** The tier is `MARKINGS_MAX_LOD`, stated once on the host and not exported — it is
+not a preference, it is the tier markings belong to. Both marking builders return the node they made and
+the chunk record carries it, so the LOD swap that already changes `mi.mesh` also sets its visibility;
+markings follow the ribbon's tier rather than a distance of their own, because two thresholds over one
+distance disagree inside the hysteresis band and leave a stripe hanging off a chunk that coarsened under
+it. Beyond `far_distance` nothing was needed: markings are children of the chunk, which is hidden whole.
+
+The ribbon's markings had the same gap and are fixed by the same mechanism — P5c is where the rule was
+stated and neither builder had ever read it.
 
 Lift: `MARKING_LIFT` **on top of** the ribbon's lift, never instead of it — the same rule the road
 markings follow, and for the same reason (coplanar geometry is decided by float precision, not by draw
