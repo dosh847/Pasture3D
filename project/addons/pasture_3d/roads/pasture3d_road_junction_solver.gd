@@ -128,6 +128,15 @@ static func resolve(p_runs: Array, p_existing: Array = [], p_opts: Dictionary = 
 			# RECONCILE, do not rebuild: the resolved fields are replaced wholesale and the user's
 			# overrides are the ones already on `prior`, so an unrelated spline edit cannot silently
 			# discard a choice made here. `id` is deliberately NOT among them.
+			#
+			# `major_override` IS remapped, and must be, because it is an INDEX into `road_keys` and this
+			# match no longer guarantees the two lists agree. Once a prior can be matched on overlap, a
+			# junction that gains or loses an arm arrives here with a different participant order, and an
+			# index carried across unchanged would quietly come to mean a different road — "this road has
+			# right of way" turning into "that one does", with no edit and nothing to see. Resolved by
+			# key, which is what the author actually chose; an override naming a road that has left the
+			# junction returns to -1, the value that means "no opinion".
+			prior.major_override = _remap_major_override(prior, j.road_keys)
 			prior.center = j.center
 			prior.road_keys = j.road_keys
 			prior.arc_lengths = j.arc_lengths
@@ -140,31 +149,72 @@ static func resolve(p_runs: Array, p_existing: Array = [], p_opts: Dictionary = 
 		else:
 			out.append(j)
 
-	# A junction that is no longer detected is KEPT and marked, not deleted. The roads may be dragged
-	# back together in a moment, and throwing away the overrides in between would be a silent loss.
+	# A junction that is no longer detected is kept and marked ONLY IF THE AUTHOR CHOSE SOMETHING HERE.
+	#
+	# The original rule kept every one of them: the roads may be dragged back together in a moment, and
+	# throwing away the overrides in between would be a silent loss. That is right about the overrides
+	# and wrong about the record. A stale junction with no override has nothing to restore — every field
+	# on it is solver output the next detection recomputes identically — so keeping it preserves nothing
+	# and costs a saved resource, a red gizmo ring and a block in the scene file, for ever.
+	#
+	# Nothing pruned them, so they accumulated: `demo_road_network.tscn` reached thirteen undetected
+	# records, none carrying a single override, and the only way to clear them was to delete the road
+	# network. See `Pasture3DRoadJunction.has_authored_override`.
 	for i in priors.size():
-		if not taken.has(i):
-			var stale: Pasture3DRoadJunction = priors[i]
-			stale.detected = false
-			out.append(stale)
+		if taken.has(i):
+			continue
+		var stale: Pasture3DRoadJunction = priors[i]
+		if not stale.has_authored_override():
+			continue
+		stale.detected = false
+		out.append(stale)
 	return out
 
 
-## The prior record `p_j` is a re-detection of, or null. Same participants, nearest centre, within
-## `p_radius`, and not already claimed by another group this resolve.
+## The prior record `p_j` is a re-detection of, or null. Overlapping participants, largest overlap first,
+## nearest centre within `p_radius`, and not already claimed by another group this resolve.
+##
+## ---- WHY OVERLAP AND NOT AN EXACT PARTICIPANT SET ----
+##
+## Matching on the exact set is correct for a junction that MOVED and wrong for one that GAINED OR LOST
+## AN ARM. Draw a T-junction, author "no left turn" on it, then run a fourth road through the same point:
+## the detection now has four participants, the prior has three, the sets differ, and the match fails. So
+## the resolve emits a brand new record with the override missing and keeps the old one beside it, marked
+## undetected — two records where the author drew one crossing, which is the exact failure the positional
+## match was introduced to prevent, reached by a different route.
+##
+## `demo_road_network.tscn` had this on disk: `Road+Road1+Road3@187,55` is the live four-arm junction at
+## `@191,55` as it stood before `Road2` was added, orphaned half a metre away.
+##
+## An arm joining or leaving does not make it a different intersection, so the test is how much the
+## participants overlap, not whether they are identical.
+##
+## MINIMUM OVERLAP IS TWO, and that is load-bearing rather than cautious. One shared road is not evidence
+## of identity: a junction of A and B, and a separate junction of A and C further along A, share exactly
+## one participant, and with a threshold of one the nearer of them could claim the other's record and
+## with it the other's overrides. Two shared roads is the smallest overlap that can only mean the same
+## crossing, because two roads cross each other at a given place exactly once.
 static func _match_prior(p_j: Pasture3DRoadJunction, p_priors: Array, p_taken: Dictionary,
 		p_radius: float) -> Pasture3DRoadJunction:
-	var want := _participant_set(p_j.road_keys)
 	var best := -1
-	var best_d := p_radius
+	var best_overlap := 0
+	var best_d := INF
 	for i in p_priors.size():
 		if p_taken.has(i):
 			continue
 		var prior: Pasture3DRoadJunction = p_priors[i]
-		if _participant_set(prior.road_keys) != want:
-			continue
 		var d := prior.center.distance_to(p_j.center)
-		if d <= best_d:
+		if d > p_radius:
+			continue
+		var overlap := _overlap_count(prior.road_keys, p_j.road_keys)
+		if overlap < 2:
+			continue
+		# THE TIE ORDER IS SPECIFIED, not incidental. More shared participants wins first, because an
+		# exact re-detection must always beat a partial one; distance breaks a tie in overlap; and the
+		# lower index breaks a tie in both, so two priors that are equally good resolve the same way on
+		# every run instead of by array order that a reload is free to change.
+		if overlap > best_overlap or (overlap == best_overlap and d < best_d):
+			best_overlap = overlap
 			best_d = d
 			best = i
 	if best < 0:
@@ -173,12 +223,31 @@ static func _match_prior(p_j: Pasture3DRoadJunction, p_priors: Array, p_taken: D
 	return p_priors[best]
 
 
-## The participants as an order-independent string, so the same pair matches whichever road the solver
-## walked first.
-static func _participant_set(p_keys: PackedStringArray) -> String:
-	var k := Array(p_keys)
-	k.sort()
-	return "+".join(k)
+## `p_prior`'s `major_override` expressed against `p_new_keys`, or -1 when it no longer names a
+## participant. Reads the road's KEY out of the old list before looking it up in the new one, because
+## the author chose a road, not a slot.
+static func _remap_major_override(p_prior: Pasture3DRoadJunction,
+		p_new_keys: PackedStringArray) -> int:
+	var old := p_prior.major_override
+	if old < 0 or old >= p_prior.road_keys.size():
+		return -1
+	var key: String = p_prior.road_keys[old]
+	for i in p_new_keys.size():
+		if p_new_keys[i] == key:
+			return i
+	return -1
+
+
+## How many road keys two participant lists share.
+static func _overlap_count(p_a: PackedStringArray, p_b: PackedStringArray) -> int:
+	var seen := {}
+	for k in p_a:
+		seen[k] = true
+	var n := 0
+	for k in p_b:
+		if seen.has(k):
+			n += 1
+	return n
 
 
 ## Resolve one cluster of crossings into a junction.

@@ -97,6 +97,37 @@ var phase_elapsed: float = 0.0
 @export var disabled: bool = false
 
 
+## True when the author has made a choice here that a re-detection could not reproduce.
+##
+## ---- THIS IS WHAT MAKES AN UNDETECTED RECORD WORTH KEEPING ----
+##
+## `Pasture3DRoadJunctionSolver.resolve` keeps a junction that stops being detected rather than deleting
+## it, because "the roads may be dragged back together in a moment, and throwing away the overrides in
+## between would be a silent loss". That reasoning is sound and it is also conditional: it is a reason to
+## keep the OVERRIDES, not a reason to keep the record. A stale junction that was never overridden has
+## nothing to restore — every field on it is solver output that the next detection would recompute
+## identically — so keeping it preserves nothing and costs a saved resource, a gizmo ring and a line in
+## the scene file, permanently and without bound.
+##
+## That was not a hypothetical: `demo_road_network.tscn` accumulated thirteen undetected records, none of
+## which carried a single override, and the only way to clear them was to delete the road network.
+##
+## The predicate is therefore the exact set of fields under `@export_group("Overrides")` plus the one
+## override that lives on a connector. Everything else is Resolved or Lane graph — solver output by
+## definition, and none of it is evidence of an authored decision.
+func has_authored_override() -> bool:
+	if control != ControlType.INHERIT or major_override >= 0 or radius_override >= 0.0 or disabled:
+		return true
+	# `allowed_override` is the one authored field the solver is forbidden to write (see
+	# Pasture3DRoadLaneConnector), so a banned turn is an authored decision exactly like the four above
+	# and must hold the record open the same way. Missing it would silently drop "no left turn here" the
+	# first time the roads stopped crossing.
+	for c in connectors:
+		if c != null and c.allowed_override != Pasture3DRoadLaneConnector.Tri.INHERIT:
+			return true
+	return false
+
+
 ## The id a junction between these roads at this place would have. Built from the SORTED participant
 ## keys, so the same junction gets the same id no matter which road the solver happened to walk first,
 ## plus the centre rounded to a metre — two distinct junctions between the same pair of roads (a road

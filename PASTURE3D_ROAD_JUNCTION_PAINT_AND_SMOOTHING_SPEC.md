@@ -3,6 +3,11 @@
 **Document:** `PASTURE3D_ROAD_JUNCTION_PAINT_AND_SMOOTHING_SPEC.md`
 **Status:** **P9b BUILT** 2026-09-02 (gate `RoadSmoothGate`, green native and forced-GDScript).
 **P9a not started.**
+**P9a-orphans BUILT 2026-09-04** (gate `RoadJunctionOrphanGate`, 7 criteria, 4 mutations) — see §2.6.
+**Revised 2026-09-04** — P9a was scoped as markings drawn *on top of* the existing apron disc. Review
+against the author's expectation ("a polygon built to connect with the ribbons of every road that
+connects to the intersection") found the surface itself in scope. **P9a-0 (§2.2) is new and comes
+first**; §2.4's overlay recommendation, SS5's suggested order and the gate in §2.6 are revised to suit.
 **References:** `PASTURE3D_ROAD_SYSTEM_PROPOSAL.md` §6.4, §8, §10; `PASTURE3D_ROAD_BRUSH_PERF_SPEC.md`
 **Phases:** proposed as **P9a** (junction paint) and **P9b** (smoothing). Both sit after P7b; neither
 depends on P8, which remains the only unbuilt phase of the original plan.
@@ -21,7 +26,7 @@ overlapping edits to `pasture3d_road_chunk_host.gd`.
 
 ---
 
-## 2. Feature A — junction ribbons, markings and stop lines (P9a)
+## 2. Feature A — the junction surface, its ribbons and its markings (P9a)
 
 ### 2.1 What exists today
 
@@ -31,14 +36,136 @@ Read before proposing anything, because most of this feature is already sitting 
 |---|---|---|
 | Lane connectors | `Pasture3DRoadLaneConnector.curve` | **Solved.** A `Curve3D` per legal path through the junction, in WORLD space, tangent-continuous with both lanes at its ends. Carries `turn`, the signed angle, and `allowed_override`. |
 | Stop lines | `Pasture3DRoadStopLine` | **Solved.** One per incoming lane: world `point`, `heading` into the junction, `width`, and the arc length. `endpoints()` already returns the two ends of the painted bar. |
-| The junction surface | `Pasture3DRoadMesher.build_apron` | **Built.** A triangle fan over the footprint disc, sampling the graded ground rather than sitting at `junction.elevation`. |
+| The junction surface | `Pasture3DRoadMesher.build_apron` | **Built, and the wrong shape** — see §2.2. A triangle fan over the footprint *disc*, sampling the graded ground rather than sitting at `junction.elevation`. The ground-sampling is right and is kept; the disc is not. |
+| Trimming the approaches | `Pasture3DRoadBrush.junction_skips`, `grade_surface` | **Built, and exempts the major road** — see §2.2. Only minor arms stop at the footprint. |
 | Road markings | `Pasture3DRoadMarkings.plan` / `.build` | **Built, but only along roads.** `plan()` answers in the grader's `u` (signed metres across, positive right); the host calls it per chunk, and `Pasture3DRoadMesher.chunk_spans` explicitly **removes everything inside a junction footprint**. |
 
-So the gap is precise: **inside a footprint there is a bare grey disc.** The carriageway's edge lines and
-centre line stop dead at the trim-back boundary, every stop line is data that nothing draws, and every
-connector curve is a path nothing shows.
+So there are two gaps, not one. **Inside a footprint there is a bare grey disc**: the carriageway's edge
+lines and centre line stop dead at the trim-back boundary, every stop line is data that nothing draws,
+and every connector curve is a path nothing shows. That is the markings gap, and §2.3-§2.4 address it.
 
-### 2.2 The one real design decision: `u` does not exist at a junction
+But the disc it would be drawn on does not meet the roads either, and that is §2.2.
+
+---
+
+### 2.2 P9a-0 — the junction surface is a polygon, and every road is trimmed to it
+
+**This section is new. It is the first thing P9a builds, because everything else in Feature A is drawn
+on the surface it produces.**
+
+#### 2.2.1 Why the disc cannot be made to work
+
+An arm's cut end is a **flat, full-width face** — a chord across the footprint, `2 * half_width` long.
+A circle and a chord coincide at exactly two points. So a disc of any radius is simultaneously:
+
+- **too big between the arms**, bulging past the corners of the carriageway onto open ground; and
+- **too small at the arm faces**, because a disc of radius `trim` reaches the *middle* of the cut face
+  and misses both of its corners, which sit at `sqrt(trim^2 + half_width^2)`.
+
+`Pasture3DRoadMesher._apron_radius()` already documents the second half of this and patches it by
+inflating the radius to reach those corners. That comment is worth reading as evidence rather than as a
+fix: **it makes the first half strictly worse.** Every metre the disc grows to catch an arm corner is a
+metre it also grows in the directions where no road runs. The workaround and the defect are the same
+number pulling opposite ways, and no value of it is correct.
+
+A disc is the right primitive for a footprint that must *contain* the arms. It is the wrong primitive
+for a surface that must *meet* them.
+
+#### 2.2.2 The other half: the major road is never trimmed
+
+`Pasture3DRoadBrush.grade_surface` and `junction_skips()` both carry the same rule, deliberately and
+with the same comment:
+
+> only a road that is NOT the major one stops at the footprint. The major road keeps its own profile and
+> paves straight through
+
+That rule is why an intersection today is **not a shared surface at all**. It is the major road's own
+ribbon, running through at full width, with the minor arms terminating into its flank and a patch laid
+beside them. At a 4-arm crossroads where every road resolves to the same `priority`, `major_index` falls
+to whichever road the solver walked first — so which road paves through is arbitrary, and the other
+arms dead-end into it.
+
+**A polygon that connects to the ribbons of every road requires every road to be trimmed, including the
+major one.** That is the substantive behaviour change in P9a-0, and it retires three things:
+
+| Retired | Where | Why it goes |
+|---|---|---|
+| The `is_major` exemption in the grading skip | `pasture3d_road_brush.gd`, `grade_surface` | Every arm now stops at the polygon boundary. |
+| The `is_major` exemption in `junction_skips()` | `pasture3d_road_brush.gd` | Mirrors the grader; must change with it or the mesh and the ground disagree about where the road is — the failure its own comment warns about. |
+| `_apron_radius()` entirely | `pasture3d_road_network.gd` | It exists only to make a disc reach a cut face. There is no disc. |
+
+**What does NOT change: the major road still decides the height.** `build_apron`'s ground-sampling
+argument is untouched, and is the reason the polygon is not flat at `junction.elevation` either. The
+major road's solved profile remains the height field the polygon samples, and `pin_for()` still pins the
+minor arms to it. Priority stops deciding *who gets trimmed*; it keeps deciding *what height the
+intersection sits at*. Those were always two different jobs sharing one flag.
+
+#### 2.2.3 The polygon
+
+Same two-stage split as the markings kernel, and for the same reason — everything that can be wrong is
+wrong in the plan:
+
+```
+plan_footprint(junction, runs) -> PackedVector2Array   # world XZ boundary, assertable as numbers
+build_footprint(boundary, ground_sampler)              # triangles
+```
+
+`plan_footprint` walks the arms **in angular order around `junction.center`** and emits, per arm:
+
+1. the arm's two cut-face corners, at `center + dir * trim` offset by `+/- half_width` across; then
+2. a **corner fillet** from this arm's trailing corner to the next arm's leading corner.
+
+Angular order is what makes this N-ary for free: three arms, four arms and a five-way all walk the same
+loop, and the boundary is closed by construction. It is also the one thing the current code has never
+been asked to do — see the note in §2.6 on why no junction in `demo_road_network.tscn` has more than
+two participants.
+
+The fillet is the only shape decision, and it is **a circular arc tangent to both cut faces**. A straight
+chord between corners is cheaper and reads as a chamfer, which is wrong for anything but a slip lane; an
+arc is what a real intersection has and costs one `atan2` per corner.
+
+**Which radius, when the arms disagree (RESOLVED 2026-09-04).** `corner_radius` is a new field on
+`Pasture3DRoadType`, resolving through the normal Segment → Brush → Group → Network chain like every
+other road setting. At a junction the arms may resolve different values, so:
+
+1. **Priority picks it.** The `corner_radius` of the **highest-`priority` participating road** wins. A
+   trunk road meeting a lane should turn with the trunk road's sweep, and priority is already the field
+   that says which road the intersection is built around — the same field that decides `elevation`.
+2. **On a tie, the group's or the network's default wins**, resolved through the same chain from the
+   junction outward.
+
+**Do not implement step 1 as `effective_major()`.** It looks like the same question and is not.
+`major_index` resolves a priority tie by falling to whichever road the solver **walked first** (see
+`_resolve_group`: `pr > best_priority` keeps the first of equals), which is scene order. That is
+tolerable for `elevation`, where tied roads are at the same height anyway and the choice is invisible.
+It is **not** tolerable for a corner radius: two equal-priority roads with different `corner_radius`
+would give the intersection a visibly different shape depending on node order, and reparenting an
+unrelated road would silently change it. Step 2 exists precisely to make the tie **deterministic and
+authored** instead of incidental — which is why the tie-break is a lookup, not a winner.
+
+A per-junction `corner_radius_override` follows the `radius_override` convention already on
+`Pasture3DRoadJunction`: negative means "no opinion, use the resolved one".
+
+**Degenerate cases the plan must answer in numbers, not in a rendered frame:**
+
+- **Two arms only** (a road crossing another at an acute angle, or a bend authored as a junction): the
+  boundary is still four corners and two fillets. Nothing special-cases arm count.
+- **Overlapping cut faces** at an acute crossing, where `trim = other_w / sin theta` grows large enough
+  that two arms' faces intersect. The boundary must fall back to the **convex hull of the corners** when
+  that happens, or the polygon self-intersects and the triangulation is garbage. Detect it on the plan,
+  not on the mesh.
+- **A fillet radius larger than the gap between two arms.** Clamp to the largest arc that fits; do not
+  emit a reversed arc.
+
+#### 2.2.4 Cost
+
+One polygon per junction per bake, tens of vertices, built in the same `build_junction_surfaces` loop
+that builds the aprons today and writing into the same `Junction_<id>` mesh instance. No new host, no
+new pass, no per-frame work. The trimming change is free — it removes an `if`.
+
+---
+
+### 2.3 The one real design decision: `u` does not exist at a junction
 
 `Pasture3DRoadMarkings.plan()` works because a road has a single across-axis. A junction has three or
 more, and no cross-section at all. **Do not try to generalise `plan()`.** The junction kernel answers in
@@ -69,7 +196,7 @@ Three primitive kinds, and no more:
 `allowed_override == OFF` emits nothing for that connector, and no guide. A connector that is not legal
 must not be painted as an invitation.
 
-### 2.3 Ribbons from connector curves
+### 2.4 Ribbons from connector curves
 
 The user's framing — "use our intersection curves to build ribbons" — is buildable directly:
 `Pasture3DRoadMesher.ring()` is a pure function of a plan polyline plus cumulative arc length, and a
@@ -81,14 +208,17 @@ it at `DEPTH_LIFT`, rather than replacing the disc with a union of ribbons. Thre
 how much they cost to learn the hard way:
 
 1. A union of ribbons has holes wherever no connector runs — the corners of a crossroads — and the
-   terrain shows through. The apron has no holes by construction.
+   terrain shows through. The §2.2 polygon has no holes by construction, and unlike the disc it also
+   has no overhang: its boundary IS the corner the ribbons would have left bare. **This is the reason
+   the overlay recommendation survives P9a-0 rather than being replaced by it.** The polygon is the
+   surface; connector ribbons stay an overlay on it.
 2. Overlay is the pattern P5a already proved works for tier FAR paint (overlay-not-base is recorded as
    the reason its edges work).
 3. It is reversible. A connector ribbon that looks wrong can be switched off without leaving a hole.
 
 The cost is overdraw across the footprint, bounded by the number of connectors, and NEAR-tier only.
 
-### 2.4 Where it lives, and LOD
+### 2.5 Where it lives, and LOD
 
 `Pasture3DRoadChunkHost` already builds one `MeshInstance3D` per junction (`Junction_<id>`, see the
 apron loop) and already owns the tier mapping. Junction paint is one more mesh per junction from the
@@ -99,9 +229,78 @@ Lift: `MARKING_LIFT` **on top of** the ribbon's lift, never instead of it — th
 markings follow, and for the same reason (coplanar geometry is decided by float precision, not by draw
 order).
 
-### 2.5 Gate — `RoadJunctionPaintGate`
+### 2.6 Gate — `RoadJunctionPaintGate`
 
 Every criterion below is decidable from numbers; none needs a rendered frame.
+
+**Fixtures: use the real ones, they exist.** `project/demo_road_network.tscn` resolves genuine N-ary
+junctions today — clustering works and is exercised:
+
+| Fixture | `road_keys` | `trim_backs` | `radius` |
+|---|---|---|---|
+| `Road+Road1+Road2+Road3@191,55` | 4 arms | `[5.691, 5.691, 6.413, 6.413]` | `6.413` |
+| `Road+Road1+Road2@-156,-221` | 3 arms | `[6.042, 5.122, 6.042]` | `6.042` |
+
+Both are detected, and the differing trim-backs within one junction are the useful part: they are what a
+single radius cannot represent, so these two records alone falsify the disc. Criterion K can therefore be
+stated against **measured project data** rather than a synthetic rig — for the 4-arm case, an arm with
+`trim = 6.413` and `half_width = 4.0` has its cut-face corners at `sqrt(6.413^2 + 4^2) = 7.559 m`, which
+the `6.413 m` disc misses by **1.146 m**. That number is the gate's expected failure magnitude when the
+disc is restored.
+
+Keep a synthetic 45/135-degree rig as well, but only for criterion J's convex-hull fallback: no junction
+in the project crosses acutely enough to make two cut faces overlap, so that path is the one branch real
+data does not reach.
+
+#### Orphaned junction records — **BUILT 2026-09-04**, gate `RoadJunctionOrphanGate`
+
+Shipped ahead of P9a-0 because it is independent of the polygon and because the polygon could not be
+judged against a viewport carrying thirteen stale red rings.
+
+**Two causes, both fixed.**
+
+1. **Nothing ever pruned.** `resolve()` kept every undetected prior for ever, reasoning that the roads
+   may be dragged back together and discarding the overrides in between would be a silent loss. That is
+   right about the *overrides* and wrong about the *record*: a stale junction nobody overrode has
+   nothing to restore, since every field on it is solver output the next detection recomputes
+   identically. `demo_road_network.tscn` had reached **thirteen undetected records, none of which
+   carried a single override**, and `junction_gizmo.gd` draws undetected records in red by design — so
+   they showed up as intersections that would not go away short of deleting the road network.
+   Now: a stale record is kept only when `Pasture3DRoadJunction.has_authored_override()` is true.
+2. **`_match_prior` demanded an exact participant set**, which is right for a junction that MOVED and
+   wrong for one that GAINED OR LOST AN ARM. Adding a fourth road to an authored three-way failed the
+   match, so the resolve emitted a new record and orphaned the old one, losing its overrides and
+   creating precisely the stale record in (1). `Road+Road1+Road3@187,55` is the live 4-arm junction from
+   before `Road2` joined, orphaned half a metre away. Now: matched on **participant overlap plus
+   proximity**, largest overlap first, distance then index breaking ties.
+
+**Minimum overlap is two, and that is load-bearing.** One shared road is not evidence of identity — a
+junction of A+B and a separate junction of A+C along the same road share exactly one participant, and at
+a threshold of one the nearer could claim the other's record *and its overrides*. Two is the smallest
+overlap that can only mean the same crossing, because two roads cross each other at a given place once.
+
+**One consequence that had to be handled with it:** `major_override` is an **index** into `road_keys`.
+Once a prior can match despite a changed participant list, an index carried across unchanged quietly
+comes to mean a different road — "this road has right of way" silently becoming "that one does". It is
+now remapped by key on reconcile, and resets to -1 when the road it named has left the junction.
+
+**Mutation results** (each fires on a different criterion, so none is redundant):
+
+| Mutation | Fires |
+|---|---|
+| Keep every stale record (the old rule) | A |
+| Exact participant-set match (the old rule) | D, E |
+| Drop the `major_override` remap | G |
+| Lower the minimum overlap to one | F |
+
+A and B are deliberately the same fixture differing only in whether an override was authored: a prune
+that deleted everything passes A, one that deleted nothing passes B, and only the pair distinguishes
+"measured nothing" from "measured well".
+
+**A gate that catches its own blunt fixture.** [G]'s first assertion originally passed on the bug — the
+reordered participants happened to leave the overridden road in the slot it already occupied, so a stale
+index was still accidentally correct. The gate now asserts that the road actually CHANGED slot before
+testing that the override followed it, and reports "cannot tell a remap from luck" when it did not.
 
 | # | Claim | Control that must fail |
 |---|---|---|
@@ -112,6 +311,12 @@ Every criterion below is decidable from numbers; none needs a rendered frame.
 | E | Guides are emitted only for turning connectors that appear in `junction.conflicts`. | A T-junction whose left turn conflicts with nothing emits no guide; adding the opposing arm makes one appear. |
 | F | `allowed_override = OFF` removes that connector's ribbon **and** its guide. | INHERIT restores both. |
 | G | A connector ribbon's ends are tangent-continuous with the arm ribbons they meet, compared for **exact** float equality at the shared arc length. | The P5b lesson: an accumulated `s` agrees to six decimals, passes any tolerance, and cracks. |
+| H | A crosswalk emits one ladder per arm, its bars spanning exactly that arm's carriageway (not its shoulders), sitting outside the stop bar. | Widen `shoulder_width` alone: the ladder must NOT change width. A ladder that grew is measuring `half_width` instead of the carriageway. |
+| I | `GIVE_WAY` triangles appear only on arms that lose priority and whose `effective_control()` is not `SIGNALS`. | Switch the junction to `SIGNALS`: every triangle disappears. Raise the losing arm's `priority` above the other: they move to the other arm rather than vanishing. |
+| J | **(P9a-0)** For a 4-arm 90-degree fixture, `plan_footprint` returns a boundary whose vertices are exactly the 8 cut-face corners plus 4 fillet arcs, in angular order, and the polygon is simple (no self-intersection) and closed. | Feed the 45-degree fixture, where `trim = w / sin 45` is larger: the boundary must still be simple. If the convex-hull fallback is missing this is where it self-intersects. |
+| K | **(P9a-0)** Every arm's cut face lies exactly on the polygon boundary — both corners of every arm are vertices of the returned boundary, to 1e-4 m. This is the whole claim of the feature: the surface MEETS the ribbons. | Revert `build_apron`'s disc: the corners now sit off the boundary by `sqrt(trim^2 + half_width^2) — trim`, which for the 8 m fixture is a number the gate can state in advance (about 1.66 m). A gate that cannot distinguish the disc from the polygon is measuring nothing. |
+| L | **(P9a-0)** The major road is trimmed like every other arm: `junction_skips()` returns a non-empty range for the major participant, and the grader's `skip` is set over it. | Restore the `is_major` exemption: the major's skip list goes empty and criterion K fails with it, because its cut face no longer exists to lie on the boundary. The two are one change and the gate must show that. |
+| M | **(P9a-0)** The fillet radius equals the highest-priority arm's resolved `corner_radius`; when the top priority is tied, it equals the network default instead. | Give two tied arms different `corner_radius` values and **reorder them in the scene tree**: the resolved fillet must NOT change. If it does, the tie is falling through to `effective_major()` and scene order is deciding geometry. |
 
 ---
 
@@ -256,11 +461,16 @@ nothing" from "measured well": a smoothing pass that did nothing at all would pa
 
 ## 4. Suggested order
 
-1. **P9b first.** It is smaller, it is pure arithmetic, its gate needs no terrain, and it changes a
-   surface P9a will then be drawing on.
-2. **P9a stop bars**, which are nearly free — the data is published and `endpoints()` already exists.
-3. **P9a arm continuations**, which need the existing markings kernel called, not extended.
-4. **P9a connector ribbons and guides**, the largest piece and the only one with a geometry question.
+1. **P9b first.** — **BUILT 2026-09-02.** It was smaller, pure arithmetic, its gate needed no terrain,
+   and it changed a surface P9a then draws on.
+2. **P9a-0, the junction polygon and the trimming change** (§2.2). It comes before every markings item
+   because all of them are drawn on the surface it produces, and because it is the only step that
+   changes where the arms END — stop bars, continuations and guides are all positioned relative to that
+   boundary. Building markings against the disc first means repositioning every one of them afterwards.
+3. **P9a stop bars**, which are nearly free — the data is published and `endpoints()` already exists.
+4. **P9a arm continuations**, which need the existing markings kernel called, not extended.
+5. **P9a crosswalks and give-way triangles** (§5 q3, now in scope — see below).
+6. **P9a connector ribbons and guides**, the largest piece and the only one with a geometry question.
 
 ---
 
@@ -272,7 +482,16 @@ nothing" from "measured well": a smoothing pass that did nothing at all would pa
 2. **Should `smooth_radius` be inheritable through the `RoadType` / `RoadGroup` / `RoadBrush` chain like
    the other road settings, or per-brush only?** Inheriting is consistent; per-brush is what "this one
    road is bumpy" actually wants. The resolve chain makes either cheap, so this is a taste call.
-3. **Crosswalks and give-way triangles** are the two markings a junction wants that this spec does not
-   propose. They are `plan_junction` primitives of the same shape as `STOP_BAR` and could be added later
-   without reopening the kernel — noted here so the primitive list is understood as extensible rather
-   than complete.
+3. ~~**Crosswalks and give-way triangles**~~ — **RESOLVED 2026-09-04: in scope.** They were deferred on
+   the reading that P9a was a minimum viable set. The author's stated expectation is "realistic
+   intersection road markings like the rest of the road", and an intersection without a crosswalk or a
+   give-way line does not read as one. They are `plan_junction` primitives of the same shape as
+   `STOP_BAR` — `CROSSWALK` is a ladder of bars across an arm just outside the stop bar, `GIVE_WAY` is a
+   row of triangles at the stop line of any arm whose `effective_control()` is not `SIGNALS` and whose
+   priority loses. Both derive from data `Pasture3DRoadStopLine` and `junction.priorities` already
+   carry. **Add gate criteria H and I in §2.6 with them.**
+4. ~~**Does `corner_radius` belong on `Pasture3DRoadType` or on the junction?**~~ — **RESOLVED
+   2026-09-04, see §2.2.3.** On the type, selected at a junction by the highest-priority participant,
+   with the group's or network's default as the tie-break and a per-junction override. The ambiguity
+   that made this a question — two road types meeting, each with an opinion — is settled by the same
+   field that already settles `elevation`, and the tie-break keeps scene order out of the geometry.
