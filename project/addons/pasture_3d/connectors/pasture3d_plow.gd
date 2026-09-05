@@ -129,6 +129,11 @@ func _make_starter_curve() -> Curve3D:
 	return c
 
 
+## This brush stamps through the closed-loop signed distance field, so `corner_radius` applies.
+func _has_corner_rounding() -> bool:
+	return true
+
+
 func _polygon_xz(path: Path3D) -> PackedVector2Array:
 	var raw := PackedVector2Array()
 	for p in _baked_world_points(path):
@@ -178,6 +183,7 @@ func _paint_spline(path: Path3D) -> void:
 	if _native_raster("stamp_mound_loop"):
 		var params := {
 			"min_x": min_x, "min_z": min_z, "vs": vs, "gw": gw, "gh": gh,
+			"crease_smoothing": crease_smoothing,
 			"height": 0.0, "capped": true, "invert": false,
 			"falloff_width": falloff_width, "edge_offset": edge_offset,
 			"flank_mode": 0, "slope_tan": 1.0,
@@ -202,6 +208,8 @@ func _paint_spline(path: Path3D) -> void:
 		return
 
 	var sdf := _signed_distance_field(poly, min_x, min_z, vs, gw, gh)
+	if crease_smoothing > 0.0:
+		sdf = _blur_field(sdf[0], gw, gh, crease_smoothing, vs)
 	var field: PackedFloat32Array = sdf[0]
 	var ramp_denom := maxf(falloff_width, 0.001)
 	var add := _blend == BLEND_ADD

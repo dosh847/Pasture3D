@@ -88,6 +88,10 @@ func _padding() -> float:
 
 ## Make `material` a dropdown of the terrain's texture slots when assets are available.
 func _validate_property(property: Dictionary) -> void:
+	# Chain: the base hides `corner_radius` on brushes with no loop SDF and the Make Splines Unique
+	# button when no curve is shared. A subclass override REPLACES the base method, so without this call
+	# those two controls silently stop being context-aware here.
+	super(property)
 	if property.name == "material":
 		var names := _texture_names()
 		if names != "":
@@ -128,6 +132,11 @@ func _make_starter_curve() -> Curve3D:
 	return c
 
 
+## This brush stamps through the closed-loop signed distance field, so `corner_radius` applies.
+func _has_corner_rounding() -> bool:
+	return true
+
+
 func _polygon_xz(path: Path3D) -> PackedVector2Array:
 	var raw := PackedVector2Array()
 	for p in _baked_world_points(path):
@@ -154,6 +163,7 @@ func _paint_spline(path: Path3D) -> void:
 	if _native_raster("stamp_splat_loop"):
 		var params := {
 			"min_x": min_x, "min_z": min_z, "vs": vs, "gw": gw, "gh": gh,
+			"crease_smoothing": crease_smoothing,
 			"strength": strength, "edge_offset": edge_offset, "falloff_width": falloff_width,
 			"material": material, "preserve_base": preserve_base, "uv_bits": uv_bits,
 			"composite": not _defer_composite, "noise": noise, "noise_strength": noise_strength,
@@ -163,6 +173,8 @@ func _paint_spline(path: Path3D) -> void:
 
 	# Same O(cells) signed distance field as Mound — gives the area mask + falloff for free.
 	var sdf := _signed_distance_field(poly, min_x, min_z, vs, gw, gh)
+	if crease_smoothing > 0.0:
+		sdf = _blur_field(sdf[0], gw, gh, crease_smoothing, vs)
 	var field: PackedFloat32Array = sdf[0]
 	var ramp_denom := maxf(falloff_width, 0.001)
 

@@ -135,6 +135,10 @@ func _migrate_legacy() -> void:
 
 
 func _validate_property(property: Dictionary) -> void:
+	# Chain: the base hides `corner_radius` on brushes with no loop SDF and the Make Splines Unique
+	# button when no curve is shared. A subclass override REPLACES the base method, so without this call
+	# those two controls silently stop being context-aware here.
+	super(property)
 	if property.name == "slope_angle" and flank_mode != FlankMode.SLOPE_ANGLE:
 		property.usage &= ~PROPERTY_USAGE_EDITOR
 
@@ -194,6 +198,11 @@ func _make_starter_curve() -> Curve3D:
 
 ## Loop projected to world XZ. Uses fine sampling to preserve genuine spline curvature
 ## and prevent polygonal faceted angle seams across slopes.
+## This brush stamps through the closed-loop signed distance field, so `corner_radius` applies.
+func _has_corner_rounding() -> bool:
+	return true
+
+
 func _polygon_xz(path: Path3D) -> PackedVector2Array:
 	var raw := PackedVector2Array()
 	for p in _baked_world_points(path):
@@ -257,6 +266,7 @@ func _paint_spline(path: Path3D) -> void:
 	if _native_raster("stamp_mound_loop"):
 		var params := {
 			"min_x": min_x, "min_z": min_z, "vs": vs, "gw": gw, "gh": gh,
+			"crease_smoothing": crease_smoothing,
 			"height": height, "capped": capped, "invert": invert,
 			"falloff_width": falloff_width, "edge_offset": edge_offset,
 			"flank_mode": int(flank_mode), "slope_tan": tan(deg_to_rad(slope_angle)),
@@ -289,6 +299,8 @@ func _paint_spline(path: Path3D) -> void:
 	# One O(cells) signed distance field replaces the old per-pixel O(edges) polygon distance (×2 for
 	# the dome's max-interior pass). Positive inside, in metres; max_inside normalises the dome.
 	var sdf := _signed_distance_field(poly, min_x, min_z, vs, gw, gh)
+	if crease_smoothing > 0.0:
+		sdf = _blur_field(sdf[0], gw, gh, crease_smoothing, vs)
 	var field: PackedFloat32Array = sdf[0]
 	var max_inside: float = sdf[1]
 	var sign := -1.0 if invert else 1.0
@@ -438,6 +450,8 @@ func generate_preview_surface(w: int, h: int) -> Array:
 	var min_z := fp.position.z
 	var vs := maxf(fp.size.x / float(maxi(w - 1, 1)), fp.size.z / float(maxi(h - 1, 1)))
 	var sdf := _signed_distance_field(poly, min_x, min_z, vs, w, h)
+	if crease_smoothing > 0.0:
+		sdf = _blur_field(sdf[0], w, h, crease_smoothing, vs)
 	var field: PackedFloat32Array = sdf[0]
 	var max_inside: float = sdf[1]
 	var sign_val := -1.0 if invert else 1.0

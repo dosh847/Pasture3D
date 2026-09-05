@@ -17,9 +17,21 @@ extends RefCounted
 
 ## Screen-space pick radius (px) for clicking a loop point or tangent handle.
 const PICK_RADIUS: float = 13.0
-## Outward length (m) at which a zero-length tangent's grab handle is drawn/picked, so it can be pulled
-## out from a straight point. Clamped to a fraction of the adjacent segment for short loops.
+## MINIMUM outward length (m) at which a zero-length tangent's grab handle is drawn/picked, so it can be
+## pulled out from a straight point.
 const TANGENT_STUB: float = 3.0
+## Fraction of the adjacent segment a stub grows to once that segment is long enough for the flat 3 m to
+## be the problem rather than the fix. A stub is a GRAB TARGET, and 3 m on a 400 m segment lands inside
+## the point's own marker: the two are a few pixels apart at any zoom that shows the loop, so the click
+## that was meant for the point takes a tangent (or vice versa) and the drag bends the curve.
+##
+## Scaling with the segment keeps the stub a constant fraction of the on-screen gap between the point and
+## its neighbour, which is the distance that actually decides whether the two are separable.
+const TANGENT_STUB_FRACTION: float = 0.25
+## Hard ceiling as a fraction of the adjacent segment, so a stub never reaches past the neighbouring
+## point and starts competing with ITS handles. Below ~12 m segments this is the binding limit and the
+## stub is exactly what it has always been.
+const TANGENT_STUB_MAX_FRACTION: float = 0.4
 
 ## The brush + loop point whose tangents are currently shown (instance id, and running point index gpi).
 ## Updated when a point/tangent is clicked; tangents for other points stay hidden to keep loops readable.
@@ -210,7 +222,8 @@ func _display_offset(p_node: Node3D, p_path: Path3D, p_idx: int, p_kind: int) ->
 
 
 ## Short outward offset for a zero-length tangent, pointing toward the adjacent point (prev for in, next
-## for out), clamped to a fraction of that segment so it never overshoots on short loops.
+## for out), scaled to a fraction of that segment so the handle stays separable from the point it belongs
+## to on long spans, and clamped so it never overshoots on short ones.
 func _stub_offset(p_node: Node3D, p_path: Path3D, p_idx: int, p_kind: int) -> Vector3:
 	var c := p_path.curve
 	var n: int = c.point_count
@@ -231,7 +244,7 @@ func _stub_offset(p_node: Node3D, p_path: Path3D, p_idx: int, p_kind: int) -> Ve
 	var l := dir.length()
 	if l < 0.001:
 		return Vector3.ZERO
-	return dir / l * minf(TANGENT_STUB, l * 0.4)
+	return dir / l * minf(maxf(TANGENT_STUB, l * TANGENT_STUB_FRACTION), l * TANGENT_STUB_MAX_FRACTION)
 
 
 ## Whether this loop is a closed polygon (Mound/Plow: min ≥ 3 points) vs an open spline (Ridge/Trough).

@@ -59,6 +59,136 @@ inline float raster_ramp(const PackedFloat32Array &lut, float x) {
 // fix had landed in only one copy — the COLDER one, so the brush paid a serial blur per stamp while the
 // graph's identical pass was parallel. Deleting this one gives the six brush call sites the threaded
 // kernel and removes the drift surface entirely.
+// ---- CREASE SMOOTHING (`crease_smoothing`) ----
+//
+// Blurs the SIGNED DISTANCE FIELD, before any profile reads it. What it removes is the loop's medial
+// axis: inside a loop every cell has a nearest edge, and the fold lines running inward from each spline
+// point are where two edges are equidistant. The height is a function of that distance, so it inherits
+// the fold. Filleting the outline (`corner_radius`) moves where the fold starts and cannot remove it,
+// because the fold is not AT the corner -- it radiates in from it.
+//
+// A blur is the right operator here for a reason that is also its safety proof: across a straight edge
+// the distance field is LINEAR, and a symmetric kernel is the identity on a linear function. So this
+// does nothing along straight runs and nothing at the rim, and bites only where the field has curvature
+// -- the creases and the corners. It is also independent of how finely the polygon was decimated, which
+// is what a smooth-minimum over segments could not manage.
+//
+// Three box passes, not a Gaussian: the radius is authored in METRES over mounds that can be hundreds
+// of cells across, and a tap-per-radius kernel would make the control's cost scale with its value. Box
+// widths follow the standard three-box Gaussian approximation, and are integers derived only from sigma
+// and the pass count, so `Pasture3DTerrainBrush._blur_field` can mirror them exactly.
+//
+// The blur runs on the field AFTER it is produced, so the GPU and CPU raster paths inherit it from this
+// one implementation and cannot drift.
+
+// Box widths for approximating a Gaussian of `sigma` cells with `n` box passes (Kovesi). Odd, >= 1.
+static void raster_box_sizes(float sigma, int n, int *r_sizes) {
+	const float w_ideal = std::sqrt(12.0f * sigma * sigma / (float)n + 1.0f);
+	int wl = (int)std::floor(w_ideal);
+	if (wl % 2 == 0) {
+		wl--;
+	}
+	if (wl < 1) {
+		wl = 1;
+	}
+	const int wu = wl + 2;
+	const float m_ideal = (12.0f * sigma * sigma - (float)(n * wl * wl) - (float)(4 * n * wl) - (float)(3 * n)) / (float)(-4 * wl - 4);
+	int m = (int)std::round(m_ideal);
+	if (m < 0) {
+		m = 0;
+	}
+	if (m > n) {
+		m = n;
+	}
+	for (int i = 0; i < n; i++) {
+		r_sizes[i] = (i < m) ? wl : wu;
+	}
+}
+
+// A row/column sample with LINEAR EXTRAPOLATION past either end, rather than clamp-to-edge.
+//
+// This is what makes the blur inert at the grid border, and it is not a refinement -- clamp-to-edge
+// broke the operator's whole safety argument. "A symmetric kernel is the identity on a linear function"
+// holds only if the samples read off the end continue the line; replicating the end value instead
+// biases every cell within the kernel's reach. On a distance field, which falls away linearly outside
+// the loop, that bias landed as a step along the entire stamped rectangle -- the field at the border
+// read several metres HIGHER than it should, so the falloff never reached the surrounding ground.
+static inline float raster_lin_sample(const float *v, int stride, int n, int i) {
+	if (n <= 1) {
+		return v[0];
+	}
+	if (i < 0) {
+		return v[0] + (float)i * (v[stride] - v[0]);
+	}
+	if (i >= n) {
+		return v[(n - 1) * stride] + (float)(i - (n - 1)) * (v[(n - 1) * stride] - v[(n - 2) * stride]);
+	}
+	return v[i * stride];
+}
+
+// One separable box pass of half-width `r`, via running sums (O(1) per cell, so the cost does not grow
+// with the radius). `scratch` is reused across passes by the caller.
+static void raster_box_pass(std::vector<float> &vals, std::vector<float> &scratch, int gw, int gh, int r) {
+	if (r < 1) {
+		return;
+	}
+	const float inv = 1.0f / (float)(2 * r + 1);
+	// Horizontal: vals -> scratch
+	for (int y = 0; y < gh; y++) {
+		const int row = y * gw;
+		const float *v = &vals[row];
+		float acc = 0.f;
+		for (int j = -r; j <= r; j++) {
+			acc += raster_lin_sample(v, 1, gw, j);
+		}
+		// Store, THEN slide. The accumulator is seeded for the window centred on x == 0, so sliding
+		// first would both double-count a sample and shift every output one cell along.
+		for (int x = 0; x < gw; x++) {
+			if (x > 0) {
+				acc += raster_lin_sample(v, 1, gw, x + r);
+				acc -= raster_lin_sample(v, 1, gw, x - r - 1);
+			}
+			scratch[row + x] = acc * inv;
+		}
+	}
+	// Vertical: scratch -> vals
+	for (int x = 0; x < gw; x++) {
+		const float *v = &scratch[x];
+		float acc = 0.f;
+		for (int j = -r; j <= r; j++) {
+			acc += raster_lin_sample(v, gw, gh, j);
+		}
+		for (int y = 0; y < gh; y++) {
+			if (y > 0) {
+				acc += raster_lin_sample(v, gw, gh, y + r);
+				acc -= raster_lin_sample(v, gw, gh, y - r - 1);
+			}
+			vals[y * gw + x] = acc * inv;
+		}
+	}
+}
+
+// Blur `field` in place by `sigma_cells`, and return the new maximum interior distance -- recomputed,
+// not carried over, because the dome normalises on it and a smoothed field has a different peak.
+float raster_blur_field(std::vector<float> &field, int gw, int gh, float sigma_cells) {
+	float max_inside = 0.f;
+	const int n = gw * gh;
+	if (sigma_cells > 0.f && n > 0) {
+		int sizes[3];
+		raster_box_sizes(sigma_cells, 3, sizes);
+		std::vector<float> scratch(n, 0.f);
+		for (int i = 0; i < 3; i++) {
+			raster_box_pass(field, scratch, gw, gh, (sizes[i] - 1) / 2);
+		}
+	}
+	for (int i = 0; i < n; i++) {
+		if (field[i] > max_inside) {
+			max_inside = field[i];
+		}
+	}
+	return max_inside;
+}
+
 // Signed distance field of a closed world polygon over the grid (port of _signed_distance_field).
 // Fills `field` (gw*gh, positive inside / negative outside, metres); returns max interior distance.
 // Uses exact analytic segment Euclidean distance matching the GPU shader with AABB pruning and multi-threaded row chunking.
@@ -953,6 +1083,12 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	}
 	if (!got_field) {
 		max_inside = raster_sdf(p_poly, min_x, min_z, vs, gw, gh, field);
+	}
+	// Crease smoothing, on the field both raster paths produce, so neither can drift from the other.
+	// `max_inside` is recomputed inside: the dome normalises on it and a blurred field peaks lower.
+	const double crease_smoothing = p_params.get("crease_smoothing", 0.0);
+	if (crease_smoothing > 0.0 && vs > 0.0) {
+		max_inside = raster_blur_field(field, gw, gh, (float)(crease_smoothing / vs));
 	}
 
 	const double height = p_params.get("height", 0.0);
@@ -2052,6 +2188,10 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 		if (!got_field) {
 			raster_sdf(p_poly, min_x, min_z, vs, gw, gh, field);
 		}
+		const double crease_smoothing = p_params.get("crease_smoothing", 0.0);
+		if (crease_smoothing > 0.0 && vs > 0.0) {
+			raster_blur_field(field, gw, gh, (float)(crease_smoothing / vs));
+		}
 	}
 
 	const double height_scale = p_params.get("height_scale", 0.0);
@@ -2268,6 +2408,10 @@ void Pasture3DData::stamp_splat_loop(const int p_layer_id, const PackedVector2Ar
 		}
 		if (!got_field) {
 			raster_sdf(p_poly, min_x, min_z, vs, gw, gh, field);
+		}
+		const double crease_smoothing = p_params.get("crease_smoothing", 0.0);
+		if (crease_smoothing > 0.0 && vs > 0.0) {
+			raster_blur_field(field, gw, gh, (float)(crease_smoothing / vs));
 		}
 	}
 

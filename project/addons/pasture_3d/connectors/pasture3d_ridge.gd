@@ -137,6 +137,10 @@ func _padding() -> float:
 
 
 func _validate_property(property: Dictionary) -> void:
+	# Chain: the base hides `corner_radius` on brushes with no loop SDF and the Make Splines Unique
+	# button when no curve is shared. A subclass override REPLACES the base method, so without this call
+	# those two controls silently stop being context-aware here.
+	super(property)
 	# Slope-angle field is only meaningful in SLOPE_ANGLE mode.
 	if property.name == "slope_angle" and flank_mode != FlankMode.SLOPE_ANGLE:
 		property.usage &= ~PROPERTY_USAGE_EDITOR
