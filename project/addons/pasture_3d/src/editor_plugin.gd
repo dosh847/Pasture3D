@@ -541,12 +541,40 @@ func _forward_brush_input(p_camera: Camera3D, p_event: InputEvent, p_brush: Past
 		var hit: Vector3 = terr.get_intersection(from, dir, false)
 		if hit.z > 3.4e38 or is_nan(hit.y):
 			return AFTER_GUI_INPUT_PASS
-		var pos := hit
-		if p_brush.snap_to_surface:
-			var h: float = p_brush._base_height_below(Vector3(hit.x, 0.0, hit.z))
-			if is_finite(h):
-				pos = Vector3(hit.x, h + p_brush.surface_offset, hit.z)
-		p_brush.editor_add_point(pos)
+		# Alt forces the seat even when the brush's Snap to Surface is off. `seated` is then passed on, so
+		# `editor_add_point` leaves the Y alone instead of reinterpolating it back onto the crest line.
+		var seated: bool = p_brush.snap_to_surface or p_event.alt_pressed
+		p_brush.editor_add_point(p_brush.editor_seat_on_surface(hit, p_event.alt_pressed), seated)
+		return AFTER_GUI_INPUT_STOP
+
+	# ---- MIDDLE-CLICK: SEND THE SELECTED POINT TO THE CURSOR ----
+	#
+	# Every bail-out below PASSES rather than stopping, and that matters more here than on the other
+	# branches: middle-drag is orbit in Godot's default navigation scheme, so a branch that swallowed the
+	# press unconditionally would kill orbiting for as long as a brush is selected. Stopping only once
+	# there is a selected point AND a surface hit keeps the camera working everywhere else.
+	if p_event.get_button_index() == MOUSE_BUTTON_MIDDLE:
+		# The gizmo's own selection, which goes inert when the point count moves under it (see
+		# `Pasture3DBrushHandles.selection_valid`). A stale index here would move a NEIGHBOUR of the point
+		# the user can see is selected, and no move beats the wrong move.
+		var msel: Array = brush_gizmo.selected_point(p_brush) if brush_gizmo else [null, -1]
+		if msel[0] == null:
+			return AFTER_GUI_INPUT_PASS
+		var mterr: Pasture3D = p_brush.terrain
+		if not is_instance_valid(mterr) or mterr.data == null:
+			return AFTER_GUI_INPUT_PASS
+		# Same CPU raymarch the add path uses, for the same reason: the GPU path reads a SubViewport it
+		# rendered the same frame, so a one-shot click gets a stale depth and lands the point underground.
+		var mfrom: Vector3 = p_camera.project_ray_origin(mouse_pos)
+		var mdir: Vector3 = p_camera.project_ray_normal(mouse_pos)
+		var mhit: Vector3 = mterr.get_intersection(mfrom, mdir, false)
+		if mhit.z > 3.4e38 or is_nan(mhit.y):
+			return AFTER_GUI_INPUT_PASS
+		# Unseated, the point lands on the visible surface the ray actually hit. Alt (or the brush's own
+		# toggle) re-seats it on the layers BELOW this brush instead — the same distinction the add path
+		# draws, so the two gestures cannot disagree about where "the ground" is.
+		p_brush.editor_move_point(msel[0], msel[1],
+				p_brush.editor_seat_on_surface(mhit, p_event.alt_pressed))
 		return AFTER_GUI_INPUT_STOP
 
 	if p_event.get_button_index() == MOUSE_BUTTON_RIGHT:

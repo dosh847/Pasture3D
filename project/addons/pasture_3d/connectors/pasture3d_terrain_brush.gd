@@ -2767,11 +2767,9 @@ func _apply_surface_snap_points(path: Path3D, indices: PackedInt32Array) -> void
 		if idx < 0 or idx >= c.point_count:
 			continue
 		var local := c.get_point_position(idx)
-		var world: Vector3 = xf * local
-		var h: float = _base_height_below(Vector3(world.x, 0.0, world.z))
-		if not is_finite(h):
-			continue
-		world.y = h + surface_offset
+		# Forced: this runs from the Snap Points button, which means "on the ground now" whatever the
+		# toggle says. A point over the void comes back unchanged and fails the compare below.
+		var world: Vector3 = editor_seat_on_surface(xf * local, true)
 		var new_local: Vector3 = inv * world
 		if not new_local.is_equal_approx(local):
 			c.set_point_position(idx, new_local)
@@ -2929,9 +2927,70 @@ func pick_brush_screen_distance(camera: Camera3D, screen_pos: Vector2, margin_px
 	return best_d if best_d == INF else maxf(best_d, SURFACE_PICK_FLOOR)
 
 
+## `p_world` with its Y moved onto the ground — THE one definition of seating a control point.
+##
+## Four callers had their own copy of this three-line idiom (the Snap Points button, the batch snap that
+## backs it, the gizmo drag, and Ctrl-click add) and the middle-click move and Alt modifier would have made
+## six. That is the shape [[component-gates-miss-wiring]] warns about: a value defined in several places is
+## fixed in none, and every one of these copies has to agree about the offset, the layer and the NaN.
+##
+## ---- WHY THE HEIGHT COMES FROM BELOW THIS BRUSH AND NOT FROM THE SURFACE ----
+##
+## `_base_height_below` reads the layers UNDER this brush's own, not the composited terrain. Seating a
+## point on ground this brush itself raised would let the loop climb its own contribution a little further
+## on every edit — the same reason the layer refresh re-seats against the base rather than the surface.
+##
+## Answers `p_world` UNCHANGED when there is nothing to seat onto (no terrain, or no region beneath the
+## point, where `_base_height_below` returns NaN). Callers that batch this can therefore test the result
+## for "did it move" instead of testing the height for finiteness, and a point over the void keeps the
+## height the user gave it rather than diving to zero.
+##
+## `p_force` seats regardless of the `snap_to_surface` toggle — the explicit gestures (the Snap Points
+## button, holding Alt) mean "put it on the ground now", which is a different question from "keep it on
+## the ground from now on".
+func editor_seat_on_surface(p_world: Vector3, p_force: bool = false) -> Vector3:
+	if not (p_force or snap_to_surface):
+		return p_world
+	var h: float = _base_height_below(Vector3(p_world.x, 0.0, p_world.z))
+	if not is_finite(h):
+		return p_world
+	return Vector3(p_world.x, h + surface_offset, p_world.z)
+
+
+## Move one loop point to `world` (undoable). Used by the middle-click "send the selected point here".
+##
+## One `set_point_position`, so the curve emits `changed` ONCE and the normal debounced dirty-rect path
+## repaints only the spans around the point (see `_schedule_spline_refresh`). Deliberately not a
+## `refresh()` — a direct bake here would repaint the whole spline for a single point and undo the
+## partial-redraw win.
+func editor_move_point(path: Path3D, idx: int, world: Vector3) -> void:
+	if path == null or path.curve == null or idx < 0 or idx >= path.curve.point_count:
+		return
+	var local: Vector3 = path.to_local(world)
+	var old: Vector3 = path.curve.get_point_position(idx)
+	# Nothing to do, and more to the point nothing to UNDO: an action committed here would put an empty
+	# step in the history that swallows one Ctrl-Z.
+	if local.is_equal_approx(old):
+		return
+	var ur := _editor_undo()
+	if ur:
+		ur.create_action("Move %s Point" % _spline_basename())
+		ur.add_do_method(path.curve, "set_point_position", idx, local)
+		ur.add_undo_method(path.curve, "set_point_position", idx, old)
+		ur.commit_action()
+	else:
+		path.curve.set_point_position(idx, local)
+	update_gizmos() # move the marker with the point rather than on the next redraw
+
+
 ## Insert a point at `world` on the nearest loop's nearest segment (undoable). The curve change drives
 ## the rebake. Used by Ctrl-click add.
-func editor_add_point(world: Vector3) -> void:
+##
+## `p_seated` says the CALLER has already put `world` on the ground (Alt held, or the brush snaps), so the
+## crest-following fallback below must not overwrite that Y. Without it, Alt-adding a point to a brush
+## whose `snap_to_surface` is off seated the point correctly in the plugin and then had it silently
+## reinterpolated back onto the old crest line here — the two halves of one gesture disagreeing.
+func editor_add_point(world: Vector3, p_seated: bool = false) -> void:
 	var best_path: Path3D = null
 	var best_d := INF
 	for s in _get_splines():
@@ -2950,7 +3009,7 @@ func editor_add_point(world: Vector3) -> void:
 	# (e.g. a tall follow-spline crest): an end-extension inherits the endpoint's height, a mid insert
 	# interpolates between its two neighbours along the segment. Snap-to-surface brushes intentionally
 	# sit on the ground, so only do this when snapping is off.
-	if not snap_to_surface:
+	if not snap_to_surface and not p_seated:
 		var c := best_path.curve
 		var n := c.point_count
 		var closed := _is_closed()
@@ -3158,11 +3217,7 @@ func _surface_snap_edits() -> Array:
 		var inv := xf.affine_inverse()
 		for i in range(c.point_count):
 			var local := c.get_point_position(i)
-			var world: Vector3 = xf * local
-			var h: float = _base_height_below(Vector3(world.x, 0.0, world.z))
-			if not is_finite(h):
-				continue
-			world.y = h + surface_offset
+			var world: Vector3 = editor_seat_on_surface(xf * local, true)
 			var new_local: Vector3 = inv * world
 			if new_local.is_equal_approx(local):
 				continue
