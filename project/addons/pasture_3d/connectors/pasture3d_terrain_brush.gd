@@ -868,6 +868,26 @@ func _get_property_list() -> Array[Dictionary]:
 			"hint_string": ",".join(labels),
 			"usage": PROPERTY_USAGE_EDITOR,
 		})
+	# The Brush Stats readout (see `_brush_stats`). Last in the list, because it describes the settings
+	# above it. The group's hint_string is the `stats_` prefix, which Godot strips off the displayed names.
+	props.append({"name": "Brush Stats", "type": TYPE_NIL, "usage": PROPERTY_USAGE_GROUP,
+			"hint_string": STATS_PREFIX})
+	var stats_closed := _is_closed()
+	var stat_names := [
+		"stats_splines",
+		"stats_perimeter" if stats_closed else "stats_length",
+		"stats_footprint",
+		"stats_area" if stats_closed else "stats_corridor_area",
+		"stats_elevation",
+		"stats_mean_slope",
+		"stats_cells",
+	]
+	for stat_name in stat_names:
+		props.append({
+			"name": stat_name,
+			"type": TYPE_STRING,
+			"usage": PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY,
+		})
 	return props
 
 
@@ -878,6 +898,9 @@ func _get(property: StringName) -> Variant:
 		return _mask_preview_layer + 1
 	if property == &"mask_preview" and _preview_relief_material() != null:
 		return _mask_preview_on
+	var stat = _get_stat(property)
+	if stat != null:
+		return stat
 	return null
 
 
@@ -1707,6 +1730,7 @@ func _emit_baked(p_tools) -> void:
 	for s in p_tools:
 		if s != null and is_instance_valid(s):
 			s.baked.emit()
+			s._refresh_stats_display()
 
 
 ## Clear the per-region "edited" GPU-push flag on every active region. update_maps(all_regions=false)
@@ -3597,11 +3621,16 @@ func _spline_span(p_spline: Path3D) -> float:
 ## ---- Geometry helpers (shared) ----
 
 ## Curve baked to a world-space polyline (Path3D transform applied).
+##
+## Falls back to the LOCAL transform when the spline is not in the tree, matching `graph_shape_path`.
+## Every bake-path caller reaches this with the spline parented and live, but the Brush Stats readout does
+## not: the inspector can read a property on a brush that is mid-construction or mid-duplication, and
+## `Node3D.global_transform` does not merely return the wrong answer there — it pushes an error per call.
 func _baked_world_points(path: Path3D) -> PackedVector3Array:
 	var out := PackedVector3Array()
 	if path.curve == null:
 		return out
-	var xf := path.global_transform
+	var xf := path.global_transform if path.is_inside_tree() else path.transform
 	# The FILLET lives here rather than in each brush's `_polygon_xz` so that every consumer of the
 	# loop — the polygon, the footprint AABB, the dirty rects, the preview mask — sees one shape. A
 	# fillet applied only where the polygon is built would stamp a rounded loop inside a square
@@ -5975,3 +6004,283 @@ func _make_starter_curve() -> Curve3D:
 
 func _spline_basename() -> String:
 	return "Spline"
+
+
+## ---- Inspector: the "Brush Stats" readout ----
+##
+## A read-only category answering "how big is the thing I just drew?" in world units, so the scale of an
+## edit is legible from the inspector rather than inferred from the viewport zoom.
+##
+## Every figure is DERIVED at read time from the live curves — nothing here is stored, so a stat can never
+## disagree with the shape it describes. The cost is that the inspector only re-reads them when the
+## property list is rebuilt, which `_refresh_stats_display` does off the bake (see there for why the bake
+## and not the curve's `changed`).
+##
+## ---- WHY LENGTH AND AREA CHANGE MEANING WITH `_is_closed()` ----
+##
+## A closed brush (Mound/Plow/Splat) is a REGION: its length is the PERIMETER of the ring and its area is
+## the ground the ring encloses. An open one (Ridge/Trough) is a CENTRELINE: it encloses nothing, and the
+## shoelace of an open polyline is a number with no referent — it would quietly report the area of the
+## accidental polygon formed by joining the last point back to the first. So for an open brush the area
+## reported is the CORRIDOR it paints: centreline length × twice the brush's lateral reach. The two cases
+## use DIFFERENT PROPERTY NAMES (Perimeter/Area vs Length/Corridor Area) rather than one field with a
+## changing meaning, because a field whose label is honest only sometimes is worse than no field.
+const STATS_PREFIX: String = "stats_"
+
+
+## Frame the cached stats were computed on, and the cache. The inspector reads the group one property at
+## a time, so an uncached `_brush_stats` ran five to seven times per refresh — tolerable while every figure
+## was arithmetic over the control points, not once terrain SAMPLING joined them.
+##
+## Keyed on the frame rather than invalidated by hand: a hand-invalidated cache has to be told about every
+## way a stat can change (a curve edit, a node move, a terrain rebake, a `corner_radius` tweak, a modifier
+## added), and the one nobody remembers is the one that silently reports last week's number. A frame key
+## cannot go stale — the worst it can do is recompute.
+var _stats_frame: int = -1
+var _stats_cache: Dictionary = {}
+
+
+## Every Brush Stats figure, computed fresh from the live splines. Keys: splines, points, length,
+## footprint (Vector2, XZ size), area, cells, elev_min, elev_max, slope (mean |grad h|), sampled.
+##
+## Measures the BAKED curve, not the authored one — `_baked_world_points` applies `corner_radius`, so a
+## filleted ring reports the shorter perimeter and smaller area that actually get stamped. That is the
+## intent: the panel describes the footprint on the terrain, not the polygon in the gizmo.
+func _brush_stats() -> Dictionary:
+	var frame := Engine.get_process_frames()
+	if frame == _stats_frame and not _stats_cache.is_empty():
+		return _stats_cache
+	var out := {
+		"splines": 0, "points": 0, "length": 0.0,
+		"footprint": Vector2.ZERO, "area": 0.0, "cells": 0.0,
+		"elev_min": NAN, "elev_max": NAN, "slope": NAN, "sampled": 0,
+	}
+	var closed := _is_closed()
+	# The brush's own lateral reach only. `_total_padding` would fold in `modifier_margin`, which is a bake
+	# skirt (see the margin note on the stack) and not part of the shape the user drew — including it would
+	# make the footprint jump the moment a modifier was added, which reads as the shape having grown.
+	var reach: float = _padding()
+	var mn := Vector2.INF
+	var mx := -Vector2.INF
+	for path in _get_splines():
+		var c: Curve3D = path.curve if is_instance_valid(path) else null
+		if c == null or c.point_count < _min_points():
+			continue
+		out["splines"] = int(out["splines"]) + 1
+		out["points"] = int(out["points"]) + c.point_count
+		var pts := _baked_world_points(path)
+		if pts.is_empty():
+			continue
+		# Measured on the baked polyline in WORLD XZ, not via `Curve3D.get_baked_length()`: that length is
+		# local (a scaled Path3D would misreport), it is 3D (a spline draped over a slope would read longer
+		# than the ground it covers), and it cannot close the ring.
+		var flat := PackedVector2Array()
+		for p in pts:
+			var v := Vector2(p.x, p.z)
+			flat.append(v)
+			mn = mn.min(v)
+			mx = mx.max(v)
+		var span := flat.size() if closed else flat.size() - 1
+		for i in range(span):
+			out["length"] = float(out["length"]) + flat[i].distance_to(flat[(i + 1) % flat.size()])
+		if closed:
+			out["area"] = float(out["area"]) + _polygon_area(flat)
+	if int(out["splines"]) == 0:
+		_stats_frame = frame
+		_stats_cache = out
+		return out
+	if not closed:
+		out["area"] = float(out["length"]) * 2.0 * reach
+	mn -= Vector2(reach, reach)
+	mx += Vector2(reach, reach)
+	out["footprint"] = mx - mn
+	var vs: float = terrain.vertex_spacing if is_instance_valid(terrain) else 0.0
+	if vs > 0.0:
+		var fp: Vector2 = out["footprint"]
+		out["cells"] = (fp.x / vs) * (fp.y / vs)
+	_sample_relief(out, mn, mx, vs)
+	_stats_frame = frame
+	_stats_cache = out
+	return out
+
+
+## Largest grid the relief sampler will lay over a footprint, per side. The sampler is a per-inspector-
+## refresh cost on the editor's main thread, so it is bounded by SAMPLE COUNT and not by resolution: a
+## brush covering a whole region gets the same 64x64 = 4096 height reads as a small one, just spaced
+## further apart.
+const STATS_RELIEF_SAMPLES: int = 64
+
+
+## Fill `p_out`'s elev_min / elev_max / slope / sampled by reading the composited terrain height over the
+## footprint box `p_mn`..`p_mx`.
+##
+## ---- WHAT THIS MEASURES, AND THE TWO PLACES IT IS DELIBERATELY APPROXIMATE ----
+##
+## It reads `get_height` — the FINISHED surface, this brush's own contribution included. That is the
+## question the panel is for ("how big is the landform I made"), not `_base_height_below`, which would
+## answer "what was here before" and report a flat 0 relief for a mound raised on a plain.
+##
+## 1. It samples the footprint BOX, not the loop's interior. Consistent with the Footprint field directly
+##    above it, and the box is what the bake clears anyway — but a thin diagonal ridge's box is mostly
+##    ground the brush never touches, so its relief is the neighbourhood's, not the ridge's.
+## 2. The slope is a central difference at the SAMPLE step, which for a large footprint is far coarser
+##    than `vertex_spacing`. Coarse differencing smooths, so mean slope is a floor on the real per-vertex
+##    figure, never a ceiling. The step is clamped to `vertex_spacing` at the fine end so a small brush
+##    reads the terrain exactly rather than inventing detail between vertices.
+func _sample_relief(p_out: Dictionary, p_mn: Vector2, p_mx: Vector2, p_vs: float) -> void:
+	if not is_configured():
+		return
+	var size := p_mx - p_mn
+	if size.x <= 0.0 or size.y <= 0.0:
+		return
+	# One step for both axes so the central difference is isotropic and the slope needs no per-axis run.
+	var step := maxf(maxf(size.x, size.y) / float(STATS_RELIEF_SAMPLES), maxf(p_vs, 0.01))
+	var nx := int(size.x / step) + 1
+	var nz := int(size.y / step) + 1
+	if nx < 2 or nz < 2:
+		return
+	var h := PackedFloat32Array()
+	h.resize(nx * nz)
+	var lo := INF
+	var hi := -INF
+	var n := 0
+	for iz in range(nz):
+		for ix in range(nx):
+			var y: float = terrain.data.get_height(
+					Vector3(p_mn.x + ix * step, 0.0, p_mn.y + iz * step))
+			# A footprint reaching past the authored regions reads NAN there. Those cells are excluded
+			# rather than clamped to zero: a mound at the edge of the world must not report a cliff down
+			# to sea level that only exists where there is no terrain.
+			if not is_finite(y):
+				h[iz * nx + ix] = NAN
+				continue
+			h[iz * nx + ix] = y
+			lo = minf(lo, y)
+			hi = maxf(hi, y)
+			n += 1
+	p_out["sampled"] = n
+	if n == 0:
+		return
+	p_out["elev_min"] = lo
+	p_out["elev_max"] = hi
+	# Mean |grad h| by central difference, over interior samples whose four neighbours all read finite.
+	var acc := 0.0
+	var g := 0
+	for iz in range(1, nz - 1):
+		for ix in range(1, nx - 1):
+			var c: float = h[iz * nx + ix]
+			var xp: float = h[iz * nx + ix + 1]
+			var xm: float = h[iz * nx + ix - 1]
+			var zp: float = h[(iz + 1) * nx + ix]
+			var zm: float = h[(iz - 1) * nx + ix]
+			if not (is_finite(c) and is_finite(xp) and is_finite(xm) \
+					and is_finite(zp) and is_finite(zm)):
+				continue
+			var dx := (xp - xm) / (2.0 * step)
+			var dz := (zp - zm) / (2.0 * step)
+			acc += sqrt(dx * dx + dz * dz)
+			g += 1
+	if g > 0:
+		p_out["slope"] = acc / float(g)
+
+
+## Unsigned area of an XZ polygon (shoelace). The sign is dropped: a ring's area does not depend on which
+## way round the user happened to draw it.
+func _polygon_area(p_pts: PackedVector2Array) -> float:
+	var n := p_pts.size()
+	if n < 3:
+		return 0.0
+	var acc := 0.0
+	for i in range(n):
+		var a := p_pts[i]
+		var b := p_pts[(i + 1) % n]
+		acc += a.x * b.y - b.x * a.y
+	return absf(acc) * 0.5
+
+
+func _fmt_distance(p_m: float) -> String:
+	if p_m >= 1000.0:
+		return "%.2f km" % (p_m / 1000.0)
+	if p_m >= 10.0:
+		return "%.1f m" % p_m
+	return "%.2f m" % p_m
+
+
+## Area in the unit a reader can picture at that size: km² for the regional, hectares for the mid-scale
+## (where m² has already become an unreadable pile of digits), m² for the small.
+func _fmt_area(p_m2: float) -> String:
+	if p_m2 >= 1000000.0:
+		return "%.2f km²" % (p_m2 / 1000000.0)
+	if p_m2 >= 10000.0:
+		return "%.2f ha" % (p_m2 / 10000.0)
+	return "%.0f m²" % p_m2
+
+
+## Slope as both a percentage (rise over run, how a grade is quoted) and degrees (how a viewport reads).
+## Neither alone is enough: 100% sounds impassable and is only 45 degrees.
+func _fmt_slope(p_grad: float) -> String:
+	return "%.1f%% (%.1f°)" % [p_grad * 100.0, rad_to_deg(atan(p_grad))]
+
+
+func _fmt_count(p_n: float) -> String:
+	if p_n >= 1000000.0:
+		return "%.2f M" % (p_n / 1000000.0)
+	if p_n >= 1000.0:
+		return "%.1f k" % (p_n / 1000.0)
+	return "%d" % int(round(p_n))
+
+
+## Value of one `stats_*` property, or null if `p_property` is not one. Split out of `_get` so the readout
+## sits next to the maths it formats.
+func _get_stat(p_property: StringName) -> Variant:
+	if not String(p_property).begins_with(STATS_PREFIX):
+		return null
+	var s := _brush_stats()
+	if int(s["splines"]) == 0:
+		return "—"
+	var fp: Vector2 = s["footprint"]
+	match p_property:
+		&"stats_splines":
+			return "%d (%d points)" % [int(s["splines"]), int(s["points"])]
+		&"stats_length", &"stats_perimeter":
+			return _fmt_distance(float(s["length"]))
+		&"stats_footprint":
+			return "%s × %s" % [_fmt_distance(fp.x), _fmt_distance(fp.y)]
+		&"stats_area", &"stats_corridor_area":
+			return _fmt_area(float(s["area"]))
+		&"stats_elevation":
+			if int(s["sampled"]) == 0:
+				return "—"
+			var lo: float = float(s["elev_min"])
+			var hi: float = float(s["elev_max"])
+			return "%s – %s  (Δ %s)" % [_fmt_distance(lo), _fmt_distance(hi), _fmt_distance(hi - lo)]
+		&"stats_mean_slope":
+			if not is_finite(float(s["slope"])):
+				return "—"
+			return _fmt_slope(float(s["slope"]))
+		&"stats_cells":
+			if float(s["cells"]) <= 0.0:
+				return "—"
+			return "%s verts @ %.2f m" % [_fmt_count(float(s["cells"])), terrain.vertex_spacing]
+	return null
+
+
+## Re-read the Brush Stats fields in the inspector.
+##
+## Driven off the BAKE rather than off each curve `changed`, for two reasons. It is a property-list rebuild,
+## which is too heavy to run per mouse-move while a handle is dragged; and the figures describe what was
+## painted, so refreshing them on the same beat as the paint keeps the readout and the terrain telling the
+## same story instead of the numbers running ahead of the surface.
+func _refresh_stats_display() -> void:
+	# BEFORE the editor guard, and unconditional. The frame key alone is not enough here: `process_frame`
+	# fires DURING a frame, so an edit and a re-read can land either side of the signal while
+	# `Engine.get_process_frames()` still reads the same number — and the cache then serves the figures
+	# from before the edit. Dropping the key outright at the one moment the numbers are known to have moved
+	# costs a single recompute and removes the window. It runs outside the editor check because the cache is
+	# not an editor concern; only the notify below is.
+	_stats_frame = -1
+	if not Engine.is_editor_hint() or not is_inside_tree():
+		return
+	var inspector := EditorInterface.get_inspector()
+	if inspector != null and inspector.get_edited_object() == self:
+		notify_property_list_changed()
