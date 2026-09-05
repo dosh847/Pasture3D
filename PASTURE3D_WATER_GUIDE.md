@@ -524,6 +524,20 @@ Two things moved rather than being renamed:
 - **`get_water_height()` and friends** were on `Pasture3D`. They are on the bodies now, and
   `Pasture3DPoolManager.body_at()` is how you find the right one. See §6.
 
+### The bench gates that still use the old properties
+
+`WaterPhase2Gate`, `WaterPhase3Gate`, `WaterPhase4Gate`, `WaterPhase5Gate` and
+`WaterBodiesPhase0Baseline` build their fixtures the pre-extraction way — `terrain.ocean_material`,
+`terrain.ocean_wave_count`, `terrain.get_water_time()`. Those properties are now only `_legacy_ocean`,
+the migration capture, so the fixtures build no ocean and render an empty frame; everything the gates
+then report is a control refusing that frame ("there is no water on screen at sea level 0", "the preset
+drew (almost) nothing", "an empty frame costs as much as water does"). **A red result from these five
+says nothing about the water code.** They are to be rewritten against `Pasture3DOcean` as part of the
+water-brush refactor rather than ported onto it twice; each file's header carries the same note.
+Everything else in the family — `WaterPhase1Gate`, `WaterBodiesPhase1/2/3/5/7`,
+`WaterVariantWarningCheck` — is current and green (windowed; most of them await
+`RenderingServer.frame_post_draw`, which never emits headless).
+
 ---
 
 ## 10. Performance notes

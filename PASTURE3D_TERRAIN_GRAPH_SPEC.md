@@ -144,6 +144,18 @@ failures) ===`.
    hash of the input surface, exactly as the erosion cache does: a drag changes the surface and the entry
    goes stale until Bake. Nodes forward nested-resource `changed` (Noise → its FastNoiseLite) so an
    Inspector edit re-bakes and bumps the revision. Gate: `bench/GraphFreezeGate`.
+
+   **Two signals, because there are two audiences (2026-09-04).** `changed` is the BAKE signal: the graph
+   re-emits a node's `changed` only when that node feeds the active output, so tuning a disconnected
+   branch does not re-bake the terrain, and `_revision`/`content_key()` do not move. That filter was too
+   wide in two places. A graph with NO output selected — the normal state while one is being authored —
+   has nothing for an edit to be downstream of and nothing baked for a re-bake to cost, yet its revision
+   stayed frozen for the whole session; that case now counts as affecting the output. And the editor's
+   inline previews render nodes the bake filter excludes, so a node on an unconnected branch kept showing
+   the value it had before you started tuning it. The graph therefore also emits `node_changed(index)` on
+   every parameter edit, whatever it is wired to, and `src/graph_editor.gd` listens to that for preview
+   refreshes only. Gate: `bench/GraphEditModelGate` [E], whose control is that dragging a node on the
+   canvas (`graph_position`) emits neither.
 2. **GraphEdit UI — BUILT (increment 3).** `Pasture3DGraphEditor` (`src/graph_editor.gd`), a bottom
    panel mapping `nodes`/`connections` onto `GraphEdit`, opened by the "Edit in Graph Editor" button an
    `EditorInspectorPlugin` (`src/graph_inspector_plugin.gd`) adds to a graph / graph modifier. Topology
