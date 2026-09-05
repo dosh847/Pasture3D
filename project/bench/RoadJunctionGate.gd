@@ -29,6 +29,7 @@ func _ready() -> void:
 	await _p_the_junction_grades_its_own_footprint()
 	await _q_a_junctioned_road_refuses_the_native_fast_path()
 	await _r_the_ground_beside_a_junction_is_graded()
+	await _s_the_crossing_grades_the_same_in_either_order()
 	print("\n=== %s (%d failures) ===\n" % ["ROAD JUNCTION PASS" if _fail == 0 else "ROAD JUNCTION FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -1085,6 +1086,117 @@ func _q_a_junctioned_road_refuses_the_native_fast_path() -> void:
 	_check("Q", controls > 0, "the control measured nothing")
 
 	(fx["terrain"] as Node).queue_free()
+
+
+## [S] Two roads that cross grade the same ground whichever of them was edited last.
+##
+## THE EDITOR DOES NOT CHAIN. Every road brush on the "Roads" layer solves and grades against
+## `composite_height_below(layer)` -- the ground BELOW the whole layer -- so no road ever sees another
+## road's earthwork as ground. `_grade_all` and `_grade_into` chain because that is convenient for a
+## gate, and chaining hides the defect this criterion is about: the order dependence is not in the GRADE,
+## it is in the WRITE. Each road hands `apply_sim_block` an absolute surface over its own corridor, and
+## where two corridors overlap the road that painted last is simply the one on the terrain.
+##
+## So this models the editor instead: grade each road ONCE against the same untouched ground, then
+## composite the results in both orders and compare. Only cells a road actually moved count as painted --
+## a grade returns the input ground unchanged outside its corridor, and treating that as a write would
+## make every road claim the whole grid.
+##
+## The fixture is a SLOPE. On the level both roads solve to the same height, the overlap agrees by
+## coincidence, and the criterion passes without the code being right -- which is what the user reported
+## as "intersections on slopes magnify the problem".
+##
+## The control is the criterion's own subject: with last-writer-wins the two composites differ, so a
+## build that has not fixed the write fails here. There is no separate control to add, because the
+## measurement IS the difference between two orders of the same inputs -- it cannot pass vacuously as
+## long as each road moved some ground, which is asserted.
+func _s_the_crossing_grades_the_same_in_either_order() -> void:
+	print("[S] two crossing roads grade the same ground in either edit order")
+	var fx := _crossing_fixture()
+	var net: Pasture3DRoadNetwork = fx["net"]
+	var gw := 96
+	var gh := 96
+	var min_x := 80.0
+	var min_z := 80.0
+	var vs := 1.0
+
+	var ground := PackedFloat32Array()
+	ground.resize(gw * gh)
+	for iz in gh:
+		for ix in gw:
+			ground[iz * gw + ix] = float(ix) * 0.5 + float(iz) * 0.2
+
+	_grade_into(fx["brushes"], ground, gw, gh, min_x, min_z, vs)
+	net.resolve_junctions()
+	await get_tree().process_frame
+
+	# Each road against the SAME ground, exactly as the editor does it.
+	var fields: Array = []
+	for b: Pasture3DRoadBrush in fx["brushes"]:
+		var mod: Pasture3DNodeRoad = null
+		for m in b.modifiers:
+			if m is Pasture3DNodeRoad:
+				mod = m
+		if mod == null:
+			continue
+		var res := b.grade_surface(mod, ground.duplicate(), gw, gh, min_x, min_z, vs)
+		if res.is_empty():
+			continue
+		fields.append(res["height"])
+	if fields.size() < 2:
+		_fail += 1
+		print("    !! fewer than two roads graded, so [S] measured nothing")
+		(fx["terrain"] as Node).queue_free()
+		return
+
+	var forward := _composite(ground, fields, gw * gh)
+	var reversed_fields: Array = fields.duplicate()
+	reversed_fields.reverse()
+	var backward := _composite(ground, reversed_fields, gw * gh)
+
+	var disagree := 0
+	var worst := 0.0
+	var worst_at := Vector2i(-1, -1)
+	for iz in gh:
+		for ix in gw:
+			var k := iz * gw + ix
+			if not (is_finite(forward[k]) and is_finite(backward[k])):
+				continue
+			var d: float = absf(forward[k] - backward[k])
+			if d > 1e-4:
+				disagree += 1
+			if d > worst:
+				worst = d
+				worst_at = Vector2i(ix, iz)
+	print("    %d cell(s) disagree between the two orders; worst %.4f m at %s"
+			% [disagree, worst, worst_at])
+	_check("S", _touched(ground, fields[0]) > 0 and _touched(ground, fields[1]) > 0,
+			"a road moved no ground at all, so [S] measured nothing")
+	_check("S", worst <= 0.01,
+			"the terrain differs by %.4f m at %s depending on which road was written last"
+			% [worst, worst_at])
+
+	(fx["terrain"] as Node).queue_free()
+
+
+## Last-writer-wins over `p_ground`: each field in turn overwrites the cells it moved.
+func _composite(p_ground: PackedFloat32Array, p_fields: Array, p_n: int) -> PackedFloat32Array:
+	var out := p_ground.duplicate()
+	for f: PackedFloat32Array in p_fields:
+		for k in p_n:
+			var v: float = f[k]
+			if is_finite(v) and absf(v - p_ground[k]) > 1e-6:
+				out[k] = v
+	return out
+
+
+## How many cells a graded field moved off the ground it was graded from.
+func _touched(p_ground: PackedFloat32Array, p_field: PackedFloat32Array) -> int:
+	var n := 0
+	for k in p_ground.size():
+		if is_finite(p_field[k]) and absf(p_field[k] - p_ground[k]) > 1e-6:
+			n += 1
+	return n
 
 
 ## Grade a flat field with every brush in `p_brushes`, in the order given, chaining the surface.

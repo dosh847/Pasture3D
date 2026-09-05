@@ -1056,7 +1056,8 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	# record, not from the road doing the writing — so this is idempotent and needs no ordering between
 	# the roads that meet here. That is the point: ordering is what two same-type roads had no
 	# non-arbitrary way to settle.
-	res["height"] = grade_junction_footprints(res["height"], p_gw, p_gh, p_min_x, p_min_z, p_vs)
+	res["height"] = _merge_junction_earthwork(res["height"], p_z, p_gw, p_gh, p_min_x, p_min_z, p_vs)
+	res["height"] = grade_junction_footprints(res["height"], p_gw, p_gh, p_min_x, p_min_z, p_vs, p_z)
 
 	p_mod.last_masks = {} if not p_mod.publish_masks else {
 		"roadbed": res["roadbed"], "cut": res["cut"], "fill": res["fill"],
@@ -1150,6 +1151,104 @@ func _foreign_formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: floa
 	return out
 
 
+## Fold in the earthwork of every road this one MEETS AT A JUNCTION, so the crossing grades the same
+## whichever road was edited last.
+##
+## ---- WHAT WAS ORDER-DEPENDENT, AND WHAT WAS NOT ----
+##
+## Not the grade. Every road brush on a shared layer solves and grades against
+## `composite_height_below(layer)` — the ground BELOW the whole layer — so no road has ever seen another
+## road's earthwork as ground, and `protect` already keeps a foreign batter off a formation. The order
+## dependence was in the WRITE: each road hands the layer an absolute surface over its own corridor, and
+## where two corridors overlap the road that painted last is simply the one on the terrain. On level
+## ground both roads solve to nearly the same height and the overlap agrees by coincidence; on a slope
+## they do not, which is why the user saw the intersection change shape with whichever road was edited
+## last, and saw it worst on slopes.
+##
+## ---- WHY THIS IS A COMBINE AND NOT AN ORDERING ----
+##
+## Ordering is the answer this file has already rejected twice (see `_foreign_formation_mask`): no road's
+## earthwork outranks another's at any priority, and two same-type roads have no non-arbitrary order to
+## be given. So the overlap is resolved by a rule that does not care who asks — each road computes the
+## other's earthwork over its OWN grid, from the SAME pre-road ground, and keeps whichever surface is
+## further from that ground. Deeper cut wins over shallower cut; higher fill wins over lower fill; and a
+## road that did nothing at a cell is at the ground, so it never wins. That is commutative, so both roads
+## return the same height in the overlap and last-writer-wins has nothing left to decide.
+##
+## It is also the physically right answer for earthworks: the ground that is actually there is the union
+## of what was excavated and the union of what was embanked, not whichever contractor finished second.
+##
+## ---- WHY ONLY JUNCTION PARTNERS ----
+##
+## This costs one extra grade per foreign road, so it is scoped to the roads that MEET this one — which
+## is the case the user reported and the only case where the overlap is guaranteed. Two roads that pass
+## near each other without a junction still overlap and still resolve by write order; that is the same
+## defect and worth fixing, but it is not paid for by grading every road in the network against every
+## other on every bake.
+func _merge_junction_earthwork(p_out: PackedFloat32Array, p_ground: PackedFloat32Array, p_gw: int,
+		p_gh: int, p_min_x: float, p_min_z: float, p_vs: float) -> PackedFloat32Array:
+	var net := road_network()
+	if net == null or p_ground.size() != p_out.size():
+		return p_out
+	var mine := road_key()
+	var partners := {}
+	for j in net.junctions_for(mine):
+		for k in j.road_keys:
+			if k != mine:
+				partners[k] = true
+	if partners.is_empty():
+		return p_out
+	for b in net.road_brushes():
+		if b == null or b == self or not partners.has(b.road_key()):
+			continue
+		var theirs := b.earthwork_over(p_ground, p_gw, p_gh, p_min_x, p_min_z, p_vs)
+		if theirs.size() != p_out.size():
+			continue
+		for k in p_out.size():
+			var g: float = p_ground[k]
+			var t: float = theirs[k]
+			if not (is_finite(g) and is_finite(t)):
+				continue
+			var m: float = p_out[k]
+			if not is_finite(m):
+				# A cell outside THIS road's corridor but inside theirs. It is not ours to write —
+				# their own bake covers it — and inventing ground here would paint the whole of their
+				# corridor from our brush.
+				continue
+			if absf(t - g) > absf(m - g):
+				p_out[k] = t
+	return p_out
+
+
+## This road's graded surface over SOMEONE ELSE'S grid, from the ground they hand us. Read-only: it
+## solves nothing, publishes no masks, and does not touch `last_alignment` — it replays the alignment
+## this road last baked. Answers an empty array when this road has not been baked, which is the honest
+## answer: a road with no alignment has not decided where it goes, so it has no earthwork to contribute.
+func earthwork_over(p_ground: PackedFloat32Array, p_gw: int, p_gh: int, p_min_x: float,
+		p_min_z: float, p_vs: float) -> PackedFloat32Array:
+	var mod := road_modifier()
+	if mod == null or mod.last_alignment == null:
+		return PackedFloat32Array()
+	var plan := _plan_points()
+	if plan.size() < 2:
+		return PackedFloat32Array()
+	var alignment := mod.last_alignment
+	var ds: float = maxf(alignment.ds, 0.05)
+	var n_s := alignment.z.size()
+	if n_s < 2:
+		return PackedFloat32Array()
+	var prof := grading_profile(mod, ds, n_s)
+	var res := Pasture3DRoadGrader.grade(p_ground.duplicate(), p_gw, p_gh, p_min_x, p_min_z, p_vs,
+			plan, alignment, prof["half"], prof["shoulder"], prof["verge"], prof["suppress"], {
+				"crown": prof["crown"],
+				"cut_batter": prof["cut_batter"],
+				"fill_batter": prof["fill_batter"],
+				"exclude": _junction_exclusion_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs),
+				"protect": _foreign_formation_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs),
+			})
+	return res["height"]
+
+
 ## Write the ground inside every footprint this road meets, to the junction's own surface.
 ##
 ## Returns the height field with the footprints written. Nothing else grades in there: every arm is
@@ -1160,8 +1259,15 @@ func _foreign_formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: floa
 ## interpolated over the same triangle fan. Ground and mesh are therefore one definition read twice
 ## rather than two that agree to a tolerance — and a tolerance between them is road surface showing
 ## through the terrain.
+## `p_ground` is the PRE-ROAD surface this bake started from. The footprint interior does not need it --
+## that height comes from the junction record -- but the batter around the footprint does: a batter that
+## starts from the road's own corridor grade is a different batter for every road that meets here, and
+## the intersection then changes shape with whichever road wrote last. Defaulting it to `p_z` keeps the
+## older single-argument call working, at the cost of exactly that order dependence.
 func grade_junction_footprints(p_z: PackedFloat32Array, p_gw: int, p_gh: int, p_min_x: float,
-		p_min_z: float, p_vs: float) -> PackedFloat32Array:
+		p_min_z: float, p_vs: float,
+		p_ground: PackedFloat32Array = PackedFloat32Array()) -> PackedFloat32Array:
+	var ground := p_ground if p_ground.size() == p_z.size() else p_z
 	var net := road_network()
 	if net == null or p_vs <= 0.0:
 		return p_z
@@ -1196,8 +1302,53 @@ func grade_junction_footprints(p_z: PackedFloat32Array, p_gw: int, p_gh: int, p_
 					continue
 				out[idx] = Pasture3DRoadMesher.footprint_height_at(at, centre, boundary, heights,
 						centre_h)
-		out = _batter_junction_footprint(out, surf, p_gw, p_gh, p_min_x, p_min_z, p_vs)
+		out = _batter_junction_footprint(out, surf, p_gw, p_gh, p_min_x, p_min_z, p_vs, ground)
+		if log_bake_timing:
+			_log_junction_datum(j, surf, out, p_gw, p_gh, p_min_x, p_min_z, p_vs)
 	return out
+
+
+## What the junction surface and this road's own ribbon think the ground is, at the same place.
+##
+## Behind `log_bake_timing` because it is a question you ask while chasing a symptom, not something a
+## bake should narrate. It answers the one thing a screenshot cannot: whether the apron and the ribbon
+## are on the same datum, or whether the intersection is drawn at a different height from the roads that
+## meet it. `apron` and `ribbon` should agree at the cut face to a few centimetres -- they are the same
+## surface by construction (§2.2.3) -- and `ground` says whether the terrain under the apron was actually
+## graded to it or left where the corridor put it.
+func _log_junction_datum(p_j: Pasture3DRoadJunction, p_surf: Dictionary, p_z: PackedFloat32Array,
+		p_gw: int, p_gh: int, p_min_x: float, p_min_z: float, p_vs: float) -> void:
+	var key := road_key()
+	var js: float = p_j.arc_length_for(key)
+	var trim: float = p_j.trim_back_for(key)
+	var mod := road_modifier()
+	if mod == null or mod.last_alignment == null or not is_finite(js) or not is_finite(trim):
+		return
+	var centre: Vector2 = p_surf["center"]
+	var centre_h := float(p_surf["center_h"])
+	var boundary: PackedVector2Array = p_surf["boundary"]
+	var heights: PackedFloat32Array = p_surf["heights"]
+
+	# The cut face on THIS road, on whichever side of the junction this road's arc length reaches it from.
+	var plan := _plan_points()
+	var cum := _plan_cum()
+	var sign_s: float = 1.0 if js + trim <= float(cum[cum.size() - 1]) else -1.0
+	var s_face: float = js + sign_s * trim
+	var at := _plan_point_at(plan, cum, s_face)
+	var ribbon: float = mod.last_alignment.height_at(s_face)
+	var apron: float = Pasture3DRoadMesher.footprint_height_at(at, centre, boundary, heights, centre_h)
+	var ground: float = _sample_grid(p_z, p_gw, p_gh, p_min_x, p_min_z, p_vs, at)
+	var hmin: float = heights[0]
+	var hmax: float = heights[0]
+	for h in heights:
+		hmin = minf(hmin, h)
+		hmax = maxf(hmax, h)
+	print("[junction %s @ %s] %s: cut face s=%.1f  ribbon %.3f  apron %.3f (d %+.3f)  ground %.3f (d %+.3f)"
+			% [str(p_j.id), str(centre), key, s_face, ribbon, apron, apron - ribbon, ground,
+					ground - apron])
+	print("    elevation %.3f  boundary %.3f .. %.3f (crown %s)  arms %d  trim %.2f m"
+			% [centre_h, hmin, hmax, "up" if centre_h >= (hmin + hmax) * 0.5 else "DOWN",
+					p_j.arm_dirs.size(), trim])
 
 
 ## The junction's own batter: the ground OUTSIDE the footprint, falling away from the polygon's edge.
@@ -1224,7 +1375,8 @@ func grade_junction_footprints(p_z: PackedFloat32Array, p_gw: int, p_gh: int, p_
 ## Idempotent for the same reason the surface pass is: every number comes from `junction_surface`, so
 ## every participant computes the same field and the order they bake in cannot be seen.
 func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_gw: int, p_gh: int,
-		p_min_x: float, p_min_z: float, p_vs: float) -> PackedFloat32Array:
+		p_min_x: float, p_min_z: float, p_vs: float,
+		p_ground: PackedFloat32Array) -> PackedFloat32Array:
 	var boundary: PackedVector2Array = p_surf["boundary"]
 	var heights: PackedFloat32Array = p_surf["heights"]
 	var cut_batter: float = maxf(float(p_surf.get("cut_batter", 1.0)), 0.01)
@@ -1244,8 +1396,8 @@ func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_g
 		z_lo = minf(z_lo, heights[i])
 		z_hi = maxf(z_hi, heights[i])
 	var rise := 0.0
-	for idx in p_z.size():
-		var h: float = p_z[idx]
+	for idx in p_ground.size():
+		var h: float = p_ground[idx]
 		if is_finite(h):
 			rise = maxf(rise, maxf(h - z_lo, z_hi - h))
 	var reach: float = rise / minf(cut_batter, fill_batter) + verge
@@ -1260,8 +1412,12 @@ func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_g
 		var wz := p_min_z + float(iz) * p_vs
 		for ix in range(ix0, ix1 + 1):
 			var idx := row + ix
-			var ground: float = out[idx]
-			if not is_finite(ground):
+			var here: float = out[idx]
+			var ground: float = p_ground[idx]
+			# NaN is "not this brush's cell". The batter meets the PRE-ROAD ground, so `ground` is the
+			# datum; `here` is only what the corridor pass already put there, and the two are combined
+			# rather than one overwriting the other.
+			if not (is_finite(here) and is_finite(ground)):
 				continue
 			var at := Vector2(p_min_x + float(ix) * p_vs, wz)
 			if Geometry2D.is_point_in_polygon(at, boundary):
@@ -1273,10 +1429,16 @@ func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_g
 			if beyond > reach:
 				continue
 			var z_edge := float(edge[1])
-			if z_edge > ground:
-				out[idx] = maxf(ground, z_edge - beyond * fill_batter)
-			else:
-				out[idx] = minf(ground, z_edge + beyond * cut_batter)
+			var cand: float = (maxf(ground, z_edge - beyond * fill_batter) if z_edge > ground
+					else minf(ground, z_edge + beyond * cut_batter))
+			# WRITTEN, NOT COMBINED. Around a junction the junction's earthwork governs: `cand` is
+			# derived from the junction record and the pre-road ground and from nothing this road did,
+			# so every road that meets here computes the same number and the result no longer depends on
+			# which road ran the pass. Keeping the corridor's own value where it was the larger earthwork
+			# was tried first and put the wall back -- the road approaches in a deep cut, its cut is
+			# always the bigger movement, and the batter that has to carry the ground down to the
+			# intersection never gets to run.
+			out[idx] = cand
 	return out
 
 

@@ -204,6 +204,20 @@ func _configure_host(p_host: Pasture3DRoadChunkHost) -> void:
 	p_host.props_enabled = ribbon_props
 
 
+## Draw the junction RING in the viewport. The ring is the influence radius a junction was detected at,
+## which is the number you want while you are asking "did it find the crossing"; it is in the way while
+## you are looking at the pavement itself, because it is drawn at the junction elevation right across the
+## surface being judged. The spokes, connectors and conflict lines are unaffected -- they say things the
+## ring does not, and turning off the one you are not reading should not cost the others.
+##
+## Editor-only, so it does not `_bump()`: nothing baked depends on it, and invalidating the network to
+## redraw a gizmo would rebuild every ribbon in the scene to hide a circle.
+@export var show_junction_discs: bool = true:
+	set(v):
+		show_junction_discs = v
+		update_gizmos()
+
+
 @export_group("Defaults")
 ## The bottom of the resolve chain (§5.3): what every road in the world uses where no group, brush or
 ## segment has an opinion. Values left unset here fall through to the resolved Pasture3DRoadType.
