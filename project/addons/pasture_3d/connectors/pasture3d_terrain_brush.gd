@@ -110,6 +110,40 @@ const REFRESH_DELAY: float = 0.1
 ## Show/hide the in/out curve-tangent handles for EVERY loop point at once. Off by default — only the
 ## selected point shows its tangents — to keep dense loops readable.
 @export_tool_button("Toggle Tangents") var _toggle_tangents_btn = _toggle_all_tangents
+## Give every spline of THIS brush that shares its Curve3D with another spline a private copy, so
+## editing this brush stops editing the others. Only shown while the shared-curve warning is up (see
+## `_validate_property`) — the button and the warning are driven by the same `_shared_curve_spline_names`
+## call, so a visible button always has something to do.
+@export_tool_button("Make Splines Unique") var _make_unique_btn = make_splines_unique
+
+## Metres of corner rounding on the BAKED loop outline. 0 keeps the sharp corners this brush has always
+## stamped. Each spline point you have left as a corner (both tangents zero — the same corner/smooth
+## distinction double-clicking a point toggles) is replaced at bake time by a circular arc of this
+## radius. Points you have already smoothed by hand keep the shape you gave them.
+##
+## The fillet is applied to a COPY of the curve, so your authored points do not move and the gizmo still
+## shows the polygon you drew — only the footprint that gets stamped is rounded. The radius is clamped
+## so it can never eat more than half of either adjacent segment, which is why a large radius on a small
+## loop stops growing rather than turning the loop inside out. Shown only on the closed-loop brushes.
+@export_range(0.0, 100.0, 0.1, "or_greater", "suffix:m") var corner_radius: float = 0.0:
+	set(v):
+		corner_radius = maxf(v, 0.0)
+		_schedule_refresh()
+
+## Metres of smoothing applied to the loop's distance field before the height profile reads it. This is
+## what softens the FOLD LINES running inward from each spline point — the loop's medial axis, where two
+## edges are equidistant. The height is a function of distance, so it inherits that fold; `corner_radius`
+## moves where the fold starts but cannot remove it, because the fold is not at the corner, it radiates
+## in from it.
+##
+## Straight runs and the rim do not move. Across a straight edge the distance field is linear and a
+## symmetric blur is the identity on a linear function, so this only bites where the field has curvature
+## — the creases and the corners. Cost does not grow with the radius (three box passes, not a Gaussian),
+## so a large value on a large mound is no more expensive than a small one.
+@export_range(0.0, 100.0, 0.5, "or_greater", "suffix:m") var crease_smoothing: float = 0.0:
+	set(v):
+		crease_smoothing = maxf(v, 0.0)
+		_schedule_refresh()
 
 @export_group("Surface")
 ## Keep this brush's spline points glued to the terrain surface while editing (their Y follows the
@@ -604,8 +638,8 @@ func _get_configuration_warnings() -> PackedStringArray:
 	var shared := _shared_curve_spline_names()
 	if not shared.is_empty():
 		warnings.append(("These splines share a Curve3D with another spline, so editing one edits "
-			+ "(and re-bakes) them all: %s. Select each Path3D and use the Curve property's dropdown "
-			+ "→ Make Unique.") % ", ".join(shared))
+			+ "(and re-bakes) them all: %s. Press Make Splines Unique on this brush (or select each "
+			+ "Path3D and use the Curve property's dropdown → Make Unique).") % ", ".join(shared))
 	return warnings
 
 
@@ -741,6 +775,9 @@ func _refresh_group_warnings() -> void:
 	for n in get_tree().get_nodes_in_group(BRUSH_GROUP):
 		if n is Pasture3DTerrainBrush:
 			n.update_configuration_warnings()
+			# The Make Splines Unique button's visibility is a property-list decision
+			# (`_validate_property`), and a property list is only re-read when it is told to be.
+			n.notify_property_list_changed()
 
 
 ## Connect (idempotently) to the editor inspector's property_edited signal so editing a shape property
@@ -3565,9 +3602,137 @@ func _baked_world_points(path: Path3D) -> PackedVector3Array:
 	if path.curve == null:
 		return out
 	var xf := path.global_transform
-	for p in path.curve.get_baked_points():
+	# The FILLET lives here rather than in each brush's `_polygon_xz` so that every consumer of the
+	# loop — the polygon, the footprint AABB, the dirty rects, the preview mask — sees one shape. A
+	# fillet applied only where the polygon is built would stamp a rounded loop inside a square
+	# footprint box, and the mismatch would show up as an unclearable rim, not as a wrong shape.
+	for p in _bake_curve(path.curve).get_baked_points():
 		out.append(xf * p)
 	return out
+
+
+## Both tangents this short (path-local metres) means the user is treating the point as a CORNER. Same
+## threshold `editor_smooth_point` uses to decide which way its toggle goes, so "sharp enough to fillet"
+## and "sharp enough that double-click will smooth it" are the same question.
+const CORNER_TANGENT_EPS: float = 0.02
+
+
+## The curve to actually bake: the authored one, or a filleted copy of it when `corner_radius` is set.
+## Never the authored curve mutated — the gizmo, the undo history and the saved scene all keep the
+## points the user placed, and only the stamped footprint rounds.
+func _bake_curve(p_curve: Curve3D) -> Curve3D:
+	if corner_radius <= 0.0 or not _has_corner_rounding():
+		return p_curve
+	return _filleted_curve(p_curve, corner_radius)
+
+
+## A copy of `p_curve` with every sharp corner replaced by a circular arc of radius `p_radius`.
+##
+## Each corner point is dropped and two points take its place, one on each adjacent edge at the arc's
+## tangent distance T = radius / tan(theta/2), with cubic handles of (4/3)·tan(sweep/4)·R pointing back
+## at the old vertex — the standard cubic approximation of a circular arc. Points that already carry
+## tangents are copied through untouched: the user shaped those, and a fillet radius is not an
+## instruction to discard hand-authored curvature.
+##
+## T is clamped to half of each adjacent segment, so two corners sharing a short edge can never overrun
+## each other and the loop cannot fold through itself at a large radius. The clamp is why the effective
+## radius is recovered from the clamped T (`T * tan(theta/2)`) when sizing the handles, instead of
+## trusting `p_radius`: on a clamped corner those two are different numbers.
+func _filleted_curve(p_curve: Curve3D, p_radius: float) -> Curve3D:
+	var closed := _is_closed()
+	var pos: Array[Vector3] = []
+	var tin: Array[Vector3] = []
+	var tout: Array[Vector3] = []
+	for i in range(p_curve.point_count):
+		pos.append(p_curve.get_point_position(i))
+		tin.append(p_curve.get_point_in(i))
+		tout.append(p_curve.get_point_out(i))
+	# ---- DROP THE WRAP DUPLICATE ----
+	#
+	# `_make_starter_curve` authors a closed square as FIVE points with the last repeating the first, so
+	# every mound in an existing scene has one. That makes the wrap segment zero-length, and a fillet
+	# that treats a zero-length neighbour as "no corner here" leaves exactly one corner sharp — the
+	# shared start/end — while every other corner rounds. Adding points never fixes it, because the
+	# duplicate is still there. The duplicate's `in` tangent belongs to the same corner as point 0's, so
+	# it is carried over rather than discarded: a user who smoothed the closing handle keeps that shape.
+	if closed:
+		while pos.size() > 2 and pos[pos.size() - 1].distance_to(pos[0]) < 0.001:
+			if tin[0].length() <= CORNER_TANGENT_EPS:
+				tin[0] = tin[pos.size() - 1]
+			pos.remove_at(pos.size() - 1)
+			tin.remove_at(tin.size() - 1)
+			tout.remove_at(tout.size() - 1)
+	var n := pos.size()
+	if n < 3:
+		return p_curve
+	var out := Curve3D.new()
+	out.bake_interval = p_curve.bake_interval
+	# `_is_closed()` is the brush's notion and it is what the rasteriser wraps on, so the filleted copy
+	# follows it rather than the source curve's own flag — a loop the brush fills as a ring but whose
+	# Curve3D.closed was never set would otherwise bake with a gap where the fillet joined.
+	out.closed = true if closed else p_curve.closed
+	for i in range(n):
+		var p := pos[i]
+		if tin[i].length() > CORNER_TANGENT_EPS or tout[i].length() > CORNER_TANGENT_EPS:
+			out.add_point(p, tin[i], tout[i]) # already smooth; leave the user's shape alone
+			continue
+		# Walk past any further coincident points to find the neighbour that actually gives a direction.
+		var prev_i := _fillet_neighbour(pos, i, -1, closed)
+		var next_i := _fillet_neighbour(pos, i, 1, closed)
+		if prev_i < 0 or next_i < 0:
+			out.add_point(p, tin[i], tout[i]) # an open spline's endpoint is not a corner
+			continue
+		var v_prev := pos[prev_i] - p
+		var v_next := pos[next_i] - p
+		var l_prev := v_prev.length()
+		var l_next := v_next.length()
+		if l_prev < 0.001 or l_next < 0.001:
+			out.add_point(p, tin[i], tout[i])
+			continue
+		var u_prev := v_prev / l_prev
+		var u_next := v_next / l_next
+		var theta := acos(clampf(u_prev.dot(u_next), -1.0, 1.0))
+		if theta >= PI - 0.01 or theta <= 0.01:
+			out.add_point(p, tin[i], tout[i]) # straight through, or doubled back — no corner to round
+			continue
+		var half := tan(theta * 0.5)
+		var trim := minf(p_radius / half, minf(l_prev * 0.5, l_next * 0.5))
+		if trim < 0.001:
+			out.add_point(p, tin[i], tout[i])
+			continue
+		var eff_r := trim * half
+		var k := (4.0 / 3.0) * tan((PI - theta) * 0.25) * eff_r
+		var a := p + u_prev * trim
+		var b := p + u_next * trim
+		# `a` arrives along the straight run from the previous point (in = 0) and leaves toward the old
+		# vertex; `b` arrives from the old vertex and leaves straight toward the next point (out = 0).
+		out.add_point(a, Vector3.ZERO, -u_prev * k)
+		out.add_point(b, -u_next * k, Vector3.ZERO)
+	return out
+
+
+## Index of the nearest neighbour of `p_i` in `p_dir` that is not coincident with it, or -1 when there
+## is none (an open spline's endpoint). Skipping coincident points is what lets a corner survive a
+## repeated vertex — the wrap duplicate above is the common one, but a double-click that dropped two
+## points in the same place produces the same degenerate segment.
+func _fillet_neighbour(p_pos: Array[Vector3], p_i: int, p_dir: int, p_closed: bool) -> int:
+	var n := p_pos.size()
+	var j := p_i
+	for _step in range(n):
+		j += p_dir
+		if j < 0:
+			if not p_closed:
+				return -1
+			j = n - 1
+		elif j >= n:
+			if not p_closed:
+				return -1
+			j = 0
+		if j == p_i:
+			return -1
+		if p_pos[j].distance_to(p_pos[p_i]) >= 0.001:
+			return j
+	return -1
 
 
 ## World footprint of a spline: XZ bounds of its baked points padded by the brush's lateral reach.
@@ -3712,6 +3877,90 @@ func _ramp_lut(c: Curve) -> PackedFloat32Array:
 ## native+oracle duality is two, and this is the oracle half.
 func _blur_grid(vals: PackedFloat32Array, gw: int, gh: int, passes: int) -> PackedFloat32Array:
 	return Pasture3DGraphOps.blur_nan(vals, gw, gh, passes)
+
+
+## Box widths approximating a Gaussian of `sigma` cells with `n` passes (Kovesi). Mirrors
+## `raster_box_sizes` in src/pasture_3d_brush_raster.cpp — integers derived from sigma alone, which is
+## what lets the oracle and the native rasteriser agree exactly rather than approximately.
+func _blur_box_sizes(sigma: float, n: int) -> PackedInt32Array:
+	var w_ideal := sqrt(12.0 * sigma * sigma / float(n) + 1.0)
+	var wl := int(floor(w_ideal))
+	if wl % 2 == 0:
+		wl -= 1
+	if wl < 1:
+		wl = 1
+	var wu := wl + 2
+	var m_ideal := (12.0 * sigma * sigma - float(n * wl * wl) - float(4 * n * wl) - float(3 * n)) / float(-4 * wl - 4)
+	var m := clampi(int(round(m_ideal)), 0, n)
+	var out := PackedInt32Array()
+	for i in range(n):
+		out.append(wl if i < m else wu)
+	return out
+
+
+## A row/column sample with LINEAR EXTRAPOLATION past either end, rather than clamp-to-edge. Mirrors
+## `raster_lin_sample`. This is what makes the blur inert at the grid border: a symmetric kernel is the
+## identity on a linear function only if the samples read off the end continue the line. Clamping
+## replicated the end value instead, which on a distance field (linear outside the loop) biased the
+## border cells several metres high and left a step around the whole stamped rectangle.
+func _blur_sample(vals: PackedFloat32Array, base: int, stride: int, n: int, i: int) -> float:
+	if n <= 1:
+		return vals[base]
+	if i < 0:
+		return vals[base] + float(i) * (vals[base + stride] - vals[base])
+	if i >= n:
+		var last := base + (n - 1) * stride
+		return vals[last] + float(i - (n - 1)) * (vals[last] - vals[last - stride])
+	return vals[base + i * stride]
+
+
+## One separable box pass of half-width `r`. Mirrors `raster_box_pass`.
+func _blur_box_pass(vals: PackedFloat32Array, gw: int, gh: int, r: int) -> PackedFloat32Array:
+	if r < 1:
+		return vals
+	var inv := 1.0 / float(2 * r + 1)
+	var tmp := PackedFloat32Array()
+	tmp.resize(gw * gh)
+	for y in range(gh):
+		var row := y * gw
+		var acc := 0.0
+		for j in range(-r, r + 1):
+			acc += _blur_sample(vals, row, 1, gw, j)
+		# Store, THEN slide: the accumulator is seeded for the window centred on x == 0, so sliding
+		# first would both double-count a sample and shift every output one cell along.
+		for x in range(gw):
+			if x > 0:
+				acc += _blur_sample(vals, row, 1, gw, x + r)
+				acc -= _blur_sample(vals, row, 1, gw, x - r - 1)
+			tmp[row + x] = acc * inv
+	var out := PackedFloat32Array()
+	out.resize(gw * gh)
+	for x in range(gw):
+		var acc2 := 0.0
+		for j in range(-r, r + 1):
+			acc2 += _blur_sample(tmp, x, gw, gh, j)
+		for y in range(gh):
+			if y > 0:
+				acc2 += _blur_sample(tmp, x, gw, gh, y + r)
+				acc2 -= _blur_sample(tmp, x, gw, gh, y - r - 1)
+			out[y * gw + x] = acc2 * inv
+	return out
+
+
+## Crease smoothing on a signed distance field: blur by `p_metres` and return
+## [PackedFloat32Array field, float max_inside], matching `_signed_distance_field`'s shape so a caller
+## can hand one straight into the other. `max_inside` is RECOMPUTED rather than carried over — the dome
+## normalises on it and a smoothed field peaks lower. Oracle for `raster_blur_field`.
+func _blur_field(p_field: PackedFloat32Array, gw: int, gh: int, p_metres: float, vs: float) -> Array:
+	var out := p_field
+	if p_metres > 0.0 and vs > 0.0 and gw * gh > 0:
+		for w in _blur_box_sizes(p_metres / vs, 3):
+			out = _blur_box_pass(out, gw, gh, (w - 1) / 2)
+	var max_inside := 0.0
+	for v in out:
+		if v > max_inside:
+			max_inside = v
+	return [out, max_inside]
 
 
 ## Ridge cross-section, corrected convention: 1 at the centre (d=0) → 0 at the skirt edge (d=1), but a
@@ -5604,8 +5853,40 @@ func _effective_modifier_margin() -> float:
 ## (which keeps the SDF a cell or two clear of the grid edge) PLUS the Modifier Margin. Every footprint /
 ## span / grid-extent computation goes through this, so widening the margin widens the grid the modifier
 ## stack evaluates over — which is the whole point (see `modifier_margin`).
+##
+## `crease_smoothing` joins them because a blur is not a local operator: a cell within the kernel's reach
+## of the grid edge is averaged with samples that were never rasterised. See `_crease_blur_reach()`.
 func _total_padding() -> float:
-	return _padding() + _effective_modifier_margin()
+	return _padding() + _effective_modifier_margin() + _crease_blur_reach()
+
+
+## How far, in metres, the crease-smoothing kernel reaches — the sum of the three box passes' half-widths.
+##
+## ---- WHY THE FOOTPRINT HAS TO GROW BY THIS ----
+##
+## The blur runs on the rasterised grid, and the grid is only as big as the footprint. Any cell closer to
+## the grid edge than the kernel's reach is averaged against samples that do not exist, and no boundary
+## rule fixes that: the field outside a loop is linear only ACROSS a straight edge, so extrapolation is
+## exact along the flanks and wrong near the corners, which is precisely where the grid corners are.
+## Measured on a 100 m square loop with 10 m of padding, the blurred field differed from the same blur
+## computed over a grid with 150 m of slack by 0.37 m at 4 m of smoothing and 9.67 m at 34 m — worst
+## exactly at the stamped rectangle's corner, which is the hard edge that shows up in the viewport. It
+## takes a large value to become visible because at small radii the kernel still fits inside `_padding()`.
+##
+## A BOX kernel weights the sample at its edge exactly as much as the one at its centre, so this is the
+## full reach and not a tail that can be truncated cheaply. The grid therefore grows with the radius the
+## user asked for — at 34 m over a 100 m mound that is roughly nine times the cells — which is the honest
+## cost of the setting rather than a cheaper wrong answer.
+func _crease_blur_reach() -> float:
+	if crease_smoothing <= 0.0 or not _has_corner_rounding():
+		return 0.0
+	var vs: float = terrain.vertex_spacing if terrain else 1.0
+	if vs <= 0.0:
+		return 0.0
+	var reach := 0
+	for w in _blur_box_sizes(crease_smoothing / vs, 3):
+		reach += (w - 1) / 2
+	return float(reach) * vs
 
 
 func _spline_paintable(path: Path3D) -> bool:
@@ -5621,6 +5902,67 @@ func _min_points() -> int:
 ## runtime toggle. Drives loop-wrap in the gizmo (tangents, segment insertion) and the rasterizers.
 func _is_closed() -> bool:
 	return _min_points() >= 3
+
+
+## Does this brush rasterise through the closed-loop signed distance field (`_signed_distance_field` and
+## its native/GPU twins)? Only those brushes have an outline to fillet and a medial axis to smooth, so
+## only they show `corner_radius` and `crease_smoothing`.
+##
+## NOT `_is_closed()`: a Ridge with its closed toggle on is still a polyline brush and goes through
+## `_exact_polyline_field`, which has no corners to round. The two questions look alike and are not.
+func _has_corner_rounding() -> bool:
+	return false
+
+
+## Hide the two context-dependent controls rather than leaving dead ones on screen:
+##   - `corner_radius` / `crease_smoothing` on brushes with no loop field to shape.
+##   - `Make Splines Unique` unless the shared-curve warning is actually up.
+##
+## The Make Unique visibility is re-evaluated by `_refresh_group_warnings`, which now also notifies the
+## property list — a hint that changes without `notify_property_list_changed` is a hint the inspector
+## never sees, and reading the property back cannot tell you that.
+func _validate_property(property: Dictionary) -> void:
+	match property.name:
+		"corner_radius", "crease_smoothing":
+			if not _has_corner_rounding():
+				property.usage &= ~PROPERTY_USAGE_EDITOR
+		"_make_unique_btn":
+			if _shared_curve_spline_names().is_empty():
+				property.usage &= ~PROPERTY_USAGE_EDITOR
+
+
+## Give each of this brush's splines that shares a Curve3D a private copy (undoable, one action for all
+## of them). The counterpart to the shared-curve warning: duplicating a brush copies the Path3D but not
+## its curve, so both clones bake off one curve until this is pressed.
+##
+## Duplicates only OUR splines. The other holder of the curve keeps the original, which is what makes
+## this safe to press on either side of the pair — pressing it on the duplicate leaves the original
+## exactly as it was authored.
+func make_splines_unique() -> void:
+	var shared := _shared_curve_spline_names()
+	if shared.is_empty():
+		return
+	var targets: Array[Path3D] = []
+	for s in _get_splines():
+		if String(s.name) in shared:
+			targets.append(s)
+	if targets.is_empty():
+		return
+	var ur := _editor_undo()
+	if ur:
+		ur.create_action("Make Brush Splines Unique")
+		for s in targets:
+			# `duplicate(true)` on a Curve3D deep-copies the point array; the shallow duplicate would
+			# hand back a curve that still shares its points and defeat the whole button.
+			ur.add_do_property(s, "curve", s.curve.duplicate(true))
+			ur.add_undo_property(s, "curve", s.curve)
+		ur.commit_action()
+	else:
+		for s in targets:
+			s.curve = s.curve.duplicate(true)
+	# `curve_changed` already rebinds and re-bakes each Path3D we touched (see `_on_path_curve_changed`),
+	# so all that is left is telling every brush the sharing picture moved.
+	_refresh_group_warnings()
 
 
 func _paint_spline(_path: Path3D) -> void:
