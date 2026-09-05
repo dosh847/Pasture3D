@@ -228,6 +228,44 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 	# approach was trimmed back from (§6) — and must leave no trace at all: marking it as a bridge deck
 	# would tell every later phase to build a viaduct at every crossroads.
 	var skip: PackedByteArray = p_opts.get("skip", PackedByteArray())
+	# ---- A BATTER MAY NOT CUT THROUGH ANOTHER ROAD'S FORMATION ----
+	#
+	# `protect` is grid-shaped, not per-sample like `skip`: it marks CELLS another road has already built
+	# on. Every other mask here is indexed by this road's arc length, which cannot express "somebody
+	# else's carriageway is over there" at all.
+	#
+	# The corridor reaches `edge_d + rise/slope + verge`, which for a road in an 8 m cutting is seventeen
+	# metres of sideways reach. Two roads crossing at different heights therefore sweep their batters
+	# straight across each other's carriageway, and whichever bakes LAST wins: the earlier road's ribbon
+	# is left spanning a trench the later road dug under it. Measured on a plain crossing of a road at
+	# grade and a road in an 8 m cutting: 225 of the first road's 729 carriageway cells were lowered, the
+	# worst by the full 8 m.
+	#
+	# Scene order deciding it is the same fault §5.2 names for the paint, and the answer here is stronger
+	# than ordering because it is not a tie-break: a batter is EARTHWORK AROUND a road, and no road's
+	# earthwork outranks another road's driving surface whatever their priorities. Only the batter is
+	# refused. A cell inside this road's own formation still grades — two carriageways genuinely
+	# overlapping is a junction, and junctions are resolved by `skip` and the footprint polygon, not here.
+	var protect: PackedByteArray = p_opts.get("protect", PackedByteArray())
+	# ---- THE JUNCTION'S OWN GROUND, AND ONLY THAT ----
+	#
+	# `exclude` is the ground consumer's version of `skip`, and it is a different SHAPE on purpose.
+	#
+	# `skip` is per arc-length sample, so refusing on it refuses the cell at EVERY lateral distance out to
+	# `reach` — seventeen metres each side on a road in a cutting. A junction trims its approaches back by
+	# ~20 m, so that is a 40 m by 34 m swath of corridor that this road stops grading; and what then
+	# grades it is `grade_junction_footprints`, which writes only the cells INSIDE the footprint polygon.
+	# The polygon is about a carriageway wide. Everything between its edge and the corridor reach — the
+	# shoulder, verge and batter running alongside the intersection — was claimed by neither, and stayed
+	# raw hillside standing over the road. That is the ring-shaped gap around a junction.
+	#
+	# So the ground refuses by CELL, matching the polygon exactly: inside it the junction grades, outside
+	# it this road's corridor does, and the two partition the ground with no seam and no hole. `skip`
+	# keeps its per-sample shape for the RIBBON, which is a strip and is genuinely trimmed at an arc
+	# length — the same two-consumers split §6 already draws, applied one level down.
+	#
+	# Refused before `nearest_on_plan` because it needs nothing from it: whose cell this is, is settled.
+	var exclude: PackedByteArray = p_opts.get("exclude", PackedByteArray())
 	var cum := cumulative_length(p_plan)
 	var graded: PackedFloat32Array = out["height"]
 	var m_bed: PackedFloat32Array = out["roadbed"]
@@ -250,6 +288,8 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 			# NaN is the brush's "not my cell" marker, not a height. Writing a road through it would
 			# invent ground outside the loop.
 			if not is_finite(ground):
+				continue
+			if idx < exclude.size() and exclude[idx] != 0:
 				continue
 			var wx := p_min_x + float(ix) * p_vs
 
@@ -280,6 +320,11 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 			var slope: float = cut_batter if z_ref < ground else fill_batter
 			var reach := edge_d + rise / slope + verge
 			if d > reach:
+				continue
+			# Another road's formation. Refused before the suppress branch so a protected cell reports
+			# nothing either: this road did not build here, and saying it did would put a bridge deck or a
+			# verge in a mask that a scatter or a paint would then act on.
+			if d > edge_d and idx < protect.size() and protect[idx] != 0:
 				continue
 
 			# A suppressed stretch still REPORTS itself — the structure mask is how a later phase learns

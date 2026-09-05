@@ -73,6 +73,12 @@ extends Node3D
 @export_flags_3d_physics var collision_mask: int = 0
 
 ## Draw lane markings on the carriageway (§10, P5c).
+## The coarsest LOD lane markings are drawn at. Tier NEAR only (§10, and §2.5 of the junction paint
+## spec): a stripe is a few centimetres wide, it is unreadable by tier MID, and beyond tier FAR the road
+## is terrain paint with no mesh to put it on. Not an @export, because it is not a preference -- it is
+## the tier the markings BELONG to, and a marking drawn at MID is overdraw nobody can see.
+const MARKINGS_MAX_LOD: int = 0
+
 @export var markings_enabled: bool = true
 
 ## Material for the painted stripes. Left null, markings are built and drawn untextured — visible, but
@@ -224,8 +230,10 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 		add_child(mi)
 		if collision_enabled:
 			_add_collider(mi, plan, cum, alignment, float(span[0]), float(span[1]), half, shoulder, crown)
+		var markings: MeshInstance3D = null
 		if markings_enabled:
-			_add_markings(mi, p_brush, plan, cum, alignment, float(span[0]), float(span[1]), crown)
+			markings = _add_markings(mi, p_brush, plan, cum, alignment, float(span[0]), float(span[1]),
+					crown)
 		if props_enabled:
 			prop_transforms.append_array(_prop_transforms(t, plan, cum, alignment, float(span[0]),
 					float(span[1]), crown))
@@ -238,6 +246,10 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 			"bounds": (meshes[0] as ArrayMesh).get_aabb(),
 			"meshes": meshes,
 			"lod": 0,
+			# Hidden as the chunk coarsens -- see `MARKINGS_MAX_LOD`. Carried on the chunk rather than
+			# found by name at LOD time: a `get_node` per chunk per frame, to answer a question the
+			# build already knew.
+			"markings": markings,
 		})
 	# Called even when props are OFF, with nothing to place: it clears the instancer by mesh id first, so
 	# switching props off removes the ones already out there. Skipping the call entirely would leave a
@@ -299,16 +311,16 @@ func _collider_from(p_parent: Node3D, p_arrays: Array) -> void:
 ## there too. Resolving once for the whole road would draw the first chunk's cross-section over all of it.
 func _add_markings(p_parent: Node3D, p_brush: Pasture3DRoadBrush, p_plan: PackedVector2Array,
 		p_cum: PackedFloat32Array, p_alignment: Pasture3DRoadAlignment, p_from: float, p_to: float,
-		p_crown: float) -> void:
+		p_crown: float) -> MeshInstance3D:
 	var t: Pasture3DRoadType = p_brush.resolved_road_type()
 	if t == null:
-		return
+		return null
 	var stripes := Pasture3DRoadMarkings.plan(p_brush.resolved_lanes(p_from), t.divider_type,
 			p_brush.resolved_one_way(p_from))
 	var arrays := Pasture3DRoadMarkings.build(p_plan, p_cum, p_alignment, stripes, p_from, p_to,
 			p_crown, 2.0, depth_lift)
 	if arrays.is_empty():
-		return
+		return null
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	if markings_material != null:
@@ -317,6 +329,7 @@ func _add_markings(p_parent: Node3D, p_brush: Pasture3DRoadBrush, p_plan: Packed
 	mi.name = "Markings"
 	mi.mesh = mesh
 	p_parent.add_child(mi)
+	return mi
 
 
 ## The transforms for one span's verge props. Nothing is placed here — they are accumulated across the
@@ -359,15 +372,15 @@ func _place_props(p_brush: Pasture3DRoadBrush, p_type: Pasture3DRoadType, p_tran
 ## several stop being separate. Put on the network's host, it is rebuilt once per resolve instead of once
 ## per participant, and there is no question of which road owns it.
 ##
-## Each apron carries one mesh repeated across the LOD slots. A disc of two dozen triangles has nothing
+## Each apron carries one mesh repeated across the LOD slots. A footprint of a few dozen triangles has nothing
 ## worth decimating, and sharing the resource costs nothing — what it buys is that aprons go through the
 ## same distance culling and the same far-hide as everything else, with no second code path.
 func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_LIFT) -> int:
 	_clear()
 	depth_lift = p_lift
 	for a: Dictionary in p_aprons:
-		var arrays := Pasture3DRoadMesher.build_apron(a["center"], float(a["radius"]), a["plan"],
-				a["cum"], a["alignment"], float(a["crown"]), 24, p_lift)
+		var arrays := Pasture3DRoadMesher.build_footprint(a["center"], a["boundary"], a["heights"],
+				float(a["center_h"]), p_lift)
 		if arrays.is_empty():
 			continue
 		var mesh := ArrayMesh.new()
@@ -380,13 +393,14 @@ func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_L
 		mi.mesh = mesh
 		mi.top_level = true
 		add_child(mi)
+		var markings := _add_junction_markings(mi, a, p_lift)
 		if collision_enabled:
 			# Rebuilt at lift ZERO, like the ribbon's (see `_add_collider`), and NOT reused from the mesh
 			# above — that one carries the render lift. Without this the road has a hole in its collision
 			# at every junction: a raycast asking "am I on tarmac" answers yes along the road and no in the
 			# middle of the crossroads, which is exactly where a vehicle most needs the answer.
-			var solid := Pasture3DRoadMesher.build_apron(a["center"], float(a["radius"]), a["plan"],
-					a["cum"], a["alignment"], float(a["crown"]), 24, 0.0)
+			var solid := Pasture3DRoadMesher.build_footprint(a["center"], a["boundary"], a["heights"],
+					float(a["center_h"]), 0.0)
 			if not solid.is_empty():
 				_collider_from(mi, solid)
 		var meshes: Array = []
@@ -400,6 +414,7 @@ func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_L
 			"bounds": mesh.get_aabb(),
 			"meshes": meshes,
 			"lod": 0,
+			"markings": markings,
 		})
 	_dirty_lod = true
 	_report = true
@@ -475,6 +490,12 @@ func _process(_delta: float) -> void:
 		if want != int(c["lod"]) or _dirty_lod:
 			c["lod"] = want
 			mi.mesh = c["meshes"][want]
+			# Markings follow the tier the ribbon is at, not a distance of their own: two thresholds over
+			# one distance would disagree in the hysteresis band and leave a stripe hanging off a chunk
+			# that had already coarsened under it.
+			var marks = c.get("markings")
+			if is_instance_valid(marks):
+				marks.visible = want <= MARKINGS_MAX_LOD
 	# Report ONCE per rebuild, on the first frame that had a camera. A ribbon that is built, parented and
 	# hidden looks exactly like a ribbon that was never built, and the two were confused for a whole
 	# debugging session — so the host says which it is, with the distance that decided it.
@@ -623,3 +644,37 @@ func pick_meshes(p_node: Node3D) -> Array[TriangleMesh]:
 		_pick_meshes = out
 		_pick_digest = key
 	return out
+
+
+## One junction's markings, as a child of its surface for the same reason a chunk's markings are a child
+## of the chunk: they share its transform, its visibility and its culling, and nothing has to keep a
+## second list in step with the first.
+##
+## THE HEIGHT COMES FROM THE SURFACE, not from the road's solved elevation. `Pasture3DRoadStopLine.point`
+## carries the road's centreline height, which is a crown above the lane the bar is painted across; a bar
+## built at that height floats at its middle and sinks at its ends, by several times MARKING_LIFT on any
+## road with a camber. So the same sampler `build_footprint` used for the surface answers here too, and
+## the paint sits on the geometry it was planned against by construction — now literally, since
+## `footprint_height_at` interpolates over the very fan the surface is built from.
+func _add_junction_markings(p_parent: Node3D, p_apron: Dictionary, p_lift: float) -> MeshInstance3D:
+	var prims: Array = p_apron.get("markings", [])
+	if prims.is_empty():
+		return null
+	var centre: Vector2 = p_apron["center"]
+	var boundary: PackedVector2Array = p_apron["boundary"]
+	var heights: PackedFloat32Array = p_apron["heights"]
+	var centre_h := float(p_apron["center_h"])
+	var sampler := func(at: Vector2) -> float:
+		return Pasture3DRoadMesher.footprint_height_at(at, centre, boundary, heights, centre_h)
+	var arrays := Pasture3DRoadJunctionMarkings.build_junction(prims, sampler, p_lift)
+	if arrays.is_empty():
+		return null
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	if markings_material != null:
+		mesh.surface_set_material(0, markings_material)
+	var mi := MeshInstance3D.new()
+	mi.name = "Markings"
+	mi.mesh = mesh
+	p_parent.add_child(mi)
+	return mi

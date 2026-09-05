@@ -461,8 +461,19 @@ func _f_the_grader_matches_its_gdscript_reference() -> void:
 	# NaN in a corner: the brush's "not my cell" marker must pass through untouched on both.
 	ground[0] = NAN
 
+	# A `protect` band down one side, because an option the parity fixture does not set is an option the
+	# two implementations are free to disagree about: the reference and the kernel each grew their own
+	# copy of this rule, and nothing else in the suite compares them. A diagonal stripe rather than a
+	# rectangle, so a kernel reading the mask row-major where the reference reads it column-major does
+	# not accidentally agree.
+	var protect := PackedByteArray()
+	protect.resize(gw * gh)
+	for iz in gh:
+		for ix in gw:
+			if (ix + iz) % 7 < 3:
+				protect[iz * gw + ix] = 1
 	var opts := {"crown": 0.04, "cut_batter": 1.2, "fill_batter": 0.7, "surface_fade": 1.5,
-			"skip": fx["skip"]}
+			"skip": fx["skip"], "protect": protect}
 	var prod: Dictionary = Pasture3DRoadGrader.grade(ground, gw, gh, min_x, min_z, 1.0,
 			fx["plan"], fx["align"], fx["half"], fx["shoulder"], fx["verge"], fx["suppress"], opts)
 	var orc: Dictionary = Pasture3DRoadGrader.grade_reference(ground, gw, gh, min_x, min_z, 1.0,

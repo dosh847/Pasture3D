@@ -25,6 +25,12 @@ func _ready() -> void:
 	await _h_a_placed_road_resolves_its_junctions()
 	_i_no_bake_kernel_reads_input_state()
 	await _j_the_apron_covers_every_trimmed_end()
+	await _l_the_major_road_is_trimmed_too()
+	await _p_the_junction_grades_its_own_footprint()
+	await _q_a_junctioned_road_refuses_the_native_fast_path()
+	await _r_the_ground_beside_a_junction_is_graded()
+	await _s_the_crossing_grades_the_same_in_either_order()
+	await _t_a_moved_junction_surface_asks_for_another_bake()
 	print("\n=== %s (%d failures) ===\n" % ["ROAD JUNCTION PASS" if _fail == 0 else "ROAD JUNCTION FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -243,14 +249,20 @@ func _d_an_override_survives_an_unrelated_edit() -> void:
 
 # ---- E ------------------------------------------------------------------------------------------
 
+## THE KERB RETURN IS TURNED OFF HERE, deliberately. A trim-back is now two terms — the clearance
+## `other_half / sin θ` and the room a kerb return needs, `radius / tan(φ/2)` — and a criterion that
+## measured their sum could not say which one was wrong. So E and F resolve with `default_corner_radius`
+## at zero and assert the clearance alone; the second term is asserted on its own below, as the exact
+## amount it adds.
 func _e_the_trim_back_leaves_no_gap_and_no_overlap() -> void:
 	print("[E] the trim-back lands each approach exactly on the other road's edge (the mesher's bar)")
+	var square := {"default_corner_radius": 0.0}
 	# Square crossing, different widths, so a solver that used its OWN width instead of the other road's
 	# would land in a visibly wrong place.
 	var w_ew := 6.0
 	var w_ns := 3.0
 	var js := Pasture3DRoadJunctionSolver.resolve([
-		_east_west("ew", 10, w_ew), _north_south("ns", 5, w_ns)])
+		_east_west("ew", 10, w_ew), _north_south("ns", 5, w_ns)], [], square)
 	var j: Pasture3DRoadJunction = js[0]
 	var t_ew := j.trim_back_for("ew")
 	var t_ns := j.trim_back_for("ns")
@@ -284,11 +296,39 @@ func _e_the_trim_back_leaves_no_gap_and_no_overlap() -> void:
 	if absf(j.trim_back_for("ew") - (t_ew + 25.0 - j.radius)) > 1e-3:
 		_fail += 1; print("    !! a widened footprint did not push its approaches back")
 
+	# THE KERB RETURN IS PAID FOR IN TRIM-BACK, and this is where that is asserted. A return is a corner
+	# of the GAP between two arms, not of the pavement, so rounding it ADDS pavement and its tangent
+	# points sit `r / tan(φ/2)` back along each road. Nothing draws it unless the arms were pushed back
+	# that far first, which is why the solver adds it here rather than the mesher assuming it.
+	#
+	# At a square crossing every corner is 90°, so tan(45°) = 1 and the allowance is exactly the radius —
+	# a number this criterion can name in advance rather than recomputing the code under test.
+	var r := 5.0
+	var rounded := Pasture3DRoadJunctionSolver.resolve([
+		_east_west("ew", 10, w_ew), _north_south("ns", 5, w_ns)],
+		[], {"default_corner_radius": r})
+	var jr: Pasture3DRoadJunction = rounded[0]
+	print("    a %.1f m kerb return -> EW trims back %.3f (want %.3f = %.3f + %.1f), corner radius %.3f"
+			% [r, jr.trim_back_for("ew"), t_ew + r, t_ew, r, jr.corner_radius])
+	if absf(jr.trim_back_for("ew") - (t_ew + r)) > 1e-3 			or absf(jr.trim_back_for("ns") - (t_ns + r)) > 1e-3:
+		_fail += 1; print("    !! a kerb return did not buy itself room in the trim-back")
+	if absf(jr.corner_radius - r) > 1e-3:
+		_fail += 1; print("    !! the junction did not adopt the resolved kerb radius")
+
+	# CONTROL: the square-corner junction above must NOT already have that room, or this is measuring
+	# nothing. It is the same fixture with the radius at zero, so the difference is the whole term.
+	print("    control: with no kerb return the same road trims back %.3f (want %.3f less)"
+			% [t_ew, r])
+	if absf(jr.trim_back_for("ew") - t_ew) < 1e-3:
+		_fail += 1; print("    !! the kerb return changed nothing, so this would pass unimplemented")
+
 
 # ---- F ------------------------------------------------------------------------------------------
 
 func _f_an_acute_crossing_trims_back_further() -> void:
 	print("[F] an acute crossing trims back further — 1/sin θ, not a fixed radius")
+	# Square corners only: see the note on E. The 1/sin θ law is the clearance term alone.
+	var square := {"default_corner_radius": 0.0}
 	var half := 4.0
 	var results: Array = []
 	for deg: float in [90.0, 45.0, 20.0]:
@@ -297,7 +337,7 @@ func _f_an_acute_crossing_trims_back_further() -> void:
 		var dir := Vector2(cos(rad), sin(rad))
 		var js := Pasture3DRoadJunctionSolver.resolve([
 			_east_west("ew", 10, half),
-			_run("x", PackedVector2Array([-dir * 150.0, dir * 150.0]), 5, half)])
+			_run("x", PackedVector2Array([-dir * 150.0, dir * 150.0]), 5, half)], [], square)
 		if js.size() != 1:
 			_fail += 1; print("    !! no junction at %.0f°" % deg); return
 		var want: float = half / sin(rad)
@@ -319,7 +359,7 @@ func _f_an_acute_crossing_trims_back_further() -> void:
 	var dir2 := Vector2(cos(rad2), sin(rad2))
 	var near := Pasture3DRoadJunctionSolver.resolve([
 		_east_west("ew", 10, half),
-		_run("x", PackedVector2Array([-dir2 * 150.0, dir2 * 150.0]), 5, half)])
+		_run("x", PackedVector2Array([-dir2 * 150.0, dir2 * 150.0]), 5, half)], [], square)
 	print("    control: a 2° crossing -> %d junction(s) (want 0, it is running alongside)" % near.size())
 	if near.size() != 0:
 		_fail += 1; print("    !! a near-parallel road produced a junction with a runaway footprint")
@@ -542,22 +582,25 @@ func _i_no_bake_kernel_reads_input_state() -> void:
 		print("    !! the scan matches nothing, so [I] would pass on any source at all")
 
 
-## [J] The junction apron reaches the CORNERS of every trimmed-back approach, not just the middle.
+## [L] The major road is trimmed back like every other arm, and its ribbon leaves a gap to match.
 ##
-## Reported from a live scene as "the intersection mesh only connects to one road". The apron disc was
-## sized `max(radius, widest_trim_back())`, and both of those are the largest TRIM-BACK — a distance
-## measured ALONG a centreline, so it lands on the MIDDLE of a cut end. A cut end is a full-width face:
-## its corners sit at `sqrt(trim^2 + half_width^2)` from the junction centre, which is strictly further.
-## The disc missed both, leaving a triangular gap at each side of every trimmed arm.
+## Until P9a-0 it was not. `grade_surface` skipped the trim for the major road and `junction_skips`
+## skipped its ribbon gap to agree, so the major road paved straight through the junction and only the
+## minor roads stopped. That is what made the footprint unbuildable as one polygon: a road with no cut
+## end has no cut corners for the boundary to pass through, and the surface had to overhang it or leave
+## it out.
 ##
-## It looked like a one-road bug because the MAJOR road is never trimmed — `_junction_gaps` skips it — so
-## its ribbon runs through and meets the apron at any radius. At a plain crossroads that is one connected
-## road and one detached one, which is exactly what was on screen.
+## ASSERTED ON THE BRUSH, NOT THE SOLVER. The solver always computed a trim-back for every participant,
+## the major one included — the exemption was in the two consumers. A criterion reading `trim_backs`
+## would therefore have passed unchanged on the bug it was written for, which is why it is not written
+## that way.
 ##
-## The CONTROL is the old expression. It has to come up SHORT here, or this criterion is asserting a
-## property the buggy code already had and would pass on the bug it was written for.
-func _j_the_apron_covers_every_trimmed_end() -> void:
-	print("[J] the apron disc covers the corners of every trimmed approach, not just the middle")
+## Both consumers are checked, because they were a matched pair and their agreement is the property that
+## matters: a ribbon that stops where the ground does not leaves a hole, and ground that stops where the
+## ribbon does not leaves a flap of road over open air. One of the two would be a regression the other
+## does not see.
+func _l_the_major_road_is_trimmed_too() -> void:
+	print("[L] every arm is trimmed, major and minor alike, in the ribbon and the ground")
 	var fx := _crossing_fixture()
 	var net: Pasture3DRoadNetwork = fx["net"]
 	for brush in fx["brushes"]:
@@ -565,42 +608,688 @@ func _j_the_apron_covers_every_trimmed_end() -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame
 
-	var by_key := {}
-	for b in net.road_brushes():
-		by_key[b.road_key()] = b
+	# CONTROL: there has to BE a major road among the brushes, or "the major road is trimmed" is a claim
+	# about nobody and the criterion is vacuous.
+	var majors := {}
+	for j in net.junctions:
+		if j.detected:
+			majors[j.major_key()] = true
+	if majors.is_empty():
+		_fail += 1
+		print("    !! no detected junction has a major road, so [L] is asserting nothing")
+
+	var checked := 0
+	var minors := 0
+	for brush: Pasture3DRoadBrush in fx["brushes"]:
+		var key := brush.road_key()
+		var gaps: Array = brush.junction_skips()
+		# The GRADER's own answer, read as the decision it returns rather than as the source of the guard
+		# that produces it. `grading_profile` is what `grade_surface` consults, and its `skip` mask is the
+		# ground the road does not write.
+		#
+		# Read SEPARATELY from the ribbon gap even though both now say the same thing, because they said
+		# different things twice in one day and the arrangement is not self-evident. What makes trimming
+		# every arm correct is `grade_junction_footprints` — the junction writes the ground its arms left,
+		# so no road has to. Criterion P asserts that half; without it, this one is satisfied by a build
+		# that trims everybody and grades nothing, which is the burial.
+		var ds := 1.0
+		var run: Dictionary = brush.build_run()
+		var n_s: int = int(ceil(float(run["cum"][run["cum"].size() - 1]) / ds)) + 1
+		var prof: Dictionary = brush.grading_profile(null, ds, n_s)
+		var skip: PackedByteArray = prof["skip"]
+
+		# The MINOR half of the same split, and not an afterthought: without it "the major road grades
+		# through" is satisfied by a build in which no road is ever skipped, which is the lumpy scar the
+		# trim exists to prevent. Every arm still stops in the ribbon, major and minor alike.
+		if not majors.has(key):
+			minors += 1
+			_check("L", not gaps.is_empty(),
+					"the minor road %s must leave a ribbon gap at its junction" % key)
+			for j in net.junctions_for(key):
+				if not j.detected:
+					continue
+				var ms: float = j.arc_length_for(key)
+				if not is_finite(ms):
+					continue
+				var mi := clampi(int(round(ms / ds)), 0, skip.size() - 1)
+				_check("L", skip[mi] == 1,
+						"the grader must skip the junction cell at s = %.3f m on the minor road %s"
+						% [ms, key])
+			continue
+		checked += 1
+		print("    %s is the major road at a junction and leaves %d ribbon gap(s)" % [key, gaps.size()])
+		_check("L", not gaps.is_empty(),
+				"the major road %s must leave a ribbon gap at its junction" % key)
+		# And the grader has to agree, arm for arm: every gap the ribbon leaves is ground the grader
+		# skipped. Compared through the same trim-back both read, so a divergence in either shows here.
+		for j in net.junctions_for(key):
+			if not j.detected:
+				continue
+			var s: float = j.arc_length_for(key)
+			var trim: float = j.trim_back_for(key)
+			if not is_finite(s):
+				continue
+			_check("L", trim > 0.01, "%s has no trim-back at %s" % [key, j.id])
+			var covered := false
+			for g: Array in gaps:
+				if g[0] <= s - trim + 1e-3 and g[1] >= s + trim - 1e-3:
+					covered = true
+			_check("L", covered,
+					"the ribbon gap must cover [%.3f, %.3f], the span the grader skipped" 							% [s - trim, s + trim])
+			var mid := clampi(int(round(s / ds)), 0, skip.size() - 1)
+			_check("L", skip[mid] == 1,
+					"the grader must skip the junction cell at s = %.3f m on the major road" % s)
+
+	print("    %d major road(s) and %d minor road(s) checked" % [checked, minors])
+	if checked == 0:
+		_fail += 1
+		print("    !! no brush in the fixture is a major road, so [L] asserted nothing")
+	if minors == 0:
+		_fail += 1
+		print("    !! no brush in the fixture is a minor road, so the other half of [L] is vacuous")
+
+	(fx["terrain"] as Node).queue_free()
+
+
+## [J] The junction footprint contains the CORNERS of every trimmed-back approach, not just the middle.
+##
+## Reported from a live scene as "the intersection mesh only connects to one road". The apron was a DISC
+## sized `max(radius, widest_trim_back())`, and both of those are the largest TRIM-BACK — a distance
+## measured ALONG a centreline, so it lands on the MIDDLE of a cut end. A cut end is a full-width face:
+## its corners sit at `sqrt(trim^2 + half_width^2)` from the junction centre, which is strictly further.
+## The disc missed both, leaving a triangular gap at each side of every trimmed arm.
+##
+## The disc is gone (P9a-0) and the surface is now a polygon through the arms' cut ends, so this asserts
+## the property directly: every cut corner of every arm is inside the boundary. ALL arms, the major road
+## included — it is trimmed like the rest now, and an assertion that still exempted it would stop
+## covering the case that made the bug hard to see.
+##
+## The CONTROL is the old disc expression. It has to come up SHORT here, or this criterion is asserting a
+## property the buggy code already had and would pass on the bug it was written for.
+func _j_the_apron_covers_every_trimmed_end() -> void:
+	print("[J] the junction polygon contains the cut corners of every trimmed arm")
+	var fx := _crossing_fixture()
+	var net: Pasture3DRoadNetwork = fx["net"]
+	for brush in fx["brushes"]:
+		(brush as Pasture3DRoadBrush)._paint_into(fx["layer"], 0)
+	await get_tree().process_frame
+	await get_tree().process_frame
 
 	var checked := 0
 	var worst_short := 0.0
 	for j in net.junctions:
 		if not j.detected or j.radius <= 0.01:
 			continue
-		var apron_r: float = net._apron_radius(j, by_key)
+		var arms: Array = j.footprint_arms()
+		var poly := Pasture3DRoadMesher.plan_footprint(j.center, arms, j.effective_corner_radius())
+		_check("J", poly.size() >= 3, "junction %s produced no footprint polygon" % j.id)
+		if poly.size() < 3:
+			continue
+		# The old disc, for the control below.
 		var old_r: float = maxf(j.radius, j.widest_trim_back())
-		for i in j.road_keys.size():
-			var key := String(j.road_keys[i])
-			if j.is_major(key) or not by_key.has(key):
-				continue
-			var b = by_key[key]
-			var t: Pasture3DRoadType = b.resolved_road_type()
-			var hw: float = t.half_width(b.resolved_lane_count()) if t != null else 3.5
-			var trim: float = j.trim_backs[i] if i < j.trim_backs.size() else 0.0
-			var corner := sqrt(trim * trim + hw * hw)
-			checked += 1
-			print("    %s: trim %.3f m, half-width %.3f m -> corner at %.3f m; apron %.3f m (old %.3f m)"
-					% [key, trim, hw, corner, apron_r, old_r])
-			_check("J", apron_r >= corner - 1e-3,
-					"apron %.3f m must reach the cut corner at %.3f m" % [apron_r, corner])
-			worst_short = maxf(worst_short, corner - old_r)
+		for arm: Dictionary in arms:
+			var d: Vector2 = arm["dir"]
+			var trim: float = arm["trim"]
+			var hw: float = arm["half"]
+			var n := Vector2(-d.y, d.x)
+			for side in [1.0, -1.0]:
+				var corner: Vector2 = j.center + d * trim + n * (hw * side)
+				checked += 1
+				_check("J", Geometry2D.is_point_in_polygon(corner, poly),
+						"cut corner %.3f m from centre is outside the footprint" 								% j.center.distance_to(corner))
+				worst_short = maxf(worst_short, j.center.distance_to(corner) - old_r)
 
-	# Without at least one trimmed minor arm there was nothing to cover and [J] measured nothing.
+	# Without a trimmed arm there was nothing to cover and [J] measured nothing.
 	if checked == 0:
 		_fail += 1
-		print("    !! no trimmed minor arm in the fixture, so [J] asserted nothing")
+		print("    !! no trimmed arm in the fixture, so [J] asserted nothing")
+	else:
+		print("    %d cut corners checked against the footprint" % checked)
 
 	# CONTROL: the old radius must MISS. If it reaches, this fixture cannot tell the fix from the bug.
-	print("    control: the old radius falls %.3f m short of the furthest corner (want > 0)" % worst_short)
+	print("    control: the old disc falls %.3f m short of the furthest corner (want > 0)" % worst_short)
 	if worst_short <= 1e-3:
 		_fail += 1
 		print("    !! the old radius already covered every corner, so [J] would pass on the bug")
 
 	(fx["terrain"] as Node).queue_free()
+
+
+# ---- P ------------------------------------------------------------------------------------------
+
+## [P] The junction grades the ground inside its own footprint, to the same surface the polygon is drawn
+## from, and the answer does not depend on which road baked first.
+##
+## ---- WHAT THIS REPLACED ----
+##
+## The footprint's ground used to be graded by whichever road was MAJOR, and the polygon was draped on
+## that road's alignment. Priority picks the major road, and two roads of the SAME TYPE tie on priority —
+## which `major_index` breaks by keeping whichever the solver walked first, i.e. scene order. So on the
+## commonest arrangement there is, a crossroads of one road type, the shape of the intersection was
+## decided by the scene tree and reordering the nodes changed it. Reported as "one is overriding the
+## other".
+##
+## The fixture is exactly that case: both roads share one `Pasture3DRoadType`, so they tie.
+##
+## Two claims, and the second is the one that could not be made before:
+##   1. the graded ground inside the footprint IS `footprint_height_at` — mesh and terrain are one surface,
+##      not two that agree to a tolerance;
+##   2. grading the roads in the opposite order gives the identical height field, to the bit.
+func _p_the_junction_grades_its_own_footprint() -> void:
+	print("[P] the junction grades its own footprint, and scene order cannot change it")
+	var fx := _crossing_fixture()
+	var net: Pasture3DRoadNetwork = fx["net"]
+	var gw := 96
+	var gh := 96
+	var min_x := 80.0
+	var min_z := 80.0
+	var vs := 1.0
+	# BAKE, RESOLVE, BAKE — the documented fixed point (P4a). A junction is detected from solved
+	# alignments, and the footprint can only be graded once the junction exists, so the first grade is
+	# what makes the junction and the two measured below are what it then asks for.
+	_grade_all(fx["brushes"], gw, gh, min_x, min_z, vs)
+	net.resolve_junctions()
+	await get_tree().process_frame
+
+	var j: Pasture3DRoadJunction = null
+	for cand in net.junctions:
+		if cand.detected:
+			j = cand
+	if j == null:
+		_fail += 1
+		print("    !! no junction resolved, so [P] measured nothing")
+		(fx["terrain"] as Node).queue_free()
+		return
+
+	# CONTROL on the fixture itself: if the two roads did NOT tie, this criterion would be measuring the
+	# easy case and the fault it exists for could not appear.
+	var priorities := {}
+	for b: Pasture3DRoadBrush in fx["brushes"]:
+		priorities[b.road_priority()] = true
+	_check("P", priorities.size() == 1,
+			"the two roads must TIE on priority, or [P] is not measuring the case that broke")
+
+	var forward := _grade_all(fx["brushes"], gw, gh, min_x, min_z, vs)
+	var reversed_order: Array = []
+	for i in range(fx["brushes"].size() - 1, -1, -1):
+		reversed_order.append(fx["brushes"][i])
+	var backward := _grade_all(reversed_order, gw, gh, min_x, min_z, vs)
+
+	var surf := net.junction_surface(j)
+	if surf.is_empty():
+		_fail += 1
+		print("    !! the junction has no surface, so [P] measured nothing")
+		(fx["terrain"] as Node).queue_free()
+		return
+	var boundary: PackedVector2Array = surf["boundary"]
+	var heights: PackedFloat32Array = surf["heights"]
+	var centre: Vector2 = surf["center"]
+	var centre_h := float(surf["center_h"])
+
+	var inside := 0
+	var worst_mesh := 0.0
+	var worst_order := 0.0
+	for iz in gh:
+		for ix in gw:
+			var at := Vector2(min_x + float(ix) * vs, min_z + float(iz) * vs)
+			if not Geometry2D.is_point_in_polygon(at, boundary):
+				continue
+			var i := iz * gw + ix
+			inside += 1
+			var want := Pasture3DRoadMesher.footprint_height_at(at, centre, boundary, heights, centre_h)
+			worst_mesh = maxf(worst_mesh, absf(forward[i] - want))
+			worst_order = maxf(worst_order, absf(forward[i] - backward[i]))
+	print("    %d cell(s) inside the footprint; worst ground-vs-mesh %.6f m, worst order swap %.6f m"
+			% [inside, worst_mesh, worst_order])
+	_check("P", inside > 0, "no cell fell inside the footprint, so [P] measured nothing")
+	_check("P", worst_mesh < 1e-4,
+			"the graded ground must BE the polygon's surface (%.6f m off)" % worst_mesh)
+	_check("P", worst_order <= 0.0,
+			"grading the roads in the other order changed the junction by %.6f m" % worst_order)
+
+	# ---- AND THE POLYGON HAS TO MEET THE RIBBONS ----
+	#
+	# Everything above is satisfied by a polygon laid FLAT at the junction elevation: the ground would
+	# equal the mesh, and neither would depend on scene order, because both would be one number. What
+	# makes that wrong is the arms — each ribbon ends at its cut face, at a height the road's own grade
+	# put it at, and the polygon has to arrive at the same place or there is a step at every approach.
+	#
+	# Measured at the MIDPOINT of each cut face, where the crown is zero and the answer is the road's
+	# solved centreline height there and nothing else.
+	var worst_arm := 0.0
+	var arms := 0
+	var off_elevation := 0
+	for i in j.arm_dirs.size():
+		if i >= j.arm_z.size():
+			continue
+		var key: String = j.road_keys[j.arm_roads[i]]
+		var dir: Vector2 = j.arm_dirs[i]
+		var face: Vector2 = j.center + dir * j.trim_back_for(key)
+		var got := Pasture3DRoadMesher.footprint_height_at(face, centre, boundary, heights, centre_h)
+		worst_arm = maxf(worst_arm, absf(got - j.arm_z[i]))
+		arms += 1
+	print("    %d arm(s): worst polygon-to-ribbon step at a cut face %.6f m" % [arms, worst_arm])
+	_check("P", arms > 0, "the junction has no arms, so the ribbon-join check measured nothing")
+	_check("P", worst_arm < 1e-3,
+			"the polygon must meet each ribbon at its cut face (%.6f m step)" % worst_arm)
+	# ---- AND `arm_z` HAS TO BE THE RIBBON'S OWN HEIGHT ----
+	#
+	# The check above cannot see this by itself: `arm_z` is both the polygon's input and its expected
+	# value there, so a cut face read at the WRONG arc length satisfies it circularly. The independent
+	# reference is the road's own alignment, asked where the ribbon actually ends. Tolerance rather than
+	# equality because an alignment re-solves against the surface entering its bake and this one is read
+	# a bake later; the fault being measured is grade x trim, which on this fixture is metres.
+	var worst_ref := 0.0
+	var refs := 0
+	for i in j.arm_dirs.size():
+		if i >= j.arm_z.size():
+			continue
+		var key: String = j.road_keys[j.arm_roads[i]]
+		var brush: Pasture3DRoadBrush = null
+		for cand: Pasture3DRoadBrush in fx["brushes"]:
+			if cand.road_key() == key:
+				brush = cand
+		if brush == null:
+			continue
+		var run: Dictionary = brush.build_run()
+		if run.is_empty():
+			continue
+		var alignment: Pasture3DRoadAlignment = run["alignment"]
+		var js: float = j.arc_length_for(key)
+		var tangent := Pasture3DRoadJunctionSolver._tangent_at(run, js)
+		var sign_ := 1.0 if tangent.dot(j.arm_dirs[i]) >= 0.0 else -1.0
+		worst_ref = maxf(worst_ref,
+				absf(j.arm_z[i] - alignment.height_at(js + sign_ * j.trim_back_for(key))))
+		refs += 1
+	print("    worst cut-face height against the road's own alignment: %.4f m over %d arm(s)"
+			% [worst_ref, refs])
+	_check("P", refs > 0, "no arm could be checked against its road, so the reference measured nothing")
+	_check("P", worst_ref < 0.05,
+			"a cut face was read %.4f m from where its ribbon ends" % worst_ref)
+
+	(fx["terrain"] as Node).queue_free()
+
+
+## [R] The ground BESIDE a junction is graded — the corridor and the footprint leave no gap.
+##
+## `skip` is per arc-length SAMPLE, so refusing on it refuses the cell at every lateral distance out to
+## the corridor REACH — `edge_d + rise/slope + verge`, which for a road in a deep cutting is tens of
+## metres each side. A junction trims its approaches back by twenty-odd metres, so a swath forty metres
+## long and sixty wide stopped being graded. What then graded it was `grade_junction_footprints`, which
+## writes only the cells INSIDE the footprint polygon — about a carriageway wide.
+##
+## The difference is a ring around every intersection: the verge and batter alongside it, claimed by
+## neither, left as raw hillside standing over the road. Reported as "there is a gap between the roads
+## and junction where the grading doesn't reach and the landscape covers the road".
+##
+## ---- WHY A CLIFF AND NOT A HEIGHT ----
+##
+## Every other criterion here measures a height that WAS written, which is why they all passed while the
+## hole was beside them: the polygon met the ribbon exactly (P), the trims were right (E, L). A hole is
+## the absence of a write, so the thing to measure is the JOIN between what was written and what was not.
+##
+## A graded surface cannot step: a batter descends at `cut_batter`, so between two cells `p_vs` apart it
+## may fall at most `p_vs * batter`, and it meets the ground by `max` rather than at a solved crossing so
+## even the outer edge is continuous by construction. An ungraded cell next to a graded one steps by the
+## whole depth of the cutting. So the measure needs no reimplementation of the batter — it asks only that
+## the surface be a surface, which is a claim from outside the derivation chain.
+##
+## The fixture needs RELIEF, or there is nothing for a batter to cut and a hole is invisible: on the flat
+## the ungraded ground is already at road level. Half a metre per cell puts the crossing in a cutting
+## deep enough that the gap is metres, not millimetres.
+func _r_the_ground_beside_a_junction_is_graded() -> void:
+	print("[R] the ground beside a junction is graded, not left as hillside")
+	var fx := _crossing_fixture()
+	var net: Pasture3DRoadNetwork = fx["net"]
+	var gw := 96
+	var gh := 96
+	var min_x := 80.0
+	var min_z := 80.0
+	var vs := 1.0
+
+	var ground := PackedFloat32Array()
+	ground.resize(gw * gh)
+	for iz in gh:
+		for ix in gw:
+			ground[iz * gw + ix] = float(ix) * 0.5 + float(iz) * 0.2
+
+	_grade_into(fx["brushes"], ground, gw, gh, min_x, min_z, vs)
+	net.resolve_junctions()
+	await get_tree().process_frame
+	var z := _grade_into(fx["brushes"], ground, gw, gh, min_x, min_z, vs)
+	# ONE MORE TURN OF THE FIXED POINT. `bake -> resolve -> bake` leaves the junction's surface
+	# describing the alignment from before the last bake; the loop has to run until it stops moving.
+	net.resolve_junctions()
+	await get_tree().process_frame
+	z = _grade_into(fx["brushes"], ground, gw, gh, min_x, min_z, vs)
+
+	var j: Pasture3DRoadJunction = null
+	for cand in net.junctions:
+		if cand.detected:
+			j = cand
+	if j == null:
+		_fail += 1
+		print("    !! no junction resolved, so [R] measured nothing")
+		(fx["terrain"] as Node).queue_free()
+		return
+
+	var surf := net.junction_surface(j)
+	var boundary: PackedVector2Array = surf["boundary"]
+	var heights: PackedFloat32Array = surf["heights"]
+
+	# THE SCAN IS SCOPED TO THE JUNCTION, by distance to the footprint polygon.
+	#
+	# Not to the corridors: `corridor_half_width` is the DEEPEST reach the road could ever need, and a
+	# road only reaches that far where it is that deep. Scanning it swept in the corridor's outer rim
+	# twenty-five metres away, where a batter that has met the ground legitimately abuts hillside nobody
+	# graded. That is a real question and not this one — this criterion is about the ring at the kerb.
+	var near := PackedByteArray()
+	near.resize(gw * gh)
+	var band := 20.0
+	for iz in gh:
+		for ix in gw:
+			var at := Vector2(min_x + float(ix) * vs, min_z + float(iz) * vs)
+			var edge := Pasture3DRoadMesher.footprint_edge_at(at, boundary, heights)
+			if not edge.is_empty() and float(edge[0]) <= band:
+				near[iz * gw + ix] = 1
+
+	# What a graded surface may step between neighbouring cells: the steeper batter over one cell, plus
+	# the ground's own fall, plus a cell of slack. Read off the fixture rather than assumed.
+	var t: Pasture3DRoadType = (net.road_types[0] as Pasture3DRoadType)
+	var allow: float = vs * maxf(t.cut_batter, t.fill_batter) + vs * 0.5 + vs * 0.5
+	var worst := 0.0
+	var worst_at := Vector2i(-1, -1)
+	var pairs := 0
+	for iz in gh:
+		for ix in range(gw - 1):
+			var i0 := iz * gw + ix
+			var i1 := i0 + 1
+			if near[i0] == 0 or near[i1] == 0:
+				continue
+			if not is_finite(z[i0]) or not is_finite(z[i1]):
+				continue
+			pairs += 1
+			var step: float = absf(z[i1] - z[i0])
+			if step > worst:
+				worst = step
+				worst_at = Vector2i(ix, iz)
+	print("    %d adjacent pair(s) within %.0f m of the footprint; worst step %.4f m at %s (allow %.2f)"
+			% [pairs, band, worst, worst_at, allow])
+	_check("R", pairs > 0, "no pair fell beside the footprint, so [R] measured nothing")
+	_check("R", worst < allow,
+			"the graded surface steps %.4f m between neighbouring cells at %s — ground nobody graded, "
+			% [worst, worst_at] + "standing beside the junction")
+
+	(fx["terrain"] as Node).queue_free()
+
+
+## Grade `p_ground` with every brush in turn, chaining the surface, and answer the result. `_grade_all`
+## is this over its own fixed slope; this one takes the field, because [R] needs relief steep enough to
+## put the crossing in a cutting and the others must keep the field they were calibrated on.
+func _grade_into(p_brushes: Array, p_ground: PackedFloat32Array, p_gw: int, p_gh: int, p_min_x: float,
+		p_min_z: float, p_vs: float) -> PackedFloat32Array:
+	# COMPOSITED, NOT CHAINED. Every road brush on a shared layer grades against
+	# `composite_height_below(layer)` -- the ground below the whole layer -- so no road has ever seen
+	# another road's earthwork as ground. Feeding one road's output to the next was convenient and
+	# wrong: it made a defect in the composite look like a defect in the grade, and hid a road's batter
+	# under whatever the next road happened to write over it.
+	var fields: Array = []
+	for b: Pasture3DRoadBrush in p_brushes:
+		var mod: Pasture3DNodeRoad = null
+		for m in b.modifiers:
+			if m is Pasture3DNodeRoad:
+				mod = m
+		if mod == null:
+			continue
+		var res := b.grade_surface(mod, p_ground.duplicate(), p_gw, p_gh, p_min_x, p_min_z, p_vs)
+		if not res.is_empty():
+			fields.append(res["height"])
+	return _composite(p_ground, fields, p_gw * p_gh)
+
+
+## [Q] A road that is in a junction does not take the native fast path.
+##
+## Every other criterion in this file measures `grade_surface`, and `grade_surface` is one of TWO paint
+## routes. The other is `Pasture3DData.stamp_road_line`, taken when `_road_native_is_complete()` says the
+## stack is nothing but the road grader — which, in a scene an author actually builds, is nearly always.
+## That call grades the corridor and writes it into the layer in one step, so `grade_junction_footprints`
+## never runs on it.
+##
+## So the whole of P was true and none of it reached the editor. The junction surface was drawn as a mesh
+## and the terrain under it was never graded to match, reported as "the junction grading does not look
+## like it is getting triggered". No criterion could have caught it, because a criterion that calls the
+## slow path directly cannot observe that the slow path is not the one being called. What has to be
+## asserted is the ROUTING DECISION itself.
+##
+## The control is the same brush with its junction records removed: it must go back to claiming the fast
+## path. Without that half, `return false` unconditionally would pass — and would cost every road in
+## every scene its rasteriser for no reason.
+func _q_a_junctioned_road_refuses_the_native_fast_path() -> void:
+	print("[Q] a road in a junction refuses the native fast path")
+	var fx := _crossing_fixture()
+	var net: Pasture3DRoadNetwork = fx["net"]
+	_grade_all(fx["brushes"], 96, 96, 80.0, 80.0, 1.0)
+	net.resolve_junctions()
+	await get_tree().process_frame
+
+	var checked := 0
+	var controls := 0
+	for b: Pasture3DRoadBrush in fx["brushes"]:
+		var key := b.road_key()
+		if net.junctions_for(key).is_empty():
+			continue
+		checked += 1
+		_check("Q", not b._road_native_is_complete(),
+				"%s is in a junction and still claims the native fast path" % key)
+
+	# THE CONTROL. Clear the network's junctions and ask again: the same brush, the same stack, and now
+	# nothing for the footprint pass to do, so the fast path must come back.
+	var saved := net.junctions.duplicate()
+	net.junctions.clear()
+	for b: Pasture3DRoadBrush in fx["brushes"]:
+		controls += 1
+		_check("Q", b._road_native_is_complete(),
+				"%s has no junction and still refuses the fast path" % b.road_key())
+	net.junctions.assign(saved)
+
+	print("    %d junctioned brush(es) and %d unjunctioned control(s) asked" % [checked, controls])
+	_check("Q", checked > 0, "no brush was in a junction, so [Q] measured nothing")
+	_check("Q", controls > 0, "the control measured nothing")
+
+	(fx["terrain"] as Node).queue_free()
+
+
+## [S] Two roads that cross grade the same ground whichever of them was edited last.
+##
+## THE EDITOR DOES NOT CHAIN. Every road brush on the "Roads" layer solves and grades against
+## `composite_height_below(layer)` -- the ground BELOW the whole layer -- so no road ever sees another
+## road's earthwork as ground. `_grade_all` and `_grade_into` chain because that is convenient for a
+## gate, and chaining hides the defect this criterion is about: the order dependence is not in the GRADE,
+## it is in the WRITE. Each road hands `apply_sim_block` an absolute surface over its own corridor, and
+## where two corridors overlap the road that painted last is simply the one on the terrain.
+##
+## So this models the editor instead: grade each road ONCE against the same untouched ground, then
+## composite the results in both orders and compare. Only cells a road actually moved count as painted --
+## a grade returns the input ground unchanged outside its corridor, and treating that as a write would
+## make every road claim the whole grid.
+##
+## The fixture is a SLOPE. On the level both roads solve to the same height, the overlap agrees by
+## coincidence, and the criterion passes without the code being right -- which is what the user reported
+## as "intersections on slopes magnify the problem".
+##
+## The control is the criterion's own subject: with last-writer-wins the two composites differ, so a
+## build that has not fixed the write fails here. There is no separate control to add, because the
+## measurement IS the difference between two orders of the same inputs -- it cannot pass vacuously as
+## long as each road moved some ground, which is asserted.
+func _s_the_crossing_grades_the_same_in_either_order() -> void:
+	print("[S] two crossing roads grade the same ground in either edit order")
+	var fx := _crossing_fixture()
+	var net: Pasture3DRoadNetwork = fx["net"]
+	var gw := 96
+	var gh := 96
+	var min_x := 80.0
+	var min_z := 80.0
+	var vs := 1.0
+
+	var ground := PackedFloat32Array()
+	ground.resize(gw * gh)
+	for iz in gh:
+		for ix in gw:
+			ground[iz * gw + ix] = float(ix) * 0.5 + float(iz) * 0.2
+
+	# Run the bake -> resolve fixed point out, the way [R] does: one turn leaves the junction's surface
+	# describing the alignment from before the last bake, and comparing two orders of a surface that has
+	# not settled measures the settling, not the ordering.
+	for _cyc in 2:
+		_grade_into(fx["brushes"], ground, gw, gh, min_x, min_z, vs)
+		net.resolve_junctions()
+		await get_tree().process_frame
+
+	# Each road against the SAME ground, exactly as the editor does it.
+	var fields: Array = []
+	for b: Pasture3DRoadBrush in fx["brushes"]:
+		var mod: Pasture3DNodeRoad = null
+		for m in b.modifiers:
+			if m is Pasture3DNodeRoad:
+				mod = m
+		if mod == null:
+			continue
+		var res := b.grade_surface(mod, ground.duplicate(), gw, gh, min_x, min_z, vs)
+		if res.is_empty():
+			continue
+		fields.append(res["height"])
+	if fields.size() < 2:
+		_fail += 1
+		print("    !! fewer than two roads graded, so [S] measured nothing")
+		(fx["terrain"] as Node).queue_free()
+		return
+
+	var forward := _composite(ground, fields, gw * gh)
+	var reversed_fields: Array = fields.duplicate()
+	reversed_fields.reverse()
+	var backward := _composite(ground, reversed_fields, gw * gh)
+
+	var disagree := 0
+	var worst := 0.0
+	var worst_at := Vector2i(-1, -1)
+	for iz in gh:
+		for ix in gw:
+			var k := iz * gw + ix
+			if not (is_finite(forward[k]) and is_finite(backward[k])):
+				continue
+			var d: float = absf(forward[k] - backward[k])
+			if d > 1e-4:
+				disagree += 1
+			if d > worst:
+				worst = d
+				worst_at = Vector2i(ix, iz)
+	print("    %d cell(s) disagree between the two orders; worst %.4f m at %s"
+			% [disagree, worst, worst_at])
+	_check("S", _touched(ground, fields[0]) > 0 and _touched(ground, fields[1]) > 0,
+			"a road moved no ground at all, so [S] measured nothing")
+	_check("S", worst <= 0.01,
+			"the terrain differs by %.4f m at %s depending on which road was written last"
+			% [worst, worst_at])
+
+	(fx["terrain"] as Node).queue_free()
+
+
+## [T] A resolve that moves the junction's SURFACE asks for another bake.
+##
+## The road system is a `bake -> resolve -> bake` fixed point, and the thing that decides whether another
+## turn is needed is `junction_digest`. It carried the pins -- arc length, pin height, trim -- and not the
+## surface, so after `bake -> resolve` the junction's cut-face cross-sections described the alignment from
+## BEFORE that bake and nothing asked for the pass that would settle them. The terrain stayed graded to a
+## surface metres from the roads meeting it while the apron mesh rebuilt to the fresh numbers, which is
+## the intersection standing over the road.
+##
+## Asserted on the DECISION, not on the scheduling: `_schedule_refresh` is editor-only and does nothing
+## headless, so a criterion that waited for a rebake would pass on a build that never asks for one. What
+## can be checked is that the digest a bake was credited with differs from the digest after the surface
+## moves.
+##
+## The control is a junction whose surface has NOT moved: the digest must be unchanged, or a digest that
+## simply hashed the clock would satisfy the first half and rebake the scene forever.
+func _t_a_moved_junction_surface_asks_for_another_bake() -> void:
+	print("[T] a resolve that moves the junction surface asks for another bake")
+	var fx := _crossing_fixture()
+	var net: Pasture3DRoadNetwork = fx["net"]
+	_grade_all(fx["brushes"], 96, 96, 80.0, 80.0, 1.0)
+	net.resolve_junctions()
+	await get_tree().process_frame
+
+	var j: Pasture3DRoadJunction = null
+	for cand in net.junctions:
+		if cand.detected:
+			j = cand
+	var b: Pasture3DRoadBrush = fx["brushes"][0]
+	if j == null or j.arm_z.is_empty():
+		_fail += 1
+		print("    !! no resolved junction with arms, so [T] measured nothing")
+		(fx["terrain"] as Node).queue_free()
+		return
+
+	var before := b.junction_digest()
+	# THE CONTROL FIRST: nothing has moved, so nothing may be asked for.
+	_check("T", b.junction_digest() == before,
+			"the digest changed with nothing moved -- every bake would ask for another")
+
+	# The surface moves the way a re-solved alignment moves it: one arm's cut face lifts.
+	var saved := j.arm_z.duplicate()
+	j.arm_z[0] = saved[0] + 2.0
+	_check("T", b.junction_digest() != before,
+			"an arm's cut face moved 2 m and the digest did not change -- nothing would rebake")
+	j.arm_z = saved.duplicate()
+	_check("T", b.junction_digest() == before, "restoring the arm did not restore the digest")
+
+	var elev := j.elevation
+	j.elevation = elev + 2.0
+	_check("T", b.junction_digest() != before,
+			"the junction elevation moved 2 m and the digest did not change")
+	j.elevation = elev
+
+	print("    digest tracks %d arm(s) and the elevation" % saved.size())
+	(fx["terrain"] as Node).queue_free()
+
+
+## Last-writer-wins over `p_ground`: each field in turn overwrites the cells it moved.
+func _composite(p_ground: PackedFloat32Array, p_fields: Array, p_n: int) -> PackedFloat32Array:
+	var out := p_ground.duplicate()
+	for f: PackedFloat32Array in p_fields:
+		for k in p_n:
+			var v: float = f[k]
+			if is_finite(v) and absf(v - p_ground[k]) > 1e-6:
+				out[k] = v
+	return out
+
+
+## How many cells a graded field moved off the ground it was graded from.
+func _touched(p_ground: PackedFloat32Array, p_field: PackedFloat32Array) -> int:
+	var n := 0
+	for k in p_ground.size():
+		if is_finite(p_field[k]) and absf(p_field[k] - p_ground[k]) > 1e-6:
+			n += 1
+	return n
+
+
+## Grade a flat field with every brush in `p_brushes`, in the order given, chaining the surface.
+func _grade_all(p_brushes: Array, p_gw: int, p_gh: int, p_min_x: float, p_min_z: float,
+		p_vs: float) -> PackedFloat32Array:
+	var z := PackedFloat32Array()
+	z.resize(p_gw * p_gh)
+	# A SLOPE, not a plane. On level ground every road solves to the same height and the order swap would
+	# be trivially satisfied, which is the fixture passing rather than the code.
+	for iz in p_gh:
+		for ix in p_gw:
+			z[iz * p_gw + ix] = float(ix) * 0.08 + float(iz) * 0.03
+	for b: Pasture3DRoadBrush in p_brushes:
+		var mod: Pasture3DNodeRoad = null
+		for m in b.modifiers:
+			if m is Pasture3DNodeRoad:
+				mod = m
+		if mod == null:
+			continue
+		var res := b.grade_surface(mod, z, p_gw, p_gh, p_min_x, p_min_z, p_vs)
+		if not res.is_empty():
+			z = res["height"]
+	return z

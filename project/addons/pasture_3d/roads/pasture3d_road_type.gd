@@ -143,6 +143,24 @@ enum DividerType { NONE, SINGLE_DASHED, SINGLE_SOLID, DOUBLE_SOLID, DASHED_SOLID
 		verge_width = maxf(v, 0.0)
 		emit_changed()
 
+## Kerb-return radius where this road meets another, metres. The sweep a vehicle turns through at an
+## intersection: a motorway slip road wants a long one, a village lane almost none.
+##
+## ---- THIS MAKES A JUNCTION BIGGER, NOT ROUNDER IN PLACE ----
+##
+## The corner between two arms is a corner of the GAP between the roads, not of the pavement, so a kerb
+## return ADDS pavement — and its tangent points sit `radius / tan(phi/2)` back along each road. The
+## solver therefore trims every arm that much FURTHER back to make room for it
+## (`Pasture3DRoadMesher.fillet_allowance`), which widens the footprint and shortens the ribbons.
+## Raising it is not free, and a value larger than the roads are long is not buildable.
+##
+## Which road's value a junction uses is decided by PRIORITY, not by this being on a type: see
+## `Pasture3DRoadJunctionSolver._corner_radius_for`.
+@export var corner_radius: float = 6.0:
+	set(v):
+		corner_radius = maxf(v, 0.0)
+		emit_changed()
+
 @export_group("Surface")
 ## Physics surface published to consumers: &"tarmac", &"gravel", &"snow", &"dirt". A StringName rather
 ## than an enum so a project can add its own without editing the addon.
@@ -197,4 +215,9 @@ func grading_signature() -> Array:
 		lane_width, lane_count, shoulder_width, crown, verge_width,
 		cut_batter, fill_batter,
 		max_grade, max_superelevation, design_speed,
+		# IN, despite being a junction setting rather than a cross-section one: the kerb return is paid
+		# for by trimming every arm further back, and the trim-back is where the grader stops writing.
+		# So changing it moves the baked height at every junction this road takes part in, and a stamp
+		# key that could not see it would serve a cached bake of the old footprint.
+		corner_radius,
 	]

@@ -56,6 +56,38 @@ enum ControlType { INHERIT = -1, UNCONTROLLED = 0, PRIORITY = 1, STOP = 2, SIGNA
 ## being detected is kept (its overrides may be wanted again) but marked, rather than deleted outright.
 @export var detected: bool = true
 
+# ---- ARMS (P9a-0) -----------------------------------------------------------------------------------
+#
+# An ARM is not a participant. A road that CROSSES the junction has two arms, one either side; a road
+# that ENDS at it has one. So a plain crossroads of two roads has four arms, and `road_keys.size()` is
+# the wrong number to walk when the question is about geometry rather than about who meets here.
+#
+# Stored rather than re-derived because three consumers need the same answer — the footprint polygon, the
+# gizmo, and the markings that will be drawn on it — and a consumer that recomputed an arm direction from
+# the plan would be free to disagree with the trim-back the solver already decided from it.
+
+## Outward unit direction of each arm, in world XZ: away from `center`, along that road.
+@export var arm_dirs: PackedVector2Array = PackedVector2Array()
+## Index into `road_keys` of the road each arm belongs to, parallel to `arm_dirs`.
+@export var arm_roads: PackedInt32Array = PackedInt32Array()
+## Half-width of each arm, metres, parallel to `arm_dirs`.
+@export var arm_halfs: PackedFloat32Array = PackedFloat32Array()
+## Each arm's CUT FACE cross-section, parallel to `arm_dirs`: the road's centreline height there, its
+## superelevation, and its crown.
+##
+## Published by the solver rather than read back from the alignments, and that is the whole point. An
+## alignment is solved against the surface ENTERING its bake, which includes whatever the other roads at
+## this junction have already graded — so re-reading one gives a slightly different answer depending on
+## which road baked first, and the intersection's shape wobbled with scene order. These are resolved
+## once, from one snapshot, and every consumer reads the same numbers. Reconcile, don't rebuild.
+@export var arm_z: PackedFloat32Array = PackedFloat32Array()
+@export var arm_banks: PackedFloat32Array = PackedFloat32Array()
+@export var arm_crowns: PackedFloat32Array = PackedFloat32Array()
+
+## Resolved kerb-return radius, metres — the highest-priority participant's, or the network default when
+## they tie and disagree. Solver output; `corner_radius_override` is the user's.
+@export var corner_radius: float = 0.0
+
 @export_group("Lane graph")
 ## The legal paths through this junction, one per (incoming lane, outgoing lane) pair the generator
 ## allowed. Solver output EXCEPT each connector's own `allowed_override`, which is reconciled by id and
@@ -95,6 +127,69 @@ var phase_elapsed: float = 0.0
 ## Suppress this junction entirely — the roads simply cross, ungraded and unconnected. The escape hatch
 ## for a detection the author disagrees with, and the reason detection never has to be perfect.
 @export var disabled: bool = false
+
+## Override the kerb-return radius here, metres. Negative inherits the resolved one. Unlike
+## `radius_override` this may make the junction SMALLER, because a smaller kerb return does not put two
+## roads' grading in the same cells — it only makes the turn tighter.
+@export var corner_radius_override: float = -1.0
+
+
+## Effective kerb-return radius, honouring the override.
+func effective_corner_radius() -> float:
+	return corner_radius_override if corner_radius_override >= 0.0 else corner_radius
+
+
+## The arms, as `Pasture3DRoadMesher.plan_footprint` wants them: outward direction, the distance at
+## which that arm's cut face sits, and its half-width.
+##
+## The trim comes from `trim_back_for` rather than from a stored per-arm number, so an author widening
+## the footprint with `radius_override` pushes the polygon's cut faces out with it — the same one place
+## every other consumer already asks.
+func footprint_arms() -> Array:
+	var out: Array = []
+	for i in arm_dirs.size():
+		if i >= arm_roads.size() or i >= arm_halfs.size():
+			break
+		var ri := arm_roads[i]
+		if ri < 0 or ri >= road_keys.size():
+			continue
+		out.append({
+			"dir": arm_dirs[i],
+			"trim": trim_back_for(String(road_keys[ri])),
+			"half": arm_halfs[i],
+		})
+	return out
+
+
+## True when the author has made a choice here that a re-detection could not reproduce.
+##
+## ---- THIS IS WHAT MAKES AN UNDETECTED RECORD WORTH KEEPING ----
+##
+## `Pasture3DRoadJunctionSolver.resolve` keeps a junction that stops being detected rather than deleting
+## it, because "the roads may be dragged back together in a moment, and throwing away the overrides in
+## between would be a silent loss". That reasoning is sound and it is also conditional: it is a reason to
+## keep the OVERRIDES, not a reason to keep the record. A stale junction that was never overridden has
+## nothing to restore — every field on it is solver output that the next detection would recompute
+## identically — so keeping it preserves nothing and costs a saved resource, a gizmo ring and a line in
+## the scene file, permanently and without bound.
+##
+## That was not a hypothetical: `demo_road_network.tscn` accumulated thirteen undetected records, none of
+## which carried a single override, and the only way to clear them was to delete the road network.
+##
+## The predicate is therefore the exact set of fields under `@export_group("Overrides")` plus the one
+## override that lives on a connector. Everything else is Resolved or Lane graph — solver output by
+## definition, and none of it is evidence of an authored decision.
+func has_authored_override() -> bool:
+	if control != ControlType.INHERIT or major_override >= 0 or radius_override >= 0.0 or disabled:
+		return true
+	# `allowed_override` is the one authored field the solver is forbidden to write (see
+	# Pasture3DRoadLaneConnector), so a banned turn is an authored decision exactly like the four above
+	# and must hold the record open the same way. Missing it would silently drop "no left turn here" the
+	# first time the roads stopped crossing.
+	for c in connectors:
+		if c != null and c.allowed_override != Pasture3DRoadLaneConnector.Tri.INHERIT:
+			return true
+	return false
 
 
 ## The id a junction between these roads at this place would have. Built from the SORTED participant

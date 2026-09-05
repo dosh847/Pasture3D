@@ -621,6 +621,89 @@ concatenation — split at any kernel boundary and add the new chunk to the `set
 Gate it by comparing GPU against CPU **for the auto path specifically**, and run it windowed: headless
 has no local RenderingDevice, so a headless run proves nothing and must report NO-SIGNAL rather than pass.
 
+### 3.6 Parity ends where the parameters come in, not where the kernel starts
+
+`GraphHydraulicAccelerationGate` measured **exactly zero** divergence between the native hydraulic
+kernel and the GDScript oracle over one iteration, and **0.00079 m** over fifteen, against a 0.0002 m
+budget. Both readings were correct, and together they say something the single-pass one alone does not:
+if a pass is bit-exact, a later pass can only diverge if something *outside* the pass differs.
+
+It was `ErosionHydraulicParams` storing `rain_rate`, `evaporation_rate`, `deposition_speed` and
+`min_slope` as `float`. The oracle reads them out of a `Dictionary`, where they are Variant **doubles**;
+the solver received `0.05f`, which is `0.05000000074505806`. Every intermediate in the kernel was
+already `double` and every grid write already rounded to `float` exactly as the oracle does — the care
+was all there, and it was defeated at the struct.
+
+Per-iteration divergence, before the fix:
+
+| iteration | max &#124;dh&#124; | cells differing |
+|---|---|---|
+| 1 | 0.000000000 | 0 |
+| 2 | 0.000000954 | 39 |
+| 8 | 0.000002384 | 723 |
+| 15 | 0.000793707 | 2010 |
+
+One float32 ULP at pass 2, doubling from there. The amplifier is any threshold branch — here
+`sed_c < cap`, which turns a last-bit difference into a whole erode-or-deposit decision for that cell.
+
+**Rules.**
+
+* **Carry parameters at the width the kernel computes in.** A params struct is part of the numerical
+  contract, not plumbing. If the kernel is `double` internally, the struct is `double`, and the
+  `from_dict` cast is `(double)`, because that is the width the Variant already holds.
+* **A float boundary is invisible for one iteration.** Anything iterative — erosion, relaxation,
+  flow routing — hides it until the ULP crosses a branch. Never conclude parity from a single pass.
+* **Widths at the GPU boundary are a separate question.** The push constants still cast back to
+  `float` where they always did, and the graph path is unaffected because its parameters arrive from a
+  float32 compiled program — a float widened to double is the same number. Fix the width where the
+  *reference* is, not everywhere.
+* **A tolerance sized for a drift is a tolerance that cannot see the drift's cause.** `[A2]`'s 2.0e-4
+  budget existed to accommodate this; at that width it could not have reported the problem until it was
+  four times over. Once the kernel was exact, its budget became the single-pass one.
+
+### 3.7 A Dev/GD twin that does not run its oracle
+
+`Pasture3DGraphNodeDevHydraulicParticle` and `…DevHydraulicStreamLog` both extend
+`Pasture3DGraphSolverNode` — LIVE/FROZEN toggle, Bake button, solver cache, staleness — and defined
+neither `eval_grid` nor `eval_grid_channels`. They inherited `Pasture3DGraphNode.eval_grid`, which
+returns the first input unchanged. The entire freeze protocol on them was decoration over a node that
+never solved, and each file's `static func solve_oracle(...)` — the reason the file exists — was
+reachable only from a parity gate calling the static directly.
+
+**Rule.** A Dev twin's `solve_oracle` is what the node IS, so it has to be what the node RUNS. Wire it:
+`eval_grid_channels` packs the `@export`s into the params dictionary and calls `solve_oracle` through
+`solve_cached`, and `eval_grid` returns channel 0 — the shape `dev_erosion_hydraulic` and the production
+twins already use. Spell out every key the oracle reads; a missing key is a slider that silently does
+nothing.
+
+`GraphSolverFreezeGate [E]` is the criterion for this: *a node that offers the freeze has a solve of its
+own to freeze.* It is worth noticing what `[B]` and `[C]` did in the meantime — they reported those two
+solvers freezing and re-baking correctly, because freezing a pass-through does behave impeccably.
+
+### 3.8 More gate discipline, from a full sweep of `bench/*.tscn`
+
+The bullets in 3.4 hold. Four more, each paid for on 2026-09-04:
+
+* **A control that requires a residual expires when the code becomes exact.** `DLAGate [CR]` failed on
+  "the reference op shows no residual at all" — the native and GDScript readers had become
+  bit-identical, and a control asserting that a shipped op *always* differs a little now fails on the
+  readers being right. Hold a reference to the same tolerance as the subject, and prove the comparison
+  discriminates with a deliberate desync instead (there, an oracle reading a 128² field against a 512²
+  bake: 4.04 m apart).
+* **A criterion that cannot run must skip, not fail.** `MaterialParamsCheck` and
+  `WaterVariantWarningCheck` read shader parameters that the headless display server never compiles.
+  Their internal vacuity guards worked perfectly and reported red — but a sweep reads red as a defect,
+  when the only established fact is that the renderer was absent. Detect
+  `DisplayServer.get_name() == "headless"`, say so, and quit 0. The guard stays for windowed runs.
+* **A `SceneTree` script must not have a `.tscn`.** `DlaParamAudit` extends `SceneTree` and documents
+  `--script`; a scene attaching it to a `Node` never runs `_init` as a main loop, so `quit()` is never
+  reached and it hangs forever — taking any sweep of `bench/*.tscn` with it. The scene was deleted.
+* **A stale fixture fails loudly and means nothing.** Five water gates build their world on
+  `Pasture3D.ocean_*`, which the ocean extraction moved to `Pasture3DOcean`. They render an empty frame
+  and their controls correctly refuse it. Their headers now say so; see PASTURE3D_WATER_GUIDE.md §9.
+
+---
+
 ## 4. Current Registry of Native Nodes (All 29 Production Nodes)
 
 | Category | Node Name | Op Tag | C++ Native Implementation | Whole-Graph Opcode |

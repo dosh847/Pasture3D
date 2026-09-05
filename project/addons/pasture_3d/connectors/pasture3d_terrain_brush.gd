@@ -3767,6 +3767,19 @@ func _stack_forces_gdscript() -> bool:
 ## about: the brush paints, nothing errors, and the noise or erosion step the user added simply has no
 ## effect with nothing said about why.
 ##
+## A ROAD IN A JUNCTION IS THE SAME KIND OF INCOMPLETENESS, for the same reason, and that is why it is
+## answered here rather than beside the fast path. `stamp_road_line` grades the corridor and writes the
+## result into the layer in one call; there is no point between the grade and the write where the
+## junction footprint could be laid over it. And the footprint is not the corridor's to compute: it comes
+## from `Pasture3DRoadNetwork.junction_surface`, interpolated over the same triangle fan the polygon MESH
+## uses, so that ground and mesh are one definition read twice. Reimplementing that fan in the kernel
+## would make it two definitions that agree to a tolerance, and a tolerance there is road surface showing
+## through the terrain.
+##
+## So a junctioned road bakes in GDScript, entirely — slower, and correct. That is the same trade the
+## modifier-stack rule above makes, and the alternative is the failure it warns about: the brush paints,
+## nothing errors, and `grade_junction_footprints` simply has no effect with nothing said about why.
+##
 ## This is the ONE place the question is answered. _paint_flat_footprint gates its fast path on it too,
 ## so the decision to take the native branch and the decision to allow it cannot drift apart.
 func _road_native_is_complete() -> bool:
@@ -3777,7 +3790,14 @@ func _road_native_is_complete() -> bool:
 			active += 1
 			if m.op() == &"road":
 				road += 1
-	return active == 1 and road == 1
+	if active != 1 or road != 1:
+		return false
+	if self is Pasture3DRoadBrush:
+		var rb := self as Pasture3DRoadBrush
+		var net := rb.road_network()
+		if net != null and not net.junctions_for(rb.road_key()).is_empty():
+			return false
+	return true
 
 
 ## Grid of the height of layers BELOW this brush's own, over the spline grid (origin min_x/min_z, step vs,

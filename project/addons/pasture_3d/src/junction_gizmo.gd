@@ -90,6 +90,11 @@ func _redraw(p_gizmo: EditorNode3DGizmo) -> void:
 	# Approaches are looked up by road key, which is what the junction stores. Built once per redraw
 	# rather than per junction: a network with twenty roads and twenty junctions would otherwise walk
 	# the scene four hundred times.
+	# Read once rather than per junction. `get` rather than a typed access because the gizmo is loaded by
+	# the plugin and must not hard-depend on the network script's class, and `true` is the answer for a
+	# network from before the property existed.
+	var discs: bool = bool(net.get("show_junction_discs") if net.get("show_junction_discs") != null else true)
+
 	var by_key := {}
 	for b in net.call("road_brushes"):
 		by_key[b.call("road_key")] = b
@@ -103,7 +108,8 @@ func _redraw(p_gizmo: EditorNode3DGizmo) -> void:
 		elif j.disabled:
 			colour = DISABLED
 		var centre: Vector3 = to_local * Vector3(j.center.x, j.elevation + LIFT, j.center.y)
-		p_gizmo.add_lines(_circle(centre, j.effective_radius()), _material_for(colour))
+		if discs:
+			p_gizmo.add_lines(_circle(centre, j.effective_radius()), _material_for(colour))
 
 		# One spoke per participant, out to where that road's grading actually stops. A spoke that does
 		# not reach the ring, or overshoots it, is the trim-back being wrong — which is the failure this
@@ -131,6 +137,16 @@ func _redraw(p_gizmo: EditorNode3DGizmo) -> void:
 				Sprites._dot_sprite(p_gizmo, end, Sprites.POINT_SIZE, spoke, false, true)
 
 		if not j.detected or j.disabled:
+			continue
+		if not discs:
+			# EVERYTHING INSIDE THE FOOTPRINT GOES WITH THE RING. The lane connectors, the conflict marks
+			# and the stop lines are all drawn across the pavement at junction elevation, and they are
+			# the harder half to see past -- a ring is one line at the edge, the lane graph is a dozen
+			# curves over the exact surface being judged. Turning off the ring and leaving them was
+			# answering a different question from the one being asked.
+			#
+			# The arms stay: a spoke says where a road's grading stops, which is what you are checking
+			# when you are looking at the ground rather than at the junction.
 			continue
 		# The lane graph. Drawn after the arms so it reads on top of them, and only for a live junction:
 		# the connectors of a disabled junction are kept but are not paths anything may take.

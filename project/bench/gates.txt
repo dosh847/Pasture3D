@@ -347,3 +347,36 @@ bench/RoadSmoothGate.tscn
 #                        red. Both were repaired to run again (they had been dead against the engine for
 #                        some time) and both now complete headless. Turning either into a real gate means
 #                        deciding what it CLAIMS, which is a separate job nobody has done.
+
+# --- Full sweep of bench/*.tscn, 2026-09-04 -----------------------------------------------------------
+#
+# 164 scenes run headless (0 failures) and 30 windowed. What it taught, so the next sweep is cheaper:
+#
+#   DlaParamAudit had a .tscn AND extends SceneTree. Attached to a Node in a scene, `_init` never runs
+#                        as a main loop, `quit()` is never reached, and the scene hangs forever - which
+#                        stalls any sweep that walks bench/*.tscn. The scene is deleted; the audit runs
+#                        the way its header always said, with --script. A SceneTree script must not have
+#                        a scene.
+#
+#   MaterialParamsCheck, WaterVariantWarningCheck - windowed only, and they now SAY so instead of
+#                        failing. Both read shader parameters the headless display server never
+#                        compiles, so their own vacuity guards fired and reported red. That is correct
+#                        behaviour for the criterion and the wrong thing for a sweep to read, so both
+#                        detect DisplayServer.get_name() == "headless", print SKIPPED and quit 0. The
+#                        guard still fires on a windowed run that measures nothing.
+#
+#   WaterPhase2Gate, WaterPhase3Gate, WaterPhase4Gate, WaterPhase5Gate, WaterBodiesPhase0Baseline -
+#                        RED FOR A KNOWN REASON. Their fixtures predate the ocean extraction and build
+#                        the world as `terrain.ocean_material` / `terrain.get_water_time()`, which is
+#                        now only _legacy_ocean. They render an empty frame and their controls refuse
+#                        it, correctly. To be rewritten against Pasture3DOcean with the water-brush
+#                        refactor, not ported twice. See PASTURE3D_WATER_GUIDE.md §9 and each header.
+#                        WaterPhase1Gate is current and green: its one failure was a stale probe for
+#                        `_target_pos`, which became an instance uniform when water got split-screen
+#                        clipmaps, and instance uniforms are not in get_shader_uniform_list().
+#
+#   Windowed-only, still: LegacyOceanScene and SimplePastureStallGate never reach a verdict even
+#                        windowed - they are long-running scenes rather than gates. The rest of the
+#                        Water*/WaterBodies* family still awaits RenderingServer.frame_post_draw
+#                        unconditionally, so it is windowed-only until somebody applies the
+#                        WaterBodiesPhase4Gate _settle fix to each.

@@ -26,6 +26,7 @@ func _ready() -> void:
 	_f_nan_outside_the_loop_survives()
 	_g_a_deep_cut_is_not_clipped_into_a_wall()
 	_h_a_corner_is_banked_away_from_its_centre()
+	_i_a_batter_does_not_cut_through_another_road()
 	print("\n=== %s (%d failures) ===\n" % ["ROAD GRADER PASS" if _fail == 0 else "ROAD GRADER FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -564,3 +565,93 @@ func _h_a_corner_is_banked_away_from_its_centre() -> void:
 	if absf(s_in - s_out) > 1e-4:
 		_fail += 1
 		print("    !! a straight road is not symmetric, so the corner comparison proves nothing")
+
+
+# ---- I ------------------------------------------------------------------------------------------
+
+## [I] A batter does not cut through another road's formation.
+##
+## The corridor is as wide as the batter needs — `edge_d + rise/slope + verge`, which for a road in an
+## 8 m cutting is seventeen metres of sideways reach. Two roads closer together than that sweep their
+## batters across each other's carriageway. Nothing about the geometry is wrong; what is wrong is that
+## the second grade OVERWRITES the first, so whichever road bakes last wins and the earlier road is left
+## spanning a trench the later one dug under it.
+##
+## ---- WHY THE FIXTURE IS TWO PARALLEL ROADS AND NOT A CROSSING ----
+##
+## A crossing was the first fixture and it was the wrong one: a junction gives each approach a `skip`
+## over the footprint, and at a SQUARE crossing that band happens to cover the whole of the other road's
+## carriageway, so the skip alone hides the fault. It stops covering it the moment the crossing is
+## oblique — the two corridors then overlap in the wedge between the arms, outside both skip bands — and
+## it never covered the case here, where two roads run near each other and never meet at all.
+##
+## So the claim is stated without junctions in it: 12 m apart, no crossing, no skip, and the road in the
+## cutting must not lower the road at grade. Junction geometry is asserted where it lives, in
+## `RoadJunctionGate` and `RoadJunctionPolygonGate`.
+##
+## The control is the same pair with `protect` withheld, and it is not a formality — it is the
+## measurement that started this: the second road cuts the full depth of its cutting out of the first
+## road's carriageway. Without it the criterion would pass just as happily on a grader that never had
+## the fault.
+func _i_a_batter_does_not_cut_through_another_road() -> void:
+	print("[I] a batter does not cut through another road's formation")
+	var gw := 81
+	var gh := 81
+	var min_x := -40.0
+	var min_z := -40.0
+	var flat := PackedFloat32Array()
+	flat.resize(gw * gh)
+	flat.fill(0.0)
+
+	var at_grade := PackedVector2Array([Vector2(0.0, -40.0), Vector2(0.0, 40.0)])
+	var in_cutting := PackedVector2Array([Vector2(12.0, -40.0), Vector2(12.0, 40.0)])
+	var n := 81
+	var opts := {"crown": 0.0, "cut_batter": 1.0, "fill_batter": 0.6}
+
+	var first := Pasture3DRoadGrader.grade(flat, gw, gh, min_x, min_z, VS, at_grade,
+			_level_alignment(n, 0.0), _widths(n, 4.0), _widths(n, 1.0), _widths(n, 4.0),
+			PackedByteArray(), opts)
+	var after_first: PackedFloat32Array = first["height"]
+	var bed: PackedFloat32Array = first["roadbed"]
+
+	# The mask the brush builds from the other road's plan, here stated directly: every cell within the
+	# first road's formation. `half_width + shoulder` is the grader's own `edge_d`, deliberately — the
+	# thing protected has to be exactly the thing the grader calls built road.
+	var protect := PackedByteArray()
+	protect.resize(gw * gh)
+	for iz in gh:
+		for ix in gw:
+			if absf(min_x + float(ix)) <= 5.0:
+				protect[iz * gw + ix] = 1
+
+	var guarded := opts.duplicate()
+	guarded["protect"] = protect
+	var worst := _worst_drop(after_first, Pasture3DRoadGrader.grade(after_first, gw, gh, min_x, min_z,
+			VS, in_cutting, _level_alignment(n, -8.0), _widths(n, 4.0), _widths(n, 1.0),
+			_widths(n, 4.0), PackedByteArray(), guarded)["height"], bed)
+	var control := _worst_drop(after_first, Pasture3DRoadGrader.grade(after_first, gw, gh, min_x, min_z,
+			VS, in_cutting, _level_alignment(n, -8.0), _widths(n, 4.0), _widths(n, 1.0),
+			_widths(n, 4.0), PackedByteArray(), opts)["height"], bed)
+	print("    protected: %d cell(s) lowered, worst %.4f m" % [worst[1], worst[0]])
+	print("    control (no protect mask): %d cell(s) lowered, worst %.4f m" % [control[1], control[0]])
+	if worst[0] > 1e-3:
+		_fail += 1
+		print("    !! the second road cut %.4f m out of the first road's carriageway" % worst[0])
+	if control[0] <= 1e-3:
+		_fail += 1
+		print("    !! the control did not reproduce the overwrite, so [I] proves nothing")
+
+
+## `[worst drop, cells lowered]` over the cells `p_bed` marks as carriageway.
+func _worst_drop(p_before: PackedFloat32Array, p_after: PackedFloat32Array,
+		p_bed: PackedFloat32Array) -> Array:
+	var worst := 0.0
+	var count := 0
+	for i in p_bed.size():
+		if p_bed[i] < 0.5:
+			continue
+		var drop: float = p_before[i] - p_after[i]
+		if drop > 1e-3:
+			count += 1
+			worst = maxf(worst, drop)
+	return [worst, count]
