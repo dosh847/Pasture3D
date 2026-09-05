@@ -384,3 +384,269 @@ static func _recompute_normals(p_verts: PackedVector3Array, p_indices: PackedInt
 	for i in p_normals.size():
 		var n := p_normals[i]
 		p_normals[i] = n.normalized() if n.length_squared() > 1e-12 else Vector3.UP
+
+
+# ---- THE JUNCTION FOOTPRINT (P9a-0) -----------------------------------------------------------------
+#
+# See PASTURE3D_ROAD_JUNCTION_PAINT_AND_SMOOTHING_SPEC.md 2.2. `build_apron` lays a DISC over the
+# footprint; this lays the polygon the arms actually bound. An arm's cut end is a flat, full-width face,
+# a disc and a chord meet at two points, and no radius fixes that: grow the disc to catch an arm's
+# corners and it grows equally in the directions where no road runs.
+#
+# ---- THE CORNER BETWEEN TWO ARMS IS REFLEX, AND THAT IS THE WHOLE GEOMETRY ----
+#
+# Take a square crossroads of half-width w. Each road is trimmed back to w, so the pavement is a PLUS
+# shape, and the vertex where two arms meet — at (w, w) — is a corner of the GAP between them, not of
+# the pavement. It is reflex as seen from inside.
+#
+# Rounding it is therefore a kerb return, and a kerb return ADDS pavement: the arc tangent to both road
+# edges is centred out in the gap at (w+r, w+r) and bulges back toward the junction, filling the flare a
+# vehicle turns through. Rounding it the other way — cutting the corner off, which is what "fillet"
+# suggests — would eat the pavement exactly where a turning vehicle needs it.
+#
+# The consequence is the one thing to keep hold of: the tangent points sit at `r / tan(phi/2)` from the
+# vertex ALONG EACH ROAD, so a fillet only fits if the arms are trimmed back that much further than the
+# point where their edges cross. `fillet_allowance` is that distance, and the solver adds it to the
+# trim-back — which is why a corner radius makes an intersection bigger rather than rounder in place.
+#
+# ---- WHY A FAN FROM THE CENTRE TRIANGULATES IT ----
+#
+# The boundary is generated arm by arm in angular order, every vertex lies outward of the centre along
+# its own arm's direction, and the fillets bulge outward rather than crossing it. So the polygon is
+# star-shaped about `p_center` by construction and a fan is valid — no ear-clipping, no library, and no
+# way for a degenerate arm to produce a self-intersecting mesh rather than an empty one.
+
+## Angles this close to straight are not a corner: `1 / tan(phi/2)` diverges as the arms become
+## collinear, and two roads leaving at 2 degrees to each other have no kerb return between them.
+const FILLET_MIN_ANGLE: float = 0.05
+
+## Points along each fillet arc. Six is enough that a 10 m kerb return is smooth at the size an
+## intersection is actually viewed from, and the whole polygon stays a few dozen vertices.
+const FILLET_SEGMENTS: int = 6
+
+
+## How much further back an arm must be trimmed for a corner radius of `p_radius` to fit between two
+## arms whose outward directions differ by `p_phi` radians.
+##
+## Returns 0 for a radius of 0 and for an angle too shallow to be a corner. This is the number that makes
+## `corner_radius` cost something: the solver adds it to the trim-back, so a bigger kerb return opens a
+## bigger hole for the polygon to fill rather than rounding the one already there.
+static func fillet_allowance(p_radius: float, p_phi: float) -> float:
+	if p_radius <= 0.0 or p_phi < FILLET_MIN_ANGLE or p_phi > PI - FILLET_MIN_ANGLE:
+		return 0.0
+	return p_radius / tan(p_phi * 0.5)
+
+
+## The world-XZ boundary of a junction footprint, counter-clockwise.
+##
+## `p_arms` is one Dictionary per ARM — not per road. A road that crosses the junction contributes two,
+## one either side; a road that ends at it contributes one. Each carries:
+##   dir   Vector2 — unit, pointing OUT of the junction along that arm
+##   trim  float   — distance from `p_center` at which that arm's cut face sits
+##   half  float   — that arm's half-width
+##
+## Returns an empty array for fewer than two usable arms, which is the same answer `build_apron` gives
+## for a zero radius: nothing to build rather than something degenerate.
+static func plan_footprint(p_center: Vector2, p_arms: Array, p_corner_radius: float = 0.0,
+		p_segments: int = FILLET_SEGMENTS) -> PackedVector2Array:
+	var arms := _ordered_arms(p_arms)
+	var out := PackedVector2Array()
+	if arms.size() < 2:
+		return out
+	for i in arms.size():
+		var a: Dictionary = arms[i]
+		var b: Dictionary = arms[(i + 1) % arms.size()]
+		var da: Vector2 = a["dir"]
+		var db: Vector2 = b["dir"]
+		# Rotating the outward direction by +90 degrees gives the side of INCREASING angle, so walking
+		# the arms in increasing angle and emitting the -n corner before the +n corner walks the whole
+		# boundary counter-clockwise without ever asking which way round we are going.
+		var na := Vector2(-da.y, da.x)
+		var nb := Vector2(-db.y, db.x)
+		var a_cw: Vector2 = p_center + da * float(a["trim"]) - na * float(a["half"])
+		var a_ccw: Vector2 = p_center + da * float(a["trim"]) + na * float(a["half"])
+		var b_cw: Vector2 = p_center + db * float(b["trim"]) - nb * float(b["half"])
+		_push(out, a_cw)
+		_push(out, a_ccw)
+		_append_fillet(out, a_ccw, da, b_cw, db, p_corner_radius, p_segments)
+	# The walk closes on itself, so the final fillet can land back on the first vertex.
+	while out.size() > 1 and out[0].distance_to(out[out.size() - 1]) <= 1e-4:
+		out.remove_at(out.size() - 1)
+	# ---- THE ACUTE-CROSSING FALLBACK ----
+	#
+	# The trim-back is `other_half / sin(theta)`, which DIVERGES as a crossing sharpens: two roads meeting
+	# at 20 degrees are each cut back nearly three times as far as at a square crossing. Past a point the
+	# two arms' cut faces reach past each other, the arm-by-arm walk threads between them, and the boundary
+	# folds over itself. A fan over a folded boundary is not a wrong shape, it is inside-out triangles.
+	#
+	# The hull is honest here rather than merely safe: at an angle sharp enough to fold, the arms are so
+	# nearly parallel that the true pavement outline IS very close to convex, and the two shapes differ by
+	# slivers. At every angle where they would differ meaningfully the walk does not fold, so the fallback
+	# never fires. Tested rather than assumed — see `RoadJunctionPolygonGate` [F].
+	if not _is_simple(out):
+		var hull := Geometry2D.convex_hull(out)
+		# `convex_hull` closes the ring by repeating the first point, which has to be dropped: a duplicated
+		# vertex is a zero-area triangle in the fan and a degenerate normal. Its winding already matches the
+		# walk's — MEASURED, not assumed, because reversing it is invisible until the surface turns out to
+		# be drawn only from underneath, and gate [F] asserts the signed area rather than trusting either.
+		if hull.size() > 1 and hull[0].distance_to(hull[hull.size() - 1]) <= 1e-4:
+			hull.remove_at(hull.size() - 1)
+		return hull
+	return out
+
+
+## True when no two non-adjacent edges of the ring cross. Adjacent edges share an endpoint by
+## construction, and two arms meeting exactly at a square corner share a vertex, so only a STRICT
+## interior crossing counts.
+static func _is_simple(p_ring: PackedVector2Array) -> bool:
+	var n := p_ring.size()
+	if n < 4:
+		return true
+	for i in n:
+		for j in range(i + 1, n):
+			if (j + 1) % n == i or (i + 1) % n == j:
+				continue
+			var a0 := p_ring[i]
+			var a1 := p_ring[(i + 1) % n]
+			var b0 := p_ring[j]
+			var b1 := p_ring[(j + 1) % n]
+			var r := a1 - a0
+			var sg := b1 - b0
+			var denom := r.cross(sg)
+			if absf(denom) < 1e-12:
+				continue
+			var qp := b0 - a0
+			var t := qp.cross(sg) / denom
+			var u := qp.cross(r) / denom
+			if t > 1e-6 and t < 1.0 - 1e-6 and u > 1e-6 and u < 1.0 - 1e-6:
+				return false
+	return true
+
+
+## The arms, normalised and sorted by the angle of their outward direction. Anything degenerate is
+## dropped here rather than guarded against at every use.
+static func _ordered_arms(p_arms: Array) -> Array:
+	var out: Array = []
+	for a in p_arms:
+		if not (a is Dictionary) or not a.has("dir"):
+			continue
+		var d: Vector2 = a["dir"]
+		if not d.is_finite() or d.length_squared() < 1e-12:
+			continue
+		d = d.normalized()
+		out.append({
+			"dir": d,
+			"trim": maxf(float(a.get("trim", 0.0)), 0.0),
+			"half": maxf(float(a.get("half", 0.01)), 0.01),
+			"ang": d.angle(),
+		})
+	out.sort_custom(func(x, y): return float(x["ang"]) < float(y["ang"]))
+	return out
+
+
+## Append the boundary strictly BETWEEN one arm's counter-clockwise corner and the next arm's clockwise
+## corner: the kerb return, or the bare vertex where their edges cross when no radius fits.
+static func _append_fillet(p_out: PackedVector2Array, p_from: Vector2, p_from_dir: Vector2,
+		p_to: Vector2, p_to_dir: Vector2, p_radius: float, p_segments: int) -> void:
+	var hit := _ray_intersect(p_from, p_from_dir, p_to, p_to_dir)
+	if hit.is_empty():
+		return # parallel arms: the two cut faces face each other and there is no corner between them
+	var c: Vector2 = hit[0]
+	var phi := acos(clampf(p_from_dir.dot(p_to_dir), -1.0, 1.0))
+	if phi < FILLET_MIN_ANGLE or phi > PI - FILLET_MIN_ANGLE:
+		_push(p_out, c)
+		return
+	# How far each cut face already sits beyond the vertex, along its own road. This is what the
+	# solver's fillet allowance buys, and with an allowance of zero it is zero: the arms meet at a
+	# square corner and no arc fits, which is the correct answer rather than a failure.
+	var s_a := (p_from - c).dot(p_from_dir)
+	var s_b := (p_to - c).dot(p_to_dir)
+	var room := maxf(minf(s_a, s_b), 0.0)
+	var half_phi := phi * 0.5
+	# CLAMPED TO WHAT FITS, never emitted as a reversed arc: an arc longer than the cut faces allow
+	# would run back past them and cross the boundary it belongs to.
+	var tan_d := minf(p_radius / tan(half_phi), room)
+	var r_eff := tan_d * tan(half_phi)
+	if r_eff <= 1e-4:
+		_push(p_out, c)
+		return
+	var t_a := c + p_from_dir * tan_d
+	var t_b := c + p_to_dir * tan_d
+	# The centre sits out in the GAP between the arms, on the bisector — the kerb return bulges back
+	# toward the junction and adds the flare, rather than cutting the corner away.
+	var o := c + (p_from_dir + p_to_dir).normalized() * (r_eff / sin(half_phi))
+	var ang_a := (t_a - o).angle()
+	var ang_b := (t_b - o).angle()
+	# The sweep is pi - phi, always under pi, so the short way round is always the right way and no
+	# winding flag is needed.
+	var sweep := wrapf(ang_b - ang_a, -PI, PI)
+	_push(p_out, t_a)
+	for k in range(1, p_segments):
+		var ang := ang_a + sweep * (float(k) / float(p_segments))
+		_push(p_out, o + Vector2(cos(ang), sin(ang)) * r_eff)
+	_push(p_out, t_b)
+
+
+## Where two rays' lines cross, as `[point]`, or empty when they are parallel.
+static func _ray_intersect(p_a: Vector2, p_da: Vector2, p_b: Vector2, p_db: Vector2) -> Array:
+	var denom := p_da.cross(p_db)
+	if absf(denom) < 1e-9:
+		return []
+	return [p_a + p_da * ((p_b - p_a).cross(p_db) / denom)]
+
+
+## Append unless it repeats the point already there. Consecutive duplicates are normal — a square corner
+## is two corners at the same place — and a zero-area triangle in the fan is a degenerate normal.
+static func _push(p_out: PackedVector2Array, p_at: Vector2) -> void:
+	if p_out.is_empty() or p_out[p_out.size() - 1].distance_to(p_at) > 1e-4:
+		p_out.append(p_at)
+
+
+## The junction surface: `p_boundary` as a triangle fan about `p_center`, draped on the major road's
+## graded surface exactly as `build_apron` drapes the disc.
+##
+## The height sampling is deliberately unchanged from the disc it replaces. The ground inside a footprint
+## is the major road's own surface — crowned, banked, climbing — and a polygon laid flat at
+## `junction.elevation` would sit a crown above the carriageway edges and cut into the middle, which is
+## the saucer `build_apron` was written to avoid. Only the OUTLINE is new.
+static func build_footprint(p_center: Vector2, p_boundary: PackedVector2Array,
+		p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
+		p_alignment: Pasture3DRoadAlignment, p_crown: float,
+		p_lift: float = DEPTH_LIFT) -> Array:
+	if p_alignment == null or p_plan.size() < 2 or p_boundary.size() < 3:
+		return []
+	var verts := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+
+	# UVs are radial about the centre, normalised by the furthest boundary point, so the surface takes a
+	# texture the same way the disc did and a material written for one works on the other.
+	var extent := 0.0
+	for at in p_boundary:
+		extent = maxf(extent, p_center.distance_to(at))
+	extent = maxf(extent, 0.01)
+
+	verts.append(_apron_point(p_center, p_plan, p_cum, p_alignment, p_crown, p_lift))
+	uvs.append(Vector2(0.5, 0.5))
+	normals.append(Vector3.UP)
+	for at in p_boundary:
+		verts.append(_apron_point(at, p_plan, p_cum, p_alignment, p_crown, p_lift))
+		var d := (at - p_center) / extent
+		uvs.append(Vector2(0.5 + d.x * 0.5, 0.5 + d.y * 0.5))
+		normals.append(Vector3.UP)
+	var n := p_boundary.size()
+	for i in n:
+		# (centre, ring i, ring i+1) with the boundary running counter-clockwise is clockwise seen from
+		# above, which is Godot's front face — the same convention as the ribbon and the disc, and
+		# invisible from every normal camera angle if reversed.
+		indices.append_array(PackedInt32Array([0, 1 + i, 1 + (i + 1) % n]))
+
+	_recompute_normals(verts, indices, normals)
+	var out := []
+	out.resize(Mesh.ARRAY_MAX)
+	out[Mesh.ARRAY_VERTEX] = verts
+	out[Mesh.ARRAY_NORMAL] = normals
+	out[Mesh.ARRAY_TEX_UV] = uvs
+	out[Mesh.ARRAY_INDEX] = indices
+	return out
