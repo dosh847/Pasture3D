@@ -20,6 +20,11 @@
 #
 # A gate that only measured the step could be passed by cropping, and one that only measured reach could be
 # passed by the seam. Both are asserted, and [C] shows each rejected rule failing the half it fails.
+#
+# [E] was added 2026-09-05: a GRAPH modifier built its own mask and never got the translation, so it read
+# the band's taper outside the loop and the un-translated ramp inside it — the seam above, in the one place
+# that had been left out of the fix for it. Section [B] could not see it, because a graph does not go
+# through `profile`.
 
 extends Node
 
@@ -203,4 +208,44 @@ func _test_masks() -> void:
 	_check("continuous across the rim too", filt_step < 0.05, "step %.4f" % filt_step)
 	_check("and it still tapers away — the erosion skirt survives the fix",
 			fmask[0] < 0.05, "outer edge %.4f" % fmask[0])
+	print("")
+
+	print("[E] A GRAPH modifier's mask gets the SAME translation — the omission that read as a cut")
+	# Asked of the shipped rule rather than restated: `_graph_feather_mask` is pure, so the gate hands it
+	# the signed field and the two band grids the stack just built and reads back what a graph would see.
+	var host := Pasture3DMound.new()
+	add_child(host)
+	var gmask: PackedFloat64Array = host._graph_feather_mask(N, ctx["sdf"], 0.0, MARGIN, 0, FALLOFF,
+			null, mask, feather, profile)
+	host.queue_free()
+
+	# The rule this replaced, rebuilt from the same inputs: the band's taper outside the loop, the
+	# un-translated ramp inside it. It is the control, and it has to still fail.
+	var was := PackedFloat64Array()
+	was.resize(N)
+	for k in range(N):
+		was[k] = feather[k] if mask[k] == 1 else plain[k]
+
+	var g_step: float = absf(gmask[_rim_out] - gmask[_rim_in])
+	var was_step: float = absf(was[_rim_out] - was[_rim_in])
+	# The rim is measured against the ramp's OWN worst step anywhere else, not against a round number: the
+	# mask is a smoothstep over 30 m, so "small" is a property of the curve and a fixed tolerance would be
+	# a number picked to pass.
+	var g_elsewhere := 0.0
+	for k in range(1, N):
+		if k == _rim_in:
+			continue
+		g_elsewhere = maxf(g_elsewhere, absf(gmask[k] - gmask[k - 1]))
+	var g_reach := 0
+	for k in range(N):
+		if mask[k] == 1 and gmask[k] > 0.01:
+			g_reach += 1
+	_check("the rim carries no bigger jump than any other cell of the ramp",
+			g_step <= g_elsewhere + 1e-9, "rim %.4f vs %.4f elsewhere" % [g_step, g_elsewhere])
+	_check("the graph mask REACHES into the band — it is not cropped to the loop", g_reach > 0,
+			"%d of %d band cells" % [g_reach, _count_band(mask)])
+	_check("and still falls to 0 at the band's outer edge", gmask[0] < 0.01, "%.4f" % gmask[0])
+	_check("control: the rule it replaced DOES step at the rim", was_step > 0.9,
+			"step %.4f vs %.4f — a graph wrote nothing at the rim and its full amplitude one cell out"
+			% [was_step, g_step])
 	print("")

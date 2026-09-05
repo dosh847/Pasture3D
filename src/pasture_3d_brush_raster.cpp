@@ -1469,27 +1469,32 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 				const int row = iz * gw;
 				for (int ix = 0; ix < gw; ix++) {
 					const int i = row + ix;
-					if (margin_active && margin_mask[(size_t)i]) {
-						gprofile[i] = (float)margin_profile_at(i); // the skirt's taper
+					if (fmode == 2) {
+						// OFF means full strength ACROSS THE LOOP, so the interior is 1 and only the band has
+						// anywhere to fade — already continuous, and translating it would take strength away
+						// from the interior this mode exists to cover.
+						if (margin_active && margin_mask[(size_t)i]) {
+							gprofile[i] = (float)margin_profile_at(i); // the skirt's taper
+							continue;
+						}
+						gprofile[i] = ((double)field[i] + edge_offset) > 0.0 ? 1.f : 0.f;
 						continue;
 					}
-					const double signed_d = (double)field[i] + edge_offset;
+					// THE FALLOFF STARTS AT THE OUTER EDGE OF THE MODIFIER MARGIN, not at the loop rim: the
+					// margin is added to the signed distance before the ramp reads it (§6.8.1), the same
+					// translation a POINT generator's mask already gets. Reading the band's taper outside the
+					// loop and the un-translated ramp inside it stepped this mask across its FULL RANGE at the
+					// rim, so a graph wrote nothing at the rim and its whole amplitude one cell out — a ring cut
+					// into the band the margin exists to smooth. Twin of Pasture3DTerrainBrush's
+					// `_graph_feather_mask`; at margin 0 it is the historical expression.
+					const double signed_d = (double)field[i] + edge_offset + modifier_margin;
 					if (signed_d <= 0.0) {
 						gprofile[i] = 0.f;
 						continue;
 					}
-					if (fmode == 2) {
-						// OFF: full 1.0 inside the loop
-						gprofile[i] = 1.f;
-					} else if (fmode == 1) {
-						// CUSTOM: uses custom_falloff_width and custom_lut
-						const float u = (float)CLAMP(signed_d / custom_fw, 0.0, 1.0);
-						gprofile[i] = (float)raster_ramp(custom_lut, u);
-					} else {
-						// USE_BRUSH_MASK: uses brush's falloff_width and p_lut
-						const float u = (float)CLAMP(signed_d / brush_fw, 0.0, 1.0);
-						gprofile[i] = (float)raster_ramp(p_lut, u);
-					}
+					// CUSTOM takes custom_falloff_width / custom_lut; USE_BRUSH_MASK the brush's own pair.
+					const float u = (float)CLAMP(signed_d / (fmode == 1 ? custom_fw : brush_fw), 0.0, 1.0);
+					gprofile[i] = (float)raster_ramp(fmode == 1 ? custom_lut : p_lut, u);
 				}
 			}
 			brush_mod_graph(steps[si], vals, basey, gprofile, add, gw, gh, vs, min_x, min_z);

@@ -5068,31 +5068,14 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	var brush_curve: Curve = p_ctx.get("falloff_curve", get("falloff_curve")) as Curve
 	var sdf: PackedFloat32Array = p_ctx.get("sdf", PackedFloat32Array())
 	var edge_off: float = p_ctx.get("edge_offset", 0.0)
-	var have_sdf := sdf.size() == n
 	var mm: PackedByteArray = p_ctx.get("margin_mask", PackedByteArray())
 	var mf: PackedFloat64Array = p_ctx.get("margin_feather", PackedFloat64Array())
-	var have_mm := mm.size() == n and mf.size() == n
 
-	var mask := PackedFloat64Array()
-	mask.resize(n)
-	for k in range(n):
-		if have_mm and mm[k] == 1:
-			mask[k] = mf[k]
-			continue
-		if have_sdf:
-			var signed_d: float = sdf[k] + edge_off
-			if signed_d <= 0.0:
-				mask[k] = 0.0
-			elif fmode == 2: # OFF
-				mask[k] = 1.0
-			elif fmode == 1: # CUSTOM
-				var u := clampf(signed_d / custom_fw, 0.0, 1.0)
-				mask[k] = _ramp(custom_curve, u)
-			else: # USE_BRUSH_MASK
-				var u := clampf(signed_d / brush_fw, 0.0, 1.0)
-				mask[k] = _ramp(brush_curve, u)
-		else:
-			mask[k] = profile[k] if profile.size() == n else 1.0
+	# The Modifier Margin belongs IN this mask, and it is one rule for every feather mode — see
+	# `_graph_feather_mask`, which is also what the gate asks rather than restating.
+	var mask := _graph_feather_mask(n, sdf, edge_off, _effective_modifier_margin(), fmode,
+			custom_fw if fmode == 1 else brush_fw, custom_curve if fmode == 1 else brush_curve,
+			mm, mf, profile)
 
 	# ---- FROZEN cache (mirrors _apply_erosion_step §6.3) ----
 	#
@@ -5164,6 +5147,53 @@ func _composite_graph(p_vals: PackedFloat32Array, p_z: PackedFloat32Array, p_zo:
 		var t: float = p_amount * p_mask[k]
 		var abs_out: float = p_z[k] + (p_zo[k] - p_z[k]) * t
 		p_vals[k] = (abs_out - p_basey[k]) if p_add else abs_out
+
+
+## The 0..1 mask a GRAPH modifier composites through, one cell at a time.
+##
+## THE FALLOFF STARTS AT THE OUTER EDGE OF THE MODIFIER MARGIN, not at the loop rim: `p_margin` is added to
+## the signed distance before the ramp reads it — the identical curve, translated outward. That is the rule
+## the host already applies to the mask a POINT generator sees (`profile_ext` in Mound and Plow, and the
+## margin note on `_run_modifier_stack`); a graph never got it, and this is that omission closed.
+##
+## WHAT IT LOOKED LIKE BEFORE, and why it reads as a cut. The band's taper runs 1 AT THE RIM down to 0 at
+## the band's outer edge; the un-translated brush ramp runs the other way, 0 AT THE RIM up to 1 over the
+## falloff. Taking the first outside the loop and the second inside it stepped the mask across its FULL
+## RANGE at the boundary, so a graph modifier wrote nothing at the rim and its whole amplitude one cell
+## outside it — a ring cut into the terrain across the margin band, which is the band the margin exists to
+## smooth. One translated ramp is monotone from the band's outer edge all the way in, and continuous by
+## construction rather than by tuning.
+##
+## OFF is the exception and keeps the band taper: it means "full strength across the loop", so the loop
+## interior is 1 and only the band has anywhere to fade — already continuous, and translating it would
+## take strength away from the interior the mode exists to cover.
+##
+## At margin 0 every expression here is the historical one, cell for cell.
+func _graph_feather_mask(p_n: int, p_sdf: PackedFloat32Array, p_edge_off: float, p_margin: float,
+		p_fmode: int, p_fw: float, p_curve: Curve, p_margin_mask: PackedByteArray,
+		p_margin_feather: PackedFloat64Array, p_profile: PackedFloat64Array) -> PackedFloat64Array:
+	var mask := PackedFloat64Array()
+	mask.resize(p_n)
+	var have_sdf := p_sdf.size() == p_n
+	var have_mm := p_margin_mask.size() == p_n and p_margin_feather.size() == p_n
+	var fw := maxf(p_fw, 0.001)
+	for k in range(p_n):
+		if not have_sdf:
+			# A host that runs the stack without a signed field (the road brush) has no rim to translate a
+			# ramp away from; its own profile is the only mask there is.
+			mask[k] = p_profile[k] if p_profile.size() == p_n else 1.0
+			continue
+		if p_fmode == 2: # OFF
+			if have_mm and p_margin_mask[k] == 1:
+				mask[k] = p_margin_feather[k]
+			else:
+				mask[k] = 1.0 if (p_sdf[k] + p_edge_off) > 0.0 else 0.0
+			continue
+		# USE_BRUSH_MASK / CUSTOM: the caller already picked which falloff this is; the margin moves where it
+		# starts, and the ramp reaches 0 on its own at the band's outer edge.
+		var signed_d: float = p_sdf[k] + p_edge_off + p_margin
+		mask[k] = 0.0 if signed_d <= 0.0 else _ramp(p_curve, clampf(signed_d / fw, 0.0, 1.0))
+	return mask
 
 
 ## The erosion FIELD step: solve over the brush's own surface, and optionally publish the four channels
