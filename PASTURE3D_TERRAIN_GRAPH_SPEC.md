@@ -10,6 +10,9 @@ over the incoming surface rather than a bare added generator. Plus the **native 
 oracle and the fallback for an unsupported op). Plus the **GPU evaluator** (2026-08-26): a RenderingDevice
 compute path for the grid passes, matched to the CPU oracle and wired into the live bake above a measured
 size threshold (see Build order §6.4). Target: Godot 4.7, Pasture3D.
+**Working guide:** `PASTURE3D_TERRAIN_GRAPH_GUIDE.md` — what a node owes the system, how the graph runs
+it, and the mistakes already paid for. That file outlives this one: this is the build plan and finishes,
+the guide describes the thing that was built.
 **Builds on:** `PASTURE3D_NODE_VOCABULARY.md` (node / op() / cell·grid), the relief op-program
 (`pasture3d_relief_material.gd`), and the brush node stack (`pasture3d_terrain_brush.gd`).
 
