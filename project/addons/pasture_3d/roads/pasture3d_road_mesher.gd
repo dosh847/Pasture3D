@@ -480,6 +480,13 @@ static func plan_footprint(p_center: Vector2, p_arms: Array, p_corner_radius: fl
 		var a_ccw: Vector2 = p_center + da * float(a["trim"]) + na * float(a["half"])
 		var b_cw: Vector2 = p_center + db * float(b["trim"]) - nb * float(b["half"])
 		_push(out, a_cw)
+		# THE CENTRELINE VERTEX, collinear with the two corners and not there for the outline's sake: the
+		# cut face is where a ribbon ends, and a ribbon is CROWNED, so a face represented by its corners
+		# alone is a chord across that crown. The polygon then sits `crown x half` below the ribbon at the
+		# middle of every approach — 0.20 m on a 0.05 crown and a 4 m half-width, a crease across each arm
+		# where the two surfaces are supposed to be one. In plan it changes nothing, which is why the
+		# outline criteria are unaffected; in section it is the whole difference.
+		_push(out, p_center + da * float(a["trim"]))
 		_push(out, a_ccw)
 		_append_fillet(out, a_ccw, da, b_cw, db, p_corner_radius, p_segments)
 	# The walk closes on itself, so the final fillet can land back on the first vertex.
@@ -615,18 +622,116 @@ static func _push(p_out: PackedVector2Array, p_at: Vector2) -> void:
 		p_out.append(p_at)
 
 
-## The junction surface: `p_boundary` as a triangle fan about `p_center`, draped on the major road's
-## graded surface exactly as `build_apron` drapes the disc.
+## The height of every boundary vertex, taken from the ARMS rather than from any one road.
 ##
-## The height sampling is deliberately unchanged from the disc it replaces. The ground inside a footprint
-## is the major road's own surface — crowned, banked, climbing — and a polygon laid flat at
-## `junction.elevation` would sit a crown above the carriageway edges and cut into the middle, which is
-## the saucer `build_apron` was written to avoid. Only the OUTLINE is new.
+## ---- WHY NOT FROM THE MAJOR ROAD ----
+##
+## `build_footprint` used to drape the polygon on the major road's alignment, which is the disc's old
+## behaviour kept. It has a fault that only shows when two roads are the SAME TYPE: they tie on priority,
+## the solver breaks the tie with `major_index`, and `major_index` is the order the solver walked — scene
+## order. So which road's crown and grade the intersection took was decided by the scene tree, and
+## reordering the nodes swapped it. Reported as "one is overriding the other".
+##
+## The arms already carry the answer. Every boundary vertex lies on some arm's CUT FACE, and that face is
+## the last cross-section of a ribbon that stops there — so the vertex's height is that ribbon's own
+## height at that across-offset, and the polygon meets each ribbon exactly by construction rather than by
+## a tolerance. Priority keeps what priority is for: it sets the junction's ELEVATION, the height the
+## whole thing sits at. It stops deciding the SHAPE.
+##
+## `p_arm_faces` is one Dictionary per arm, as `Pasture3DRoadJunction.footprint_arms()` gives them plus
+## the three numbers a cross-section needs: `dir`, `trim`, `half`, `z` (that road's centreline height at
+## its cut face), `bank`, `crown`.
+##
+## A vertex on a FILLET lies on no cut face at all — it is the kerb return between two arms — so the
+## blend is over every arm, weighted by inverse square distance to its cut face. On a cut face that
+## distance is zero and the arm owns the vertex outright, which is what makes the join exact.
+static func footprint_boundary_heights(p_center: Vector2, p_boundary: PackedVector2Array,
+		p_arm_faces: Array, p_fallback: float) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	out.resize(p_boundary.size())
+	if p_arm_faces.is_empty():
+		out.fill(p_fallback)
+		return out
+	for i in p_boundary.size():
+		var v := p_boundary[i] - p_center
+		var sum := 0.0
+		var wsum := 0.0
+		var exact := NAN
+		for face: Dictionary in p_arm_faces:
+			var dir: Vector2 = face["dir"]
+			var n := Vector2(-dir.y, dir.x)
+			var along: float = v.dot(dir)
+			var across: float = v.dot(n)
+			var z := Pasture3DRoadGrader.surface_height(float(face["z"]), float(face["bank"]),
+					float(face["crown"]), across)
+			# Distance to the cut face as a SEGMENT, not to its infinite line: an arm on the far side of
+			# the junction has a cut face whose line runs right past this vertex, and weighting by the line
+			# would let it pull a corner it is nowhere near.
+			var d_along: float = along - float(face["trim"])
+			var over: float = maxf(absf(across) - float(face["half"]), 0.0)
+			var d2: float = d_along * d_along + over * over
+			if d2 <= 1e-8:
+				exact = z
+				break
+			var w := 1.0 / d2
+			sum += z * w
+			wsum += w
+		out[i] = exact if not is_nan(exact) else (sum / wsum if wsum > 0.0 else p_fallback)
+	return out
+
+
+## The junction surface at one point, interpolated over the SAME triangle fan the mesh is built from.
+##
+## Not a second definition of the surface: the mesh is `(centre, boundary[i], boundary[i+1])` and so is
+## this, so the terrain the junction grades and the polygon it draws are one surface read twice. Any
+## other interpolation — a plane fit, an inverse-distance blend — would agree with the mesh only to a
+## tolerance, and a tolerance between ground and mesh is the road surface showing through the terrain.
+##
+## Returns `p_center_h` for a point outside the fan, which is the answer a caller wants when it is
+## rasterising a bounding box and asking about cells it will then reject.
+static func footprint_height_at(p_at: Vector2, p_center: Vector2, p_boundary: PackedVector2Array,
+		p_heights: PackedFloat32Array, p_center_h: float) -> float:
+	var n := p_boundary.size()
+	if n < 3 or p_heights.size() != n:
+		return p_center_h
+	for i in n:
+		var a := p_boundary[i]
+		var b := p_boundary[(i + 1) % n]
+		var bary := _barycentric(p_at, p_center, a, b)
+		if bary.is_empty():
+			continue
+		return p_center_h * bary[0] + p_heights[i] * bary[1] + p_heights[(i + 1) % n] * bary[2]
+	return p_center_h
+
+
+## `[u, v, w]` for a point inside triangle `abc`, or empty when it is outside. A shared edge belongs to
+## both triangles — the epsilon is inclusive — so a point exactly on a fan spoke gets an answer rather
+## than falling through every triangle and landing on the centre height.
+static func _barycentric(p_at: Vector2, p_a: Vector2, p_b: Vector2, p_c: Vector2) -> Array:
+	var v0 := p_b - p_a
+	var v1 := p_c - p_a
+	var v2 := p_at - p_a
+	var den := v0.cross(v1)
+	if absf(den) < 1e-12:
+		return []
+	var v := v2.cross(v1) / den
+	var w := v0.cross(v2) / den
+	if v < -1e-6 or w < -1e-6 or v + w > 1.0 + 1e-6:
+		return []
+	return [1.0 - v - w, v, w]
+
+
+## The junction surface: `p_boundary` as a triangle fan about `p_center`, at the heights the ARMS give.
+##
+## The heights arrive as an argument rather than being sampled here, because the ground the junction
+## grades has to be the same surface — `footprint_height_at` interpolates over this exact fan, so the
+## polygon and the terrain under it are one definition read twice rather than two that agree to a
+## tolerance. It also takes the last road-specific thing out of this kernel: the disc it replaced sampled
+## the MAJOR road's alignment, which made the intersection's shape depend on scene order whenever two
+## roads tied on priority.
 static func build_footprint(p_center: Vector2, p_boundary: PackedVector2Array,
-		p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
-		p_alignment: Pasture3DRoadAlignment, p_crown: float,
-		p_lift: float = DEPTH_LIFT) -> Array:
-	if p_alignment == null or p_plan.size() < 2 or p_boundary.size() < 3:
+		p_heights: PackedFloat32Array, p_center_h: float, p_lift: float = DEPTH_LIFT) -> Array:
+	if p_boundary.size() < 3 or p_heights.size() != p_boundary.size():
 		return []
 	var verts := PackedVector3Array()
 	var normals := PackedVector3Array()
@@ -640,11 +745,12 @@ static func build_footprint(p_center: Vector2, p_boundary: PackedVector2Array,
 		extent = maxf(extent, p_center.distance_to(at))
 	extent = maxf(extent, 0.01)
 
-	verts.append(_apron_point(p_center, p_plan, p_cum, p_alignment, p_crown, p_lift))
+	verts.append(Vector3(p_center.x, p_center_h + p_lift, p_center.y))
 	uvs.append(Vector2(0.5, 0.5))
 	normals.append(Vector3.UP)
-	for at in p_boundary:
-		verts.append(_apron_point(at, p_plan, p_cum, p_alignment, p_crown, p_lift))
+	for i in p_boundary.size():
+		var at := p_boundary[i]
+		verts.append(Vector3(at.x, p_heights[i] + p_lift, at.y))
 		var d := (at - p_center) / extent
 		uvs.append(Vector2(0.5 + d.x * 0.5, 0.5 + d.y * 0.5))
 		normals.append(Vector3.UP)

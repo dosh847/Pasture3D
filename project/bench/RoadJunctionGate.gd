@@ -26,6 +26,7 @@ func _ready() -> void:
 	_i_no_bake_kernel_reads_input_state()
 	await _j_the_apron_covers_every_trimmed_end()
 	await _l_the_major_road_is_trimmed_too()
+	await _p_the_junction_grades_its_own_footprint()
 	print("\n=== %s (%d failures) ===\n" % ["ROAD JUNCTION PASS" if _fail == 0 else "ROAD JUNCTION FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -595,7 +596,7 @@ func _i_no_bake_kernel_reads_input_state() -> void:
 ## ribbon does not leaves a flap of road over open air. One of the two would be a regression the other
 ## does not see.
 func _l_the_major_road_is_trimmed_too() -> void:
-	print("[L] the major road is trimmed in the RIBBON and grades through in the GROUND")
+	print("[L] every arm is trimmed, major and minor alike, in the ribbon and the ground")
 	var fx := _crossing_fixture()
 	var net: Pasture3DRoadNetwork = fx["net"]
 	for brush in fx["brushes"]:
@@ -622,12 +623,11 @@ func _l_the_major_road_is_trimmed_too() -> void:
 		# that produces it. `grading_profile` is what `grade_surface` consults, and its `skip` mask is the
 		# ground the road does not write.
 		#
-		# It has to be read SEPARATELY from the ribbon gap, and asserted to say the OPPOSITE, because the
-		# two are different consumers with different owners. Both halves were once exempt together and
-		# then retired together, and each pairing broke the junctions in its own direction: exempt in the
-		# ribbon and the major road paves a second surface through the polygon; skipped in the ground and
-		# NOTHING grades inside a footprint, so the raw hillside stands up through the intersection. A
-		# criterion that reads one half and infers the other cannot see either failure.
+		# Read SEPARATELY from the ribbon gap even though both now say the same thing, because they said
+		# different things twice in one day and the arrangement is not self-evident. What makes trimming
+		# every arm correct is `grade_junction_footprints` — the junction writes the ground its arms left,
+		# so no road has to. Criterion P asserts that half; without it, this one is satisfied by a build
+		# that trims everybody and grades nothing, which is the burial.
 		var ds := 1.0
 		var run: Dictionary = brush.build_run()
 		var n_s: int = int(ceil(float(run["cum"][run["cum"].size() - 1]) / ds)) + 1
@@ -673,10 +673,8 @@ func _l_the_major_road_is_trimmed_too() -> void:
 			_check("L", covered,
 					"the ribbon gap must cover [%.3f, %.3f], the span the grader skipped" 							% [s - trim, s + trim])
 			var mid := clampi(int(round(s / ds)), 0, skip.size() - 1)
-			_check("L", skip[mid] == 0,
-					("the grader must NOT skip the junction cell at s = %.3f m on the major road — "
-					+ "nothing else grades inside a footprint, and the polygon is draped on this "
-					+ "road's own graded surface") % s)
+			_check("L", skip[mid] == 1,
+					"the grader must skip the junction cell at s = %.3f m on the major road" % s)
 
 	print("    %d major road(s) and %d minor road(s) checked" % [checked, minors])
 	if checked == 0:
@@ -751,3 +749,181 @@ func _j_the_apron_covers_every_trimmed_end() -> void:
 		print("    !! the old radius already covered every corner, so [J] would pass on the bug")
 
 	(fx["terrain"] as Node).queue_free()
+
+
+# ---- P ------------------------------------------------------------------------------------------
+
+## [P] The junction grades the ground inside its own footprint, to the same surface the polygon is drawn
+## from, and the answer does not depend on which road baked first.
+##
+## ---- WHAT THIS REPLACED ----
+##
+## The footprint's ground used to be graded by whichever road was MAJOR, and the polygon was draped on
+## that road's alignment. Priority picks the major road, and two roads of the SAME TYPE tie on priority —
+## which `major_index` breaks by keeping whichever the solver walked first, i.e. scene order. So on the
+## commonest arrangement there is, a crossroads of one road type, the shape of the intersection was
+## decided by the scene tree and reordering the nodes changed it. Reported as "one is overriding the
+## other".
+##
+## The fixture is exactly that case: both roads share one `Pasture3DRoadType`, so they tie.
+##
+## Two claims, and the second is the one that could not be made before:
+##   1. the graded ground inside the footprint IS `footprint_height_at` — mesh and terrain are one surface,
+##      not two that agree to a tolerance;
+##   2. grading the roads in the opposite order gives the identical height field, to the bit.
+func _p_the_junction_grades_its_own_footprint() -> void:
+	print("[P] the junction grades its own footprint, and scene order cannot change it")
+	var fx := _crossing_fixture()
+	var net: Pasture3DRoadNetwork = fx["net"]
+	var gw := 96
+	var gh := 96
+	var min_x := 80.0
+	var min_z := 80.0
+	var vs := 1.0
+	# BAKE, RESOLVE, BAKE — the documented fixed point (P4a). A junction is detected from solved
+	# alignments, and the footprint can only be graded once the junction exists, so the first grade is
+	# what makes the junction and the two measured below are what it then asks for.
+	_grade_all(fx["brushes"], gw, gh, min_x, min_z, vs)
+	net.resolve_junctions()
+	await get_tree().process_frame
+
+	var j: Pasture3DRoadJunction = null
+	for cand in net.junctions:
+		if cand.detected:
+			j = cand
+	if j == null:
+		_fail += 1
+		print("    !! no junction resolved, so [P] measured nothing")
+		(fx["terrain"] as Node).queue_free()
+		return
+
+	# CONTROL on the fixture itself: if the two roads did NOT tie, this criterion would be measuring the
+	# easy case and the fault it exists for could not appear.
+	var priorities := {}
+	for b: Pasture3DRoadBrush in fx["brushes"]:
+		priorities[b.road_priority()] = true
+	_check("P", priorities.size() == 1,
+			"the two roads must TIE on priority, or [P] is not measuring the case that broke")
+
+	var forward := _grade_all(fx["brushes"], gw, gh, min_x, min_z, vs)
+	var reversed_order: Array = []
+	for i in range(fx["brushes"].size() - 1, -1, -1):
+		reversed_order.append(fx["brushes"][i])
+	var backward := _grade_all(reversed_order, gw, gh, min_x, min_z, vs)
+
+	var surf := net.junction_surface(j)
+	if surf.is_empty():
+		_fail += 1
+		print("    !! the junction has no surface, so [P] measured nothing")
+		(fx["terrain"] as Node).queue_free()
+		return
+	var boundary: PackedVector2Array = surf["boundary"]
+	var heights: PackedFloat32Array = surf["heights"]
+	var centre: Vector2 = surf["center"]
+	var centre_h := float(surf["center_h"])
+
+	var inside := 0
+	var worst_mesh := 0.0
+	var worst_order := 0.0
+	for iz in gh:
+		for ix in gw:
+			var at := Vector2(min_x + float(ix) * vs, min_z + float(iz) * vs)
+			if not Geometry2D.is_point_in_polygon(at, boundary):
+				continue
+			var i := iz * gw + ix
+			inside += 1
+			var want := Pasture3DRoadMesher.footprint_height_at(at, centre, boundary, heights, centre_h)
+			worst_mesh = maxf(worst_mesh, absf(forward[i] - want))
+			worst_order = maxf(worst_order, absf(forward[i] - backward[i]))
+	print("    %d cell(s) inside the footprint; worst ground-vs-mesh %.6f m, worst order swap %.6f m"
+			% [inside, worst_mesh, worst_order])
+	_check("P", inside > 0, "no cell fell inside the footprint, so [P] measured nothing")
+	_check("P", worst_mesh < 1e-4,
+			"the graded ground must BE the polygon's surface (%.6f m off)" % worst_mesh)
+	_check("P", worst_order <= 0.0,
+			"grading the roads in the other order changed the junction by %.6f m" % worst_order)
+
+	# ---- AND THE POLYGON HAS TO MEET THE RIBBONS ----
+	#
+	# Everything above is satisfied by a polygon laid FLAT at the junction elevation: the ground would
+	# equal the mesh, and neither would depend on scene order, because both would be one number. What
+	# makes that wrong is the arms — each ribbon ends at its cut face, at a height the road's own grade
+	# put it at, and the polygon has to arrive at the same place or there is a step at every approach.
+	#
+	# Measured at the MIDPOINT of each cut face, where the crown is zero and the answer is the road's
+	# solved centreline height there and nothing else.
+	var worst_arm := 0.0
+	var arms := 0
+	var off_elevation := 0
+	for i in j.arm_dirs.size():
+		if i >= j.arm_z.size():
+			continue
+		var key: String = j.road_keys[j.arm_roads[i]]
+		var dir: Vector2 = j.arm_dirs[i]
+		var face: Vector2 = j.center + dir * j.trim_back_for(key)
+		var got := Pasture3DRoadMesher.footprint_height_at(face, centre, boundary, heights, centre_h)
+		worst_arm = maxf(worst_arm, absf(got - j.arm_z[i]))
+		arms += 1
+	print("    %d arm(s): worst polygon-to-ribbon step at a cut face %.6f m" % [arms, worst_arm])
+	_check("P", arms > 0, "the junction has no arms, so the ribbon-join check measured nothing")
+	_check("P", worst_arm < 1e-3,
+			"the polygon must meet each ribbon at its cut face (%.6f m step)" % worst_arm)
+	# ---- AND `arm_z` HAS TO BE THE RIBBON'S OWN HEIGHT ----
+	#
+	# The check above cannot see this by itself: `arm_z` is both the polygon's input and its expected
+	# value there, so a cut face read at the WRONG arc length satisfies it circularly. The independent
+	# reference is the road's own alignment, asked where the ribbon actually ends. Tolerance rather than
+	# equality because an alignment re-solves against the surface entering its bake and this one is read
+	# a bake later; the fault being measured is grade x trim, which on this fixture is metres.
+	var worst_ref := 0.0
+	var refs := 0
+	for i in j.arm_dirs.size():
+		if i >= j.arm_z.size():
+			continue
+		var key: String = j.road_keys[j.arm_roads[i]]
+		var brush: Pasture3DRoadBrush = null
+		for cand: Pasture3DRoadBrush in fx["brushes"]:
+			if cand.road_key() == key:
+				brush = cand
+		if brush == null:
+			continue
+		var run: Dictionary = brush.build_run()
+		if run.is_empty():
+			continue
+		var alignment: Pasture3DRoadAlignment = run["alignment"]
+		var js: float = j.arc_length_for(key)
+		var tangent := Pasture3DRoadJunctionSolver._tangent_at(run, js)
+		var sign_ := 1.0 if tangent.dot(j.arm_dirs[i]) >= 0.0 else -1.0
+		worst_ref = maxf(worst_ref,
+				absf(j.arm_z[i] - alignment.height_at(js + sign_ * j.trim_back_for(key))))
+		refs += 1
+	print("    worst cut-face height against the road's own alignment: %.4f m over %d arm(s)"
+			% [worst_ref, refs])
+	_check("P", refs > 0, "no arm could be checked against its road, so the reference measured nothing")
+	_check("P", worst_ref < 0.05,
+			"a cut face was read %.4f m from where its ribbon ends" % worst_ref)
+
+	(fx["terrain"] as Node).queue_free()
+
+
+## Grade a flat field with every brush in `p_brushes`, in the order given, chaining the surface.
+func _grade_all(p_brushes: Array, p_gw: int, p_gh: int, p_min_x: float, p_min_z: float,
+		p_vs: float) -> PackedFloat32Array:
+	var z := PackedFloat32Array()
+	z.resize(p_gw * p_gh)
+	# A SLOPE, not a plane. On level ground every road solves to the same height and the order swap would
+	# be trivially satisfied, which is the fixture passing rather than the code.
+	for iz in p_gh:
+		for ix in p_gw:
+			z[iz * p_gw + ix] = float(ix) * 0.08 + float(iz) * 0.03
+	for b: Pasture3DRoadBrush in p_brushes:
+		var mod: Pasture3DNodeRoad = null
+		for m in b.modifiers:
+			if m is Pasture3DNodeRoad:
+				mod = m
+		if mod == null:
+			continue
+		var res := b.grade_surface(mod, z, p_gw, p_gh, p_min_x, p_min_z, p_vs)
+		if not res.is_empty():
+			z = res["height"]
+	return z

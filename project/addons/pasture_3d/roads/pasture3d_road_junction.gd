@@ -72,6 +72,17 @@ enum ControlType { INHERIT = -1, UNCONTROLLED = 0, PRIORITY = 1, STOP = 2, SIGNA
 @export var arm_roads: PackedInt32Array = PackedInt32Array()
 ## Half-width of each arm, metres, parallel to `arm_dirs`.
 @export var arm_halfs: PackedFloat32Array = PackedFloat32Array()
+## Each arm's CUT FACE cross-section, parallel to `arm_dirs`: the road's centreline height there, its
+## superelevation, and its crown.
+##
+## Published by the solver rather than read back from the alignments, and that is the whole point. An
+## alignment is solved against the surface ENTERING its bake, which includes whatever the other roads at
+## this junction have already graded — so re-reading one gives a slightly different answer depending on
+## which road baked first, and the intersection's shape wobbled with scene order. These are resolved
+## once, from one snapshot, and every consumer reads the same numbers. Reconcile, don't rebuild.
+@export var arm_z: PackedFloat32Array = PackedFloat32Array()
+@export var arm_banks: PackedFloat32Array = PackedFloat32Array()
+@export var arm_crowns: PackedFloat32Array = PackedFloat32Array()
 
 ## Resolved kerb-return radius, metres — the highest-priority participant's, or the network default when
 ## they tie and disagree. Solver output; `corner_radius_override` is the user's.

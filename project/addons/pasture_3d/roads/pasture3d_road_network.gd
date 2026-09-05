@@ -647,6 +647,57 @@ func paint_layer_owner() -> String:
 # ---- TIER FAR: painting the roads (P5, §10) -----------------------------------------------------------
 
 
+## One junction's surface, as the boundary polygon and a height per boundary vertex.
+##
+## ONE definition with two consumers, deliberately: `build_junction_surfaces` draws it and
+## `Pasture3DRoadBrush.grade_junction_footprints` grades the ground to it. The disc it replaced had the
+## mesh sampling the major road's alignment while the ground was graded by that road's own corridor pass,
+## which is two definitions that agreed only where the junction happened to be exactly that road's
+## camber. Returns an empty Dictionary when the junction cannot be described.
+func junction_surface(p_junction: Pasture3DRoadJunction) -> Dictionary:
+	if p_junction == null or not p_junction.detected:
+		return {}
+	var boundary := Pasture3DRoadMesher.plan_footprint(p_junction.center,
+			p_junction.footprint_arms(), p_junction.effective_corner_radius())
+	if boundary.size() < 3:
+		return {}
+	return {
+		"center": p_junction.center,
+		"center_h": p_junction.elevation,
+		"boundary": boundary,
+		"heights": Pasture3DRoadMesher.footprint_boundary_heights(p_junction.center, boundary,
+				_arm_faces(p_junction), p_junction.elevation),
+	}
+
+
+## Each ARM's cut face, as `footprint_boundary_heights` wants it.
+##
+## Every number comes off the JUNCTION RECORD, not off a road. That is what makes the intersection's
+## shape independent of scene order: `arm_z`/`arm_banks`/`arm_crowns` were resolved once from one
+## snapshot, whereas re-reading a road's alignment gives a different answer depending on which road at
+## this junction baked first — an alignment is solved against the surface entering its own bake.
+##
+## Returns an empty Array for a record from before those fields existed. The caller then falls back to
+## the junction elevation, which is flat and visibly wrong rather than subtly wrong, and one resolve
+## fixes it.
+func _arm_faces(p_junction: Pasture3DRoadJunction, _p_by_key: Dictionary = {}) -> Array:
+	var n := p_junction.arm_dirs.size()
+	if p_junction.arm_z.size() != n or p_junction.arm_banks.size() != n 			or p_junction.arm_crowns.size() != n or p_junction.arm_halfs.size() != n:
+		return []
+	var out: Array = []
+	for i in n:
+		var key: String = p_junction.road_keys[p_junction.arm_roads[i]] 				if p_junction.arm_roads[i] >= 0 and p_junction.arm_roads[i] < p_junction.road_keys.size() 				else ""
+		out.append({
+			"dir": p_junction.arm_dirs[i],
+			"trim": p_junction.trim_back_for(key),
+			"half": p_junction.arm_halfs[i],
+			"z": p_junction.arm_z[i],
+			"bank": p_junction.arm_banks[i],
+			"crown": p_junction.arm_crowns[i],
+		})
+	return out
+
+
 ## Build the apron inside every detected junction footprint (§6, §10).
 ##
 ## THE HOLE THIS FILLS IS ONE THE MESHER CREATES ON PURPOSE. Approaches stop at the footprint so two
@@ -677,6 +728,9 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 		var run: Dictionary = b.build_run()
 		if run.is_empty():
 			continue
+		# Still the major road's, and only for the two things priority actually decides: what the surface
+		# is MADE of, and how high the whole thing sits. The SHAPE comes from the arms below — see
+		# `footprint_boundary_heights`, and the tie two same-type roads used to lose to scene order.
 		var t: Pasture3DRoadType = b.resolved_road_type()
 		# A junction whose arms the solver could not describe (a pre-P9a-0 record loaded from disk, or a
 		# degenerate group) produces no polygon, and is SKIPPED rather than falling back to a disc. A
@@ -685,6 +739,7 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 				j.effective_corner_radius())
 		if boundary.size() < 3:
 			continue
+		var heights: PackedFloat32Array = junction_surface(j)["heights"]
 		aprons.append({
 			"id": j.id,
 			"center": j.center,
@@ -697,10 +752,8 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 			# than on a second reconstruction of it.
 			"markings": Pasture3DRoadJunctionMarkings.plan_junction(j, _arms_for(j, by_key),
 					{"default_control": default_control}),
-			"plan": run["plan"],
-			"cum": run["cum"],
-			"alignment": run["alignment"],
-			"crown": t.crown if t != null else 0.05,
+			"heights": heights,
+			"center_h": j.elevation,
 			"material": t.surface_material if t != null else null,
 		})
 	var host := ensure_junction_host()

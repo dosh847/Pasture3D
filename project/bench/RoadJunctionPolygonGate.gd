@@ -253,7 +253,10 @@ func _g_the_fan_faces_up() -> void:
 	a.ground = z.duplicate()
 	var plan := PackedVector2Array([Vector2(-100.0, 0.0), Vector2(100.0, 0.0)])
 	var cum := Pasture3DRoadGrader.cumulative_length(plan)
-	var arrays := Pasture3DRoadMesher.build_footprint(Vector2.ZERO, poly, plan, cum, a, 0.0, 0.0)
+	var heights := PackedFloat32Array()
+	heights.resize(poly.size())
+	heights.fill(0.0)
+	var arrays := Pasture3DRoadMesher.build_footprint(Vector2.ZERO, poly, heights, 0.0, 0.0)
 	if arrays.is_empty():
 		_fail += 1
 		print("    !! build_footprint returned nothing, so [G] measured nothing")

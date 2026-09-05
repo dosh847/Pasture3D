@@ -99,7 +99,7 @@ major one.** That is the substantive behaviour change in P9a-0, and it retires t
 
 | Retired | Where | Why it goes |
 |---|---|---|
-| The `is_major` exemption in the grading skip | `pasture3d_road_brush.gd`, `grading_profile` | **KEPT — retiring this was wrong, corrected 2026-09-04 the same day.** Nothing else grades the ground inside a footprint: every minor approach is skipped, so with the major road skipped as well the terrain keeps its raw height while the polygon sits at road level, and the hillside comes up through the intersection. It is also why `build_footprint` drapes the polygon on the MAJOR ROAD'S alignment — the polygon is drawn on the surface the major road graded, so the major road has to have graded it. |
+| The `is_major` exemption in the grading skip | `pasture3d_road_brush.gd`, `grading_profile` | **Retired 2026-09-04**, on the third attempt. Keeping it let the major road pave a second surface through the polygon; retiring it alone left NOTHING grading inside a footprint and buried every intersection. What makes retirement correct is `grade_junction_footprints`, added with it — see §2.2.3. |
 | The `is_major` exemption in `junction_skips()` | `pasture3d_road_brush.gd` | **Retired 2026-09-04.** Every arm's ribbon stops at the footprint and the polygon covers what they leave: mesh meets mesh, both at the junction's elevation. |
 | `_apron_radius()` entirely | `pasture3d_road_network.gd` | It exists only to make a disc reach a cut face. There is no disc. **Deleted 2026-09-04.** |
 
@@ -129,6 +129,51 @@ for the closed form and would have measured the sum, unable to say which term wa
 resolve with `default_corner_radius` at zero and assert the clearance alone, and E asserts the allowance
 separately at a square crossing, where `tan(45°) = 1` makes it exactly the radius — a figure the gate
 states in advance instead of recomputing the code under test.
+
+#### 2.2.3 The junction owns its own surface — **BUILT 2026-09-04**
+
+The major road used to grade the footprint's ground and the polygon used to be draped on its alignment.
+Both are gone. The reason is a case this document never considered: **two roads of the SAME TYPE**, which
+is the commonest arrangement there is and the one in the author's test scene.
+
+Same type means the same `priority`, so they TIE. The solver breaks the tie with `if pr > best_priority`
+— strictly greater, so the first road *walked* wins — and that is `major_index`, which is scene order. So
+the intersection took its crown, its grade and its camber from whichever road happened to sit higher in
+the tree, and reordering the nodes changed the shape of the junction. Reported as "one is overriding the
+other". It is the same fault `corner_radius` already refuses to run on (§2.2.1: scene order is "tolerable
+for a height and not for visible geometry") — the ground was simply still running on it.
+
+The fix is not a better tie-break. It is to stop asking the question:
+
+1. **Every arm is trimmed**, ribbon and ground alike, with no exemption for anybody.
+2. **The polygon's boundary vertices take their heights from the ARMS.** Every boundary vertex lies on
+   some arm's cut face, and that face is the last cross-section of a ribbon that stops there — so the
+   vertex height is that ribbon's own height at that across-offset, and the polygon meets each ribbon
+   exactly by construction rather than by a tolerance. A fillet vertex lies on no cut face and blends the
+   arms by inverse square distance to theirs.
+3. **The junction grades the ground inside its footprint**, to the same surface, interpolated over the
+   same triangle fan the mesh is built from. Ground and mesh are one definition read twice
+   (`Pasture3DRoadNetwork.junction_surface`), not two that agree to a tolerance — and a tolerance between
+   them is road surface showing through the terrain.
+
+Priority keeps exactly what priority is for: it sets `elevation`, the height the intersection sits at,
+and picks the material. It no longer decides the SHAPE, so a tie stops being visible at all.
+
+**Three details that were each wrong first.**
+
+*The cut face is at `trim`, not at the centre.* On a road with a grade the two differ by grade x trim —
+0.68 m on the gate's fixture — which is a step against every ribbon the polygon is meant to join.
+
+*The cut face needs its CENTRELINE vertex.* A face represented by its two corners is a chord across the
+ribbon's crown, so the polygon sat `crown x half` below the road at the middle of every approach: 0.20 m
+on a 0.05 crown and a 4 m half-width, a crease across each arm. The extra vertex is collinear in plan and
+changes no outline criterion; in section it is the whole difference.
+
+*The cross-sections are STORED, not read back.* An alignment is solved against the surface entering its
+own bake, which includes whatever the other roads at this junction have already graded — so re-reading
+one gives a different answer depending on who baked first, and the shape wobbled with scene order by
+0.084 m even after everything above. `arm_z`, `arm_banks` and `arm_crowns` are resolved once from one
+snapshot and every consumer reads the same numbers. Reconcile, don't rebuild.
 
 **What does NOT change: the major road still decides the height.** `build_apron`'s ground-sampling
 argument is untouched, and is the reason the polygon is not flat at `junction.elevation` either. The
@@ -397,12 +442,19 @@ Each criterion now records that it RAN TO COMPLETION and the summary fails for a
 generalising to the other gates: `_fail == 0` is only trustworthy alongside "and every criterion
 finished". See [[bench-gate-practices]].
 
-#### The trim split — **CORRECTED 2026-09-04**, gate `RoadJunctionGate` [L]
+#### The junction's own surface — **BUILT 2026-09-04**, gate `RoadJunctionGate` [L], [P]
 
 | # | Mutation | Caught by |
 |---|---|---|
-| 16 | Skip the major road in the ground again | L — the major half. This is the bug as reported: "the intersections are getting buried". |
-| 17 | Skip nobody in the ground | L — the minor half, which is what stops "the major road grades through" being satisfied by a build that trims no one |
+| 16 | Skip the major road in the ground with nothing grading the footprint | P — the ground is left at raw height |
+| 17 | Skip nobody in the ground | L — the minor half |
+| 18 | Return no arm faces, so the polygon is flat at the junction elevation | P — 0.80 m step at the cut faces |
+| 19 | Read the cut faces at the junction CENTRE rather than at the trim | P's independent reference, at 0.68 m. **Survived the first round**: `arm_z` is both the polygon's input and its expected value, so the join check was satisfied circularly, and an "is it at the elevation" discriminator did not separate it either. Only the road's own alignment did. |
+| 20 | Drop the cut face's centreline vertex | P — 0.20 m, the crown chorded |
+
+**The circularity in 19 is the lesson.** A criterion that checks a derived value against the number it
+was derived from asserts only that the derivation is a function. It needs a reference from outside the
+chain — here the road's alignment, asked where the ribbon ends.
 
 #### Connector ribbons and guides — **BUILT 2026-09-04**, gate `RoadJunctionPaintGate`
 
@@ -489,7 +541,8 @@ testing that the override followed it, and reports "cannot tell a remap from luc
 | I | **(BUILT)** `GIVE_WAY` triangles appear only on arms that lose priority and whose `effective_control()` is not `SIGNALS`, with the **apex pointing away from the junction** and the row outside the crossing. | Switch the junction to `SIGNALS`: every triangle disappears. Raise the losing arm's `priority` above the other: they move to the other arm rather than vanishing. **Reverse the apex**: the road/no-road assertions cannot see orientation, and a correct row turned round aims the instruction at the traffic already leaving — that mutation survived until the apex check was added. |
 | J | **(P9a-0)** For a 4-arm 90-degree fixture, `plan_footprint` returns a boundary whose vertices are exactly the 8 cut-face corners plus 4 fillet arcs, in angular order, and the polygon is simple (no self-intersection) and closed. | Feed the 45-degree fixture, where `trim = w / sin 45` is larger: the boundary must still be simple. If the convex-hull fallback is missing this is where it self-intersects. |
 | K | **(P9a-0)** Every arm's cut face lies exactly on the polygon boundary — both corners of every arm are vertices of the returned boundary, to 1e-4 m. This is the whole claim of the feature: the surface MEETS the ribbons. | Revert `build_apron`'s disc: the corners now sit off the boundary by `sqrt(trim^2 + half_width^2) — trim`, which for the 8 m fixture is a number the gate can state in advance (about 1.66 m). A gate that cannot distinguish the disc from the polygon is measuring nothing. |
-| L | **(P9a-0, corrected)** The major road is trimmed in the RIBBON and grades through in the GROUND, and the minor road does both. Four assertions, not two. | Both directions, and each needs its own: skip the major in the ground and the intersection is buried; skip nobody and the lumpy scar the trim exists to prevent comes back. |
+| L | **(P9a-0)** Every arm is trimmed, major and minor alike, in the ribbon and the ground. | Skip nobody and the lumpy scar the trim exists to prevent comes back. L alone is satisfied by a build that trims everybody and grades nothing — the burial — which is why P exists. |
+| P | **(BUILT)** The junction grades its own footprint, to the polygon's own surface, and swapping the two roads' scene order changes the height field by nothing at all. The fixture's roads share one road type, so they TIE. | Four controls. Drop the arm faces and the polygon goes flat (0.80 m step). Read the cut faces at the junction centre and they land 0.68 m from where the ribbons end — caught only against the road's own alignment, since `arm_z` is otherwise both the input and the expected value. Drop the centreline vertex and the crown is chorded (0.20 m). And the tie itself is asserted, or the criterion is measuring the easy case. |
 | N | **(P9a stop bars)** A `disabled` or undetected junction emits no primitives at all. | Remove the guard: a crossing the author marked as an overpass paints stop bars on a road with nothing crossing it. |
 | O | **(P9a stop bars)** `build_junction` puts every vertex on the surface its sampler describes, and falls back to the primitive's flat published height only when given none. | Make the builder ignore its sampler. The control is the fallback itself: build the same primitive both ways and the two answers must DIFFER, or the criterion cannot tell "the sampler was used" from "the sampler agreed". The sampler in the gate is a ramp, not a constant, so a builder that sampled once and reused the answer fails too. |
 | M | **(P9a-0)** The fillet radius equals the highest-priority arm's resolved `corner_radius`; when the top priority is tied, it equals the network default instead. | Give two tied arms different `corner_radius` values and **reorder them in the scene tree**: the resolved fillet must NOT change. If it does, the tie is falling through to `effective_major()` and scene order is deciding geometry. |

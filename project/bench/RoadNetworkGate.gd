@@ -223,7 +223,7 @@ func _b_the_pin_reaches_the_minor_roads_profile() -> void:
 ## skip array actually reached the grader. The control is the same bake with the junction disabled: the
 ## minor road then grades straight through and the cell moves.
 func _c_the_trim_back_stops_the_minor_road_grading_the_junction() -> void:
-	print("[C] the trim-back stops the minor road grading the junction")
+	print("[C] the trim-back stops the minor road grading the junction, and the junction grades it")
 	var ground := _valley(0.10)
 	var w := _crossroads()
 	var net: Pasture3DRoadNetwork = w["net"]
@@ -250,19 +250,25 @@ func _c_the_trim_back_stops_the_minor_road_grading_the_junction() -> void:
 	var c_bed: float = _at(through["roadbed"], 0.0, inside_z)
 	net.queue_free()
 
-	# The height alone is degenerate on the valley floor — a road that solves flat at ground level writes
-	# the height it would have written anyway — so the ROADBED MASK carries the assertion: inside the
-	# footprint the minor road claims no carriageway at all.
-	var stopped := absf(h_in - g_in) < 1e-4 and bed_in == 0.0
+	# The ROADBED MASK carries the assertion, not the height. It always had to — on the valley floor a
+	# road that solves flat at ground level writes the height it would have written anyway — and now the
+	# height positively must NOT match the ground: the junction grades its own footprint, so a cell inside
+	# the trim is at the junction's surface. Both facts are asserted, because they fail differently. An
+	# unclaimed cell at raw ground height is the burial (nothing graded the intersection); a claimed cell
+	# is the minor road paving through the footprint, which is the scar the trim exists to prevent.
+	var stopped := bed_in == 0.0
+	var junction_graded := absf(h_in - g_in) > 1e-4
 	var still_grades := bed_out == 1.0
 	# The control disables the junction, which withholds the pin AND the trim together, so its height on
 	# the valley floor is 0 either way — only the mask separates them. The height clause above is not
 	# vacuous for the same reason it is here: WITH the pin the road wants to sit 0.76 m up, so a trim that
 	# failed to apply would show as a moved cell.
 	var control := c_bed == 1.0
-	_check("C", trim > 0.0 and stopped and still_grades and control,
+	_check("C", trim > 0.0 and stopped and junction_graded and still_grades and control,
 			"trim %.2f m; inside z=%.1f ground %.3f -> %.3f roadbed %.0f (%s); disabled -> %.3f roadbed %.0f (%s); outside z=%.1f roadbed %.0f (%s)" % [
-				trim, inside_z, g_in, h_in, bed_in, "left alone" if stopped else "GRADED ANYWAY",
+				trim, inside_z, g_in, h_in, bed_in,
+				("the junction's, not the road's" if junction_graded else "LEFT AT RAW GROUND")
+						if stopped else "THE ROAD PAVED THROUGH",
 				c_in, c_bed, "control graded" if control else "CONTROL DID NOT MOVE",
 				outside_z, bed_out, "graded" if still_grades else "NOT GRADED"])
 

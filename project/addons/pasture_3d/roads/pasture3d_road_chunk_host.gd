@@ -366,8 +366,8 @@ func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_L
 	_clear()
 	depth_lift = p_lift
 	for a: Dictionary in p_aprons:
-		var arrays := Pasture3DRoadMesher.build_footprint(a["center"], a["boundary"], a["plan"],
-				a["cum"], a["alignment"], float(a["crown"]), p_lift)
+		var arrays := Pasture3DRoadMesher.build_footprint(a["center"], a["boundary"], a["heights"],
+				float(a["center_h"]), p_lift)
 		if arrays.is_empty():
 			continue
 		var mesh := ArrayMesh.new()
@@ -386,8 +386,8 @@ func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_L
 			# above — that one carries the render lift. Without this the road has a hole in its collision
 			# at every junction: a raycast asking "am I on tarmac" answers yes along the road and no in the
 			# middle of the crossroads, which is exactly where a vehicle most needs the answer.
-			var solid := Pasture3DRoadMesher.build_footprint(a["center"], a["boundary"], a["plan"],
-					a["cum"], a["alignment"], float(a["crown"]), 0.0)
+			var solid := Pasture3DRoadMesher.build_footprint(a["center"], a["boundary"], a["heights"],
+					float(a["center_h"]), 0.0)
 			if not solid.is_empty():
 				_collider_from(mi, solid)
 		var meshes: Array = []
@@ -634,17 +634,18 @@ func pick_meshes(p_node: Node3D) -> Array[TriangleMesh]:
 ## carries the road's centreline height, which is a crown above the lane the bar is painted across; a bar
 ## built at that height floats at its middle and sinks at its ends, by several times MARKING_LIFT on any
 ## road with a camber. So the same sampler `build_footprint` used for the surface answers here too, and
-## the paint sits on the geometry it was planned against by construction.
+## the paint sits on the geometry it was planned against by construction — now literally, since
+## `footprint_height_at` interpolates over the very fan the surface is built from.
 func _add_junction_markings(p_parent: Node3D, p_apron: Dictionary, p_lift: float) -> void:
 	var prims: Array = p_apron.get("markings", [])
 	if prims.is_empty():
 		return
-	var plan: PackedVector2Array = p_apron["plan"]
-	var cum: PackedFloat32Array = p_apron["cum"]
-	var alignment: Pasture3DRoadAlignment = p_apron["alignment"]
-	var crown := float(p_apron["crown"])
+	var centre: Vector2 = p_apron["center"]
+	var boundary: PackedVector2Array = p_apron["boundary"]
+	var heights: PackedFloat32Array = p_apron["heights"]
+	var centre_h := float(p_apron["center_h"])
 	var sampler := func(at: Vector2) -> float:
-		return Pasture3DRoadMesher.surface_height(at, plan, cum, alignment, crown)
+		return Pasture3DRoadMesher.footprint_height_at(at, centre, boundary, heights, centre_h)
 	var arrays := Pasture3DRoadJunctionMarkings.build_junction(prims, sampler, p_lift)
 	if arrays.is_empty():
 		return

@@ -150,6 +150,9 @@ static func resolve(p_runs: Array, p_existing: Array = [], p_opts: Dictionary = 
 			prior.arm_dirs = j.arm_dirs
 			prior.arm_roads = j.arm_roads
 			prior.arm_halfs = j.arm_halfs
+			prior.arm_z = j.arm_z
+			prior.arm_banks = j.arm_banks
+			prior.arm_crowns = j.arm_crowns
 			prior.corner_radius = j.corner_radius
 			prior.elevation = j.elevation
 			prior.major_index = j.major_index
@@ -332,6 +335,11 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 	var dirs := PackedVector2Array()
 	var arm_roads := PackedInt32Array()
 	var halfs := PackedFloat32Array()
+	# Parallel to `dirs`: which way along its road each arm points, and at what arc length the junction
+	# sits on it. Kept so the cut-face cross-sections can be read once the trims are FINAL — the fillet
+	# allowance is added to them below, and a face height taken before that is a face height at the wrong
+	# place.
+	var arm_signs := PackedFloat32Array()
 	for gi in range(idx.size()):
 		var run: Dictionary = p_runs[idx[gi]]
 		var tang := _tangent_at(run, arcs[gi])
@@ -343,10 +351,12 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 			dirs.append(tang)
 			arm_roads.append(gi)
 			halfs.append(hw)
+			arm_signs.append(1.0)
 		if arcs[gi] > ARM_MIN_LENGTH:
 			dirs.append(-tang)
 			arm_roads.append(gi)
 			halfs.append(hw)
+			arm_signs.append(-1.0)
 	j.arm_dirs = dirs
 	j.arm_roads = arm_roads
 	j.arm_halfs = halfs
@@ -363,6 +373,36 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 	for gi in range(idx.size()):
 		trims[gi] += allow[gi]
 	j.trim_backs = trims
+
+	# ---- THE CUT-FACE CROSS-SECTIONS, ONCE THE TRIMS ARE FINAL --------------------------------------
+	#
+	# Read HERE and stored, rather than left for the mesher to read back off the alignments. An alignment
+	# is solved against the surface entering its own bake, so re-reading one gives a different answer
+	# depending on which road at this junction baked first — and the polygon built from it then changed
+	# shape with scene order. These are one snapshot, taken once, that every consumer shares.
+	#
+	# At `arcs[gi] + sign * trim`, not at `arcs[gi]`: that is where the ribbon actually ends, and on any
+	# road with a grade through the junction the two differ by grade x trim — exactly the step the polygon
+	# would otherwise have against every ribbon it is meant to join.
+	var arm_z := PackedFloat32Array()
+	var arm_banks := PackedFloat32Array()
+	var arm_crowns := PackedFloat32Array()
+	for ai in dirs.size():
+		var gi: int = arm_roads[ai]
+		var run: Dictionary = p_runs[idx[gi]]
+		var alignment: Pasture3DRoadAlignment = run.get("alignment")
+		var s_face: float = arcs[gi] + arm_signs[ai] * trims[gi]
+		if alignment == null or alignment.count() == 0:
+			arm_z.append(j.elevation)
+			arm_banks.append(0.0)
+		else:
+			var si := alignment.index_at(s_face)
+			arm_z.append(alignment.height_at(s_face))
+			arm_banks.append(alignment.bank[si] if si < alignment.bank.size() else 0.0)
+		arm_crowns.append(float(run.get("crown", 0.05)))
+	j.arm_z = arm_z
+	j.arm_banks = arm_banks
+	j.arm_crowns = arm_crowns
 
 	# The footprint has to contain every trimmed end, so it is the largest of them.
 	var r := 0.0

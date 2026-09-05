@@ -911,25 +911,19 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 	# stops at the footprint, and the junction surface — one polygon spanning the trimmed ends of all of
 	# them — is what covers the gap they leave.
 	#
-	# ---- THE MAJOR ROAD IS TRIMMED IN THE RIBBON AND NOT IN THE GROUND ----
+	# ---- EVERY ARM IS TRIMMED, AND THE JUNCTION OWNS WHAT THEY LEAVE ----
 	#
-	# These are two consumers with two different owners, and collapsing them into one rule broke the
-	# junctions twice in opposite directions on 2026-09-04.
+	# Three arrangements were tried in one day and the first two were both wrong. Exempting the major road
+	# in both consumers let it pave a second surface through the polygon. Retiring the exemption in both
+	# left NOTHING grading the terrain inside a footprint, so the raw hillside stood up through the
+	# intersection. Restoring only the ground half fixed that and kept a worse fault underneath: the major
+	# road is chosen by priority, two roads of the SAME TYPE tie, and the tie falls to `major_index` —
+	# scene order. Which road's crown and grade the intersection took was decided by the scene tree.
 	#
-	# The RIBBON: every arm stops at the footprint, the major road included, because the junction POLYGON
-	# covers what they leave. Mesh meets mesh, both at the junction's elevation, and a major road paving
-	# its own cross-section through while the polygon lays another over the same place is two surfaces
-	# disagreeing wherever the junction is not exactly the major road's camber. See `junction_skips`.
-	#
-	# The GROUND: the major road grades straight through, and MUST. Nothing else can. Every minor
-	# approach is skipped, so if the major road is skipped as well then no road writes the terrain inside
-	# a footprint at all — it keeps its raw height while the junction polygon sits at road level, and the
-	# hillside comes up through the intersection. That is what "the intersections are getting buried"
-	# was. It is also why `build_footprint` drapes the polygon on the MAJOR ROAD'S alignment: the polygon
-	# is drawn on the surface the major road graded, so the major road has to have graded it.
-	#
-	# Retiring the exemption in BOTH places was the error. The ribbon half was right and stays retired;
-	# this half is restored. Gate [L] asserts the split rather than either half alone.
+	# So the trim is now unconditional in both consumers, and the thing that was missing is supplied:
+	# `grade_junction_footprints` writes the ground inside a footprint from the JUNCTION's own surface.
+	# Priority keeps what priority is for — it sets `elevation`, the height the intersection sits at, and
+	# the material it is made of. It no longer decides the SHAPE, so a tie stops being visible at all.
 	var pins := {}
 	var skip := PackedByteArray()
 	skip.resize(p_n_s)
@@ -944,12 +938,11 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 			var ji := clampi(int(round(js / p_ds)), 0, p_n_s - 1)
 			if is_finite(jpin):
 				pins[ji] = jpin
-			if not j.is_major(jkey):
-				var trim: float = j.trim_back_for(jkey)
-				var lo := clampi(int(floor((js - trim) / p_ds)), 0, p_n_s - 1)
-				var hi := clampi(int(ceil((js + trim) / p_ds)), 0, p_n_s - 1)
-				for i in range(lo, hi + 1):
-					skip[i] = 1
+			var trim: float = j.trim_back_for(jkey)
+			var lo := clampi(int(floor((js - trim) / p_ds)), 0, p_n_s - 1)
+			var hi := clampi(int(ceil((js + trim) / p_ds)), 0, p_n_s - 1)
+			for i in range(lo, hi + 1):
+				skip[i] = 1
 	return {
 		"half": half, "shoulder": shoulder, "verge": verge, "suppress": suppress,
 		"pins": pins, "skip": skip,
@@ -1040,6 +1033,13 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	if jnet != null:
 		jnet.request_resolve()
 
+	# The junction owns the ground inside its footprint, and writes it AFTER the corridor pass so no
+	# batter can be laid over it. Every participant writes the same surface — it comes from the junction
+	# record, not from the road doing the writing — so this is idempotent and needs no ordering between
+	# the roads that meet here. That is the point: ordering is what two same-type roads had no
+	# non-arbitrary way to settle.
+	res["height"] = grade_junction_footprints(res["height"], p_gw, p_gh, p_min_x, p_min_z, p_vs)
+
 	p_mod.last_masks = {} if not p_mod.publish_masks else {
 		"roadbed": res["roadbed"], "cut": res["cut"], "fill": res["fill"],
 		"verge": res["verge"], "structure": res["structure"], "surface": res["surface"],
@@ -1085,9 +1085,13 @@ func _foreign_formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: floa
 	for b in net.road_brushes():
 		if b != null and b != self and b.road_key() != mine:
 			others.append(b)
+	# The footprints go in even when this road has no neighbours to protect against: the ground inside one
+	# belongs to the junction, and a batter from any road — including this one, approaching from outside
+	# the trim — would otherwise be laid over it after `grade_junction_footprints` wrote it.
+	out.resize(p_gw * p_gh)
+	_stamp_footprints(out, net, p_gw, p_gh, p_min_x, p_min_z, p_vs)
 	if others.is_empty():
 		return out
-	out.resize(p_gw * p_gh)
 	for b in others:
 		var radius := b.formation_half_width()
 		if radius <= 0.0:
@@ -1130,6 +1134,78 @@ func _foreign_formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: floa
 						if Vector2(wx - at.x, wz - at.y).length_squared() <= r2:
 							out[row + ix] = 1
 	return out
+
+
+## Write the ground inside every footprint this road meets, to the junction's own surface.
+##
+## Returns the height field with the footprints written. Nothing else grades in there: every arm is
+## trimmed back, so without this the terrain keeps its raw height and the hillside comes up through the
+## intersection.
+##
+## The surface is `Pasture3DRoadNetwork.junction_surface`, the same one the polygon mesh is built from,
+## interpolated over the same triangle fan. Ground and mesh are therefore one definition read twice
+## rather than two that agree to a tolerance — and a tolerance between them is road surface showing
+## through the terrain.
+func grade_junction_footprints(p_z: PackedFloat32Array, p_gw: int, p_gh: int, p_min_x: float,
+		p_min_z: float, p_vs: float) -> PackedFloat32Array:
+	var net := road_network()
+	if net == null or p_vs <= 0.0:
+		return p_z
+	var out := p_z
+	for j in net.junctions_for(road_key()):
+		var surf := net.junction_surface(j)
+		if surf.is_empty():
+			continue
+		var boundary: PackedVector2Array = surf["boundary"]
+		var heights: PackedFloat32Array = surf["heights"]
+		var centre: Vector2 = surf["center"]
+		var centre_h := float(surf["center_h"])
+		var lo := boundary[0]
+		var hi := boundary[0]
+		for at in boundary:
+			lo = Vector2(minf(lo.x, at.x), minf(lo.y, at.y))
+			hi = Vector2(maxf(hi.x, at.x), maxf(hi.y, at.y))
+		var ix0 := clampi(int(floor((lo.x - p_min_x) / p_vs)), 0, p_gw - 1)
+		var ix1 := clampi(int(ceil((hi.x - p_min_x) / p_vs)), 0, p_gw - 1)
+		var iz0 := clampi(int(floor((lo.y - p_min_z) / p_vs)), 0, p_gh - 1)
+		var iz1 := clampi(int(ceil((hi.y - p_min_z) / p_vs)), 0, p_gh - 1)
+		for iz in range(iz0, iz1 + 1):
+			var row := iz * p_gw
+			var wz := p_min_z + float(iz) * p_vs
+			for ix in range(ix0, ix1 + 1):
+				var idx := row + ix
+				# NaN is the brush's "not my cell" marker, not a height, exactly as in the grader.
+				if not is_finite(out[idx]):
+					continue
+				var at := Vector2(p_min_x + float(ix) * p_vs, wz)
+				if not Geometry2D.is_point_in_polygon(at, boundary):
+					continue
+				out[idx] = Pasture3DRoadMesher.footprint_height_at(at, centre, boundary, heights,
+						centre_h)
+	return out
+
+
+## Mark every detected junction footprint in the network into `p_into`.
+func _stamp_footprints(p_into: PackedByteArray, p_net: Pasture3DRoadNetwork, p_gw: int, p_gh: int,
+		p_min_x: float, p_min_z: float, p_vs: float) -> void:
+	for j in p_net.junctions:
+		var surf := p_net.junction_surface(j)
+		if surf.is_empty():
+			continue
+		var boundary: PackedVector2Array = surf["boundary"]
+		var lo := boundary[0]
+		var hi := boundary[0]
+		for at in boundary:
+			lo = Vector2(minf(lo.x, at.x), minf(lo.y, at.y))
+			hi = Vector2(maxf(hi.x, at.x), maxf(hi.y, at.y))
+		for iz in range(clampi(int(floor((lo.y - p_min_z) / p_vs)), 0, p_gh - 1),
+				clampi(int(ceil((hi.y - p_min_z) / p_vs)), 0, p_gh - 1) + 1):
+			var row := iz * p_gw
+			var wz := p_min_z + float(iz) * p_vs
+			for ix in range(clampi(int(floor((lo.x - p_min_x) / p_vs)), 0, p_gw - 1),
+					clampi(int(ceil((hi.x - p_min_x) / p_vs)), 0, p_gw - 1) + 1):
+				if Geometry2D.is_point_in_polygon(Vector2(p_min_x + float(ix) * p_vs, wz), boundary):
+					p_into[row + ix] = 1
 
 
 ## Half the FORMATION — carriageway plus shoulder — which is `edge_d` in the grader, deliberately: the
@@ -1477,6 +1553,8 @@ func build_run() -> Dictionary:
 		# whole group, and a run that withheld it would silently fall back to the network default.
 		"corner_radius": t.corner_radius,
 		"half_width": t.half_width(resolved_lane_count()),
+		# For the junction's cut-face cross-sections: the solver reads the camber there once and stores it.
+		"crown": t.crown,
 	}
 
 
