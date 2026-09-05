@@ -183,7 +183,50 @@ that looks exactly like a real answer.
 
 ---
 
-## 5. Solver nodes and the freeze
+## 5. The GPU device is shared, and it is lazy
+
+Every GPU-backed solver in `src/pasture_3d_graph_gpu.cpp` goes through **one** device:
+
+```cpp
+static Pasture3DGraphGPU &graph_gpu() {
+    static Pasture3DGraphGPU s_gpu;   // one device, one shader compile, for the whole file
+    return s_gpu;
+}
+```
+
+**Do not add a `static Pasture3DGraphGPU` at your dispatch site.** Every site used to hold its own, so a
+scene that touched the seven geo primitives plus hydraulic plus the graph paid **nine**
+`create_local_rendering_device()` calls and nine full grid-shader compiles — seven of them never
+dispatched a single workgroup, and each held its own VRAM until static destruction, which runs *after*
+`RenderingServer` may already be gone. The class carries no state between calls, so sharing it costs
+nothing and the fix was purely a count.
+
+Four rules follow, and a new GPU-backed op has to respect all four:
+
+- **Route through `dispatch_or_cpu()`**, do not hand-roll the "big enough? try GPU, else CPU" test. That
+  policy was written out nine times; a new bail condition was a nine-site edit and a site missed out of
+  the nine failed silently, on the one op nobody re-benchmarked.
+- **Initialisation is lazy and latched.** `_ensure_init()` builds the device and the pipelines on first
+  real use, and sets `_init_failed` on any failure so a machine with no compute support pays the probe
+  once instead of on every dispatch. A failure path that frees `_rd` must also set the latch — freeing
+  without latching re-probes forever.
+- **`_ensure_init()` returns false off the main thread**, before it touches `RenderingServer`.
+  RenderingDevice is main-thread only; that guard is the C++ half of the same contract §3 states in
+  GDScript, and `graph_gpu_threshold()` returning 0 on a worker is the GDScript-visible face of it.
+- **A shader that fails to compile must say so.** A silent `false` from `_ensure_init()` is
+  indistinguishable from "this machine has no RenderingDevice", and a parity gate then reports
+  NO-SIGNAL for what is actually a broken kernel. Push the compile error.
+
+The brush SDF rasteriser (`src/pasture_3d_gpu_raster.cpp`) holds a **second**, separate local device. That
+is deliberate — a different shader, a different lifetime, and it is not on the graph's dispatch path — so
+"share the device" means share it *within* a subsystem, not fold the two together.
+
+Parity gates for this path must run **windowed**: there is no local RenderingDevice under `--headless`, so
+a headless GPU gate measures the CPU fallback and passes for the wrong reason. `GraphGpuParityGate`.
+
+---
+
+## 6. Solver nodes and the freeze
 
 Extend `Pasture3DGraphSolverNode` when a solve is expensive enough that re-running it on every
 evaluation is not acceptable. You get `enum Evaluation { LIVE, FROZEN }`, a Bake button, a stale
@@ -211,7 +254,7 @@ func eval_grid_channels(p_inputs, p_gw, p_gh, _p_mask, p_rect) -> Array:
 
 ---
 
-## 6. Invalidation and caching
+## 7. Invalidation and caching
 
 Three signals, and they are not interchangeable:
 
@@ -243,7 +286,7 @@ skip on the road's own properties ships a stale paint.
 
 ---
 
-## 7. The editor
+## 8. The editor
 
 - **Previews are owned by the editor, not the node.** One low-resolution multi-tap evaluation fills every
   open thumbnail at once, off the main thread, debounced. `evaluate()` never renders a thumbnail, and
@@ -259,7 +302,7 @@ skip on the road's own properties ships a stale paint.
 
 ---
 
-## 8. Gates
+## 9. Gates
 
 One gate per claim, and the graph family is dense enough that the right first question about a change is
 *which gate owns this*:
@@ -293,7 +336,7 @@ not `_full_dirty`; and a gate that touches `data_directory` can modify the demo 
 
 ---
 
-## 9. Things that have actually gone wrong
+## 10. Things that have actually gone wrong
 
 Each of these cost real time. They are here in the order you are likely to meet them.
 
@@ -303,10 +346,10 @@ Each of these cost real time. They are here in the order you are likely to meet 
 4. **`native_out_count()` returning `output_count()`** — a channel the kernel never writes is served as
    zeros, which looks like a real answer.
 5. **A hand-rolled solver cache key** — two solvers omitted `gw`/`gh` and could not tell 512×128 from
-   128×512. §5.
+   128×512. §6.
 6. **Overriding `clear_cache()`** instead of `_clear_solver_cache()` — eviction freed nothing and
-   destroyed every frozen solve. §5.
-7. **Memoising a compiled program** — copied bytes go stale silently. §6.
+   destroyed every frozen solve. §6.
+7. **Memoising a compiled program** — copied bytes go stale silently. §7.
 8. **Calling `evaluate()` from a worker** — refused by design; compile on main, solve on the worker. §3.
 9. **Assuming an unwired port means something other than zeros** — the native path binds the zero buffer.
 10. **`Signal.is_connected` ignoring binds** — it matches on object+method, so bind-keyed connections
@@ -314,3 +357,5 @@ Each of these cost real time. They are here in the order you are likely to meet 
     same Callable for all three of `is_connected` / `connect` / `disconnect`.
 11. **Parameters carried at a narrower width than the kernel computes in** — bit-exact for one
     iteration, 0.0008 m out by fifteen. `PASTURE3D_NODE_ACCELERATION_GUIDE.md` §3.6.
+12. **A `static Pasture3DGraphGPU` at each dispatch site** — nine devices, nine shader compiles,
+    seven of them never dispatched, all freed after `RenderingServer` may be gone. §5.
