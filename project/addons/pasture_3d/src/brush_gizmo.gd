@@ -289,10 +289,11 @@ func _set_subgizmo_transform(p_gizmo: EditorNode3DGizmo, p_id: int, p_transform:
 		if not _orig.has(p_id):
 			_orig[p_id] = path.curve.get_point_position(idx)
 		var world := node.to_global(p_transform.origin)
-		if brush != null and brush.snap_to_surface:
-			var h: float = brush._base_height_below(Vector3(world.x, 0.0, world.z))
-			if is_finite(h):
-				world.y = h + brush.surface_offset
+		if brush != null:
+			# Not forced: a drag honours the toggle. Alt is not read here on purpose — the editor already
+			# owns Alt during a gizmo drag in two of the three navigation schemes, so a modifier that means
+			# "seat it" here would fight the camera. Alt seats on the two CLICK gestures instead.
+			world = brush.editor_seat_on_surface(world, false)
 		path.curve.set_point_position(idx, path.to_local(world))
 		return
 	# Tangent (in/out).
