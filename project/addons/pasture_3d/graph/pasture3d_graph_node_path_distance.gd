@@ -52,6 +52,18 @@ func op() -> StringName:
 	return &"path_distance"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = unreachable_distance
+	p[1] = max_distance
+	return {"params": p}
+
+
+func native_out_count() -> int:
+	return 3 # distance, s, t
+
+
 func role() -> Role:
 	return Role.FILTER
 

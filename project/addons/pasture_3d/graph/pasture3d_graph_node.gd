@@ -81,6 +81,16 @@ func _on_node_changed_bump_revision() -> void:
 	_dirty_revision += 1
 
 
+## Call from every property setter. `@export` assignment emits NO `Resource.changed` in GDScript, so a
+## node whose parameters are plain `@export` vars with no setter is INVISIBLE to invalidation: its
+## `_dirty_revision` never moves, `_compute_node_inputs_hash` does not read parameters either, and the
+## node serves its first grid forever while the host graph never even schedules a re-bake.
+##
+## Solver nodes override this to mark their private solve stale as well; the base is just the signal.
+func _param_changed() -> void:
+	emit_changed()
+
+
 ## Returns true if the node needs re-evaluation (its properties changed, inputs signature changed, or cache empty).
 func is_dirty(p_inputs_hash: int) -> bool:
 	if _cached_grid.is_empty():
@@ -101,12 +111,47 @@ func store_cache(p_grid: PackedFloat32Array, p_aux: Dictionary, p_inputs_hash: i
 	_last_access_tick = p_access_tick
 
 
-## Clears this node's cached buffers and resets cache revisions.
+## Clears this node's cached buffers and resets cache revisions. NOT for overriding — a solver with its
+## own private cache overrides `_clear_solver_cache()` below, which this calls.
+##
+## It used to be the override point, and all twenty solver nodes took it: each cleared its own `_cache`
+## and none called `super`, so the base `_cached_grid` — which is precisely what `get_cache_size_bytes()`
+## measures, and which line 681 stores for EVERY node in the eval order — survived. Eviction therefore
+## freed zero measured bytes, `get_total_cache_bytes() <= max_cache_bytes` never became true, and the
+## loop walked the entire list clearing every node in the graph. Each override's `emit_changed()` then
+## destroyed a FROZEN solve, which is the expensive work the freeze exists to skip. Splitting the base
+## work from the hook makes skipping it unrepresentable rather than merely discouraged.
 func clear_cache() -> void:
 	_cached_grid = PackedFloat32Array()
 	_cached_aux = {}
 	_last_baked_revision = -1
 	_inputs_hash = 0
+	_clear_solver_cache()
+
+
+## The cache key for a solver node's private solve: the grid DIMENSIONS, then every input grid the
+## solve actually depends on, in a fixed order.
+##
+## The twenty solver nodes used to spell this four different ways. Ten wrote
+## `hash(gw) ^ (hash(gh) << 1) ^ hash(surface)`; Mudslide folded its mask in and Thermal its hardness
+## array (both correct — those really are extra dependencies); and Lake Flooding and Stream Extraction
+## used `hash(arr.size()) ^ hash(arr)`, which omits `gw`/`gh` ENTIRELY. A frozen Lake Flooding could not
+## tell 512x128 from 128x512: same cell count, same values, same key, and the cached lake surface was
+## served against a grid of a different shape. The dependency SET is still each node's own business; the
+## rule for turning it into a key is not.
+static func solver_cache_key(p_gw: int, p_gh: int, p_grids: Array) -> int:
+	var h: int = hash(p_gw) ^ (hash(p_gh) << 1)
+	var shift: int = 2
+	for g in p_grids:
+		shift += 2
+		h = h ^ (hash(g) << shift)
+	return h
+
+
+## Override point for a solver node holding a private solve cache. The base does nothing; whatever a
+## subclass does here happens IN ADDITION to the buffer reset above, never instead of it.
+func _clear_solver_cache() -> void:
+	pass
 
 
 ## Returns the primary cached output grid (port 0).
@@ -256,9 +301,67 @@ func input_count() -> int:
 	return 1
 
 
+## Which native params SLOT each input port overrides when a wire drives it, in port order; -1 for a port
+## that carries a grid rather than a scalar. Empty means "no port is a scalar".
+##
+## This used to be `PARAM_PORT_MAP` in `pasture3d_terrain_graph.gd`, keyed by op string, alongside four
+## other tables that also described ops from the outside. A node whose entry was missing was not an
+## error: the port simply stopped looking like a scalar, so a driven value reached the script path and
+## not the native one, and anything deriving "is this a grid port" from the table got the wrong answer
+## (see the Expand/Shrink `amount` note that entry carried). Declared here, the fact travels with the
+## node that owns it.
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array()
+
+
+## Marshal this node's parameters into the flat 16-slot scalar block the native op table reads, plus its
+## FastNoiseLite and its 256-entry curve LUT when it has them:
+##
+##     { "params": PackedFloat32Array (16), "noise": FastNoiseLite|null, "lut": PackedFloat32Array }
+##
+## `{}` means "no scalar parameters", which is right for the structural ops. The op ID is NOT returned
+## here — that comes from `Pasture3DUtil.graph_op_ids()`, the one C++ list.
+##
+## WHY THIS LIVES ON THE NODE. It used to be 60 `match` arms in `_lower_node_op`, naming this node's
+## properties from the outside with `node.get("name")`. `get()` on a name the node does not have returns
+## null and the arm fell through to a hardcoded default, so a typo produced a plausible surface rather
+## than an error, and four shipped bugs of exactly that shape are on the record: Crater baked a fixed
+## amplitude of 25.0 into every crater, Warp put `strength` in the slot the kernel reads as the noise
+## TYPE, Curve named five properties that do not exist (and threw on `bool(null)`), and Mask read `mode`
+## for `property` so every mask lowered as SLOPE. Written here, `amplitude` is a member reference and a
+## typo is a PARSE error. That is the whole point of the move; the tidiness is incidental.
+func native_lower() -> Dictionary:
+	return {}
+
+
+## How many CHANNELS this node's native kernel writes, which is not always `output_count()` — an op may
+## offer five ports in the editor and implement one in C++. Reporting the kernel's number is what makes
+## `native_supported()` refuse to lower a graph that reads a channel the kernel does not produce; saying
+## `output_count()` here would serve a field of zeros that looks exactly like a real answer.
+##
+## Was `NATIVE_OUT_COUNT` in `pasture3d_terrain_graph.gd`; a missing entry silently truncated a
+## multi-output node to channel 0.
+func native_out_count() -> int:
+	return 1
+
+
 ## Port labels, for the editor and for configuration warnings. Length should match `input_count()`.
 func input_names() -> PackedStringArray:
 	return PackedStringArray(["in"])
+
+
+## Which INPUT PORT carries this node's secondary GRID operand -- the mask, the noise field, the per-cell
+## weight -- or -1 when it has none.
+##
+## A node with a grid on a port other than 0 has to say so HERE, next to input_names(), because the native
+## and GPU evaluators cannot see the port list. They used to hardcode `in1` for all of them, which was right
+## only for Mudslide: Contrast read its "amount" scalar as a per-cell mask, Falloff read "strength", and
+## SmoothFill and RecastCliff read "radius" and "talus". Both halves failed at once -- the real mask was
+## ignored AND a driving constant acted as one -- and nothing refused the graph.
+##
+## Port 0 is the primary input and is never the answer; -1 means the op has no secondary grid.
+func aux_grid_port() -> int:
+	return -1
 
 
 ## The value an UNWIRED input port reads. A HEIGHT port reads 0 (a missing height adds nothing); a MASK

@@ -1171,6 +1171,87 @@ PackedFloat32Array Pasture3DUtil::graph_cell_eval_grid(const Dictionary &p_progr
 
 // Native whole-graph evaluator — a thin binding over graph_eval_grid so a headless gate and the native
 // rasteriser share one implementation.
+Dictionary Pasture3DUtil::graph_op_ids() {
+	// The single source of truth for "which op tag is which kernel". Written with the enum CONSTANTS, not
+	// integers, so a rename is a compile error rather than a wrong surface. Several tags deliberately
+	// share an id: every `const_*` flavour collapses to CONST, the structural passthroughs to OUTPUT, and
+	// the two geometry SOURCE nodes lower to a zero CONST while contributing a geometry-table entry.
+	static const struct {
+		const char *tag;
+		GraphCellOpType id;
+	} k_ops[] = {
+		{ "noise", GRAPH_OP_NOISE },
+		{ "const", GRAPH_OP_CONST },
+		{ "const_int", GRAPH_OP_CONST },
+		{ "const_vector", GRAPH_OP_CONST },
+		{ "const_color", GRAPH_OP_CONST },
+		{ "const_bool", GRAPH_OP_CONST },
+		{ "road_source", GRAPH_OP_CONST },
+		{ "shape_source", GRAPH_OP_CONST },
+		{ "blend", GRAPH_OP_BLEND },
+		{ "terrace", GRAPH_OP_TERRACE },
+		{ "input", GRAPH_OP_INPUT },
+		{ "smooth", GRAPH_OP_SMOOTH },
+		{ "output", GRAPH_OP_OUTPUT },
+		{ "reroute", GRAPH_OP_OUTPUT },
+		{ "terrain_bus_merge", GRAPH_OP_OUTPUT },
+		{ "terrain_bus_split", GRAPH_OP_OUTPUT },
+		{ "noise_jordan", GRAPH_OP_NOISE_JORDAN },
+		{ "noise_swiss", GRAPH_OP_NOISE_SWISS },
+		{ "geological_primitive", GRAPH_OP_GEOLOGICAL_PRIMITIVE },
+		{ "furrows", GRAPH_OP_FURROWS },
+		{ "dunes", GRAPH_OP_DUNES },
+		{ "crater", GRAPH_OP_CRATER },
+		{ "warp", GRAPH_OP_WARP },
+		{ "strata", GRAPH_OP_STRATA },
+		{ "const_curve", GRAPH_OP_CURVE },
+		{ "curve", GRAPH_OP_CURVE },
+		{ "remap", GRAPH_OP_REMAP },
+		{ "mask", GRAPH_OP_MASK },
+		{ "curvature", GRAPH_OP_CURVATURE },
+		{ "talus_projection", GRAPH_OP_TALUS_PROJECTION },
+		{ "spectral_equalizer", GRAPH_OP_SPECTRAL_EQUALIZER },
+		{ "depression_filling", GRAPH_OP_DEPRESSION_FILLING },
+		{ "lake_flooding", GRAPH_OP_LAKE_FLOODING },
+		{ "stream_extraction", GRAPH_OP_STREAM_EXTRACTION },
+		{ "erosion_hydraulic", GRAPH_OP_EROSION_HYDRAULIC },
+		{ "erosion_thermal", GRAPH_OP_EROSION_THERMAL },
+		{ "scree", GRAPH_OP_SCREE },
+		{ "erosion", GRAPH_OP_EROSION },
+		{ "hydraulic_particle", GRAPH_OP_HYDRAULIC_PARTICLE },
+		{ "hydraulic_stream_log", GRAPH_OP_HYDRAULIC_STREAM_LOG },
+		{ "hydraulic_saleve", GRAPH_OP_HYDRAULIC_SALEVE },
+		{ "mountain_cone", GRAPH_OP_MOUNTAIN_CONE },
+		{ "mountain_inselberg", GRAPH_OP_MOUNTAIN_INSELBERG },
+		{ "mountain_range_radial", GRAPH_OP_MOUNTAIN_RANGE_RADIAL },
+		{ "mountain_tibesti", GRAPH_OP_MOUNTAIN_TIBESTI },
+		{ "mountain_stump", GRAPH_OP_MOUNTAIN_STUMP },
+		{ "shattered_peak", GRAPH_OP_SHATTERED_PEAK },
+		{ "caldera", GRAPH_OP_CALDERA },
+		{ "falloff", GRAPH_OP_FALLOFF },
+		{ "contrast", GRAPH_OP_CONTRAST },
+		{ "transform", GRAPH_OP_TRANSFORM },
+		{ "distance_transform", GRAPH_OP_DISTANCE_TRANSFORM },
+		{ "expand_shrink", GRAPH_OP_EXPAND_SHRINK },
+		{ "relative_elevation", GRAPH_OP_RELATIVE_ELEVATION },
+		{ "smooth_fill", GRAPH_OP_SMOOTH_FILL },
+		{ "recast_cliff", GRAPH_OP_RECAST_CLIFF },
+		{ "warp_downslope", GRAPH_OP_WARP_DOWNSLOPE },
+		{ "gavoronoise", GRAPH_OP_GAVORONOISE },
+		{ "flooding_uniform_level", GRAPH_OP_FLOODING_UNIFORM_LEVEL },
+		{ "water_mask", GRAPH_OP_WATER_MASK },
+		{ "mudslide", GRAPH_OP_MUDSLIDE },
+		{ "path_distance", GRAPH_OP_PATH_QUERY },
+		{ "path_mask", GRAPH_OP_PATH_MASK },
+		{ "road_grade", GRAPH_OP_ROAD_GRADE },
+	};
+	Dictionary d;
+	for (const auto &e : k_ops) {
+		d[StringName(e.tag)] = (int)e.id;
+	}
+	return d;
+}
+
 PackedFloat32Array Pasture3DUtil::graph_eval_grid(const Dictionary &p_program, const int p_gw,
 		const int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_input) {
 	godot::GraphProgram prog;
@@ -1946,8 +2027,13 @@ PackedFloat32Array Pasture3DUtil::sample_brush_input(const int p_w, const int p_
 // Protected Functions
 ///////////////////////////
 
+int Pasture3DUtil::gd_graph_gpu_threshold() {
+	return graph_gpu_threshold();
+}
+
 void Pasture3DUtil::_bind_methods() {
 	// Control map converters
+	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("graph_gpu_threshold"), &gd_graph_gpu_threshold);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("as_float", "value"), &as_float);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("as_uint", "value"), &as_uint);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("get_base", "pixel"), &gd_get_base);
@@ -1998,6 +2084,8 @@ void Pasture3DUtil::_bind_methods() {
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("graph_cell_eval_grid", "program", "gw", "gh", "rect"),
 			&Pasture3DUtil::graph_cell_eval_grid);
+	// Terrain graph — the op vocabulary (op tag -> GraphCellOpType id), so GDScript stops hand-typing it.
+	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("graph_op_ids"), &Pasture3DUtil::graph_op_ids);
 	// Terrain graph — the native whole-graph evaluator (grid-pass interleave).
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("graph_eval_grid", "program", "gw", "gh", "rect", "input"),

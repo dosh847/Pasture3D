@@ -116,6 +116,67 @@ func to_params() -> Dictionary:
 	return {}
 
 
+## This modifier's whole-grid pass, for a `needs_grid()` step on the GDScript path. The default is the
+## identity, which is right for a point modifier — it contributes through `eval_point`, not here.
+##
+## `p_step` is this modifier's own compiled block; `p_ctx` carries the grid geometry and, in `host`, the
+## brush running the stack. Returning `p_vals` unchanged is the honest answer for a node with no grid
+## pass; the bug this replaces is a node that HAS one and never gets asked.
+##
+## It used to be a hardcoded `if`-chain on `op()` in `_apply_field_step`, four arms deep, falling through
+## to `return p_vals`. A new grid modifier that forgot to edit that chain did NOTHING, with no error and
+## no warning: the brush painted, the stack reported the step, and its pass simply never ran. Dispatching
+## through the node makes forgetting unrepresentable — a subclass that does not override this has said so.
+func apply_field(_p_step: Dictionary, p_vals: PackedFloat32Array, _p_ctx: Dictionary) -> PackedFloat32Array:
+	return p_vals
+
+
+## True when this modifier cannot run on the native rasteriser and forces the whole stamp to GDScript.
+##
+## `p_host` is the brush, because the answer is not always a property of the modifier alone: a road
+## grader is native only when `stamp_road_line` exists AND it is the stack's only active step. The same
+## op-string set used to be re-enumerated in `_stack_forces_gdscript`, so the list of grid ops and the
+## list of ops that can bail were two lists that had to agree.
+func forces_gdscript(_p_host) -> bool:
+	return false
+
+
+## The deferred-solve entry for this modifier, or `{}` when it has nothing to defer.
+##
+## `p_out` is the slot the rasteriser wrote during pass 1; a `pending` key in it means the surface that
+## WOULD have been solved is waiting. Called for every step that produced one, so a modifier that defers
+## says so here rather than being recognised by its class at the call site — which is what used to
+## happen, as `m is Pasture3DNodeErosion` / `elif m is Pasture3DNodeGraph`, with a third deferring
+## modifier matching neither branch and being dropped in silence.
+func make_pending(_p_out: Dictionary, _p_extent: String) -> Dictionary:
+	return {}
+
+
+## Which of the host's deferred queues `make_pending` builds for. Only meaningful when it builds one.
+func pending_queue() -> StringName:
+	return &""
+
+
+## True when this modifier needs the working surface at its own position in the stack captured and handed
+## back to it. Default false.
+##
+## The host used to ask this as `m != null and "material" in m and m.material != null and
+## m.material.has_method("set_seed_surface")` — a four-deep inline capability probe inside a generic
+## loop, which is a type switch spelled as duck-typing. It also answered for the wrong object: `"material"
+## in m` is a fact about the modifier, `has_method` a fact about its material, and neither is a fact about
+## whether this bake should capture.
+func wants_seed_surface() -> bool:
+	return false
+
+
+## Take the captured surface. `p_surface` carries the grid, its dimensions and the loop's ORIENTED frame —
+## the two rectangles differ, and on a rotated loop a plain rescale between them would shear the ridges
+## off their own crest lines. Returns true when the modifier actually consumed it, which is what tells the
+## host another bake is needed.
+func take_seed_surface(_p_surface: Dictionary) -> bool:
+	return false
+
+
 ## Drop every cached output. The host calls this on an explicit Bake; a modifier that caches nothing has
 ## nothing to do.
 func clear_cache() -> void:

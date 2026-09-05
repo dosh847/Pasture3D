@@ -4,9 +4,8 @@
 # Used for algorithm prototyping, A/B testing, and automated headless CI parity verification.
 @tool
 class_name Pasture3DGraphNodeDevErosionHydraulic
-extends Pasture3DGraphNode
+extends Pasture3DGraphSolverNode
 
-enum Evaluation { LIVE, FROZEN }
 
 @export_group("Simulation")
 @export_range(1, 100, 1, "or_greater") var iterations: int = 25:
@@ -45,17 +44,13 @@ enum Evaluation { LIVE, FROZEN }
 		_param_changed()
 
 @export_group("Evaluation")
-@export var evaluation: Evaluation = Evaluation.LIVE:
-	set(v):
-		evaluation = v
-		emit_changed()
 
 @export_tool_button("Bake Hydraulic Erosion") var _bake_btn = clear_cache
 
-var _cache: Dictionary = {}
-var _cache_key: int = 0
-var _dirty_since_bake: bool = false
-var _stale: bool = false
+
+## Names this node's own Bake button, for the freeze warning.
+func bake_label() -> String:
+	return "Bake Hydraulic Erosion"
 
 
 func op() -> StringName:
@@ -98,15 +93,6 @@ func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.MASK])
 
 
-func clear_cache() -> void:
-	if _cache.is_empty() and not _stale and not _dirty_since_bake:
-		return
-	_cache.clear()
-	_dirty_since_bake = false
-	_stale = false
-	emit_changed()
-
-
 func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> Array:
 	var n := p_gw * p_gh
 	var surface: PackedFloat32Array = (p_inputs[0] as PackedFloat32Array) if p_inputs.size() > 0 \
@@ -114,24 +100,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	if surface.size() != n:
 		surface = Pasture3DGraphOps.zeros(n)
 
-	if evaluation == Evaluation.FROZEN:
-		var key := _surface_hash(surface, p_gw, p_gh)
-		if not _cache.is_empty():
-			if _dirty_since_bake or key != _cache_key:
-				_set_stale(true)
-			return _cache[_cache_key]
-		var solved := _solve_gdscript(surface, p_gw, p_gh, p_rect)
-		_cache = {}
-		_cache_key = key
-		_cache[key] = solved
-		_dirty_since_bake = false
-		_set_stale(false)
-		return solved
-
-	if not _cache.is_empty():
-		_cache.clear()
-	_set_stale(false)
-	return _solve_gdscript(surface, p_gw, p_gh, p_rect)
+	return solve_cached(_surface_hash(surface, p_gw, p_gh), func(): return _solve_gdscript(surface, p_gw, p_gh, p_rect))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -139,23 +108,12 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> 
 
 
 func _param_changed() -> void:
-	if not _cache.is_empty():
-		_dirty_since_bake = true
+	mark_dirty_since_bake()
 	emit_changed()
 
 
-func _set_stale(p_stale: bool) -> void:
-	if _stale == p_stale:
-		return
-	_stale = p_stale
-	if Engine.is_editor_hint():
-		emit_changed.call_deferred()
-
-
 func _surface_hash(p_surface: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
-	var h := hash(p_gw) ^ (hash(p_gh) << 1)
-	h = h ^ hash(p_surface)
-	return h
+	return solver_cache_key(p_gw, p_gh, [p_surface])
 
 
 func _solve_gdscript(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2) -> Array:
@@ -201,6 +159,10 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 				flow_accum[i] += p_rain
 
 		var next_water := water.duplicate()
+		# The routing sweep both scatters into and reads flow_accum, so it reads a SNAPSHOT -- see the note
+		# on the native kernel's twin of this line. Reading the live array made carrying capacity depend on
+		# raster order.
+		var flow_accum_in := flow_accum.duplicate()
 		var next_sediment := sediment.duplicate()
 		var next_height := height.duplicate()
 
@@ -240,7 +202,7 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 				if total_diff > 0.0:
 					var eff_slope: float = maxf(max_slope, p_min_slope)
 					var vel: float = sqrt(clampf(eff_slope * cell_dist, 0.05, 50.0))
-					var flow_factor: float = log(1.0 + flow_accum[i] * 10.0) + 1.0
+					var flow_factor: float = log(1.0 + flow_accum_in[i] * 10.0) + 1.0
 					var cap: float = p_cap * eff_slope * vel * w_c * flow_factor * 0.5
 
 					var sed_c: float = sediment[i]
@@ -270,7 +232,10 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 							flow_accum[ni] += moved_w
 							sed_c = maxf(sed_c - moved_s, 0.0)
 
-					next_sediment[i] = sed_c
+					# += the DELTA, not = the retained amount -- see the note on the native kernel's twin of
+					# this line. next_sediment starts as a copy of sediment and neighbours scatter into it,
+					# so assigning here discarded upstream deposits made earlier in the same scan.
+					next_sediment[i] += sed_c - sediment[i]
 
 		for i in range(n):
 			if is_finite(next_height[i]):

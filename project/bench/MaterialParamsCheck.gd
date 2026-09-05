@@ -30,6 +30,17 @@ var _material: Pasture3DMaterial
 
 func _ready() -> void:
 	print("\n=== Pasture3DMaterial stored parameters ===\n")
+	# Every criterion here reads the shader's own parameter list, and the headless display server never
+	# compiles one — the scrape comes back with zero groups and `set_shader_parameter` reads back null.
+	# A and D then report themselves vacuous and C reports a false red, which is the honest outcome for a
+	# criterion that cannot run but is the wrong thing for a sweep to read as a defect. Say so and stop.
+	if DisplayServer.get_name() == "headless":
+		print("SKIPPED: needs a display server (the shader is never compiled headless).")
+		print("Run windowed: Godot_console.exe --path project res://bench/MaterialParamsCheck.tscn")
+		print("")
+		print("=== MATERIAL PARAMS CHECK SKIPPED (headless) ===")
+		get_tree().quit(0)
+		return
 	_build()
 	await _settle()
 	_gate_a_no_group_names_stored()

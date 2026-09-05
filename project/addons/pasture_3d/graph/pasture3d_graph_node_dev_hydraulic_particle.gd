@@ -5,9 +5,8 @@
 # Used for algorithm prototyping, A/B testing, and automated headless CI parity verification.
 @tool
 class_name Pasture3DGraphNodeDevHydraulicParticle
-extends Pasture3DGraphNode
+extends Pasture3DGraphSolverNode
 
-enum Evaluation { LIVE, FROZEN }
 
 @export_group("Simulation")
 ## Total number of raindrops / particles simulated across the terrain footprint.
@@ -83,17 +82,13 @@ enum Evaluation { LIVE, FROZEN }
 		_param_changed()
 
 @export_group("Evaluation")
-@export var evaluation: Evaluation = Evaluation.LIVE:
-	set(v):
-		evaluation = v
-		emit_changed()
 
 @export_tool_button("Bake Particle Erosion") var _bake_btn = clear_cache
 
-var _cache: Dictionary = {}
-var _cache_key: int = 0
-var _dirty_since_bake: bool = false
-var _stale: bool = false
+
+## Names this node's own Bake button, for the freeze warning.
+func bake_label() -> String:
+	return "Bake Particle Erosion"
 
 
 func op() -> StringName:
@@ -136,17 +131,46 @@ func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.MASK, PortType.MASK])
 
 
+## The oracle is what this node IS, so it has to be what this node RUNS. Without these two, the class
+## inherits Pasture3DGraphNode.eval_grid, which hands the first input straight back — the FROZEN/LIVE
+## toggle, the bake button and the cache would all be decoration over a node that never solves, and
+## GraphSolverFreezeGate [E] names exactly that. Mirrors the production twin's shape.
+func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> Array:
+	var n := p_gw * p_gh
+	var surface: PackedFloat32Array = (p_inputs[0] as PackedFloat32Array) 			if (p_inputs.size() > 0 and p_inputs[0] is PackedFloat32Array) else Pasture3DGraphOps.zeros(n)
+	var mask_in: PackedFloat32Array = (p_inputs[1] as PackedFloat32Array) 			if (p_inputs.size() > 1 and p_inputs[1] is PackedFloat32Array) else PackedFloat32Array()
+	if surface.size() != n:
+		surface = Pasture3DGraphOps.zeros(n)
+	return solve_cached(solver_cache_key(p_gw, p_gh, [surface, mask_in]),
+			func(): return solve_oracle(surface, p_gw, p_gh, p_rect, _params_for_oracle(mask_in)))
+
+
+func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
+	return eval_grid_channels(p_inputs, p_gw, p_gh, p_mask, p_rect)[0]
+
+
+## Every key the oracle reads, so a parameter edit reaches the solve. Keys are the oracle's own
+## `p_params.get(...)` names; a typo here is a silently ignored slider.
+func _params_for_oracle(p_mask: PackedFloat32Array) -> Dictionary:
+	return {
+		"droplet_count": droplet_count,
+		"max_lifetime": max_lifetime,
+		"inertia": inertia,
+		"sediment_capacity": sediment_capacity,
+		"erosion_speed": erosion_speed,
+		"deposition_speed": deposition_speed,
+		"evaporation_rate": evaporation_rate,
+		"min_slope": min_slope,
+		"gravity": gravity,
+		"bedrock_gap": bedrock_gap,
+		"ridge_forcing": ridge_forcing,
+		"seed": self.seed,
+		"mask": p_mask,
+	}
+
+
 func _param_changed() -> void:
-	if evaluation == Evaluation.FROZEN:
-		_stale = true
-	emit_changed()
-
-
-func clear_cache() -> void:
-	_cache.clear()
-	_cache_key = 0
-	_dirty_since_bake = false
-	_stale = false
+	mark_dirty_since_bake()
 	emit_changed()
 
 

@@ -36,3 +36,8 @@ func is_active() -> bool:
 
 func to_params() -> Dictionary:
 	return {"passes": passes}
+
+
+## Pasture3DNode.apply_field(). A box blur over the working grid.
+func apply_field(_p_step: Dictionary, p_vals: PackedFloat32Array, p_ctx: Dictionary) -> PackedFloat32Array:
+	return p_ctx["host"]._blur_grid(p_vals, int(p_ctx["gw"]), int(p_ctx["gh"]), passes)

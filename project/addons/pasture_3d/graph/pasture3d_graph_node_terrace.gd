@@ -59,6 +59,23 @@ func op() -> StringName:
 	return &"terrace"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	var nz = null
+	p[0] = band_height
+	p[1] = hardness
+	p[2] = amount
+	p[3] = jitter
+	if p[3] > 0.0 and has_method("_jitter_field"):
+		nz = call("_jitter_field")
+	return {"params": p, "noise": nz}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 0, 1, -1])
+
+
 func role() -> Role:
 	return Role.FILTER
 

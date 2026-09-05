@@ -238,3 +238,18 @@ func modifier_warnings(p_host) -> PackedStringArray:
 ## Worst height the last bake put between the road and the ground, metres. 0 when nothing is baked.
 func _deepest_structure() -> float:
 	return last_alignment.deepest_structure() if last_alignment != null else 0.0
+
+
+## Pasture3DNode.apply_field(). See Pasture3DNodeErosion.apply_field for why the body stays on the host.
+func apply_field(p_step: Dictionary, p_vals: PackedFloat32Array, p_ctx: Dictionary) -> PackedFloat32Array:
+	return p_ctx["host"]._apply_road_step(p_step, p_vals, p_ctx)
+
+
+## Pasture3DNode.forces_gdscript(). A road grader takes the GDScript path when the native stamp_road_line
+## is absent, and also when it is not the whole answer for this stack — see
+## Pasture3DTerrainBrush._road_native_is_complete().
+func forces_gdscript(p_host) -> bool:
+	if p_host.terrain == null or p_host.terrain.data == null \
+			or not p_host.terrain.data.has_method("stamp_road_line"):
+		return true
+	return not p_host._road_native_is_complete()

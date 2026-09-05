@@ -926,3 +926,48 @@ static func _crater(nu: float, nv: float, inv_ex: float, inv_ez: float,
 		var s := (r - rim_pos) / (1.0 - rim_pos)
 		val = rim_height * pow(1.0 - s, maxf(params[p + 4], 0.01))
 	return val * params[p]
+
+
+## Everything about this material that changes what it stamps, as one hashable value.
+##
+## Pasture3DTerrainBrush's stamp cache replays a previously rasterised grid whenever the spline's stamp
+## key is unchanged, and `_modifier_signature()` asked each modifier for a `content_key()`. A Relief
+## modifier had none, and its `to_params()` carries only the two strengths — so SWAPPING THE MATERIAL,
+## or editing any op inside it, left the key identical and the brush replayed the previous material's
+## stamp. Nothing errored; the terrain simply kept the old landform.
+##
+## The properties are walked rather than `compile()` being hashed, because this runs before the decision
+## to rasterise: keying on the compiled program would compile every material on every repaint, including
+## the DLA growth this cache exists to avoid re-running.
+func content_key() -> int:
+	return hash(_content_values(self, 0))
+
+
+## Storage properties, one level of nested Resource at a time. Depth-limited rather than cycle-tracked
+## because a relief stack that contains itself is already refused by compile()'s `_building` guard, and a
+## key that stopped early would only ever be too CONSERVATIVE — it cannot claim two materials are the same.
+static func _content_values(p_res: Resource, p_depth: int) -> Array:
+	if p_res == null or p_depth > 4:
+		return []
+	var vals: Array = [p_res.get_class()]
+	var sc := p_res.get_script()
+	if sc != null:
+		vals.append(sc.resource_path)
+	for p in p_res.get_property_list():
+		if int(p["usage"]) & PROPERTY_USAGE_STORAGE == 0:
+			continue
+		var v = p_res.get(p["name"])
+		if v is Resource:
+			vals.append(_content_values(v, p_depth + 1))
+		elif v is Array:
+			var sub: Array = []
+			for e in v:
+				sub.append(_content_values(e, p_depth + 1) if e is Resource else e)
+			vals.append(sub)
+		elif v is Object:
+			# An unhandled Object hashes by identity, which is stable within a session and is all the
+			# cache needs; it must never hash to a constant, or two of them would look alike.
+			vals.append(v.get_instance_id() if v != null else 0)
+		else:
+			vals.append(v)
+	return vals

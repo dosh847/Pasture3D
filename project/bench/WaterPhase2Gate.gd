@@ -1,5 +1,22 @@
 # Pasture3D Water — Phase 2 exit gate (spec §7).
 #
+# STALE FIXTURE — RED FOR A KNOWN REASON, NOT A REGRESSION (recorded 2026-09-04).
+#
+# This gate builds its world as `terrain.ocean_material = ...`, `terrain.ocean_wave_count = ...`,
+# `terrain.get_water_time()`. The ocean has since been EXTRACTED out of Pasture3D into a
+# `Pasture3DOcean` node under a `Pasture3DPoolManager`; `Pasture3D` keeps `ocean_*` only as
+# `_legacy_ocean`, a capture used to migrate scenes saved before the split. So the fixture builds no
+# ocean, renders an empty frame, and everything downstream fails.
+#
+# READ THE FAILURES AS THE CONTROLS WORKING. "there is no water on screen at sea level 0", "the preset
+# drew (almost) nothing", "an empty frame costs as much as water does", "the control shows no motion"
+# — each of those is this gate refusing to pass on a frame with nothing in it. That is the behaviour
+# bench gates here are supposed to have. Nothing about the water code is implicated by them.
+#
+# NOT BEING PORTED. The water brushes are due to be overtaken by the graph nodes that derive water from
+# terrain, and these gates get rewritten against `Pasture3DOcean` as part of that work rather than
+# ported onto it twice. Until then a red result here carries no information; do not debug water from it.
+#
 # Gate criteria:
 #   A. C++ generates a wave table and it reaches the shader
 #   B. the uploaded table overrides the compile-time fallback

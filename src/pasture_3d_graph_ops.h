@@ -24,6 +24,7 @@
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/rect2.hpp>
 
+#include <functional>
 #include <vector>
 
 namespace godot {
@@ -224,6 +225,17 @@ struct GraphProgram {
 	// Channels above 0 are allocated ONLY when some operand reads them: a solve nobody asked a question
 	// of costs what it always did.
 	PackedInt32Array out_count;
+	// Which INPUT PORT carries each slot's secondary GRID operand -- the mask, the noise field, the
+	// per-cell weight -- or -1 when the op has none.
+	//
+	// Six ops used to read that grid from `in1` unconditionally, which was right only for Mudslide.
+	// Contrast declares its mask on port 2 and its `amount` SCALAR on port 1, so `in1` gave the native
+	// kernel a driving constant to use as a per-cell mask while the real mask went unread -- both halves
+	// wrong at once, and nothing refused the graph. The port is not knowable here (the native side cannot
+	// see a node's input_names), so the node answers it: Pasture3DGraphNode.aux_grid_port. Empty on a
+	// program compiled before this existed, which reads as -1 everywhere -- i.e. no secondary grid, which
+	// is a mask ignored rather than a scalar misread as one.
+	PackedInt32Array aux_port;
 	PackedInt32Array in0_port; // which channel of in0's slot this operand reads; 0 when absent
 	PackedInt32Array in1_port;
 	PackedInt32Array in2_port;
@@ -245,7 +257,7 @@ struct GraphProgram {
 	std::vector<GraphGeomEntry> geom;
 	// Which of the 16 params slots each of in0..in3 OVERRIDES when that port is wired, or -1 when the port
 	// is not a scalar parameter. Without this the evaluator read parameters from the program alone and
-	// ignored every wire into a parameter port. See PARAM_PORT_MAP in pasture3d_terrain_graph.gd.
+	// ignored every wire into a parameter port. See Pasture3DGraphNode.native_param_ports().
 	PackedInt32Array pmap0;
 	PackedInt32Array pmap1;
 	PackedInt32Array pmap2;
@@ -266,6 +278,25 @@ struct GraphProgram {
 
 // Read a program dictionary from Pasture3DTerrainGraph.compile_graph_program.
 bool graph_build(const Dictionary &p_prog, GraphProgram &r_out);
+
+// One slot's sixteen scalar parameters, with every DRIVEN parameter applied.
+//
+// A wire into a parameter port overrides the value baked at compile time with cell 0 of the driving
+// node's output. Both the in-slot table (pmap0..3, riding in0..in3) and the flat overflow table
+// (pdrv_node/param/src, for ports >= 4) are walked here.
+//
+// This lives in one function because it was previously open-coded in the CPU evaluator ONLY: the GPU
+// evaluator read p_prog.params*[s] straight through and silently ignored every driven parameter, so the
+// same graph flooded to 120 m below the GPU threshold and to whatever the inspector held above it. Two
+// evaluators resolving parameters two ways is the bug; a shared function is the fix.
+//
+// p_fetch supplies a driving value: given the driving slot and channel, it writes cell 0 of that grid to
+// r_value and returns true, or returns false if the value cannot be produced (in which case the baked
+// value stands). The CPU passes a scratch-pool lookup; the GPU flushes its plan and reads the buffer
+// back. r_PH[k] says whether slot k has a value at all -- several ops fall back when a program omits a
+// higher params array, and an override counts as present.
+void graph_resolve_op_params(const GraphProgram &p_prog, int p_slot, float r_P[16], bool r_PH[16],
+		const std::function<bool(int p_src, int p_chan, float &r_value)> &p_fetch);
 
 // Evaluate the whole graph to a p_gw*p_gh row-major field over p_rect using scratch arena memory reuse.
 PackedFloat32Array graph_eval_grid(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect,

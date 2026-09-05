@@ -69,6 +69,25 @@ func op() -> StringName:
 	return &"falloff"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	var fc: Vector2 = centre if centre != null else Vector2.ZERO
+	p[0] = float(shape)
+	p[1] = fc.x
+	p[2] = fc.y
+	p[3] = radius
+	p[4] = feather
+	p[5] = strength
+	p[6] = 1.0 if bool(invert) else 0.0
+	p[7] = distance_noise
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 5, 3, -1])
+
+
 func role() -> Role:
 	return Role.FILTER
 
@@ -83,6 +102,11 @@ func input_count() -> int:
 
 func input_names() -> PackedStringArray:
 	return PackedStringArray(["in", "strength", "radius", "noise"])
+
+
+func aux_grid_port() -> int:
+	return 3 # "noise" -- a distance-perturbation field, not a mask
+
 
 
 func input_port_types() -> PackedInt32Array:

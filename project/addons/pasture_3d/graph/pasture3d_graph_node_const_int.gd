@@ -16,6 +16,13 @@ func op() -> StringName:
 	return &"const_int"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = float(value)
+	return {"params": p}
+
+
 func role() -> Role:
 	return Role.GENERATOR
 

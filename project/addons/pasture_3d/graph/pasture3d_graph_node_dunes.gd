@@ -67,6 +67,24 @@ func op() -> StringName:
 	return &"dunes"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = amplitude
+	p[1] = wavelength
+	p[2] = direction_degrees
+	p[3] = asymmetry
+	p[4] = crest_sharpness
+	p[5] = wander_amount
+	p[6] = wander_size
+	p[7] = float(seed)
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([0, 1, 2, 3, 4])
+
+
 func role() -> Role:
 	return Role.GENERATOR
 

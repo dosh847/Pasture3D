@@ -39,6 +39,20 @@ func op() -> StringName:
 	return &"talus_projection"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = talus_angle_deg
+	p[1] = float(iterations)
+	p[2] = transfer_rate
+	p[3] = amount
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 0, 1, 2, 3])
+
+
 func role() -> Role:
 	return Role.FILTER
 

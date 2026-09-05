@@ -160,6 +160,12 @@ void graph_cell_to_world(int p_ix, int p_iz, int p_gw, int p_gh, const Rect2 &p_
 	r_wz = (double)p_rect.position.y + ((double)p_iz + 0.5) * dz;
 }
 
+// NaN-aware separable 3-tap blur, in place. Non-finite cells contribute nothing, so the blur never
+// bleeds a feature outward past its footprint; `p_passes <= 0` is the identity and allocates nothing.
+//
+// `isfinite`, not `isnan`: the GDScript oracle this must match byte-for-byte
+// (Pasture3DGraphOps.blur_nan) tests `is_finite`, so an INFINITE cell was dropped there and averaged in
+// here — the §2.4 mismatch, in the one kernel both the graph's Smooth node and every height brush run.
 void graph_nan_blur(std::vector<float> &r_vals, int p_gw, int p_gh, int p_passes) {
 	if (p_passes <= 0) {
 		return;
@@ -172,10 +178,10 @@ void graph_nan_blur(std::vector<float> &r_vals, int p_gw, int p_gh, int p_passes
 				const int row = iz * p_gw;
 				for (int ix = 0; ix < p_gw; ix++) {
 					const float v = r_vals[row + ix];
-					if (std::isnan(v)) { tmp[row + ix] = (float)NAN; continue; }
+					if (!std::isfinite(v)) { tmp[row + ix] = (float)NAN; continue; }
 					float sum = 0.5f * v, weight = 0.5f;
-					if (ix > 0 && !std::isnan(r_vals[row + ix - 1])) { sum += 0.25f * r_vals[row + ix - 1]; weight += 0.25f; }
-					if (ix < p_gw - 1 && !std::isnan(r_vals[row + ix + 1])) { sum += 0.25f * r_vals[row + ix + 1]; weight += 0.25f; }
+					if (ix > 0 && std::isfinite(r_vals[row + ix - 1])) { sum += 0.25f * r_vals[row + ix - 1]; weight += 0.25f; }
+					if (ix < p_gw - 1 && std::isfinite(r_vals[row + ix + 1])) { sum += 0.25f * r_vals[row + ix + 1]; weight += 0.25f; }
 					tmp[row + ix] = sum / weight;
 				}
 			}
@@ -186,14 +192,85 @@ void graph_nan_blur(std::vector<float> &r_vals, int p_gw, int p_gh, int p_passes
 				const int row = iz * p_gw;
 				for (int ix = 0; ix < p_gw; ix++) {
 					const float v = tmp[row + ix];
-					if (std::isnan(v)) { r_vals[row + ix] = (float)NAN; continue; }
+					if (!std::isfinite(v)) { r_vals[row + ix] = (float)NAN; continue; }
 					float sum = 0.5f * v, weight = 0.5f;
-					if (iz > 0 && !std::isnan(tmp[(iz - 1) * p_gw + ix])) { sum += 0.25f * tmp[(iz - 1) * p_gw + ix]; weight += 0.25f; }
-					if (iz < p_gh - 1 && !std::isnan(tmp[(iz + 1) * p_gw + ix])) { sum += 0.25f * tmp[(iz + 1) * p_gw + ix]; weight += 0.25f; }
+					if (iz > 0 && std::isfinite(tmp[(iz - 1) * p_gw + ix])) { sum += 0.25f * tmp[(iz - 1) * p_gw + ix]; weight += 0.25f; }
+					if (iz < p_gh - 1 && std::isfinite(tmp[(iz + 1) * p_gw + ix])) { sum += 0.25f * tmp[(iz + 1) * p_gw + ix]; weight += 0.25f; }
 					r_vals[row + ix] = sum / weight;
 				}
 			}
 		});
+	}
+}
+
+void graph_resolve_op_params(const GraphProgram &p_prog, int p_slot, float r_P[16], bool r_PH[16],
+		const std::function<bool(int p_src, int p_chan, float &r_value)> &p_fetch) {
+	const int s = p_slot;
+	const int count = p_prog.count;
+	auto at = [&](const PackedFloat32Array &p_arr) -> float {
+		return p_arr.size() == count ? p_arr[s] : 0.f;
+	};
+	auto has = [&](const PackedFloat32Array &p_arr) -> bool {
+		return p_arr.size() == count;
+	};
+	const PackedFloat32Array *pv[16] = { &p_prog.params, &p_prog.params_b, &p_prog.params_c,
+		&p_prog.params_d, &p_prog.params_e, &p_prog.params_f, &p_prog.params_g, &p_prog.params_h,
+		&p_prog.params_i, &p_prog.params_j, &p_prog.params_k, &p_prog.params_l, &p_prog.params_m,
+		&p_prog.params_n, &p_prog.params_o, &p_prog.params_p };
+	for (int k = 0; k < 16; k++) {
+		r_P[k] = at(*pv[k]);
+		r_PH[k] = has(*pv[k]);
+	}
+	// params (slot 0) is mandatory: a program without it is not a program, and the ops that read P[0]
+	// have no fallback to fall back to.
+	r_PH[0] = true;
+
+	const PackedInt32Array *pmaps[4] = { &p_prog.pmap0, &p_prog.pmap1, &p_prog.pmap2, &p_prog.pmap3 };
+	const PackedInt32Array *ins[4] = { &p_prog.in0, &p_prog.in1, &p_prog.in2, &p_prog.in3 };
+	const PackedInt32Array *ports[4] = { &p_prog.in0_port, &p_prog.in1_port, &p_prog.in2_port,
+		&p_prog.in3_port };
+	for (int k = 0; k < 4; k++) {
+		if (pmaps[k]->size() != count || ins[k]->size() != count) {
+			continue;
+		}
+		const int slot = (*pmaps[k])[s];
+		const int src = (*ins[k])[s];
+		if (slot < 0 || slot >= 16 || src < 0 || src >= count) {
+			continue;
+		}
+		// The driving CHANNEL, not just the driving slot: a scalar can be driven off a solver's secondary
+		// output the same as a grid can, and reading cell 0 of the wrong buffer is a parameter that is
+		// wrong by a plausible amount rather than obviously.
+		int chan = 0;
+		if (ports[k]->size() == count && (*ports[k])[s] > 0) {
+			chan = (*ports[k])[s];
+		}
+		float v = 0.f;
+		if (p_fetch(src, chan, v)) {
+			r_P[slot] = v;
+			r_PH[slot] = true;
+		}
+	}
+	// The same override for ports >= 4, which carry no in-slot. Read from cell 0 exactly as above, so a
+	// parameter driven through port 5 is indistinguishable from one driven through port 1.
+	const int n_pdrv = p_prog.pdrv_node.size();
+	for (int k = 0; k < n_pdrv; k++) {
+		if (p_prog.pdrv_node[k] != s) {
+			continue;
+		}
+		const int slot = p_prog.pdrv_param[k];
+		const int src = p_prog.pdrv_src[k];
+		if (slot < 0 || slot >= 16 || src < 0 || src >= count) {
+			continue;
+		}
+		// Always channel 0. The overflow table carries no channel, and rather than widen it for a case
+		// nobody has yet wired, the compiler refuses to lower a secondary-channel wire into a port >= 4 at
+		// all -- see native_supported. A refusal is recoverable; a silently wrong parameter is not.
+		float v = 0.f;
+		if (p_fetch(src, 0, v)) {
+			r_P[slot] = v;
+			r_PH[slot] = true;
+		}
 	}
 }
 
@@ -225,6 +302,7 @@ bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 	if (p_prog.has("in2")) r_out.in2 = p_prog["in2"];
 	if (p_prog.has("in3")) r_out.in3 = p_prog["in3"];
 	if (p_prog.has("out_count")) r_out.out_count = p_prog["out_count"];
+	if (p_prog.has("aux_port")) r_out.aux_port = p_prog["aux_port"];
 	if (p_prog.has("in0_port")) r_out.in0_port = p_prog["in0_port"];
 	if (p_prog.has("in1_port")) r_out.in1_port = p_prog["in1_port"];
 	if (p_prog.has("in2_port")) r_out.in2_port = p_prog["in2_port"];
@@ -352,6 +430,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 	// before P2b. Checked as a whole array rather than per slot so a half-written program cannot be
 	// half-believed.
 	const int32_t *out_count = p_prog.out_count.size() == p_prog.count ? p_prog.out_count.ptr() : nullptr;
+	const int32_t *aux_port = p_prog.aux_port.size() == p_prog.count ? p_prog.aux_port.ptr() : nullptr;
 	const int32_t *in_port_arr[4] = {
 		p_prog.in0_port.size() == p_prog.count ? p_prog.in0_port.ptr() : nullptr,
 		p_prog.in1_port.size() == p_prog.count ? p_prog.in1_port.ptr() : nullptr,
@@ -511,17 +590,24 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 		return arr;
 	};
 
-	const int32_t *pmap_arr[4] = {
-		p_prog.pmap0.size() == p_prog.count ? p_prog.pmap0.ptr() : nullptr,
-		p_prog.pmap1.size() == p_prog.count ? p_prog.pmap1.ptr() : nullptr,
-		p_prog.pmap2.size() == p_prog.count ? p_prog.pmap2.ptr() : nullptr,
-		p_prog.pmap3.size() == p_prog.count ? p_prog.pmap3.ptr() : nullptr,
+	// This slot's secondary GRID operand, read from the port the NODE declares rather than from a
+	// hardcoded `in1`. Returns an empty array when the port is unwired or the op has none, which every
+	// caller already reads as "no mask" / "no perturbation".
+	auto aux_grid_of = [&](int p_slot) -> PackedFloat32Array {
+		if (aux_port == nullptr) {
+			return PackedFloat32Array();
+		}
+		const int port = aux_port[p_slot];
+		if (port < 1 || port > 3) {
+			return PackedFloat32Array();
+		}
+		const int32_t *srcs[4] = { in0, in1, in2, in3 };
+		const int32_t *arr = srcs[port];
+		if (arr == nullptr || arr[p_slot] < 0) {
+			return PackedFloat32Array();
+		}
+		return get_grid_packed(arr[p_slot], chan_of(port, p_slot));
 	};
-	const int32_t *in_arr[4] = { in0, in1, in2, in3 };
-	const int n_pdrv = p_prog.pdrv_node.size();
-	const int32_t *pdrv_node = n_pdrv ? p_prog.pdrv_node.ptr() : nullptr;
-	const int32_t *pdrv_param = n_pdrv ? p_prog.pdrv_param.ptr() : nullptr;
-	const int32_t *pdrv_src = n_pdrv ? p_prog.pdrv_src.ptr() : nullptr;
 
 	// 3. Sequential evaluation of nodes in topological order
 	for (int s = 0; s < p_prog.count; s++) {
@@ -566,69 +652,23 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 		// This slot's sixteen parameters, resolved. Every op below reads P[] rather than the program's
 		// params arrays directly, because a parameter can be DRIVEN: a wire into a parameter port overrides
-		// the value baked at compile time with the driving node's output. Doing it once here, generically,
-		// is deliberate — the previous attempt patched the generators case by case and silently missed
-		// four of them, which is the same way this bug arrived in the first place.
+		// the value baked at compile time with the driving node's output. Doing it once, generically, is
+		// deliberate -- the previous attempt patched the generators case by case and silently missed four of
+		// them, which is the same way this bug arrived in the first place.
 		//
-		// A driven parameter is read from cell 0 of the source grid. That is not a shortcut: it is the
-		// convention the GDScript nodes' eval_grid already uses (`p_inputs[k][0]`), and the two evaluators
-		// have to agree exactly or the parity gates are comparing different graphs.
-		float P[16] = {
-			params[s], params_b ? params_b[s] : 0.f, params_c ? params_c[s] : 0.f,
-			params_d ? params_d[s] : 0.f, params_e ? params_e[s] : 0.f, params_f ? params_f[s] : 0.f,
-			params_g ? params_g[s] : 0.f, params_h ? params_h[s] : 0.f, params_i ? params_i[s] : 0.f,
-			params_j ? params_j[s] : 0.f, params_k ? params_k[s] : 0.f, params_l ? params_l[s] : 0.f,
-			params_m ? params_m[s] : 0.f, params_n ? params_n[s] : 0.f, params_o ? params_o[s] : 0.f,
-			params_p ? params_p[s] : 0.f
-		};
-		// Whether each slot has a value at all. A program may omit the higher params arrays; several ops
-		// have their own fallback for that case, and those fallbacks have to survive this rewrite. An
-		// override counts as present.
-		bool PH[16] = {
-			true, params_b != nullptr, params_c != nullptr, params_d != nullptr, params_e != nullptr,
-			params_f != nullptr, params_g != nullptr, params_h != nullptr, params_i != nullptr,
-			params_j != nullptr, params_k != nullptr, params_l != nullptr, params_m != nullptr,
-			params_n != nullptr, params_o != nullptr, params_p != nullptr
-		};
-		for (int k = 0; k < 4; k++) {
-			if (!pmap_arr[k] || !in_arr[k]) {
-				continue;
+		// The walk itself lives in graph_resolve_op_params so the GPU evaluator resolves parameters through
+		// the same code rather than its own; a driven parameter is read from cell 0 of the source grid, which
+		// is the convention the GDScript nodes' eval_grid already uses (`p_inputs[k][0]`).
+		float P[16];
+		bool PH[16];
+		graph_resolve_op_params(p_prog, s, P, PH, [&](int p_src, int p_chan, float &r_value) -> bool {
+			const float *b = buf_of(p_src, p_chan);
+			if (b == nullptr) {
+				return false;
 			}
-			const int slot = pmap_arr[k][s];
-			const int src = in_arr[k][s];
-			if (slot < 0 || slot >= 16 || src < 0 || src >= p_prog.count) {
-				continue;
-			}
-			// The driving CHANNEL, not just the driving slot: a scalar can be driven off a solver's
-			// secondary output the same as a grid can, and reading cell 0 of the wrong buffer is a
-			// parameter that is wrong by a plausible amount rather than obviously.
-			const float *b = buf_of(src, chan_of(k, s));
-			if (b) {
-				P[slot] = b[0];
-				PH[slot] = true;
-			}
-		}
-		// The same override for ports >= 4, which carry no in-slot. Read from cell 0 exactly as above, so
-		// a parameter driven through port 5 is indistinguishable from one driven through port 1.
-		for (int k = 0; k < n_pdrv; k++) {
-			if (pdrv_node[k] != s) {
-				continue;
-			}
-			const int slot = pdrv_param[k];
-			const int src = pdrv_src[k];
-			if (slot < 0 || slot >= 16 || src < 0 || src >= p_prog.count) {
-				continue;
-			}
-			// Always channel 0. The overflow table carries no channel, and rather than widen it for a
-			// case nobody has yet wired, the compiler refuses to lower a secondary-channel wire into a
-			// port >= 4 at all — see native_supported. A refusal is recoverable; a silently wrong
-			// parameter is not.
-			const float *b = buf_of(src, 0);
-			if (b) {
-				P[slot] = b[0];
-				PH[slot] = true;
-			}
-		}
+			r_value = b[0];
+			return true;
+		});
 
 		switch (ops[s]) {
 			case GRAPH_OP_INPUT: {
@@ -687,8 +727,18 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 							default: val = a; break;
 						}
 						if (gc) {
-							const double mask_val = std::clamp((double)gc[i], 0.0, 1.0);
-							val = a + (val - a) * mask_val;
+							// A NON-FINITE MASK CELL IS "NO OPINION", NOT A HOLE. std::clamp uses a
+							// three-way comparison, so clamp(NaN, 0, 1) is NaN and the cell used to come
+							// out NaN -- a hole punched in otherwise-finite terrain, and one the GPU
+							// kernel did not punch because it guards with isnan. NaN is the brush-loop
+							// mask value and survives Smooth, Terrace and the morphology ops, so it
+							// reaches here in ordinary graphs. An ABSENT mask already means 1.0 in this
+							// vocabulary (the unwired port is a filled 1.0), so an unreadable mask cell
+							// means 1.0 too. See PASTURE3D_NODE_VOCABULARY.md.
+							if (std::isfinite(gc[i])) {
+								const double mask_val = std::clamp((double)gc[i], 0.0, 1.0);
+								val = a + (val - a) * mask_val;
+							}
 						}
 						g_ptr[i] = (float)val;
 					}
@@ -823,9 +873,10 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 			case GRAPH_OP_FALLOFF: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
-				// in1 is the optional distance-perturbation grid; an unwired port passes an empty array,
-				// which falloff_grid reads as "no perturbation" rather than as zeros.
-				PackedFloat32Array nz_arr = (in1[s] >= 0) ? get_grid_packed(in1[s], c_in1) : PackedFloat32Array();
+				// The optional distance-perturbation grid, on the port the node declares (3, "noise"). It
+				// used to be read from in1, which is the "strength" SCALAR port: a Const driving strength
+				// was consumed as a per-cell perturbation field and the wired noise was ignored.
+				PackedFloat32Array nz_arr = aux_grid_of(s);
 				PackedFloat32Array res = falloff_grid(in_arr, nz_arr, p_gw, p_gh, p_rect, (int)P[0],
 						P[1], P[2], P[3], P[4], P[5],
 						P[6] > 0.5f, P[7]);
@@ -834,7 +885,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 			case GRAPH_OP_CONTRAST: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
-				PackedFloat32Array msk_arr = (in1[s] >= 0) ? get_grid_packed(in1[s], c_in1) : PackedFloat32Array();
+				PackedFloat32Array msk_arr = aux_grid_of(s);
 				PackedFloat32Array res = contrast_grid(in_arr, msk_arr, (int)P[0], P[1],
 						P[2], P[3], P[4], P[5] > 0.5f);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
@@ -862,7 +913,10 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 			case GRAPH_OP_EXPAND_SHRINK: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
-				PackedFloat32Array msk_arr = (in1[s] >= 0) ? get_grid_packed(in1[s], c_in1) : PackedFloat32Array();
+				// ExpandShrink has NO mask port -- its three ports are in / radius / amount, and both of the
+				// latter are scalars. in1 here was the radius, handed to the kernel as a per-cell blend
+				// weight. aux_grid_of answers empty for it, which the kernel reads as "fully applied".
+				PackedFloat32Array msk_arr = aux_grid_of(s);
 				PackedFloat32Array res = expand_shrink_solve(in_arr, msk_arr, p_gw, p_gh, p_rect,
 						(int)P[0], P[1], (int)P[2], (int)P[3], P[4]);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
@@ -877,7 +931,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 			case GRAPH_OP_SMOOTH_FILL: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
-				PackedFloat32Array msk_arr = (in1[s] >= 0) ? get_grid_packed(in1[s], c_in1) : PackedFloat32Array();
+				PackedFloat32Array msk_arr = aux_grid_of(s);
 				// The deposition channel is dropped here. This evaluator produces ONE grid per slot; a
 				// graph that wires the deposition port is routed to the multi-channel path instead, so
 				// nothing is lost by not computing it.
@@ -888,7 +942,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 			case GRAPH_OP_RECAST_CLIFF: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
-				PackedFloat32Array msk_arr = (in1[s] >= 0) ? get_grid_packed(in1[s], c_in1) : PackedFloat32Array();
+				PackedFloat32Array msk_arr = aux_grid_of(s);
 				PackedFloat32Array res = recast_cliff_solve(in_arr, msk_arr, p_gw, p_gh, p_rect,
 						P[0], P[1], P[2], P[3], P[4], P[5],
 						P[6]);
@@ -897,7 +951,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 			case GRAPH_OP_WARP_DOWNSLOPE: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
-				PackedFloat32Array msk_arr = (in1[s] >= 0) ? get_grid_packed(in1[s], c_in1) : PackedFloat32Array();
+				PackedFloat32Array msk_arr = aux_grid_of(s);
 				PackedFloat32Array res = warp_downslope_solve(in_arr, msk_arr, p_gw, p_gh, p_rect,
 						P[0], P[1], P[2] > 0.5f, P[3]);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
@@ -919,7 +973,9 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 			case GRAPH_OP_MUDSLIDE: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
-				PackedFloat32Array msk_arr = (in1[s] >= 0) ? get_grid_packed(in1[s], c_in1) : PackedFloat32Array();
+				// Mudslide is the one op whose mask really is on port 1, so this reads the same buffer it
+				// always did -- through the declared port rather than by coincidence.
+				PackedFloat32Array msk_arr = aux_grid_of(s);
 				PackedFloat32Array res = mudslide_solve(in_arr, msk_arr, p_gw, p_gh, p_rect, P[0],
 						P[1], P[2], P[3], P[4], P[5], nullptr, nullptr);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);

@@ -109,6 +109,10 @@ func edit_graph(p_graph: Pasture3DTerrainGraph, p_mod: Pasture3DNodeGraph = null
 			graph.changed.connect(_on_graph_changed)
 		if graph.has_signal(&"structure_changed") and not graph.structure_changed.is_connected(_on_graph_changed):
 			graph.structure_changed.connect(_on_graph_changed)
+		# Previews, and only previews. A node that does not feed the output never reaches `changed`, so
+		# without this its open thumbnail kept showing the value it had before you started tuning it.
+		if graph.has_signal(&"node_changed") and not graph.node_changed.is_connected(_on_node_param_changed):
+			graph.node_changed.connect(_on_node_param_changed)
 	_last_structure_hash = _structure_hash()
 	_rebuild()
 
@@ -130,6 +134,10 @@ func _structure_hash() -> int:
 	return h
 
 
+func _on_node_param_changed(_p_index: int) -> void:
+	_schedule_preview_refresh()
+
+
 func _on_graph_changed() -> void:
 	if graph == null:
 		_rebuild()
@@ -148,25 +156,29 @@ func _on_graph_changed() -> void:
 func _refresh_nodes_state() -> void:
 	if graph == null or _graphedit == null:
 		return
+	# `output_index()` is O(V) with a virtual `op()` dispatch per node, and it was called INSIDE this
+	# loop — 1,600 dispatches per `changed` on a 40-node graph, i.e. per slider tick. It cannot change
+	# while the loop runs, so it is one call.
+	var out_index := graph.output_index()
 	for i in range(graph.nodes.size()):
 		var node: Pasture3DGraphNode = graph.nodes[i]
 		if node == null:
 			continue
-		var gn_name := "n%d" % i
-		if _graphedit.has_node(gn_name):
-			var gn: GraphNode = _graphedit.get_node(gn_name) as GraphNode
-			if gn != null:
-				var is_out := i == graph.output_index()
-				var is_solo := graph.output_override == i
-				gn.title = node.display_name() + ("  ★ SOLO" if is_solo else ("  ● OUT" if is_out else ""))
-				if is_solo:
-					gn.modulate = Color(1.0, 0.9, 0.5)
-				elif is_out:
-					gn.modulate = Color(0.8, 1.0, 0.85)
-				elif node.muted:
-					gn.modulate = Color(0.65, 0.65, 0.7, 0.6)
-				else:
-					gn.modulate = Color.WHITE
+		# One lookup, not a `has_node` followed by a `get_node` that repeats the same path resolution.
+		var gn: GraphNode = _graphedit.get_node_or_null("n%d" % i) as GraphNode
+		if gn == null:
+			continue
+		var is_out := i == out_index
+		var is_solo := graph.output_override == i
+		gn.title = node.display_name() + ("  ★ SOLO" if is_solo else ("  ● OUT" if is_out else ""))
+		if is_solo:
+			gn.modulate = Color(1.0, 0.9, 0.5)
+		elif is_out:
+			gn.modulate = Color(0.8, 1.0, 0.85)
+		elif node.muted:
+			gn.modulate = Color(0.65, 0.65, 0.7, 0.6)
+		else:
+			gn.modulate = Color.WHITE
 
 
 func _auto_fit_node_range(p_index: int) -> void:
@@ -833,7 +845,7 @@ func _populate_node_slots_and_controls(p_gn: GraphNode, p_index: int, p_node: Pa
 		if not p_node.collapsed and r < n_in:
 			var is_wired := wired_inputs.has(r)
 			if not is_wired:
-				_append_slot_inline_widget(row_box, p_node, p_index, r, in_name)
+				_append_slot_inline_widget(row_box, p_node, r)
 
 		# Label each output channel on the right so a multi-output node's ports are told apart.
 		if multi_out and r < n_out:
@@ -875,23 +887,101 @@ func _populate_node_slots_and_controls(p_gn: GraphNode, p_index: int, p_node: Pa
 		_preview_rects[p_index] = tex_rect
 
 
-func _append_slot_inline_widget(p_row: HBoxContainer, p_node: Pasture3DGraphNode, p_index: int, p_port: int, p_port_name: String) -> void:
+## Which property each inline port widget edits, as `{op: {port: [property, ...]}}`.
+##
+## The RANGE is deliberately not here. It comes from the property's own `@export_range`, read at build
+## time by `_spin_from_hint` below. This used to be 542 lines of 91 near-identical SpinBox blocks
+## restating min/max/step that the nodes already declared, and by the time it was measured 37 of the 41
+## comparable pairs had drifted. Sixteen were the destructive kind: the node declares `or_greater` and the
+## widget clamped, so a Warp authored at frequency 0.3 displayed as 0.1 and was WRITTEN BACK as 0.1 on the
+## next interaction. Two numbers that must agree, kept in two places, is the same shape as §6.1's five op
+## tables.
+const SLOT_SPINS := {
+	&"const": {0: [&"value"]},
+	&"const_int": {0: [&"value"]},
+	&"noise": {0: [&"amplitude"]},
+	&"noise_swiss": {0: [&"amplitude"], 1: [&"ridge_offset"], 2: [&"erosion_accent"], 3: [&"gain"], 4: [&"frequency"]},
+	&"noise_jordan": {0: [&"amplitude"], 1: [&"warp_strength"], 2: [&"damp_strength"], 3: [&"gain"], 4: [&"frequency"]},
+	&"furrows": {0: [&"amplitude"], 1: [&"spacing"], 2: [&"direction_degrees"], 3: [&"wobble_amount"]},
+	&"dunes": {0: [&"amplitude"], 1: [&"wavelength"], 2: [&"direction_degrees"], 3: [&"asymmetry"], 4: [&"crest_sharpness"]},
+	&"crater": {0: [&"amplitude"], 1: [&"floor_depth"], 2: [&"rim_height"], 3: [&"rim_width"]},
+	&"geological_primitive": {0: [&"height"], 1: [&"radius"], 2: [&"steepness"], 3: [&"eccentricity"]},
+	&"warp": {1: [&"strength"], 2: [&"amplitude"], 3: [&"frequency"]},
+	&"terrace": {1: [&"band_height"], 2: [&"hardness"], 3: [&"amount"]},
+	&"strata": {1: [&"band_height"], 2: [&"hardness"], 3: [&"dip"], 4: [&"dip_direction_degrees"], 5: [&"amount"]},
+	&"curve": {1: [&"input_min"], 2: [&"input_max"], 3: [&"output_min"], 4: [&"output_max"], 5: [&"amount"]},
+	&"remap": {1: [&"in_min"], 2: [&"in_max"], 3: [&"out_min"], 4: [&"out_max"]},
+	&"mask": {1: [&"band_min"], 2: [&"band_max"], 3: [&"falloff_lo"], 4: [&"falloff_hi"], 5: [&"strength"]},
+	&"curvature": {1: [&"radius"], 2: [&"contrast"]},
+	&"talus_projection": {1: [&"talus_angle_deg"], 2: [&"iterations"], 3: [&"transfer_rate"], 4: [&"amount"]},
+	&"spectral_equalizer": {1: [&"macro_gain"], 2: [&"meso_gain"], 3: [&"micro_gain"], 4: [&"amount"]},
+	&"depression_filling": {1: [&"fill_depth_limit"], 2: [&"amount"]},
+	&"erosion_hydraulic": {1: [&"iterations"], 2: [&"rain_rate"], 3: [&"erosion_speed"], 4: [&"deposition_speed"]},
+	&"erosion_thermal": {2: [&"talus_angle"], 3: [&"iterations"], 4: [&"settling_rate"]},
+	&"erosion": {1: [&"iterations"], 2: [&"erosion_rate"], 3: [&"hillslope_diffusion"]},
+	&"scree": {1: [&"amplitude"], 2: [&"grain_size"], 3: [&"min_slope_degrees"]},
+	&"dla": {1: [&"amplitude"], 2: [&"coverage"], 3: [&"detail_size"]},
+	&"lake_flooding": {1: [&"water_elevation"], 2: [&"flood_percent"], 3: [&"shoreline_width"]},
+	&"stream_extraction": {1: [&"min_catchment_cells"], 2: [&"carve_depth"], 3: [&"channel_width"]},
+}
+
+
+## One SpinBox for one property, configured from that property's own `@export_range`.
+##
+## A property with no range hint gets an unbounded box rather than an invented limit: no hint means no
+## constraint, and inventing one here would be exactly the second table this function exists to delete.
+## `allow_greater` / `allow_lesser` follow the hint's own `or_greater` / `or_lesser` flags, so a soft range
+## stays soft and the widget can no longer silently narrow a value the graph was authored with.
+func _spin_from_hint(p_row: HBoxContainer, p_node: Pasture3DGraphNode, p_prop: StringName) -> void:
+	var hint := ""
+	var is_int := false
+	var found := false
+	for prop in p_node.get_property_list():
+		if StringName(prop.get("name", &"")) != p_prop:
+			continue
+		found = true
+		is_int = int(prop.get("type", TYPE_NIL)) == TYPE_INT
+		if int(prop.get("hint", 0)) == PROPERTY_HINT_RANGE:
+			hint = String(prop.get("hint_string", ""))
+		break
+	if not found:
+		# The node does not have this property at all. Silent in the old code — `p_node.get("typo")`
+		# returned null and the box read 0 — and the same bug class as §6.1's four.
+		push_warning("Pasture3D graph editor: node '%s' has no property '%s' for its inline widget." % [p_node.op(), p_prop])
+		return
+
+	var sb := SpinBox.new()
+	var bits: PackedStringArray = hint.split(",") if hint != "" else PackedStringArray()
+	if bits.size() >= 2 and bits[0].is_valid_float() and bits[1].is_valid_float():
+		sb.min_value = bits[0].to_float()
+		sb.max_value = bits[1].to_float()
+		sb.step = bits[2].to_float() if bits.size() >= 3 and bits[2].is_valid_float() else (1.0 if is_int else 0.01)
+		sb.allow_greater = hint.contains("or_greater")
+		sb.allow_lesser = hint.contains("or_lesser")
+	else:
+		sb.min_value = -1000000.0
+		sb.max_value = 1000000.0
+		sb.step = 1.0 if is_int else 0.01
+		sb.allow_greater = true
+		sb.allow_lesser = true
+	sb.value = float(p_node.get(p_prop))
+	sb.value_changed.connect(func(v: float): p_node.set(p_prop, int(v) if is_int else v))
+	p_row.add_child(sb)
+
+
+## The inline widgets for one input port: the spin boxes the table names, then whatever this op needs that
+## a spin box cannot express.
+func _append_slot_inline_widget(p_row: HBoxContainer, p_node: Pasture3DGraphNode, p_port: int) -> void:
+	for prop in SLOT_SPINS.get(p_node.op(), {}).get(p_port, []):
+		_spin_from_hint(p_row, p_node, prop)
+	_append_slot_special_widget(p_row, p_node, p_port)
+
+
+## The widgets that are not a number in a range: colour pickers, checkboxes, enum dropdowns, the seed dice,
+## the curve preset, and Const Vector's paired X/Y (two boxes editing one Vector2).
+func _append_slot_special_widget(p_row: HBoxContainer, p_node: Pasture3DGraphNode, p_port: int) -> void:
 	var op := p_node.op()
 	match op:
-		&"const":
-			if p_port == 0:
-				var sb := SpinBox.new(); sb.min_value = -10000.0; sb.max_value = 10000.0; sb.step = 0.5
-				sb.value = float(p_node.get("value"))
-				sb.value_changed.connect(func(val: float): p_node.set("value", val))
-				p_row.add_child(sb)
-
-		&"const_int":
-			if p_port == 0:
-				var sb := SpinBox.new(); sb.min_value = -100000.0; sb.max_value = 100000.0; sb.step = 1.0
-				sb.value = float(p_node.get("value"))
-				sb.value_changed.connect(func(val: float): p_node.set("value", int(val)))
-				p_row.add_child(sb)
-
 		&"const_vector":
 			if p_port == 0:
 				var v: Vector2 = p_node.get("value") if p_node.get("value") is Vector2 else Vector2.ZERO
@@ -937,10 +1027,6 @@ func _append_slot_inline_widget(p_row: HBoxContainer, p_node: Pasture3DGraphNode
 
 		&"noise":
 			if p_port == 0:
-				var a_sb := SpinBox.new(); a_sb.min_value = 0.0; a_sb.max_value = 1000.0; a_sb.step = 0.5
-				a_sb.value = float(p_node.get("amplitude"))
-				a_sb.value_changed.connect(func(val: float): p_node.set("amplitude", val))
-				p_row.add_child(a_sb)
 				var seed_btn := Button.new(); seed_btn.text = "🎲"; seed_btn.tooltip_text = "Randomize seed"
 				seed_btn.pressed.connect(func():
 					var n: FastNoiseLite = p_node.get("noise")
@@ -950,180 +1036,24 @@ func _append_slot_inline_widget(p_row: HBoxContainer, p_node: Pasture3DGraphNode
 
 		&"noise_swiss":
 			if p_port == 0:
-				var a_sb := SpinBox.new(); a_sb.min_value = 0.0; a_sb.max_value = 2000.0; a_sb.step = 1.0
-				a_sb.value = float(p_node.get("amplitude"))
-				a_sb.value_changed.connect(func(val: float): p_node.set("amplitude", val))
-				p_row.add_child(a_sb)
 				var seed_btn := Button.new(); seed_btn.text = "🎲"; seed_btn.tooltip_text = "Randomize seed"
 				seed_btn.pressed.connect(func(): p_node.set("seed", randi() % 100000))
 				p_row.add_child(seed_btn)
-			elif p_port == 1:
-				var ro_sb := SpinBox.new(); ro_sb.min_value = 0.1; ro_sb.max_value = 5.0; ro_sb.step = 0.05
-				ro_sb.value = float(p_node.get("ridge_offset"))
-				ro_sb.value_changed.connect(func(val: float): p_node.set("ridge_offset", val))
-				p_row.add_child(ro_sb)
-			elif p_port == 2:
-				var ea_sb := SpinBox.new(); ea_sb.min_value = 0.0; ea_sb.max_value = 1.0; ea_sb.step = 0.01
-				ea_sb.value = float(p_node.get("erosion_accent"))
-				ea_sb.value_changed.connect(func(val: float): p_node.set("erosion_accent", val))
-				p_row.add_child(ea_sb)
-			elif p_port == 3:
-				var g_sb := SpinBox.new(); g_sb.min_value = 0.01; g_sb.max_value = 2.0; g_sb.step = 0.05
-				g_sb.value = float(p_node.get("gain"))
-				g_sb.value_changed.connect(func(val: float): p_node.set("gain", val))
-				p_row.add_child(g_sb)
-			elif p_port == 4:
-				var f_sb := SpinBox.new(); f_sb.min_value = 0.0001; f_sb.max_value = 0.1; f_sb.step = 0.0005
-				f_sb.value = float(p_node.get("frequency"))
-				f_sb.value_changed.connect(func(val: float): p_node.set("frequency", val))
-				p_row.add_child(f_sb)
-
 		&"noise_jordan":
 			if p_port == 0:
-				var a_sb := SpinBox.new(); a_sb.min_value = 0.0; a_sb.max_value = 2000.0; a_sb.step = 1.0
-				a_sb.value = float(p_node.get("amplitude"))
-				a_sb.value_changed.connect(func(val: float): p_node.set("amplitude", val))
-				p_row.add_child(a_sb)
 				var seed_btn := Button.new(); seed_btn.text = "🎲"; seed_btn.tooltip_text = "Randomize seed"
 				seed_btn.pressed.connect(func(): p_node.set("seed", randi() % 100000))
 				p_row.add_child(seed_btn)
-			elif p_port == 1:
-				var ws_sb := SpinBox.new(); ws_sb.min_value = 0.0; ws_sb.max_value = 2.0; ws_sb.step = 0.05
-				ws_sb.value = float(p_node.get("warp_strength"))
-				ws_sb.value_changed.connect(func(val: float): p_node.set("warp_strength", val))
-				p_row.add_child(ws_sb)
-			elif p_port == 2:
-				var ds_sb := SpinBox.new(); ds_sb.min_value = 0.0; ds_sb.max_value = 2.0; ds_sb.step = 0.05
-				ds_sb.value = float(p_node.get("damp_strength"))
-				ds_sb.value_changed.connect(func(val: float): p_node.set("damp_strength", val))
-				p_row.add_child(ds_sb)
-			elif p_port == 3:
-				var g_sb := SpinBox.new(); g_sb.min_value = 0.01; g_sb.max_value = 2.0; g_sb.step = 0.05
-				g_sb.value = float(p_node.get("gain"))
-				g_sb.value_changed.connect(func(val: float): p_node.set("gain", val))
-				p_row.add_child(g_sb)
-			elif p_port == 4:
-				var f_sb := SpinBox.new(); f_sb.min_value = 0.0001; f_sb.max_value = 0.1; f_sb.step = 0.0005
-				f_sb.value = float(p_node.get("frequency"))
-				f_sb.value_changed.connect(func(val: float): p_node.set("frequency", val))
-				p_row.add_child(f_sb)
-
 		&"furrows":
 			if p_port == 0:
-				var a_sb := SpinBox.new(); a_sb.min_value = 0.0; a_sb.max_value = 500.0; a_sb.step = 0.5
-				a_sb.value = float(p_node.get("amplitude"))
-				a_sb.value_changed.connect(func(val: float): p_node.set("amplitude", val))
-				p_row.add_child(a_sb)
 				var seed_btn := Button.new(); seed_btn.text = "🎲"; seed_btn.tooltip_text = "Randomize seed"
 				seed_btn.pressed.connect(func(): p_node.set("seed", randi() % 100000))
 				p_row.add_child(seed_btn)
-			elif p_port == 1:
-				var sp_sb := SpinBox.new(); sp_sb.min_value = 1.0; sp_sb.max_value = 500.0; sp_sb.step = 1.0
-				sp_sb.value = float(p_node.get("spacing"))
-				sp_sb.value_changed.connect(func(val: float): p_node.set("spacing", val))
-				p_row.add_child(sp_sb)
-			elif p_port == 2:
-				var dir_sb := SpinBox.new(); dir_sb.min_value = 0.0; dir_sb.max_value = 360.0; dir_sb.step = 1.0
-				dir_sb.value = float(p_node.get("direction_degrees"))
-				dir_sb.value_changed.connect(func(val: float): p_node.set("direction_degrees", val))
-				p_row.add_child(dir_sb)
-			elif p_port == 3:
-				var wob_sb := SpinBox.new(); wob_sb.min_value = 0.0; wob_sb.max_value = 50.0; wob_sb.step = 0.5
-				wob_sb.value = float(p_node.get("wobble_amount"))
-				wob_sb.value_changed.connect(func(val: float): p_node.set("wobble_amount", val))
-				p_row.add_child(wob_sb)
-
 		&"dunes":
 			if p_port == 0:
-				var a_sb := SpinBox.new(); a_sb.min_value = 0.0; a_sb.max_value = 500.0; a_sb.step = 0.5
-				a_sb.value = float(p_node.get("amplitude"))
-				a_sb.value_changed.connect(func(val: float): p_node.set("amplitude", val))
-				p_row.add_child(a_sb)
 				var seed_btn := Button.new(); seed_btn.text = "🎲"; seed_btn.tooltip_text = "Randomize seed"
 				seed_btn.pressed.connect(func(): p_node.set("seed", randi() % 100000))
 				p_row.add_child(seed_btn)
-			elif p_port == 1:
-				var wl_sb := SpinBox.new(); wl_sb.min_value = 1.0; wl_sb.max_value = 500.0; wl_sb.step = 1.0
-				wl_sb.value = float(p_node.get("wavelength"))
-				wl_sb.value_changed.connect(func(val: float): p_node.set("wavelength", val))
-				p_row.add_child(wl_sb)
-			elif p_port == 2:
-				var dir_sb := SpinBox.new(); dir_sb.min_value = 0.0; dir_sb.max_value = 360.0; dir_sb.step = 1.0
-				dir_sb.value = float(p_node.get("direction_degrees"))
-				dir_sb.value_changed.connect(func(val: float): p_node.set("direction_degrees", val))
-				p_row.add_child(dir_sb)
-			elif p_port == 3:
-				var asym_sb := SpinBox.new(); asym_sb.min_value = 0.0; asym_sb.max_value = 1.0; asym_sb.step = 0.05
-				asym_sb.value = float(p_node.get("asymmetry"))
-				asym_sb.value_changed.connect(func(val: float): p_node.set("asymmetry", val))
-				p_row.add_child(asym_sb)
-			elif p_port == 4:
-				var sh_sb := SpinBox.new(); sh_sb.min_value = 0.0; sh_sb.max_value = 1.0; sh_sb.step = 0.05
-				sh_sb.value = float(p_node.get("crest_sharpness"))
-				sh_sb.value_changed.connect(func(val: float): p_node.set("crest_sharpness", val))
-				p_row.add_child(sh_sb)
-
-		&"crater":
-			if p_port == 0:
-				var a_sb := SpinBox.new(); a_sb.min_value = 0.0; a_sb.max_value = 1000.0; a_sb.step = 0.5
-				a_sb.value = float(p_node.get("amplitude"))
-				a_sb.value_changed.connect(func(val: float): p_node.set("amplitude", val))
-				p_row.add_child(a_sb)
-			elif p_port == 1:
-				var fd_sb := SpinBox.new(); fd_sb.min_value = 0.0; fd_sb.max_value = 500.0; fd_sb.step = 0.5
-				fd_sb.value = float(p_node.get("floor_depth"))
-				fd_sb.value_changed.connect(func(val: float): p_node.set("floor_depth", val))
-				p_row.add_child(fd_sb)
-			elif p_port == 2:
-				var rh_sb := SpinBox.new(); rh_sb.min_value = 0.0; rh_sb.max_value = 200.0; rh_sb.step = 0.5
-				rh_sb.value = float(p_node.get("rim_height"))
-				rh_sb.value_changed.connect(func(val: float): p_node.set("rim_height", val))
-				p_row.add_child(rh_sb)
-			elif p_port == 3:
-				var rw_sb := SpinBox.new(); rw_sb.min_value = 0.01; rw_sb.max_value = 1.0; rw_sb.step = 0.02
-				rw_sb.value = float(p_node.get("rim_width"))
-				rw_sb.value_changed.connect(func(val: float): p_node.set("rim_width", val))
-				p_row.add_child(rw_sb)
-
-		&"geological_primitive":
-			if p_port == 0:
-				var h_sb := SpinBox.new(); h_sb.min_value = 1.0; h_sb.max_value = 1000.0; h_sb.step = 1.0
-				h_sb.value = float(p_node.get("height"))
-				h_sb.value_changed.connect(func(val: float): p_node.set("height", val))
-				p_row.add_child(h_sb)
-			elif p_port == 1:
-				var r_sb := SpinBox.new(); r_sb.min_value = 1.0; r_sb.max_value = 1000.0; r_sb.step = 1.0
-				r_sb.value = float(p_node.get("radius"))
-				r_sb.value_changed.connect(func(val: float): p_node.set("radius", val))
-				p_row.add_child(r_sb)
-			elif p_port == 2:
-				var st_sb := SpinBox.new(); st_sb.min_value = 0.1; st_sb.max_value = 5.0; st_sb.step = 0.1
-				st_sb.value = float(p_node.get("steepness"))
-				st_sb.value_changed.connect(func(val: float): p_node.set("steepness", val))
-				p_row.add_child(st_sb)
-			elif p_port == 3:
-				var ecc_sb := SpinBox.new(); ecc_sb.min_value = 0.0; ecc_sb.max_value = 0.95; ecc_sb.step = 0.05
-				ecc_sb.value = float(p_node.get("eccentricity"))
-				ecc_sb.value_changed.connect(func(val: float): p_node.set("eccentricity", val))
-				p_row.add_child(ecc_sb)
-
-		&"warp":
-			if p_port == 1:
-				var st_sb := SpinBox.new(); st_sb.min_value = 0.0; st_sb.max_value = 200.0; st_sb.step = 0.5
-				st_sb.value = float(p_node.get("strength"))
-				st_sb.value_changed.connect(func(val: float): p_node.set("strength", val))
-				p_row.add_child(st_sb)
-			elif p_port == 2:
-				var a_sb := SpinBox.new(); a_sb.min_value = 0.0; a_sb.max_value = 500.0; a_sb.step = 0.5
-				a_sb.value = float(p_node.get("amplitude"))
-				a_sb.value_changed.connect(func(val: float): p_node.set("amplitude", val))
-				p_row.add_child(a_sb)
-			elif p_port == 3:
-				var f_sb := SpinBox.new(); f_sb.min_value = 0.0001; f_sb.max_value = 0.1; f_sb.step = 0.001
-				f_sb.value = float(p_node.get("frequency"))
-				f_sb.value_changed.connect(func(val: float): p_node.set("frequency", val))
-				p_row.add_child(f_sb)
-
 		&"blend":
 			if p_port == 0:
 				var opt := OptionButton.new()
@@ -1136,90 +1066,6 @@ func _append_slot_inline_widget(p_row: HBoxContainer, p_node: Pasture3DGraphNode
 				opt.item_selected.connect(func(idx: int): p_node.set("mode", idx))
 				p_row.add_child(opt)
 
-		&"terrace":
-			if p_port == 1:
-				var b_sb := SpinBox.new(); b_sb.min_value = 0.1; b_sb.max_value = 200.0; b_sb.step = 0.5
-				b_sb.value = float(p_node.get("band_height"))
-				b_sb.value_changed.connect(func(val: float): p_node.set("band_height", val))
-				p_row.add_child(b_sb)
-			elif p_port == 2:
-				var h_sb := SpinBox.new(); h_sb.min_value = 0.0; h_sb.max_value = 1.0; h_sb.step = 0.05
-				h_sb.value = float(p_node.get("hardness"))
-				h_sb.value_changed.connect(func(val: float): p_node.set("hardness", val))
-				p_row.add_child(h_sb)
-			elif p_port == 3:
-				var amt_sb := SpinBox.new(); amt_sb.min_value = 0.0; amt_sb.max_value = 1.0; amt_sb.step = 0.05
-				amt_sb.value = float(p_node.get("amount"))
-				amt_sb.value_changed.connect(func(val: float): p_node.set("amount", val))
-				p_row.add_child(amt_sb)
-
-		&"strata":
-			if p_port == 1:
-				var b_sb := SpinBox.new(); b_sb.min_value = 0.1; b_sb.max_value = 200.0; b_sb.step = 0.5
-				b_sb.value = float(p_node.get("band_height"))
-				b_sb.value_changed.connect(func(val: float): p_node.set("band_height", val))
-				p_row.add_child(b_sb)
-			elif p_port == 2:
-				var h_sb := SpinBox.new(); h_sb.min_value = 0.0; h_sb.max_value = 1.0; h_sb.step = 0.05
-				h_sb.value = float(p_node.get("hardness"))
-				h_sb.value_changed.connect(func(val: float): p_node.set("hardness", val))
-				p_row.add_child(h_sb)
-			elif p_port == 3:
-				var d_sb := SpinBox.new(); d_sb.min_value = -45.0; d_sb.max_value = 45.0; d_sb.step = 0.5
-				d_sb.value = float(p_node.get("dip"))
-				d_sb.value_changed.connect(func(val: float): p_node.set("dip", val))
-				p_row.add_child(d_sb)
-			elif p_port == 4:
-				var dir_sb := SpinBox.new(); dir_sb.min_value = 0.0; dir_sb.max_value = 360.0; dir_sb.step = 1.0
-				dir_sb.value = float(p_node.get("dip_direction_degrees"))
-				dir_sb.value_changed.connect(func(val: float): p_node.set("dip_direction_degrees", val))
-				p_row.add_child(dir_sb)
-			elif p_port == 5:
-				var amt_sb := SpinBox.new(); amt_sb.min_value = 0.0; amt_sb.max_value = 1.0; amt_sb.step = 0.05
-				amt_sb.value = float(p_node.get("amount"))
-				amt_sb.value_changed.connect(func(val: float): p_node.set("amount", val))
-				p_row.add_child(amt_sb)
-
-		&"curve":
-			if p_port == 1:
-				var sb := SpinBox.new(); sb.min_value = -10000.0; sb.max_value = 10000.0; sb.step = 0.5; sb.value = float(p_node.get("input_min"))
-				sb.value_changed.connect(func(v: float): p_node.set("input_min", v))
-				p_row.add_child(sb)
-			elif p_port == 2:
-				var sb := SpinBox.new(); sb.min_value = -10000.0; sb.max_value = 10000.0; sb.step = 0.5; sb.value = float(p_node.get("input_max"))
-				sb.value_changed.connect(func(v: float): p_node.set("input_max", v))
-				p_row.add_child(sb)
-			elif p_port == 3:
-				var sb := SpinBox.new(); sb.min_value = -10000.0; sb.max_value = 10000.0; sb.step = 0.5; sb.value = float(p_node.get("output_min"))
-				sb.value_changed.connect(func(v: float): p_node.set("output_min", v))
-				p_row.add_child(sb)
-			elif p_port == 4:
-				var sb := SpinBox.new(); sb.min_value = -10000.0; sb.max_value = 10000.0; sb.step = 0.5; sb.value = float(p_node.get("output_max"))
-				sb.value_changed.connect(func(v: float): p_node.set("output_max", v))
-				p_row.add_child(sb)
-			elif p_port == 5:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 1.0; sb.step = 0.05; sb.value = float(p_node.get("amount"))
-				sb.value_changed.connect(func(v: float): p_node.set("amount", v))
-				p_row.add_child(sb)
-
-		&"remap":
-			if p_port == 1:
-				var sb := SpinBox.new(); sb.min_value = -10000.0; sb.max_value = 10000.0; sb.step = 0.5; sb.value = float(p_node.get("in_min"))
-				sb.value_changed.connect(func(v: float): p_node.set("in_min", v))
-				p_row.add_child(sb)
-			elif p_port == 2:
-				var sb := SpinBox.new(); sb.min_value = -10000.0; sb.max_value = 10000.0; sb.step = 0.5; sb.value = float(p_node.get("in_max"))
-				sb.value_changed.connect(func(v: float): p_node.set("in_max", v))
-				p_row.add_child(sb)
-			elif p_port == 3:
-				var sb := SpinBox.new(); sb.min_value = -10000.0; sb.max_value = 10000.0; sb.step = 0.5; sb.value = float(p_node.get("out_min"))
-				sb.value_changed.connect(func(v: float): p_node.set("out_min", v))
-				p_row.add_child(sb)
-			elif p_port == 4:
-				var sb := SpinBox.new(); sb.min_value = -10000.0; sb.max_value = 10000.0; sb.step = 0.5; sb.value = float(p_node.get("out_max"))
-				sb.value_changed.connect(func(v: float): p_node.set("out_max", v))
-				p_row.add_child(sb)
-
 		&"mask":
 			if p_port == 0:
 				var opt := OptionButton.new()
@@ -1227,27 +1073,6 @@ func _append_slot_inline_widget(p_row: HBoxContainer, p_node: Pasture3DGraphNode
 				opt.selected = int(p_node.get("property"))
 				opt.item_selected.connect(func(id: int): p_node.set("property", id))
 				p_row.add_child(opt)
-			elif p_port == 1:
-				var sb := SpinBox.new(); sb.min_value = -10000.0; sb.max_value = 10000.0; sb.step = 0.5; sb.value = float(p_node.get("band_min"))
-				sb.value_changed.connect(func(v: float): p_node.set("band_min", v))
-				p_row.add_child(sb)
-			elif p_port == 2:
-				var sb := SpinBox.new(); sb.min_value = -10000.0; sb.max_value = 10000.0; sb.step = 0.5; sb.value = float(p_node.get("band_max"))
-				sb.value_changed.connect(func(v: float): p_node.set("band_max", v))
-				p_row.add_child(sb)
-			elif p_port == 3:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 500.0; sb.step = 0.5; sb.value = float(p_node.get("falloff_lo"))
-				sb.value_changed.connect(func(v: float): p_node.set("falloff_lo", v))
-				p_row.add_child(sb)
-			elif p_port == 4:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 500.0; sb.step = 0.5; sb.value = float(p_node.get("falloff_hi"))
-				sb.value_changed.connect(func(v: float): p_node.set("falloff_hi", v))
-				p_row.add_child(sb)
-			elif p_port == 5:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 1.0; sb.step = 0.05; sb.value = float(p_node.get("strength"))
-				sb.value_changed.connect(func(v: float): p_node.set("strength", v))
-				p_row.add_child(sb)
-
 		&"curvature":
 			if p_port == 0:
 				var opt := OptionButton.new()
@@ -1255,135 +1080,6 @@ func _append_slot_inline_widget(p_row: HBoxContainer, p_node: Pasture3DGraphNode
 				opt.selected = int(p_node.get("mode"))
 				opt.item_selected.connect(func(id: int): p_node.set("mode", id))
 				p_row.add_child(opt)
-			elif p_port == 1:
-				var sb := SpinBox.new(); sb.min_value = 1; sb.max_value = 10; sb.step = 1; sb.value = int(p_node.get("radius"))
-				sb.value_changed.connect(func(v: float): p_node.set("radius", int(v)))
-				p_row.add_child(sb)
-			elif p_port == 2:
-				var sb := SpinBox.new(); sb.min_value = 0.1; sb.max_value = 10.0; sb.step = 0.1; sb.value = float(p_node.get("contrast"))
-				sb.value_changed.connect(func(v: float): p_node.set("contrast", v))
-				p_row.add_child(sb)
-
-		&"talus_projection":
-			if p_port == 1:
-				var sb := SpinBox.new(); sb.min_value = 5.0; sb.max_value = 80.0; sb.step = 0.5; sb.value = float(p_node.get("talus_angle_deg"))
-				sb.value_changed.connect(func(v: float): p_node.set("talus_angle_deg", v))
-				p_row.add_child(sb)
-			elif p_port == 2:
-				var sb := SpinBox.new(); sb.min_value = 1; sb.max_value = 100; sb.step = 1; sb.value = int(p_node.get("iterations"))
-				sb.value_changed.connect(func(v: float): p_node.set("iterations", int(v)))
-				p_row.add_child(sb)
-			elif p_port == 3:
-				var sb := SpinBox.new(); sb.min_value = 0.01; sb.max_value = 1.0; sb.step = 0.05; sb.value = float(p_node.get("transfer_rate"))
-				sb.value_changed.connect(func(v: float): p_node.set("transfer_rate", v))
-				p_row.add_child(sb)
-			elif p_port == 4:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 1.0; sb.step = 0.05; sb.value = float(p_node.get("amount"))
-				sb.value_changed.connect(func(v: float): p_node.set("amount", v))
-				p_row.add_child(sb)
-
-		&"spectral_equalizer":
-			if p_port == 1:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 5.0; sb.step = 0.05; sb.value = float(p_node.get("macro_gain"))
-				sb.value_changed.connect(func(v: float): p_node.set("macro_gain", v))
-				p_row.add_child(sb)
-			elif p_port == 2:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 5.0; sb.step = 0.05; sb.value = float(p_node.get("meso_gain"))
-				sb.value_changed.connect(func(v: float): p_node.set("meso_gain", v))
-				p_row.add_child(sb)
-			elif p_port == 3:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 5.0; sb.step = 0.05; sb.value = float(p_node.get("micro_gain"))
-				sb.value_changed.connect(func(v: float): p_node.set("micro_gain", v))
-				p_row.add_child(sb)
-			elif p_port == 4:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 1.0; sb.step = 0.05; sb.value = float(p_node.get("amount"))
-				sb.value_changed.connect(func(v: float): p_node.set("amount", v))
-				p_row.add_child(sb)
-
-		&"depression_filling":
-			if p_port == 1:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 500.0; sb.step = 0.5; sb.value = float(p_node.get("fill_depth_limit"))
-				sb.value_changed.connect(func(v: float): p_node.set("fill_depth_limit", v))
-				p_row.add_child(sb)
-			elif p_port == 2:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 1.0; sb.step = 0.05; sb.value = float(p_node.get("amount"))
-				sb.value_changed.connect(func(v: float): p_node.set("amount", v))
-				p_row.add_child(sb)
-
-		&"erosion_hydraulic":
-			if p_port == 1:
-				var sb := SpinBox.new(); sb.min_value = 1; sb.max_value = 200; sb.step = 1; sb.value = int(p_node.get("iterations"))
-				sb.value_changed.connect(func(v: float): p_node.set("iterations", int(v)))
-				p_row.add_child(sb)
-			elif p_port == 2:
-				var sb := SpinBox.new(); sb.min_value = 0.001; sb.max_value = 1.0; sb.step = 0.01; sb.value = float(p_node.get("rain_rate"))
-				sb.value_changed.connect(func(v: float): p_node.set("rain_rate", v))
-				p_row.add_child(sb)
-			elif p_port == 3:
-				var sb := SpinBox.new(); sb.min_value = 0.01; sb.max_value = 2.0; sb.step = 0.05; sb.value = float(p_node.get("erosion_speed"))
-				sb.value_changed.connect(func(v: float): p_node.set("erosion_speed", v))
-				p_row.add_child(sb)
-			elif p_port == 4:
-				var sb := SpinBox.new(); sb.min_value = 0.01; sb.max_value = 2.0; sb.step = 0.05; sb.value = float(p_node.get("deposition_speed"))
-				sb.value_changed.connect(func(v: float): p_node.set("deposition_speed", v))
-				p_row.add_child(sb)
-
-		&"erosion_thermal":
-			if p_port == 2:
-				var sb := SpinBox.new(); sb.min_value = 5.0; sb.max_value = 80.0; sb.step = 0.5; sb.value = float(p_node.get("talus_angle"))
-				sb.value_changed.connect(func(v: float): p_node.set("talus_angle", v))
-				p_row.add_child(sb)
-			elif p_port == 3:
-				var sb := SpinBox.new(); sb.min_value = 1; sb.max_value = 200; sb.step = 1; sb.value = int(p_node.get("iterations"))
-				sb.value_changed.connect(func(v: float): p_node.set("iterations", int(v)))
-				p_row.add_child(sb)
-			elif p_port == 4:
-				var sb := SpinBox.new(); sb.min_value = 0.01; sb.max_value = 1.0; sb.step = 0.05; sb.value = float(p_node.get("settling_rate"))
-				sb.value_changed.connect(func(v: float): p_node.set("settling_rate", v))
-				p_row.add_child(sb)
-
-		&"erosion":
-			if p_port == 1:
-				var sb := SpinBox.new(); sb.min_value = 1; sb.max_value = 200; sb.step = 1; sb.value = int(p_node.get("iterations"))
-				sb.value_changed.connect(func(v: float): p_node.set("iterations", int(v)))
-				p_row.add_child(sb)
-			elif p_port == 2:
-				var sb := SpinBox.new(); sb.min_value = 0.001; sb.max_value = 1.0; sb.step = 0.01; sb.value = float(p_node.get("erosion_rate"))
-				sb.value_changed.connect(func(v: float): p_node.set("erosion_rate", v))
-				p_row.add_child(sb)
-			elif p_port == 3:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 2.0; sb.step = 0.05; sb.value = float(p_node.get("hillslope_diffusion"))
-				sb.value_changed.connect(func(v: float): p_node.set("hillslope_diffusion", v))
-				p_row.add_child(sb)
-
-		&"scree":
-			if p_port == 1:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 100.0; sb.step = 0.5; sb.value = float(p_node.get("amplitude"))
-				sb.value_changed.connect(func(v: float): p_node.set("amplitude", v))
-				p_row.add_child(sb)
-			elif p_port == 2:
-				var sb := SpinBox.new(); sb.min_value = 0.01; sb.max_value = 10.0; sb.step = 0.05; sb.value = float(p_node.get("grain_size"))
-				sb.value_changed.connect(func(v: float): p_node.set("grain_size", v))
-				p_row.add_child(sb)
-			elif p_port == 3:
-				var sb := SpinBox.new(); sb.min_value = 5.0; sb.max_value = 60.0; sb.step = 0.5; sb.value = float(p_node.get("min_slope_degrees"))
-				sb.value_changed.connect(func(v: float): p_node.set("min_slope_degrees", v))
-				p_row.add_child(sb)
-
-		&"dla":
-			if p_port == 1:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 500.0; sb.step = 1.0; sb.value = float(p_node.get("amplitude"))
-				sb.value_changed.connect(func(v: float): p_node.set("amplitude", v))
-				p_row.add_child(sb)
-			elif p_port == 2:
-				var sb := SpinBox.new(); sb.min_value = 0.2; sb.max_value = 1.0; sb.step = 0.05; sb.value = float(p_node.get("coverage"))
-				sb.value_changed.connect(func(v: float): p_node.set("coverage", v))
-				p_row.add_child(sb)
-			elif p_port == 3:
-				var sb := SpinBox.new(); sb.min_value = 0.03; sb.max_value = 0.50; sb.step = 0.01; sb.value = float(p_node.get("detail_size"))
-				sb.value_changed.connect(func(v: float): p_node.set("detail_size", v))
-				p_row.add_child(sb)
-
 		&"lake_flooding":
 			if p_port == 0:
 				var opt := OptionButton.new()
@@ -1391,33 +1087,6 @@ func _append_slot_inline_widget(p_row: HBoxContainer, p_node: Pasture3DGraphNode
 				opt.selected = int(p_node.get("flood_mode"))
 				opt.item_selected.connect(func(id: int): p_node.set("flood_mode", id))
 				p_row.add_child(opt)
-			elif p_port == 1:
-				var sb := SpinBox.new(); sb.min_value = -1000.0; sb.max_value = 2000.0; sb.step = 0.5; sb.value = float(p_node.get("water_elevation"))
-				sb.value_changed.connect(func(v: float): p_node.set("water_elevation", v))
-				p_row.add_child(sb)
-			elif p_port == 2:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 1.0; sb.step = 0.02; sb.value = float(p_node.get("flood_percent"))
-				sb.value_changed.connect(func(v: float): p_node.set("flood_percent", v))
-				p_row.add_child(sb)
-			elif p_port == 3:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 50.0; sb.step = 0.5; sb.value = float(p_node.get("shoreline_width"))
-				sb.value_changed.connect(func(v: float): p_node.set("shoreline_width", v))
-				p_row.add_child(sb)
-
-		&"stream_extraction":
-			if p_port == 1:
-				var sb := SpinBox.new(); sb.min_value = 1.0; sb.max_value = 500.0; sb.step = 1.0; sb.value = float(p_node.get("min_catchment_cells"))
-				sb.value_changed.connect(func(v: float): p_node.set("min_catchment_cells", v))
-				p_row.add_child(sb)
-			elif p_port == 2:
-				var sb := SpinBox.new(); sb.min_value = 0.0; sb.max_value = 50.0; sb.step = 0.2; sb.value = float(p_node.get("carve_depth"))
-				sb.value_changed.connect(func(v: float): p_node.set("carve_depth", v))
-				p_row.add_child(sb)
-			elif p_port == 3:
-				var sb := SpinBox.new(); sb.min_value = 1.0; sb.max_value = 50.0; sb.step = 0.5; sb.value = float(p_node.get("channel_width"))
-				sb.value_changed.connect(func(v: float): p_node.set("channel_width", v))
-				p_row.add_child(sb)
-
 
 func _add_inline_node_controls(p_gn: GraphNode, p_index: int, p_node: Pasture3DGraphNode) -> void:
 	var op := p_node.op()
@@ -1432,13 +1101,6 @@ func _add_inline_node_controls(p_gn: GraphNode, p_index: int, p_node: Pasture3DG
 			)
 			btn_row.add_child(auto_btn)
 			p_gn.add_child(btn_row)
-
-
-func _graph_has_sink() -> bool:
-	for nd in graph.nodes:
-		if nd != null and nd.op() == &"output":
-			return true
-	return false
 
 
 func _graph_label() -> String:
@@ -1835,6 +1497,10 @@ func _action_delete_nodes(p_indices: Array[int]) -> void:
 	var old_nodes := graph.nodes.duplicate()
 	var old_conns := graph.connections.duplicate()
 	var old_out := graph.output_node
+	# `remove_node` shifts `output_override` along with the indices, so undoing the indices without it
+	# leaves a solo-preview pointing at a DIFFERENT node — `output_index()` then bakes and caches the
+	# wrong field. `_action_set_output` below already saves and restores it.
+	var old_override := graph.output_override
 	
 	_ur_create_action("Delete Terrain Graph Node(s)")
 	for i in sorted_indices:
@@ -1842,6 +1508,7 @@ func _action_delete_nodes(p_indices: Array[int]) -> void:
 	_ur_add_undo_property(graph, &"nodes", old_nodes)
 	_ur_add_undo_property(graph, &"connections", old_conns)
 	_ur_add_undo_property(graph, &"output_node", old_out)
+	_ur_add_undo_property(graph, &"output_override", old_override)
 	_ur_commit()
 
 

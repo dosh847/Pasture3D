@@ -52,116 +52,13 @@ inline float raster_ramp(const PackedFloat32Array &lut, float x) {
 	return lut[i0] * (1.f - frac) + lut[i0 + 1] * frac;
 }
 
-// NaN-aware separable 3-tap Gaussian blur of a packed grid, in place. NaN cells are skipped (treated as
-// "no contribution") so the blur never bleeds a feature outward past its footprint. No-op and NO
-// allocation when passes <= 0, so an unused smoother costs nothing. Shared by the spline height brushes
-// (mirrors Pasture3DTerrainBrush._blur_grid for A/B parity).
-static void nan_blur(std::vector<float> &vals, int gw, int gh, int passes) {
-	if (passes <= 0) {
-		return;
-	}
-	const size_t n = (size_t)gw * gh;
-	std::vector<float> tmp(n);
-	for (int p = 0; p < passes; p++) {
-		// Horizontal pass: 1 2 1 kernel over finite cells.
-		for (int iz = 0; iz < gh; iz++) {
-			const int row = iz * gw;
-			for (int ix = 0; ix < gw; ix++) {
-				const int i = row + ix;
-				const float v = vals[i];
-				if (std::isnan(v)) {
-					tmp[i] = (float)NAN;
-					continue;
-				}
-				float wsum = 2.f;
-				float sum = 2.f * v;
-				if (ix > 0 && !std::isnan(vals[i - 1])) {
-					sum += vals[i - 1];
-					wsum += 1.f;
-				}
-				if (ix + 1 < gw && !std::isnan(vals[i + 1])) {
-					sum += vals[i + 1];
-					wsum += 1.f;
-				}
-				tmp[i] = sum / wsum;
-			}
-		}
-		// Vertical pass: 1 2 1 kernel over finite cells.
-		for (int iz = 0; iz < gh; iz++) {
-			const int row = iz * gw;
-			for (int ix = 0; ix < gw; ix++) {
-				const int i = row + ix;
-				const float v = tmp[i];
-				if (std::isnan(v)) {
-					vals[i] = (float)NAN;
-					continue;
-				}
-				float wsum = 2.f;
-				float sum = 2.f * v;
-				if (iz > 0 && !std::isnan(tmp[i - gw])) {
-					sum += tmp[i - gw];
-					wsum += 1.f;
-				}
-				if (iz + 1 < gh && !std::isnan(tmp[i + gw])) {
-					sum += tmp[i + gw];
-					wsum += 1.f;
-				}
-				vals[i] = sum / wsum;
-			}
-		}
-	}
-}
-
-// 8-neighbor Chamfer Distance Transform on a 2D float grid, in place.
-// `arr` must have 0 at source cells, RBIG everywhere else.
-// `a` is the orthogonal step cost (usually vs), `b` is the diagonal step cost (usually vs * 1.414).
-void raster_chamfer(std::vector<float> &arr, int gw, int gh, float a, float b) {
-	// Forward pass: scan top-left to bottom-right.
-	for (int iz = 0; iz < gh; iz++) {
-		const int row = iz * gw;
-		for (int ix = 0; ix < gw; ix++) {
-			const int i = row + ix;
-			float d = arr[i];
-			if (iz > 0) {
-				const int up = i - gw;
-				d = std::min(d, arr[up] + a);
-				if (ix > 0) {
-					d = std::min(d, arr[up - 1] + b);
-				}
-				if (ix + 1 < gw) {
-					d = std::min(d, arr[up + 1] + b);
-				}
-			}
-			if (ix > 0) {
-				d = std::min(d, arr[i - 1] + a);
-			}
-			arr[i] = d;
-		}
-	}
-	// Backward pass: scan bottom-right to top-left.
-	for (int iz = gh - 1; iz >= 0; iz--) {
-		const int row = iz * gw;
-		for (int ix = gw - 1; ix >= 0; ix--) {
-			const int i = row + ix;
-			float d = arr[i];
-			if (iz + 1 < gh) {
-				const int down = i + gw;
-				d = std::min(d, arr[down] + a);
-				if (ix > 0) {
-					d = std::min(d, arr[down - 1] + b);
-				}
-				if (ix + 1 < gw) {
-					d = std::min(d, arr[down + 1] + b);
-				}
-			}
-			if (ix + 1 < gw) {
-				d = std::min(d, arr[i + 1] + a);
-			}
-			arr[i] = d;
-		}
-	}
-}
-
+// The blur the height brushes smooth with is `graph_nan_blur` (pasture_3d_graph_ops.cpp).
+//
+// There were FOUR copies of this kernel: this one (serial, 6 call sites), graph_ops.cpp's (threaded via
+// parallel_for_rows), and two in GDScript. The intended native+oracle duality is TWO, and the threading
+// fix had landed in only one copy — the COLDER one, so the brush paid a serial blur per stamp while the
+// graph's identical pass was parallel. Deleting this one gives the six brush call sites the threaded
+// kernel and removes the drift surface entirely.
 // Signed distance field of a closed world polygon over the grid (port of _signed_distance_field).
 // Fills `field` (gw*gh, positive inside / negative outside, metres); returns max interior distance.
 // Uses exact analytic segment Euclidean distance matching the GPU shader with AABB pruning and multi-threaded row chunking.
@@ -304,117 +201,6 @@ float raster_sdf(const PackedVector2Array &poly, double min_x, double min_z, dou
 		}
 	}
 	return global_max_inside;
-}
-
-// Chamfer that carries two payloads with the nearest-feature distance (port of _chamfer_payload).
-void raster_chamfer_payload(std::vector<float> &dist, std::vector<float> &p1, std::vector<float> &p2, int gw, int gh, float a, float b) {
-	for (int iz = 0; iz < gh; iz++) {
-		const int row = iz * gw;
-		for (int ix = 0; ix < gw; ix++) {
-			const int i = row + ix;
-			float bd = dist[i];
-			int bj = -1;
-			if (iz > 0) {
-				const int up = i - gw;
-				if (dist[up] + a < bd) { bd = dist[up] + a; bj = up; }
-				if (ix > 0 && dist[up - 1] + b < bd) { bd = dist[up - 1] + b; bj = up - 1; }
-				if (ix < gw - 1 && dist[up + 1] + b < bd) { bd = dist[up + 1] + b; bj = up + 1; }
-			}
-			if (ix > 0 && dist[i - 1] + a < bd) { bd = dist[i - 1] + a; bj = i - 1; }
-			if (bj >= 0) { dist[i] = bd; p1[i] = p1[bj]; p2[i] = p2[bj]; }
-		}
-	}
-	for (int iz = gh - 1; iz >= 0; iz--) {
-		const int row = iz * gw;
-		for (int ix = gw - 1; ix >= 0; ix--) {
-			const int i = row + ix;
-			float bd = dist[i];
-			int bj = -1;
-			if (iz < gh - 1) {
-				const int dn = i + gw;
-				if (dist[dn] + a < bd) { bd = dist[dn] + a; bj = dn; }
-				if (ix < gw - 1 && dist[dn + 1] + b < bd) { bd = dist[dn + 1] + b; bj = dn + 1; }
-				if (ix > 0 && dist[dn - 1] + b < bd) { bd = dist[dn - 1] + b; bj = dn - 1; }
-			}
-			if (ix < gw - 1 && dist[i + 1] + a < bd) { bd = dist[i + 1] + a; bj = i + 1; }
-			if (bj >= 0) { dist[i] = bd; p1[i] = p1[bj]; p2[i] = p2[bj]; }
-		}
-	}
-}
-
-// Three-payload chamfer: same nearest-feature propagation as raster_chamfer_payload but carries p3 too.
-void raster_chamfer_payload3(std::vector<float> &dist, std::vector<float> &p1, std::vector<float> &p2, std::vector<float> &p3, int gw, int gh, float a, float b) {
-	for (int iz = 0; iz < gh; iz++) {
-		const int row = iz * gw;
-		for (int ix = 0; ix < gw; ix++) {
-			const int i = row + ix;
-			float bd = dist[i];
-			int bj = -1;
-			if (iz > 0) {
-				const int up = i - gw;
-				if (dist[up] + a < bd) { bd = dist[up] + a; bj = up; }
-				if (ix > 0 && dist[up - 1] + b < bd) { bd = dist[up - 1] + b; bj = up - 1; }
-				if (ix < gw - 1 && dist[up + 1] + b < bd) { bd = dist[up + 1] + b; bj = up + 1; }
-			}
-			if (ix > 0 && dist[i - 1] + a < bd) { bd = dist[i - 1] + a; bj = i - 1; }
-			if (bj >= 0) { dist[i] = bd; p1[i] = p1[bj]; p2[i] = p2[bj]; p3[i] = p3[bj]; }
-		}
-	}
-	for (int iz = gh - 1; iz >= 0; iz--) {
-		const int row = iz * gw;
-		for (int ix = gw - 1; ix >= 0; ix--) {
-			const int i = row + ix;
-			float bd = dist[i];
-			int bj = -1;
-			if (iz < gh - 1) {
-				const int dn = i + gw;
-				if (dist[dn] + a < bd) { bd = dist[dn] + a; bj = dn; }
-				if (ix < gw - 1 && dist[dn + 1] + b < bd) { bd = dist[dn + 1] + b; bj = dn + 1; }
-				if (ix > 0 && dist[dn - 1] + b < bd) { bd = dist[dn - 1] + b; bj = dn - 1; }
-			}
-			if (ix < gw - 1 && dist[i + 1] + a < bd) { bd = dist[i + 1] + a; bj = i + 1; }
-			if (bj >= 0) { dist[i] = bd; p1[i] = p1[bj]; p2[i] = p2[bj]; p3[i] = p3[bj]; }
-		}
-	}
-}
-
-// Feature field of a world-space polyline over the grid (port of _polyline_field). Fills lat / base_y /
-// along (size gw*gh); returns the polyline's total arc length.
-float raster_polyline_field(const PackedVector3Array &pts, double min_x, double min_z, double vs, int gw, int gh,
-		std::vector<float> &lat, std::vector<float> &base_y, std::vector<float> &along) {
-	const int n = gw * gh;
-	lat.assign(n, RBIG);
-	base_y.assign(n, 0.f);
-	along.assign(n, 0.f);
-	const double sample = vs * 0.5;
-	double run = 0.0;
-	const int np = pts.size();
-	for (int k = 0; k < np - 1; k++) {
-		const Vector3 a = pts[k];
-		const Vector3 b = pts[k + 1];
-		const double ax = a.x;
-		const double az = a.z;
-		const double seg = std::sqrt((b.x - ax) * (b.x - ax) + (b.z - az) * (b.z - az));
-		const double along_a = run;
-		run += seg;
-		int steps = (int)std::ceil(seg / sample);
-		if (steps < 1) {
-			steps = 1;
-		}
-		for (int s = 0; s <= steps; s++) {
-			const double tt = (double)s / (double)steps;
-			const int ix = (int)std::lround((ax + (b.x - ax) * tt - min_x) / vs);
-			const int iz = (int)std::lround((az + (b.z - az) * tt - min_z) / vs);
-			if (ix >= 0 && ix < gw && iz >= 0 && iz < gh) {
-				const int idx = iz * gw + ix;
-				lat[idx] = 0.f;
-				base_y[idx] = (float)(a.y + (b.y - a.y) * tt);
-				along[idx] = (float)(along_a + seg * tt);
-			}
-		}
-	}
-	raster_chamfer_payload(lat, base_y, along, gw, gh, (float)vs, (float)(vs * 1.4142135624));
-	return (float)run;
 }
 
 
@@ -1329,6 +1115,22 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	const double cz0 = p_clip.position.z;
 	const double cz1 = p_clip.position.z + p_clip.size.z;
 
+	// A FIELD modifier reads the WHOLE grid, so the pre-pass that fills that grid cannot be clipped to the
+	// dirty rect the way the write loop can. Clipping it left every cell outside the rect at NaN and a
+	// field step then saw a brush that stops at the rect edge: an erosion pass computed its drainage
+	// network against a cliff that only exists because of which cells happened to be dirty, so the same
+	// brush baked to different terrain depending on what the user had touched last. Widening by the
+	// modifier margin would not be enough -- a drainage network is global, not local -- so the pre-pass
+	// simply ignores the clip when a field step is present, and only the WRITE loop narrows back to it.
+	bool has_field_step = false;
+	for (const BrushModStep &st : steps) {
+		if (st.field) {
+			has_field_step = true;
+			break;
+		}
+	}
+	const bool pre_clip = has_clip && !has_field_step;
+
 	// Rasterise the brush's own profile into its own grids first, then run the modifier list over them.
 	// The split is not a tidier spelling of one fused loop: a FIELD modifier reads the whole grid, so the
 	// profile has to be finished before any modifier can look at it.
@@ -1370,14 +1172,14 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	};
 	for (int iz = 0; iz < gh; iz++) {
 		const double z = min_z + iz * vs;
-		if (has_clip && (z < cz0 || z >= cz1)) {
+		if (pre_clip && (z < cz0 || z >= cz1)) {
 			continue;
 		}
 		const int row = iz * gw;
 		for (int ix = 0; ix < gw; ix++) {
 			const double signed_d = (double)field[row + ix] + edge_offset;
 			const double x = min_x + ix * vs;
-			if (has_clip && (x < cx0 || x >= cx1)) {
+			if (pre_clip && (x < cx0 || x >= cx1)) {
 				continue;
 			}
 			if (signed_d <= 0.0) {
@@ -1433,8 +1235,8 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 			// the ones this brush built. Taken from `amp` rather than `vals` for exactly that reason.
 			if (in_vals) {
 				for (size_t k = 0; k < n; k++) {
-					amp[k] = std::isnan(vals[k]) ? NAN
-												 : (add ? (double)vals[k] : (double)vals[k] - (double)basey[k]);
+					amp[k] = !std::isfinite(vals[k]) ? NAN
+													: (add ? (double)vals[k] : (double)vals[k] - (double)basey[k]);
 				}
 				in_vals = false;
 			}
@@ -1461,7 +1263,7 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 			}
 			if (in_vals) {
 				for (size_t k = 0; k < n; k++) {
-					amp[k] = std::isnan(vals[k]) ? NAN : (add ? (double)vals[k] : (double)vals[k] - (double)basey[k]);
+					amp[k] = !std::isfinite(vals[k]) ? NAN : (add ? (double)vals[k] : (double)vals[k] - (double)basey[k]);
 				}
 				in_vals = false;
 			}
@@ -1512,12 +1314,12 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 		}
 		if (!in_vals) {
 			for (size_t k = 0; k < n; k++) {
-				vals[k] = std::isnan(amp[k]) ? (float)NAN : (float)(add ? amp[k] : (double)basey[k] + amp[k]);
+				vals[k] = !std::isfinite(amp[k]) ? (float)NAN : (float)(add ? amp[k] : (double)basey[k] + amp[k]);
 			}
 			in_vals = true;
 		}
 		if (steps[si].kind == BrushModStep::SMOOTH) {
-			nan_blur(vals, gw, gh, steps[si].passes);
+			graph_nan_blur(vals, gw, gh, steps[si].passes);
 		} else if (steps[si].kind == BrushModStep::EROSION) {
 			brush_mod_erode(steps[si], vals, basey, add, gw, gh, vs, fields);
 		} else if (steps[si].kind == BrushModStep::GRAPH) {
@@ -1560,7 +1362,7 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	}
 	if (!in_vals) {
 		for (size_t k = 0; k < n; k++) {
-			vals[k] = std::isnan(amp[k]) ? (float)NAN : (float)(add ? amp[k] : (double)basey[k] + amp[k]);
+			vals[k] = !std::isfinite(amp[k]) ? (float)NAN : (float)(add ? amp[k] : (double)basey[k] + amp[k]);
 		}
 	}
 
@@ -1570,7 +1372,7 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	// untouched skirt zone leaves the surrounding terrain exactly as it was.
 	if (margin_active) {
 		for (size_t k = 0; k < n; k++) {
-			if (!margin_mask[k] || std::isnan(vals[k])) {
+			if (!margin_mask[k] || !std::isfinite(vals[k])) {
 				continue;
 			}
 			const double moved = add ? (double)vals[k] : (double)vals[k] - (double)basey[k];
@@ -1579,7 +1381,7 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 			}
 		}
 	}
-	nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
+	graph_nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
 
 	if (batched) {
 		const int min_px = (int)std::lround(min_x / vs);
@@ -1592,7 +1394,11 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 			const int row = iz * gw;
 			for (int ix = 0; ix < gw; ix++) {
 				const float v = vals[row + ix];
-				if (std::isnan(v)) { continue; }
+				// !isfinite, not isnan. NAN is the buffer's "this cell writes nothing" sentinel, but an
+				// INFINITY is just as unwritable and is not NaN, so it used to pass this test and reach
+				// the terrain -- where graph_nan_blur then smeared it across the neighbourhood. Matches the
+				// GDScript oracle, which asks is_finite.
+				if (!std::isfinite(v)) { continue; }
 				const double x = min_x + ix * vs;
 				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
 				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
@@ -1796,7 +1602,7 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 
 	// NaN-aware separable 3-tap Gaussian blur. Smooths the chamfer DT's octagonal isocontour
 	// artifacts in `lat` that appear as angular surface faceting when diff is large.
-	nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
+	graph_nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
 
 	// Write back.
 	if (batched) {
@@ -1810,7 +1616,11 @@ void Pasture3DData::stamp_ridge_line(const int p_layer_id, const PackedVector3Ar
 			const int row = iz * gw;
 			for (int ix = 0; ix < gw; ix++) {
 				const float v = vals[row + ix];
-				if (std::isnan(v)) { continue; }
+				// !isfinite, not isnan. NAN is the buffer's "this cell writes nothing" sentinel, but an
+				// INFINITY is just as unwritable and is not NaN, so it used to pass this test and reach
+				// the terrain -- where graph_nan_blur then smeared it across the neighbourhood. Matches the
+				// GDScript oracle, which asks is_finite.
+				if (!std::isfinite(v)) { continue; }
 				const double x = min_x + ix * vs;
 				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
 				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
@@ -2003,7 +1813,7 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 	}
 
 	// Optional NaN-aware post-smoothing (default 0 = no-op, no allocation).
-	nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
+	graph_nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
 
 	if (batched) {
 		_apply_stamp_block(wlayer, (int)std::lround(min_x / vs), (int)std::lround(min_z / vs), gw, gh, vals.data(), blend);
@@ -2016,7 +1826,11 @@ void Pasture3DData::stamp_trough_line(const int p_layer_id, const PackedVector3A
 			const int row = iz * gw;
 			for (int ix = 0; ix < gw; ix++) {
 				const float v = vals[row + ix];
-				if (std::isnan(v)) { continue; }
+				// !isfinite, not isnan. NAN is the buffer's "this cell writes nothing" sentinel, but an
+				// INFINITY is just as unwritable and is not NaN, so it used to pass this test and reach
+				// the terrain -- where graph_nan_blur then smeared it across the neighbourhood. Matches the
+				// GDScript oracle, which asks is_finite.
+				if (!std::isfinite(v)) { continue; }
 				const double x = min_x + ix * vs;
 				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
 				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
@@ -2147,7 +1961,7 @@ void Pasture3DData::stamp_road_line(const int p_layer_id, const PackedVector2Arr
 	}
 
 	// NaN-aware separable blur if requested
-	nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
+	graph_nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
 
 	// Write back
 	if (batched) {
@@ -2161,7 +1975,11 @@ void Pasture3DData::stamp_road_line(const int p_layer_id, const PackedVector2Arr
 			const int row = iz * gw;
 			for (int ix = 0; ix < gw; ix++) {
 				const float v = vals[row + ix];
-				if (std::isnan(v)) { continue; }
+				// !isfinite, not isnan. NAN is the buffer's "this cell writes nothing" sentinel, but an
+				// INFINITY is just as unwritable and is not NaN, so it used to pass this test and reach
+				// the terrain -- where graph_nan_blur then smeared it across the neighbourhood. Matches the
+				// GDScript oracle, which asks is_finite.
+				if (!std::isfinite(v)) { continue; }
 				const double x = min_x + (double)ix * vs;
 				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
 				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
@@ -2378,7 +2196,10 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 				}
 				amp = height_scale * (sv - height_offset) * mask * src_strength;
 			}
-			if (std::fabs(amp) < 0.0001) {
+			// An INF or NaN amplitude is not a small write, it is a NO write: a relief op that overflowed
+			// or divided by zero must leave the ground alone rather than stamp an infinity. The batched
+			// apply path takes the buffer wholesale, so this is the only place to stop it.
+			if (!std::isfinite(amp) || std::fabs(amp) < 0.0001) {
 				continue;
 			}
 			const Vector3 pos(x, 0.0, z);
@@ -2394,7 +2215,7 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 	}
 
 	// Optional NaN-aware post-smoothing (default 0 = no-op, no allocation).
-	nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
+	graph_nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
 
 	if (batched) {
 		_apply_stamp_block(wlayer, (int)std::lround(min_x / vs), (int)std::lround(min_z / vs), gw, gh, vals.data(), blend);
@@ -2405,7 +2226,11 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 			const int row = iz * gw;
 			for (int ix = 0; ix < gw; ix++) {
 				const float v = vals[row + ix];
-				if (std::isnan(v)) { continue; }
+				// !isfinite, not isnan. NAN is the buffer's "this cell writes nothing" sentinel, but an
+				// INFINITY is just as unwritable and is not NaN, so it used to pass this test and reach
+				// the terrain -- where graph_nan_blur then smeared it across the neighbourhood. Matches the
+				// GDScript oracle, which asks is_finite.
+				if (!std::isfinite(v)) { continue; }
 				const double x = min_x + ix * vs;
 				if (has_clip && (x < cx0 || x >= cx1)) { continue; }
 				_stamp_write(wlayer, p_layer_id, composite, wloc, wregion, Vector3(x, 0.0, z), (double)v, blend);
@@ -2502,7 +2327,11 @@ void Pasture3DData::stamp_splat_loop(const int p_layer_id, const PackedVector2Ar
 				continue;
 			}
 			const Vector3 pos(x, 0.0, z);
-			const uint32_t cur = get_control(pos);
+			// control_or_default, not get_control: over a region whose control map has not been created
+			// yet the raw answer is UINT32_MAX, and the `cur & 0x6` below would then carry the hole and
+			// navigation bits into every painted cell while get_base(cur) returned texture 31. The road
+			// sibling below has always normalised this; the splat path had not.
+			const uint32_t cur = control_or_default(pos);
 			const uint8_t base_id = preserve_base ? get_base(cur) : (uint8_t)material;
 			const uint32_t ctrl = enc_base(base_id) | enc_overlay((uint8_t)material) | enc_blend((uint8_t)blend_int) | uv_bits | (cur & 0x6);
 			if (batched) {
@@ -2551,17 +2380,10 @@ int Pasture3DData::stamp_road_surface_control(const int p_layer_id, const Packed
 			}
 			const double x = p_min_x + (double)ix * p_vs;
 			const Vector3 pos((float)x, 0.0f, (float)z);
-			uint32_t cur = get_control(pos);
-			// UINT32_MAX is get_control's "no region, deleted region, or no control map" answer — it is
-			// not a control word. Decoded, it yields base id 31 (0xFFFFFFFF >> 27 & 0x1F) and both
-			// preserve bits set, so a road over a region whose control map has not been created yet
-			// would paint the LAST texture slot and turn navigation on, and read as a wrong texture id
-			// rather than as a road that painted where there was no data. This is the same -1 -> 0
-			// normalisation Pasture3DRoadPaint.surface_control's caller does in GDScript; the two paths
-			// have to agree because either can be the one that paints a given cell.
-			if (cur == UINT32_MAX) {
-				cur = 0u;
-			}
+			// The same -1 -> 0 normalisation Pasture3DRoadPaint.surface_control's caller does in GDScript;
+			// the two paths have to agree because either can be the one that paints a given cell. It lives
+			// in control_or_default now, because the splat rasteriser needed it too and did not have it.
+			const uint32_t cur = control_or_default(pos);
 			const uint8_t base_id = p_preserve_base ? get_base(cur) : (uint8_t)p_texture_id;
 			const int blend_int = (int)std::lround(std::clamp(cover, 0.0f, 1.0f) * 255.0f);
 			const uint32_t ctrl = enc_base(base_id) | enc_overlay((uint8_t)p_texture_id) | enc_blend((uint8_t)blend_int) | (cur & 0x6);

@@ -31,6 +31,19 @@ func op() -> StringName:
 	return &"noise"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	var nz = null
+	p[0] = amplitude
+	nz = noise
+	return {"params": p, "noise": nz}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([0])
+
+
 func role() -> Role:
 	return Role.GENERATOR
 

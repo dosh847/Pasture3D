@@ -24,6 +24,12 @@ class Pasture3DData : public Object {
 public: // Constants
 	static inline const real_t CURRENT_DATA_VERSION = 0.93f; // Current Data format version
 	static inline const int REGION_MAP_SIZE = 32;
+	// The GPU crossover defaults, in cells. Public and named so the READER (_gpu_raster_threshold,
+	// graph_gpu_threshold) and the Project Settings REGISTRATION cannot disagree — they did, by 16x,
+	// for the whole life of the GPU rasteriser, and every stamp between 256^2 and 1024^2 quietly took
+	// the CPU path as a result.
+	static inline const int GPU_RASTER_THRESHOLD_DEFAULT = 65536;  // 256^2
+	static inline const int GRAPH_GPU_THRESHOLD_DEFAULT = 65536;   // 256^2
 	static inline const Vector2i REGION_MAP_VSIZE = V2I(REGION_MAP_SIZE);
 
 	enum HeightFilter {
@@ -102,6 +108,8 @@ private:
 	// Project-setting threshold (cells) at/above which a stamp box uses the GPU path. 0 disables GPU;
 	// 1 forces GPU-always (testing). Reads `pasture_3d/performance/gpu_raster_threshold`.
 	int _gpu_raster_threshold() const;
+	// Register one performance threshold in Project Settings, if it is not registered already.
+	static void _register_threshold(class ProjectSettings *p_ps, const String &p_name, const int p_default);
 
 	// Functions
 	void _clear();
@@ -415,6 +423,13 @@ public:
 	Color get_color(const Vector3 &p_global_position) const;
 	void set_control(const Vector3 &p_global_position, const uint32_t p_control);
 	uint32_t get_control(const Vector3 &p_global_position) const;
+	// get_control answers UINT32_MAX for "no region, deleted region, or no control map yet", which is a
+	// SENTINEL and not a control word. Decoded it is base id 31 with the hole and navigation bits set, so
+	// a writer that ORs bits into it paints the last texture slot, punches a hole (get_height then returns
+	// NAN, and the cell reads as no-data) and turns navigation on. Every reader that intends to MODIFY a
+	// control word wants this instead; only a reader asking "is there data here" wants the raw sentinel.
+	// The splat rasteriser missed the check that its road sibling ten lines away already had.
+	uint32_t control_or_default(const Vector3 &p_global_position) const;
 	void set_roughness(const Vector3 &p_global_position, const real_t p_roughness);
 	real_t get_roughness(const Vector3 &p_global_position) const;
 
@@ -561,8 +576,17 @@ inline uint32_t Pasture3DData::get_control(const Vector3 &p_global_position) con
 	return (std::isnan(val)) ? UINT32_MAX : as_uint(val);
 }
 
+// Every read-modify-write setter below goes through this: they OR their field into the word they read
+// back, so on a region with no control map yet the sentinel would set every OTHER field at once -- base
+// id 31, hole, navigation -- as a side effect of setting one. The getters have always guarded it; the
+// setters had not.
+inline uint32_t Pasture3DData::control_or_default(const Vector3 &p_global_position) const {
+	const uint32_t c = get_control(p_global_position);
+	return (c == UINT32_MAX) ? 0u : c;
+}
+
 inline void Pasture3DData::set_control_base_id(const Vector3 &p_global_position, const uint8_t p_base) {
-	uint32_t control = get_control(p_global_position);
+	uint32_t control = control_or_default(p_global_position);
 	uint8_t base = CLAMP(p_base, uint8_t(0), uint8_t(31));
 	set_control(p_global_position, (control & ~(0x1F << 27)) | enc_base(base));
 }
@@ -573,7 +597,7 @@ inline uint32_t Pasture3DData::get_control_base_id(const Vector3 &p_global_posit
 }
 
 inline void Pasture3DData::set_control_overlay_id(const Vector3 &p_global_position, const uint8_t p_overlay) {
-	uint32_t control = get_control(p_global_position);
+	uint32_t control = control_or_default(p_global_position);
 	uint8_t overlay = CLAMP(p_overlay, uint8_t(0), uint8_t(31));
 	set_control(p_global_position, (control & ~(0x1F << 22)) | enc_overlay(overlay));
 }
@@ -585,7 +609,7 @@ inline uint32_t Pasture3DData::get_control_overlay_id(const Vector3 &p_global_po
 
 // Expects 0.0 to 1.0 range
 inline void Pasture3DData::set_control_blend(const Vector3 &p_global_position, const real_t p_blend) {
-	uint32_t control = get_control(p_global_position);
+	uint32_t control = control_or_default(p_global_position);
 	uint8_t blend = uint8_t(CLAMP(Math::round(p_blend * 255.f), 0.f, 255.f));
 	set_control(p_global_position, (control & ~(0xFF << 14)) | enc_blend(blend));
 }
@@ -597,7 +621,7 @@ inline real_t Pasture3DData::get_control_blend(const Vector3 &p_global_position)
 
 // Expects angle in degrees
 inline void Pasture3DData::set_control_angle(const Vector3 &p_global_position, const real_t p_angle) {
-	uint32_t control = get_control(p_global_position);
+	uint32_t control = control_or_default(p_global_position);
 	uint8_t uvrotation = uint8_t(CLAMP(Math::round(p_angle / 22.5f), 0.f, 15.f));
 	set_control(p_global_position, (control & ~(0xF << 10)) | enc_uv_rotation(uvrotation));
 }
@@ -611,7 +635,7 @@ inline real_t Pasture3DData::get_control_angle(const Vector3 &p_global_position)
 
 // Expects scale as a percentage modifier
 inline void Pasture3DData::set_control_scale(const Vector3 &p_global_position, const real_t p_scale) {
-	uint32_t control = get_control(p_global_position);
+	uint32_t control = control_or_default(p_global_position);
 	std::array<uint32_t, 8> scale_align = { 5, 6, 7, 0, 1, 2, 3, 4 };
 	uint8_t uvscale = scale_align[uint8_t(CLAMP(Math::round((p_scale + 60.f) / 20.f), 0.f, 7.f))];
 	set_control(p_global_position, (control & ~(0x7 << 7)) | enc_uv_scale(uvscale));
@@ -625,7 +649,7 @@ inline real_t Pasture3DData::get_control_scale(const Vector3 &p_global_position)
 }
 
 inline void Pasture3DData::set_control_hole(const Vector3 &p_global_position, const bool p_hole) {
-	uint32_t control = get_control(p_global_position);
+	uint32_t control = control_or_default(p_global_position);
 	set_control(p_global_position, (control & ~(0x1 << 2)) | enc_hole(p_hole));
 }
 
@@ -635,7 +659,7 @@ inline bool Pasture3DData::get_control_hole(const Vector3 &p_global_position) co
 }
 
 inline void Pasture3DData::set_control_navigation(const Vector3 &p_global_position, const bool p_navigation) {
-	uint32_t control = get_control(p_global_position);
+	uint32_t control = control_or_default(p_global_position);
 	set_control(p_global_position, (control & ~(0x1 << 1)) | enc_nav(p_navigation));
 }
 
@@ -645,7 +669,7 @@ inline bool Pasture3DData::get_control_navigation(const Vector3 &p_global_positi
 }
 
 inline void Pasture3DData::set_control_auto(const Vector3 &p_global_position, const bool p_auto) {
-	uint32_t control = get_control(p_global_position);
+	uint32_t control = control_or_default(p_global_position);
 	set_control(p_global_position, (control & ~(0x1)) | enc_auto(p_auto));
 }
 

@@ -25,6 +25,13 @@ const FrameDataScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_f
 ## Emitted when graph topology (nodes added/removed, frames, positions) changes for UI canvas synchronization.
 signal structure_changed()
 
+## One node's parameters changed, whatever that node is wired to. `changed` is the BAKE signal and stays
+## gated on "does this reach the output"; this one is the EDITOR signal, and the editor's node previews
+## need it precisely for the nodes `changed` filters out — the branch you are still building, and every
+## node in a graph that has no output selected yet. Carries the node's index in `nodes`, or -1 if the
+## emitter is not in the array.
+signal node_changed(index: int)
+
 ## The nodes. Order here is authoring order only — evaluation order is derived from `connections`.
 @export var nodes: Array[Pasture3DGraphNode] = []:
 	set(v):
@@ -89,6 +96,7 @@ var _fold_cache: Dictionary = {}    # root:int -> Dictionary (fold plan)
 func _invalidate_topology_cache() -> void:
 	_order_cache.clear()
 	_fold_cache.clear()
+	_native_ok_cache.clear()
 
 
 ## Clears all cached output grid buffers across every node in the graph.
@@ -140,11 +148,19 @@ func _bind_nodes(p_list: Array, p_connect: bool) -> void:
 	for n in p_list:
 		if n == null:
 			continue
+		# The bound Callable, once, for all three operations — `is_connected`, `connect`, `disconnect`.
+		#
+		# This is clarity, not a bug fix: `Signal.is_connected` matches on object+method and IGNORES the
+		# binds, so probing the unbound `_on_node_changed` did find the bound entry and the disconnect
+		# below did work. (`b == h` is still false; the two use different rules. Measured on 4.7.) That
+		# same loose matching is what DOES break `_connect_spline` in the brush, where two Path3Ds share
+		# one Curve3D and differ only in their bind — see the relay there.
+		var cb := _on_node_changed.bind(n)
 		if p_connect:
-			if not n.changed.is_connected(_on_node_changed):
-				n.changed.connect(_on_node_changed.bind(n))
-		elif n.changed.is_connected(_on_node_changed):
-			n.changed.disconnect(_on_node_changed)
+			if not n.changed.is_connected(cb):
+				n.changed.connect(cb)
+		elif n.changed.is_connected(cb):
+			n.changed.disconnect(cb)
 
 
 func _on_node_changed(p_node: Pasture3DGraphNode = null) -> void:
@@ -152,11 +168,20 @@ func _on_node_changed(p_node: Pasture3DGraphNode = null) -> void:
 	if p_node != null:
 		n_idx = nodes.find(p_node)
 	
-	var affects_output := true
+	# A node the graph does not contain cannot feed the output — that is provable, not a guess, so it
+	# defaults to false. It used to default to true, which meant a node left wired by the dead disconnect
+	# branch above unconditionally re-baked the terrain after being removed.
+	# The editor hears about every edit; only the bake is filtered. GraphEditModelGate [E].
+	node_changed.emit(n_idx)
+
+	var affects_output := p_node == null
 	if n_idx >= 0:
 		var out_idx := output_index()
-		if out_idx >= 0:
-			affects_output = get_downstream_nodes(n_idx).has(out_idx)
+		# No output at all is the graph being authored, not a node proven irrelevant: there is nothing for
+		# the edit to be downstream OF, and nothing baked for a spurious re-bake to cost. Treating that as
+		# "does not affect the output" left `_revision` — and so every cache keyed on `content_key()` —
+		# frozen for the whole time a graph had no output node.
+		affects_output = get_downstream_nodes(n_idx).has(out_idx) if out_idx >= 0 else true
 
 	if affects_output:
 		emit_changed()
@@ -201,8 +226,15 @@ func _on_frame_changed() -> void:
 var _revision: int = 0
 
 
+func _bump_revision() -> void:
+	_revision += 1
+
+
 func _init() -> void:
-	changed.connect(func(): _revision += 1)
+	# A named method, not a lambda: a lambda touching a member becomes a `GDScriptLambdaSelfCallable`
+	# holding a strong reference to its host, and storing that in the host's own signal list is a
+	# reference cycle a `RefCounted` graph never escapes — taking every node's `_cached_grid` with it.
+	changed.connect(_bump_revision)
 	structure_changed.connect(_invalidate_topology_cache)
 
 
@@ -370,15 +402,6 @@ func set_output(p_index: int) -> void:
 		output_node = p_index
 
 
-## Returns all connections touching `p_index` ([from, from_port, to, to_port]).
-func get_node_connections(p_index: int) -> Array:
-	var result: Array = []
-	for c in connections:
-		if int(c[0]) == p_index or int(c[2]) == p_index:
-			result.append(c)
-	return result
-
-
 ## Serializes a subset of nodes and their internal connecting wires into a clipboard dictionary.
 func serialize_subgraph(p_indices: Array) -> Dictionary:
 	var valid_indices: Array[int] = []
@@ -514,6 +537,20 @@ static func cell_to_world(p_ix: int, p_iz: int, p_gw: int, p_gh: int, p_rect: Re
 ## a pass. `_eval_unfolded` is the reference this matches (to float32 rounding — the fold keeps
 ## intermediates in double, so it is in fact slightly more accurate); GraphFoldGate holds the two together.
 func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null, p_root_node: int = -1) -> PackedFloat32Array:
+	# NO Pasture3DTerrainGraph METHOD MAY BE CALLED OFF THE MAIN THREAD, and this is where that is
+	# enforced rather than documented. evaluate() mutates the shared resource on BOTH of its routes --
+	# store_cache below, _global_access_tick, each node's _last_access_tick, _evict_cache_if_needed -- so
+	# a worker calling it races any main-thread edit of graph.nodes or graph.connections: concurrent
+	# refcount traffic on the same Array and Dictionary, which surfaces as an out-of-range index, a
+	# corrupted cache grid, or an editor crash. The contract is compile here, solve there: hand a worker
+	# compile_graph_program()'s output and let it call the stateless Pasture3DUtil.graph_eval_grid.
+	#
+	# Returns zeros rather than half-evaluating, so a caller that ignores the error still gets a defined
+	# grid instead of a race.
+	if OS.get_thread_caller_id() != OS.get_main_thread_id():
+		push_error("Pasture3DTerrainGraph.evaluate() called off the main thread. Compile on the main "
+				+ "thread with compile_graph_program() and solve with Pasture3DUtil.graph_eval_grid.")
+		return Pasture3DGraphOps.zeros(p_gw * p_gh)
 	var n := p_gw * p_gh
 	var out := p_root_node if (p_root_node >= 0 and p_root_node < nodes.size()) else output_index()
 	if out < 0 or out >= nodes.size() or nodes[out] == null:
@@ -528,8 +565,23 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 			if not field.is_empty() and field.size() == n:
 				# The bake does not touch 2D node previews. The graph editor owns previews end to end,
 				# rendering them off the main thread from its own single low-res tap pass (see graph_editor.gd).
-				if p_root_node < 0 or p_root_node == output_index():
-					nodes[out].store_cache(field, {}, _compute_node_inputs_hash(out, p_gw, p_gh, p_rect, p_mask, p_input, {}, {}, {}, _content_sig(p_input), _content_sig(p_mask)), _global_access_tick)
+				# The native call returns port 0 and nothing else, so it has no auxiliary channels to
+				# store. It used to store `{}` for them anyway, which does not mean "unknown" to
+				# `get_cached_aux()` — it means "there are none": a later cache hit then handed every
+				# downstream `_read_channel` on port >= 1 a zero grid. A multi-output node as the graph
+				# output therefore does not get a native-path cache entry at all; the next evaluate
+				# recomputes it, which is slower and true, and the GDScript path at line 695 below still
+				# fills both halves properly.
+				#
+				# The key gets the real dependency maps for the same reason it does there. With `{}` for
+				# both, the per-port loop inside `_compute_node_inputs_hash` never ran and the key
+				# encoded nothing about the graph that produced the grid — only its dimensions, rect,
+				# muted flag and op. `_fold_plan` is topology-only and served from `_fold_cache`, so
+				# asking for it here costs nothing after the first call.
+				var single_output: bool = nodes[out].output_count() <= 1
+				if (p_root_node < 0 or p_root_node == output_index()) and single_output:
+					var plan_n: Dictionary = _fold_plan(out)
+					nodes[out].store_cache(field, {}, _compute_node_inputs_hash(out, p_gw, p_gh, p_rect, p_mask, p_input, plan_n["inputs_of"], plan_n["input_ports_of"], _content_sig(p_input), _content_sig(p_mask)), _global_access_tick)
 				return field
 
 	# 2. GDScript Folded / Multi-Channel Evaluation Reference Path
@@ -539,7 +591,13 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 		return Pasture3DGraphOps.zeros(n)
 	var inputs_of: Dictionary = plan["inputs_of"]
 	var input_ports_of: Dictionary = plan["input_ports_of"]
-	var materialize: Dictionary = plan["materialize"]
+	# `plan["materialize"]` is deliberately NOT read here. The documented cell-node fold — evaluate a
+	# non-grid node per cell instead of allocating a grid for it — is not wired up: this loop materialises
+	# every node, and `{}` was already being passed everywhere the plan would have been consumed, so the
+	# local below it was dead. Leaving the plan built and unused is cheap (it is topology-only and
+	# `_fold_cache`d) and it is what a future fold would consume; reading it into a variable nobody uses
+	# only made the fold look implemented. See PASTURE3D_TERRAIN_GRAPH_SPEC.md, "cell-node fold", and
+	# §4.1 — every node materialising a grid is what makes that ceiling arrive sooner.
 
 	_global_access_tick += 1
 	# Once per evaluate, not once per node: every node's signature folds in the same two arrays.
@@ -555,7 +613,7 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 	var aux := {}   # node index -> { output_port >= 1 : grid } for multi-output solver channels
 	for ni in order:
 		var node: Pasture3DGraphNode = nodes[ni]
-		var inputs_hash: int = _compute_node_inputs_hash(ni, p_gw, p_gh, p_rect, p_mask, p_input, inputs_of, input_ports_of, {}, surf_sig, mask_sig)
+		var inputs_hash: int = _compute_node_inputs_hash(ni, p_gw, p_gh, p_rect, p_mask, p_input, inputs_of, input_ports_of, surf_sig, mask_sig)
 
 		# Cache hit check: if clean and matching size, serve cached grid in 0.0 ms
 		if not node.is_dirty(inputs_hash) and node.get_cached_grid().size() == n:
@@ -717,7 +775,7 @@ func _content_sig(p_arr) -> int:
 
 
 ## Computes a signature hash representing node inputs, wiring, and spatial evaluation context.
-func _compute_node_inputs_hash(p_ni: int, p_gw: int, p_gh: int, p_rect: Rect2, p_mask, p_input, p_inputs_of: Dictionary, p_input_ports_of: Dictionary, p_materialize: Dictionary = {}, p_surf_sig: int = 0, p_mask_sig: int = 0) -> int:
+func _compute_node_inputs_hash(p_ni: int, p_gw: int, p_gh: int, p_rect: Rect2, p_mask, p_input, p_inputs_of: Dictionary, p_input_ports_of: Dictionary, p_surf_sig: int = 0, p_mask_sig: int = 0) -> int:
 	var node: Pasture3DGraphNode = nodes[p_ni]
 	var sig: Array = [
 		p_gw,
@@ -749,11 +807,11 @@ func _compute_node_inputs_hash(p_ni: int, p_gw: int, p_gh: int, p_rect: Rect2, p
 			sig.append(-1)
 			sig.append(node.input_unwired_default(p))
 		else:
-			_append_input_signature(s, sp, sig, p_inputs_of, p_input_ports_of, p_materialize)
+			_append_input_signature(s, sp, sig)
 	return hash(sig)
 
 
-func _append_input_signature(p_s: int, p_sp: int, p_sig: Array, p_inputs_of: Dictionary, p_input_ports_of: Dictionary, p_materialize: Dictionary) -> void:
+func _append_input_signature(p_s: int, p_sp: int, p_sig: Array) -> void:
 	if p_s < 0 or p_s >= nodes.size() or nodes[p_s] == null:
 		p_sig.append(-1)
 		return
@@ -762,20 +820,11 @@ func _append_input_signature(p_s: int, p_sp: int, p_sig: Array, p_inputs_of: Dic
 	p_sig.append(p_sp)
 	p_sig.append(src_node.muted)
 	p_sig.append(src_node._dirty_revision)
-	if p_materialize.get(p_s, true):
-		p_sig.append(src_node._inputs_hash)
-	else:
-		# Folded upstream node: recurse into its inputs
-		var srcs: Array = p_inputs_of.get(p_s, [])
-		var ports: Array = p_input_ports_of.get(p_s, [])
-		for p in range(srcs.size()):
-			var sub_s: int = srcs[p]
-			var sub_sp: int = ports[p]
-			if sub_s < 0 or sub_s >= nodes.size() or nodes[sub_s] == null:
-				p_sig.append(-1)
-				p_sig.append(src_node.input_unwired_default(p))
-			else:
-				_append_input_signature(sub_s, sub_sp, p_sig, p_inputs_of, p_input_ports_of, p_materialize)
+	# Every node materialises (see `evaluate`), so the source's own `_inputs_hash` is always the right
+	# signature. This used to branch on a `p_materialize` dictionary that every caller passed as `{}`,
+	# whose `else` recursed into the folded node's inputs — unreachable code for the fold that was never
+	# wired. It comes back with the fold, not before it.
+	p_sig.append(src_node._inputs_hash)
 
 
 func _cell_value_fast(p_ni: int, p_cell: int, p_wx: float, p_wz: float, p_grids: Dictionary, p_aux: Dictionary,
@@ -943,38 +992,45 @@ func compile_cell_program() -> Dictionary:
 		var srcs: Array = inputs_of[ni]
 		var sa: int = int(srcs[0]) if srcs.size() > 0 else -1
 		var sb: int = int(srcs[1]) if srcs.size() > 1 else -1
-		var op_id := 0
+		# The id comes from the same C++ list the grid path reads, so the two compilers can no longer
+		# disagree about what an op tag means. The `match` below stays, because it is answering a DIFFERENT
+		# question: the cell evaluator implements only NOISE / CONST / BLEND / TERRACE, so having an id is
+		# necessary and not sufficient here.
+		#
+		# Mute lowers to BLEND-add-nothing rather than to the grid path's OUTPUT because the cell kernel
+		# has no passthrough op at all. Same concept, two vocabularies; naming both from `op_ids()` is as
+		# unified as they can honestly be.
+		var op_id := int(op_ids().get(node.op(), 0))
 		var param := 0.0
 		var pb := 0.0
 		var pc := 0.0
 		var pd := 0.0
 		var nz = null
 		if node.muted:
-			op_id = 3 # BLEND
+			op_id = int(op_ids().get(&"blend", 0))
 			param = 0.0 # BLEND_ADD
 			sb = -1 # unwired second input (adds 0.0 -> pure passthrough of sa)
 		else:
 			match node.op():
 				&"noise":
-					op_id = 1; param = float(node.get("amplitude")); nz = node.get("noise")
+					param = float(node.get("amplitude")); nz = node.get("noise")
 				&"const":
-					op_id = 2; param = float(node.get("value"))
+					param = float(node.get("value"))
 				&"const_int":
-					op_id = 2; param = float(int(node.get("value")))
+					param = float(int(node.get("value")))
 				&"const_vector":
 					var cv: Vector2 = node.get("value") if node.get("value") is Vector2 else Vector2.ZERO
-					op_id = 2; param = cv.length()
+					param = cv.length()
 				&"const_color":
 					var cc: Color = node.get("value") if node.get("value") is Color else Color.WHITE
-					op_id = 2; param = cc.get_luminance()
+					param = cc.get_luminance()
 				&"const_bool":
-					op_id = 2; param = 1.0 if bool(node.get("value")) else 0.0
+					param = 1.0 if bool(node.get("value")) else 0.0
 				&"blend":
 					if srcs.size() > 2 and int(srcs[2]) >= 0:
 						return {} # a masked blend is 3-input; the native cell evaluator only reads a & b
-					op_id = 3; param = float(int(node.get("mode")))
+					param = float(int(node.get("mode")))
 				&"terrace":
-					op_id = 4
 					param = float(node.get("band_height"))
 					pb = float(node.get("hardness"))
 					pc = float(node.get("amount"))
@@ -1075,6 +1131,11 @@ func compile_graph_program(p_root_node: int = -1) -> Dictionary:
 	# in0..in3 reads. Emitted for every program, not only ones that use them, so the native side never has
 	# to guess whether a missing array means "one channel" or "an older compiler".
 	var out_count := PackedInt32Array()
+	# Which INPUT PORT carries each slot's secondary GRID operand (mask / noise / per-cell weight), or -1.
+	# The native and GPU evaluators cannot see a node's port list, so they used to hardcode `in1` for every
+	# op that has one -- correct for Mudslide and wrong for the other five. The node answers this itself
+	# (Pasture3DGraphNode.aux_grid_port), so a new node declares it beside its own input_names().
+	var aux_port := PackedInt32Array()
 	var in0_port := PackedInt32Array()
 	var in1_port := PackedInt32Array()
 	var in2_port := PackedInt32Array()
@@ -1116,6 +1177,7 @@ func compile_graph_program(p_root_node: int = -1) -> Dictionary:
 		in2.append(int(slot_of[s2]) if s2 >= 0 else -1)
 		in3.append(int(slot_of[s3]) if s3 >= 0 else -1)
 		out_count.append(native_out_count(ni))
+		aux_port.append(node.aux_grid_port())
 		var iports: Array = input_ports_of.get(ni, [])
 		in0_port.append(int(iports[0]) if iports.size() > 0 and s0 >= 0 else 0)
 		in1_port.append(int(iports[1]) if iports.size() > 1 and s1 >= 0 else 0)
@@ -1142,7 +1204,7 @@ func compile_graph_program(p_root_node: int = -1) -> Dictionary:
 		"params_i": params_i, "params_j": params_j, "params_k": params_k, "params_l": params_l,
 		"params_m": params_m, "params_n": params_n, "params_o": params_o, "params_p": params_p,
 		"in0": in0, "in1": in1, "in2": in2, "in3": in3,
-		"out_count": out_count,
+		"out_count": out_count, "aux_port": aux_port,
 		"in0_port": in0_port, "in1_port": in1_port, "in2_port": in2_port, "in3_port": in3_port,
 		"in_g": _geo["in_g"], "geom": _geo["geom"],
 		"pmap0": pmap0, "pmap1": pmap1, "pmap2": pmap2, "pmap3": pmap3,
@@ -1174,46 +1236,25 @@ func compile_graph_program(p_root_node: int = -1) -> Dictionary:
 ##
 ## hydraulic_saleve's dx/dy are deliberately absent: they are per-cell FIELDS, not scalars, and the native
 ## case already consumes them as grids.
-const PARAM_PORT_MAP := {
-		&"noise": [0],
-		&"terrace": [-1, 0, 1, -1],
-		&"noise_jordan": [0, 5, 6, 3, 1],
-		&"gavoronoise": [0, 4, 1],
-		&"noise_swiss": [0, 5, 6, 3, 1],
-		&"geological_primitive": [2, 3, 5, 4],
-		&"furrows": [0, 1, 2, 4],
-		&"dunes": [0, 1, 2, 3, 4],
-		&"crater": [0, 1, 2, 3],
-		&"warp": [-1, 2, 4, 1],
-		&"strata": [-1, 0, 1, 3, 4, 2],
-		&"curve": [-1, 0, 1, 2, 3, 4],
-		&"remap": [-1, 0, 1, 2, 3],
-		&"mask": [-1, 1, 2, 3, 4, 6],
-		&"curvature": [-1, 1, 2],
-		&"falloff": [-1, 5, 3, -1],
-		&"contrast": [-1, 1, -1],
-		&"transform": [-1, -1, 2, 3, 7],
-		&"distance_transform": [-1, 0],
-		&"expand_shrink": [-1, 1, -1],
-		&"relative_elevation": [-1, 0],
-		&"smooth_fill": [-1, 1, 2, -1],
-		&"recast_cliff": [-1, 0, 2, -1],
-		&"flooding_uniform_level": [-1, 0],
-		&"water_mask": [-1, 1],
-		&"mudslide": [-1, -1, 5],
-		&"warp_downslope": [-1, 3, -1],
-		&"talus_projection": [-1, 0, 1, 2, 3],
-		&"spectral_equalizer": [-1, 0, 1, 2, 5],
-		&"depression_filling": [-1, 1, -1],
-		&"lake_flooding": [-1, 1, -1, 3],
-		&"stream_extraction": [-1, 0, 1, 2],
-		&"erosion_hydraulic": [-1, 0, 1, 4, 5],
-		&"erosion_thermal": [-1, -1, 0, 1, 2],
-		&"scree": [-1, 0, 1, 4],
-		&"erosion": [-1, 0, 1, 3],
-		&"hydraulic_particle": [-1, -1, 0, 4, 5],
-		&"hydraulic_stream_log": [-1, -1, 0, 1],
-	}
+
+
+## The op vocabulary, read once from C++ and memoised.
+##
+## `Pasture3DUtil.graph_op_ids()` maps every op tag the native evaluator implements to its
+## `GraphCellOpType` id. It replaces 70 hand-typed integers in `_lower_node_op` AND the `SUPPORTED`
+## allow-list that restated the same set — two tables that had to agree with no way to say so. An id typed
+## wrong lowered the wrong kernel; an op missing from the allow-list did not fail loudly, it silently
+## dropped the ENTIRE graph onto the script evaluator, which is how DLA escaped native lowering.
+##
+## Empty when the extension is unavailable — which is exactly the state `native_supported()` must report
+## as "no", so that degradation needs no branch of its own.
+static var _op_ids_cache: Dictionary = {}
+
+
+static func op_ids() -> Dictionary:
+	if _op_ids_cache.is_empty() and ClassDB.class_has_method("Pasture3DUtil", "graph_op_ids"):
+		_op_ids_cache = Pasture3DUtil.graph_op_ids()
+	return _op_ids_cache
 
 
 ## Lower ONE node into the native op table: its GraphCellOpType id, the 16 parallel scalar params
@@ -1224,241 +1265,24 @@ const PARAM_PORT_MAP := {
 ## evaluator does not implement — the caller then abandons the native path. A muted node lowers to op 12
 ## (passthrough of its first input), matching the folded evaluator's mute semantics.
 func _lower_node_op(node: Pasture3DGraphNode) -> Dictionary:
-	var op_id := 0
-	var p0 := 0.0; var pb := 0.0; var pc := 0.0; var pd := 0.0; var pe := 0.0
-	var pf := 0.0; var pg := 0.0; var ph := 0.0; var pi := 0.0; var pj := 0.0
-	var pk := 0.0; var pl := 0.0; var pm := 0.0; var pn := 0.0; var po := 0.0
-	var pp := 0.0
-	var nz = null
-	var lut = PackedFloat32Array()
-
-	var _f := func(p: StringName, def: float = 0.0) -> float:
-		var v = node.get(p)
-		return float(v) if v != null else def
-
-	var _i := func(p: StringName, def: int = 0) -> int:
-		var v = node.get(p)
-		return int(v) if v != null else def
-
-	if node.muted:
-		op_id = 12 # GRAPH_OP_OUTPUT / GRAPH_OP_REROUTE (passthrough of in0)
-	else:
-		match node.op():
-			&"input":
-				op_id = 10
-			&"output", &"reroute", &"terrain_bus_merge", &"terrain_bus_split":
-				op_id = 12
-			&"noise":
-				op_id = 1; p0 = _f.call(&"amplitude", 1.0); nz = node.get("noise")
-			&"const":
-				op_id = 2; p0 = _f.call(&"value", 0.0)
-			&"const_int":
-				op_id = 2; p0 = float(_i.call(&"value", 0))
-			&"const_vector":
-				var cv: Vector2 = node.get("value") if node.get("value") is Vector2 else Vector2.ZERO
-				op_id = 2; p0 = cv.length()
-			&"const_color":
-				var cc: Color = node.get("value") if node.get("value") is Color else Color.WHITE
-				op_id = 2; p0 = cc.get_luminance()
-			&"const_bool":
-				op_id = 2; p0 = 1.0 if bool(node.get("value")) else 0.0
-			&"const_curve":
-				op_id = 21; p0 = 0.0; pb = 1.0; pc = 0.0; pd = 1.0; pe = 1.0
-				var c: Curve = node.get("curve")
-				if c != null:
-					lut.resize(256)
-					for li in range(256):
-						lut[li] = c.sample_baked(float(li) / 255.0)
-			&"blend":
-				op_id = 3; p0 = float(_i.call(&"mode", 0))
-			&"terrace":
-				op_id = 4
-				p0 = _f.call(&"band_height", 8.0)
-				pb = _f.call(&"hardness", 0.8)
-				pc = _f.call(&"amount", 1.0)
-				pd = _f.call(&"jitter", 0.0)
-				if pd > 0.0 and node.has_method("_jitter_field"):
-					nz = node.call("_jitter_field")
-			&"smooth":
-				op_id = 11; p0 = float(_i.call(&"passes", 1))
-			&"noise_jordan":
-				op_id = 13; p0 = _f.call(&"amplitude", 100.0); pb = _f.call(&"frequency", 0.005); pc = float(_i.call(&"octaves", 6)); pd = _f.call(&"gain", 0.5); pe = _f.call(&"lacunarity", 2.0); pf = _f.call(&"warp_strength", 0.35); pg = _f.call(&"damp_strength", 0.8); ph = float(_i.call(&"seed", 0))
-			&"gavoronoise":
-				op_id = 53
-				p0 = _f.call(&"amplitude", 60.0); pb = _f.call(&"frequency", 0.002)
-				pc = float(_i.call(&"octaves", 4)); pd = float(_i.call(&"seed", 0))
-				pe = _f.call(&"angle_deg", 0.0); pf = _f.call(&"angle_spread", 1.0)
-				pg = _f.call(&"slope_strength", 1.0); ph = _f.call(&"branch_strength", 2.0)
-				pj = _f.call(&"z_cut_min", 0.2); pk = _f.call(&"z_cut_max", 1.0)
-			&"noise_swiss":
-				op_id = 14; p0 = _f.call(&"amplitude", 100.0); pb = _f.call(&"frequency", 0.005); pc = float(_i.call(&"octaves", 6)); pd = _f.call(&"gain", 0.5); pe = _f.call(&"lacunarity", 2.0); pf = _f.call(&"ridge_offset", 1.0); pg = _f.call(&"erosion_accent", 0.3); ph = float(_i.call(&"seed", 0))
-			&"geological_primitive":
-				op_id = 15; p0 = float(_i.call(&"primitive_type", 0)); pb = float(_i.call(&"mapping", 0)); pc = _f.call(&"height", 50.0); pd = _f.call(&"radius", 50.0); pe = _f.call(&"eccentricity", 0.0); pf = _f.call(&"steepness", 1.0); pg = _f.call(&"azimuth_degrees", 0.0); var off: Vector2 = node.get("center_offset") if node.get("center_offset") != null else Vector2.ZERO; pj = off.x; pk = off.y
-			&"furrows":
-				op_id = 16; p0 = _f.call(&"amplitude", 1.0); pb = _f.call(&"spacing", 15.0); pc = _f.call(&"direction_degrees", 0.0); pd = float(_i.call(&"profile", 1)); pe = _f.call(&"wobble_amount", 2.0); pf = _f.call(&"wobble_size", 70.0); pg = float(_i.call(&"seed", 0))
-			&"dunes":
-				op_id = 17; p0 = _f.call(&"amplitude", 2.0); pb = _f.call(&"wavelength", 30.0); pc = _f.call(&"direction_degrees", 0.0); pd = _f.call(&"asymmetry", 0.4); pe = _f.call(&"crest_sharpness", 0.6); pf = _f.call(&"wander_amount", 2.0); pg = _f.call(&"wander_size", 60.0); ph = float(_i.call(&"seed", 0))
-			&"crater":
-				# `radius` and `center_offset` are not properties of Pasture3DGraphNodeCrater, so `_f` fell
-				# through to its defaults and the native path baked a fixed amplitude of 25.0 and a fixed
-				# terrace_steps of 0 into EVERY crater, whatever the node was set to. The names below are
-				# the node's own, and the order is crater_grid()'s signature.
-				op_id = 18; p0 = _f.call(&"amplitude", 20.0); pb = _f.call(&"floor_depth", 0.7); pc = _f.call(&"rim_height", 0.15); pd = _f.call(&"rim_width", 0.25); pe = _f.call(&"ejecta_falloff", 2.0); pf = _f.call(&"floor_flatness", 0.35); pg = float(_i.call(&"terrace_steps", 0))
-			&"warp":
-				# Was misaligned twice over: it read `gain` and `lacunarity`, which Pasture3DGraphNodeWarp
-				# does not have, and it put `strength` in the slot warp_solve_grid() reads as the noise TYPE.
-				op_id = 19; p0 = float(_i.call(&"warp_type", 0)); pb = _f.call(&"frequency", 0.005); pc = _f.call(&"strength", 20.0); pd = float(_i.call(&"octaves", 3)); pe = _f.call(&"amplitude", 1.0); pf = _f.call(&"roughness", 0.5); pg = float(_i.call(&"seed", 0))
-			&"strata":
-				# `wavelength` and `dip_direction_deg` are not properties of the node (they are `band_height`
-				# and `dip_direction_degrees`), and the surviving values sat in the wrong argument slots.
-				op_id = 20; p0 = _f.call(&"band_height", 10.0); pb = _f.call(&"hardness", 0.5); pc = _f.call(&"amount", 1.0); pd = _f.call(&"dip", 15.0); pe = _f.call(&"dip_direction_degrees", 0.0); pf = _f.call(&"break_amount", 0.2); pg = _f.call(&"break_size", 50.0); ph = float(_i.call(&"seed", 0))
-			&"curve":
-				# Every name here was wrong: the node's are input_min/input_max/output_min/output_max/amount.
-				# `clamp_output` does not exist at all, and `bool(null)` THREW — so compiling any graph
-				# containing a Curve node raised "Nonexistent 'bool' constructor" rather than merely
-				# producing a wrong surface. The fifth argument of curve_grid() is the blend amount.
-				op_id = 21; p0 = _f.call(&"input_min", 0.0); pb = _f.call(&"input_max", 100.0); pc = _f.call(&"output_min", 0.0); pd = _f.call(&"output_max", 100.0); pe = _f.call(&"amount", 1.0)
-				var c: Curve = node.get("curve")
-				if c != null:
-					lut.resize(256)
-					for li in range(256):
-						lut[li] = c.sample_baked(float(li) / 255.0)
-			&"remap":
-				op_id = 22; p0 = _f.call(&"in_min", 0.0); pb = _f.call(&"in_max", 100.0); pc = _f.call(&"out_min", 0.0); pd = _f.call(&"out_max", 100.0); pe = 1.0 if bool(node.get("clamp_output")) else 0.0; pf = _f.call(&"soft_knee", 0.0)
-			&"mask":
-				# The property is exported as `property`, not `mode`, and `strength` is params_g. Reading
-				# the wrong name silently lowered SLOPE for every mask, and leaving strength at its 0
-				# default made mask_grid lerp all the way back to "ungated" — so a native-path Mask
-				# returned 1.0 everywhere while the node's own eval_grid returned the right field.
-				op_id = 23; p0 = float(_i.call(&"property", 0)); pb = _f.call(&"band_min", 0.0); pc = _f.call(&"band_max", 100.0); pd = _f.call(&"falloff_lo", 10.0); pe = _f.call(&"falloff_hi", 10.0); pf = 1.0 if bool(node.get("invert")) else 0.0; pg = _f.call(&"strength", 1.0)
-			&"curvature":
-				# `feature` and `strength` are not properties of the node; it has `mode`, `radius`, `contrast`,
-				# which is also curvature_solve()'s argument order.
-				op_id = 24; p0 = float(_i.call(&"mode", 0)); pb = float(_i.call(&"radius", 1)); pc = _f.call(&"contrast", 1.0)
-			&"falloff":
-				op_id = 44
-				var fc: Vector2 = node.get("centre") if node.get("centre") != null else Vector2.ZERO
-				p0 = float(_i.call(&"shape", 0)); pb = fc.x; pc = fc.y
-				pd = _f.call(&"radius", 500.0); pe = _f.call(&"feather", 200.0)
-				pf = _f.call(&"strength", 1.0)
-				pg = 1.0 if bool(node.get("invert")) else 0.0
-				ph = _f.call(&"distance_noise", 0.0)
-			&"contrast":
-				op_id = 45; p0 = float(_i.call(&"mode", 0)); pb = _f.call(&"amount", 1.0); pc = _f.call(&"range_min", 0.0); pd = _f.call(&"range_max", 100.0); pe = _f.call(&"mask_amount", 1.0); pf = 1.0 if bool(node.get("explicit_window")) else 0.0
-			&"transform":
-				op_id = 46
-				var toff: Vector2 = node.get("offset") if node.get("offset") != null else Vector2.ZERO
-				var tpiv: Vector2 = node.get("pivot") if node.get("pivot") != null else Vector2.ZERO
-				p0 = toff.x; pb = toff.y
-				pc = _f.call(&"rotation_deg", 0.0); pd = _f.call(&"scale", 1.0)
-				pe = tpiv.x; pf = tpiv.y
-				pg = float(_i.call(&"edge_mode", 0)); ph = _f.call(&"amount", 1.0)
-			&"distance_transform":
-				op_id = 47
-				p0 = _f.call(&"threshold", 0.5); pb = float(_i.call(&"direction", 0))
-				pc = float(_i.call(&"metric", 0)); pd = float(_i.call(&"output_units", 0))
-				pe = _f.call(&"max_distance", 0.0)
-			&"expand_shrink":
-				op_id = 48
-				p0 = float(_i.call(&"mode", 0)); pb = _f.call(&"radius", 5.0)
-				pc = float(_i.call(&"kernel", 0)); pd = float(_i.call(&"iterations", 1))
-				pe = _f.call(&"amount", 1.0)
-			&"relative_elevation":
-				op_id = 49; p0 = _f.call(&"radius", 200.0); pb = float(_i.call(&"output_units", 0))
-			&"smooth_fill":
-				op_id = 50; p0 = float(_i.call(&"mode", 0)); pb = _f.call(&"radius", 50.0)
-				pc = _f.call(&"k", 0.1); pd = _f.call(&"amount", 1.0)
-			&"recast_cliff":
-				op_id = 51
-				p0 = _f.call(&"talus_angle_deg", 40.0); pb = _f.call(&"radius", 20.0)
-				pc = _f.call(&"amplitude", 10.0); pd = _f.call(&"gain", 2.0)
-				pe = _f.call(&"direction_deg", -1.0); pf = _f.call(&"direction_spread_deg", 60.0)
-				pg = _f.call(&"amount", 1.0)
-			&"flooding_uniform_level":
-				op_id = 54
-				p0 = _f.call(&"water_level", 0.0); pb = 1.0 if bool(node.get("clamp_terrain")) else 0.0
-			&"water_mask":
-				op_id = 55
-				p0 = _f.call(&"depth_threshold", 0.01); pb = _f.call(&"shore_width", 8.0)
-				pc = float(_i.call(&"shore_falloff", 1))
-			# ---- The road nodes (P2c). Their geometry does not ride in these params: it goes in the
-			# program's geometry table and `in_g` names an entry, because a polyline is neither a float
-			# nor an index into the scratch arena (§4.1).
-			&"road_source", &"shape_source":
-				# A PATH producer still fills a grid slot, with zeros — the same 0.0 its eval_cell
-				# returns. The slot exists so nothing that indexes by node has to special-case it.
-				#
-				# Both source kinds lower identically and share this case, because by the time a path is
-				# in the geometry table there IS no difference: a ring is a ring, and `closed` rides on
-				# the entry. The two nodes differ only in what they name and who resolves them.
-				op_id = 2; p0 = 0.0
-			&"path_distance":
-				op_id = 57
-				p0 = _f.call(&"unreachable_distance", 10000.0); pb = _f.call(&"max_distance", 0.0)
-			&"path_mask":
-				op_id = 58
-				p0 = _f.call(&"width_scale", 1.0); pb = _f.call(&"feather", 2.0)
-				pc = 1.0 if bool(node.get("invert")) else 0.0
-			&"road_grade":
-				op_id = 59; p0 = _f.call(&"amount", 1.0)
-			&"mudslide":
-				op_id = 56
-				p0 = _f.call(&"talus_angle_deg", 30.0); pb = _f.call(&"depth", 4.0)
-				pc = _f.call(&"travel_distance", 60.0); pd = _f.call(&"depth_exponent", 1.0)
-				pe = _f.call(&"viscosity_power", 1.0); pf = _f.call(&"amount", 1.0)
-			&"warp_downslope":
-				op_id = 52
-				p0 = _f.call(&"displacement", 20.0); pb = _f.call(&"radius", 20.0)
-				pc = 1.0 if bool(node.get("reverse")) else 0.0; pd = _f.call(&"amount", 1.0)
-			&"talus_projection":
-				op_id = 25; p0 = _f.call(&"talus_angle_deg", 35.0); pb = float(_i.call(&"iterations", 16)); pc = _f.call(&"transfer_rate", 0.5); pd = _f.call(&"amount", 1.0)
-			&"spectral_equalizer":
-				op_id = 26; p0 = _f.call(&"macro_gain", 1.0); pb = _f.call(&"meso_gain", 1.0); pc = _f.call(&"micro_gain", 1.5); pd = float(_i.call(&"macro_passes", 16)); pe = float(_i.call(&"meso_passes", 4)); pf = _f.call(&"amount", 1.0)
-			&"depression_filling":
-				op_id = 27; p0 = _f.call(&"epsilon_slope", 0.0001); pb = _f.call(&"fill_depth_limit", 0.0); pc = _f.call(&"amount", 1.0)
-			&"lake_flooding":
-				op_id = 28; p0 = float(_i.call(&"flood_mode", 0)); pb = _f.call(&"water_elevation", 10.0); pc = _f.call(&"flood_percent", 1.0); pd = _f.call(&"shoreline_width", 4.0)
-			&"stream_extraction":
-				op_id = 29; p0 = _f.call(&"min_catchment_cells", 24.0); pb = _f.call(&"carve_depth", 3.0); pc = _f.call(&"channel_width", 8.0); pd = _f.call(&"bank_falloff", 4.0)
-			&"erosion_hydraulic":
-				op_id = 30; p0 = float(_i.call(&"iterations", 25)); pb = _f.call(&"rain_rate", 0.05); pc = _f.call(&"evaporation_rate", 0.02); pd = _f.call(&"sediment_capacity", 8.0); pe = _f.call(&"erosion_speed", 0.5); pf = _f.call(&"deposition_speed", 0.4); pg = _f.call(&"min_slope", 0.01)
-			&"erosion_thermal":
-				op_id = 31; p0 = _f.call(&"talus_angle", 30.0); pb = float(_i.call(&"iterations", 25)); pc = _f.call(&"settling_rate", 0.7)
-			&"scree":
-				op_id = 32; p0 = _f.call(&"amplitude", 2.0); pb = _f.call(&"grain_size", 0.05); pc = _f.call(&"downslope_streak", 0.7); pd = _f.call(&"toe_deposition", 0.8); pe = _f.call(&"min_slope_degrees", 25.0); pf = _f.call(&"slope_falloff_degrees", 8.0); pg = float(_i.call(&"seed", 0))
-			&"erosion":
-				op_id = 33; p0 = float(_i.call(&"iterations", 30)); pb = _f.call(&"erosion_rate", 0.08); pc = _f.call(&"area_exponent", 0.45); pd = _f.call(&"hillslope_diffusion", 0.15); pe = _f.call(&"deposition", 0.0)
-			&"hydraulic_particle":
-				op_id = 34; p0 = float(_i.call(&"droplet_count", 25000)); pb = float(_i.call(&"max_lifetime", 30)); pc = _f.call(&"inertia", 0.05); pd = _f.call(&"sediment_capacity", 4.0); pe = _f.call(&"erosion_speed", 0.3); pf = _f.call(&"deposition_speed", 0.3); pg = _f.call(&"evaporation_rate", 0.01); ph = _f.call(&"min_slope", 0.01); pi = _f.call(&"gravity", 4.0); pj = float(_i.call(&"seed", 1337)); pk = _f.call(&"bedrock_gap", 2.0); pl = _f.call(&"ridge_forcing", 0.0)
-			&"hydraulic_stream_log":
-				op_id = 35; p0 = float(_i.call(&"iterations", 15)); pb = _f.call(&"incision_rate", 0.15); pc = _f.call(&"area_exponent", 0.5); pd = _f.call(&"slope_exponent", 1.0); pe = _f.call(&"min_catchment", 1.0); pf = _f.call(&"bank_smoothing", 0.1); pg = _f.call(&"peak_preservation", 0.5); ph = _f.call(&"gradient_power", 0.8)
-			&"hydraulic_saleve":
-				op_id = 36; p0 = float(_i.call(&"iterations", 25)); pb = _f.call(&"erosion_strength", 0.5); pc = _f.call(&"drainage_exponent", 0.15); pd = _f.call(&"drainage_noise", 0.15); pe = _f.call(&"shape_preservation", 2.0); pf = _f.call(&"bank_smoothing", 0.1); pg = _f.call(&"deposition_radius", 0.1); ph = _f.call(&"deposition_strength", 0.5); pi = _f.call(&"stream_strength", 0.02); pj = _f.call(&"stream_exp", 0.8); pk = _f.call(&"gain", 1.0); pl = _f.call(&"gamma", 1.0); pm = _f.call(&"mix_factor", 1.0); pn = float(_i.call(&"seed", 0)); po = 1.0 if bool(node.get("enable_post_smoothing")) else 0.0; pp = _f.call(&"reference_relief", 0.0)
-			&"mountain_cone":
-				op_id = 37; p0 = float(_i.call(&"seed", 0)); pb = _f.call(&"elevation", 25.0); pc = _f.call(&"scale", 1.0); pd = float(_i.call(&"octaves", 8)); pe = _f.call(&"peak_kw", 4.0); pf = _f.call(&"rugosity", 0.0); pg = _f.call(&"angle", 45.0); ph = _f.call(&"gamma", 0.5); pi = _f.call(&"cone_alpha", 1.2); pj = _f.call(&"ridge_amp", 0.4); pk = _f.call(&"base_noise_amp", 0.05)
-			&"mountain_inselberg":
-				op_id = 38; p0 = float(_i.call(&"seed", 0)); pb = _f.call(&"elevation", 25.0); pc = _f.call(&"scale", 1.0); pd = float(_i.call(&"octaves", 8)); pe = _f.call(&"rugosity", 0.0); pf = _f.call(&"angle", 45.0); pg = _f.call(&"gamma", 0.5); ph = _f.call(&"bulk_amp", 0.5); pi = _f.call(&"base_noise_amp", 0.05)
-			&"mountain_range_radial":
-				op_id = 39; p0 = float(_i.call(&"seed", 0)); pb = _f.call(&"elevation", 25.0); pc = _f.call(&"kw_x", 4.0); pd = _f.call(&"kw_y", 4.0); pe = _f.call(&"half_width", 0.2); pf = _f.call(&"angle_spread_ratio", 0.5); pg = _f.call(&"core_size_ratio", 0.2); ph = float(_i.call(&"octaves", 8)); pi = _f.call(&"weight", 0.7); pj = _f.call(&"persistence", 0.5); pk = _f.call(&"lacunarity", 2.0)
-			&"mountain_tibesti":
-				op_id = 40; p0 = float(_i.call(&"seed", 0)); pb = _f.call(&"elevation", 25.0); pc = _f.call(&"scale", 1.0); pd = float(_i.call(&"octaves", 8)); pe = _f.call(&"peak_kw", 4.0); pf = _f.call(&"rugosity", 0.0); pg = _f.call(&"angle", 45.0); ph = _f.call(&"angle_spread_ratio", 0.5); pi = _f.call(&"gamma", 0.5); pj = _f.call(&"bulk_amp", 0.5); pk = _f.call(&"base_noise_amp", 0.05)
-			&"mountain_stump":
-				op_id = 41; p0 = float(_i.call(&"seed", 0)); pb = _f.call(&"elevation", 25.0); pc = _f.call(&"scale", 1.0); pd = float(_i.call(&"octaves", 8)); pe = _f.call(&"peak_kw", 4.0); pf = _f.call(&"rugosity", 0.0); pg = _f.call(&"angle", 45.0); ph = _f.call(&"k_smoothing", 0.05); pi = _f.call(&"gamma", 0.5); pj = _f.call(&"ridge_amp", 0.4); pk = _f.call(&"base_noise_amp", 0.05)
-			&"shattered_peak":
-				op_id = 42; p0 = float(_i.call(&"seed", 0)); pb = _f.call(&"elevation", 25.0); pc = _f.call(&"scale", 1.0); pd = float(_i.call(&"octaves", 8)); pe = _f.call(&"peak_kw", 4.0); pf = _f.call(&"rugosity", 0.0); pg = _f.call(&"angle", 45.0); ph = _f.call(&"gamma", 0.5); pi = _f.call(&"bulk_amp", 0.5); pj = _f.call(&"base_noise_amp", 0.05); pk = _f.call(&"k_smoothing", 0.05)
-			&"caldera":
-				op_id = 43; p0 = _f.call(&"elevation", 25.0); pb = _f.call(&"radius", 0.2); pc = _f.call(&"sigma_inner", 0.05); pd = _f.call(&"sigma_outer", 0.15); pe = _f.call(&"z_bottom", 0.2); pf = _f.call(&"noise_r_amp", 0.02); pg = _f.call(&"noise_z_ratio", 0.05)
-			_:
-				return {} # an op the native evaluator does not implement
-
+	# Two lookups and no vocabulary of its own. The id comes from the C++ list; the parameters come from
+	# the node that owns them. What used to be here was 60 match arms reading this node's properties by
+	# string from the outside — see `Pasture3DGraphNode.native_lower()` for the four shipped bugs that
+	# arrangement produced and why a typo there was silent.
+	var op_id := int(op_ids().get(&"output" if node.muted else node.op(), -1))
+	if op_id < 0:
+		return {} # an op the native evaluator does not implement
+	# A muted node passes its first input through and has no parameters of its own, so it marshals none
+	# and maps no port.
+	var low: Dictionary = {} if node.muted else node.native_lower()
+	var pr: PackedFloat32Array = low.get("params", PackedFloat32Array())
+	pr.resize(16)
 	return {
 		"op": op_id,
-		"params": PackedFloat32Array([p0, pb, pc, pd, pe, pf, pg, ph, pi, pj, pk, pl, pm, pn, po, pp]),
-		# Which params slot each input port overrides when wired. A muted node passes its first input
-		# through and has no parameters of its own, so it maps nothing.
-		"pmap": PackedInt32Array([] if node.muted else PARAM_PORT_MAP.get(node.op(), [])),
-		"noise": nz,
-		"lut": lut,
+		"params": pr,
+		"pmap": PackedInt32Array() if node.muted else node.native_param_ports(),
+		"noise": low.get("noise"),
+		"lut": low.get("lut", PackedFloat32Array()),
 	}
 
 
@@ -1481,7 +1305,8 @@ func _eval_order_multi(p_roots: Array) -> Array:
 		for c in connections:
 			if c.size() >= 4 and int(c[2]) == cur:
 				var from := int(c[0])
-				if from >= 0 and from < nodes.size() and not needed.has(from):
+				# Null-skip for the same reason as `_eval_order` below.
+				if from >= 0 and from < nodes.size() and nodes[from] != null and not needed.has(from):
 					needed[from] = true
 					frontier.push_back(from)
 	var indeg := {}
@@ -1593,6 +1418,11 @@ func compile_graph_program_multi(p_roots: Array) -> Dictionary:
 	var pdrv_param := PackedInt32Array()
 	var pdrv_src := PackedInt32Array()
 	var out_count := PackedInt32Array()
+	# Which INPUT PORT carries each slot's secondary GRID operand (mask / noise / per-cell weight), or -1.
+	# The native and GPU evaluators cannot see a node's port list, so they used to hardcode `in1` for every
+	# op that has one -- correct for Mudslide and wrong for the other five. The node answers this itself
+	# (Pasture3DGraphNode.aux_grid_port), so a new node declares it beside its own input_names().
+	var aux_port := PackedInt32Array()
 	var in0_port := PackedInt32Array()
 	var in1_port := PackedInt32Array()
 	var in2_port := PackedInt32Array()
@@ -1625,6 +1455,7 @@ func compile_graph_program_multi(p_roots: Array) -> Dictionary:
 		in2.append(int(slot_of[s2]) if s2 >= 0 else -1)
 		in3.append(int(slot_of[s3]) if s3 >= 0 else -1)
 		out_count.append(native_out_count(ni))
+		aux_port.append(node.aux_grid_port())
 		var iports: Array = input_ports_of.get(ni, [])
 		in0_port.append(int(iports[0]) if iports.size() > 0 and s0 >= 0 else 0)
 		in1_port.append(int(iports[1]) if iports.size() > 1 and s1 >= 0 else 0)
@@ -1656,7 +1487,7 @@ func compile_graph_program_multi(p_roots: Array) -> Dictionary:
 			"params_i": params_i, "params_j": params_j, "params_k": params_k, "params_l": params_l,
 			"params_m": params_m, "params_n": params_n, "params_o": params_o, "params_p": params_p,
 			"in0": in0, "in1": in1, "in2": in2, "in3": in3,
-			"out_count": out_count,
+			"out_count": out_count, "aux_port": aux_port,
 			"in0_port": in0_port, "in1_port": in1_port, "in2_port": in2_port, "in3_port": in3_port,
 			"in_g": _geo["in_g"], "geom": _geo["geom"],
 		"pmap0": pmap0, "pmap1": pmap1, "pmap2": pmap2, "pmap3": pmap3,
@@ -1679,11 +1510,6 @@ func compile_graph_program_multi(p_roots: Array) -> Dictionary:
 ## whole allow-list style exists to prevent.
 ##
 ## Add an entry the same commit you write the channels, never in advance.
-const NATIVE_OUT_COUNT := {
-	&"erosion": 5, # height, flow, erosion, deposition, wetness
-	&"path_distance": 3, # distance, s, t
-	&"road_grade": 6, # height, roadbed, cut, fill, verge, structure
-}
 
 
 ## How many channels the native evaluator produces for the op at `p_node`, 1 when it is single-output or
@@ -1693,7 +1519,7 @@ func native_out_count(p_node: int) -> int:
 		return 1
 	if nodes[p_node].muted:
 		return 1 # a muted node lowers to passthrough, which has one channel whatever it wrapped
-	return int(NATIVE_OUT_COUNT.get(nodes[p_node].op(), 1))
+	return nodes[p_node].native_out_count()
 
 
 ## ---- The geometry table (P2c, PASTURE3D_GRAPH_GEOMETRY_PORTS_SPEC.md §4.1) ----
@@ -1781,43 +1607,49 @@ func _compile_geometry(p_order: Array, p_inputs_of: Dictionary) -> Dictionary:
 var force_gdscript_evaluation := false
 
 
+## Memoised per [root, revision]. The answer is a function of TOPOLOGY, the op set, and mute state, all of
+## which bump `_revision` when they change on a node that feeds the output — and a node that does not feed
+## the output is not in `order`, so it cannot change the answer either.
+##
+## Deliberately NOT extended to memoise `compile_graph_program`'s RESULT. A compiled program copies the
+## nodes' values into flat arrays; memoising those bytes means a source that mutates without announcing
+## it leaves the program silently stale, which is a failure mode this project has already paid for once.
+## This cache holds a bool derived from structure, which has no such copy to go stale.
+var _native_ok_cache: Dictionary = {}   # [root, revision] -> bool
+
+
 func native_supported(p_root_node: int = -1) -> bool:
 	if force_gdscript_evaluation:
 		return false
 	var out := p_root_node if (p_root_node >= 0 and p_root_node < nodes.size()) else output_index()
 	if out < 0 or out >= nodes.size() or nodes[out] == null:
 		return false
+	# A 5-spline brush with a graph modifier asked this question five times per bake, each answer an
+	# O(E*V) walk with an `Array.has()` scan inside it, for five identical answers.
+	var ck := [out, _revision]
+	if _native_ok_cache.has(ck):
+		return _native_ok_cache[ck]
+	var ok := _native_supported_uncached(out)
+	# One entry per revision, and a revision is only reachable while it is current — so the dictionary
+	# would grow one entry per edit for the resource's lifetime. It answers exactly one revision at a
+	# time, so clearing it is free.
+	_native_ok_cache.clear()
+	_native_ok_cache[ck] = ok
+	return ok
+
+
+func _native_supported_uncached(p_out: int) -> bool:
+	var out := p_out
 	var order := _eval_order(out)
 	if order.is_empty():
 		return false
-	const SUPPORTED := [
-		&"input", &"output", &"reroute", &"terrain_bus_merge", &"terrain_bus_split",
-		&"noise", &"const", &"const_int", &"const_vector", &"const_color", &"const_bool", &"const_curve",
-		&"blend", &"smooth", &"terrace",
-		&"noise_jordan", &"noise_swiss", &"gavoronoise", &"geological_primitive", &"furrows", &"dunes",
-		&"crater", &"warp", &"strata", &"curve", &"remap", &"mask", &"curvature",
-		&"talus_projection", &"spectral_equalizer", &"depression_filling", &"lake_flooding",
-		&"stream_extraction", &"erosion_hydraulic", &"erosion_thermal", &"scree", &"erosion",
-		&"hydraulic_particle", &"hydraulic_stream_log", &"hydraulic_saleve",
-		&"mountain_cone", &"mountain_inselberg",
-		&"mountain_range_radial", &"mountain_tibesti", &"mountain_stump",
-		&"shattered_peak", &"caldera",
-		# Spec phases 1-2. These MUST be listed here. This allow-list is what decides whether the whole
-		# graph goes to the native evaluator, and an op missing from it does not fail loudly — it
-		# silently drops the ENTIRE graph onto the GDScript path, where a pointwise node like Falloff
-		# runs per cell in script. Any new op with a case in pasture_3d_graph_ops.cpp belongs here.
-		&"falloff", &"contrast", &"transform", &"distance_transform", &"expand_shrink",
-		&"relative_elevation", &"smooth_fill", &"recast_cliff",
-		# Spec phase 4.
-		&"warp_downslope",
-		# Spec phase 5.
-		&"flooding_uniform_level", &"water_mask", &"mudslide",
-		# Geometry ports (P2c). The two source nodes lower to a zero CONST and contribute a geometry-table
-		# entry rather than a grid; the other three read it through `in_g`.
-		&"road_source", &"shape_source", &"path_distance", &"path_mask", &"road_grade"
-	]
+	# The allow-list used to be restated here as 63 op tags. It is `op_ids()` now — the same C++ list the
+	# lowering reads its id from, so "the native evaluator implements this op" is one fact rather than two
+	# that had to be kept in step. Forgetting an entry used to be silent: it did not fail, it dropped the
+	# WHOLE graph onto the script evaluator, which is how DLA ran unlowered for as long as it did.
+	var supported := op_ids()
 	for ni in order:
-		if nodes[ni] == null or (not nodes[ni].muted and not SUPPORTED.has(nodes[ni].op())):
+		if nodes[ni] == null or (not nodes[ni].muted and not supported.has(nodes[ni].op())):
 			return false
 		# A FROZEN solver owns a cache the native program knows nothing about. Lowering it silently re-solved
 		# on every evaluation and never reported itself stale, so the freeze looked like it worked while doing
@@ -1845,7 +1677,7 @@ func native_supported(p_root_node: int = -1) -> bool:
 				return false
 	# A compiled program carries four GRID slots, in0..in3, so a wire into port 4 or beyond has no in-slot.
 	# A driven SCALAR does not need one — the native evaluator reads cell 0 of the source buffer, and those
-	# ports now travel in the flat pdrv_* overflow table (see PARAM_PORT_MAP). A port >= 4 that the table
+	# ports now travel in the flat pdrv_* overflow table (see `native_param_ports`). A port >= 4 the node
 	# does not map is a real grid input with nowhere to go, and the kernel would fall back to the baked
 	# local value without saying so, which is exactly the silent-drop this guard exists to stop.
 	for c in connections:
@@ -1855,7 +1687,7 @@ func native_supported(p_root_node: int = -1) -> bool:
 				continue
 			if nodes[to_node].muted:
 				return false # muted lowers to passthrough, which carries no params at all
-			var pm = PARAM_PORT_MAP.get(nodes[to_node].op(), [])
+			var pm := nodes[to_node].native_param_ports()
 			var port := int(c[3])
 			if port >= pm.size() or int(pm[port]) < 0:
 				return false
@@ -1978,7 +1810,12 @@ func _eval_order(p_root: int = -1) -> Array:
 		for c in connections:
 			if c.size() >= 4 and int(c[2]) == cur:
 				var from := int(c[0])
-				if from >= 0 and from < nodes.size() and not needed.has(from):
+				# `nodes[from] != null` is not belt-and-braces: a .tres whose node script failed to load
+				# (renamed script, or a dev-flag script absent from a build) leaves a null in `nodes`, and
+				# `_fold_plan` calls `nodes[ni].input_count()` unguarded. Dropping it from the ancestor set
+				# leaves the downstream port unwired, which binds the zero buffer — the flat zero field
+				# `evaluate` already promises for an unusable graph, instead of a crash.
+				if from >= 0 and from < nodes.size() and nodes[from] != null and not needed.has(from):
 					needed[from] = true
 					frontier.push_back(from)
 	# 2. Kahn's algorithm over edges internal to the ancestor set.

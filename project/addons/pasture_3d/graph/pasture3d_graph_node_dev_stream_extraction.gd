@@ -4,44 +4,40 @@
 # Used for algorithm prototyping, A/B testing, and automated headless CI parity verification.
 @tool
 class_name Pasture3DGraphNodeDevStreamExtraction
-extends Pasture3DGraphNode
+extends Pasture3DGraphSolverNode
 
-enum Evaluation { LIVE, FROZEN }
 
 @export_group("Simulation")
-@export_range(1.0, 500.0, 1.0) var min_catchment_cells: float = 30.0:
+@export_range(1.0, 500.0, 1.0) var min_catchment_cells: float = 24.0:
 	set(v):
 		min_catchment_cells = maxf(v, 1.0)
 		_param_changed()
 
-@export_range(0.0, 50.0, 0.5) var carve_depth: float = 4.0:
+@export_range(0.0, 50.0, 0.5) var carve_depth: float = 3.0:
 	set(v):
 		carve_depth = maxf(v, 0.0)
 		_param_changed()
 
-@export_range(1.0, 100.0, 1.0) var channel_width: float = 12.0:
+@export_range(1.0, 100.0, 1.0) var channel_width: float = 8.0:
 	set(v):
 		channel_width = maxf(v, 1.0)
 		_param_changed()
 
-@export_range(0.0, 1.0, 0.05) var bank_falloff: float = 0.5:
+@export_range(0.0, 1.0, 0.05) var bank_falloff: float = 4.0:
 	set(v):
 		bank_falloff = clampf(v, 0.0, 1.0)
 		_param_changed()
 
 @export_group("Evaluation")
-@export var evaluation: Evaluation = Evaluation.LIVE:
-	set(v):
-		evaluation = v
-		emit_changed()
 
 @export_tool_button("Bake Streams") var _bake_btn = clear_cache
 
-var _cache: Dictionary = {}
-var _cache_key: int = 0
-var _dirty_since_bake: bool = false
-var _stale: bool = false
 var _last_stream_points: PackedVector3Array = PackedVector3Array()
+
+
+## Names this node's own Bake button, for the freeze warning.
+func bake_label() -> String:
+	return "Bake Streams"
 
 
 func op() -> StringName:
@@ -80,15 +76,6 @@ func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.MASK])
 
 
-func clear_cache() -> void:
-	if _cache.is_empty() and not _stale and not _dirty_since_bake:
-		return
-	_cache.clear()
-	_dirty_since_bake = false
-	_stale = false
-	emit_changed()
-
-
 func _param_changed() -> void:
 	_dirty_since_bake = true
 	emit_changed()
@@ -102,24 +89,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	else:
 		in_grid = Pasture3DGraphOps.zeros(n)
 
-	if evaluation == Evaluation.FROZEN:
-		var key := _grid_hash(in_grid)
-		if not _cache.is_empty():
-			if _dirty_since_bake or key != _cache_key:
-				_stale = true
-			return _cache[_cache_key]
-		var solved := _solve_gdscript(in_grid, p_gw, p_gh, p_rect)
-		_cache = {}
-		_cache_key = key
-		_cache[key] = solved
-		_dirty_since_bake = false
-		_stale = false
-		return solved
-
-	if not _cache.is_empty():
-		_cache.clear()
-	_stale = false
-	return _solve_gdscript(in_grid, p_gw, p_gh, p_rect)
+	return solve_cached(_grid_hash(in_grid, p_gw, p_gh), func(): return _solve_gdscript(in_grid, p_gw, p_gh, p_rect))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -246,8 +216,5 @@ func _trace_primary_streamline(p_accum: PackedFloat32Array, p_rec: PackedInt32Ar
 	_last_stream_points = pts
 
 
-func _grid_hash(arr: PackedFloat32Array) -> int:
-	var h: int = arr.size()
-	for i in range(0, arr.size(), maxi(1, arr.size() / 32)):
-		h = (h * 31) ^ int(arr[i] * 1000.0)
-	return h
+func _grid_hash(arr: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
+	return solver_cache_key(p_gw, p_gh, [arr])

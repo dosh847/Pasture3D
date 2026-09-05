@@ -37,6 +37,10 @@ func _ready() -> void:
 	_c_upstream_invalidation_cascading()
 	_d_slider_scrub_performance()
 	_e_cache_eviction_and_memory_limits()
+	_f_solver_eviction_frees_measured_bytes()
+	_g_a_frozen_graph_modifier_knows_where_it_is()
+	_h_a_solver_key_carries_its_dimensions()
+	_i_the_native_path_keys_on_the_graph()
 	print("\n=== %s (%d failures) ===\n" % ["GRAPH NODE CACHING PASS" if _fail == 0 else "GRAPH NODE CACHING FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -225,6 +229,161 @@ func _e_cache_eviction_and_memory_limits() -> void:
 	print("    control: unlimited cache stores all nodes: %d bytes (want > 20000)" % bytes_unlimited)
 	if bytes_unlimited <= 20000:
 		_fail += 1; print("    !! control dead: multi-node pipeline failed to cache all nodes under 256MB")
+
+
+# --- F. Evicting a SOLVER node frees the bytes eviction measures (P4 §4.1) ---------------------------
+#
+# [E] above uses Noise / Smooth / Terrace, none of which override `clear_cache()`, so it never touched
+# the defect. All twenty SOLVER nodes did override it, each clearing only its own private `_cache` and
+# none calling `super` — so the base `_cached_grid`, which is exactly what `get_cache_size_bytes()`
+# measures, survived. Eviction freed zero measured bytes, the `<= max_cache_bytes` break never fired,
+# and the loop went on to clear every node in the graph, destroying frozen solves as it went.
+func _f_solver_eviction_frees_measured_bytes() -> void:
+	print("[F] clearing a solver node frees the bytes get_total_cache_bytes() counts (§4.1)")
+	var n := Pasture3DGraphNodeRegistry.create(&"erosion")
+	if n == null:
+		_fail += 1; print("    !! could not create an Erosion node")
+		return
+	# store_cache is what the evaluator calls for EVERY node in the eval order, solver or not — which is
+	# why a solver really does hold a base buffer its own override could not reach.
+	var grid := PackedFloat32Array(); grid.resize(GW * GH)
+	n.store_cache(grid, {1: grid.duplicate()}, 12345, 1)
+	var before := n.get_cache_size_bytes()
+	print("    solver cache after store_cache: %d bytes (want > 0)" % before)
+	if before <= 0:
+		_fail += 1; print("    !! fixture dead: store_cache left nothing to free")
+		return
+	n.clear_cache()
+	var after := n.get_cache_size_bytes()
+	print("    after clear_cache: %d bytes (want == 0)" % after)
+	if after != 0:
+		_fail += 1; print("    !! a solver override skipped the base buffer reset — eviction frees nothing")
+	# CONTROL: the same call on a node with no override has always worked, so a `get_cache_size_bytes`
+	# that simply returned 0 would pass the line above for the wrong reason.
+	var plain := Pasture3DGraphNodeRegistry.create(&"noise")
+	plain.store_cache(grid, {}, 1, 1)
+	var plain_before := plain.get_cache_size_bytes()
+	plain.clear_cache()
+	print("    control: a non-solver node measures %d bytes then 0" % plain_before)
+	if plain_before <= 0 or plain.get_cache_size_bytes() != 0:
+		_fail += 1; print("    !! control dead: the measurement itself is not working")
+
+
+# --- G. A frozen Graph modifier's cache knows WHERE it was solved (P4 §4.2) --------------------------
+#
+# `_extent_key` is "ox,oz,gw,gh" and the fallback parsed only fields 2 and 3, so a cached grid of the
+# right SIZE was served for any PLACE: two same-sized loops under one Mound, and loop B got loop A's
+# terrain. Silently — for a pure generator graph the staleness key is `g.content_key()`, which does not
+# change when a loop moves.
+func _g_a_frozen_graph_modifier_knows_where_it_is() -> void:
+	print("[G] a frozen Graph modifier does not serve another loop's grid (§4.2)")
+	var m := Pasture3DNodeGraph.new()
+	m.evaluation = Pasture3DNode.Evaluation.FROZEN
+	var grid := PackedFloat32Array(); grid.resize(8 * 8)
+	for i in range(grid.size()):
+		grid[i] = float(i)
+	m.store_cache("0,0,8,8", {"key": 99, "grid": grid})
+
+	# CONTROL FIRST: the exact key still hits. A `cache_for` that returned {} unconditionally would pass
+	# every assertion below while disabling the cache entirely.
+	var exact := m.cache_for("0,0,8,8")
+	var exact_n: int = (exact.get("grid", PackedFloat32Array()) as PackedFloat32Array).size()
+	print("    control: the exact extent hits (%d cells)" % exact_n)
+	if exact_n != 64:
+		_fail += 1; print("    !! control dead: the exact-key hit is gone, so this section proves nothing")
+
+	var far := m.cache_for("640,640,8,8")
+	print("    a loop 640 cells away: %s (want a miss)" % ("HIT" if not far.is_empty() else "miss"))
+	if not far.is_empty():
+		_fail += 1; print("    !! another loop's grid was served for a different origin")
+	# And the miss is not memoised under the asking key, which is how the old fallback made the mistake
+	# permanent: it wrote the borrowed entry back, so the next question got the same wrong answer faster.
+	if m.cache_for("640,640,8,8").size() != far.size():
+		_fail += 1; print("    !! the miss was written back into the cache")
+
+	# The drag-jitter case the fallback was written for survives, as a TRANSLATION rather than a stretch:
+	# one cell east reads one cell east, and the column that falls off the edge clamps.
+	var near := m.cache_for("1,0,8,8")
+	var ng: PackedFloat32Array = near.get("grid", PackedFloat32Array())
+	print("    a loop 1 cell away: %s" % ("shifted" if ng.size() == 64 else "miss"))
+	if ng.size() != 64:
+		_fail += 1; print("    !! the one-cell drag tolerance was lost along with the fallback")
+	elif ng[0] != grid[1] or ng[7] != grid[7]:
+		_fail += 1; print("    !! the re-projection is not a whole-cell shift (got %.1f, %.1f; want %.1f, %.1f)"
+				% [ng[0], ng[7], grid[1], grid[7]])
+	# A dimension change is a miss, not a stretch.
+	if not m.cache_for("0,0,16,4").is_empty():
+		_fail += 1; print("    !! a 16x4 request was served from an 8x8 solve")
+
+
+# --- H. A solver cache key carries its grid dimensions (P4 §4.4) -------------------------------------
+#
+# Lake Flooding and Stream Extraction keyed on `hash(arr.size()) ^ hash(arr)`. 512x128 and 128x512 hold
+# the same cells in the same order, so a frozen Lake Flooding could not tell the two apart and served a
+# lake surface solved for a grid of the other shape.
+func _h_a_solver_key_carries_its_dimensions() -> void:
+	print("[H] a solver's cache key distinguishes 512x128 from 128x512 (§4.4)")
+	var arr := PackedFloat32Array(); arr.resize(512 * 128)
+	for i in range(arr.size()):
+		arr[i] = float(i % 97)
+	var wide := Pasture3DGraphNode.solver_cache_key(512, 128, [arr])
+	var tall := Pasture3DGraphNode.solver_cache_key(128, 512, [arr])
+	print("    512x128 -> %d, 128x512 -> %d (want different)" % [wide, tall])
+	if wide == tall:
+		_fail += 1; print("    !! the same key for two shapes: a frozen solve crosses between them")
+	# CONTROL: the key is still a function of the DATA, not a bare dimension pair — otherwise every solve
+	# at one size would collide and the assertion above would pass on a key that cached nothing usefully.
+	var moved := arr.duplicate()
+	moved[0] += 1.0
+	if Pasture3DGraphNode.solver_cache_key(512, 128, [moved]) == wide:
+		_fail += 1; print("    !! control dead: the key ignores the grid contents")
+	# And the same shape with the same data is the same key, or nothing would ever hit.
+	if Pasture3DGraphNode.solver_cache_key(512, 128, [arr]) != wide:
+		_fail += 1; print("    !! the key is not stable for identical inputs")
+
+
+# --- I. The native path's stored key encodes the graph that produced the grid (P4 §4.4) --------------
+#
+# The native branch passed `{}` for both `inputs_of` and `input_ports_of`, so the per-port loop inside
+# `_compute_node_inputs_hash` never ran and the output node's key came out of `[gw, gh, rect, muted, op]`
+# alone — identical for every graph of the same size. The GDScript path at line 695 has always passed the
+# real maps; this is the same call made the same way.
+#
+# What this does NOT test is the aux half, and deliberately: the native branch now declines to store a
+# multi-output node at all rather than stamping `{}` over its channels, so the state that used to hand
+# downstream `_read_channel` zeros is no longer reachable to assert on. Nor does it test parameter
+# sensitivity — a node's signature carries no parameters at all, which is §4.3's finding and is covered
+# by GraphNodeParamGate, not by this key.
+func _i_the_native_path_keys_on_the_graph() -> void:
+	print("[I] the native path stores a key that knows the graph shape (§4.4)")
+	var g := Pasture3DTerrainGraph.new()
+	var n := Pasture3DGraphNodeNoise.new()
+	var fnl := FastNoiseLite.new(); fnl.seed = 3; fnl.frequency = 0.03
+	n.noise = fnl; n.amplitude = 20.0
+	var sm := Pasture3DGraphNodeSmooth.new(); sm.passes = 4
+	var o := Pasture3DGraphNodeOutput.new()
+	var nodes: Array[Pasture3DGraphNode] = [n, sm, o]
+	g.nodes = nodes
+	g.output_node = 2
+
+	# CONTROL FIRST: the fixture has to reach the native branch, or the key under test is the GDScript
+	# one and the section says nothing about the line it was written for.
+	g.connections = [PackedInt32Array([0, 0, 2, 0])] # Noise -> Output
+	print("    control: native_supported = %s (want true)" % g.native_supported())
+	if not g.native_supported():
+		_fail += 1; print("    !! the fixture does not lower to native, so [I] proves nothing")
+		return
+	g.evaluate(GW, GH, RECT)
+	var direct: int = g.nodes[2]._inputs_hash
+
+	g.connections = [PackedInt32Array([0, 0, 1, 0]), PackedInt32Array([1, 0, 2, 0])] # via Smooth
+	g.emit_signal("structure_changed")
+	g.evaluate(GW, GH, RECT)
+	var via_smooth: int = g.nodes[2]._inputs_hash
+
+	print("    Noise->Output key %d, Noise->Smooth->Output key %d (want different)" % [direct, via_smooth])
+	if direct == via_smooth:
+		_fail += 1; print("    !! the stored key is blind to the graph that produced the grid")
 
 
 # ---- helpers -----------------------------------------------------------------------------------------

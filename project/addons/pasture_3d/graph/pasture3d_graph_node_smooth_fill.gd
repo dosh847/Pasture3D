@@ -51,6 +51,20 @@ func op() -> StringName:
 	return &"smooth_fill"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = float(mode)
+	p[1] = radius
+	p[2] = k
+	p[3] = amount
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 1, 2, -1])
+
+
 func role() -> Role:
 	return Role.FILTER
 
@@ -65,6 +79,11 @@ func input_count() -> int:
 
 func input_names() -> PackedStringArray:
 	return PackedStringArray(["in", "radius", "k", "mask"])
+
+
+func aux_grid_port() -> int:
+	return 3 # "mask"
+
 
 
 func input_port_types() -> PackedInt32Array:

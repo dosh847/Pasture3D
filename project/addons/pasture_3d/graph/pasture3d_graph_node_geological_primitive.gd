@@ -80,6 +80,26 @@ func op() -> StringName:
 	return &"geological_primitive"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = float(primitive_type)
+	p[1] = float(mapping)
+	p[2] = height
+	p[3] = radius
+	p[4] = eccentricity
+	p[5] = steepness
+	p[6] = azimuth_degrees
+	var off: Vector2 = center_offset if center_offset != null else Vector2.ZERO
+	p[9] = off.x
+	p[10] = off.y
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([2, 3, 5, 4])
+
+
 func role() -> Role:
 	return Role.GENERATOR
 

@@ -12,10 +12,25 @@ extends Pasture3DGraphNode
 ## Matches GRADIENT_EPSILON in src/pasture_3d_warp_downslope.cpp and the 1.0e-4 in the mode-17 shader.
 const GRADIENT_EPSILON := 1.0e-4
 
-@export var displacement: float = 20.0
-@export var radius: float = 20.0
-@export var reverse: bool = false
-@export_range(0.0, 1.0, 0.01) var amount: float = 1.0
+@export var displacement: float = 20.0:
+	set(v):
+		displacement = v
+		_param_changed()
+
+@export var radius: float = 20.0:
+	set(v):
+		radius = v
+		_param_changed()
+
+@export var reverse: bool = false:
+	set(v):
+		reverse = v
+		_param_changed()
+
+@export_range(0.0, 1.0, 0.01) var amount: float = 1.0:
+	set(v):
+		amount = v
+		_param_changed()
 
 
 func op() -> StringName:

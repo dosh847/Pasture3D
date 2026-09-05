@@ -16,6 +16,14 @@ func op() -> StringName:
 	return &"const_vector"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	var cv: Vector2 = value if value is Vector2 else Vector2.ZERO
+	p[0] = cv.length()
+	return {"params": p}
+
+
 func role() -> Role:
 	return Role.GENERATOR
 

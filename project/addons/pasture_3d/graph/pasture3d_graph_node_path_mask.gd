@@ -50,6 +50,15 @@ func op() -> StringName:
 	return &"path_mask"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = width_scale
+	p[1] = feather
+	p[2] = 1.0 if bool(invert) else 0.0
+	return {"params": p}
+
+
 func role() -> Role:
 	return Role.FILTER
 

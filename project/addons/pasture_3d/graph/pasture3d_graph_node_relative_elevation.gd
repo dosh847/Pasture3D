@@ -34,6 +34,18 @@ func op() -> StringName:
 	return &"relative_elevation"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = radius
+	p[1] = float(output_units)
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 0])
+
+
 func role() -> Role:
 	return Role.FILTER
 

@@ -68,6 +68,23 @@ func op() -> StringName:
 	return &"furrows"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = amplitude
+	p[1] = spacing
+	p[2] = direction_degrees
+	p[3] = float(profile)
+	p[4] = wobble_amount
+	p[5] = wobble_size
+	p[6] = float(seed)
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([0, 1, 2, 4])
+
+
 func role() -> Role:
 	return Role.GENERATOR
 

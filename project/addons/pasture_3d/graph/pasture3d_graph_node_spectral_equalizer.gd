@@ -53,6 +53,22 @@ func op() -> StringName:
 	return &"spectral_equalizer"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = macro_gain
+	p[1] = meso_gain
+	p[2] = micro_gain
+	p[3] = float(macro_passes)
+	p[4] = float(meso_passes)
+	p[5] = amount
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 0, 1, 2, 5])
+
+
 func role() -> Role:
 	return Role.FILTER
 

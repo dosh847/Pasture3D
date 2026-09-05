@@ -1,5 +1,22 @@
 # Pasture3D Water Bodies — Phase 0 baseline (spec §11, PASTURE3D_WATER_BODIES_SPEC.md).
 #
+# STALE FIXTURE — RED FOR A KNOWN REASON, NOT A REGRESSION (recorded 2026-09-04).
+#
+# This gate builds its world as `terrain.ocean_material = ...`, `terrain.ocean_wave_count = ...`,
+# `terrain.get_water_time()`. The ocean has since been EXTRACTED out of Pasture3D into a
+# `Pasture3DOcean` node under a `Pasture3DPoolManager`; `Pasture3D` keeps `ocean_*` only as
+# `_legacy_ocean`, a capture used to migrate scenes saved before the split. So the fixture builds no
+# ocean, renders an empty frame, and everything downstream fails.
+#
+# READ THE FAILURES AS THE CONTROLS WORKING. "there is no water on screen at sea level 0", "the preset
+# drew (almost) nothing", "an empty frame costs as much as water does", "the control shows no motion"
+# — each of those is this gate refusing to pass on a frame with nothing in it. That is the behaviour
+# bench gates here are supposed to have. Nothing about the water code is implicated by them.
+#
+# NOT BEING PORTED. The water brushes are due to be overtaken by the graph nodes that derive water from
+# terrain, and these gates get rewritten against `Pasture3DOcean` as part of that work rather than
+# ported onto it twice. Until then a red result here carries no information; do not debug water from it.
+#
 # Phase 2 extracts the ocean out of Pasture3D into a Pasture3DOcean node and rewires the
 # clipmap mesher underneath BOTH the ocean and the terrain. Its gate is "pixel- and
 # millisecond-neutral vs Phase 0", and that claim cannot be made against a memory of

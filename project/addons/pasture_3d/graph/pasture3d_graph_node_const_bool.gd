@@ -16,6 +16,13 @@ func op() -> StringName:
 	return &"const_bool"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = 1.0 if bool(value) else 0.0
+	return {"params": p}
+
+
 func role() -> Role:
 	return Role.GENERATOR
 

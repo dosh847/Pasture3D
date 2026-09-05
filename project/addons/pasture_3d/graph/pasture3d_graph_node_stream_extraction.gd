@@ -13,9 +13,8 @@
 # ribbon directly into the scene along the valley.
 @tool
 class_name Pasture3DGraphNodeStreamExtraction
-extends Pasture3DGraphNode
+extends Pasture3DGraphSolverNode
 
-enum Evaluation { LIVE, FROZEN }
 
 ## Minimum upstream catchment cells required to initiate stream channel formation.
 @export_range(4.0, 500.0, 2.0, "or_greater") var min_catchment_cells: float = 24.0:
@@ -34,11 +33,6 @@ enum Evaluation { LIVE, FROZEN }
 	set(v):
 		channel_width = maxf(v, 0.5)
 		_param_changed()
-## FROZEN means this node serves its own cache, which only the GDScript evaluator can do. See
-## Pasture3DGraphNode.blocks_native().
-func blocks_native() -> bool:
-	return evaluation == Evaluation.FROZEN
-
 
 
 ## Lateral bank transition falloff (metres).
@@ -48,24 +42,35 @@ func blocks_native() -> bool:
 		_param_changed()
 
 @export_group("Evaluation")
-@export var evaluation: Evaluation = Evaluation.LIVE:
-	set(v):
-		evaluation = v
-		emit_changed()
 
 @export_tool_button("Bake Streams") var _bake_btn = clear_cache
 @export_tool_button("Spawn Pasture3DStream in Scene") var _spawn_btn = spawn_stream_in_scene
 
 # ---- Runtime cache ----
-var _cache: Dictionary = {}
-var _cache_key: int = 0
-var _dirty_since_bake: bool = false
-var _stale: bool = false
 var _last_stream_points: PackedVector3Array = PackedVector3Array()
+
+
+## Names this node's own Bake button, for the freeze warning.
+func bake_label() -> String:
+	return "Bake Streams"
 
 
 func op() -> StringName:
 	return &"stream_extraction"
+
+
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = min_catchment_cells
+	p[1] = carve_depth
+	p[2] = channel_width
+	p[3] = bank_falloff
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 0, 1, 2])
 
 
 func role() -> Role:
@@ -114,24 +119,13 @@ func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.MASK])
 
 
-func clear_cache() -> void:
-	if _cache.is_empty() and not _stale and not _dirty_since_bake:
-		return
-	_cache.clear()
-	_dirty_since_bake = false
-	_stale = false
-	emit_changed()
-
-
 func _param_changed() -> void:
 	_dirty_since_bake = true
 	emit_changed()
 
 
 func node_warnings() -> PackedStringArray:
-	var w := PackedStringArray()
-	if _stale:
-		w.append("%s is FROZEN and input changed since bake. Press Bake Streams to re-solve." % display_name())
+	var w := super()
 	return w
 
 
@@ -147,25 +141,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	var cd: float = float(p_inputs[2][0]) if (p_inputs.size() > 2 and p_inputs[2] is PackedFloat32Array and p_inputs[2].size() > 0) else carve_depth
 	var cw: float = float(p_inputs[3][0]) if (p_inputs.size() > 3 and p_inputs[3] is PackedFloat32Array and p_inputs[3].size() > 0) else channel_width
 
-	if evaluation == Evaluation.FROZEN:
-		var key := _grid_hash(in_grid)
-		if not _cache.is_empty():
-			if _dirty_since_bake or key != _cache_key:
-				_stale = true
-			return _cache[_cache_key]
-		var solved := _solve_dynamic(in_grid, p_gw, p_gh, p_rect, mc, cd, cw)
-		_cache = {}
-		_cache_key = key
-		_cache[key] = solved
-		_dirty_since_bake = false
-		_stale = false
-		return solved
-
-	# LIVE
-	if not _cache.is_empty():
-		_cache.clear()
-	_stale = false
-	return _solve_dynamic(in_grid, p_gw, p_gh, p_rect, mc, cd, cw)
+	return solve_cached(_grid_hash(in_grid, p_gw, p_gh), func(): return _solve_dynamic(in_grid, p_gw, p_gh, p_rect, mc, cd, cw))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -265,5 +241,5 @@ func spawn_stream_in_scene() -> void:
 ## not an identity — on a radial mound that stride lands on one column, every value in it is 0, and a
 ## flat surface hashes the same. The node then served its cached solve for a different surface and did
 ## NOT flag itself stale, which is the one thing the freeze is supposed to tell you.
-func _grid_hash(arr: PackedFloat32Array) -> int:
-	return hash(arr.size()) ^ hash(arr)
+func _grid_hash(arr: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
+	return solver_cache_key(p_gw, p_gh, [arr])

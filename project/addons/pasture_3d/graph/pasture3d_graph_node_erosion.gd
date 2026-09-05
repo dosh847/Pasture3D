@@ -31,9 +31,8 @@
 # reload.
 @tool
 class_name Pasture3DGraphNodeErosion
-extends Pasture3DGraphNode
+extends Pasture3DGraphSolverNode
 
-enum Evaluation { LIVE, FROZEN }
 
 @export_group("Simulation")
 ## Solver iterations. Each one re-routes the drainage network over the current surface, so more iterations
@@ -68,25 +67,48 @@ enum Evaluation { LIVE, FROZEN }
 		_param_changed()
 
 @export_group("Evaluation")
-## FROZEN (the default) solves once and serves the cache until Bake Erosion, raising a stale warning when the
-## surface or params changed since. A solve is expensive; LIVE re-solves on EVERY evaluation and is only for
-## a small graph where a solve is cheap enough to watch.
-@export var evaluation: Evaluation = Evaluation.FROZEN:
-	set(v):
-		evaluation = v
-		emit_changed()
 
 @export_tool_button("Bake Erosion") var _bake_btn = clear_cache
 
 # ---- Runtime freeze state (not serialised — the caches rebuild on demand) ----
-var _cache: Dictionary = {}        # input-hash -> [height, flow, ero, dep, wet]
-var _cache_key: int = 0            # the input hash the cache was solved for
-var _dirty_since_bake: bool = false
-var _stale: bool = false
+
+
+## This solve is heavy enough that FROZEN is the right default; the base defaults to LIVE.
+func _init() -> void:
+	# `super()` is not optional. Pasture3DGraphNode._init connects `changed` to the revision bump, and a
+	# subclass `_init` that does not chain silently drops that connection — every parameter on this node,
+	# `muted` included, then becomes invisible to invalidation and it serves its first grid forever.
+	# GraphNodeParamGate names each one that stops bumping.
+	super()
+	evaluation = Evaluation.FROZEN
+
+
+## Names this node's own Bake button, for the freeze warning.
+func bake_label() -> String:
+	return "Bake Erosion"
 
 
 func op() -> StringName:
 	return &"erosion"
+
+
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = float(iterations)
+	p[1] = erosion_rate
+	p[2] = area_exponent
+	p[3] = hillslope_diffusion
+	p[4] = deposition
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 0, 1, 3])
+
+
+func native_out_count() -> int:
+	return 5 # height, flow, erosion, deposition, wetness
 
 
 func role() -> Role:
@@ -135,27 +157,8 @@ func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.MASK, PortType.MASK, PortType.MASK])
 
 
-## FROZEN means this node serves its own cache, which only the GDScript evaluator can do. See
-## Pasture3DGraphNode.blocks_native().
-func blocks_native() -> bool:
-	return evaluation == Evaluation.FROZEN
-
-
-## Drop the cached solve, so the next evaluation re-solves. This is the explicit Bake.
-func clear_cache() -> void:
-	if _cache.is_empty() and not _stale and not _dirty_since_bake:
-		return
-	_cache.clear()
-	_dirty_since_bake = false
-	_stale = false
-	emit_changed()
-
-
 func node_warnings() -> PackedStringArray:
-	var w := PackedStringArray()
-	if _stale:
-		w.append("%s is FROZEN and the surface or its parameters changed since the bake — it is showing "
-			% display_name() + "the erosion it solved for the old shape. Press Bake Erosion to re-solve.")
+	var w := super()
 	if evaluation == Evaluation.FROZEN and not _cache.is_empty():
 		w.append("%s holds %.1f MB of frozen solve. Press Bake Erosion to re-solve it."
 			% [display_name(), _cache_bytes() / 1048576.0])
@@ -177,25 +180,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	if surface.size() != n:
 		surface = Pasture3DGraphOps.zeros(n)
 
-	if evaluation == Evaluation.FROZEN:
-		var key := _surface_hash(surface, p_gw, p_gh)
-		if not _cache.is_empty():
-			if _dirty_since_bake or key != _cache_key:
-				_set_stale(true)
-			return _cache[_cache_key]
-		var solved := _solve_dynamic(surface, p_gw, p_gh, p_rect, iters, er, diff)
-		_cache = {}
-		_cache_key = key
-		_cache[key] = solved
-		_dirty_since_bake = false
-		_set_stale(false)
-		return solved
-
-	# LIVE
-	if not _cache.is_empty():
-		_cache.clear()
-	_set_stale(false)
-	return _solve_dynamic(surface, p_gw, p_gh, p_rect, iters, er, diff)
+	return solve_cached(_surface_hash(surface, p_gw, p_gh), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, iters, er, diff))
 
 
 func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_iters: int, p_er: float, p_diff: float) -> Array:
@@ -237,18 +222,8 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> 
 # ---- Internals -------------------------------------------------------------------------------------
 
 func _param_changed() -> void:
-	if not _cache.is_empty():
-		_dirty_since_bake = true
+	mark_dirty_since_bake()
 	emit_changed()
-
-
-func _set_stale(p_stale: bool) -> void:
-	if _stale == p_stale:
-		return
-	_stale = p_stale
-	# The warning list changed; refresh it without re-solving (this runs DURING a bake).
-	if Engine.is_editor_hint():
-		emit_changed.call_deferred()
 
 
 ## Run the native stream-power solve over `p_surface` and split it into the five channels. The grid maps onto
@@ -289,6 +264,4 @@ func _cache_bytes() -> int:
 ## A cheap order-sensitive hash of the surface, the freeze staleness key: a different upstream surface
 ## produces a different key, so a frozen solve knows it is looking at new ground.
 func _surface_hash(p_surface: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
-	var h := hash(p_gw) ^ (hash(p_gh) << 1)
-	h = h ^ hash(p_surface)
-	return h
+	return solver_cache_key(p_gw, p_gh, [p_surface])

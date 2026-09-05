@@ -559,16 +559,16 @@ func bake_mountain() -> void:
 
 ## Record that the held mountain no longer matches its inputs.
 ##
-## Deliberately NOT `_touch()`: every caller runs DURING a bake, and `_touch` emits `changed`, which the
-## brush re-bakes on. The deferred emit on the FALSE->TRUE edge only is what puts the warning in the
-## inspector without turning a reshape drag into one re-bake per frame — the flag stays true for the rest
-## of the drag, so the edge fires once. Mirrors Pasture3DNodeErosion.set_stale.
+## Deliberately NOT `_touch()`, and deliberately NOT emitting `changed`: every caller runs DURING a bake,
+## and the brush re-bakes on `changed` — a reshape drag would become one re-bake per frame, each one
+## setting the flag again. The flag is read when the inspector next repaints, which is enough to show the
+## warning and costs nothing during the drag.
+##
+## This used to carry an `if _stale: return` early-out and a deferred emit; Phase 1 removed the emit, and
+## with it the only reason the early-out existed. A bare assignment is idempotent on its own.
+## Pasture3DNodeErosion.set_stale keeps its early-out because it takes a bool and can also CLEAR.
 func _mark_stale() -> void:
-	if _stale:
-		return
 	_stale = true
-	if Engine.is_editor_hint():
-		emit_changed.call_deferred()
 
 
 ## Cut the loop's own rectangle out of the square working grid. Exactly centred, because `_field_dims`

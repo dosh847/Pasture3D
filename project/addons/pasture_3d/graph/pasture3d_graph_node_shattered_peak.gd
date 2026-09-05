@@ -70,6 +70,23 @@ func op() -> StringName:
 	return &"shattered_peak"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = float(seed)
+	p[1] = elevation
+	p[2] = scale
+	p[3] = float(octaves)
+	p[4] = peak_kw
+	p[5] = rugosity
+	p[6] = angle
+	p[7] = gamma
+	p[8] = bulk_amp
+	p[9] = base_noise_amp
+	p[10] = k_smoothing
+	return {"params": p}
+
+
 func display_name() -> String:
 	return "Shattered Peak"
 

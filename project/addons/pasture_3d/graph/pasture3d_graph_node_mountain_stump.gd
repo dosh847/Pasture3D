@@ -70,6 +70,23 @@ func op() -> StringName:
 	return &"mountain_stump"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = float(seed)
+	p[1] = elevation
+	p[2] = scale
+	p[3] = float(octaves)
+	p[4] = peak_kw
+	p[5] = rugosity
+	p[6] = angle
+	p[7] = k_smoothing
+	p[8] = gamma
+	p[9] = ridge_amp
+	p[10] = base_noise_amp
+	return {"params": p}
+
+
 func display_name() -> String:
 	return "Mountain Stump"
 

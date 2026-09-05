@@ -63,6 +63,24 @@ func op() -> StringName:
 	return &"expand_shrink"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = float(mode)
+	p[1] = radius
+	p[2] = float(kernel)
+	p[3] = float(iterations)
+	p[4] = amount
+	return {"params": p}
+
+
+	# Port 2 is `amount`, which this node reads as a SCALAR (p_inputs[2][0]) and not as a grid.
+	# The entry was missing from the old table, so a driven amount reached the script path and
+	# never the native one.
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 1, 4])
+
+
 func role() -> Role:
 	return Role.FILTER
 

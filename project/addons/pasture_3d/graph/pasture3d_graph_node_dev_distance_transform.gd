@@ -13,11 +13,33 @@
 class_name Pasture3DGraphNodeDevDistanceTransform
 extends Pasture3DGraphNode
 
-@export_range(0.0, 1.0, 0.01) var threshold: float = 0.5
-@export var direction: int = 0 ## Matches Pasture3DGraphNodeDistanceTransform.Direction.
-@export var metric: int = 0 ## Matches Pasture3DGraphNodeDistanceTransform.Metric.
-@export var output_units: int = 0 ## Matches Pasture3DGraphNodeDistanceTransform.OutputUnits.
-@export var max_distance: float = 0.0
+@export_range(0.0, 1.0, 0.01) var threshold: float = 0.5:
+	set(v):
+		threshold = v
+		_param_changed()
+
+## Matches Pasture3DGraphNodeDistanceTransform.Direction.
+@export var direction: int = 0:
+	set(v):
+		direction = v
+		_param_changed()
+
+## Matches Pasture3DGraphNodeDistanceTransform.Metric.
+@export var metric: int = 0:
+	set(v):
+		metric = v
+		_param_changed()
+
+## Matches Pasture3DGraphNodeDistanceTransform.OutputUnits.
+@export var output_units: int = 0:
+	set(v):
+		output_units = v
+		_param_changed()
+
+@export var max_distance: float = 0.0:
+	set(v):
+		max_distance = v
+		_param_changed()
 
 var last_normalisation_divisor: float = 1.0
 

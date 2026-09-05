@@ -10,9 +10,8 @@
 #   port 2  "flow"      MASK    water flow accumulation / drainage paths
 @tool
 class_name Pasture3DGraphNodeErosionHydraulic
-extends Pasture3DGraphNode
+extends Pasture3DGraphSolverNode
 
-enum Evaluation { LIVE, FROZEN }
 
 @export_group("Simulation")
 ## Number of simulation passes. More iterations deepen channels and carve drainage networks.
@@ -57,30 +56,38 @@ enum Evaluation { LIVE, FROZEN }
 		min_slope = maxf(v, 0.0)
 		_param_changed()
 
-## FROZEN means this node serves its own cache, which only the GDScript evaluator can do. See
-## Pasture3DGraphNode.blocks_native().
-func blocks_native() -> bool:
-	return evaluation == Evaluation.FROZEN
-
 
 @export_group("Evaluation")
-## LIVE re-solves on every evaluation; FROZEN caches the solve until Bake is pressed.
-@export var evaluation: Evaluation = Evaluation.LIVE:
-	set(v):
-		evaluation = v
-		emit_changed()
 
 @export_tool_button("Bake Hydraulic Erosion") var _bake_btn = clear_cache
 
 # ---- Runtime freeze state ----
-var _cache: Dictionary = {}
-var _cache_key: int = 0
-var _dirty_since_bake: bool = false
-var _stale: bool = false
+
+
+## Names this node's own Bake button, for the freeze warning.
+func bake_label() -> String:
+	return "Bake Hydraulic Erosion"
 
 
 func op() -> StringName:
 	return &"erosion_hydraulic"
+
+
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = float(iterations)
+	p[1] = rain_rate
+	p[2] = evaporation_rate
+	p[3] = sediment_capacity
+	p[4] = erosion_speed
+	p[5] = deposition_speed
+	p[6] = min_slope
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 0, 1, 4, 5])
 
 
 func role() -> Role:
@@ -131,19 +138,8 @@ func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.MASK])
 
 
-func clear_cache() -> void:
-	if _cache.is_empty() and not _stale and not _dirty_since_bake:
-		return
-	_cache.clear()
-	_dirty_since_bake = false
-	_stale = false
-	emit_changed()
-
-
 func node_warnings() -> PackedStringArray:
-	var w := PackedStringArray()
-	if _stale:
-		w.append("%s is FROZEN and input or parameters changed. Press Bake to re-solve." % display_name())
+	var w := super()
 	if is_zero_approx(rain_rate) or is_zero_approx(erosion_speed):
 		w.append("%s: Rain Rate or Erosion Speed is 0, so no erosion will occur." % display_name())
 	return w
@@ -160,24 +156,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	if surface.size() != n:
 		surface = Pasture3DGraphOps.zeros(n)
 
-	if evaluation == Evaluation.FROZEN:
-		var key := _surface_hash(surface, p_gw, p_gh)
-		if not _cache.is_empty():
-			if _dirty_since_bake or key != _cache_key:
-				_set_stale(true)
-			return _cache[_cache_key]
-		var solved := _solve_dynamic(surface, p_gw, p_gh, p_rect, iters, rr, es, ds)
-		_cache = {}
-		_cache_key = key
-		_cache[key] = solved
-		_dirty_since_bake = false
-		_set_stale(false)
-		return solved
-
-	if not _cache.is_empty():
-		_cache.clear()
-	_set_stale(false)
-	return _solve_dynamic(surface, p_gw, p_gh, p_rect, iters, rr, es, ds)
+	return solve_cached(_surface_hash(surface, p_gw, p_gh), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, iters, rr, es, ds))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -187,23 +166,12 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> 
 # ---- Internals -------------------------------------------------------------------------------------
 
 func _param_changed() -> void:
-	if not _cache.is_empty():
-		_dirty_since_bake = true
+	mark_dirty_since_bake()
 	emit_changed()
 
 
-func _set_stale(p_stale: bool) -> void:
-	if _stale == p_stale:
-		return
-	_stale = p_stale
-	if Engine.is_editor_hint():
-		emit_changed.call_deferred()
-
-
 func _surface_hash(p_surface: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
-	var h := hash(p_gw) ^ (hash(p_gh) << 1)
-	h = h ^ hash(p_surface)
-	return h
+	return solver_cache_key(p_gw, p_gh, [p_surface])
 
 
 func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_iters: int, p_rr: float, p_es: float, p_ds: float) -> Array:

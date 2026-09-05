@@ -18,12 +18,35 @@ const MAX_SWEEPS := 4096
 ## fraction is not resolution-invariant.
 const TRANSPORT_GAIN := 0.25
 
-@export var talus_angle_deg: float = 30.0
-@export var depth: float = 4.0
-@export var travel_distance: float = 60.0
-@export var depth_exponent: float = 1.0
-@export var viscosity_power: float = 1.0
-@export_range(0.0, 1.0, 0.01) var amount: float = 1.0
+@export var talus_angle_deg: float = 30.0:
+	set(v):
+		talus_angle_deg = v
+		_param_changed()
+
+@export var depth: float = 4.0:
+	set(v):
+		depth = v
+		_param_changed()
+
+@export var travel_distance: float = 60.0:
+	set(v):
+		travel_distance = v
+		_param_changed()
+
+@export var depth_exponent: float = 1.0:
+	set(v):
+		depth_exponent = v
+		_param_changed()
+
+@export var viscosity_power: float = 1.0:
+	set(v):
+		viscosity_power = v
+		_param_changed()
+
+@export_range(0.0, 1.0, 0.01) var amount: float = 1.0:
+	set(v):
+		amount = v
+		_param_changed()
 
 
 func op() -> StringName:
