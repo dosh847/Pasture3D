@@ -24,6 +24,10 @@
 class_name Pasture3DRoadBrush
 extends Pasture3DTerrainBrush
 
+## How finely a foreign road's plan is walked when stamping the protection mask, in metres. Half a metre
+## leaves the union of discs scalloped by well under a cell at any vertex spacing the terrain can show.
+const PROTECT_STEP: float = 0.5
+
 @export_group("Road")
 ## What this brush overrides for its whole length. Sits between its segments and its group in the
 ## resolve chain (§5.3). Unset fields inherit; they are never copied down from the group.
@@ -1017,6 +1021,7 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 				"cut_batter": prof["cut_batter"],
 				"fill_batter": prof["fill_batter"],
 				"skip": skip,
+				"protect": _foreign_formation_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs),
 			})
 	# The alignment this bake solved is what makes this road detectable, so the resolve is asked for
 	# AFTER it exists — and coalesced on the network, so a refresh that bakes six roads resolves once.
@@ -1032,6 +1037,81 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 		"gw": p_gw, "gh": p_gh, "min_x": p_min_x, "min_z": p_min_z, "vs": p_vs,
 	}
 	return res
+
+
+## The cells every OTHER road in this network has built a formation on, as a grid-shaped mask for the
+## grader's `protect` option.
+##
+## ---- WHY THIS IS NOT SOLVED BY ORDERING ----
+##
+## A road's corridor reaches `edge_d + rise/batter + verge`, so a road in an 8 m cutting disturbs ground
+## seventeen metres either side. Two roads crossing at different heights sweep their batters across each
+## other's carriageway, and without this mask whichever brush bakes LAST wins — the earlier road is left
+## spanning a trench the later one dug under it. Bakes happen in scene order, which is the same fault
+## §5.2 names for the paint.
+##
+## The paint's answer is to order by priority. That is the wrong answer here, and a weaker one: a batter
+## is EARTHWORK AROUND a road, not the road, and no road's earthwork outranks another road's driving
+## surface at any priority. So this is a refusal rather than a tie-break, and it needs no ordering at all
+## — every road refuses every other, in whatever order they bake.
+##
+## ---- WHY IT IS STAMPED RATHER THAN QUERIED ----
+##
+## The obvious shape is the grader's own: walk every cell and ask how far it is from each foreign road.
+## That is a full nearest-on-plan scan of the grid PER FOREIGN ROAD, which makes a four-road network cost
+## four grades instead of one. Stamping a disc of the formation radius at each plan sample is bounded by
+## the road's own length instead of by the grid, and the union of discs along a polyline sampled every
+## `PROTECT_STEP` metres is the formation with scalloping far below one cell.
+func _foreign_formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: float,
+		p_vs: float) -> PackedByteArray:
+	var out := PackedByteArray()
+	var net := road_network()
+	if net == null or p_gw <= 0 or p_gh <= 0 or p_vs <= 0.0:
+		return out
+	var mine := road_key()
+	var others: Array[Pasture3DRoadBrush] = []
+	for b in net.road_brushes():
+		if b != null and b != self and b.road_key() != mine:
+			others.append(b)
+	if others.is_empty():
+		return out
+	out.resize(p_gw * p_gh)
+	for b in others:
+		var radius := b.formation_half_width()
+		if radius <= 0.0:
+			continue
+		var plan := b._plan_points()
+		if plan.size() < 2:
+			continue
+		var r_cells := int(ceil(radius / p_vs))
+		var r2 := radius * radius
+		for i in range(plan.size() - 1):
+			var a := plan[i]
+			var c := plan[i + 1]
+			var seg := a.distance_to(c)
+			var steps := maxi(int(ceil(seg / PROTECT_STEP)), 1)
+			for k in range(steps + 1):
+				var at := a.lerp(c, float(k) / float(steps))
+				var cx := int(round((at.x - p_min_x) / p_vs))
+				var cz := int(round((at.y - p_min_z) / p_vs))
+				for iz in range(maxi(cz - r_cells, 0), mini(cz + r_cells + 1, p_gh)):
+					var wz := p_min_z + float(iz) * p_vs
+					var row := iz * p_gw
+					for ix in range(maxi(cx - r_cells, 0), mini(cx + r_cells + 1, p_gw)):
+						var wx := p_min_x + float(ix) * p_vs
+						if Vector2(wx - at.x, wz - at.y).length_squared() <= r2:
+							out[row + ix] = 1
+	return out
+
+
+## Half the FORMATION — carriageway plus shoulder — which is `edge_d` in the grader, deliberately: the
+## thing being protected has to be exactly the thing the grader calls built road, or the two disagree by
+## a shoulder at every crossing.
+func formation_half_width() -> float:
+	var t := resolved_road_type()
+	if t == null:
+		return 0.0
+	return t.half_width(resolved_lane_count()) + t.shoulder_width
 
 
 # ---- TIER FAR: the carriageway paints itself (P5, §10) -----------------------------------------------

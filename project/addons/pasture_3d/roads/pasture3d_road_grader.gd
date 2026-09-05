@@ -228,6 +228,25 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 	# approach was trimmed back from (§6) — and must leave no trace at all: marking it as a bridge deck
 	# would tell every later phase to build a viaduct at every crossroads.
 	var skip: PackedByteArray = p_opts.get("skip", PackedByteArray())
+	# ---- A BATTER MAY NOT CUT THROUGH ANOTHER ROAD'S FORMATION ----
+	#
+	# `protect` is grid-shaped, not per-sample like `skip`: it marks CELLS another road has already built
+	# on. Every other mask here is indexed by this road's arc length, which cannot express "somebody
+	# else's carriageway is over there" at all.
+	#
+	# The corridor reaches `edge_d + rise/slope + verge`, which for a road in an 8 m cutting is seventeen
+	# metres of sideways reach. Two roads crossing at different heights therefore sweep their batters
+	# straight across each other's carriageway, and whichever bakes LAST wins: the earlier road's ribbon
+	# is left spanning a trench the later road dug under it. Measured on a plain crossing of a road at
+	# grade and a road in an 8 m cutting: 225 of the first road's 729 carriageway cells were lowered, the
+	# worst by the full 8 m.
+	#
+	# Scene order deciding it is the same fault §5.2 names for the paint, and the answer here is stronger
+	# than ordering because it is not a tie-break: a batter is EARTHWORK AROUND a road, and no road's
+	# earthwork outranks another road's driving surface whatever their priorities. Only the batter is
+	# refused. A cell inside this road's own formation still grades — two carriageways genuinely
+	# overlapping is a junction, and junctions are resolved by `skip` and the footprint polygon, not here.
+	var protect: PackedByteArray = p_opts.get("protect", PackedByteArray())
 	var cum := cumulative_length(p_plan)
 	var graded: PackedFloat32Array = out["height"]
 	var m_bed: PackedFloat32Array = out["roadbed"]
@@ -280,6 +299,11 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 			var slope: float = cut_batter if z_ref < ground else fill_batter
 			var reach := edge_d + rise / slope + verge
 			if d > reach:
+				continue
+			# Another road's formation. Refused before the suppress branch so a protected cell reports
+			# nothing either: this road did not build here, and saying it did would put a bridge deck or a
+			# verge in a mask that a scatter or a paint would then act on.
+			if d > edge_d and idx < protect.size() and protect[idx] != 0:
 				continue
 
 			# A suppressed stretch still REPORTS itself — the structure mask is how a later phase learns

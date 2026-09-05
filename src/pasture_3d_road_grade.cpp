@@ -101,6 +101,13 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 	if (p_opts.has("skip")) {
 		skip = p_opts["skip"];
 	}
+	// A BATTER MAY NOT CUT THROUGH ANOTHER ROAD'S FORMATION. Grid-shaped, not per-sample like `skip`:
+	// it marks cells another road has already built on, which no arc-length mask can express. See the
+	// long note in `Pasture3DRoadGrader.grade_reference`.
+	PackedByteArray protect;
+	if (p_opts.has("protect")) {
+		protect = p_opts["protect"];
+	}
 
 	const float *src = p_height.ptr();
 	float *graded = height.ptrw();
@@ -124,6 +131,8 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 	const int n_sup = p_suppress.size();
 	const uint8_t *skip_ptr = skip.ptr();
 	const int n_skip = skip.size();
+	const uint8_t *protect_ptr = protect.ptr();
+	const int n_protect = protect.size();
 
 	Pasture3DThreadPool::parallel_for_rows(p_gh, 8, [&](int z0, int z1) {
 		std::vector<int> scratch;
@@ -162,6 +171,11 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 				const double rise = std::abs(z_ref - ground);
 				const double slope = z_ref < ground ? cut_batter : fill_batter;
 				if (d > edge_d + rise / slope + verge) {
+					continue;
+				}
+				// Another road's formation. Refused before the suppress branch so a protected cell reports
+				// nothing either: this road did not build here.
+				if (d > edge_d && idx < n_protect && protect_ptr[idx] != 0) {
 					continue;
 				}
 
