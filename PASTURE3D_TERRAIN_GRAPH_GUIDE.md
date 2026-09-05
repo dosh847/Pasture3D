@@ -302,7 +302,72 @@ skip on the road's own properties ships a stale paint.
 
 ---
 
-## 9. Gates
+## 9. Sockets and inline parameters
+
+A node's face on the canvas is built entirely from its own overrides, in
+`graph_editor.gd::_populate_node_slots_and_controls`. **One row per slot index**, and row `r` carries
+input port `r` on the left and output port `r` on the right — which is where §2's port-index-equals-
+channel-index rule comes from. Nothing in the editor hardcodes a node's shape; it reads
+`input_count()`, `input_names()`, `input_port_types()`, and the four output equivalents, and a node with
+one wrong count draws one wrong row. `GraphAllNodeSocketsGate` sweeps the registry for exactly that.
+
+Port colour is `PORT_COLORS[type % size]`, so a new `PortType` without a colour silently reuses another
+type's — add both together.
+
+### Smart Socket Collapse
+
+An **unwired** input port on an expanded node draws an inline editor widget in place of the empty socket
+row. Wire the port and the widget disappears: a value that is now coming down a wire must not also be
+sitting in a box that claims to set it. This is why a parameter can legitimately exist both as a port and
+as an `@export` — they are the same value, and the wire wins.
+
+### The two tables that fill those widgets
+
+```gdscript
+const SLOT_SPINS := {
+    &"warp": {1: [&"strength"], 2: [&"amplitude"], 3: [&"frequency"]},
+    …
+}
+```
+
+`SLOT_SPINS` says **which property** each port edits, and nothing else. **The range is deliberately not
+there** — `_spin_from_hint()` reads it from the property's own `@export_range` at build time. This
+replaced 542 lines of 91 near-identical `SpinBox` blocks restating min/max/step the nodes already
+declared, and by the time anyone measured, **37 of the 41 comparable pairs had drifted**. Sixteen of those
+were the destructive kind: the node declared `or_greater`, the widget clamped, and a Warp authored at
+frequency 0.3 displayed as 0.1 — then wrote 0.1 back on the next interaction. So:
+
+- **Never restate a range in the editor.** Put it on the `@export_range` and let the widget read it.
+- **A property with no range hint gets an unbounded box**, not an invented limit. No hint means no
+  constraint, and inventing one here is how the second table grows back.
+- **`or_greater` / `or_lesser` must survive** into `allow_greater` / `allow_lesser`, or a soft range
+  becomes a hard clamp on a value the graph was already authored with.
+- **A name in `SLOT_SPINS` that the node does not have pushes a warning.** It used to be silent —
+  `p_node.get("typo")` returned null and the box read 0, which is indistinguishable from a real zero.
+
+What a spin box cannot express (a Vector2 pair, a colour, a bool, a curve or noise sub-resource, a seed
+re-roll) is added per-op in `_append_slot_inline_widget`; whole-node controls that belong to no port —
+Remap and Curve's *Auto Fit Range* — go in `_add_inline_node_controls`. Both are `match` on `op()`, so
+they are the one place the editor is allowed to know a node by name. Everything else stays generic.
+
+### The rest of the header row
+
+Mute, collapse, set-as-output, preview toggle, and (on solvers) Bake. `collapsed` suppresses the inline
+widgets and the node-level controls but **not** the sockets — a collapsed node still wires. Bake runs the
+same `clear_cache()` the inspector button does, so a solver can be re-baked without opening the
+Inspector.
+
+### Adding an inline parameter — the short version
+
+1. Declare the `@export` with a real `@export_range`, and a setter that calls `_param_changed()`.
+2. If it should also be wirable, add it to `input_names()` / `input_port_types()` at the right index.
+3. Add `{op: {port: [property]}}` to `SLOT_SPINS` — **the property name only, never the range**.
+4. Non-numeric? Add a case in `_append_slot_inline_widget`. Not port-bound? `_add_inline_node_controls`.
+5. If the hint changes at runtime, call `notify_property_list_changed()` (§8).
+
+---
+
+## 10. Gates
 
 One gate per claim, and the graph family is dense enough that the right first question about a change is
 *which gate owns this*:
@@ -336,7 +401,7 @@ not `_full_dirty`; and a gate that touches `data_directory` can modify the demo 
 
 ---
 
-## 10. Things that have actually gone wrong
+## 11. Things that have actually gone wrong
 
 Each of these cost real time. They are here in the order you are likely to meet them.
 
@@ -359,3 +424,5 @@ Each of these cost real time. They are here in the order you are likely to meet 
     iteration, 0.0008 m out by fifteen. `PASTURE3D_NODE_ACCELERATION_GUIDE.md` §3.6.
 12. **A `static Pasture3DGraphGPU` at each dispatch site** — nine devices, nine shader compiles,
     seven of them never dispatched, all freed after `RenderingServer` may be gone. §5.
+13. **A widget restating a property's range** — 37 of 41 pairs had drifted, and 16 of those
+    silently narrowed values the graph was authored with. §9.
