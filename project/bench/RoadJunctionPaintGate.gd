@@ -3,15 +3,17 @@
 # RoadJunctionPaintGate — markings INSIDE a junction (road P9a).
 # See PASTURE3D_ROAD_JUNCTION_PAINT_AND_SMOOTHING_SPEC.md §2.3, §2.6.
 #
-# Built so far: stop bars, crossings and give-way rows. Connector guides come next and will add their
-# criteria to this file. ARM_CONTINUATION is not coming -- see the note on
-# `Pasture3DRoadJunctionMarkings.Kind`; the gap it was for was the disc's, and P9a-0 closed it.
+# ARM_CONTINUATION is not coming -- see the note on `Pasture3DRoadJunctionMarkings.Kind`; the gap it was
+# for was the disc's, and P9a-0 closed it.
 #
 #   A  a 4-arm crossroads emits exactly one STOP_BAR per incoming lane, on both roads
 #   B  each bar's midpoint is its stop line's point, its edge is across the heading, and it moves when
 #      the trim-back moves
 #   H  a crossing spans the arm's CARRIAGEWAY, not its formation, and sits outside the stop bar
 #   I  give-way triangles appear only on arms that lose priority, and never under signals
+#   E  guides go only to TURNING connectors that must give way -- not to every legal movement
+#   F  a forbidden connector emits neither ribbon nor guide, and INHERIT restores both
+#   G  a connector ribbon starts and ends on its own connector's endpoints, and is one lane wide
 #   N  a disabled or undetected junction paints nothing
 #   O  build_junction puts the paint ON the surface it is given, not at the road's centreline height
 #
@@ -42,9 +44,12 @@ func _ready() -> void:
 	await _b_a_bar_sits_on_its_stop_line()
 	await _h_a_crossing_spans_the_carriageway()
 	await _i_give_way_goes_to_the_arm_that_loses()
+	await _e_guides_go_only_to_conflicted_turns()
+	await _f_a_forbidden_movement_paints_nothing()
+	await _g_a_ribbon_lands_on_its_connector()
 	await _n_a_disabled_junction_paints_nothing()
 	_o_the_paint_sits_on_the_surface()
-	for want in ["A", "B", "H", "I", "N", "O"]:
+	for want in ["A", "B", "E", "F", "G", "H", "I", "N", "O"]:
 		if not _ran.has(want):
 			_fail += 1
 			print("    !! criterion %s did not run to completion, so it measured nothing" % want)
@@ -69,7 +74,10 @@ func _a_one_stop_bar_per_incoming_lane() -> void:
 	# Two two-lane roads crossing: each road has two ARMS at the junction and one lane of each arm runs
 	# INTO it, so four incoming lanes and four bars. Stated from the fixture, not read off the code.
 	var incoming := j.stop_lines.size()
-	var bars := Pasture3DRoadJunctionMarkings.plan_junction(j)
+	# BY KIND. A plan now carries crossings, give-way rows and the connector overlay as well, so "the
+	# primitives" and "the stop bars" stopped being the same list the moment the second kind was added.
+	var bars := _of_kind(Pasture3DRoadJunctionMarkings.plan_junction(j),
+			Pasture3DRoadJunctionMarkings.Kind.STOP_BAR)
 	print("    %d stop line(s) published -> %d STOP_BAR primitive(s) (want equal, and 4)"
 			% [incoming, bars.size()])
 	_check("A", bars.size() == incoming,
@@ -113,7 +121,8 @@ func _b_a_bar_sits_on_its_stop_line() -> void:
 		(fx["terrain"] as Node).queue_free()
 		return
 
-	var bars := Pasture3DRoadJunctionMarkings.plan_junction(j)
+	var bars := _of_kind(Pasture3DRoadJunctionMarkings.plan_junction(j),
+			Pasture3DRoadJunctionMarkings.Kind.STOP_BAR)
 	var worst_mid := 0.0
 	var worst_dot := 0.0
 	for i in bars.size():
@@ -151,7 +160,8 @@ func _b_a_bar_sits_on_its_stop_line() -> void:
 	j.radius_override = j.radius + 12.0
 	net.resolve_junctions()
 	await get_tree().process_frame
-	var after := Pasture3DRoadJunctionMarkings.plan_junction(_the_junction(net))
+	var after := _of_kind(Pasture3DRoadJunctionMarkings.plan_junction(_the_junction(net)),
+			Pasture3DRoadJunctionMarkings.Kind.STOP_BAR)
 	var moved := 0.0
 	for i in mini(after.size(), before.size()):
 		var q: PackedVector2Array = after[i]["quad"]
@@ -336,6 +346,218 @@ func _i_give_way_goes_to_the_arm_that_loses() -> void:
 	(fx["terrain"] as Node).queue_free()
 
 
+# ---- E ------------------------------------------------------------------------------------------
+
+## [E] Guides go only to TURNING movements that must give way.
+##
+## A four-arm crossroads of two-lane roads has a dozen legal movements. A guide along each fills the
+## junction with white and none of them can be followed, which is the opposite of what a guide is for.
+## So the criterion is a RATIO, not a presence: strictly fewer movements carry a guide than exist, and
+## every one that does is a turn that yields.
+##
+## The control is the straight-ahead movement with priority. It has to be present in the fixture and
+## have NO guide -- a driver going where the road already points needs no line, and a kernel that
+## painted one would be painting all of them.
+func _e_guides_go_only_to_conflicted_turns() -> void:
+	print("[E] guides go only to turning movements that must give way")
+	var fx := await _fixture(true)
+	var net: Pasture3DRoadNetwork = fx["net"]
+	var j := _the_junction(net)
+	if j == null:
+		_fail += 1
+		print("    !! no junction, so [E] measured nothing")
+		(fx["terrain"] as Node).queue_free()
+		return
+
+	var prims := _plan(net, j)
+	var guided := {}  # by CONNECTOR id: one lane feeds several movements
+	for g: Dictionary in _of_kind(prims, Pasture3DRoadJunctionMarkings.Kind.CONNECTOR_GUIDE):
+		guided[String(g["connector"])] = true
+
+	var legal := 0
+	var straight_with_priority := 0
+	var turning_yielders := 0
+	for c in j.connectors:
+		if c == null or not c.allowed():
+			continue
+		legal += 1
+		var yields: bool = not j.yields_to(c.id).is_empty()
+		var turning: bool = c.turn == Pasture3DRoadLaneConnector.Turn.LEFT \
+				or c.turn == Pasture3DRoadLaneConnector.Turn.RIGHT
+		if turning and yields:
+			turning_yielders += 1
+		elif not turning and not yields:
+			straight_with_priority += 1
+			# THE CONTROL, asserted per movement: this one must have no guide.
+			_check("E", not guided.has(String(c.id)),
+					"a straight movement with priority must have no guide (%s)" % c.id)
+	# THE DASHES ARE DASHES, not a solid line with gaps in the wrong places. Asserted as the total
+	# painted length per guided movement against what `Pasture3DRoadMarkings.runs` predicts for the same
+	# curve — comparing against the kernel rather than against a literal, so the two cannot drift when
+	# the dash pitch changes. Without this, a strip that snapped each dash to the nearest tessellation
+	# sample would pass everything above: the right movements are guided, they are simply the wrong
+	# length. That mutation survived the first round.
+	var painted := {}
+	for g: Dictionary in _of_kind(prims, Pasture3DRoadJunctionMarkings.Kind.CONNECTOR_GUIDE):
+		var q: PackedVector2Array = g["quad"]
+		var k := String(g["connector"])
+		painted[k] = float(painted.get(k, 0.0)) + q[0].distance_to(q[3])
+	var worst_dash := 0.0
+	for c in j.connectors:
+		if c == null or not guided.has(String(c.id)):
+			continue
+		var total := 0.0
+		var pts := c.curve.tessellate_even_length(5, 0.5)
+		for i in range(1, pts.size()):
+			total += Vector2(pts[i - 1].x, pts[i - 1].z).distance_to(Vector2(pts[i].x, pts[i].z))
+		var want := 0.0
+		for run: Array in Pasture3DRoadMarkings.runs(Pasture3DRoadMarkings.Style.DASHED, 0.0, total):
+			want += float(run[1]) - float(run[0])
+		worst_dash = maxf(worst_dash, absf(float(painted.get(String(c.id), 0.0)) - want))
+	print("    worst painted-length error %.4f m against the markings kernel's own runs (want 0)"
+			% worst_dash)
+	_check("E", worst_dash < 1e-2,
+			"a guide's dashes are not the kernel's dashes (%.4f m off)" % worst_dash)
+
+	print("    %d legal movement(s): %d turning yielders, %d straight with priority; %d guided lane(s)"
+			% [legal, turning_yielders, straight_with_priority, guided.size()])
+	_check("E", legal > 0, "the fixture must have legal movements")
+	_check("E", turning_yielders > 0, "the fixture must contain a turn that yields, or [E] proves nothing")
+	_check("E", straight_with_priority > 0,
+			"the fixture must contain a straight movement with priority, or the control is vacuous")
+	_check("E", guided.size() < legal,
+			"guides must be a SUBSET of legal movements, got %d of %d" % [guided.size(), legal])
+
+	_ran["E"] = true
+	(fx["terrain"] as Node).queue_free()
+
+
+# ---- F ------------------------------------------------------------------------------------------
+
+## [F] A forbidden movement paints nothing -- neither ribbon nor guide -- and INHERIT restores both.
+##
+## `allowed_override = OFF` is the author saying "no left turn here". A painted path is an invitation to
+## make exactly the turn they forbade, worse than an unmarked junction because it contradicts the sign
+## that presumably stands beside it.
+##
+## Both halves are asserted because they fail differently: a kernel that filtered guides but not ribbons
+## would still paint the turn, in the more visible of the two.
+func _f_a_forbidden_movement_paints_nothing() -> void:
+	print("[F] a forbidden movement paints neither ribbon nor guide, and INHERIT restores both")
+	var fx := await _fixture(true)
+	var net: Pasture3DRoadNetwork = fx["net"]
+	var j := _the_junction(net)
+	if j == null:
+		_fail += 1
+		print("    !! no junction, so [F] measured nothing")
+		(fx["terrain"] as Node).queue_free()
+		return
+
+	# Pick a movement that is currently painted BOTH ways, so switching it off can be seen in both.
+	var target: Pasture3DRoadLaneConnector = null
+	for c in j.connectors:
+		if c != null and c.allowed() and not j.yields_to(c.id).is_empty() \
+				and (c.turn == Pasture3DRoadLaneConnector.Turn.LEFT \
+					or c.turn == Pasture3DRoadLaneConnector.Turn.RIGHT):
+			target = c
+			break
+	if target == null:
+		_fail += 1
+		print("    !! no guided movement in the fixture, so [F] would assert nothing")
+		(fx["terrain"] as Node).queue_free()
+		return
+
+	var before := _counts(_plan(net, j))
+	target.allowed_override = Pasture3DRoadLaneConnector.Tri.OFF
+	var off := _counts(_plan(net, j))
+	print("    %s off -> ribbons %d->%d, guides %d->%d" % [target.id,
+			before["ribbon"], off["ribbon"], before["guide"], off["guide"]])
+	_check("F", off["guide"] < before["guide"], "switching a movement off must remove its guide")
+	_check("F", off["ribbon"] < before["ribbon"], "switching a movement off must remove its ribbon")
+
+	target.allowed_override = Pasture3DRoadLaneConnector.Tri.INHERIT
+	var back := _counts(_plan(net, j))
+	print("    INHERIT -> ribbons %d, guides %d (want %d and %d)"
+			% [back["ribbon"], back["guide"], before["ribbon"], before["guide"]])
+	_check("F", back["guide"] == before["guide"] and back["ribbon"] == before["ribbon"],
+			"INHERIT must restore both")
+
+	_ran["F"] = true
+	(fx["terrain"] as Node).queue_free()
+
+
+# ---- G ------------------------------------------------------------------------------------------
+
+## [G] A connector ribbon lands on its own connector's endpoints, and is one lane wide.
+##
+## The spec asked for tangent continuity with the arm ribbons at EXACT float equality, citing the P5b
+## lesson that an accumulated `s` agrees to six decimals and cracks anyway. That bar is met by
+## CONSTRUCTION here and the criterion says so rather than re-measuring it: the ribbon is sampled off
+## `connector.curve`, and the curve is the thing the lane solver already built tangent-continuous with
+## both lanes. There is no second arc-length accumulation to disagree.
+##
+## What is worth asserting is that the sampling did not LOSE those endpoints -- an even-length
+## tessellation that dropped or overshot the last point would detach the ribbon at exactly the join the
+## curve was built to make. So: the ribbon's first and last quads straddle the connector's own entry and
+## exit points.
+func _g_a_ribbon_lands_on_its_connector() -> void:
+	print("[G] a connector ribbon lands on its connector's endpoints, one lane wide")
+	var fx := await _fixture()
+	var net: Pasture3DRoadNetwork = fx["net"]
+	var j := _the_junction(net)
+	if j == null:
+		_fail += 1
+		print("    !! no junction, so [G] measured nothing")
+		(fx["terrain"] as Node).queue_free()
+		return
+
+	var prims := _plan(net, j)
+	var by_lane := {}
+	for r: Dictionary in _of_kind(prims, Pasture3DRoadJunctionMarkings.Kind.CONNECTOR_RIBBON):
+		var k := "%s:%d" % [String(r["road_key"]), int(r["lane"])]
+		if not by_lane.has(k):
+			by_lane[k] = []
+		(by_lane[k] as Array).append(r)
+	_check("G", not by_lane.is_empty(), "legal movements must produce ribbons")
+
+	var t: Pasture3DRoadType = (net.road_types[0] as Pasture3DRoadType)
+	var worst_end := 0.0
+	var worst_width := 0.0
+	var checked := 0
+	for c in j.connectors:
+		if c == null or not c.allowed():
+			continue
+		var quads: Array = by_lane.get("%s:%d" % [c.from_key, c.from_lane], [])
+		if quads.is_empty():
+			continue
+		var entry := Vector2(c.entry_point().x, c.entry_point().z)
+		var exit_p := Vector2(c.exit_point().x, c.exit_point().z)
+		# How near the ribbon's own extremes come to the connector's endpoints. Measured over every quad
+		# because the quads of one lane's several movements share a key.
+		var near_entry := INF
+		var near_exit := INF
+		for q: Dictionary in quads:
+			for pt in (q["quad"] as PackedVector2Array):
+				near_entry = minf(near_entry, entry.distance_to(pt))
+				near_exit = minf(near_exit, exit_p.distance_to(pt))
+			# One lane wide: the across-road edge of each quad.
+			var qq: PackedVector2Array = q["quad"]
+			worst_width = maxf(worst_width, absf(qq[0].distance_to(qq[1]) - t.lane_width))
+		# Half a lane, because a corner of the end quad sits half a width off the centreline endpoint.
+		worst_end = maxf(worst_end, maxf(near_entry, near_exit) - t.lane_width * 0.5)
+		checked += 1
+	print("    %d movement(s): worst endpoint overshoot %.4f m, worst width error %.6f m"
+			% [checked, worst_end, worst_width])
+	_check("G", checked > 0, "no movement was checked, so [G] measured nothing")
+	_check("G", worst_end < 1e-3,
+			"a ribbon does not reach its connector's endpoints (%.4f m)" % worst_end)
+	_check("G", worst_width < 1e-4,
+			"a ribbon is not one lane wide (%.6f m off %.3f)" % [worst_width, t.lane_width])
+
+	_ran["G"] = true
+	(fx["terrain"] as Node).queue_free()
+
+
 # ---- N ------------------------------------------------------------------------------------------
 
 ## [N] A disabled junction paints nothing.
@@ -437,6 +659,14 @@ func _plan(p_net: Pasture3DRoadNetwork, p_j: Pasture3DRoadJunction) -> Array:
 		by_key[(b as Pasture3DRoadBrush).road_key()] = b
 	return Pasture3DRoadJunctionMarkings.plan_junction(p_j, p_net._arms_for(p_j, by_key),
 			{"default_control": p_net.default_control})
+
+
+## How many primitives of each connector kind a plan holds.
+func _counts(p_prims: Array) -> Dictionary:
+	return {
+		"ribbon": _of_kind(p_prims, Pasture3DRoadJunctionMarkings.Kind.CONNECTOR_RIBBON).size(),
+		"guide": _of_kind(p_prims, Pasture3DRoadJunctionMarkings.Kind.CONNECTOR_GUIDE).size(),
+	}
 
 
 func _of_kind(p_prims: Array, p_kind: int) -> Array:

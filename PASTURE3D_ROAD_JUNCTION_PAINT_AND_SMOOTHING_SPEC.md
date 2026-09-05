@@ -5,10 +5,13 @@
 **P9a-0 BUILT 2026-09-04** (§2.2: the junction surface is a polygon, and every road is trimmed to it).
 Gates `RoadJunctionPolygonGate` (A–G, the planar kernel) and `RoadJunctionGate` (E, J, L, the wiring);
 criterion M is in the polygon gate. Four mutations, all caught — see §2.6.
-**P9a stop bars, crossings and give-way rows BUILT 2026-09-04** (`Pasture3DRoadJunctionMarkings`, gate
-`RoadJunctionPaintGate`, criteria A, B, H, I, N, O, ten mutations).
-**P9a ARM_CONTINUATION is RETIRED, not deferred — see §2.3.** **Connector ribbons and guides
-(§2.4) not started**, and are all that remain of P9a.
+**P9a BUILT 2026-09-04** — stop bars, crossings, give-way rows, connector ribbons and connector guides
+(`Pasture3DRoadJunctionMarkings`, gate `RoadJunctionPaintGate`, criteria A, B, E, F, G, H, I, N, O,
+fifteen mutations). **P9a ARM_CONTINUATION is RETIRED, not deferred — see §2.3.**
+
+**Both features of this document are now built.** What is left is not a phase: LOD (§2.5) puts junction
+paint at tier NEAR only and the host currently builds it at every tier, and the connector overlay's
+overdraw (§2.4) has not been measured on a real scene.
 **P9a-orphans BUILT 2026-09-04** (gate `RoadJunctionOrphanGate`, 7 criteria, 4 mutations) — see §2.6.
 **Revised 2026-09-04** — P9a was scoped as markings drawn *on top of* the existing apron disc. Review
 against the author's expectation ("a polygon built to connect with the ribbons of every road that
@@ -243,10 +246,28 @@ Three primitive kinds, and no more:
   LOWEST, not the highest — a participant the junction has no record for must not silently acquire
   right of way.
 
-- **`CONNECTOR_GUIDE`** — a dashed line along `connector.curve`, emitted only for connectors whose
-  `turn` is `LEFT` or `RIGHT` **and** which cross opposing traffic (`junction.conflicts` already says
-  which). A guide on every connector paints a junction solid white; the conflict list is what makes the
-  set small enough to read.
+- **`CONNECTOR_GUIDE`** — **BUILT 2026-09-04.** A dashed line along `connector.curve`, emitted only for
+  connectors whose `turn` is `LEFT` or `RIGHT` **and** which must give way (`junction.yields_to(id)`
+  non-empty — the directed half of the conflict list, which is the one that means "this movement is the
+  one that has to wait"). A guide on every connector paints a junction solid white; on the gate's
+  fixture that is 12 legal movements narrowed to 6.
+
+  The dashes come from `Pasture3DRoadMarkings.runs()` — called, not reimplemented, so a guide dash and a
+  lane dash cannot drift apart. The curve is sampled with `tessellate_even_length` rather than
+  `tessellate`: the adaptive one puts its samples where the CURVATURE is, which is exactly where a dash
+  needs even spacing, and a dash measured along an unevenly sampled polyline is longer through the
+  straight part of a turn than through its apex.
+
+- **`CONNECTOR_RIBBON`** — **BUILT 2026-09-04.** One lane wide along each legal movement, the width
+  taken from the arm's own cross-section rather than from an option, so a junction of a motorway and a
+  lane does not draw both at the same width. §2.4's overlay recommendation stands: this sits ON the
+  polygon, it does not replace it.
+
+  **The lift is per KIND**, because the three things are stacked rather than side by side: surface,
+  then ribbon at `RIBBON_LIFT`, then paint at `MARKING_LIFT`. `RIBBON_LIFT` is derived from
+  `MARKING_LIFT` rather than written as a second constant, so the ordering stays true if either moves.
+  A single lift would put a guide inside the ribbon it is painted on, and coplanar geometry is decided
+  by float precision, not by draw order.
 
 `allowed_override == OFF` emits nothing for that connector, and no guide. A connector that is not legal
 must not be painted as an invitation.
@@ -364,6 +385,28 @@ Each criterion now records that it RAN TO COMPLETION and the summary fails for a
 generalising to the other gates: `_fail == 0` is only trustworthy alongside "and every criterion
 finished". See [[bench-gate-practices]].
 
+#### Connector ribbons and guides — **BUILT 2026-09-04**, gate `RoadJunctionPaintGate`
+
+| # | Mutation | Caught by |
+|---|---|---|
+| 11 | Guide every legal movement | E — the straight-with-priority control, and the subset check |
+| 12 | Paint forbidden movements | F, both halves |
+| 13 | Fix every ribbon at 3.0 m instead of the lane's width | G |
+| 14 | Snap a dash's START to the nearest tessellation sample | E's painted-length check. **Survived the first round**, when E asserted only WHICH movements were guided. |
+| 15 | Snap a dash's END as well | the same check, at 0.23 m rather than 24.9 m — worth keeping both, since the small one is the one a tolerance would swallow |
+
+**Adding a kind broke two older criteria, silently in principle.** A and B read `plan_junction()` as
+"the stop bars" — true when stop bars were the only kind. Once the plan carried five kinds, B indexed
+`stop_lines[i]` with `i` running over 440 primitives and threw on every iteration past the fourth. It
+was caught only because criterion B then failed to record that it had run (see the completion check
+above). Both now filter by kind. The general point: a criterion that reads a whole collection is
+asserting something about its CONTENTS as well, and that second claim is invisible until the collection
+grows.
+
+**The connector id is on the primitive, not just the road and lane.** One lane feeds several movements,
+so `road:lane` cannot tell a left turn's paint from the straight-ahead's — E's control could not be
+written without it, and it read as a false failure until the id was added.
+
 #### Orphaned junction records — **BUILT 2026-09-04**, gate `RoadJunctionOrphanGate`
 
 Shipped ahead of P9a-0 because it is independent of the polygon and because the polygon could not be
@@ -420,9 +463,9 @@ testing that the override followed it, and reports "cannot tell a remap from luc
 | B | Each bar's midpoint equals its `stop_line.point` to 1e-4 m, and its normal is `heading`. | Change `radius_override`: the trim-back moves and every bar moves with it. A bar that stayed put is reading the wrong boundary. |
 | C | A one-way arm gets **no divider continuation** (no opposing traffic), but still gets edge lines. | Flip it two-way; the divider appears. |
 | D | Continuation offsets equal `Pasture3DRoadMarkings.plan()` on that arm, exactly. | Change `divider_type`; both move together. Asserting a literal offset here would drift with a copied formula — compare against the kernel. |
-| E | Guides are emitted only for turning connectors that appear in `junction.conflicts`. | A T-junction whose left turn conflicts with nothing emits no guide; adding the opposing arm makes one appear. |
-| F | `allowed_override = OFF` removes that connector's ribbon **and** its guide. | INHERIT restores both. |
-| G | A connector ribbon's ends are tangent-continuous with the arm ribbons they meet, compared for **exact** float equality at the shared arc length. | The P5b lesson: an accumulated `s` agrees to six decimals, passes any tolerance, and cracks. |
+| E | **(BUILT)** Guides are emitted only for turning connectors that must give way, and the dashes are `Pasture3DRoadMarkings.runs()`' own. | Guide every legal movement: the straight-ahead-with-priority control fires, and the subset check with it. **And a separate mutation for the dashes** — snapping a dash to the nearest tessellation sample leaves the RIGHT movements guided at the WRONG length, which every other assertion in E passes. That one survived the first round. |
+| F | **(BUILT)** `allowed_override = OFF` removes that connector's ribbon **and** its guide. | INHERIT restores both. Both halves are asserted separately: a kernel that filtered guides but not ribbons would still paint the forbidden turn, in the more visible of the two. |
+| G | **(BUILT, restated)** A connector ribbon lands on its own connector's endpoints and is one lane wide. | The original wording asked for exact-float tangent continuity with the arm ribbons, citing P5b. That bar is met **by construction** and the criterion says so instead of re-measuring it: the ribbon is sampled off `connector.curve`, which the lane solver already built tangent-continuous with both lanes, so there is no second arc-length accumulation to disagree. What the sampling CAN lose is the endpoints — an even-length tessellation that dropped or overshot the last point would detach the ribbon at exactly the join the curve exists to make — so that is what G asserts. Control: fix every ribbon at 3.0 m and the width check fires. |
 | H | **(BUILT)** A crosswalk emits one ladder per arm, its bars spanning exactly that arm's carriageway (not its shoulders), sitting outside the stop bar. | Widen `shoulder_width` alone: the ladder must NOT change width. A ladder that grew is measuring `half_width` instead of the carriageway. |
 | I | **(BUILT)** `GIVE_WAY` triangles appear only on arms that lose priority and whose `effective_control()` is not `SIGNALS`, with the **apex pointing away from the junction** and the row outside the crossing. | Switch the junction to `SIGNALS`: every triangle disappears. Raise the losing arm's `priority` above the other: they move to the other arm rather than vanishing. **Reverse the apex**: the road/no-road assertions cannot see orientation, and a correct row turned round aims the instruction at the traffic already leaving — that mutation survived until the apex check was added. |
 | J | **(P9a-0)** For a 4-arm 90-degree fixture, `plan_footprint` returns a boundary whose vertices are exactly the 8 cut-face corners plus 4 fillet arcs, in angular order, and the polygon is simple (no self-intersection) and closed. | Feed the 45-degree fixture, where `trim = w / sin 45` is larger: the boundary must still be simple. If the convex-hull fallback is missing this is where it self-intersects. |
@@ -588,7 +631,9 @@ nothing" from "measured well": a smoothing pass that did nothing at all would pa
    §2.3.
 5. **P9a crosswalks and give-way triangles** (§5 q3, now in scope — see below). — **BUILT 2026-09-04.**
 6. **P9a connector ribbons and guides**, the largest piece and the only one with a geometry question.
-   — **NOT STARTED.** All that remains of P9a.
+   — **BUILT 2026-09-04.** The geometry question resolved itself: the ribbon is sampled off
+   `connector.curve`, so continuity with the lanes is a property of the curve rather than of this
+   kernel. **This completes P9a, and with P9b it completes this document.**
 
 ---
 
