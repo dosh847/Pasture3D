@@ -227,6 +227,17 @@ bench/GraphLiveNotifyProbe.tscn
 # in the allow-list. Swept from the registry so a new solver is covered the day it appears.
 bench/GraphFrozenSolverGate.tscn
 
+# --- S1: an authored curve as graph geometry (PASTURE3D_SPLINE_GRAPH_SPEC.md) ---
+# Pasture3DSpline is a brush that PAINTS NOTHING, so every criterion is a join rather than a sum: the
+# path arrives world-placed with the widths and heights it was drawn with; an empty key resolves to the
+# HOST's own child, which is what lets a preset be duplicated without every copy carving the original's
+# line; a non-painting brush reserves no layer and joins no layer's sibling set; an edit reaches its
+# consumers and nobody else; and re-resolving an unchanged spline emits nothing, or a graph with a spline
+# in it re-solves on every bake. Each has a control that fails, including the two most misleading ones —
+# `carry_heights` off must publish an EMPTY height array rather than a zero-filled "sea level", and the
+# painting control must SHOW the layer binding whose absence C is asserting.
+bench/SplineSourceGate.tscn
+
 # --- Road system P0: the data model and its resolve chain (PASTURE3D_ROAD_SYSTEM_PROPOSAL.md §11) ---
 # Nothing here touches the terrain — P0 is the model. What it pins is what the later phases build on and
 # could not cheaply revisit: nearest-level resolution, clear-re-inherits (the defect that killed the

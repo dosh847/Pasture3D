@@ -202,7 +202,7 @@ func _init() -> void:
 
 
 func _ready() -> void:
-	if _layer_owner == "":
+	if _layer_owner == "" and _paints():
 		_layer_owner = BRUSH_OWNER_PREFIX + _default_layer_name()
 	add_to_group(BRUSH_GROUP)
 	set_notify_transform(true)
@@ -628,7 +628,9 @@ func _detach_from_current() -> void:
 func _get_configuration_warnings() -> PackedStringArray:
 	var warnings: PackedStringArray = []
 	if not is_instance_valid(terrain):
-		warnings.append("Assign a Pasture3D terrain for this brush to paint into.")
+		warnings.append("Assign a Pasture3D terrain for this brush to paint into." if _paints()
+			else ("Assign a Pasture3D terrain so this spline can derive its key and snap to the "
+				+ "surface."))
 	elif not terrain.data or terrain.data.region_locations.size() == 0:
 		warnings.append("The Pasture3D terrain has no regions yet — add regions in Pasture3D first.")
 	if _get_splines().is_empty() and _wants_own_splines():
@@ -807,19 +809,25 @@ func _on_inspector_property_edited(_property: StringName) -> void:
 func _get_property_list() -> Array[Dictionary]:
 	var props: Array[Dictionary] = []
 	# The real binding: persisted, hidden from the inspector (shown via `tool_layer`).
-	props.append({"name": "_layer_owner", "type": TYPE_STRING, "usage": PROPERTY_USAGE_STORAGE})
-	props.append({"name": "Layer", "type": TYPE_NIL, "usage": PROPERTY_USAGE_GROUP, "hint_string": ""})
-	var names := _brush_layer_names()
-	var cur := _layer_display_name()
-	if not names.has(cur):
-		names.append(cur)
-	props.append({
-		"name": "tool_layer",
-		"type": TYPE_STRING,
-		"hint": PROPERTY_HINT_ENUM,
-		"hint_string": ",".join(names),
-		"usage": PROPERTY_USAGE_EDITOR,
-	})
+	#
+	# Skipped whole for a brush that paints nothing. Not merely hidden: an unlisted STORAGE property is
+	# one a scene cannot carry, so a Pasture3DSpline can never save an owner string that nothing reads and
+	# that a later change to `_paints()` would silently act on.
+	if _paints():
+		props.append({"name": "_layer_owner", "type": TYPE_STRING, "usage": PROPERTY_USAGE_STORAGE})
+		props.append({"name": "Layer", "type": TYPE_NIL, "usage": PROPERTY_USAGE_GROUP,
+				"hint_string": ""})
+		var names := _brush_layer_names()
+		var cur := _layer_display_name()
+		if not names.has(cur):
+			names.append(cur)
+		props.append({
+			"name": "tool_layer",
+			"type": TYPE_STRING,
+			"hint": PROPERTY_HINT_ENUM,
+			"hint_string": ",".join(names),
+			"usage": PROPERTY_USAGE_EDITOR,
+		})
 	# The modifier stack (PASTURE3D_BRUSH_EROSION_SPEC.md §6), on the hosts whose rasteriser runs it.
 	# Declared here rather than as an @export for the reason in the comment above: a dynamic property lands
 	# AFTER the script's own exports, which is where a pipeline belongs — below the shape properties it
@@ -1056,6 +1064,12 @@ func _on_refresh_timer() -> void:
 	_full_dirty = false
 	_dirty_splines = {}
 	_moved_node = false
+	# The non-painting branch sits AFTER the snapshot deliberately: a brush that returned before the
+	# clear above would carry a permanently-set dirty flag and re-arm the timer forever.
+	if not _paints():
+		_refresh_consumers()
+		_last_baked_xform = global_transform
+		return
 	var bake: Callable = (_refresh_owner.bind(_layer_owner, false, []) if full or splines.is_empty()
 			else _refresh_owner_rect.bind(_layer_owner, splines, moved_node))
 	# §14. Both bake paths go through the same driver, because either can be the one that has no cache
@@ -1081,6 +1095,11 @@ func _refresh_button() -> void:
 func refresh(record_undo: bool = false) -> void:
 	if not Engine.is_editor_hint() or not is_configured():
 		return
+	# A brush that paints nothing has nothing of its own to bake. What its edit changed is an INPUT to
+	# somebody else's graph, so the refresh walks outward instead of inward.
+	if not _paints():
+		_refresh_consumers()
+		return
 	if _wants_deferred_bake():
 		await _bake_deferred(_refresh_owner.bind(_layer_owner, false, []), _layer_owner, record_undo)
 		return
@@ -1104,6 +1123,11 @@ func force_bake_modifiers() -> void:
 ## rasteriser each bake is cheap. `extra_clears` lets a rebind also drop a departing tool's footprint.
 func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> void:
 	if not is_configured():
+		return
+	# Also reached by the detach and rebind paths, not only by refresh(). A brush that paints nothing owns
+	# no layer, so there is nothing to clear and nothing to repaint — and `_ensure_layer_for` below would
+	# otherwise CREATE a layer for it as a side effect of asking which one it has.
+	if not _paints():
 		return
 	var sibs := _tools_on_owner(owner)
 	var layer_id := _ensure_layer_for(owner, owner == _layer_owner)
@@ -1918,9 +1942,12 @@ func _tools_on_owner(owner: String) -> Array:
 	var out: Array = []
 	if is_inside_tree():
 		for n in get_tree().get_nodes_in_group(BRUSH_GROUP):
-			if n is Pasture3DTerrainBrush and is_instance_valid(n) and n.terrain == terrain and n._layer_owner == owner:
+			# `_paints()`: a geometry-only brush must never join a layer's sibling set, or every repaint of
+			# that layer would call its empty paint and clear footprints it does not have.
+			if (n is Pasture3DTerrainBrush and is_instance_valid(n) and n.terrain == terrain
+					and n._layer_owner == owner and n._paints()):
 				out.append(n)
-	if owner == _layer_owner and not out.has(self):
+	if _paints() and owner == _layer_owner and not out.has(self):
 		out.append(self)
 	return out
 
@@ -2354,6 +2381,11 @@ func _owns_mask_preview() -> bool:
 ## Returns the layer index, or -1 on builds/terrains without the layers Tool API (destructive fallback).
 func _ensure_layer_for(owner: String, sync_blend: bool) -> int:
 	if not terrain or not terrain.data:
+		return -1
+	# This function CREATES on demand, so merely asking it which layer we own is enough to make one. A
+	# brush that paints nothing must never reserve a layer: the symptom is an empty "Splines" layer that
+	# every other brush's Layer dropdown then offers as somewhere to paint.
+	if not _paints():
 		return -1
 	var mt := _map_type()
 	var nm := owner.trim_prefix(BRUSH_OWNER_PREFIX)
@@ -3453,6 +3485,11 @@ func find_pool_manager() -> Node:
 ## re-asks it in its configuration warnings — changing a brush's blend mode AFTER the water exists
 ## is the case a creation-time dialog alone would miss, and it is the more likely one.
 func brush_raises() -> bool:
+	# A brush that writes nothing at all cannot bury anything, whatever its blend mode reads. Today this
+	# is already false through the map-type test below, but only by accident of the default blend — the
+	# rule is that it does not paint, so the rule is what is written.
+	if not _paints():
+		return false
 	# A brush that does not write height cannot bury anything. Pasture3DSplat paints control/colour,
 	# so it is silent here by construction rather than by being named in a list.
 	if _map_type() != PASTURE_3D_MAPTYPE_HEIGHT:
@@ -5941,6 +5978,26 @@ func _map_type() -> int:
 	return PASTURE_3D_MAPTYPE_HEIGHT
 
 
+## Does this brush write into the terrain? False for a node that exists only to PUBLISH GEOMETRY —
+## Pasture3DSpline, whose whole job is to be authored as a curve and read by a graph.
+##
+## Declared as a hook rather than left to an empty `_paint_spline` override, because painting is not the
+## part that has to be suppressed. An empty paint still reserves a tool layer, still joins the sibling
+## repaint of every other brush on that layer, and still shows a Layer dropdown, an Add Water button and
+## a blend mode that decide nothing. Those are all layer-binding consequences, and this is the one
+## question they all hang off.
+##
+## What a `false` brush KEEPS is everything that made it worth being a brush: the gizmo, point pick /
+## add / remove, tangent handles, surface snap, corner rounding, the nameplate, Brush Stats, Make
+## Splines Unique and the placement tool. All of those are keyed on this class, and re-implementing them
+## on a bare Node3D is the cost this hook exists to avoid.
+##
+## See PASTURE3D_SPLINE_GRAPH_SPEC.md §4.2 for the site list, and the counter-argument on
+## Pasture3DSimPass — three of whose four objections to extending this base are answered by this hook.
+func _paints() -> bool:
+	return true
+
+
 ## Default tool-layer name for a fresh node of this type (e.g. "Mounds"). Used to build _layer_owner.
 func _default_layer_name() -> String:
 	return "Brush"
@@ -6043,6 +6100,11 @@ func _validate_property(property: Dictionary) -> void:
 		"_make_unique_btn":
 			if _shared_curve_spline_names().is_empty():
 				property.usage &= ~PROPERTY_USAGE_EDITOR
+		"_add_water_btn", "force_gdscript_raster", "log_bake_timing":
+			# Water is authored inside a brush's loop, and the other two describe a bake. A brush that
+			# paints nothing has no basin to fill and no rasteriser to A/B.
+			if not _paints():
+				property.usage &= ~PROPERTY_USAGE_EDITOR
 
 
 ## Give each of this brush's splines that shares a Curve3D a private copy (undoable, one action for all
@@ -6077,6 +6139,64 @@ func make_splines_unique() -> void:
 	# `curve_changed` already rebinds and re-bakes each Path3D we touched (see `_on_path_curve_changed`),
 	# so all that is left is telling every brush the sharing picture moved.
 	_refresh_group_warnings()
+
+
+## Re-resolve and re-bake every brush whose graph reads a spline of THIS brush.
+##
+## The counterpart to `_refresh_owner` for a brush that paints nothing. `_refresh_owner` walks inward —
+## my layer, my siblings, my footprint. This walks outward: what my edit changed is an INPUT to somebody
+## else's graph, and only that somebody can act on it.
+##
+## RESOLUTION HAPPENS HERE rather than being left to the consumer's own bake, because the consumer may be
+## FROZEN. Assigning the new path is what emits `changed` through the graph and marks the modifier stale;
+## a frozen modifier that is never told serves the old field forever with nothing on screen saying so.
+## After this, a LIVE consumer re-solves on the refresh scheduled below and a FROZEN one raises its
+## "press Bake Graph" warning — which is the correct outcome, and the one that reads as a bug when it is
+## not explained. Pasture3DGraphNodeSplineSource.node_warnings says it at the node too.
+##
+## Matched by KEY, so this is generic: it would serve a Mound read through a Shape Source just as well.
+## Only the non-painting path calls it today. A painting brush already re-bakes itself when edited, and
+## making its consumers follow as well is a behaviour change that belongs to whoever wants it rather than
+## a side effect of adding a spline.
+## NOT gated on `Engine.is_editor_hint()`, deliberately. The editor-only half of the work is the
+## re-bake, and `_schedule_refresh` already declines to queue one outside the editor; the RESOLUTION half
+## is plain data and must run wherever it is called from, or a headless gate calling this measures
+## nothing and reports a pass for it (gate-pass-can-mean-nothing-ran).
+func _refresh_consumers() -> void:
+	if not is_inside_tree():
+		return
+	var key := shape_key()
+	for n in get_tree().get_nodes_in_group(BRUSH_GROUP):
+		if n == self or not (n is Pasture3DTerrainBrush) or not is_instance_valid(n):
+			continue
+		var b := n as Pasture3DTerrainBrush
+		if b.terrain != terrain or not _brush_reads_spline(b, key):
+			continue
+		for m in b.modifiers:
+			var mg := m as Pasture3DNodeGraph
+			if mg != null and mg.graph != null:
+				Pasture3DGraphSources.resolve(mg.graph, b)
+		b._schedule_refresh()
+
+
+## Does `p_brush`'s modifier stack hold a graph with a Spline Source that names `p_key`?
+##
+## An EMPTY key also counts, but only when we are the brush's own child: an empty key resolves to the
+## host's first Pasture3DSpline child (§5.1), so it names us exactly when we are that child. Treating an
+## empty key as "matches everything" would re-bake every preset in the scene on every spline edit.
+func _brush_reads_spline(p_brush: Pasture3DTerrainBrush, p_key: String) -> bool:
+	for m in p_brush.modifiers:
+		var mg := m as Pasture3DNodeGraph
+		if mg == null or mg.graph == null:
+			continue
+		for node in mg.graph.nodes:
+			if node == null or node.op() != &"spline_source":
+				continue
+			if node.spline_key == p_key:
+				return true
+			if String(node.spline_key).is_empty() and get_parent() == p_brush:
+				return true
+	return false
 
 
 func _paint_spline(_path: Path3D) -> void:
