@@ -143,39 +143,38 @@ int Pasture3DPathGeom::vertex_before(double p_s) const {
 	return last;
 }
 
-double Pasture3DPathGeom::half_width_at(double p_s) const {
-	if (width.empty()) {
-		return 1.0;
+// The rule, written once. Both index clamps matter: a CLOSED ring is one vertex longer than the arrays
+// built from the open point list, so the closing segment reads the last entry at both ends — which is the
+// first vertex's value, because a closed ring's last point IS its first point.
+double Pasture3DPathGeom::lerp_vertex(const std::vector<float> &p_v, double p_s) const {
+	if (p_v.empty()) {
+		return std::numeric_limits<double>::quiet_NaN();
 	}
-	if (width.size() == 1) {
-		return width[0];
+	if (p_v.size() == 1) {
+		return p_v[0];
 	}
 	const int i = vertex_before(p_s);
-	const int last = (int)width.size() - 1;
-	const double a = width[std::min(i, last)];
-	const double b = width[std::min(i + 1, last)];
-	const double seg = cum[i + 1] - cum[i];
-	const double f = seg <= 0.0 ? 0.0 : std::clamp((p_s - cum[i]) / seg, 0.0, 1.0);
+	const int last = (int)p_v.size() - 1;
+	const double a = p_v[(size_t)std::min(i, last)];
+	const double b = p_v[(size_t)std::min(i + 1, last)];
+	const double seg = cum[(size_t)(i + 1)] - cum[(size_t)i];
+	const double f = seg <= 0.0 ? 0.0 : std::clamp((p_s - cum[(size_t)i]) / seg, 0.0, 1.0);
 	return a + (b - a) * f;
+}
+
+double Pasture3DPathGeom::half_width_at(double p_s) const {
+	// 1.0, not NaN: a path with no widths still has a meaningful `t` if you read it as signed metres.
+	// This is the fallback `height_at` deliberately does NOT share.
+	const double v = lerp_vertex(width, p_s);
+	return std::isnan(v) ? 1.0 : v;
 }
 
 // Deliberately NOT `half_width_at`'s twin with a different fallback. The fallbacks differ in kind: a path
 // with no widths still HAS a meaningful `t` if you read it as metres, so 1.0 is a usable answer. A path
 // with no heights has no elevation at all, and any finite answer would be invented.
 double Pasture3DPathGeom::height_at(double p_s) const {
-	if (height.empty()) {
-		return std::numeric_limits<double>::quiet_NaN();
-	}
-	if (height.size() == 1) {
-		return height[0];
-	}
-	const int i = vertex_before(p_s);
-	const int last = (int)height.size() - 1;
-	const double a = height[std::min(i, last)];
-	const double b = height[std::min(i + 1, last)];
-	const double seg = cum[i + 1] - cum[i];
-	const double f = seg <= 0.0 ? 0.0 : std::clamp((p_s - cum[i]) / seg, 0.0, 1.0);
-	return a + (b - a) * f;
+	// No fallback at all — `lerp_vertex`'s NaN is exactly the answer wanted here.
+	return lerp_vertex(height, p_s);
 }
 
 // ---- the query --------------------------------------------------------------------------------------

@@ -11,6 +11,9 @@
 
 #include "constants.h"
 #include "generated_texture.h"
+// Pasture3DPathCarveParams is not named in this header, but path_carve_grid forwards to a kernel
+// declared there and the enum values are what its callers pass; including it keeps the two together.
+#include "pasture_3d_path_carve.h"
 
 class Pasture3D;
 
@@ -287,6 +290,23 @@ public:
 	static Dictionary path_query_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
 			const int p_gw, const int p_gh, const Rect2 &p_rect, const double p_unreachable,
 			const double p_max_distance, const PackedFloat32Array &p_heights = PackedFloat32Array());
+
+	// Carve one cross-section along a PATH (PASTURE3D_SPLINE_GRAPH_SPEC.md §7.1). Returns { ok, height,
+	// bed, flank, cut, fill }: the composited surface plus four coverage masks, which exist so erosion can
+	// be wired to weather AROUND a carve rather than through it.
+	//
+	// The dozen parameters arrive as ONE PackedFloat32Array rather than a dozen arguments, in the order
+	// Pasture3DGraphNodePathCarve.native_lower() writes them — the same sixteen-slot layout the lowered
+	// program uses. A twelve-argument binding and a sixteen-float program block would be two orderings of
+	// one thing, and the failure when they drifted would be a carve that silently read `falloff` as a
+	// slope angle.
+	//
+	// `p_profile` is a 0..1 ramp with index 0 at the FLAT EDGE reading 1 and the last index at the FLANK
+	// FOOT reading 0. The caller always bakes a full table — a user Curve or the analytic cosine default.
+	static Dictionary path_carve_grid(const PackedVector2Array &p_points,
+			const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights, const bool p_closed,
+			const PackedFloat32Array &p_surface, const int p_gw, const int p_gh, const Rect2 &p_rect,
+			const PackedFloat32Array &p_profile, const PackedFloat32Array &p_params);
 
 	// Rasterise a PATH as a [0,1] mask (PASTURE3D_GRAPH_GEOMETRY_PORTS_SPEC.md §5.2). TWO RULES chosen by
 	// `p_closed`, not one rule with a parameter: an OPEN path masks a corridor — 1 on the carriageway,

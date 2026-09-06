@@ -249,6 +249,22 @@ bench/SplineSourceGate.tscn
 # NO-SIGNAL rather than a pass when there is no local RenderingDevice. Run this one WITHOUT --headless.
 bench/PathHeightGate.tscn
 
+# S3 - Path Carve: one cross-section cut along a path (spec §7). This is Ridge's and Trough's mathematics
+# written once, in C++, as a node — so the criteria are all about whether the C++ and the [Dev/GD] oracle
+# it was lifted from still describe the same surface, on four cross-sections that take different branches
+# (a peaked crest never touches the flat-top case; a bed flips the sign of the offset and the meaning of
+# the blend). [B] MEASURES the flank's angle off the output rather than asserting it from the parameter
+# that produced it, and does it at two angles, because one angle passes on a kernel that ignores it.
+#
+# The fixture's terrain SLOPES and is bumpy on purpose: over flat ground a two-reference drape and a naive
+# fixed-height skirt are the same surface, so the property the kernel exists for would go untested.
+#
+# [E] has a GPU half with the same limitation PathHeightGate [D] has — there is no carve mode in the
+# shader, so a Path Carve graph must BAIL rather than serve channel 0. It asserts the refusal with a
+# control proving the GPU route is live, and reports NO-SIGNAL headless. Run this one WITHOUT --headless
+# to cover that half; everything else is green headless.
+bench/PathCarveGate.tscn
+
 # --- Road system P0: the data model and its resolve chain (PASTURE3D_ROAD_SYSTEM_PROPOSAL.md §11) ---
 # Nothing here touches the terrain — P0 is the model. What it pins is what the later phases build on and
 # could not cheaply revisit: nearest-level resolution, clear-re-inherits (the defect that killed the

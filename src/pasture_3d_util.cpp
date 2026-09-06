@@ -10,6 +10,7 @@
 
 #include "logger.h"
 #include "pasture_3d_curvature.h"
+#include "pasture_3d_path_carve.h"
 #include "pasture_3d_path_query.h"
 #include "pasture_3d_road_grade.h"
 #include "pasture_3d_depression_filling.h"
@@ -1244,6 +1245,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "path_distance", GRAPH_OP_PATH_QUERY },
 		{ "path_mask", GRAPH_OP_PATH_MASK },
 		{ "road_grade", GRAPH_OP_ROAD_GRADE },
+		{ "path_carve", GRAPH_OP_PATH_CARVE },
 	};
 	Dictionary d;
 	for (const auto &e : k_ops) {
@@ -1664,6 +1666,14 @@ Dictionary Pasture3DUtil::path_query_grid(const PackedVector2Array &p_points,
 		const double p_unreachable, const double p_max_distance, const PackedFloat32Array &p_heights) {
 	return godot::path_query_grid(p_points, p_widths, p_gw, p_gh, p_rect, p_unreachable, p_max_distance,
 			p_heights);
+}
+
+Dictionary Pasture3DUtil::path_carve_grid(const PackedVector2Array &p_points,
+		const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights, const bool p_closed,
+		const PackedFloat32Array &p_surface, const int p_gw, const int p_gh, const Rect2 &p_rect,
+		const PackedFloat32Array &p_profile, const PackedFloat32Array &p_params) {
+	return godot::path_carve_grid(p_points, p_widths, p_heights, p_closed, p_surface, p_gw, p_gh, p_rect,
+			p_profile, path_carve_params_from(p_params.ptr(), p_params.size()));
 }
 
 PackedFloat32Array Pasture3DUtil::path_mask_grid(const PackedVector2Array &p_points,
@@ -2240,6 +2250,10 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("path_query_grid", "points", "widths", "gw", "gh", "rect", "unreachable",
 					"max_distance", "heights"),
 			&Pasture3DUtil::path_query_grid, DEFVAL(PackedFloat32Array()));
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("path_carve_grid", "points", "widths", "heights", "closed", "surface", "gw", "gh",
+					"rect", "profile", "params"),
+			&Pasture3DUtil::path_carve_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("path_mask_grid", "points", "widths", "closed", "gw", "gh", "rect", "width_scale",
 					"feather", "invert"),

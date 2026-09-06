@@ -376,6 +376,24 @@ func _segment_distance(p_seg: int, p_at: Vector2) -> float:
 	return p_at.distance_to(a + ab * f)
 
 
+## Interpolate ANY per-vertex array at arc length `p_s`, by the rule half_width_at and height_at use.
+##
+## Public wrapper on `_lerp_at`. S3's carve interpolates a FOURTH per-vertex array — the terrain height
+## under each path vertex — and re-deriving "which segment is s in" in the oracle would be a second rule
+## that agrees with this one until a closed ring's clamped last vertex made it not. NAN for an empty
+## array: every caller supplies its own meaning for "this path carries none of that", and they do not
+## agree (a width falls back to 1.0, a height must not fall back at all).
+##
+## Mirrors Pasture3DPathGeom::lerp_vertex, which is the same rule in C++.
+func lerp_vertex(p_values: PackedFloat32Array, p_s: float) -> float:
+	if p_values.is_empty():
+		return NAN
+	if p_values.size() == 1:
+		return p_values[0]
+	_ensure()
+	return _lerp_at(p_values, p_s)
+
+
 ## Interpolate a per-vertex array at arc length `p_s`. Shared by half_width_at and height_at so the two
 ## cannot drift apart on how they handle a short array or an s past the end.
 func _lerp_at(p_values: PackedFloat32Array, p_s: float) -> float:

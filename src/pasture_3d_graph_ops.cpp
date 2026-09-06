@@ -1,5 +1,7 @@
 #include "pasture_3d_graph_ops.h"
 
+#include "pasture_3d_path_carve.h"
+
 #include "pasture_3d_road_grade.h"
 #include "pasture_3d_distance_transform.h"
 #include "pasture_3d_morphology.h"
@@ -1017,6 +1019,32 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				if (ch_h) {
 					const PackedFloat32Array a = res["height"];
 					if (a.size() == n) std::copy_n(a.ptr(), n, ch_h);
+				}
+			} break;
+
+			case GRAPH_OP_PATH_CARVE: {
+				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
+				// PASS THE SURFACE THROUGH when there is no path, for the reason ROAD_GRADE does: an
+				// unresolved Spline Source is a normal state, and a carve that answered zeros while a
+				// spline was being renamed would flatten the terrain to sea level. The kernel makes the
+				// same choice for an empty geometry, so this is the `in_g == -1` half of it.
+				if (geo == nullptr || geo->geom.is_empty()) {
+					std::copy_n(in_arr.ptr(), n, g_ptr);
+					break;
+				}
+				// Through the SAME unpacker the Pasture3DUtil binding uses, and reading the RESOLVED P[]
+				// rather than the program's params arrays, so a wire driving `offset` reaches the kernel.
+				Dictionary res = path_carve_grid_geom(geo->geom, in_arr, p_gw, p_gh, p_rect,
+						p_prog.luts[(size_t)s], path_carve_params_from(P, 16));
+				const PackedFloat32Array h_arr = res["height"];
+				if (h_arr.size() == n) std::copy_n(h_arr.ptr(), n, g_ptr);
+				// bed / flank / cut / fill are channels 1-4, written only where a port asks for them.
+				static const char *ch_names[4] = { "bed", "flank", "cut", "fill" };
+				for (int c = 0; c < 4; c++) {
+					float *dst = want_aux(c + 1);
+					if (!dst) continue;
+					const PackedFloat32Array a = res[ch_names[c]];
+					if (a.size() == n) std::copy_n(a.ptr(), n, dst);
 				}
 			} break;
 

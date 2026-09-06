@@ -89,6 +89,7 @@ enum GraphCellOpType {
 	GRAPH_OP_PATH_QUERY = 57, // FILTER grid: distance / s / t / height from in_g (4 outputs)
 	GRAPH_OP_PATH_MASK = 58, // FILTER grid: a [0,1] corridor or region mask from in_g (1 output)
 	GRAPH_OP_ROAD_GRADE = 59, // SOLVER grid: cut a road into in0 along in_g (6 outputs)
+	GRAPH_OP_PATH_CARVE = 60, // SOLVER grid: cut one cross-section into in0 along in_g (5 outputs)
 };
 
 // Blend modes — sync with Pasture3DGraphNodeBlend.Mode { ADD, SUB, MUL, MAX, MIN } (0..4). Prefixed

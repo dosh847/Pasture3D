@@ -1,7 +1,7 @@
 # Pasture3D Spline & Graph Geometry Operations Specification
 
 **Document:** `PASTURE3D_SPLINE_GRAPH_SPEC.md`
-**Status:** **S1 + S2 BUILT 2026-09-05** (`SplineSourceGate` 6/6, `PathHeightGate` 4/4 — [D] needs a windowed run). S3–S8 specified, unbuilt.
+**Status:** **S1 + S2 + S3 BUILT 2026-09-05** (`SplineSourceGate` 6/6, `PathHeightGate` 4/4, `PathCarveGate` 5/5 — [D] and [E] respectively need a windowed run for their GPU halves; both verified windowed). S4–S8 specified, unbuilt.
 **Target:** Pasture3D Terrain Graph + brush system (Godot 4.7 GDExtension, C++20, GDScript)
 **Builds on:** `PASTURE3D_GRAPH_GEOMETRY_PORTS_SPEC.md` (the PATH port, the geometry table, §8.1 Shape
 Source, §8.2 rivers) — this document is the general-geometry half of the family that spec's §1 lists and
@@ -604,6 +604,32 @@ ones that break the compile-time model. §8.4.
 
 ---
 
+### 7.4 What S3 built differently: no ADD blend, and no GPU mode
+
+Two departures from §7.1, both deliberate, both recorded here rather than left to be rediscovered as gaps.
+
+**There is no ADD blend.** §7.1 lists REPLACE / ADD / MAX / MIN by analogy with the brush blends, but the
+analogy does not survive contact with the kernel: a brush stamp computes a shape in its own space and ADD
+is what puts it onto the ground, whereas Path Carve's cross-section is **already draped onto the incoming
+surface** — `carved = ground + diff * p`. ADD would therefore be `ground + (carved - ground)`, byte for
+byte REPLACE. Offering both would advertise a difference that cannot exist, and a user who picked the wrong
+one would find no fault to report. The three that remain differ genuinely: REPLACE takes the carve, MAX
+keeps whichever is higher (a ridge that never digs), MIN whichever is lower (a channel that never dams).
+
+**There is no GPU mode**, for the reason §6.4 gives at length and one of its own. `GRAPH_OP_PATH_CARVE`
+lands in the GPU evaluator's `default:` case beside `GRAPH_OP_ROAD_GRADE`, so a graph containing a carve
+drops to the CPU whole. That is not only the channel guard — the carve reads a **geometry table entry**,
+which is a sideband the GPU plan has no representation for at all, exactly as Road Grade does; writing one
+is its own phase, and doing it for one op would leave the other two path nodes behind. `PathCarveGate` [E]
+asserts the **bail**, with a control proving the GPU route was live when it bailed, so a guard weakened
+without a shader behind it is a red gate rather than a canyon quietly graded to a distance field.
+
+What was *not* compromised is native lowering. `blocks_native()` is graph-wide, so a carve that refused to
+lower would drag every erosion and noise node beside it onto the GDScript evaluator; [E]'s first half is
+what holds that line, and its control is that the lowered program actually moved the ground.
+
+---
+
 ## 8. The geometry pre-pass — how PATH→PATH nodes lower
 
 ### 8.1 The problem, precisely
@@ -852,7 +878,7 @@ silent criteria — a criterion that threw before asserting must be reported as 
 | :--- | :--- | :--- |
 | **S1** ✅ | `Pasture3DSpline` (§4), the `_paints()` hook and its sites, `Spline Source` (§5), `Pasture3DGraphSources.resolve_splines`, consumer refresh, palette entry. **No new maths, no C++.** BUILT — see §5.4 for the three places the build differs from what is written above. | `SplineSourceGate`: [A] the published path is world-placed, carries per-vertex widths and (when `carry_heights`) heights — control: a spline offset from the origin whose local points would look plausible at the origin; [B] the empty key resolves to the host's own child, and a **duplicated** brush resolves to its own — control: a typed key does not follow the duplicate; [C] a non-painting brush reserves no layer and appears in no sibling set — control: the same fixture with `_paints()` true does; [D] moving a point re-bakes the consumer — control: an unrelated brush is not re-baked; [E] re-resolving an unchanged spline does not bump the revision — control: moving a point does; [F] `Pasture3DSpline` is absent from the Shape Source dropdown and present in the Spline Source one. |
 | **S2** ✅ | Heights in `Pasture3DPathGeom`, `GraphGeomEntry` flatten, the GPU SSBO array, `Path Distance`'s fourth channel (§6). BUILT — the SSBO array was NOT, see §6.4. | `PathHeightGate`: [A] `height_at` matches `Pasture3DGraphPath.height_at` on a sloped path, CPU / GPU / oracle — control: a flat path is not what is being measured (assert the range is non-zero); [B] a path with no heights reads NaN everywhere, and NaN survives to the output rather than becoming 0 — control: the same fixture with heights reads finite; [C] the appended channel does not move ports 0-2 — control: the pre-change expected values, hard-coded; [D] **replaces [A]'s GPU half**: a graph wired to `height` makes the GPU evaluator bail rather than serving it channel 0 — control: the channel-0 graph must return a field, or there is no RenderingDevice and the criterion reports NO-SIGNAL instead of a pass. |
-| **S3** | `Path Carve` (§7.1): the C++ kernel (`src/pasture_3d_path_carve.cpp`), `Pasture3DUtil.path_carve_grid` + the `_geom` overload, `GRAPH_OP_PATH_CARVE`, CPU lowering, GPU mode, the production node and its `[Dev/GD]` oracle. Follows `PASTURE3D_NODE_ACCELERATION_GUIDE.md` §2 steps 0-6 verbatim. | `PathCarveGate`: [A] native vs oracle on four cross-sections (peaked crest, flat crest, V bed, flat bed) over sloping ground — control: a zero-offset carve changes nothing, and a control that the fixture is not flat; [B] SLOPE_ANGLE reaches the ground at the stated angle — measured, not asserted from the parameter (`check-derived-values-outside-the-chain`); [C] the five channels are distinct and none is constant; [D] `width_source = PATH` produces a carve that widens where the path widens — control: CONSTANT does not; [E] GPU parity, or an explicit refusal that is *tested to refuse*. |
+| **S3** ✅ | `Path Carve` (§7.1): the C++ kernel (`src/pasture_3d_path_carve.cpp`), `Pasture3DUtil.path_carve_grid` + the `_geom` overload, `GRAPH_OP_PATH_CARVE`, CPU lowering, GPU mode, the production node and its `[Dev/GD]` oracle. Follows `PASTURE3D_NODE_ACCELERATION_GUIDE.md` §2 steps 0-6 verbatim. BUILT — with two departures, see §7.4. | `PathCarveGate`: [A] native vs oracle on four cross-sections (peaked crest, flat crest, V bed, flat bed) over sloping ground — control: a zero-offset carve changes nothing, and a control that the fixture is not flat; [B] SLOPE_ANGLE reaches the ground at the stated angle — measured, not asserted from the parameter (`check-derived-values-outside-the-chain`); [C] the five channels are distinct and none is constant; [D] `width_source = PATH` produces a carve that widens where the path widens — control: CONSTANT does not; [E] GPU parity, or an explicit refusal that is *tested to refuse*. |
 | **S4** | The geometry pre-pass (§8.2-8.3): `eval_path`, the PATH-sub-DAG topological order in `compile_graph_program`, the cache. Plus `Path Width` (§7.3) as its first customer. | `PathPrePassGate`: [A] a `Spline Source → Path Width → Path Carve` chain lowers **natively** and matches the GDScript evaluator — control: the same graph with the pre-pass disabled falls to GDScript, proving the route was actually taken (`graph-gpu-bail-is-graph-wide`: only a direct native call proves it); [B] fanout is one table entry for two consumers of one produced path; [C] `eval_path` is not re-run when nothing changed — count the calls — control: editing the width does re-run it. |
 | **S5** | The reshape family (§7.4): five PATH→PATH nodes, metres not fractions, stable seeds. | `PathShapeGate`: [A] each node changes the path — control: at zero strength each is the identity, byte for byte; [B] the same seed twice gives the same path, and a different seed a different one; [C] arc length after `Path Resample` at 1 m step is within a cell of the input's; [D] `Meanderize` with `remove_loops` produces a non-self-intersecting path — control: without it, on a fixture chosen to loop, it does not. |
 | **S6** | **Ridge and Trough rebuilt** (§9): reparent onto `Pasture3DPlow`, the preset, loop auto-fit + Fit to Splines, the `_set` migration shim, deletion of `stamp_ridge_line` / `stamp_trough_line` and the old bodies. | `SplineBrushPresetGate`: [A] a fresh Ridge bakes a raised crest along its child spline without any wiring — control: with the Spline Source unwired it bakes nothing, not a wall; [B] auto-fit grows the loop when the spline leaves it and **never shrinks** — control: a spline pulled well inside leaves the loop alone; [C] `Fit to Splines` is one undo action that restores both loop and terrain; [D] a migrated legacy Ridge's crest line is within 0.05 m of the old rasteriser's and its flank reach within one cell — controls: the fixture is not flat, and the *unmigrated* parameters produce a measurably different surface; [E] a duplicated Ridge carves its own spline, not the original's; [F] the deleted kernels are gone — `ClassDB` no longer exposes `stamp_ridge_line`; [G] **Add Water on a rebuilt Trough still builds a `Pasture3DStream`, not a `Pasture3DPool`** (§12.2) — control: Add Water on a plain Plow still builds a Pool, so the test is measuring the override and not a blanket change. |

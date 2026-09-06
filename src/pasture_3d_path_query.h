@@ -89,6 +89,16 @@ struct Pasture3DPathGeom {
 	bool build(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
 			const PackedFloat32Array &p_heights = PackedFloat32Array());
 
+	// Interpolate ANY per-vertex array at arc length `p_s`, by the rule `half_width_at` and `height_at`
+	// both use: find the segment `p_s` falls in, lerp its two ends, clamp the index at both ends. NaN for
+	// an empty array — every caller supplies its own meaning for "this path carries none of that", and
+	// they do not agree (a width falls back to 1.0, a height must not fall back at all).
+	//
+	// Public because S3's carve interpolates a FOURTH per-vertex array — the terrain height under each
+	// path vertex — and re-deriving "which segment is `s` in" there would be a second rule that agrees
+	// with this one until a closed ring's clamped last vertex made it not.
+	double lerp_vertex(const std::vector<float> &p_v, double p_s) const;
+
 	// Half-width at arc length `p_s`, interpolated between the vertices either side. 1.0 when the path
 	// carries no widths, which makes `t` read as signed METRES — the useful degenerate case.
 	double half_width_at(double p_s) const;
@@ -116,10 +126,12 @@ struct Pasture3DPathGeom {
 	// lives only in a gate drifts from the thing it defines.
 	Pasture3DPathHit nearest_brute(double p_x, double p_z) const;
 
+	// The vertex index `p_s` sits at or after. Public alongside `lerp_vertex` for the same reason.
+	int vertex_before(double p_s) const;
+
 private:
 	Pasture3DPathHit resolve(double p_x, double p_z, const int *p_cand, int p_count) const;
 	double segment_distance(int p_seg, double p_x, double p_z) const;
-	int vertex_before(double p_s) const;
 };
 
 // Rasterise distance / s / t over a grid. Cell CENTRES over p_rect, matching graph_cell_to_world and the
