@@ -63,6 +63,12 @@ struct Pasture3DPathHit {
 struct Pasture3DPathGeom {
 	std::vector<float> px, pz; // vertices, world metres
 	std::vector<float> width; // half-width per vertex; empty means 1.0 everywhere
+	// Per-vertex elevation in metres. EMPTY means this path says WHERE and not HOW HIGH, and that is a
+	// state three different sources produce for three different reasons: a hand-authored fixture that
+	// never had a Y, a Pasture3DSpline with `carry_heights` off, and a road whose vertical alignment is
+	// carried in `profile` instead. Zero-filling on the way in would turn all three into "sea level",
+	// which is a plausible-looking wrong answer and the harder kind to notice.
+	std::vector<float> height;
 	std::vector<double> cum; // cumulative arc length, prefix-summed once in build()
 	bool closed = false;
 
@@ -80,11 +86,19 @@ struct Pasture3DPathGeom {
 
 	// Flatten a PATH into this struct and build the index. False (and the struct left empty) for fewer
 	// than two points, which is a normal state — an unresolved Road Source — and never an error.
-	bool build(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths);
+	bool build(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
+			const PackedFloat32Array &p_heights = PackedFloat32Array());
 
 	// Half-width at arc length `p_s`, interpolated between the vertices either side. 1.0 when the path
 	// carries no widths, which makes `t` read as signed METRES — the useful degenerate case.
 	double half_width_at(double p_s) const;
+
+	// Elevation at arc length `p_s`, interpolated between the vertices either side. NaN when the path
+	// carries no heights — NOT 0, and not `unreachable_distance`. NaN is the vocabulary's "no data" in a
+	// HEIGHT grid (PASTURE3D_NODE_VOCABULARY.md §1), so it propagates through arithmetic instead of
+	// quietly grading something to sea level, and it is the one value a downstream node cannot mistake
+	// for a measurement.
+	double height_at(double p_s) const;
 
 	// The nearest point on the polyline. `r_scratch` is a per-thread candidate buffer reused across cells
 	// so a grid query allocates nothing in its inner loop.
@@ -115,9 +129,14 @@ private:
 // fills distance with `p_unreachable` and s/t with 0 — never 0 distance, which would mean every cell is on
 // the road and would make a downstream Road Grade flatten the terrain (spec §4.3).
 //
-// Returns { ok: bool, distance, s, t }; ok is false only for a degenerate grid.
+// `height` is the fourth channel: `height_at(s)` off the same hit, NaN where the path carries no heights
+// and NaN over the whole grid for an empty path. Not `p_unreachable` there — that is a DISTANCE, and ten
+// kilometres reads as a perfectly plausible elevation.
+//
+// Returns { ok: bool, distance, s, t, height }; ok is false only for a degenerate grid.
 Dictionary path_query_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
-		int p_gw, int p_gh, const Rect2 &p_rect, double p_unreachable, double p_max_distance);
+		int p_gw, int p_gh, const Rect2 &p_rect, double p_unreachable, double p_max_distance,
+		const PackedFloat32Array &p_heights = PackedFloat32Array());
 
 // The same query against a geometry that is ALREADY BUILT (P2c). The graph evaluator holds one
 // Pasture3DPathGeom per geometry-table entry for the whole bake, so a road read by four slots is indexed

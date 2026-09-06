@@ -1,6 +1,6 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
-# Pasture3DGraphNodePathDistance — turns a PATH into three fields: distance, s and t (§8).
+# Pasture3DGraphNodePathDistance — turns a PATH into four fields: distance, s, t and height (§8).
 #
 # ---- THE PRODUCTION NODE. THE MATHS IS IN C++ ----
 #
@@ -61,7 +61,7 @@ func native_lower() -> Dictionary:
 
 
 func native_out_count() -> int:
-	return 3 # distance, s, t
+	return 4 # distance, s, t, height
 
 
 func role() -> Role:
@@ -85,17 +85,20 @@ func input_port_types() -> PackedInt32Array:
 
 
 func output_count() -> int:
-	return 3
+	return 4
 
 
+## APPENDED, never inserted. Port indices are what a saved graph's wires are stored as, so putting
+## `height` anywhere but last would silently re-aim every existing wire one port along.
 func output_names() -> PackedStringArray:
-	return PackedStringArray(["distance", "s", "t"])
+	return PackedStringArray(["distance", "s", "t", "height"])
 
 
 ## `distance` and `s` are metres, so HEIGHT-typed rather than MASK: a mask is [0,1] by contract and these
 ## two are not. `t` is normalised but SIGNED and unbounded off the carriageway, which is also not a mask.
+## `height` is metres above sea level, which is what HEIGHT means most literally of the four.
 func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.HEIGHT, PortType.HEIGHT])
+	return PackedInt32Array([PortType.HEIGHT, PortType.HEIGHT, PortType.HEIGHT, PortType.HEIGHT])
 
 
 func reads_paths() -> bool:
@@ -120,8 +123,12 @@ func eval_grid_channels(_p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect:
 	# what "no road" reads as — the one answer in this node whose wrong value flattens a terrain.
 	var pts := _path.points if _path != null else PackedVector2Array()
 	var widths := _path.half_widths if _path != null else PackedFloat32Array()
+	# Handed over EMPTY when the path carries none, not zero-filled. The kernel answers NaN for an empty
+	# height array and 0 m for a zero-filled one, and those are different claims: "no elevation was
+	# authored" against "the line is at sea level".
+	var hts := _path.heights if _path != null else PackedFloat32Array()
 	var res: Dictionary = Pasture3DUtil.path_query_grid(pts, widths, p_gw, p_gh, p_rect,
-			unreachable_distance, max_distance)
+			unreachable_distance, max_distance, hts)
 	if not bool(res.get("ok", false)):
 		push_error("[Pasture3D] path_query_grid failed for a %d x %d grid." % [p_gw, p_gh])
 		return _unreachable_fill(n)
@@ -130,7 +137,7 @@ func eval_grid_channels(_p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect:
 	if dist.size() != n:
 		push_error("[Pasture3D] path_query_grid returned %d cells for a %d cell grid." % [dist.size(), n])
 		return _unreachable_fill(n)
-	return [dist, res["s"], res["t"]]
+	return [dist, res["s"], res["t"], res["height"]]
 
 
 ## The safe answer when the kernel is missing or failed: far away, everywhere. Not zeros — see
@@ -140,13 +147,18 @@ func _unreachable_fill(p_n: int) -> Array:
 	var dist := PackedFloat32Array()
 	var s_out := PackedFloat32Array()
 	var t_out := PackedFloat32Array()
+	var h_out := PackedFloat32Array()
 	dist.resize(p_n)
 	s_out.resize(p_n)
 	t_out.resize(p_n)
+	h_out.resize(p_n)
 	dist.fill(unreachable_distance if max_distance <= 0.0 else minf(unreachable_distance, max_distance))
 	s_out.fill(0.0)
 	t_out.fill(0.0)
-	return [dist, s_out, t_out]
+	# NAN rather than 0, for the reason the kernel's empty-path fill gives: 0 is sea level, and a fail-fast
+	# that answered a plausible elevation is the silent degradation this whole file exists to delete.
+	h_out.fill(NAN)
+	return [dist, s_out, t_out, h_out]
 
 
 func node_warnings() -> PackedStringArray:

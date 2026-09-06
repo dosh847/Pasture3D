@@ -1,7 +1,7 @@
 # Pasture3D Spline & Graph Geometry Operations Specification
 
 **Document:** `PASTURE3D_SPLINE_GRAPH_SPEC.md`
-**Status:** **S1 BUILT 2026-09-05** (`SplineSourceGate`, 6/6 green headless). S2–S8 specified, unbuilt.
+**Status:** **S1 + S2 BUILT 2026-09-05** (`SplineSourceGate` 6/6, `PathHeightGate` 4/4 — [D] needs a windowed run). S3–S8 specified, unbuilt.
 **Target:** Pasture3D Terrain Graph + brush system (Godot 4.7 GDExtension, C++20, GDScript)
 **Builds on:** `PASTURE3D_GRAPH_GEOMETRY_PORTS_SPEC.md` (the PATH port, the geometry table, §8.1 Shape
 Source, §8.2 rivers) — this document is the general-geometry half of the family that spec's §1 lists and
@@ -428,6 +428,32 @@ restating because §7 depends on it:
 `heights` here is the drawn Y of the control points — an authoring input, not a solve. A river that wants
 its bed to follow the ground reads the *surface*, and §8.4's `Path Drape` is how a drawn line is made to.
 
+### 6.4 What S2 built differently: there is no GPU height
+
+§6.1 asks for a parallel float array in the binding-4 SSBO and the same interpolation in the shader.
+**Not built, deliberately.**
+
+The GPU evaluator's plan holds **one buffer per slot**, so it cannot serve channels at all — and rather
+than serve channel 0 under every port's name, the guard near the top of `graph_eval_grid_gpu` refuses any
+program whose wires read a channel above 0. `height` is channel 3. There is no reachable path from a graph
+to a height-aware shader, so a height array in the SSBO would be a fast path nothing can take and no gate
+can measure, and per `pre-stack-code-gets-deleted` that is not something this repo keeps.
+
+The cost is already paid: `s` and `t` are channels 1 and 2 and have always taken the graph off the GPU.
+`height` adds no new limitation, only a fourth reason for one that exists. The day the GPU evaluator grows
+per-slot channels, the SSBO array and the shader interpolation belong in that change, where they can be
+measured — not banked ahead of it.
+
+`PathHeightGate` [D] is what replaces the GPU parity criterion: it asserts the **refusal**, so if the guard
+is ever weakened without the shader being written, the failure is a red gate rather than a river bed graded
+to a distance field.
+
+One further detail worth having written down, because it looks like an oversight in both directions:
+**heights are not ring-closed alongside the points.** `path_close_ring` appends the first vertex to a closed
+path, so a closed ring is one vertex longer than its height array — and `height_at` clamps to the last
+entry for exactly that vertex, which is the first vertex's height, because a closed ring's last point *is*
+its first point. Closing both would be a second place that has to agree about it.
+
 ---
 
 ## 7. The operation nodes
@@ -825,7 +851,7 @@ silent criteria — a criterion that threw before asserting must be reported as 
 | Phase | Scope | Gate |
 | :--- | :--- | :--- |
 | **S1** ✅ | `Pasture3DSpline` (§4), the `_paints()` hook and its sites, `Spline Source` (§5), `Pasture3DGraphSources.resolve_splines`, consumer refresh, palette entry. **No new maths, no C++.** BUILT — see §5.4 for the three places the build differs from what is written above. | `SplineSourceGate`: [A] the published path is world-placed, carries per-vertex widths and (when `carry_heights`) heights — control: a spline offset from the origin whose local points would look plausible at the origin; [B] the empty key resolves to the host's own child, and a **duplicated** brush resolves to its own — control: a typed key does not follow the duplicate; [C] a non-painting brush reserves no layer and appears in no sibling set — control: the same fixture with `_paints()` true does; [D] moving a point re-bakes the consumer — control: an unrelated brush is not re-baked; [E] re-resolving an unchanged spline does not bump the revision — control: moving a point does; [F] `Pasture3DSpline` is absent from the Shape Source dropdown and present in the Spline Source one. |
-| **S2** | Heights in `Pasture3DPathGeom`, `GraphGeomEntry` flatten, the GPU SSBO array, `Path Distance`'s fourth channel (§6). | `PathHeightGate`: [A] `height_at` matches `Pasture3DGraphPath.height_at` on a sloped path, CPU / GPU / oracle — control: a flat path is not what is being measured (assert the range is non-zero); [B] a path with no heights reads NaN everywhere, and NaN survives to the output rather than becoming 0 — control: the same fixture with heights reads finite; [C] the appended channel does not move ports 0-2 — control: the pre-change expected values, hard-coded. |
+| **S2** ✅ | Heights in `Pasture3DPathGeom`, `GraphGeomEntry` flatten, the GPU SSBO array, `Path Distance`'s fourth channel (§6). BUILT — the SSBO array was NOT, see §6.4. | `PathHeightGate`: [A] `height_at` matches `Pasture3DGraphPath.height_at` on a sloped path, CPU / GPU / oracle — control: a flat path is not what is being measured (assert the range is non-zero); [B] a path with no heights reads NaN everywhere, and NaN survives to the output rather than becoming 0 — control: the same fixture with heights reads finite; [C] the appended channel does not move ports 0-2 — control: the pre-change expected values, hard-coded; [D] **replaces [A]'s GPU half**: a graph wired to `height` makes the GPU evaluator bail rather than serving it channel 0 — control: the channel-0 graph must return a field, or there is no RenderingDevice and the criterion reports NO-SIGNAL instead of a pass. |
 | **S3** | `Path Carve` (§7.1): the C++ kernel (`src/pasture_3d_path_carve.cpp`), `Pasture3DUtil.path_carve_grid` + the `_geom` overload, `GRAPH_OP_PATH_CARVE`, CPU lowering, GPU mode, the production node and its `[Dev/GD]` oracle. Follows `PASTURE3D_NODE_ACCELERATION_GUIDE.md` §2 steps 0-6 verbatim. | `PathCarveGate`: [A] native vs oracle on four cross-sections (peaked crest, flat crest, V bed, flat bed) over sloping ground — control: a zero-offset carve changes nothing, and a control that the fixture is not flat; [B] SLOPE_ANGLE reaches the ground at the stated angle — measured, not asserted from the parameter (`check-derived-values-outside-the-chain`); [C] the five channels are distinct and none is constant; [D] `width_source = PATH` produces a carve that widens where the path widens — control: CONSTANT does not; [E] GPU parity, or an explicit refusal that is *tested to refuse*. |
 | **S4** | The geometry pre-pass (§8.2-8.3): `eval_path`, the PATH-sub-DAG topological order in `compile_graph_program`, the cache. Plus `Path Width` (§7.3) as its first customer. | `PathPrePassGate`: [A] a `Spline Source → Path Width → Path Carve` chain lowers **natively** and matches the GDScript evaluator — control: the same graph with the pre-pass disabled falls to GDScript, proving the route was actually taken (`graph-gpu-bail-is-graph-wide`: only a direct native call proves it); [B] fanout is one table entry for two consumers of one produced path; [C] `eval_path` is not re-run when nothing changed — count the calls — control: editing the width does re-run it. |
 | **S5** | The reshape family (§7.4): five PATH→PATH nodes, metres not fractions, stable seeds. | `PathShapeGate`: [A] each node changes the path — control: at zero strength each is the identity, byte for byte; [B] the same seed twice gives the same path, and a different seed a different one; [C] arc length after `Path Resample` at 1 m step is within a cell of the input's; [D] `Meanderize` with `remove_loops` produces a non-self-intersecting path — control: without it, on a fixture chosen to loop, it does not. |

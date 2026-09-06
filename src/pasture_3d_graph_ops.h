@@ -86,7 +86,7 @@ enum GraphCellOpType {
 	GRAPH_OP_WATER_MASK = 55, // FILTER grid: submerged mask plus a metric shore band (§8.2)
 	GRAPH_OP_MUDSLIDE = 56, // SOLVER grid: move a finite, maskable quantity of material downhill (§8.3)
 	// ---- Geometry consumers (P2c). These read in_g, not a scratch buffer. ----
-	GRAPH_OP_PATH_QUERY = 57, // FILTER grid: distance / s / t from in_g (3 outputs)
+	GRAPH_OP_PATH_QUERY = 57, // FILTER grid: distance / s / t / height from in_g (4 outputs)
 	GRAPH_OP_PATH_MASK = 58, // FILTER grid: a [0,1] corridor or region mask from in_g (1 output)
 	GRAPH_OP_ROAD_GRADE = 59, // SOLVER grid: cut a road into in0 along in_g (6 outputs)
 };

@@ -279,9 +279,14 @@ public:
 	// normalised by the local half-width with POSITIVE = the driver's right. An empty path fills `distance`
 	// with p_unreachable and s/t with 0 — never 0 distance, which would read as "every cell is on the road".
 	// p_max_distance > 0 clamps `distance` only.
+	//
+	// A fourth channel, `height`, answers the path's own per-vertex elevation at that same `s`, and NaN
+	// where the path carries none — including for every cell of an empty path, because an elevation of 0
+	// reads as sea level and an elevation of p_unreachable reads as ten kilometres. `p_heights` is APPENDED
+	// and defaulted, so every existing seven-argument call keeps its meaning and gets NaN.
 	static Dictionary path_query_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
 			const int p_gw, const int p_gh, const Rect2 &p_rect, const double p_unreachable,
-			const double p_max_distance);
+			const double p_max_distance, const PackedFloat32Array &p_heights = PackedFloat32Array());
 
 	// Rasterise a PATH as a [0,1] mask (PASTURE3D_GRAPH_GEOMETRY_PORTS_SPEC.md §5.2). TWO RULES chosen by
 	// `p_closed`, not one rule with a parameter: an OPEN path masks a corridor — 1 on the carriageway,

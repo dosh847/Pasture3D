@@ -324,9 +324,18 @@ bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 			e.kind = d.has("kind") ? (int)d["kind"] : 0;
 			const PackedVector2Array pts = d.has("points") ? (PackedVector2Array)d["points"] : PackedVector2Array();
 			const PackedFloat32Array vals = d.has("values") ? (PackedFloat32Array)d["values"] : PackedFloat32Array();
+			// ABSENT, not empty-by-default: a path that carries no heights and a path whose heights are all
+			// zero must stay distinguishable all the way to `height_at`, which answers NaN for the first
+			// and 0 m for the second (S2, spec §6.1).
+			const PackedFloat32Array hts = d.has("heights") ? (PackedFloat32Array)d["heights"] : PackedFloat32Array();
 			const bool closed = d.has("closed") && (bool)d["closed"];
 			e.geom.closed = closed && pts.size() >= 3;
-			e.geom.build(path_close_ring(pts, closed), vals);
+			// The heights are NOT ring-closed alongside the points. `path_close_ring` appends the first
+			// vertex, so a closed ring is one longer than its height array, and `height_at` clamps to the
+			// last entry for exactly that vertex -- which is the first vertex's height, since a closed
+			// ring's last point IS its first point. Closing both here would be a second place that has to
+			// agree about it.
+			e.geom.build(path_close_ring(pts, closed), vals, hts);
 			if (d.has("profile")) {
 				const Dictionary pr = d["profile"];
 				e.has_profile = true;
@@ -1001,6 +1010,13 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				if (ch_t) {
 					const PackedFloat32Array a = res["t"];
 					if (a.size() == n) std::copy_n(a.ptr(), n, ch_t);
+				}
+				// Channel 3, APPENDED. Ports 0-2 keep their indices, so every graph already wired to
+				// distance / s / t stays wired to the same three fields.
+				float *ch_h = want_aux(3);
+				if (ch_h) {
+					const PackedFloat32Array a = res["height"];
+					if (a.size() == n) std::copy_n(a.ptr(), n, ch_h);
 				}
 			} break;
 

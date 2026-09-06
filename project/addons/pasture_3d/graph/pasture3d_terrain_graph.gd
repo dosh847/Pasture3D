@@ -1555,6 +1555,9 @@ func _geom_entry(p_path: Pasture3DGraphPath) -> Dictionary:
 		"closed": p_path.closed,
 		"points": p_path.points,
 		"values": p_path.half_widths,
+		# Per-vertex elevation, and EMPTY when the path carries none — which the native build copies
+		# verbatim rather than padding, so `height_at` can answer NaN instead of sea level (spec §6.1).
+		"heights": p_path.heights,
 	}
 	if p_path.can_grade() and p_path.alignment != null:
 		d["profile"] = {

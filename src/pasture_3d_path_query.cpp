@@ -8,15 +8,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 using namespace godot;
 
 // ---- construction -----------------------------------------------------------------------------------
 
-bool Pasture3DPathGeom::build(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths) {
+bool Pasture3DPathGeom::build(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
+		const PackedFloat32Array &p_heights) {
 	px.clear();
 	pz.clear();
 	width.clear();
+	height.clear();
 	cum.clear();
 	bucket_start.clear();
 	bucket_items.clear();
@@ -38,6 +41,14 @@ bool Pasture3DPathGeom::build(const PackedVector2Array &p_points, const PackedFl
 	width.resize(p_widths.size());
 	for (int i = 0; i < p_widths.size(); i++) {
 		width[i] = p_widths[i];
+	}
+	// Copied VERBATIM, empty included. Not resized to n_pts and not padded: an array shorter than the ring
+	// is what a closed path hands over — path_close_ring repeats the first VERTEX and cannot know to repeat
+	// its height too — and `height_at` clamps the index for exactly that case. Padding here would put the
+	// decision in two places.
+	height.resize(p_heights.size());
+	for (int i = 0; i < p_heights.size(); i++) {
+		height[i] = p_heights[i];
 	}
 
 	cum.resize(n_pts);
@@ -143,6 +154,25 @@ double Pasture3DPathGeom::half_width_at(double p_s) const {
 	const int last = (int)width.size() - 1;
 	const double a = width[std::min(i, last)];
 	const double b = width[std::min(i + 1, last)];
+	const double seg = cum[i + 1] - cum[i];
+	const double f = seg <= 0.0 ? 0.0 : std::clamp((p_s - cum[i]) / seg, 0.0, 1.0);
+	return a + (b - a) * f;
+}
+
+// Deliberately NOT `half_width_at`'s twin with a different fallback. The fallbacks differ in kind: a path
+// with no widths still HAS a meaningful `t` if you read it as metres, so 1.0 is a usable answer. A path
+// with no heights has no elevation at all, and any finite answer would be invented.
+double Pasture3DPathGeom::height_at(double p_s) const {
+	if (height.empty()) {
+		return std::numeric_limits<double>::quiet_NaN();
+	}
+	if (height.size() == 1) {
+		return height[0];
+	}
+	const int i = vertex_before(p_s);
+	const int last = (int)height.size() - 1;
+	const double a = height[std::min(i, last)];
+	const double b = height[std::min(i + 1, last)];
 	const double seg = cum[i + 1] - cum[i];
 	const double f = seg <= 0.0 ? 0.0 : std::clamp((p_s - cum[i]) / seg, 0.0, 1.0);
 	return a + (b - a) * f;
@@ -317,9 +347,10 @@ Pasture3DPathHit Pasture3DPathGeom::nearest(double p_x, double p_z, std::vector<
 // ---- the grid kernel --------------------------------------------------------------------------------
 
 Dictionary godot::path_query_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
-		int p_gw, int p_gh, const Rect2 &p_rect, double p_unreachable, double p_max_distance) {
+		int p_gw, int p_gh, const Rect2 &p_rect, double p_unreachable, double p_max_distance,
+		const PackedFloat32Array &p_heights) {
 	Pasture3DPathGeom geom;
-	geom.build(p_points, p_widths);
+	geom.build(p_points, p_widths, p_heights);
 	return path_query_grid_geom(geom, p_gw, p_gh, p_rect, p_unreachable, p_max_distance);
 }
 
@@ -331,10 +362,12 @@ Dictionary godot::path_query_grid_geom(const Pasture3DPathGeom &p_geom, int p_gw
 		return out;
 	}
 	const int n = p_gw * p_gh;
-	PackedFloat32Array dist, s_out, t_out;
+	PackedFloat32Array dist, s_out, t_out, h_out;
 	dist.resize(n);
 	s_out.resize(n);
 	t_out.resize(n);
+	h_out.resize(n);
+	const float nan_v = std::numeric_limits<float>::quiet_NaN();
 
 	if (p_geom.is_empty()) {
 		// One fill, not a per-cell branch. An unresolved Road Source is a normal state and the whole grid
@@ -344,10 +377,15 @@ Dictionary godot::path_query_grid_geom(const Pasture3DPathGeom &p_geom, int p_gw
 		dist.fill(far_v);
 		s_out.fill(0.0f);
 		t_out.fill(0.0f);
+		// NaN, not 0 and not `far_v`. s and t fill with 0 because they are meaningless-but-bounded on an
+		// empty path; an elevation of 0 would read as sea level and an elevation of `unreachable` would
+		// read as ten kilometres. Only NaN reads as the truth, which is that there is nothing to measure.
+		h_out.fill(nan_v);
 		out["ok"] = true;
 		out["distance"] = dist;
 		out["s"] = s_out;
 		out["t"] = t_out;
+		out["height"] = h_out;
 		return out;
 	}
 
@@ -360,6 +398,10 @@ Dictionary godot::path_query_grid_geom(const Pasture3DPathGeom &p_geom, int p_gw
 	float *dist_w = dist.ptrw();
 	float *s_w = s_out.ptrw();
 	float *t_w = t_out.ptrw();
+	float *h_w = h_out.ptrw();
+	// Hoisted: `height_at` answers NaN for every cell of a heightless path, and asking it gw*gh times to
+	// be told so costs a nearest-vertex walk per cell for a constant.
+	const bool has_h = !p_geom.height.empty();
 
 	Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int z0, int z1) {
 		// One candidate buffer per chunk, reused across every cell in it: the query allocates nothing in
@@ -376,6 +418,10 @@ Dictionary godot::path_query_grid_geom(const Pasture3DPathGeom &p_geom, int p_gw
 														   : hit.distance);
 				s_w[idx] = (float)hit.s;
 				t_w[idx] = (float)hit.t;
+				// Off the SAME hit. This is the whole argument for a fourth channel rather than a fifth
+				// node: `s` is already solved here, and `height_at` is one interpolation on top of it,
+				// where a separate node would re-run the nearest-segment search for every cell.
+				h_w[idx] = has_h ? (float)p_geom.height_at(hit.s) : nan_v;
 			}
 		}
 	});
@@ -384,6 +430,7 @@ Dictionary godot::path_query_grid_geom(const Pasture3DPathGeom &p_geom, int p_gw
 	out["distance"] = dist;
 	out["s"] = s_out;
 	out["t"] = t_out;
+	out["height"] = h_out;
 	return out;
 }
 

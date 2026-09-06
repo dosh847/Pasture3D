@@ -69,17 +69,20 @@ func input_port_types() -> PackedInt32Array:
 
 
 func output_count() -> int:
-	return 3
+	return 4
 
 
+## APPENDED, never inserted. Port indices are what a saved graph's wires are stored as, so putting
+## `height` anywhere but last would silently re-aim every existing wire one port along.
 func output_names() -> PackedStringArray:
-	return PackedStringArray(["distance", "s", "t"])
+	return PackedStringArray(["distance", "s", "t", "height"])
 
 
 ## `distance` and `s` are metres, so HEIGHT-typed rather than MASK: a mask is [0,1] by contract and these
 ## two are not. `t` is normalised but SIGNED and unbounded off the carriageway, which is also not a mask.
+## `height` is metres above sea level, which is what HEIGHT means most literally of the four.
 func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.HEIGHT, PortType.HEIGHT])
+	return PackedInt32Array([PortType.HEIGHT, PortType.HEIGHT, PortType.HEIGHT, PortType.HEIGHT])
 
 
 func reads_paths() -> bool:
@@ -103,16 +106,19 @@ func eval_grid_channels(_p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect:
 	var dist := PackedFloat32Array()
 	var s_out := PackedFloat32Array()
 	var t_out := PackedFloat32Array()
+	var h_out := PackedFloat32Array()
 	dist.resize(n)
 	s_out.resize(n)
 	t_out.resize(n)
+	h_out.resize(n)
 	if _path == null or _path.segment_count() == 0:
 		# One fill, not a per-cell branch. An unresolved Road Source is a normal state and the whole grid
 		# has the same answer, so the empty case must not cost a query per cell to say so.
 		dist.fill(_clamped(unreachable_distance))
 		s_out.fill(0.0)
 		t_out.fill(0.0)
-		return [dist, s_out, t_out]
+		h_out.fill(NAN)
+		return [dist, s_out, t_out, h_out]
 
 	# Cell CENTRES, matching the evaluator's own convention for a cell node's world XZ. Sampling corners
 	# instead would offset the whole field by half a cell against every other node in the graph, which is
@@ -130,7 +136,12 @@ func eval_grid_channels(_p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect:
 			dist[idx] = _clamped(q["distance"])
 			s_out[idx] = q["s"]
 			t_out[idx] = q["t"]
-	return [dist, s_out, t_out]
+			# Through Pasture3DGraphPath.height_at, which is the DEFINITION the C++ height_at was ported
+			# from — including its NAN-for-an-empty-array rule. An oracle that computed the interpolation
+			# itself would be a second definition, and the two would agree until a closed ring's clamped
+			# last vertex made them not.
+			h_out[idx] = _path.height_at(q["s"])
+	return [dist, s_out, t_out, h_out]
 
 
 func _clamped(p_d: float) -> float:

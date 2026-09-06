@@ -1661,8 +1661,9 @@ PackedFloat32Array Pasture3DUtil::spectral_equalizer_grid(const PackedFloat32Arr
 
 Dictionary Pasture3DUtil::path_query_grid(const PackedVector2Array &p_points,
 		const PackedFloat32Array &p_widths, const int p_gw, const int p_gh, const Rect2 &p_rect,
-		const double p_unreachable, const double p_max_distance) {
-	return godot::path_query_grid(p_points, p_widths, p_gw, p_gh, p_rect, p_unreachable, p_max_distance);
+		const double p_unreachable, const double p_max_distance, const PackedFloat32Array &p_heights) {
+	return godot::path_query_grid(p_points, p_widths, p_gw, p_gh, p_rect, p_unreachable, p_max_distance,
+			p_heights);
 }
 
 PackedFloat32Array Pasture3DUtil::path_mask_grid(const PackedVector2Array &p_points,
@@ -2237,8 +2238,8 @@ void Pasture3DUtil::_bind_methods() {
 			&Pasture3DUtil::spectral_equalizer_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("path_query_grid", "points", "widths", "gw", "gh", "rect", "unreachable",
-					"max_distance"),
-			&Pasture3DUtil::path_query_grid);
+					"max_distance", "heights"),
+			&Pasture3DUtil::path_query_grid, DEFVAL(PackedFloat32Array()));
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("path_mask_grid", "points", "widths", "closed", "gw", "gh", "rect", "width_scale",
 					"feather", "invert"),
