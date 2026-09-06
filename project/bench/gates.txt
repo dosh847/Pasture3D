@@ -378,6 +378,28 @@ bench/PathShapeGate.tscn
 # and removing derives_path_from_grid BOTH left it green, because the gate was measuring its own call.
 bench/PathDeriveGate.tscn
 
+# --- S7b: the staged compile (PASTURE3D_SPLINE_GRAPH_SPEC.md 8.4) ---
+# The phase that removes S7a's cost. evaluate() cuts the program at each derive node, evaluates that
+# node's grid inputs first (recursively, so a stage that lowers takes the kernel), produces its path,
+# then compiles the whole program with those paths in the geometry table.
+#   [A] a graph with a derive node runs the STAGED route and matches the S7a reference. The route is
+#       asserted through staged_compile_count, not inferred: a staged compile that silently fell through
+#       to S7a agrees with the reference perfectly, and a fall-through is the likeliest way this ships
+#       broken because it is not a fault. Control: force_no_staged_compile keeps the S7a route live.
+#   [B] the path re-derives when the FIRST stage's input moves and not when only the remainder's
+#       parameters do, with the terrain moving in both cases. There is no node cache on this route and
+#       that is deliberate (see the spec): _compute_node_inputs_hash does not describe the field a stage
+#       produced, and a key that does not describe what it holds is how a stale paint ships.
+#   [C] the derive still contributes -- 93 m against the same graph without it. Without this, [A] is
+#       satisfied by two routes that both ignore the drape.
+#   [D] native_supported() still answers FALSE. Not a leftover: it is the off-thread contract, because a
+#       program compiled without staging carries a path nobody produced.
+#
+# The fixture's carve offset is POSITIVE and the comment says why. The first version used a negative one,
+# which the kernel negates for a BED, so the floor sat above the line and MIN kept the ground -- [A]
+# passed comparing two routes that had both carved nothing.
+bench/PathStagedCompileGate.tscn
+
 # S6 - Ridge and Trough as Pasture3DPlow presets (PASTURE3D_SPLINE_GRAPH_SPEC.md §9, §12.2). The two
 # brushes stop being rasterisers: each is a Plow that arrives with a Pasture3DSpline child and a graph
 # already wired (Input -> Path Carve -> Output, Spline Source -> Path Carve.path), and stamp_ridge_line

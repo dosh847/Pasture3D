@@ -556,6 +556,31 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 	if out < 0 or out >= nodes.size() or nodes[out] == null:
 		return Pasture3DGraphOps.zeros(n)
 
+	# 0. The staged compile (spec 8.4, S7b). A graph whose ONLY native blocker is the derive family is
+	# cut at those nodes: each one's grid inputs are evaluated first -- natively, if they lower -- and
+	# handed to it, which produces its path; then the whole program is compiled with those paths in the
+	# geometry table and the derive nodes lowered to CONST like every other PATH producer.
+	#
+	# This runs BEFORE the native check rather than inside it because it is the thing that makes the
+	# native check true. `native_supported(out)` is still false here and still should be: it answers
+	# "can this be compiled once and handed to a worker", and the capture is a main-thread, evaluate-time
+	# event. `_stage_derives` is what changes the answer, and only for this call.
+	if _native_supported_if_staged(out) and ClassDB.class_has_method("Pasture3DUtil", "graph_eval_grid"):
+		if _stage_derives(out, p_gw, p_gh, p_rect, p_mask, p_input):
+			var sprog: Dictionary = compile_graph_program(out)
+			if not sprog.is_empty():
+				var s_in := _surface_grid(p_input, n)
+				var sfield: PackedFloat32Array = Pasture3DUtil.graph_eval_grid(sprog, p_gw, p_gh, p_rect, s_in)
+				if not sfield.is_empty() and sfield.size() == n:
+					staged_compile_count += 1
+					# No `store_cache` here, unlike the single-program path below. A derive node's answer
+					# depends on a grid, and `_compute_node_inputs_hash` folds in the graph's parameters
+					# and the input surface -- not the FIELD a stage produced. Keying a cache on
+					# something that does not describe what is in it is how a stale paint ships
+					# (`cache-key-the-output-not-the-input`), so the staged route recomputes, which is
+					# slower than it could be and never wrong. S7b's cost win is the kernel, not a skip.
+					return sfield
+
 	# 1. Native C++ Whole-Graph Acceleration Path
 	if native_supported(out) and ClassDB.class_has_method("Pasture3DUtil", "graph_eval_grid"):
 		var prog: Dictionary = compile_graph_program(out)
@@ -1631,6 +1656,60 @@ func _resolved_path_of(p_ni: int, p_inputs_of: Dictionary, p_stack: Dictionary =
 	return made
 
 
+## Run the first half of the staged compile: give every derive node its grid, in topological order.
+##
+## Spec 8.4's cut, one node at a time:
+##
+##     compile( everything feeding the node's grid port ) -> evaluate -> eval_path( that result )
+##
+## The "evaluate" is a recursive `evaluate` call rooted at the upstream node, so a stage that lowers takes
+## the kernel and one that does not takes GDScript -- and a derive feeding another derive is handled by
+## the recursion rather than by a second mechanism, because the outer loop walks in topological order and
+## the inner call stages whatever it finds above it.
+##
+## Returns false when a stage could not be produced, which sends `evaluate` down the ordinary routes
+## rather than compiling a program whose geometry table names a path nobody made.
+func _stage_derives(p_out: int, p_gw: int, p_gh: int, p_rect: Rect2, p_mask, p_input) -> bool:
+	var order := _eval_order(p_out)
+	if order.is_empty():
+		return false
+	var plan := _fold_plan(p_out)
+	var inputs_of: Dictionary = plan["inputs_of"]
+	var n := p_gw * p_gh
+	var staged := 0
+	for ni in order:
+		var node: Pasture3DGraphNode = nodes[ni]
+		# Muted or not. A muted derive still has to be handed its grid: `_resolved_path_of` does not read
+		# mute state, so skipping one would leave it serving whatever it captured last -- a path from a
+		# different bake, which is the one answer worse than no path at all.
+		if node == null or not node.derives_path_from_grid():
+			continue
+		var count: int = node.input_count()
+		var types: PackedInt32Array = node.input_port_types()
+		var srcs: Array = inputs_of.get(ni, [])
+		var ins: Array = []
+		ins.resize(count)
+		for port in range(count):
+			# An unwired port is its declared default, filled -- the same convention `_input_grids` uses,
+			# and the reason the derive family declares NAN for its optional grids: it is the only way
+			# back to "nothing is wired" from a grid of identical numbers.
+			var dv: float = node.input_unwired_default(port)
+			var src: int = int(srcs[port]) if port < srcs.size() else -1
+			if src < 0 or port >= types.size() or int(types[port]) == Pasture3DGraphNode.PortType.PATH:
+				ins[port] = Pasture3DGraphOps.zeros(n) if is_zero_approx(dv) else Pasture3DGraphOps.filled(n, dv)
+				continue
+			var g: PackedFloat32Array = evaluate(p_gw, p_gh, p_rect, p_mask, p_input, src)
+			if g.size() != n:
+				return false
+			ins[port] = g
+		node.eval_grid(ins, p_gw, p_gh, p_mask, p_rect)
+		staged += 1
+	# Nothing staged means no derive node was reachable, so there was nothing for this route to do and
+	# the ordinary native path is the honest one. Reporting success would make `staged_compile_count`
+	# count graphs this phase never touched.
+	return staged > 0
+
+
 ## One geometry-table entry: the polyline, its per-vertex widths, and — only when the road has a solved
 ## alignment — the grading profile in the alignment's OWN sampling.
 ##
@@ -1709,6 +1788,20 @@ func _compile_geometry(p_order: Array, p_inputs_of: Dictionary) -> Dictionary:
 var force_gdscript_evaluation := false
 
 
+## ---- THE STAGED COMPILE (spec 8.4, phase S7b) ---------------------------------------------------
+##
+## Set to hold a graph containing derive nodes on the S7a route: the whole-graph bail, GDScript, correct
+## and slow. Not a user setting -- it is the control PathStagedCompileGate needs, because the staged and
+## unstaged routes are supposed to produce the SAME terrain, and a staged route that quietly did nothing
+## would agree with the reference for the most boring possible reason.
+var force_no_staged_compile := false
+
+## Counts staged compiles that actually ran. Read by the gates for the same reason `eval_path_count` is:
+## "the terrain is right" is equally true of a staged run and of one that fell through to GDScript, and
+## the whole point of S7b is WHICH of those happened.
+var staged_compile_count: int = 0
+
+
 ## Memoised per [root, revision]. The answer is a function of TOPOLOGY, the op set, and mute state, all of
 ## which bump `_revision` when they change on a node that feeds the output — and a node that does not feed
 ## the output is not in `order`, so it cannot change the answer either.
@@ -1740,7 +1833,31 @@ func native_supported(p_root_node: int = -1) -> bool:
 	return ok
 
 
-func _native_supported_uncached(p_out: int) -> bool:
+## True when the only thing keeping this graph off the native tier is the S7a derive family.
+##
+## Asked by `evaluate` before it stages. Deliberately NOT folded into `native_supported`, which stays the
+## honest answer to "can this graph be compiled and handed to a worker": a derive node's capture happens
+## during evaluation on the main thread, so a program compiled without staging carries a path that is
+## stale or absent, and the off-thread contract at the top of `evaluate` would be quietly broken.
+func _native_supported_if_staged(p_out: int) -> bool:
+	if force_gdscript_evaluation or force_no_staged_compile:
+		return false
+	# The cheap question first. `_native_supported_uncached` is an O(E*V) walk and it is NOT memoised on
+	# this route -- the memo is keyed on [root, revision] and would collide with `native_supported`'s own
+	# answer for the same pair, which is a different question with a different answer. A graph with no
+	# derive node in it can never be staged, and that is one O(V) scan rather than the walk, paid by every
+	# bake of every ordinary graph in the project.
+	var any := false
+	for nd in nodes:
+		if nd != null and nd.derives_path_from_grid():
+			any = true
+			break
+	if not any:
+		return false
+	return _native_supported_uncached(p_out, true)
+
+
+func _native_supported_uncached(p_out: int, p_ignore_derives: bool = false) -> bool:
 	var out := p_out
 	var order := _eval_order(out)
 	if order.is_empty():
@@ -1758,7 +1875,11 @@ func _native_supported_uncached(p_out: int) -> bool:
 		# nothing at all — which is worse than being slow. Only DLA escaped it, and only because its op was
 		# never added to the allow-list above.
 		if nodes[ni] != null and not nodes[ni].muted and nodes[ni].blocks_native():
-			return false
+			# S7b: a derive node blocks a SINGLE-program compile and does not block a staged one. Its
+			# path is produced before the remainder is compiled and travels in the geometry table, so
+			# what reaches the kernel is one flat polyline -- the same thing an S4 filter hands it.
+			if not (p_ignore_derives and nodes[ni].derives_path_from_grid()):
+				return false
 	# A wire out of a secondary port (port >= 1, e.g. a solver's flow field) used to drop the whole graph
 	# to the GDScript evaluator unconditionally. Since P2b the program can carry channels, so the bail
 	# narrows to the case that is still unlowerable: reading a channel the NATIVE op does not write.
