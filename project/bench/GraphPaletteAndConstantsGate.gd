@@ -151,25 +151,50 @@ func _c_registry_categories() -> void:
 			found += 1
 	_assert(found == road_ops.size(), "all %d road oracles are in Dev / Reference (found %d)"
 			% [road_ops.size(), found])
-	# Roads returned at P2a with a production, C++-backed Path Distance in it. The general rule is what is
-	# checked, not that one name: an ordered category with no entries is a menu that opens onto nothing,
-	# which is how "Roads" was left when the four road nodes moved behind the developer flag.
+	# Roads returned at P2a with a production, C++-backed Path Distance in it, and lost it again to Paths
+	# in S6's follow-up. The general rule is what is checked, not any one name: an ordered category with
+	# no entries is a menu that opens onto nothing, which is how "Roads" was left when the four road nodes
+	# moved behind the developer flag -- and is exactly the way splitting a category can go wrong.
 	var empty_cats := PackedStringArray()
 	for cat in listed:
 		if cat != "Dev / Reference" and (cat_map.get(cat, []) as Array).is_empty():
 			empty_cats.append(cat)
 	_assert(empty_cats.is_empty(), "no empty category is left in the palette order (found %s)"
 			% str(empty_cats))
-	var roads_ops := {}
-	for e in (cat_map.get("Roads", []) as Array):
-		roads_ops[e["op"]] = true
-	var want_roads: Array[StringName] = [&"road_source", &"path_distance", &"path_mask", &"road_grade"]
-	var have := 0
-	for o in want_roads:
-		if roads_ops.has(o):
-			have += 1
-	_assert(have == want_roads.size(),
-			"Roads carries all %d production road nodes again (found %d)" % [want_roads.size(), have])
+	# The PATH family got its own category (§5.4's deferred S1 item). Both halves are asserted, and by
+	# MEMBERSHIP rather than by count: a split that put everything on one side would leave the other empty
+	# and be caught above, but a split that dropped a node entirely would not, and neither would one that
+	# left Path Carve filed under Roads. Naming the ops is what makes this criterion able to fail.
+	var want: Dictionary = {
+		"Paths": [&"spline_source", &"shape_source", &"path_distance", &"path_mask", &"path_width",
+				&"path_resample", &"path_smooth", &"path_decimate", &"path_fractalize",
+				&"path_meanderize", &"path_carve"],
+		"Roads": [&"road_source", &"road_grade"],
+	}
+	for cat in want:
+		var ops := {}
+		for e in (cat_map.get(cat, []) as Array):
+			ops[e["op"]] = true
+		var missing := PackedStringArray()
+		for o in (want[cat] as Array):
+			if not ops.has(o):
+				missing.append(String(o))
+		_assert(missing.is_empty(), "%s carries all %d of its nodes (missing %s)" % [
+				cat, (want[cat] as Array).size(), str(missing)])
+		# The other direction: a node that stayed behind is as wrong as one that never arrived, and the
+		# membership test above cannot see it.
+		var strays := PackedStringArray()
+		for e in (cat_map.get(cat, []) as Array):
+			if not (want[cat] as Array).has(e["op"]):
+				strays.append(String(e["op"]))
+		_assert(strays.is_empty(), "%s carries nothing else (found %s)" % [cat, str(strays)])
+	# CONTROL: the two categories are genuinely distinct in the palette ORDER, not one name resolving to
+	# the same bucket twice. Without it, a `categories()` that returned "Paths" and "Roads" while
+	# `entries()` filed everything under one of them would satisfy everything above.
+	_assert(listed.has("Paths") and listed.has("Roads")
+			and listed.find("Paths") != listed.find("Roads"),
+			"Paths and Roads are separate entries in the palette order (%d and %d)" % [
+					listed.find("Paths"), listed.find("Roads")])
 
 
 func _d_search_dialog_tree() -> void:

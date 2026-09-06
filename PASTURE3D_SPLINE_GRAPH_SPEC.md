@@ -368,11 +368,24 @@ that decides persistence. And `queue_free()` between criteria leaves the previou
 group that `_refresh_consumers` scans, with both fixtures deriving the key `"River"`; the sibling count
 dropped from 3 to 1 when that was fixed, which is how the leak was confirmed real rather than theoretical.
 
-**Deliberately not done in S1:** the palette category is still `"Roads"`, which is already the wrong name
-for a family that will carry rivers and cliff lines by S5. Renaming it touches a hardcoded order list in
-`Pasture3DGraphNodeRegistry.categories()` *and* a criterion in `GraphPaletteAndConstantsGate` that reads
-`cat_map.get("Roads")` — renaming without the gate would leave that criterion measuring an empty list.
-Worth doing when S3–S5 land more nodes there, together with the gate update.
+**Deliberately not done in S1, done after S6:** the palette category was `"Roads"`, which was already the
+wrong name for a family that would carry rivers and cliff lines by S5. By S6 it was thirteen entries deep
+and eleven of them had nothing to do with roads.
+
+It is a SPLIT rather than a rename. `"Paths"` carries everything that makes, edits or consumes a PATH
+generically — `Spline Source`, `Shape Source`, `Path Distance`, `Path Mask`, `Path Width`, the five
+reshape nodes and `Path Carve` — and `"Roads"` keeps the two nodes that really are about roads: the one
+that names a road in the scene, and the one that grades a carriageway. Paths sits before Roads in the
+order, because a road is one thing you can make a path out of and the general case reads first. A user
+carving along a road now takes Road Source from one and Path Carve from the other, which is the shape of
+the dependency.
+
+The gate update was the reason to defer it and is the reason it is safe: `GraphPaletteAndConstantsGate`
+read `cat_map.get("Roads")`, so a rename alone would have left that criterion measuring an empty list and
+passing. It now asserts BOTH categories by MEMBERSHIP and in both directions — every op that should be
+there, and nothing that should not — plus a control that the two are distinct entries in the palette
+order rather than one bucket under two names. Verified to fail: filing `path_carve` back under Roads
+fails two of the four assertions.
 
 ---
 
