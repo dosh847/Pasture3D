@@ -802,7 +802,10 @@ func _make_graphnode(p_index: int, p_node: Pasture3DGraphNode) -> GraphNode:
 		var bake_btn := Button.new()
 		bake_btn.text = "Bake"
 		bake_btn.tooltip_text = "Re-solve this solver (clears its frozen cache)"
-		if bool(p_node.get("_stale")):
+		# `_stale` is declared by the solvers that FREEZE (Erosion, DLA), not by the base class, so
+		# `get()` answers null on the ones that do not — and `bool(null)` is not a conversion in GDScript,
+		# it is a constructor call that does not exist. Compare against true instead, which is null-safe.
+		if p_node.get("_stale") == true:
 			bake_btn.modulate = Color(1.0, 0.75, 0.3)
 		bake_btn.pressed.connect(func(): _action_bake_solver(p_index))
 		thbox.add_child(bake_btn)
