@@ -14,6 +14,12 @@
 # whose shape is fixed and whose size is the knob the user is given. Editing the spline for any of those
 # would change it for every other reader, because a path is shared by instance.
 #
+# ---- IT KEEPS THE ROAD PROFILE, AND THE RESHAPE FAMILY DOES NOT ----
+#
+# `moves_the_line()` is false here. A solved road's `alignment` and `sample_*` arrays describe a specific
+# centreline, and every node in §7.4 moves that line and so has to drop them. This one does not touch the
+# line at all, so a Road Grade downstream still has a profile to grade to.
+#
 # ---- IT MUST NOT MUTATE ITS INPUT ----
 #
 # The input path belongs to the node above and is handed unchanged to everyone else reading it. Writing
@@ -29,7 +35,7 @@
 # change the widths. x = 0 is the start of the line and x = 1 its end, in metres.
 @tool
 class_name Pasture3DGraphNodePathWidth
-extends Pasture3DGraphNode
+extends Pasture3DGraphNodePathShape
 
 ## SET replaces the path's widths outright; SCALE multiplies whatever it arrived with.
 ##
@@ -75,121 +81,40 @@ enum Mode { SET, SCALE }
 		emit_changed()
 
 
-## Counts completed `eval_path` calls. Not saved, not shown, and read by nothing but PathPrePassGate —
-## the memo in `_resolved_path_of` is invisible from the outside otherwise, and "the answer is right"
-## is equally true of a cache that hits and one that re-runs the work every time.
-var eval_path_count: int = 0
-
-# The instance handed out. Kept for the fanout reason in the header; null until the first real path.
-var _out: Pasture3DGraphPath = null
-
-
 func op() -> StringName:
 	return &"path_width"
 
 
-func role() -> Role:
-	return Role.FILTER
+## The one node in the PATH family that leaves the centreline where it is. See the header.
+func moves_the_line() -> bool:
+	return false
 
 
-func input_count() -> int:
-	return 1
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["path"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.PATH])
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["path"])
-
-
-func output_port_type() -> int:
-	return PortType.PATH
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.PATH])
-
-
-## A PATH producer still fills a grid slot, with zeros. See Pasture3DGraphNode.path_output.
-func eval_cell(_p_wx: float, _p_wz: float, _p_inputs: PackedFloat32Array) -> float:
-	return 0.0
-
-
-## Lowers to CONST for the reason every PATH node does: it produces no grid, its path travels in the
-## program's geometry table, and the slot is a placeholder. The op still has to be in `k_ops` — an
-## absent tag drops the WHOLE graph to the GDScript evaluator without a word (see the Spline Source
-## omission, which hid for four phases).
-func native_lower() -> Dictionary:
-	var p := PackedFloat32Array()
-	p.resize(16)
-	p[0] = 0.0
-	return {"params": p}
-
-
-## The path this node PRODUCES. See Pasture3DGraphNode.eval_path.
-##
-## Returns the INPUT unchanged when there is nothing to do — no path, or one with fewer than two
-## vertices. Passing the input through rather than emitting an empty copy keeps an unresolved source's
-## warning attached to the source, and keeps the geometry table at one entry instead of two.
-func eval_path(p_inputs: Array) -> Pasture3DGraphPath:
-	eval_path_count += 1
-	var src: Pasture3DGraphPath = p_inputs[0] if p_inputs.size() > 0 else null
-	if src == null or src.points.size() < 2:
-		return src
-
-	# Arc length per vertex, walked here rather than asked of the path: the path's `_cum` is the RING's,
-	# which has an extra vertex on a closed line, and `half_widths` is indexed by `points`. Mixing the two
-	# would shift every width by one on any closed path and by nothing on an open one.
-	var n := src.points.size()
-	var cum := PackedFloat32Array()
-	cum.resize(n)
-	cum[0] = 0.0
-	for i in range(1, n):
-		cum[i] = cum[i - 1] + src.points[i].distance_to(src.points[i - 1])
+## Rewrite the widths. See Pasture3DGraphNodePathShape.reshape — `p_out` already carries the input's
+## points, heights and road profile, so this writes `half_widths` and nothing else.
+func reshape(p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -> void:
+	# Arc length per vertex, from the base helper, which explains why it is not the path's own `_cum`.
+	var n := p_src.points.size()
+	var cum := arc_lengths(p_src.points)
 	var total: float = cum[n - 1]
 
 	var hw := PackedFloat32Array()
 	hw.resize(n)
-	for i in range(n):
+	for i in n:
 		var base: float = half_width
 		if mode == Mode.SCALE:
 			# An empty `half_widths` means 1.0 everywhere (the path resource says so), so SCALE over a
 			# widthless path gives `half_width` metres — the same answer SET gives, which is the only
 			# reading of "scale nothing" that is not a surprise.
 			var was: float = 1.0
-			if src.half_widths.size() > 0:
-				was = src.half_widths[mini(i, src.half_widths.size() - 1)]
+			if p_src.half_widths.size() > 0:
+				was = p_src.half_widths[mini(i, p_src.half_widths.size() - 1)]
 			base = was * half_width
 		if along != null:
 			var x: float = (cum[i] / total) if total > 0.0 else 0.0
 			base *= maxf(along.sample_baked(clampf(x, 0.0, 1.0)), 0.0)
 		hw[i] = maxf(base, min_half_width)
-
-	if _out == null:
-		_out = Pasture3DGraphPath.new()
-	# Copied field by field rather than by `duplicate()`, which would deep-copy the alignment and the
-	# sample arrays into a second set nobody can reach — and, more to the point, would allocate a new
-	# instance every call, which is exactly what the kept `_out` exists to avoid.
-	_out.points = src.points
-	_out.heights = src.heights
-	_out.closed = src.closed
-	_out.alignment = src.alignment
-	_out.sample_half_widths = src.sample_half_widths
-	_out.sample_shoulders = src.sample_shoulders
-	_out.sample_verges = src.sample_verges
-	_out.sample_suppress = src.sample_suppress
-	_out.sample_skip = src.sample_skip
-	_out.crown = src.crown
-	_out.cut_batter = src.cut_batter
-	_out.fill_batter = src.fill_batter
-	_out.half_widths = hw
-	return _out
+	p_out.half_widths = hw
 
 
 func node_warnings() -> PackedStringArray:

@@ -312,6 +312,33 @@ bench/PathCarveGpuGate.tscn
 # identical either way. Only the count could see it; the agreement criteria could not.
 bench/PathPrePassGate.tscn
 
+# S5 - the five reshape nodes (spec §7.4). Green headless.
+#
+# "The path changed" is not a criterion here, because a node that mangles the path changes it too, and so
+# does one whose only effect is to drop the widths. Each criterion measures the property its node exists
+# for and pairs it with the plausible wrong answer:
+#
+#   [A] identity at zero, byte for byte. Resample's zero is NOT a tiny step -- that is its busiest case.
+#       Its identity is a step longer than the whole line, which cannot place a second vertex. The first
+#       version of the criterion got this backwards and called a correct answer a failure.
+#   [C] spacing AND arc length. Spacing alone passes on a node that resampled the chord between the
+#       endpoints; arc length alone passes on a node that returned its input.
+#   [D] length, not appearance. The sign error the meander algorithm invites does not mirror the river,
+#       it STRAIGHTENS it -- silent at one iteration, total at six -- and a straightened line still looks
+#       like a line. A meandering one is measurably LONGER.
+#   [E] an empty heights array must stay empty. Resizing it to the new vertex count fills it with 0.0,
+#       and zero in a HEIGHT array is sea level, not "no data" -- every ridge drawn at 400 m comes back
+#       at the water.
+#   [F] a reshape drops the solved road profile and Path Width keeps it. A stale alignment describes the
+#       line the path used to be, while can_grade() still answers true.
+#
+# [D]'s knot fixture is the SPARSE nine-point line, not the dense one: this gate's `_self_intersects` is
+# deliberately the naive pairwise scan, kept as an independent definition rather than growing the bucket
+# index Path Meanderize needed. Nine points through four iterations is 144, which knots readily and
+# scans instantly. Run it on the dense path and the gate hangs -- which is how the node's own O(n²) loop
+# removal was found.
+bench/PathShapeGate.tscn
+
 # --- Road system P0: the data model and its resolve chain (PASTURE3D_ROAD_SYSTEM_PROPOSAL.md §11) ---
 # Nothing here touches the terrain — P0 is the model. What it pins is what the later phases build on and
 # could not cheaply revisit: nearest-level resolution, clear-re-inherits (the defect that killed the

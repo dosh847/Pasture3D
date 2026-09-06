@@ -1198,6 +1198,14 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		// resolved host-side by the pre-pass and travels in the geometry table, and the slot is a
 		// placeholder.
 		{ "path_width", GRAPH_OP_CONST },
+		// The S5 reshape family (spec §7.4). All CONST, all for the same reason: they are pure PATH -> PATH
+		// transforms resolved host-side by the pre-pass, so what reaches the kernel is one flat polyline and
+		// the family costs the native tier nothing because it never arrives there.
+		{ "path_resample", GRAPH_OP_CONST },
+		{ "path_smooth", GRAPH_OP_CONST },
+		{ "path_decimate", GRAPH_OP_CONST },
+		{ "path_fractalize", GRAPH_OP_CONST },
+		{ "path_meanderize", GRAPH_OP_CONST },
 		{ "blend", GRAPH_OP_BLEND },
 		{ "terrace", GRAPH_OP_TERRACE },
 		{ "input", GRAPH_OP_INPUT },
