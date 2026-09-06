@@ -1598,12 +1598,16 @@ func _resolved_path_of(p_ni: int, p_inputs_of: Dictionary, p_stack: Dictionary =
 		if int(types[k]) == Pasture3DGraphNode.PortType.PATH:
 			any_path = true
 			break
-	if not any_path:
+	# A derive node (8.4) has a grid input and may have no PATH input at all, and still produces a path.
+	# Short-circuiting on "no PATH input" would answer Path from Flow with the null it holds.
+	if not any_path and not node.derives_path_from_grid():
 		return node.path_output()
 
 	p_stack[p_ni] = true
 	var ins: Array = []
-	var key_parts: Array = [node._dirty_revision]
+	# The salt is the derive family's captured grid. Nothing else in this key moves when the erosion above
+	# re-solves -- see Pasture3DGraphNode.path_eval_salt.
+	var key_parts: Array = [node._dirty_revision, node.path_eval_salt()]
 	for k in range(types.size()):
 		var up: Pasture3DGraphPath = null
 		if k < n_in and int(types[k]) == Pasture3DGraphNode.PortType.PATH:

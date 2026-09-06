@@ -168,7 +168,9 @@ func _c_registry_categories() -> void:
 	var want: Dictionary = {
 		"Paths": [&"spline_source", &"shape_source", &"path_distance", &"path_mask", &"path_width",
 				&"path_resample", &"path_smooth", &"path_decimate", &"path_fractalize",
-				&"path_meanderize", &"path_carve"],
+				&"path_meanderize", &"path_carve",
+				# S7a: the three grid-reading geometry nodes (spec 7.5, 8.4).
+				&"path_drape", &"path_width_field", &"path_from_flow"],
 		"Roads": [&"road_source", &"road_grade"],
 	}
 	for cat in want:

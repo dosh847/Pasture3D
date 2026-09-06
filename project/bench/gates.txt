@@ -346,6 +346,38 @@ bench/PathPrePassGate.tscn
 # removal was found.
 bench/PathShapeGate.tscn
 
+# --- S7a: grid-reading geometry (PASTURE3D_SPLINE_GRAPH_SPEC.md 7.5, 8.4) ---
+# Three nodes that read a GRID and produce a PATH: Path Drape, Path Width from Field, Path from Flow.
+# The inversion the S4 pre-pass cannot serve -- the field they read is made by the program being
+# compiled -- so all three answer blocks_native() true and the graph runs on the GDScript evaluator.
+# S7b removes that cost; S7a is what it removes the cost OF.
+#   [A] a draped path's heights are the surface at its vertices, to 1e-4 m, against a sampler the gate
+#       writes itself rather than borrowing from the node -- a shared idea of where a cell is cannot
+#       catch a half-cell shift. Control: the same line undraped is 122 m off the ground.
+#   [B] force-downhill never rises, on a fixture proved to climb, AND only ever LOWERS. The second half
+#       is not redundant: a symmetric smoothing passes monotonicity while lifting the head of the line
+#       off the ground it was just draped onto.
+#   [C] widths read off a field grow downstream AND land on the mapped values, not merely larger ones.
+#       Control: a constant field gives one width everywhere. The field is a controlled ramp, not an
+#       Erosion solve -- what is being measured is the remap, and a criterion that can fail for two
+#       reasons names neither.
+#   [D] each of the three takes the graph off the native tier, asserted through native_supported()
+#       directly. Control FIRST: the same chain without the node lowers, or "not native" is
+#       unfalsifiable. The three ops are in graph_op_ids despite never reaching a native compile, so
+#       that this bail has exactly ONE cause (op-ids-omission-drops-graph-to-gdscript is the other).
+#   [E] Path from Flow follows the main stem past a confluence with a weaker tributary, and the line
+#       comes back running downstream -- measured on the FIELD at the two ends, so a trace that happened
+#       to run +x for an unrelated reason cannot pass. Control: a threshold above the field's maximum
+#       traces nothing.
+#   [F] the memo re-derives when the field moves and not otherwise, and the new heights are the NEW
+#       ground. This is what path_eval_salt exists for: _resolved_path_of keys on path digests and node
+#       revisions, and an erosion re-solving above moves NEITHER.
+#
+# Every criterion reads derived_path() -- the path the GRAPH resolved -- never one the gate called for
+# itself. That distinction is the gate: with the criteria calling eval_path directly, removing the salt
+# and removing derives_path_from_grid BOTH left it green, because the gate was measuring its own call.
+bench/PathDeriveGate.tscn
+
 # S6 - Ridge and Trough as Pasture3DPlow presets (PASTURE3D_SPLINE_GRAPH_SPEC.md §9, §12.2). The two
 # brushes stop being rasterisers: each is a Plow that arrives with a Pasture3DSpline child and a graph
 # already wired (Input -> Path Carve -> Output, Spline Source -> Path Carve.path), and stamp_ridge_line

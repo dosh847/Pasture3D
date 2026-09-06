@@ -677,10 +677,65 @@ billion segment tests per cut attempt. The first version was that scan, and it d
 hung it. Segments now go into a uniform bucket index and the cut is a single forward pass, largest loop
 first.
 
-### 7.5 The derive family — §8.4
+### 7.5 The derive family — §8.4 (S7a BUILT)
 
-`Path Drape`, `Path Width from field`, `Path from Flow`. Deferred to their own phase because they are the
-ones that break the compile-time model. §8.4.
+`Path Drape`, `Path Width from Field`, `Path from Flow`: the three nodes that read a GRID and produce
+GEOMETRY. Deferred to their own phase because they are the ones that break the compile-time model, and
+built as S7a on a shared `Pasture3DGraphNodePathDerive`.
+
+**How the grid reaches a path.** `eval_path` is called out of `_resolved_path_of`, a recursion over the
+PATH sub-DAG that knows nothing about grids, so the field arrives by the other door: the GDScript
+evaluator materialises every node in topological order and calls `eval_grid` on anything answering
+`needs_grid()`. This family answers true, captures its inputs and its domain there, and returns the zero
+grid a PATH producer's slot already holds. A consumer's `_path_inputs` call comes later in that same
+order — a carve wired to a derive node is downstream of it by construction — so the capture it reads is
+the current one. No new pass, and no second ordering to keep in step with the first.
+
+Two hooks on `Pasture3DGraphNode` make it work, and both are invisible when missing:
+
+* `derives_path_from_grid()` stops `_resolved_path_of` short-circuiting. That function answers any node
+  with no PATH input using `path_output()`, which is right for a source — it HOLDS one — and silently
+  wrong for `Path from Flow`, which holds nothing and makes one out of the water. Without it the trace
+  never runs and the carve below sees null.
+* `path_eval_salt()` folds the captured grid into the memo key. Nothing else in that key moves when the
+  erosion above re-solves: it is the input paths' content digests plus the node's own revision, and a
+  traced river has neither. Without it the first river is served forever
+  (`memoised-programs-hide-invalidation`), and the terrain is right on the first bake and stale on every
+  one after.
+
+**What each node is.** `Path Drape` samples the surface at every vertex (bilinear — nearest would
+staircase a crest by one cell's relief per boundary crossed), adds `offset`, and optionally clamps the
+sequence so it never rises, at `min_drop` metres per metre. The clamp is one-sided by construction: a bed
+allowed to climb to meet a hill is not a river, but one lowered into it is a gorge. `Path Width from
+Field` maps a window of the field onto a window of half-width — explicitly, with `field_min` / `field_max`
+typed in, because accumulation has no units a width could use and normalising by the field's own maximum
+would make extending the terrain northwards narrow a river in the south. `Path from Flow` seeds at the
+cell of maximum accumulation, walks to the highest unvisited neighbour until the flow drops under
+`min_flow`, and REVERSES: accumulation grows downstream, so walking up it follows the main stem at every
+confluence by construction, and vertex 0 has to end up the head of the line because force-downhill, arc
+length `s` and `Pasture3DStream` all read it that way.
+
+---
+
+### 7.8 What S7a built differently
+
+Two departures.
+
+**1. `Path Width from Field` is a node, not a mode on `Path Width`.** §8.4 drafts it as "`Path Width`
+field mode". A mode would work, and it is the wrong shape: `blocks_native()` and S7b's cut are NODE-level
+facts, so a Path Width that blocked the whole graph in one of three modes would be a node whose cost is
+invisible in its title, and whose staged-compile cut depended on a parameter somebody can change without
+recompiling anything. Two nodes, two honest answers. The arithmetic that is genuinely shared — the taper,
+the SET/SCALE reading, the `min_half_width` floor — is shared by being written the same way, and the floor
+matters more here than there: `t` is an across-distance divided by the half-width, and a flow field is
+zero across most of its domain.
+
+**2. `Path from Flow` traces ONE stem, not a network.** A PATH is a polyline and a drainage network is a
+tree; there is no port type for one, and expressing it would mean the node emitting N paths, which the
+geometry table, the carve and the whole PATH sideband are not shaped for. A second tributary is a second
+node with its own seed, its own carve and its own width — visible in the graph rather than hidden in one
+node's output. This is a real limitation, stated rather than discovered, and §12.3 is where a network
+belongs if one is ever wanted.
 
 ---
 
@@ -1180,7 +1235,7 @@ silent criteria — a criterion that threw before asserting must be reported as 
 | **S5** ✅ | The reshape family (§7.4): five PATH→PATH nodes, metres not fractions, stable seeds. BUILT — on a shared `Pasture3DGraphNodePathShape` base, with seven departures listed at the end of §7.4 (the seventh is a native path-index fix the family provoked). | `PathShapeGate`: [A] each node changes the line — control: at its zero setting each is the identity, byte for byte (Resample's is a step longer than the line, since a near-zero step is its busiest case, not its idlest); [B] the same seed twice gives the same path — control: a different seed does not; [C] Resample at 1 m puts vertices 1 m apart AND preserves arc length to 0.04 m — both halves, since spacing alone passes on a node that resampled the chord; [D] `Meanderize` LENGTHENS the line (the sign error this algorithm invites straightens the river rather than mirroring it) and `remove_loops` leaves it non-self-intersecting — control: without it, on a fixture chosen to knot, 47 crossings survive; [E] widths and heights are resampled onto the new vertices — control: a path carrying none still carries none, rather than gaining zeros a HEIGHT array would read as sea level; [F] a reshape drops a solved road profile — control: `Path Width` keeps it; [G] a reshaped path's query cost follows its vertex count and not its square — a ratio against the same line before the reshape, so the number does not measure the machine; this is the one criterion that measures what the reshape costs the kernel downstream, and it is what the seventh departure above was found by. |
 | **S6** ✅ | **Ridge and Trough rebuilt** (§9): reparent onto `Pasture3DPlow`, the preset, loop auto-fit + Fit to Splines, the `_set` migration shim, deletion of `stamp_ridge_line` / `stamp_trough_line` and the old bodies. BUILT — with nine departures, see §9.6. | `SplineBrushPresetGate`: [A] a fresh Ridge bakes a raised crest along its child spline without any wiring — control: with the Spline Source unwired it bakes nothing, not a wall; [B] auto-fit grows the loop when the spline leaves it and **never shrinks** — control: a spline pulled well inside leaves the loop alone; [C] `Fit to Splines` is one undo action that restores both loop and terrain; [D] a migrated legacy Ridge's crest line is within 0.05 m of the old rasteriser's and its flank reach within one cell — controls: the fixture is not flat, and the *unmigrated* parameters produce a measurably different surface; [E] a duplicated Ridge carves its own spline, not the original's; [F] the deleted kernels are gone — `ClassDB` no longer exposes `stamp_ridge_line`; [G] **Add Water on a rebuilt Trough still builds a `Pasture3DStream`, not a `Pasture3DPool`** (§12.2) — control: Add Water on a plain Plow still builds a Pool, so the test is measuring the override and not a blanket change. |
 | **S3b** ✅ | **A GPU geometry-aware carve, `height` only** (§7.7): heights into the binding-4 layout, a vertex-sample pre-dispatch, the carve shader. BUILT — brought forward to directly after S3 at the user's request, the Plow carve being slow in the editor. The four masks stay CPU — the one-buffer-per-slot limit is not this phase's to lift. | `PathCarveGpuGate`: [A] GPU vs CPU on `PathCarveGate` [A]'s four cross-sections — control: the GPU route is live AND the carve moved the ground, so a silent CPU fallback cannot pass as agreement; [B] a graph wiring `bed` still bails — control: the same graph wiring `height` does not; [C] a heightless path with `follow_path_height` on matches across routes — control: the same path WITH heights differs; [D] the vertex-sampled ground reference is used on the GPU too — measured as the crest carrying the terrain's roughness, NOT as its smoothness; see §7.7 for why the intuitive fixture measures nothing. |
-| **S7a** | Grid-reading geometry (§8.4): `Path Drape` (+ force-downhill), `Path Width` field mode, `Path from Flow`. Correct on the GDScript evaluator; `blocks_native()` true. | `PathDeriveGate`: [A] a draped path's heights equal the surface sampled at its vertices — control: an undraped path does not; [B] force-downhill produces a monotonically non-increasing height sequence — control: without it, on the same uphill fixture, it does not; [C] width from `Erosion.flow` widens downstream — control: a constant field does not; [D] each of the three takes the graph off the native path, *and is checked to* — a bail nobody verifies is a bail that quietly stopped happening. |
+| **S7a** ✅ | Grid-reading geometry (§8.4): `Path Drape` (+ force-downhill), `Path Width` field mode, `Path from Flow`. Correct on the GDScript evaluator; `blocks_native()` true. BUILT — on a shared `Pasture3DGraphNodePathDerive`, with two departures, see §7.8. | `PathDeriveGate`: [A] a draped path's heights equal the surface sampled at its vertices — control: an undraped path does not; [B] force-downhill produces a monotonically non-increasing height sequence — control: without it, on the same uphill fixture, it does not; [C] width from `Erosion.flow` widens downstream — control: a constant field does not; [D] each of the three takes the graph off the native path, *and is checked to* — a bail nobody verifies is a bail that quietly stopped happening, with a control that the same graph WITHOUT the node lowers; [E] `Path from Flow` follows the main stem at a confluence and comes back running downstream — control: a threshold above the field's maximum traces nothing; [F] the memo re-derives when the field changes and NOT otherwise, which is the criterion `path_eval_salt` exists for. Every criterion reads the path the GRAPH resolved (`derived_path()`), never one the gate called for itself: a gate that calls `eval_path` passes whether or not `_resolved_path_of` ever reached the node, and that is exactly the two bugs [E] and [F] are about. |
 | **S7b** | The staged compile (§8.4): cut the program at each grid-reading geometry node, evaluate, produce the path, compile the remainder. Removes S7a's graph-wide bail. | `PathStagedCompileGate`: [A] the S7a fixtures now lower natively and match their own GDScript results to the erosion gates' thresholds — control: the S7a bail path, still reachable, gives the same answer more slowly; [B] a two-stage graph's cache invalidates when *either* stage's inputs change — control: changing nothing re-serves without re-solving. |
 
 | **S8** | **Write the Lake & River spec** (§12) — a document, not a build: the Pond overhaul as a preset over the water-accumulation nodes, and what happens to `Pasture3DStream` once a Trough's own spline is a loop. | No measurement gate: the deliverable is a spec with its own phases and gates. What S8 must *close* is listed in §12.3, and the one thing it cannot defer is §12.2, which S6 breaks. |

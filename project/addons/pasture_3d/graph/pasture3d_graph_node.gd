@@ -265,6 +265,28 @@ func eval_path(_p_inputs: Array) -> Pasture3DGraphPath:
 	return path_output()
 
 
+## True when this node produces a PATH out of a GRID it reads (spec 8.4). Only the S7a derive family
+## answers true.
+##
+## It exists because `Pasture3DTerrainGraph._resolved_path_of` short-circuits: a node with no PATH input
+## is answered with `path_output()`, which is right for a source -- it holds one -- and silently wrong
+## for `Path from Flow`, which holds nothing and makes one out of the water.
+func derives_path_from_grid() -> bool:
+	return false
+
+
+## Extra material folded into `_resolved_path_of`'s memo key. Zero for every node whose path is a pure
+## function of its path inputs, which is all of them except the derive family.
+##
+## Nothing else in that key moves when an upstream SOLVER re-solves: the key is the input paths' content
+## digests plus this node's own revision, and a river traced out of an erosion field has neither. So
+## without a salt the memo would serve the first river it ever traced, forever, and the terrain would be
+## right the first time and stale every time after -- the shape of bug `memoised-programs-hide-invalidation`
+## already names once.
+func path_eval_salt() -> int:
+	return 0
+
+
 ## True when this node reads PATH inputs, so the evaluator collects them before calling `eval_grid`.
 ## Answering true costs one dictionary walk per evaluation and nothing else.
 func reads_paths() -> bool:

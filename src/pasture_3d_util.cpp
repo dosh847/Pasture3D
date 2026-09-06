@@ -1206,6 +1206,15 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "path_decimate", GRAPH_OP_CONST },
 		{ "path_fractalize", GRAPH_OP_CONST },
 		{ "path_meanderize", GRAPH_OP_CONST },
+		// The S7a derive family (spec 7.5, 8.4). CONST like the rest of the PATH nodes -- they produce no
+		// grid either. The tag is here even though they answer blocks_native() true and so never reach a
+		// native compile at all: an op missing from this map takes the whole graph off the native tier
+		// silently (op-ids-omission-drops-graph-to-gdscript), which would give the S7a bail a SECOND cause
+		// and make PathDeriveGate [D] unable to say which one it measured. It is also what S7b needs in
+		// place before the staged compile can lower the remainder of the program.
+		{ "path_drape", GRAPH_OP_CONST },
+		{ "path_width_field", GRAPH_OP_CONST },
+		{ "path_from_flow", GRAPH_OP_CONST },
 		{ "blend", GRAPH_OP_BLEND },
 		{ "terrace", GRAPH_OP_TERRACE },
 		{ "input", GRAPH_OP_INPUT },
