@@ -61,7 +61,19 @@ enum Blend { REPLACE, MAX, MIN }
 
 ## Metres above (CREST) or below (BED) the reference. With Follow Path Height on the path IS the
 ## reference and this is a bonus offset.
-@export_range(0.0, 500.0, 0.1, "or_greater", "suffix:m") var offset: float = 0.0:
+##
+## ---- IT GOES NEGATIVE, AND THE SIGN IS RELATIVE TO THE CROSS-SECTION ----
+##
+## `cross_section` already carries the direction -- the kernel takes `-offset` for a BED -- so a POSITIVE
+## number always means "further in the direction this section goes": a crest higher, a bed deeper. A
+## NEGATIVE one walks back the other way, and that is a shape rather than a mistake: a crest below its own
+## line is a cutting or a sunken lane, and a bed above its line is a raised channel or an aqueduct bed.
+##
+## The range used to start at 0, which clamped the inspector and made those two unreachable without
+## editing the scene by hand. Note the interaction with `blend`, because it is what makes a negative
+## offset look broken rather than wrong: a BED with the default MIN never raises ground, so a bed lifted
+## above the terrain composites to nothing at all. Switch to REPLACE to see it.
+@export_range(-500.0, 500.0, 0.1, "or_greater", "or_less", "suffix:m") var offset: float = 0.0:
 	set(v):
 		offset = v
 		emit_changed()

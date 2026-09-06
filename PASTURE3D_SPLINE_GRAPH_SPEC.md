@@ -492,8 +492,11 @@ enum CrossSection { CREST, BED }
 @export var cross_section: CrossSection = CrossSection.CREST
 
 ## Metres above (CREST) or below (BED) the reference. With Follow Path Height on, the path IS the
-## reference and this is a bonus offset (default 0).
-@export var offset: float = 0.0
+## reference and this is a bonus offset (default 0). SIGNED: positive goes further in the direction the
+## cross-section already goes, negative walks back the other way -- a crest below its own line is a
+## cutting, a bed above its line is an aqueduct. The range shipped starting at 0, which clamped the
+## inspector and made both unreachable.
+@export_range(-500.0, 500.0, 0.1, "or_greater", "or_less", "suffix:m") var offset: float = 0.0
 
 ## Half-width of the FLAT top or floor, metres. 0 = peaked crest / V-basin.
 ##
