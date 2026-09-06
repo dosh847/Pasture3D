@@ -22,8 +22,78 @@ func _ready() -> void:
 	_d_native_lowering_all_nodes()
 	_e_driven_params_all_generators()
 	_f_no_native_path_ignores_a_driven_port()
+	_g_every_palette_op_is_lowerable()
 	print("\n=== %s (%d failures) ===\n" % ["GRAPH ALL NODE SOCKETS PASS" if _fail == 0 else "GRAPH ALL NODE SOCKETS FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
+
+
+# [G] EVERY palette op has an entry in the native op-id map, or is declared as deliberately unlowered.
+#
+# The regression net for a bug that shipped in S1 and was found only by profiling in S3b: `Spline Source`
+# was added to the palette, given a node, a gate and an icon — and never added to `op_ids()`. Nothing
+# failed. `_native_supported_uncached` looks its op tag up in that map, does not find it, and drops the
+# WHOLE graph onto the GDScript evaluator; the terrain still comes out right, just many times slower. The
+# same omission hid DLA for months, and the comment in that function says so.
+#
+# What makes this class of bug survive gates is that the natural fixture avoids it. Every Path Carve gate
+# built its graphs from `Road Source` — a deliberate choice, because a Spline Source resolves from the
+# scene and a headless gate has no brush — and Road Source IS in the map. The node under test was fine;
+# the node beside it was the one that silently un-accelerated the graph.
+#
+# So this criterion does not test a graph at all. It walks the PALETTE and asserts that every op the user
+# can add is either lowerable or on the exceptions list below, which is the only form that cannot be
+# dodged by picking a convenient fixture.
+func _g_every_palette_op_is_lowerable() -> void:
+	print("[G] every palette op is in the native op-id map")
+	if not ClassDB.class_has_method("Pasture3DUtil", "graph_op_ids"):
+		_assert(false, "Pasture3DUtil.graph_op_ids is not bound — rebuild the GDExtension")
+		return
+	var ids: Dictionary = Pasture3DUtil.graph_op_ids()
+
+	# An op may be absent from the map on exactly two declared grounds, and neither is a list this file
+	# maintains — a list has to be edited when a node is added, which is the same maintenance step S1
+	# skipped, so it would fail in precisely the circumstance this criterion exists for.
+	#
+	#   * its registry CATEGORY is "Dev / Reference". A [Dev/GD] oracle exists to be the GDScript
+	#     definition its C++ twin is measured against, so being unlowered is what it is FOR. The registry
+	#     entry is the declaration.
+	#   * or its node answers blocks_native() true, which is the same statement made by the node.
+	#
+	# Anything else absent from the map is the S1 bug again: an op the user can add that quietly takes
+	# every node beside it onto the GDScript evaluator.
+	var missing := PackedStringArray()
+	var declared := 0
+	var total := 0
+	for e in Pasture3DGraphNodeRegistry.entries(true):
+		var op: StringName = e["op"]
+		total += 1
+		if ids.has(op):
+			continue
+		if String(e.get("category", "")) == "Dev / Reference":
+			declared += 1
+			continue
+		var node: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(op)
+		if node != null and node.has_method("blocks_native") and node.blocks_native():
+			declared += 1
+			continue
+		missing.append(String(op))
+	_assert(missing.is_empty(),
+			"%d palette op(s) missing from op_ids(): %s — each drops its whole graph to GDScript"
+			% [missing.size(), "none" if missing.is_empty() else str(missing)])
+	print("    %d op(s) are absent from the map and declare it (oracle, or blocks_native)" % declared)
+
+	# CONTROL: the map was actually READ. An empty or tiny op_ids() would make `missing` fill up rather
+	# than empty out, so that direction is safe — but a registry that returned nothing would pass this
+	# criterion having checked zero ops, which is the "measured nothing" failure.
+	print("    control: checked %d palette op(s) against %d native op id(s)" % [total, ids.size()])
+	_assert(total > 40 and ids.size() > 40,
+			"the palette and the op-id map are both populated (%d ops, %d ids)" % [total, ids.size()])
+
+	# CONTROL: the check can FAIL. An op tag that is deliberately not in the map must be reported as
+	# missing — otherwise the lookup above is inert and would pass whatever the map contained.
+	print("    control: a fictional op is correctly seen as unlowerable: %s"
+			% str(not ids.has(&"no_such_op_xyz")))
+	_assert(not ids.has(&"no_such_op_xyz"), "op_ids() does not claim to implement a made-up op")
 
 
 func _a_parameter_socket_definitions() -> void:

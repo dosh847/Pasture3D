@@ -1189,6 +1189,11 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "const_bool", GRAPH_OP_CONST },
 		{ "road_source", GRAPH_OP_CONST },
 		{ "shape_source", GRAPH_OP_CONST },
+		// S1 added Spline Source and forgot this line, so EVERY graph containing one fell to the GDScript
+		// evaluator entire -- the silent whole-graph drop `_native_supported_uncached` warns about, and the
+		// same one that hid DLA for as long as it did. A PATH source lowers to CONST because it produces no
+		// grid at all: its path travels in the geometry table, and the slot is a placeholder.
+		{ "spline_source", GRAPH_OP_CONST },
 		{ "blend", GRAPH_OP_BLEND },
 		{ "terrace", GRAPH_OP_TERRACE },
 		{ "input", GRAPH_OP_INPUT },

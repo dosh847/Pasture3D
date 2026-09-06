@@ -213,6 +213,12 @@ bench/GraphHydraulicStreamLogGate.tscn
 bench/GraphHydraulicSaleveGate.tscn
 bench/GraphPhase1BrushTest.tscn
 # --- Terrain graph, universal node parameter sockets & inline controls ---
+# [G] walks the PALETTE rather than a graph: every op the user can add must be in graph_op_ids(), or be
+# declared unlowerable by its registry category ("Dev / Reference") or its own blocks_native(). It exists
+# because `spline_source` shipped missing from that map in S1 and nothing failed -- an absent tag makes
+# native_supported() false for the WHOLE graph, so the terrain is still correct and merely many times
+# slower. Every Path Carve gate had used Road Source for its fixtures, which IS in the map, so the node
+# under test was fine and the node beside it was the one un-accelerating everything.
 bench/GraphAllNodeSocketsGate.tscn
 
 # --- Modifier Margin: the band's mask must not step at the loop rim (§6.8.1) ---
