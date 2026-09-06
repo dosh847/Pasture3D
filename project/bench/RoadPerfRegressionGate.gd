@@ -87,7 +87,7 @@ func _covers_xz(p_outer: AABB, p_inner: AABB) -> bool:
 ## whole — a fixture that would fail [B] on correct code. A kilometres-long road is also the case the
 ## partial path exists for.
 func _spline_fixture() -> Array:
-	var brush := Pasture3DRidge.new()
+	var brush := Pasture3DSpline.new()
 	add_child(brush)
 	var path := Path3D.new()
 	var curve := Curve3D.new()

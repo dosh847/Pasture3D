@@ -1,7 +1,7 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
 # Pasture3DRoadBrush — lays out a road along one or more child Path3D splines, open or closed, exactly
-# as Pasture3DRidge and Pasture3DTrough lay out a crest or a channel.
+# as a Pasture3DRidge or Pasture3DTrough lays out a crest or a channel.
 # See PASTURE3D_ROAD_SYSTEM_PROPOSAL.md §2 and §4.1.
 #
 # ---- WHY A BRUSH ----
@@ -86,7 +86,7 @@ const PROTECT_STEP: float = 0.5
 ##
 ## ---- WHY THIS AND NOT A MANUAL WRAP ----
 ##
-## Pasture3DRidge appends `pts[0]` to its own polyline, and copying that here would have been wrong.
+## A closed-loop brush appends `pts[0]` to its own polyline, and copying that here would have been wrong.
 ## `Curve3D.closed` already bakes the closing segment: on a 4-point 300 m square, `tessellate()` goes from
 ## 4 points to 5 — the last exactly equal to the first — and `get_baked_length()` from 300 m to 400 m. So
 ## the wrap arrives through `_plan_points`'s existing `tessellate()` call, and appending a point on top of
@@ -275,7 +275,7 @@ func _disconnect_content(p_src: Object) -> void:
 ## all. So changing lane count from 2 to 6, picking a different road type, flipping Follow Terrain,
 ## marking a segment as a bridge or editing `lane_width` on the type did nothing to the terrain: the old
 ## corridor stayed until an unrelated edit forced a bake. Every sibling brush already does the
-## equivalent — Pasture3DRidge.width schedules a refresh from its setter.
+## equivalent — Pasture3DSpline.half_width schedules a refresh from its setter.
 ##
 ## Safe during `_init` and scene load: `_schedule_refresh` gates on `_can_auto_refresh()`, which requires
 ## the node to be inside the tree.

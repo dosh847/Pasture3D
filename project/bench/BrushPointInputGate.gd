@@ -59,11 +59,12 @@ func _check(p_label: String, p_ok: bool, p_detail: String) -> void:
 		_fail += 1
 
 
-## A Ridge (an OPEN brush, so `editor_add_point`'s crest-following branch is the one that matters) whose
-## points sit at CREST_Y, far above the ramp. auto_refresh off: the gate is about the curve edits, and a
+## A Pasture3DSpline (an OPEN brush, so `editor_add_point`'s crest-following branch is the one that
+## matters) whose points sit at CREST_Y, far above the ramp. This was a Ridge until S6 made Ridge a
+## closed-loop Plow preset, which would have taken the polygon branch instead and measured nothing. auto_refresh off: the gate is about the curve edits, and a
 ## bake per edit would only add time and a GPU path this has no opinion about.
-func _ridge(p_snap: bool) -> Pasture3DRidge:
-	var r := Pasture3DRidge.new()
+func _ridge(p_snap: bool) -> Pasture3DSpline:
+	var r := Pasture3DSpline.new()
 	r.auto_refresh = false
 	var p := Path3D.new()
 	var c := Curve3D.new()

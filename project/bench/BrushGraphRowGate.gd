@@ -184,10 +184,13 @@ func _test_unsupported_brush_is_the_control() -> void:
 	print("[E] CONTROL: only a brush that runs a stack may get the row")
 	# _parse_begin returns before add_custom_control when _supports_modifiers() is false. The
 	# EditorInspector cannot be driven headless, so this pins the guard that early return reads.
-	var ridge := Pasture3DRidge.new()
-	add_child(ridge)
-	_check("control: Pasture3DRidge reports false", not ridge._supports_modifiers())
-	ridge.queue_free()
+	# Pasture3DSpline, not Pasture3DRidge: S6 moved Ridge onto Pasture3DPlow, so it reports TRUE now and
+	# this control would have been asserting the opposite of the truth. Pasture3DSpline is the brush that
+	# still has no stack.
+	var spline := Pasture3DSpline.new()
+	add_child(spline)
+	_check("control: Pasture3DSpline reports false", not spline._supports_modifiers())
+	spline.queue_free()
 
 	var mound := _mound()
 	_check("Pasture3DMound reports true", mound._supports_modifiers())

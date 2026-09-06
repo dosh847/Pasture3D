@@ -279,7 +279,7 @@ func _gate_di_hidden_handle_selects_its_point() -> void:
 ## A brush with one open spline of `p_n` points and a camera framing it. Shared by DK and DL, which both
 ## need real screen projections rather than reasoning about them.
 func _pick_fixture(p_n: int) -> Array:
-	var brush := Pasture3DRidge.new()
+	var brush := Pasture3DSpline.new()
 	_root.add_child(brush)
 	var path := Path3D.new()
 	var c := Curve3D.new()

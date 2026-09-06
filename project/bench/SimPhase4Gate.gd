@@ -452,12 +452,25 @@ func _gate_m_clear() -> void:
 #
 # Two criteria, because they fail differently: the NODE must be at the feature's centre (all three axes,
 # unaffected by the descend pass), and the node's spline must retrace the extracted polyline in XZ. Y is
-# left out of the second one on purpose — _attach_generated runs make_descend on a Trough, which is
+# left out of the second one on purpose — _attach_generated runs make_bed_descend on a Trough, which is
 # entitled to move a point's height and not its position.
 #
 # CONTROL for both: the same measurement against the RAW local points, which is exactly what an unplaced
 # brush produces. It must be hundreds of metres out, or the site is at the origin and neither criterion
 # is testing anything.
+## The splines that carry the FEATURE, for a generated brush.
+##
+## Since S6 a Trough's own spline is the AREA loop and the channel lives on the preset's child spline, so
+## `_get_splines()` alone would compare the loop against the river it surrounds and fail on correct code.
+## A Pond is unchanged and answers with its own.
+static func _feature_splines(p_brush) -> Array:
+	if p_brush is Pasture3DSplinePreset:
+		var sp = (p_brush as Pasture3DSplinePreset)._preset_spline()
+		if sp != null:
+			return sp._get_splines()
+	return p_brush._get_splines()
+
+
 func _m_placement(p_sim, p_generated: Array) -> void:
 	var w: Dictionary = p_sim.extract_water()
 	var feats: Array = []
@@ -492,7 +505,7 @@ func _m_placement(p_sim, p_generated: Array) -> void:
 	var control_pt := 0.0
 	var compared := 0
 	for b in p_generated:
-		for s in b._get_splines():
+		for s in _feature_splines(b):
 			var c3: Curve3D = s.curve
 			if c3 == null:
 				continue
@@ -540,7 +553,7 @@ func _m_inside_write_area(p_sim, p_generated: Array) -> void:
 	var outside := 0
 	var checked := 0
 	for b in p_generated:
-		for s in b._get_splines():
+		for s in _feature_splines(b):
 			var c3: Curve3D = s.curve
 			if c3 == null:
 				continue
@@ -755,10 +768,13 @@ func _route_flow(p_z: PackedFloat32Array, p_gw: int, p_gh: int, p_cell: float) -
 
 
 ## How many of these brushes have a pool on at least one of their splines.
+## `_feature_splines`, not `_get_splines`: since S6 Add Water on a Trough follows the preset's CHILD
+## line (§12.2), so the pool is bound to that Path3D and the brush's own loop has none. Asking the loop
+## would report every generated river as dry.
 func _with_water(p_brushes: Array) -> int:
 	var n := 0
 	for b in p_brushes:
-		for s in b._get_splines():
+		for s in _feature_splines(b):
 			if b.pool_for_spline(s) != null:
 				n += 1
 				break

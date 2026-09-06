@@ -365,25 +365,31 @@ func _check_property_visibility() -> void:
 	var mound := Pasture3DMound.new()
 	var splat := Pasture3DSplat.new()
 	var plow := Pasture3DPlow.new()
-	var ridge := Pasture3DRidge.new()
+	var spline := Pasture3DSpline.new()
 	# Mound and Splat both define their OWN _validate_property; if either stopped chaining super() this
-	# is the criterion that notices.
-	for pair in [["Mound", mound], ["Splat", splat], ["Plow", plow]]:
+	# is the criterion that notices. Ridge joined the list in S6: it became a Plow preset, so it now
+	# rasterises a loop SDF and corner rounding applies to it like any other closed brush.
+	var ridge := Pasture3DRidge.new()
+	for pair in [["Mound", mound], ["Splat", splat], ["Plow", plow], ["Ridge", ridge]]:
 		for prop in ["corner_radius", "crease_smoothing"]:
 			var vis := _has_editor_usage(pair[1], prop)
 			print("    %s %s visible: %s (want true)" % [pair[0], prop, vis])
 			if not vis:
 				_bad("%s hides %s — check that its _validate_property chains super()" % [pair[0], prop])
-	# Control: Ridge is a polyline brush and goes through _exact_polyline_field, which has no loop.
+	# Control: Pasture3DSpline is an open polyline that paints nothing, so it has no loop SDF to round.
+	# This used to be Ridge, and S6 is why it is not: the rebuild moved Ridge onto Pasture3DPlow, so the
+	# brush that was the negative case became a positive one. A control that quietly turned into a
+	# duplicate of the thing it was controlling for would have kept passing and measured nothing.
 	for prop in ["corner_radius", "crease_smoothing"]:
-		var ridge_vis := _has_editor_usage(ridge, prop)
-		print("    Ridge %s visible: %s (want false)" % [prop, ridge_vis])
-		if ridge_vis:
-			_bad("Ridge shows %s but never rasterises a loop SDF" % prop)
+		var spline_vis := _has_editor_usage(spline, prop)
+		print("    Spline %s visible: %s (want false)" % [prop, spline_vis])
+		if spline_vis:
+			_bad("Pasture3DSpline shows %s but never rasterises a loop SDF" % prop)
 	mound.free()
 	splat.free()
 	plow.free()
 	ridge.free()
+	spline.free()
 	_done += 1
 
 

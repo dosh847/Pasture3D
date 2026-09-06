@@ -748,9 +748,20 @@ func _attach_generated(p_node: Node3D) -> void:
 	# gets one visibility toggle (§10.3).
 	p_node._assign_layer_by_name("Generated Lakes" if p_node is Pasture3DPond else "Generated Rivers")
 	p_node.set("_suspend_auto", false)
+	# A preset brush is built by code here, so its graph does not exist yet -- `_ready` only schedules the
+	# build for the next idle frame, and everything below drives the node synchronously. Building it now
+	# also runs the migration shim, which is what moves the bed Path3D `_make_trough` attached onto the
+	# preset's child spline and fits the loop around it.
+	if p_node is Pasture3DSplinePreset:
+		var preset := p_node as Pasture3DSplinePreset
+		preset.install_preset_now()
+		# After placement, so the loop is fitted in the transform the brush will actually bake in.
+		preset.ensure_area_loop()
 	p_node.refresh()
 	if p_node is Pasture3DTrough:
-		p_node.make_descend() # residual non-monotonic Y from sampling a noisy surface (§10.1)
+		# The BED line, not the brush's loop: after S6 the Trough's own spline is the area ring, and a
+		# ring cannot descend. Residual non-monotonic Y from sampling a noisy surface (§10.1).
+		p_node.make_bed_descend()
 	# §10.3 — water comes from the existing pool path, for BOTH kinds and synchronously. A Pond would
 	# seed its own on the next idle frame (auto_add_water), which is one frame in which Add Brushes has
 	# produced a dry lake; _make_pond turns that off and we press the same button here instead. One path,
@@ -791,9 +802,21 @@ func _make_trough(p_seg: Dictionary, p_widest: float) -> Pasture3DTrough:
 	t.name = "River"
 	t.set_meta(GENERATED_META, true)
 	t.snap_to_surface = false # the Y comes from the eroded surface, not from a re-snap
-	t.depth = cfg["river_carve_depth"]
-	t.bed_half_width = maxf(float(cfg["river_width_max"]), 0.1) * 0.5
-	t.width_curve = _width_curve(areas, p_widest)
+	# After S6 a Trough is a Plow with a graph, and the numbers below live on the Path Carve and on the
+	# preset's child spline rather than on the brush. Built here rather than through the `_set` migration
+	# shim: this river is NEW, not a scene saved by the old brush, and routing new work through a
+	# compatibility path is how the path outlives the thing it was compatible with.
+	t.install_preset_now()
+	var carve := t.preset_carve()
+	var sp := t._preset_spline()
+	if carve == null or sp == null:
+		push_warning("[Pasture3D] %s: could not build a river Trough's preset." % name)
+		return null
+	carve.offset = cfg["river_carve_depth"]
+	# `flat_width` is a FULL width where `river_width_max` is one too — no halving, unlike the old
+	# `bed_half_width` this replaces.
+	carve.flat_width = maxf(float(cfg["river_width_max"]), 0.1)
+	sp.width_along = _width_curve(areas, p_widest)
 	# World points, stored relative to where the node will sit — see PLACE_META.
 	var origin := _centroid(pts)
 	t.set_meta(PLACE_META, origin)
@@ -803,7 +826,10 @@ func _make_trough(p_seg: Dictionary, p_widest: float) -> Pasture3DTrough:
 	for p in pts:
 		c.add_point(p - origin)
 	path.curve = c
-	t.add_child(path)
+	# Onto the preset's child spline, which is what the graph's Spline Source reads. The brush's own
+	# spline is the AREA loop, and `_attach_generated` grows it around this line by pressing the same
+	# Fit to Splines the user has.
+	t.adopt_preset_line(path)
 	return t
 
 

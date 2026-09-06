@@ -302,8 +302,6 @@ public:
 	// `params` is a Dictionary of grid (min_x/min_z/vs/gw/gh) + shape knobs; `lut` is a 0..1 ramp LUT
 	// (empty => analytic default). The GDScript keeps the equivalent loop as a fallback / A/B reference.
 	void stamp_mound_loop(const int p_layer_id, const PackedVector2Array &p_poly, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut);
-	void stamp_ridge_line(const int p_layer_id, const PackedVector3Array &p_pts, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut);
-	void stamp_trough_line(const int p_layer_id, const PackedVector3Array &p_pts, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut);
 	void stamp_road_line(const int p_layer_id, const PackedVector2Array &p_plan, const AABB &p_clip, const Dictionary &p_params);
 	PackedFloat32Array get_height_below_along_plan(const int p_layer_id, const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum, const double p_ds, const int p_n_s);
 	int stamp_road_surface_control(const int p_layer_id, const PackedFloat32Array &p_surface,

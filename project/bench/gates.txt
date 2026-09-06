@@ -346,6 +346,45 @@ bench/PathPrePassGate.tscn
 # removal was found.
 bench/PathShapeGate.tscn
 
+# S6 - Ridge and Trough as Pasture3DPlow presets (PASTURE3D_SPLINE_GRAPH_SPEC.md §9, §12.2). The two
+# brushes stop being rasterisers: each is a Plow that arrives with a Pasture3DSpline child and a graph
+# already wired (Input -> Path Carve -> Output, Spline Source -> Path Carve.path), and stamp_ridge_line
+# and stamp_trough_line are deleted rather than kept behind a flag.
+#
+# Almost every way this can fail LOOKS like success. A preset that never built its graph still bakes the
+# Plow's own falloff, which is terrain moving. A Spline Source resolving nothing hands Path Carve an
+# empty path and its fail-fast passes the surface through, so "nothing exploded" is not evidence of
+# wiring. A migration that dropped every parameter still produces a ridge -- the default one. So:
+#
+#   [A] a fresh Ridge bakes a raised crest along its child spline with no wiring by hand, measured
+#       against untouched ground 120 m away. Control: a Spline Source misdirected BEFORE it ever
+#       resolved bakes nothing, not a wall. "Before it ever resolved" is the honest form of that
+#       control -- resolve_shapes states the family policy that a key naming nothing LEAVES the path
+#       alone, so misdirecting a resolved source would measure that policy instead.
+#   [B] Fit to Splines grows a 5 m loop around an 80 m line until nothing violates the margin, and a
+#       second fit moves nothing. Plus the agreement the code comments promise, between
+#       polygon_signed_distance and the rasteriser's _signed_distance_field, over a box proved to
+#       straddle the rim. This is the criterion that found the fit decimating its ring at half the very
+#       margin it was fitting.
+#   [C] the undo record restores the loop exactly in both directions. Headless there is no
+#       EditorUndoRedoManager, so what is measured is the RECORD the single action is built out of, and
+#       the gate prints that distinction rather than implying a Ctrl+Z.
+#   [D] an old Ridge's crest_height and width survive as Path Carve.offset and the child spline's
+#       half_width, and the BAKE puts the crest 18 m above the ground it draped onto with its flank
+#       reaching within one cell of 22 m. Controls: the site is proved non-flat (78 m of relief, which
+#       is what makes a draped crest distinguishable from a fixed-height one), and a preset carrying
+#       only its own defaults is proved to differ in both numbers. This found the migration leaving the
+#       preset's starter stub in place beside the real crest.
+#   [E] a duplicated Ridge's graph resolves ITS OWN line -- measured through input_spline_polylines,
+#       because two brushes each owning a child spline while both resolving the original's would pass a
+#       tree-shaped test.
+#   [F] ClassDB no longer exposes stamp_ridge_line or stamp_trough_line, with a control that
+#       Pasture3DData is bound and still carries the kernels the rebuild KEPT.
+#   [G] Add Water on a rebuilt Trough builds a Pasture3DStream, not a Pasture3DPool (§12.2 option a),
+#       and its source_spline is the preset's child line. Control: a plain Plow with the same shape of
+#       closed loop still builds a Pool, so this measures the override and not a blanket change.
+bench/SplineBrushPresetGate.tscn
+
 # --- Road system P0: the data model and its resolve chain (PASTURE3D_ROAD_SYSTEM_PROPOSAL.md §11) ---
 # Nothing here touches the terrain — P0 is the model. What it pins is what the later phases build on and
 # could not cheaply revisit: nearest-level resolution, clear-re-inherits (the defect that killed the

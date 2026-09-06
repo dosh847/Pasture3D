@@ -102,8 +102,14 @@ func _ready() -> void:
 # then sits still while its basin walks away is not bound in any useful sense.
 func _gate_a_button_binds() -> void:
 	print("[A] one press per brush type produces a correctly bound pool:")
-	for kind in ["Pasture3DMound", "Pasture3DPlow", "Pasture3DSplat", "Pasture3DRidge",
-			"Pasture3DTrough"]:
+	# Ridge and Trough left out since S6. They are Pasture3DPlow presets now, and Add Water on one
+	# deliberately follows the preset's CHILD spline rather than the brush's own loop (§12.2) — so the
+	# "source_spline is the brush's own Path3D" assertion below is false for them BY DESIGN. Asserting it
+	# anyway would fail correct code; weakening it to accommodate them would stop it checking anything
+	# for the three brushes it is actually about. SplineBrushPresetGate [G] is where the preset route is
+	# measured. Pasture3DSpline takes the fourth slot: an open-polyline brush, which is what makes the
+	# closed/open decision below a decision.
+	for kind in ["Pasture3DMound", "Pasture3DPlow", "Pasture3DSplat", "Pasture3DSpline"]:
 		var root := _make_world()
 		_make_manager(root)
 		var brush := _make_brush(kind, root, [[30.0, true]])
@@ -177,7 +183,7 @@ func _gate_a_button_binds() -> void:
 	# appeared" from being unconditional.
 	var croot := _make_world()
 	_make_manager(croot)
-	var open_brush := _make_brush("Pasture3DRidge", croot, [[30.0, false]])
+	var open_brush := _make_brush("Pasture3DSpline", croot, [[30.0, false]])
 	_make_carve(open_brush)
 	await _settle()
 	var open_pools: Array = open_brush.add_pool()
@@ -197,7 +203,7 @@ func _gate_a_button_binds() -> void:
 	# The second half of that control: a one-point spline is neither a loop nor a river.
 	var sroot := _make_world()
 	_make_manager(sroot)
-	var stub := _make_brush("Pasture3DRidge", sroot, [])
+	var stub := _make_brush("Pasture3DSpline", sroot, [])
 	_make_carve(stub)
 	var path := Path3D.new()
 	var one := Curve3D.new()
@@ -281,9 +287,11 @@ func _gate_c_raise_matrix() -> void:
 		["Pasture3DMound", {"blend_mode": B_MAX, "invert": true}, false],
 		["Pasture3DMound", {"blend_mode": B_MIN, "invert": false}, false],
 		["Pasture3DMound", {"blend_mode": B_REPLACE, "invert": false}, false],
-		["Pasture3DRidge", {"blend_mode": B_MAX, "invert": false}, true],
-		["Pasture3DRidge", {"blend_mode": B_MIN, "invert": false}, false],
-		["Pasture3DRidge", {"blend_mode": B_MAX, "invert": true}, false],
+		# No `invert` row for Ridge since S6: a Plow preset has no `invert` property, and its inversion
+		# lives in the stack (Pasture3DPlow._raise_inverted). Pasture3DMound's invert row above is what
+		# still covers the flipped-stamp case.
+		["Pasture3DRidge", {"blend_mode": B_MAX}, true],
+		["Pasture3DRidge", {"blend_mode": B_MIN}, false],
 		["Pasture3DTrough", {"blend_mode": B_MIN}, false],
 		["Pasture3DTrough", {"blend_mode": B_MAX}, true],
 		["Pasture3DPlow", {"blend_mode": B_ADD}, true],
@@ -779,6 +787,7 @@ func _new_brush(p_class: String) -> Node3D:
 		"Pasture3DMound": return Pasture3DMound.new()
 		"Pasture3DPlow": return Pasture3DPlow.new()
 		"Pasture3DSplat": return Pasture3DSplat.new()
+		"Pasture3DSpline": return Pasture3DSpline.new()
 		"Pasture3DRidge": return Pasture3DRidge.new()
 		"Pasture3DTrough": return Pasture3DTrough.new()
 	push_error("unknown brush class %s" % p_class)

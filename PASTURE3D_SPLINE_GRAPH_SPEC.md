@@ -1055,6 +1055,62 @@ The gate therefore measures **the crest line, the flank reach and monotonicity**
 and does **not** claim bit parity. Saying "within 0.05 m on the crest" and meaning it is worth more than a
 tolerance loose enough to pass whatever happens.
 
+### 9.6 What S6 built differently
+
+Six departures, all found by building it and by `SplineBrushPresetGate`'s controls.
+
+**1. An intermediate class, `Pasture3DSplinePreset`, between `Pasture3DPlow` and the two brushes.**
+§9.2 says `Pasture3DRidge extends Pasture3DPlow`, and it does — this sits between. The preset
+construction, the migration shim, the graph wiring and the Add Water override are identical on both
+subclasses and are all easy to get subtly wrong in ways nothing reports: a preset that rebuilds itself on
+load discards the user's edits, a migration that runs twice doubles a height. Written twice, that is
+twice the chances. `Pasture3DRidge` and `Pasture3DTrough` are now about 120 lines each, and every line is
+a number or a legacy name.
+
+**2. `smooth_passes` is not migrated, because `Pasture3DPlow` already declares it.** §9.5's table maps
+it onto a `Pasture3DNodeSmooth` after the carve. It cannot: Godot calls `_set` only for names the class
+does not declare, so a saved `smooth_passes` lands straight on the Plow property of the same name and
+`_legacy` never sees it — and that property is the same blur after the same rasterisation. The shadowing
+IS the migration.
+
+`blend_mode` is shadowed the same way and is NOT harmless, so it is handled: `SHADOWED` names it,
+`_apply_migration` reads it off `self` rather than out of `_legacy`, runs it through the map like any
+other, and puts the property back to the Plow default. Left alone, an old Ridge saved with MIN would also
+composite its whole layer with MIN — the same intent applied twice on two different axes.
+
+**3. The presets ship a non-zero `Path Carve.offset`.** Path Carve's own default is 0, which for a CREST
+means a crest level with the line that draws it: a preset that visibly does nothing. A preset exists to
+arrive doing something, so a Ridge starts at +20 m and a Trough at −6 m. Criterion [A] is what found
+this — it measured a rise of exactly 0.000 m through a graph that was wired perfectly.
+
+**4. `_reparent_legacy_splines` deletes the preset's starter line.** `_install_preset` gives every new
+preset a two-point stub so a hand-placed Ridge has something to drag. On a MIGRATING one that stub is not
+a spare: it sits at the brush's origin, the Spline Source finds it alongside the reparented crest, and
+the carve follows whichever comes first. The symptom is a ridge at the right height in the wrong place,
+which reads as a transform bug. Criterion [D] found it as a crest 44 m out.
+
+**5. `_offset_outline` builds its ring wide and decimates by the slack.** The isocontour is traced off a
+grid and then simplified to control points, and both steps can only cut INWARD. It was decimating at
+`spline_margin * 0.5` — half the very clearance being fitted — so `fit_loop_to_splines` came back
+reporting violations it had just created. The contour is now taken at `margin + slack` and decimated with
+a tolerance of `slack`, so the worst the simplification can do is give back what the widening bought.
+Overshooting is free: the fit only ever grows.
+
+**6. `install_preset_now()` and `adopt_preset_line()`, for callers that build a preset in code.**
+`_ready` can only schedule the preset for the next idle frame, and `Pasture3DSimBase._make_trough` — and
+every gate — builds a Trough and then drives it synchronously. The generated rivers are built through
+these rather than through the `_set` migration shim: a generated river is NEW, and routing new work
+through a compatibility path is how the path outlives the thing it was compatible with.
+
+Two consequences outside §9 that the rebuild forced, both in gates rather than in the plugin:
+`WaterBodiesPhase4Gate` [A] and [C] no longer use Ridge or Trough (a preset's Add Water follows its child
+spline BY DESIGN, so that gate's "source_spline is the brush's own Path3D" assertion is false for one),
+and `SimPhase4Gate` reads a generated river's geometry and its water off the preset's child line rather
+than off the brush's loop. Every other gate that used a Ridge as a generic open-spline fixture now uses
+`Pasture3DSpline`, which is what an open-polyline brush is since S6 — including
+`BrushGraphRowGate`'s "a brush with no stack" control, which had quietly become an assertion of the
+opposite of the truth.
+
 ---
 
 ## 10. Phases
@@ -1070,7 +1126,7 @@ silent criteria — a criterion that threw before asserting must be reported as 
 | **S3** ✅ | `Path Carve` (§7.1): the C++ kernel (`src/pasture_3d_path_carve.cpp`), `Pasture3DUtil.path_carve_grid` + the `_geom` overload, `GRAPH_OP_PATH_CARVE`, CPU lowering, GPU mode, the production node and its `[Dev/GD]` oracle. Follows `PASTURE3D_NODE_ACCELERATION_GUIDE.md` §2 steps 0-6 verbatim. BUILT — with two departures, see §7.4. | `PathCarveGate`: [A] native vs oracle on four cross-sections (peaked crest, flat crest, V bed, flat bed) over sloping ground — control: a zero-offset carve changes nothing, and a control that the fixture is not flat; [B] SLOPE_ANGLE reaches the ground at the stated angle — measured, not asserted from the parameter (`check-derived-values-outside-the-chain`); [C] the five channels are distinct and none is constant; [D] `width_source = PATH` produces a carve that widens where the path widens — control: CONSTANT does not; [E] GPU parity, or an explicit refusal that is *tested to refuse*. |
 | **S4** ✅ | The geometry pre-pass (§8.2-8.3): `eval_path`, the PATH sub-DAG resolution, the cache. Plus `Path Width` (§7.3) as its first customer. BUILT — with five departures, see §8.5. | `PathPrePassGate`: [A] a `Spline Source → Path Width → Path Carve` chain lowers **natively** — asserted by calling `native_supported()` directly, not inferred from the output looking right — and matches the GDScript evaluator; two controls, because there are two ways to be vacuous: the same chain with the filter removed must differ by metres (the filter did something), and the same chain with the pre-pass switched off must differ too (the pre-pass is why); [B] fanout is one table entry for two consumers of one produced path — control: two separate filters on one source give two; [C] `eval_path` is not re-run when nothing changed — count the calls — control: editing the width does re-run it. |
 | **S5** ✅ | The reshape family (§7.4): five PATH→PATH nodes, metres not fractions, stable seeds. BUILT — on a shared `Pasture3DGraphNodePathShape` base, with seven departures listed at the end of §7.4 (the seventh is a native path-index fix the family provoked). | `PathShapeGate`: [A] each node changes the line — control: at its zero setting each is the identity, byte for byte (Resample's is a step longer than the line, since a near-zero step is its busiest case, not its idlest); [B] the same seed twice gives the same path — control: a different seed does not; [C] Resample at 1 m puts vertices 1 m apart AND preserves arc length to 0.04 m — both halves, since spacing alone passes on a node that resampled the chord; [D] `Meanderize` LENGTHENS the line (the sign error this algorithm invites straightens the river rather than mirroring it) and `remove_loops` leaves it non-self-intersecting — control: without it, on a fixture chosen to knot, 47 crossings survive; [E] widths and heights are resampled onto the new vertices — control: a path carrying none still carries none, rather than gaining zeros a HEIGHT array would read as sea level; [F] a reshape drops a solved road profile — control: `Path Width` keeps it; [G] a reshaped path's query cost follows its vertex count and not its square — a ratio against the same line before the reshape, so the number does not measure the machine; this is the one criterion that measures what the reshape costs the kernel downstream, and it is what the seventh departure above was found by. |
-| **S6** | **Ridge and Trough rebuilt** (§9): reparent onto `Pasture3DPlow`, the preset, loop auto-fit + Fit to Splines, the `_set` migration shim, deletion of `stamp_ridge_line` / `stamp_trough_line` and the old bodies. | `SplineBrushPresetGate`: [A] a fresh Ridge bakes a raised crest along its child spline without any wiring — control: with the Spline Source unwired it bakes nothing, not a wall; [B] auto-fit grows the loop when the spline leaves it and **never shrinks** — control: a spline pulled well inside leaves the loop alone; [C] `Fit to Splines` is one undo action that restores both loop and terrain; [D] a migrated legacy Ridge's crest line is within 0.05 m of the old rasteriser's and its flank reach within one cell — controls: the fixture is not flat, and the *unmigrated* parameters produce a measurably different surface; [E] a duplicated Ridge carves its own spline, not the original's; [F] the deleted kernels are gone — `ClassDB` no longer exposes `stamp_ridge_line`; [G] **Add Water on a rebuilt Trough still builds a `Pasture3DStream`, not a `Pasture3DPool`** (§12.2) — control: Add Water on a plain Plow still builds a Pool, so the test is measuring the override and not a blanket change. |
+| **S6** ✅ | **Ridge and Trough rebuilt** (§9): reparent onto `Pasture3DPlow`, the preset, loop auto-fit + Fit to Splines, the `_set` migration shim, deletion of `stamp_ridge_line` / `stamp_trough_line` and the old bodies. BUILT — with six departures, see §9.6. | `SplineBrushPresetGate`: [A] a fresh Ridge bakes a raised crest along its child spline without any wiring — control: with the Spline Source unwired it bakes nothing, not a wall; [B] auto-fit grows the loop when the spline leaves it and **never shrinks** — control: a spline pulled well inside leaves the loop alone; [C] `Fit to Splines` is one undo action that restores both loop and terrain; [D] a migrated legacy Ridge's crest line is within 0.05 m of the old rasteriser's and its flank reach within one cell — controls: the fixture is not flat, and the *unmigrated* parameters produce a measurably different surface; [E] a duplicated Ridge carves its own spline, not the original's; [F] the deleted kernels are gone — `ClassDB` no longer exposes `stamp_ridge_line`; [G] **Add Water on a rebuilt Trough still builds a `Pasture3DStream`, not a `Pasture3DPool`** (§12.2) — control: Add Water on a plain Plow still builds a Pool, so the test is measuring the override and not a blanket change. |
 | **S3b** ✅ | **A GPU geometry-aware carve, `height` only** (§7.7): heights into the binding-4 layout, a vertex-sample pre-dispatch, the carve shader. BUILT — brought forward to directly after S3 at the user's request, the Plow carve being slow in the editor. The four masks stay CPU — the one-buffer-per-slot limit is not this phase's to lift. | `PathCarveGpuGate`: [A] GPU vs CPU on `PathCarveGate` [A]'s four cross-sections — control: the GPU route is live AND the carve moved the ground, so a silent CPU fallback cannot pass as agreement; [B] a graph wiring `bed` still bails — control: the same graph wiring `height` does not; [C] a heightless path with `follow_path_height` on matches across routes — control: the same path WITH heights differs; [D] the vertex-sampled ground reference is used on the GPU too — measured as the crest carrying the terrain's roughness, NOT as its smoothness; see §7.7 for why the intuitive fixture measures nothing. |
 | **S7a** | Grid-reading geometry (§8.4): `Path Drape` (+ force-downhill), `Path Width` field mode, `Path from Flow`. Correct on the GDScript evaluator; `blocks_native()` true. | `PathDeriveGate`: [A] a draped path's heights equal the surface sampled at its vertices — control: an undraped path does not; [B] force-downhill produces a monotonically non-increasing height sequence — control: without it, on the same uphill fixture, it does not; [C] width from `Erosion.flow` widens downstream — control: a constant field does not; [D] each of the three takes the graph off the native path, *and is checked to* — a bail nobody verifies is a bail that quietly stopped happening. |
 | **S7b** | The staged compile (§8.4): cut the program at each grid-reading geometry node, evaluate, produce the path, compile the remainder. Removes S7a's graph-wide bail. | `PathStagedCompileGate`: [A] the S7a fixtures now lower natively and match their own GDScript results to the erosion gates' thresholds — control: the S7a bail path, still reachable, gives the same answer more slowly; [B] a two-stage graph's cache invalidates when *either* stage's inputs change — control: changing nothing re-serves without re-solving. |
@@ -1198,6 +1254,15 @@ out, and **S6 must pick one and pin it with a gate criterion** rather than leavi
   and it leaves a hole for however long S8 takes.
 * **(c) Do nothing**, and a Trough's Add Water makes a moat. This is what happens if nobody decides, which
   is the reason it is written down as an option rather than left as an outcome.
+
+**S6 chose (a).** `Pasture3DTerrainBrush._water_source_splines()` is the hook — it returns
+`_get_splines()`, and `add_pool_now()` iterates it instead of `_get_splines()` directly.
+`Pasture3DSplinePreset` overrides it to return the child spline's `Path3D`s, falling back to the loop
+when there is no child. **The closed/open rule is untouched**: a preset whose child line is itself a ring
+still gets a Pool, and it should. `SplineBrushPresetGate` [G] measures both halves — a rebuilt Trough
+produces a `Pasture3DStream` whose `source_spline` is the child line, and a plain Plow with the same
+shape of closed loop still produces a `Pasture3DPool`, so the criterion is about the override rather than
+about Add Water having stopped making pools.
 
 ### 12.3 What the Lake & River spec has to close
 

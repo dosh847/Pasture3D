@@ -1,7 +1,7 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
 # Pasture3DTerrainBrush — shared base for the spline-driven landscape brushes
-# (Pasture3DMound / Pasture3DRidge / Pasture3DTrough). See PASTURE3D_LANDSCAPE_TOOLS_SPEC.md and
+# (Pasture3DMound / Pasture3DPlow / Pasture3DSpline). See PASTURE3D_LANDSCAPE_TOOLS_SPEC.md and
 # PASTURE3D_TOOL_LAYER_ASSIGNMENT_SPEC.md.
 #
 # A brush node paints N child Path3D splines into ONE reserved, non-destructive height layer. Tools
@@ -1100,6 +1100,14 @@ func refresh(record_undo: bool = false) -> void:
 	if not _paints():
 		_refresh_consumers()
 		return
+	# Before the bake, so the grid this bake builds is the grown one and not the clipped one. The curve
+	# edits it makes are handed to `_refresh_owner` through `_pending_fit_undo` rather than committing
+	# their own action: a grow that undid separately from the bake it caused would leave the loop and the
+	# terrain disagreeing about where the rim is, which is a state neither of them can be blamed for.
+	if auto_fit_loop and not _fitting:
+		_fitting = true
+		auto_fit_loop_now(true)
+		_fitting = false
 	if _wants_deferred_bake():
 		await _bake_deferred(_refresh_owner.bind(_layer_owner, false, []), _layer_owner, record_undo)
 		return
@@ -1207,9 +1215,15 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 	if ur != null:
 		var after := _snapshot_owner(owner)
 		ur.create_action("Pasture3D %s Bake" % _spline_basename())
+		# The auto-fit's curve edits go in FIRST on the do side and are undone with the terrain on the
+		# other, so one Ctrl+Z puts both back. See `auto_fit_loop_now`.
+		for e in _pending_fit_undo:
+			ur.add_do_method(self, "_restore_loop_points", e[0], e[2])
+			ur.add_undo_method(self, "_restore_loop_points", e[0], e[1])
 		ur.add_do_method(self, "_restore_owner", owner, after)
 		ur.add_undo_method(self, "_restore_owner", owner, before)
 		ur.commit_action(false)
+	_pending_fit_undo.clear()
 
 	# After the GPU push, so a listener that reads get_height() sees this bake and not the
 	# previous one.
@@ -3271,9 +3285,9 @@ func _new_spline() -> Path3D:
 	var path := Path3D.new()
 	path.name = "%s%d" % [_spline_basename(), _get_splines().size() + 1]
 	path.curve = _make_starter_curve()
-	# Closed-fill brushes (Mound/Plow/Splat) author a polygon, so their spline node is a closed Curve3D
-	# from the start — the native Path3D gizmo then draws the last→first segment and editing stays coherent
-	# (no duplicated wrap point). Ridge/Trough stay open. Curve3D.closed is Godot 4.x native.
+	# Closed-fill brushes author a polygon, so their spline node is a closed Curve3D from the start — the
+	# native Path3D gizmo then draws the last→first segment and editing stays coherent (no duplicated wrap
+	# point). Pasture3DSpline stays open. Curve3D.closed is Godot 4.x native.
 	if path.curve and _is_closed():
 		path.curve.closed = true
 	add_child(path)
@@ -3367,7 +3381,7 @@ func add_pool_now() -> Array:
 
 	var targets: Array[Path3D] = []
 	var skipped := PackedStringArray()
-	for s in _get_splines():
+	for s in _water_source_splines():
 		if pool_for_spline(s) != null:
 			continue
 		# The CURVE decides which kind of water this is, not the brush class: closed fills as a
@@ -3468,6 +3482,20 @@ func pool_for_spline(path: Path3D) -> Node:
 		if is_instance_valid(n) and n.get("source_spline") == path:
 			return n
 	return null
+
+
+## The splines Add Water should follow. This brush's own, on every brush that carves with them.
+##
+## A hook rather than `_get_splines()` inline because the S6 presets do not carve with their own spline
+## any more: a Ridge's or Trough's loop is the AREA and the line being carved is a child Pasture3DSpline.
+## Add Water on one has to follow the line, or a Trough — whose whole documented relationship with
+## Pasture3DStream is "press Add Water" — would build a moat around itself. See
+## Pasture3DSplinePreset._water_source_splines and PASTURE3D_SPLINE_GRAPH_SPEC.md §12.2.
+##
+## What it does NOT change is the closed-versus-open rule in `_build_pool_for`. The curve still decides
+## which kind of water this is; this only decides which curve is asked.
+func _water_source_splines() -> Array:
+	return _get_splines()
 
 
 ## The scene's water manager, or null. One per scene is the normal case; the first is the active
@@ -4082,25 +4110,6 @@ func _blur_field(p_field: PackedFloat32Array, gw: int, gh: int, p_metres: float,
 		if v > max_inside:
 			max_inside = v
 	return [out, max_inside]
-
-
-## Ridge cross-section, corrected convention: 1 at the centre (d=0) → 0 at the skirt edge (d=1), but a
-## custom Curve is read edge→centre (sampled at 1-d) so an INCREASING curve makes a natural peaked ridge,
-## consistent with Trough's bank_profile. Default (no curve) = rounded cosine — identical to the old
-## behaviour (cosine is symmetric), so default-shaped ridges are unchanged; only custom-curve ridges flip.
-func _ridge_cross(c: Curve, d: float) -> float:
-	d = clampf(d, 0.0, 1.0)
-	if c:
-		return c.sample_baked(1.0 - d)
-	return 0.5 + 0.5 * cos(d * PI)
-
-
-func _ridge_cross_lut(c: Curve) -> PackedFloat32Array:
-	var lut := PackedFloat32Array()
-	lut.resize(RAMP_LUT_N)
-	for i in range(RAMP_LUT_N):
-		lut[i] = _ridge_cross(c, float(i) / float(RAMP_LUT_N - 1))
-	return lut
 
 
 ## True when the native C++ rasteriser for `method` is available (post-Round-2 build). Falls back to the
@@ -5737,17 +5746,8 @@ func _loop_frame(poly: PackedVector2Array) -> Array:
 ## grid and the source of the O(cells × edges) freeze. Decimate the baked polyline down to roughly the
 ## terrain resolution before rasterising; the chamfer distance field below then runs in O(cells).
 
-## Sample _base_height_below at each spline point. O(npts) — cheap alternative to _base_below_grid
-## for computing ground_ref in C++ via per-segment linear interpolation (a_ground + t*(b_ground-a_ground)).
-func _below_pts(pts: PackedVector3Array) -> PackedFloat32Array:
-	var out := PackedFloat32Array()
-	out.resize(pts.size())
-	for i in range(pts.size()):
-		out[i] = _base_height_below(pts[i])
-	return out
-
-
-## 3-D version of _decimate for ridge/trough open polylines (preserves XYZ for height).
+## 3-D version of _decimate, preserving XYZ for height. Written for the old Ridge/Trough rasterisers;
+## after S6 its one caller is Pasture3DSpline, which decimates the line it publishes to the graph.
 func _decimate3(pts: PackedVector3Array, step: float) -> PackedVector3Array:
 	var n := pts.size()
 	if n < 3:
@@ -5914,58 +5914,6 @@ func _signed_distance_field(poly: PackedVector2Array, min_x: float, min_z: float
 	return [field, max_inside]
 
 
-## EXACT closest-point-on-segment feature field of a world-space polyline (the GDScript reference oracle
-## for the native stamp_ridge/trough_line field; mirrors its ds==1 path verbatim). For each cell within
-## `reach` of the polyline, returns the nearest lateral distance, the spline crest/bed Y at the nearest
-## point, the arc length to it, and the below-layer ground there (linearly interpolated from `below_pts`).
-## Returns [lat, base_y, along, ground_ref, total]. Unreached cells keep lat=BIG, ground_ref=NAN. This is
-## O(cells × segments) like the native ds==1 path — exact (no chamfer angular error, no seams), so it
-## replaces _polyline_field + _smooth_arclength_fields for an exact A/B match with the C++ rasteriser.
-func _exact_polyline_field(pts: PackedVector3Array, below_pts: PackedFloat32Array,
-		min_x: float, min_z: float, vs: float, gw: int, gh: int, reach: float) -> Array:
-	var n := gw * gh
-	const BIG := 1.0e9
-	var lat := PackedFloat32Array(); lat.resize(n); lat.fill(BIG)
-	var base_y := PackedFloat32Array(); base_y.resize(n)
-	var along := PackedFloat32Array(); along.resize(n)
-	var ground_ref := PackedFloat32Array(); ground_ref.resize(n); ground_ref.fill(NAN)
-	var has_below := below_pts.size() == pts.size()
-	var arc := 0.0
-	var npts := pts.size()
-	for k in range(npts - 1):
-		var a := pts[k]
-		var b := pts[k + 1]
-		var dx := b.x - a.x
-		var dz := b.z - a.z
-		var seg_len_sq := dx * dx + dz * dz
-		var seg_len := sqrt(seg_len_sq)
-		var ag := below_pts[k] if has_below else NAN
-		var bg := below_pts[k + 1] if has_below else NAN
-		var six0 := maxi(0, int(floor((minf(a.x, b.x) - reach - min_x) / vs)))
-		var six1 := mini(gw - 1, int(ceil((maxf(a.x, b.x) + reach - min_x) / vs)))
-		var siz0 := maxi(0, int(floor((minf(a.z, b.z) - reach - min_z) / vs)))
-		var siz1 := mini(gh - 1, int(ceil((maxf(a.z, b.z) + reach - min_z) / vs)))
-		for iz in range(siz0, siz1 + 1):
-			var cz := min_z + iz * vs
-			var row := iz * gw
-			for ix in range(six0, six1 + 1):
-				var cx := min_x + ix * vs
-				var qx := cx - a.x
-				var qz := cz - a.z
-				var t := clampf((qx * dx + qz * dz) / seg_len_sq, 0.0, 1.0) if seg_len_sq > 1e-18 else 0.0
-				var px := a.x + t * dx
-				var pz := a.z + t * dz
-				var d := sqrt((cx - px) * (cx - px) + (cz - pz) * (cz - pz))
-				var i := row + ix
-				if d < lat[i]:
-					lat[i] = d
-					base_y[i] = a.y + t * (b.y - a.y)
-					along[i] = arc + t * seg_len
-					ground_ref[i] = (ag + t * (bg - ag)) if has_below else NAN
-		arc += seg_len
-	return [lat, base_y, along, ground_ref, maxf(arc, 0.001)]
-
-
 ## ---- Virtuals for subclasses ----
 
 func _get_blend_mode() -> int:
@@ -6069,8 +6017,8 @@ func _min_points() -> int:
 
 
 ## Whether the loop wraps last-point-to-first (a closed ring). Closed-fill brushes (Mound/Plow/Splat,
-## min ≥ 3 points) are always closed; the open polyline brushes (Ridge/Trough) override this with a
-## runtime toggle. Drives loop-wrap in the gizmo (tangents, segment insertion) and the rasterizers.
+## and since S6 the Plow presets Ridge/Trough, min ≥ 3 points) are always closed; the open polyline
+## brush Pasture3DSpline overrides this with a runtime toggle. Drives loop-wrap in the gizmo (tangents, segment insertion) and the rasterizers.
 func _is_closed() -> bool:
 	return _min_points() >= 3
 
@@ -6079,8 +6027,11 @@ func _is_closed() -> bool:
 ## its native/GPU twins)? Only those brushes have an outline to fillet and a medial axis to smooth, so
 ## only they show `corner_radius` and `crease_smoothing`.
 ##
-## NOT `_is_closed()`: a Ridge with its closed toggle on is still a polyline brush and goes through
-## `_exact_polyline_field`, which has no corners to round. The two questions look alike and are not.
+## NOT `_is_closed()`. Before S6 the standing example was a Ridge with its closed toggle on: a ring, and
+## still a polyline brush with no loop field to fillet. Ridge became a Plow preset and stopped being that
+## example -- Pasture3DSpline is the one now, an open line that publishes geometry and rasterises nothing.
+## The two questions look alike and are not, which is why this stayed a separate hook rather than
+## collapsing into `_is_closed()` the moment its only counter-example moved.
 func _has_corner_rounding() -> bool:
 	return false
 
@@ -6099,6 +6050,11 @@ func _validate_property(property: Dictionary) -> void:
 				property.usage &= ~PROPERTY_USAGE_EDITOR
 		"_make_unique_btn":
 			if _shared_curve_spline_names().is_empty():
+				property.usage &= ~PROPERTY_USAGE_EDITOR
+		"spline_margin", "auto_fit_loop", "_fit_btn":
+			# Spline Fit needs both halves: a loop to grow and a modifier stack that reads a spline to
+			# grow it TO. See `_supports_spline_fit`.
+			if not _supports_spline_fit():
 				property.usage &= ~PROPERTY_USAGE_EDITOR
 		"_add_water_btn", "force_gdscript_raster", "log_bake_timing":
 			# Water is authored inside a brush's loop, and the other two describe a bake. A brush that
@@ -6489,3 +6445,565 @@ func _refresh_stats_display() -> void:
 	var inspector := EditorInterface.get_inspector()
 	if inspector != null and inspector.get_edited_object() == self:
 		notify_property_list_changed()
+
+
+# ---- Spline Fit: the loop follows the splines its graph reads --------------------------------------
+#
+# PASTURE3D_SPLINE_GRAPH_SPEC.md §9.4. Offered only where `_supports_modifiers() and _is_closed()` --
+# a Plow and its presets -- because it is meaningless anywhere else: a brush with no loop has nothing to
+# fit, and a brush with no modifier stack reads no input spline to fit it TO.
+#
+# ---- WHY THE LOOP HAS TO CHASE THE SPLINE AT ALL ----
+#
+# The loop is the extent. Everything the Plow does -- the mask, the dirty rect, the per-extent frozen
+# graph cache keyed on `ox,oz,gw,gh` -- is bounded by it, and that is the performance argument for the
+# whole S6 rebuild. But the thing being CARVED is a child `Pasture3DSpline`, which the user drags
+# independently. Drag it past the rim and the carve is clipped, in exactly the place the rim feather
+# is, so it reads as a wall rather than as a missing end.
+#
+# ---- GROW ONLY, AND THAT IS A DECISION ----
+#
+# A refit that also pulled the loop IN would fight every user who deliberately drew a loop larger than
+# the spline: a Ridge with room for erosion spill, a Plow whose graph reaches past its crest. Growing is
+# the case where NOT acting produces a visibly clipped carve; shrinking is the case where acting
+# destroys authored intent. So growing is automatic and shrinking is `Fit to Splines`, a button.
+@export_group("Spline Fit")
+
+## Metres of loop kept clear around every input spline.
+##
+## The carve's flank reach plus a margin. A crest whose flank is cut off at the loop rim reads as a wall,
+## and the rim is exactly where the feather is -- so the default is generous rather than tight.
+@export var spline_margin: float = 30.0:
+	set(v):
+		spline_margin = maxf(v, 0.0)
+		_schedule_refresh()
+
+## Grow the loop when an input spline moves outside it. Never shrinks -- see the section header.
+@export var auto_fit_loop: bool = true:
+	set(v):
+		auto_fit_loop = v
+		_schedule_refresh()
+
+## Rebuild the loop as the offset outline of every input spline at `spline_margin`. Undoable as one
+## action, because it replaces authored geometry.
+@export_tool_button("Fit to Splines") var _fit_btn = fit_loop_to_splines
+
+## Curve edits this bake's undo action still has to record: [Curve3D, before, after]. Filled by
+## `auto_fit_loop_now` and drained by `_refresh_owner`, so one Ctrl+Z puts the loop AND the terrain
+## back -- a grow that undid separately from the bake it caused would leave the two disagreeing.
+var _pending_fit_undo: Array = []
+
+## Re-entry guard. Moving a control point emits the curve's `changed`, which schedules another refresh;
+## without this the first grow would bake, grow, bake for as long as the deficit took to close.
+var _fitting: bool = false
+
+
+## True where Spline Fit means anything. Same gate `modifier_margin` uses, and already true for a Plow
+## without new plumbing: `_is_closed()` defaults to `_min_points() >= 3`, and Plow's `_min_points()` is 3.
+func _supports_spline_fit() -> bool:
+	return _supports_modifiers() and _is_closed()
+
+
+## The world-space XZ polylines this brush's graph actually reads, one per input spline.
+##
+## Resolved through the graph, not by looking for children: a `Spline Source` with a key points at
+## somebody else's spline, and fitting the loop to a child the graph never reads would grow it for a
+## spline that contributes nothing. The empty-key host fallback (5.1) is what makes the preset's own
+## child the common case.
+##
+## The AUTHORED spline, not the reshaped one. A Meanderize downstream can push the line hundreds of
+## metres off what was drawn, and a loop that grew to contain a procedurally generated wander -- every
+## bake, permanently, because this never shrinks -- would run away from the user rather than follow them.
+func input_spline_polylines() -> Array:
+	var out: Array = []
+	if not _supports_spline_fit():
+		return out
+	var seen := {}
+	for m in modifiers:
+		if m == null or not (m is Pasture3DNodeGraph):
+			continue
+		var g: Pasture3DTerrainGraph = (m as Pasture3DNodeGraph).graph
+		if g == null:
+			continue
+		# Re-resolve rather than trusting whatever the last bake left on the node: the button can be
+		# pressed on a brush that has never baked, and a stale `path` is the one input that would move the
+		# loop somewhere the spline no longer is.
+		Pasture3DGraphSources.resolve_splines(g, self)
+		for node in g.nodes:
+			if node == null or node.op() != &"spline_source":
+				continue
+			var p: Pasture3DGraphPath = node.path_output()
+			if p == null or p.points.size() < 2 or seen.has(p.get_instance_id()):
+				continue
+			seen[p.get_instance_id()] = true
+			out.append(p.points)
+	return out
+
+
+## Signed distance from `p_q` to closed polygon `p_poly`, POSITIVE INSIDE, in metres.
+##
+## The point-wise form of `_signed_distance_field`, and it has to stay that: same even-odd inside rule,
+## same exact Euclidean distance to the nearest edge. Containment and masking disagreeing about where
+## the rim is would show up as a loop that grows forever (a sample the fit thinks is outside and the
+## mask thinks is inside is never satisfied) or not at all. `SplineBrushPresetGate` samples both at the
+## same places and requires them to agree, which is the only thing that stops the two drifting.
+static func polygon_signed_distance(p_poly: PackedVector2Array, p_q: Vector2) -> float:
+	var pc := p_poly.size()
+	if pc < 3:
+		return -INF
+	var best := INF
+	var inside := false
+	for e in range(pc):
+		var a := p_poly[e]
+		var b := p_poly[(e + 1) % pc]
+		# The same half-open edge rule the scanline fill uses, so a query exactly level with a shared
+		# vertex is counted once rather than twice or not at all.
+		if (a.y <= p_q.y and b.y > p_q.y) or (b.y <= p_q.y and a.y > p_q.y):
+			var t := (p_q.y - a.y) / (b.y - a.y)
+			if p_q.x < a.x + t * (b.x - a.x):
+				inside = not inside
+		var ab := b - a
+		var len2 := ab.length_squared()
+		var f: float = 0.0 if len2 <= 0.0 else clampf((p_q - a).dot(ab) / len2, 0.0, 1.0)
+		best = minf(best, p_q.distance_to(a + ab * f))
+	return best if inside else -best
+
+
+## This brush's baked loop polygon in world XZ, for `p_path`. The RIM as everything else sees it --
+## filleted, decimated the same way. `edge_offset` is NOT applied: that is the mask's own shift and it
+## is added to the signed distance, not to the geometry.
+func loop_polygon_xz(p_path: Path3D) -> PackedVector2Array:
+	var raw := PackedVector2Array()
+	for p in _baked_world_points(p_path):
+		raw.append(Vector2(p.x, p.z))
+	var vs: float = terrain.vertex_spacing if terrain else 1.0
+	return _decimate(raw, minf(vs * 0.25, 0.25))
+
+
+## Every input-spline sample not inside `p_path`'s loop by at least `spline_margin`, as
+## `[Vector2 sample, float deficit]`. Empty means the loop already contains everything it carves.
+##
+## `edge_offset` is folded in on the REQUIREMENT side rather than by moving the polygon, because that is
+## how the mask reads it -- `signed_d = field + edge_offset` in the Plow's rasteriser. A loop contracted
+## by a negative offset must therefore be grown further, not less.
+func loop_fit_violations(p_path: Path3D) -> Array:
+	var out: Array = []
+	var poly := loop_polygon_xz(p_path)
+	if poly.size() < 3:
+		return out
+	var want: float = spline_margin - _fit_edge_offset()
+	for pts in input_spline_polylines():
+		for q in (pts as PackedVector2Array):
+			var d := polygon_signed_distance(poly, q)
+			if d < want:
+				out.append([q, want - d])
+	return out
+
+
+## This brush's mask edge offset, or 0 on a brush that has none. Read through `get()` because
+## `edge_offset` lives on Pasture3DPlow and this machinery is on the base -- a Sim or a Mound that grows
+## a loop later should not have to grow the property too.
+func _fit_edge_offset() -> float:
+	var v = get("edge_offset")
+	return float(v) if v != null else 0.0
+
+
+## Grow this brush's loops so every input spline sits `spline_margin` inside them. Returns true when
+## geometry moved.
+##
+## For each violating sample, the two endpoints of the nearest AUTHORED edge are pushed outward along
+## that edge's outward normal by the deficit. Authored, not baked: the baked polyline is a few hundred
+## points and moving those would destroy the loop's shape and its handles. Pushing the control points
+## preserves the shape the user drew, is cheap, and converges -- each pass strictly increases the loop's
+## coverage and the deficit it corrects is bounded by the spline's own extent.
+func auto_fit_loop_now(p_record_undo: bool = true) -> bool:
+	if not _supports_spline_fit():
+		return false
+	var moved := false
+	for path in _get_splines():
+		if path == null or path.curve == null or path.curve.point_count < 3:
+			continue
+		var viol := loop_fit_violations(path)
+		if viol.is_empty():
+			continue
+		var curve: Curve3D = path.curve
+		var before := PackedVector3Array()
+		for i in curve.point_count:
+			before.append(curve.get_point_position(i))
+		var world := PackedVector2Array()
+		for i in curve.point_count:
+			var wp: Vector3 = path.global_transform * curve.get_point_position(i)
+			world.append(Vector2(wp.x, wp.z))
+		var winding := _loop_winding(world)
+		# Accumulated per control point and applied once. Applying each violation as it is found would
+		# make the result depend on the order the samples were walked, and the loop would keep moving
+		# under a spline that had stopped.
+		var push := PackedVector2Array()
+		push.resize(curve.point_count)
+		for v in viol:
+			var q: Vector2 = v[0]
+			var deficit: float = v[1]
+			var e := _nearest_loop_edge(world, q)
+			var a := world[e]
+			var b := world[(e + 1) % world.size()]
+			var ab := b - a
+			if ab.length_squared() <= 0.0:
+				continue
+			# The OUTWARD normal: the left normal of the walking direction, flipped by the winding, so a
+			# loop drawn clockwise and one drawn anticlockwise both grow away from their interior. Getting
+			# this backwards does not mirror the loop, it collapses it through itself.
+			var nrm := Vector2(ab.y, -ab.x).normalized() * winding
+			var j := (e + 1) % world.size()
+			if deficit > push[e].length():
+				push[e] = nrm * deficit
+			if deficit > push[j].length():
+				push[j] = nrm * deficit
+		var any := false
+		for i in curve.point_count:
+			if push[i].length_squared() <= 0.0:
+				continue
+			any = true
+			var wp: Vector3 = path.global_transform * curve.get_point_position(i)
+			wp.x += push[i].x
+			wp.z += push[i].y
+			curve.set_point_position(i, path.to_local(wp))
+		if not any:
+			continue
+		moved = true
+		var after := PackedVector3Array()
+		for i in curve.point_count:
+			after.append(curve.get_point_position(i))
+		if p_record_undo:
+			_pending_fit_undo.append([curve, before, after])
+	return moved
+
+
+## +1 when `p_poly` is wound so that the left normal of each edge points OUT, -1 otherwise. From the
+## signed area, which is the only definition that does not need a point already known to be inside.
+static func _loop_winding(p_poly: PackedVector2Array) -> float:
+	var area := 0.0
+	var n := p_poly.size()
+	for i in n:
+		var a := p_poly[i]
+		var b := p_poly[(i + 1) % n]
+		area += a.cross(b)
+	return 1.0 if area < 0.0 else -1.0
+
+
+## Index of the loop edge nearest to `p_q` (the edge from vertex i to i+1, wrapping).
+static func _nearest_loop_edge(p_poly: PackedVector2Array, p_q: Vector2) -> int:
+	var best := INF
+	var best_e := 0
+	var n := p_poly.size()
+	for i in n:
+		var a := p_poly[i]
+		var ab := p_poly[(i + 1) % n] - a
+		var len2 := ab.length_squared()
+		var t: float = 0.0 if len2 <= 0.0 else clampf((p_q - a).dot(ab) / len2, 0.0, 1.0)
+		var d := p_q.distance_squared_to(a + ab * t)
+		if d < best:
+			best = d
+			best_e = i
+	return best_e
+
+
+## Restore a loop's control points. The undo half of `auto_fit_loop_now` and of `fit_loop_to_splines`; a
+## method rather than a property write because a Curve3D has no single settable "points" and an undo
+## action needs one call.
+func _restore_loop_points(p_curve: Curve3D, p_pts: PackedVector3Array) -> void:
+	if p_curve == null:
+		return
+	while p_curve.point_count > p_pts.size():
+		p_curve.remove_point(p_curve.point_count - 1)
+	for i in p_pts.size():
+		if i < p_curve.point_count:
+			p_curve.set_point_position(i, p_pts[i])
+		else:
+			p_curve.add_point(p_pts[i])
+	if is_inside_tree():
+		update_gizmos()
+
+
+## Rebuild every loop as the offset outline of the input splines at `spline_margin` (the button).
+##
+## ---- ONE RING, AND WHAT HAPPENS TO THE SPLINES LEFT OUT ----
+##
+## The offset of several far-apart splines is several rings. The loop is fitted to the ring containing
+## the loop's current centroid, and a warning names how many were left outside. Bridging them would
+## swallow the ground between, which is not what "fit" means; refusing outright would leave a two-spline
+## brush with a button that never works.
+func fit_loop_to_splines() -> void:
+	if not _supports_spline_fit():
+		return
+	var polys := input_spline_polylines()
+	if polys.is_empty():
+		push_warning("[Pasture3D] %s: Fit to Splines found no input spline in this brush's graph."
+				% name)
+		return
+	var paths := _get_splines()
+	if paths.is_empty():
+		return
+	var ur := _editor_undo()
+	if ur != null:
+		ur.create_action("Fit %s to Splines" % _spline_basename())
+	var left_out := 0
+	var changed := false
+	for path in paths:
+		if path == null or path.curve == null:
+			continue
+		var curve: Curve3D = path.curve
+		var before := PackedVector3Array()
+		var centroid := Vector2.ZERO
+		for i in curve.point_count:
+			before.append(curve.get_point_position(i))
+			var wp: Vector3 = path.global_transform * curve.get_point_position(i)
+			centroid += Vector2(wp.x, wp.z)
+		if curve.point_count > 0:
+			centroid /= float(curve.point_count)
+		var res := _offset_outline(polys, spline_margin, centroid)
+		var ring: PackedVector2Array = res[0]
+		left_out = maxi(left_out, int(res[1]))
+		if ring.size() < 3:
+			continue
+		var after := PackedVector3Array()
+		for w in ring:
+			after.append(path.to_local(Vector3(w.x, 0.0, w.y)))
+		changed = true
+		if ur != null:
+			ur.add_do_method(self, "_restore_loop_points", curve, after)
+			ur.add_undo_method(self, "_restore_loop_points", curve, before)
+		else:
+			_restore_loop_points(curve, after)
+	if ur != null:
+		# The bake is INSIDE the action, both ways, so one Ctrl+Z puts the loop and the terrain back
+		# together. A fit that undid its geometry and left the terrain carved to the old loop is the
+		# failure this button would otherwise ship.
+		ur.add_do_method(self, "refresh", false)
+		ur.add_undo_method(self, "refresh", false)
+		ur.commit_action()
+	elif changed:
+		refresh(false)
+	if left_out > 0:
+		push_warning(("[Pasture3D] %s: Fit to Splines shaped the loop around the splines nearest its "
+				+ "centre; %d input spline(s) are too far away to be included without swallowing the "
+				+ "ground between them.") % [name, left_out])
+
+
+## The outline of every polyline in `p_polys`, offset outward by `p_margin`, as ONE ring -- the one
+## containing `p_centroid` (or the largest, when the centroid is inside none). Returns
+## `[PackedVector2Array ring, int splines_left_out]`.
+##
+## A Minkowski sum with a disc, rasterised rather than solved analytically: the exact offset of a
+## self-intersecting polyline needs a full arrangement, and every degenerate case in it produces a loop
+## nobody drew. A distance field is a definition that cannot fold -- the offset is exactly the
+## `p_margin` isocontour -- and this ring is decimated to control points immediately afterwards, so the
+## rasterisation's precision is spent on a shape that gets simplified anyway.
+func _offset_outline(p_polys: Array, p_margin: float, p_centroid: Vector2) -> Array:
+	var lo := Vector2(INF, INF)
+	var hi := Vector2(-INF, -INF)
+	for pts in p_polys:
+		for q in (pts as PackedVector2Array):
+			lo = Vector2(minf(lo.x, q.x), minf(lo.y, q.y))
+			hi = Vector2(maxf(hi.x, q.x), maxf(hi.y, q.y))
+	if lo.x > hi.x:
+		return [PackedVector2Array(), 0]
+	# THE RING IS BUILT WIDE ON PURPOSE.
+	#
+	# The isocontour is traced off a grid and then decimated to control points, and both steps can only
+	# cut INWARD -- a chord across a bulge, a cell of rasterisation. Cut inward from exactly `p_margin`
+	# and the result no longer contains the spline by the margin, which is the one thing the caller asked
+	# for. So the contour is taken at `p_margin + slack` and decimated with a tolerance of `slack`: the
+	# worst the simplification can do is give back what the widening bought. Overshooting is free here --
+	# the fit only ever grows a loop, and a loop a metre too big is what the user then drags in.
+	var slack: float = maxf(clampf(p_margin / 20.0, 0.25, 8.0) * 2.0, 1.0)
+	var grow := p_margin + slack
+	var pad := grow + 2.0
+	lo -= Vector2(pad, pad)
+	hi += Vector2(pad, pad)
+	# One cell per twentieth of the margin, capped: the ring is decimated to control points straight
+	# afterwards, so resolution past "the isocontour is smooth" buys nothing and costs a grid.
+	var cell: float = clampf(p_margin / 20.0, 0.25, 8.0)
+	var gw := mini(int((hi.x - lo.x) / cell) + 2, 512)
+	var gh := mini(int((hi.y - lo.y) / cell) + 2, 512)
+	cell = maxf(maxf((hi.x - lo.x) / float(maxi(gw - 2, 1)), (hi.y - lo.y) / float(maxi(gh - 2, 1))),
+			0.01)
+	# Inside the offset region, per cell, plus which spline put it there. Brute force over segments: the
+	# splines are a few hundred points and the grid is capped at a quarter of a megacell, and a bucket
+	# index here would be a third implementation of the one in Pasture3DGraphPath.
+	var inside := PackedByteArray()
+	inside.resize(gw * gh)
+	var owner := PackedInt32Array()
+	owner.resize(gw * gh)
+	owner.fill(-1)
+	var m2 := grow * grow
+	for pi in p_polys.size():
+		var pts: PackedVector2Array = p_polys[pi]
+		for si in range(pts.size()):
+			var a := pts[si]
+			var b: Vector2 = pts[si + 1] if si + 1 < pts.size() else a
+			var ab := b - a
+			var len2 := ab.length_squared()
+			var ix0 := maxi(int((minf(a.x, b.x) - grow - lo.x) / cell), 0)
+			var ix1 := mini(int((maxf(a.x, b.x) + grow - lo.x) / cell) + 1, gw - 1)
+			var iz0 := maxi(int((minf(a.y, b.y) - grow - lo.y) / cell), 0)
+			var iz1 := mini(int((maxf(a.y, b.y) + grow - lo.y) / cell) + 1, gh - 1)
+			for iz in range(iz0, iz1 + 1):
+				var row := iz * gw
+				for ix in range(ix0, ix1 + 1):
+					if inside[row + ix] == 1:
+						continue
+					var q := lo + Vector2(float(ix) * cell, float(iz) * cell)
+					var t: float = 0.0 if len2 <= 0.0 else clampf((q - a).dot(ab) / len2, 0.0, 1.0)
+					if q.distance_squared_to(a + ab * t) <= m2:
+						inside[row + ix] = 1
+						owner[row + ix] = pi
+	var comp := _label_components(inside, gw, gh)
+	var labels: PackedInt32Array = comp[0]
+	var count: int = comp[1]
+	if count == 0:
+		return [PackedVector2Array(), 0]
+	# The component holding the loop's current centre, so a fit does not teleport the loop to whichever
+	# ring happens to be first. Falls back to the largest when the centre is in none.
+	var want := -1
+	var cix := int((p_centroid.x - lo.x) / cell)
+	var ciz := int((p_centroid.y - lo.y) / cell)
+	if cix >= 0 and cix < gw and ciz >= 0 and ciz < gh:
+		want = labels[ciz * gw + cix]
+	if want <= 0:
+		var sizes := PackedInt32Array()
+		sizes.resize(count + 1)
+		for k in labels.size():
+			if labels[k] > 0:
+				sizes[labels[k]] += 1
+		var best := 0
+		for l in range(1, count + 1):
+			if sizes[l] > best:
+				best = sizes[l]
+				want = l
+	var kept := {}
+	for k in labels.size():
+		if labels[k] == want and owner[k] >= 0:
+			kept[owner[k]] = true
+	return [_trace_component(labels, want, gw, gh, lo, cell, slack),
+			maxi(p_polys.size() - kept.size(), 0)]
+
+
+## Four-connected connected-component labelling of `p_inside`. Returns `[PackedInt32Array labels, int
+## count]`, labels 1..count with 0 for "outside every offset region".
+static func _label_components(p_inside: PackedByteArray, p_gw: int, p_gh: int) -> Array:
+	var labels := PackedInt32Array()
+	labels.resize(p_gw * p_gh)
+	var next := 0
+	var stack := PackedInt32Array()
+	for start in labels.size():
+		if p_inside[start] == 0 or labels[start] != 0:
+			continue
+		next += 1
+		stack.clear()
+		stack.append(start)
+		labels[start] = next
+		while not stack.is_empty():
+			var k: int = stack[stack.size() - 1]
+			stack.remove_at(stack.size() - 1)
+			var kx: int = k % p_gw
+			var kz: int = k / p_gw
+			for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+				var nx: int = kx + d.x
+				var nz: int = kz + d.y
+				if nx < 0 or nx >= p_gw or nz < 0 or nz >= p_gh:
+					continue
+				var nk: int = nz * p_gw + nx
+				if p_inside[nk] == 0 or labels[nk] != 0:
+					continue
+				labels[nk] = next
+				stack.append(nk)
+	return [labels, next]
+
+
+## The outer boundary of component `p_label`, as a world-space ring, decimated to control points.
+##
+## ---- AN ANGULAR SWEEP, NOT A BOUNDARY WALK ----
+##
+## The boundary cells are sorted by angle about the component's centroid and the FURTHEST one in each
+## angular bucket is kept, which is the outer boundary by construction rather than by following it.
+##
+## Valid because of what this shape is: a MARGIN offset of a set of splines, which at any useful margin
+## is star-shaped about its centre. Where it is not, the error is a chord across a concavity -- a loop
+## the user can see and edit, on a brush that works. A contour walk would be exact and would bring its
+## own degenerate cases (single-cell bridges, cells belonging to two turns of a spiral) to a shape that
+## gets decimated to a dozen control points immediately afterwards.
+func _trace_component(p_labels: PackedInt32Array, p_label: int, p_gw: int, p_gh: int,
+		p_lo: Vector2, p_cell: float, p_tol: float) -> PackedVector2Array:
+	var pts := PackedVector2Array()
+	var cx := 0.0
+	var cz := 0.0
+	var n := 0
+	for k in p_labels.size():
+		if p_labels[k] != p_label:
+			continue
+		var kx: int = k % p_gw
+		var kz: int = k / p_gw
+		cx += float(kx)
+		cz += float(kz)
+		n += 1
+		# A boundary cell: in the component, with at least one 4-neighbour that is not. The grid edge
+		# counts as "not", so a component touching the border still closes.
+		var edge: bool = kx == 0 or kx == p_gw - 1 or kz == 0 or kz == p_gh - 1
+		if not edge:
+			edge = (p_labels[k - 1] != p_label or p_labels[k + 1] != p_label
+					or p_labels[k - p_gw] != p_label or p_labels[k + p_gw] != p_label)
+		if edge:
+			pts.append(Vector2(float(kx), float(kz)))
+	if pts.size() < 3 or n == 0:
+		return PackedVector2Array()
+	var centre := Vector2(cx / float(n), cz / float(n))
+	var bucketed := {}
+	for p in pts:
+		var key := int(atan2(p.y - centre.y, p.x - centre.x) * 32.0)
+		if not bucketed.has(key) or centre.distance_squared_to(p) > centre.distance_squared_to(bucketed[key]):
+			bucketed[key] = p
+	var keys: Array = bucketed.keys()
+	keys.sort()
+	var ring := PackedVector2Array()
+	for key in keys:
+		var p: Vector2 = bucketed[key]
+		ring.append(p_lo + Vector2(p.x * p_cell, p.y * p_cell))
+	# `p_tol`, not a fraction of the margin. Decimating at `spline_margin * 0.5` cut corners by half the
+	# very clearance being fitted, so the fit came back reporting violations it had just created --
+	# and the simplification is exactly what `_offset_outline`'s slack was widened to pay for.
+	return _decimate(ring, p_tol)
+
+
+## Clamp every point of this brush's splines so the line never rises along its length.
+##
+## Hoisted here from Pasture3DTrough when the Trough became a Plow preset (S6). It reads nothing but
+## `_get_splines()` and was never about channels: "make this line descend" is a question any spline can
+## be asked, and after the rebuild the line that has to descend is a child Pasture3DSpline, which is a
+## brush of its own. A Trough's Make Descend button now forwards to its bed spline's.
+func make_descend() -> void:
+	# Gather the clamps first so we can register a single undoable action. Walk each curve carrying the
+	# running (already-clamped) previous Y, so a run of rising points all collapse to the first's level.
+	var old_points: Array = [] # [curve, index, original_position]
+	var new_points: Array = [] # [curve, index, clamped_position]
+	for s in _get_splines():
+		var c: Curve3D = s.curve
+		if c == null or c.point_count == 0:
+			continue
+		var prev_y := c.get_point_position(0).y
+		for i in range(1, c.point_count):
+			var p := c.get_point_position(i)
+			if p.y > prev_y:
+				old_points.append([c, i, p])
+				new_points.append([c, i, Vector3(p.x, prev_y, p.z)])
+			else:
+				prev_y = p.y
+	if new_points.is_empty():
+		return
+	var ur := _editor_undo()
+	if ur:
+		ur.create_action("Make %s Descend" % _spline_basename())
+		ur.add_do_method(self, "_set_curve_points_and_repaint", new_points)
+		ur.add_undo_method(self, "_set_curve_points_and_repaint", old_points)
+		ur.commit_action() # executes the do method now (applies the clamps + repaints)
+	else:
+		_set_curve_points_and_repaint(new_points)
