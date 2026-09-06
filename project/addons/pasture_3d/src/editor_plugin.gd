@@ -680,6 +680,13 @@ func _instantiate_placement_brush() -> Node3D:
 ## exactly the nodes we must not touch. Do not "simplify" this into the brush's _init() for the same
 ## reason. See PASTURE3D_PLOW_RELIEF_MATERIAL_SPEC.md §11.
 func _apply_placement_defaults(node: Node3D) -> void:
+	# A preset brings its own graph and must be left alone. Pasture3DRidge and Pasture3DTrough ARE
+	# Pasture3DPlows since S6, so the branch below caught them and gave each a Mountain Cone before it had
+	# ever entered the tree -- and `_has_preset()` then saw a graph modifier, concluded the node had
+	# already been set up, and skipped the child spline and the Path Carve entirely. Every Ridge placed
+	# from the toolbar arrived as a mountain with no crest to draw.
+	if node is Pasture3DSplinePreset:
+		return
 	if node is Pasture3DPlow:
 		var plow := node as Pasture3DPlow
 		if plow.modifiers.is_empty():

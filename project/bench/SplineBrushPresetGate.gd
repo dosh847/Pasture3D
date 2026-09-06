@@ -160,6 +160,32 @@ func _a_a_fresh_ridge_carves_without_wiring() -> void:
 			"CONTROL an unwired Spline Source bakes nothing: %.4f m on the line (a wall would be metres)"
 					% c_on)
 
+	# A preset that ALREADY carries somebody else's graph must still get its own. The toolbar's
+	# `_apply_placement_defaults` gave every Pasture3DPlow a Mountain Cone graph before it entered the
+	# tree, and a Ridge is a Plow since S6 -- so `_has_preset()` saw a graph modifier, concluded the node
+	# was already set up, and skipped the child spline and the Path Carve. Every Ridge placed from the
+	# toolbar arrived as a mountain with no crest to draw, and no criterion above noticed, because they
+	# all build their fixture with `new()` and nothing else touches the stack.
+	var loaded = Pasture3DRidge.new()
+	loaded.name = "RidgeAForeign"
+	loaded.auto_fit_loop = false
+	var foreign := Pasture3DNodeGraph.new()
+	foreign.graph = Pasture3DTerrainGraph.create_default()
+	var mods: Array[Pasture3DNode] = []
+	mods.append(foreign)
+	loaded.modifiers = mods
+	_root.add_child(loaded)
+	loaded.terrain = _terrain
+	loaded.install_preset_now()
+	_check("A", loaded._preset_spline() != null and loaded.preset_carve() != null,
+			"a preset carrying a foreign graph still installs its own: child spline %s, Path Carve %s" % [
+					"yes" if loaded._preset_spline() != null else "NO",
+					"yes" if loaded.preset_carve() != null else "NO"])
+	# CONTROL: the foreign graph is still there. "It got a preset" would also be true of an install that
+	# threw the user's own stack away, which is a worse bug than the one being fixed.
+	_check("A", loaded.modifiers.has(foreign),
+			"CONTROL the foreign graph survived: %d modifier(s) on the brush" % loaded.modifiers.size())
+
 
 # ---- [B] auto-fit only ever grows ------------------------------------------------------------------
 
@@ -192,10 +218,42 @@ func _b_auto_fit_grows_and_never_shrinks() -> void:
 					moved, settled_area, again_area])
 	loop = loop # the curve is held by the tree; named for the reader
 
+	# `fit_tolerance` is the knob over how many points the fitted loop lands with, and the containment it
+	# is measured against must survive it -- a coarser loop that no longer clears the margin has traded
+	# the thing the fit exists for.
+	_b_the_tolerance_trades_points_not_containment(ridge)
+
 	# The agreement the code comments promise: `polygon_signed_distance` is the point-wise twin of the
 	# rasteriser's `_signed_distance_field`, same half-open even-odd rule and the same exact edge
 	# distance. Two implementations of one rule, and the loop fit trusts the cheap one.
 	_b_the_two_distance_fields_agree(ridge)
+
+
+## A coarser `fit_tolerance` must give strictly fewer control points and still contain the line.
+func _b_the_tolerance_trades_points_not_containment(p_brush) -> void:
+	var path: Path3D = p_brush._get_splines()[0]
+	var fine := 0
+	var coarse := 0
+	var fine_bad := 0
+	var coarse_bad := 0
+	for tol in [1.0, 12.0]:
+		p_brush.fit_tolerance = tol
+		_loop_curve(p_brush, 5.0)
+		p_brush.fit_loop_to_splines()
+		path = p_brush._get_splines()[0]
+		var n: int = path.curve.point_count
+		var bad: int = p_brush.loop_fit_violations(path).size()
+		if tol == 1.0:
+			fine = n
+			fine_bad = bad
+		else:
+			coarse = n
+			coarse_bad = bad
+	p_brush.fit_tolerance = 1.0
+	_check("B", coarse < fine,
+			"fit_tolerance 1 m -> %d control point(s), 12 m -> %d" % [fine, coarse])
+	_check("B", fine_bad == 0 and coarse_bad == 0,
+			"both loops still clear the margin: %d and %d violation(s)" % [fine_bad, coarse_bad])
 
 
 ## `polygon_signed_distance` against `_signed_distance_field` on the same polygon.

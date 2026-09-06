@@ -6051,7 +6051,7 @@ func _validate_property(property: Dictionary) -> void:
 		"_make_unique_btn":
 			if _shared_curve_spline_names().is_empty():
 				property.usage &= ~PROPERTY_USAGE_EDITOR
-		"spline_margin", "auto_fit_loop", "_fit_btn":
+		"spline_margin", "fit_tolerance", "auto_fit_loop", "_fit_btn":
 			# Spline Fit needs both halves: a loop to grow and a modifier stack that reads a spline to
 			# grow it TO. See `_supports_spline_fit`.
 			if not _supports_spline_fit():
@@ -6478,6 +6478,27 @@ func _refresh_stats_display() -> void:
 		spline_margin = maxf(v, 0.0)
 		_schedule_refresh()
 
+## How far the fitted loop may deviate from the exact offset outline, in metres. Bigger means FEWER
+## control points.
+##
+## The loop is traced off a distance field as a dense ring and then simplified, and this is the
+## simplification's tolerance -- which is what actually decides how far apart the points end up. Named
+## for the tolerance rather than for a spacing because a straight run needs two points however long it
+## is: an offset outline is mostly straight, and a spacing dial would put points along it that carry no
+## shape.
+##
+## IT ALSO GROWS THE LOOP BY THE SAME AMOUNT, and that is not a side effect to fix. A simplification can
+## only cut INWARD, so the contour is taken at `spline_margin + fit_tolerance` and cut back by at most
+## `fit_tolerance` -- which is what keeps `spline_margin` a promise rather than an aspiration. Ask for a
+## much coarser loop and you get a slightly bigger one; at the default it is a metre.
+## The default is metres rather than centimetres because an offset outline is a shape people EDIT. At
+## 1 m a 360 m ring comes back with 138 control points, one every two and a half metres, and dragging
+## that is worse than redrawing it; at 4 m it is a few dozen and still well inside a 30 m margin.
+@export_range(0.1, 50.0, 0.1, "or_greater", "suffix:m") var fit_tolerance: float = 4.0:
+	set(v):
+		fit_tolerance = maxf(v, 0.1)
+		_schedule_refresh()
+
 ## Grow the loop when an input spline moves outside it. Never shrinks -- see the section header.
 @export var auto_fit_loop: bool = true:
 	set(v):
@@ -6760,7 +6781,7 @@ func fit_loop_to_splines() -> void:
 			centroid += Vector2(wp.x, wp.z)
 		if curve.point_count > 0:
 			centroid /= float(curve.point_count)
-		var res := _offset_outline(polys, spline_margin, centroid)
+		var res := _offset_outline(polys, spline_margin, centroid, fit_tolerance)
 		var ring: PackedVector2Array = res[0]
 		left_out = maxi(left_out, int(res[1]))
 		if ring.size() < 3:
@@ -6798,7 +6819,7 @@ func fit_loop_to_splines() -> void:
 ## nobody drew. A distance field is a definition that cannot fold -- the offset is exactly the
 ## `p_margin` isocontour -- and this ring is decimated to control points immediately afterwards, so the
 ## rasterisation's precision is spent on a shape that gets simplified anyway.
-func _offset_outline(p_polys: Array, p_margin: float, p_centroid: Vector2) -> Array:
+func _offset_outline(p_polys: Array, p_margin: float, p_centroid: Vector2, p_tolerance: float) -> Array:
 	var lo := Vector2(INF, INF)
 	var hi := Vector2(-INF, -INF)
 	for pts in p_polys:
@@ -6815,18 +6836,27 @@ func _offset_outline(p_polys: Array, p_margin: float, p_centroid: Vector2) -> Ar
 	# for. So the contour is taken at `p_margin + slack` and decimated with a tolerance of `slack`: the
 	# worst the simplification can do is give back what the widening bought. Overshooting is free here --
 	# the fit only ever grows a loop, and a loop a metre too big is what the user then drags in.
-	var slack: float = maxf(clampf(p_margin / 20.0, 0.25, 8.0) * 2.0, 1.0)
+	#
+	# `slack` is the user's `fit_tolerance`, floored at the rasterisation cell: simplifying finer than the
+	# grid the contour came off cannot buy points back, it only keeps the ones the raster's own stair
+	# steps put there.
+	var probe_cell: float = clampf(p_margin / 20.0, 0.25, 8.0)
+	var slack: float = maxf(p_tolerance, probe_cell)
 	var grow := p_margin + slack
 	var pad := grow + 2.0
 	lo -= Vector2(pad, pad)
 	hi += Vector2(pad, pad)
 	# One cell per twentieth of the margin, capped: the ring is decimated to control points straight
 	# afterwards, so resolution past "the isocontour is smooth" buys nothing and costs a grid.
-	var cell: float = clampf(p_margin / 20.0, 0.25, 8.0)
+	var cell: float = probe_cell
 	var gw := mini(int((hi.x - lo.x) / cell) + 2, 512)
 	var gh := mini(int((hi.y - lo.y) / cell) + 2, 512)
 	cell = maxf(maxf((hi.x - lo.x) / float(maxi(gw - 2, 1)), (hi.y - lo.y) / float(maxi(gh - 2, 1))),
 			0.01)
+	# The 512 cap can coarsen the cell past what `slack` was computed against, on a very large extent. The
+	# tolerance follows it rather than the other way round: a ring traced off 8 m cells cannot be honest
+	# about a 1 m tolerance, and claiming one would give back containment instead of points.
+	slack = maxf(slack, cell)
 	# Inside the offset region, per cell, plus which spline put it there. Brute force over segments: the
 	# splines are a few hundred points and the grid is capped at a quarter of a megacell, and a bucket
 	# index here would be a third implementation of the one in Pasture3DGraphPath.

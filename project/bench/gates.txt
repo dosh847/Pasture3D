@@ -361,11 +361,19 @@ bench/PathShapeGate.tscn
 #       resolved bakes nothing, not a wall. "Before it ever resolved" is the honest form of that
 #       control -- resolve_shapes states the family policy that a key naming nothing LEAVES the path
 #       alone, so misdirecting a resolved source would measure that policy instead.
+#       Also: a preset already carrying a FOREIGN graph modifier still installs its own child spline and
+#       Path Carve, with a control that the foreign graph survives. This is the toolbar bug -- every
+#       Ridge placed from the Place Brush tool arrived as a Mountain Cone with no crest, because
+#       _apply_placement_defaults gives any Pasture3DPlow a graph and "has a graph" was read as "has a
+#       preset". No other criterion could see it: they all build their fixture with new().
 #   [B] Fit to Splines grows a 5 m loop around an 80 m line until nothing violates the margin, and a
 #       second fit moves nothing. Plus the agreement the code comments promise, between
 #       polygon_signed_distance and the rasteriser's _signed_distance_field, over a box proved to
 #       straddle the rim. This is the criterion that found the fit decimating its ring at half the very
 #       margin it was fitting.
+#       Also: fit_tolerance trades points for coarseness WITHOUT trading containment -- 1 m gives 138
+#       control points on the fixture and 12 m gives 34, and both still clear the margin. That pairing
+#       is the whole criterion: either half alone is satisfied by a knob that does nothing.
 #   [C] the undo record restores the loop exactly in both directions. Headless there is no
 #       EditorUndoRedoManager, so what is measured is the RECORD the single action is built out of, and
 #       the gate prints that distinction rather than implying a Ctrl+Z.

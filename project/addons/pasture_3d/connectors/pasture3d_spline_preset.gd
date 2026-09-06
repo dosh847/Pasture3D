@@ -93,13 +93,20 @@ func _build_preset_if_new() -> void:
 		_apply_migration()
 
 
+## Has this node been given its preset yet?
+##
+## THE TEST IS THE TREE, NOT A FLAG -- but it asks about THE PRESET, not about "is there any graph".
+## Anything may put a graph modifier on a brush: the inspector's Add Graph button, a placement default, a
+## user. Treating any of those as "already set up" is how a placed Ridge ended up with somebody else's
+## graph, no child spline and nothing to carve. A graph counts only if it contains the Path Carve this
+## preset is built around.
+##
+## Either half alone is still enough, and deliberately so: detach the child spline and the Ridge stops
+## carving rather than growing a new one next time the scene loads.
 func _has_preset() -> bool:
 	if _preset_spline() != null:
 		return true
-	for m in modifiers:
-		if m is Pasture3DNodeGraph:
-			return true
-	return false
+	return preset_carve() != null
 
 
 ## This preset's own child spline, or null. The FIRST Pasture3DSpline child, which is the same rule
@@ -131,12 +138,9 @@ func _install_preset() -> void:
 			var line := sp._new_spline()
 			if line != null and root != null:
 				line.owner = root
-	var has_graph := false
-	for m in modifiers:
-		if m is Pasture3DNodeGraph:
-			has_graph = true
-			break
-	if has_graph:
+	# The PRESET's graph, not "any graph" -- for the same reason `_has_preset` asks that question. A brush
+	# that already carries somebody else's stack still needs its own Path Carve, and it keeps theirs.
+	if preset_carve() != null:
 		return
 	var mod := Pasture3DNodeGraph.new()
 	mod.graph = _build_preset_graph()
