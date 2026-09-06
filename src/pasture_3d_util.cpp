@@ -1194,6 +1194,10 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		// same one that hid DLA for as long as it did. A PATH source lowers to CONST because it produces no
 		// grid at all: its path travels in the geometry table, and the slot is a placeholder.
 		{ "spline_source", GRAPH_OP_CONST },
+		// S4's PATH filter. CONST for the same reason the sources are: it produces no grid, its path is
+		// resolved host-side by the pre-pass and travels in the geometry table, and the slot is a
+		// placeholder.
+		{ "path_width", GRAPH_OP_CONST },
 		{ "blend", GRAPH_OP_BLEND },
 		{ "terrace", GRAPH_OP_TERRACE },
 		{ "input", GRAPH_OP_INPUT },

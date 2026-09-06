@@ -755,6 +755,13 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 ## come from a stale node. Cache invalidation then needs nothing new — `_append_input_signature`
 ## already folds a source's `_dirty_revision` into its consumer's hash, and a Road Source re-emits
 ## `changed` when its path resource does.
+##
+## Since S4 the source is asked through `_resolved_path_of` rather than for `path_output()` directly, so a
+## FILTER between the source and here contributes its work. Both routes into the geometry go through that
+## one resolver deliberately: this is the GDScript evaluator's hand-off and `_path_operand_of` is the
+## native compile's, and when they disagreed about which path a node sees, the two evaluators would carve
+## different terrain from one graph — the class of bug `[Dev/GD]` twins exist to catch and would then be
+## measuring the wrong thing.
 func _path_inputs(p_ni: int, p_inputs_of: Dictionary) -> Array:
 	var out: Array = []
 	for s_i in p_inputs_of.get(p_ni, []):
@@ -762,7 +769,7 @@ func _path_inputs(p_ni: int, p_inputs_of: Dictionary) -> Array:
 		if src < 0 or src >= nodes.size() or nodes[src] == null:
 			out.append(null)
 		else:
-			out.append(nodes[src].path_output())
+			out.append(_resolved_path_of(src, p_inputs_of))
 	return out
 
 
@@ -1538,8 +1545,86 @@ func _path_operand_of(p_ni: int, p_inputs_of: Dictionary) -> Pasture3DGraphPath:
 			continue
 		var src := int(srcs[k])
 		if src >= 0 and src < nodes.size() and nodes[src] != null:
-			return nodes[src].path_output()
+			return _resolved_path_of(src, p_inputs_of)
 	return null
+
+
+## ---- THE PATH PRE-PASS (spec §8.2-8.3) ----------------------------------------------------------
+##
+## Set to make `_resolved_path_of` degenerate to the pre-S4 single hop: every node answers with the path
+## it HOLDS, so a filter contributes nothing. Not a user setting and not exported — it is the control a
+## gate needs, because "the width came out right" is also what you see when the width node happens to be
+## a no-op, and only turning the pre-pass off distinguishes them.
+var force_no_path_prepass := false
+
+# node index -> [key, path]. The key folds the node's own `_dirty_revision` and the CONTENT DIGEST of
+# every resolved input path, so an edit anywhere upstream misses and everything else hits.
+var _path_eval_cache: Dictionary = {}
+
+
+## The path a node PRODUCES, resolved through however many PATH filters sit above it.
+##
+## ---- WHY A MEMOISED RECURSION AND NOT A TOPOLOGICAL SWEEP ----
+##
+## A sweep would have to be run somewhere, and there are five call sites that want a path (two compilers,
+## the folded evaluator, the unfolded oracle, the preview taps) reached by four different orderings.
+## Recursion resolves in dependency order by construction, from whichever of them asks first, and the
+## memo makes the repeat asks free — the sweep's only real advantage.
+##
+## ---- WHY THE KEY IS A DIGEST AND NOT A REVISION CHAIN ----
+##
+## A filter's output depends on its inputs' CONTENTS, and a Road Source re-baked to byte-identical
+## geometry bumps its revision every bake. Keying on revisions alone would re-run every filter in the
+## graph on every bake and hand back a new instance each time, which costs the geometry table's fanout
+## dedup as well as the work. `content_digest` is one native hash per path (§ its own comment) and it is
+## the same measure `Pasture3DGraphPath` already uses to decide whether it changed at all.
+func _resolved_path_of(p_ni: int, p_inputs_of: Dictionary, p_stack: Dictionary = {}) -> Pasture3DGraphPath:
+	if p_ni < 0 or p_ni >= nodes.size() or nodes[p_ni] == null:
+		return null
+	var node: Pasture3DGraphNode = nodes[p_ni]
+	if force_no_path_prepass:
+		return node.path_output()
+	# A cycle cannot be built in the editor, but a graph resource can be hand-edited and a `.tscn` can be
+	# merged badly. Answering with what the node holds breaks the loop without pretending it was legal.
+	if p_stack.has(p_ni):
+		return node.path_output()
+	# A source has no PATH inputs to resolve and its `eval_path` is `path_output` by definition, so the
+	# common case never allocates the input array or touches the cache at all.
+	var types := node.input_port_types()
+	var srcs: Array = p_inputs_of.get(p_ni, [])
+	var n_in := mini(types.size(), srcs.size())
+	var any_path := false
+	for k in range(n_in):
+		if int(types[k]) == Pasture3DGraphNode.PortType.PATH:
+			any_path = true
+			break
+	if not any_path:
+		return node.path_output()
+
+	p_stack[p_ni] = true
+	var ins: Array = []
+	var key_parts: Array = [node._dirty_revision]
+	for k in range(types.size()):
+		var up: Pasture3DGraphPath = null
+		if k < n_in and int(types[k]) == Pasture3DGraphNode.PortType.PATH:
+			up = _resolved_path_of(int(srcs[k]), p_inputs_of, p_stack)
+		ins.append(up)
+		# The digest AND the instance id: two different paths can hash alike in principle, and more to the
+		# point a consumer that keeps its own instance needs to know when the thing above it was replaced
+		# rather than edited, which a content digest cannot say.
+		key_parts.append(up.content_digest() if up != null else 0)
+		key_parts.append(up.get_instance_id() if up != null else 0)
+	p_stack.erase(p_ni)
+
+	var key := hash(key_parts)
+	var hit = _path_eval_cache.get(p_ni)
+	# `hit[1] == null` is a HIT, not a miss: producing no path is a legal answer (an unresolved source
+	# above a filter), and treating it as a miss would re-run that filter every single evaluation.
+	if hit != null and int(hit[0]) == key and (hit[1] == null or is_instance_valid(hit[1])):
+		return hit[1]
+	var made := node.eval_path(ins)
+	_path_eval_cache[p_ni] = [key, made]
+	return made
 
 
 ## One geometry-table entry: the polyline, its per-vertex widths, and — only when the road has a solved
@@ -1588,6 +1673,16 @@ func _compile_geometry(p_order: Array, p_inputs_of: Dictionary) -> Dictionary:
 	var in_g := PackedInt32Array()
 	var by_id := {}
 	for ni in p_order:
+		# A PATH PRODUCER names no entry, even though it has a PATH input and `_path_operand_of` would
+		# happily answer with it. Its grid slot is a zero placeholder (see `Pasture3DGraphNode.path_output`)
+		# and its op lowers to CONST, so it cannot read geometry — but the entry would still be built,
+		# deduplicated apart from the path it PRODUCES, and uploaded to the GPU as a second polyline that
+		# nothing dispatches against. PathPrePassGate [B] is what found this: two carves behind one filter
+		# shared one entry correctly, and the table still held two.
+		var node: Pasture3DGraphNode = nodes[int(ni)] if int(ni) < nodes.size() else null
+		if node != null and node.output_port_type() == Pasture3DGraphNode.PortType.PATH:
+			in_g.append(-1)
+			continue
 		var path := _path_operand_of(int(ni), p_inputs_of)
 		if path == null:
 			in_g.append(-1)

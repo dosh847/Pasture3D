@@ -239,6 +239,32 @@ func path_output() -> Pasture3DGraphPath:
 	return null
 
 
+## The PATH this node produces GIVEN its resolved PATH inputs, in input-port order (null for a port that
+## is unwired or fed by something producing no path). Spec §8.2.
+##
+## ---- WHY THIS EXISTS ALONGSIDE `path_output` ----
+##
+## `path_output` answers "what path do you HOLD" — the right question for a source, which holds one, and
+## the only question the graph asked before S4. It is the wrong question for a FILTER: a Path Width holds
+## nothing at all, it makes a path out of the one upstream, so a graph that only ever calls `path_output`
+## sees null at the filter and hands the carve the raw spline. That is not an error anywhere; it is a
+## width setting that silently does nothing.
+##
+## Defaulting to `path_output()` is what makes every existing source correct without being touched: a
+## source ignores its (empty) inputs and returns what it holds, which is exactly what it did before.
+##
+## ---- RETURN A STABLE INSTANCE ----
+##
+## A filter that allocates a fresh Pasture3DGraphPath on every call breaks the geometry table's fanout
+## dedup, which keys on INSTANCE ID (`_compile_geometry`): two consumers of one filter would name two
+## entries and the path would be indexed twice per bake. The graph memoises this call per node so the
+## same instance comes back while nothing upstream changed — implementations should mutate their own
+## kept instance rather than returning a new one, and must never mutate an INPUT path, which belongs to
+## the node upstream and is shared with everyone else reading it.
+func eval_path(_p_inputs: Array) -> Pasture3DGraphPath:
+	return path_output()
+
+
 ## True when this node reads PATH inputs, so the evaluator collects them before calling `eval_grid`.
 ## Answering true costs one dictionary walk per evaluation and nothing else.
 func reads_paths() -> bool:
