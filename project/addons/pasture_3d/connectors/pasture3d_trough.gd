@@ -42,7 +42,9 @@ func _gizmo_color() -> Color:
 
 
 ## Narrower than a Ridge's: a channel's half-width is its bank run, and 8 m is a stream rather than a
-## gorge. The flat floor is `Path Carve.flat_width`, which is a different number.
+## gorge. This sizes the CHILD spline — the gizmo, and the per-vertex width a user gets after switching
+## `width_source` to PATH. The carved bank is `_configure_carve`'s `width`; the flat floor is
+## `flat_width`, and all three are different numbers.
 func _preset_half_width() -> float:
 	return 8.0
 
@@ -55,8 +57,18 @@ func _configure_carve(p_carve: Pasture3DGraphNodePathCarve) -> void:
 	# Negative, for the same reason the Ridge's is positive and not zero: a channel arrives cut.
 	p_carve.offset = -6.0
 	p_carve.flat_width = 4.0
+	# SLOPE_ANGLE, where the Ridge's is FIXED_WIDTH: a bank that meets the ground at a constant angle is
+	# what makes a channel read as cut INTO the terrain rather than draped over it, and `width` is then
+	# the cap on how far that bank is allowed to reach before it gives up.
+	p_carve.flank_mode = Pasture3DGraphNodePathCarve.FlankMode.SLOPE_ANGLE
+	p_carve.slope_angle = 30.0
+	p_carve.falloff = 10.0
 	p_carve.follow_path_height = true
-	p_carve.width_source = Pasture3DGraphNodePathCarve.WidthSource.PATH
+	# CONSTANT for the reason Pasture3DRidge._configure_carve gives at length: PATH is the better tool
+	# and the wrong default, because its width lives on a node the user has not met yet.
+	p_carve.width_source = Pasture3DGraphNodePathCarve.WidthSource.CONSTANT
+	p_carve.width_scale = 1.0
+	p_carve.width = 20.0
 
 
 ## Clamp each bed line's points so its Y never rises along the path — a channel that flows.
@@ -78,8 +90,8 @@ func make_bed_descend() -> void:
 func _migration_map() -> Dictionary:
 	return {
 		"depth": &"offset",
-		"bank_width": ["spline", "half_width"],
-		"width_curve": ["spline", "width_along"],
+		"bank_width": Callable(self, "_migrate_width"),
+		"width_curve": Callable(self, "_migrate_width_curve"),
 		"flank_mode": &"flank_mode",
 		"slope_angle": &"slope_angle",
 		"bank_profile": &"profile",
@@ -134,3 +146,25 @@ func _migrate_closed(p_value, _p_carve, p_spline: Pasture3DSpline) -> void:
 ## `bed_half_width` remembered across the two setters above, because the dictionary that drives them has
 ## no order and either may run first.
 var _migrated_bed_half: float = 0.0
+
+
+## Old `bank_width` is a HALF-width, and so is Path Carve's `width` under CONSTANT — both are the flank's
+## lateral reach from the line (see `reach` in src/pasture_3d_path_carve.cpp). It has to be written in
+## BOTH places: the child spline, because that is where the gizmo and any later switch to PATH read it
+## from, and the carve, because CONSTANT is now the preset's default and a migration that only wrote the
+## spline would silently replace the user's authored width with the preset's 20 m.
+func _migrate_width(p_value, p_carve: Pasture3DGraphNodePathCarve, p_spline: Pasture3DSpline) -> void:
+	var w: float = maxf(float(p_value), 0.0)
+	p_spline.half_width = w
+	p_carve.width = w
+
+
+## A width CURVE cannot be carried by a constant, so a scene that had one moves the carve back to PATH.
+##
+## That is not a departure from the new default, it is what the default is for: PATH is the right answer
+## for anybody who has already expressed a per-vertex width, and CONSTANT is the right answer for
+## somebody who has not. The old brush's taper keeps working, which is the whole promise of §9.5.
+func _migrate_width_curve(p_value, p_carve: Pasture3DGraphNodePathCarve, p_spline: Pasture3DSpline) -> void:
+	p_spline.width_along = p_value
+	if p_value != null:
+		p_carve.width_source = Pasture3DGraphNodePathCarve.WidthSource.PATH

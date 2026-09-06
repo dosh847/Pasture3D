@@ -379,7 +379,12 @@ bench/PathShapeGate.tscn
 #       the gate prints that distinction rather than implying a Ctrl+Z.
 #   [D] an old Ridge's crest_height and width survive as Path Carve.offset and the child spline's
 #       half_width, and the BAKE puts the crest 18 m above the ground it draped onto with its flank
-#       reaching within one cell of 22 m. Controls: the site is proved non-flat (78 m of relief, which
+#       reaching within one cell of 22 m. The reach half of that is load-bearing twice over: the
+#       presets ship width_source = CONSTANT (§9.6 departure 9, so a fresh preset's reach is visible
+#       in the inspector beside the offset that uses it rather than on a child node), which makes the
+#       old width's trip to the child spline's half_width INERT for the carve. _migrate_width writes
+#       both, and this is the criterion that would have caught it writing only one -- the crest would
+#       still have landed at 18 m and only the flank would have moved. Controls: the site is proved non-flat (78 m of relief, which
 #       is what makes a draped crest distinguishable from a fixed-height one), and a preset carrying
 #       only its own defaults is proved to differ in both numbers. This found the migration leaving the
 #       preset's starter stub in place beside the real crest.

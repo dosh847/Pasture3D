@@ -50,22 +50,37 @@ func _gizmo_color() -> Color:
 	return Color(1.0, 0.62, 0.24)
 
 
-## A crest is drawn to a width; 12 m of half-width is a hill rather than a hedgerow, and it is the
-## number `Path Carve.width_source = PATH` then reads per vertex.
+## The CHILD spline's half-width: the gizmo's drawn ribbon, and the number `Path Carve` reads per vertex
+## if the user switches `width_source` to PATH. The preset ships CONSTANT, so out of the box this sizes
+## what you see rather than what gets carved — those are `_configure_carve`'s `width`.
 func _preset_half_width() -> float:
 	return 12.0
 
 
 ## CREST and MAX: a ridge raises, and MAX is what makes it a ridge rather than a bulge — it never digs,
 ## whatever the ground under it does.
+##
+## ---- WHY WIDTH_SOURCE IS CONSTANT ----
+##
+## Path Carve's own default is PATH, which reads the drawn line's per-vertex half-widths. That is the
+## better tool and an experienced user will switch to it. It is the wrong DEFAULT: a fresh preset whose
+## reach comes from a property on a different node reads as broken to somebody who has not yet found that
+## node, and "it does nothing until you learn where the width lives" is exactly the first impression a
+## preset exists to prevent. CONSTANT puts the reach on the carve, beside the offset that uses it.
 func _configure_carve(p_carve: Pasture3DGraphNodePathCarve) -> void:
 	p_carve.cross_section = Pasture3DGraphNodePathCarve.CrossSection.CREST
 	p_carve.blend = Pasture3DGraphNodePathCarve.Blend.MAX
 	# Path Carve's own default is 0, which for a CREST means a crest level with the line that draws it —
 	# a preset that visibly does nothing. A preset exists to arrive doing something, and 20 m is a hill.
 	p_carve.offset = 20.0
+	p_carve.flat_width = 0.0
+	p_carve.flank_mode = Pasture3DGraphNodePathCarve.FlankMode.FIXED_WIDTH
+	p_carve.slope_angle = 30.0
+	p_carve.falloff = 10.0
 	p_carve.follow_path_height = true
-	p_carve.width_source = Pasture3DGraphNodePathCarve.WidthSource.PATH
+	p_carve.width_source = Pasture3DGraphNodePathCarve.WidthSource.CONSTANT
+	p_carve.width_scale = 1.0
+	p_carve.width = 20.0
 
 
 ## §9.5's table. A bare StringName goes to the carve; `["spline", name]` to the child spline; a Callable
@@ -73,8 +88,8 @@ func _configure_carve(p_carve: Pasture3DGraphNodePathCarve) -> void:
 func _migration_map() -> Dictionary:
 	return {
 		"crest_height": &"offset",
-		"width": ["spline", "half_width"],
-		"width_curve": ["spline", "width_along"],
+		"width": Callable(self, "_migrate_width"),
+		"width_curve": Callable(self, "_migrate_width_curve"),
 		"flank_mode": &"flank_mode",
 		"slope_angle": &"slope_angle",
 		"profile": &"profile",
@@ -121,3 +136,25 @@ func _migrate_closed(p_value, _p_carve, p_spline: Pasture3DSpline) -> void:
 	for path in p_spline._get_splines():
 		if path.curve != null:
 			path.curve.closed = bool(p_value)
+
+
+## Old `width` is a HALF-width, and so is Path Carve's `width` under CONSTANT — both are the flank's
+## lateral reach from the line (see `reach` in src/pasture_3d_path_carve.cpp). It has to be written in
+## BOTH places: the child spline, because that is where the gizmo and any later switch to PATH read it
+## from, and the carve, because CONSTANT is now the preset's default and a migration that only wrote the
+## spline would silently replace the user's authored width with the preset's 20 m.
+func _migrate_width(p_value, p_carve: Pasture3DGraphNodePathCarve, p_spline: Pasture3DSpline) -> void:
+	var w: float = maxf(float(p_value), 0.0)
+	p_spline.half_width = w
+	p_carve.width = w
+
+
+## A width CURVE cannot be carried by a constant, so a scene that had one moves the carve back to PATH.
+##
+## That is not a departure from the new default, it is what the default is for: PATH is the right answer
+## for anybody who has already expressed a per-vertex width, and CONSTANT is the right answer for
+## somebody who has not. The old brush's taper keeps working, which is the whole promise of §9.5.
+func _migrate_width_curve(p_value, p_carve: Pasture3DGraphNodePathCarve, p_spline: Pasture3DSpline) -> void:
+	p_spline.width_along = p_value
+	if p_value != null:
+		p_carve.width_source = Pasture3DGraphNodePathCarve.WidthSource.PATH
