@@ -416,15 +416,15 @@ func _extent(p_h: PackedFloat32Array, p_ix: int) -> float:
 
 # ---- E ------------------------------------------------------------------------------------------
 
-## [E] A graph containing Path Carve lowers NATIVELY and matches the GDScript evaluator — and the GPU
-## refuses it rather than serving channel 0.
+## [E] A graph containing Path Carve lowers NATIVELY and matches the GDScript evaluator — and reaches the
+## GPU carve shader S3b added.
 ##
 ## Two halves, because they are the two ways the phase can be quietly incomplete. Lowering is what makes
 ## the node worth having: `blocks_native()` is GRAPH-WIDE, so a visible node that blocked would drag the
-## erosion and the noise beside it onto the GDScript evaluator. And the GPU has no carve mode, so it must
-## BAIL — a plan that holds one buffer per slot would otherwise serve `bed` a copy of `height`.
+## erosion and the noise beside it onto the GDScript evaluator. The GPU half is a liveness check only —
+## PathCarveGpuGate is what measures the shader.
 func _e_the_graph_lowers_and_the_gpu_refuses() -> void:
-	print("[E] the graph lowers natively, and the GPU refuses")
+	print("[E] the graph lowers natively, and reaches the GPU carve shader")
 	var surf := _terrain()
 	var g := _carve_graph(_spline(), 0)
 	var lowers: bool = g.native_supported() and not g.compile_graph_program().is_empty()
@@ -478,10 +478,24 @@ func _e_the_graph_lowers_and_the_gpu_refuses() -> void:
 			RECT, surf)
 	print("    the GPU route is live (%d cell(s) on a bare graph); the carve graph returned %d"
 			% [ctrl.size(), gpu.size()])
-	if not gpu.is_empty():
+	# S3b CHANGED THIS EXPECTATION, and the change is the point. Through S3 the carve had no shader and
+	# this criterion asserted the REFUSAL, so that a guard weakened without a kernel behind it would show
+	# up here rather than as a canyon graded to a distance field. S3b wrote the kernel, so the refusal is
+	# now the failure: a bail would mean the whole phase is inert and every carve is back on the CPU.
+	#
+	# What the GPU carve actually COMPUTES is PathCarveGpuGate's, not this gate's — it owns the four
+	# cross-sections, the NaN height stripe, the mask channels that must still bail, and the per-vertex
+	# ground reference. All this needs to know is that the route exists.
+	if gpu.size() != GW * GH:
 		_fail += 1
-		print("    !! the GPU served a Path Carve graph, but there is no carve mode in the shader — so")
-		print("       this is some other op's output, or the input surface, wearing the carve's name.")
+		print("    !! the GPU refused a Path Carve graph. Since S3b there is a carve shader, so a bail")
+		print("       here means the op is no longer reaching it — see PathCarveGpuGate.")
+	else:
+		var gw := _worst(gpu, nat)
+		print("    the GPU carve agrees with the lowered CPU program to %.7f m" % gw)
+		if gw > 2.0e-3:
+			_fail += 1
+			print("    !! the GPU served a carve that disagrees with the CPU one")
 
 
 ## Input -> Spline-less Road Source -> Path Carve[ch] -> Output.

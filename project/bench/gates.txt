@@ -259,11 +259,26 @@ bench/PathHeightGate.tscn
 # The fixture's terrain SLOPES and is bumpy on purpose: over flat ground a two-reference drape and a naive
 # fixed-height skirt are the same surface, so the property the kernel exists for would go untested.
 #
-# [E] has a GPU half with the same limitation PathHeightGate [D] has — there is no carve mode in the
-# shader, so a Path Carve graph must BAIL rather than serve channel 0. It asserts the refusal with a
-# control proving the GPU route is live, and reports NO-SIGNAL headless. Run this one WITHOUT --headless
-# to cover that half; everything else is green headless.
+# [E]'s GPU half was INVERTED by S3b. Through S3 there was no carve shader, so it asserted the refusal;
+# since S3b there is one, so a bail there now means the phase went inert. It is a liveness check only --
+# what the GPU carve computes belongs to PathCarveGpuGate. Reports NO-SIGNAL headless, so run this one
+# WITHOUT --headless to cover that half; everything else is green headless.
 bench/PathCarveGate.tscn
+
+# S3b - the SAME carve on the GPU, `height` only (spec §7.7). Two dispatches: one samples the terrain
+# under each path VERTEX, the other carves. Every criterion calls graph_eval_grid_gpu DIRECTLY, because
+# the likeliest defect makes GPU and CPU agree -- the route refuses the program, the caller falls back,
+# and the "GPU" result IS the CPU result (`graph-gpu-bail-is-graph-wide`).
+#
+# [D] is the one worth reading before editing. The obvious per-vertex-vs-per-cell fixture measures
+# NOTHING: with follow_path_height off the ground reference cancels out of `diff` entirely, however bumpy
+# the fixture is. With it ON the crest lands at ground + (drawn - ground_ref), so a per-CELL reference
+# cancels to the drawn height exactly -- a dead-flat crest -- and the per-VERTEX one does not. The
+# discriminator is therefore that the crest IS rough, which is the opposite of the intuition.
+#
+# WINDOWED ONLY, and it says so rather than passing: with no RenderingDevice it prints NO-SIGNAL and
+# quits 0 as SKIPPED, so a headless sweep neither greens it nor reds it.
+bench/PathCarveGpuGate.tscn
 
 # --- Road system P0: the data model and its resolve chain (PASTURE3D_ROAD_SYSTEM_PROPOSAL.md §11) ---
 # Nothing here touches the terrain — P0 is the model. What it pins is what the later phases build on and

@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://bench/PathCarveGpuGate.gd" id="1_pcgpu"]
+
+[node name="PathCarveGpuGate" type="Node"]
+script = ExtResource("1_pcgpu")

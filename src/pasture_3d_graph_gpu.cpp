@@ -1,5 +1,6 @@
 #include "pasture_3d_graph_gpu.h"
 #include "pasture_3d_data.h"
+#include "pasture_3d_path_carve.h"
 
 #include <godot_cpp/classes/fast_noise_lite.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
@@ -16,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 using namespace godot;
@@ -54,6 +56,10 @@ enum GraphKernelMode {
 	GKM_PATH_DISTANCE = 26,
 	GKM_PATH_MASK = 27,
 	GKM_MUDSLIDE_POOL = 28,
+	// S3b. Two modes, because the carve needs the terrain sampled AT EACH PATH VERTEX before any cell
+	// can be solved, and one dispatch cannot both write that array and read it.
+	GKM_PATH_VERTEX_GROUND = 29,
+	GKM_PATH_CARVE = 30,
 };
 
 struct GraphKernelModeName {
@@ -91,6 +97,8 @@ static const GraphKernelModeName GRAPH_KERNEL_MODES[] = {
 	{ "GKM_PATH_DISTANCE", GKM_PATH_DISTANCE },
 	{ "GKM_PATH_MASK", GKM_PATH_MASK },
 	{ "GKM_MUDSLIDE_POOL", GKM_MUDSLIDE_POOL },
+	{ "GKM_PATH_VERTEX_GROUND", GKM_PATH_VERTEX_GROUND },
+	{ "GKM_PATH_CARVE", GKM_PATH_CARVE },
 };
 
 // `#version` has to be the first line of the source, so it is prepended here rather than living in the
@@ -132,7 +140,10 @@ layout(set = 0, binding = 2, std430) restrict readonly buffer BBuf { float b[]; 
 layout(set = 0, binding = 3, std430) restrict readonly buffer CBuf { float c[]; };
 // THE GEOMETRY OPERAND (P2d). One flat float array holding the single path this dispatch reads: a
 // two-float header, then the ring's vertices as x,z pairs, then a half-width per vertex, then the
-// prefix-summed arc length per vertex. Packed as floats rather than as a struct array because std430
+// prefix-summed arc length per vertex, then (S3b) the DRAWN HEIGHT per vertex -- NaN throughout when the
+// path carries none, so the shader has one case rather than two and "no height" cannot read as sea level.
+// The height stripe is APPENDED so every offset above it is unchanged: Path Distance and Path Mask were
+// compiled against this layout before it existed. Packed as floats rather than as a struct array because std430
 // alignment rules on a vec2 array differ between drivers, and a layout that is right on one machine and
 // padded on another is the worst kind of GPU bug: it produces a plausible road.
 //
@@ -158,6 +169,9 @@ layout(push_constant, std430) uniform Params {
 	// GAVORONOISE needs one integer beyond `ip` (octaves) — the seed — and the eight float slots are
 	// exactly full. Appended rather than packed into `ip`, because packing a 32-bit seed into spare bits
 	// would silently truncate it and two seeds would start producing the same terrain.
+	// PATH_CARVE packs its five enums and flags into ip2 rather than spending five float slots on values
+	// that are 0 or 1: bit0 cross_section, bit1 flank_mode, bit2 width_source, bit3 follow_path_height,
+	// bits 4-5 blend. `ip` carries the vertex count, as it does for the other two path modes.
 	int ip2; int pad0; int pad1; int pad2;
 } p;
 
@@ -199,6 +213,77 @@ float pathHalfWidth(int gn, int GW0, int GC0, float s) {
 	float seg = g[GC0 + i + 1] - g[GC0 + i];
 	float f = (seg <= 0.0) ? 0.0 : clamp((s - g[GC0 + i]) / seg, 0.0, 1.0);
 	return w0 + (w1 - w0) * f;
+}
+
+// Interpolate a per-vertex stripe of the GEOMETRY buffer at arc length `s`. A transcription of
+// Pasture3DPathGeom::lerp_vertex, which is the single interpolation rule the CPU kernel and its oracle
+// both go through -- so the width, the drawn height and the ground reference cannot drift apart here by
+// being written out three times. `B0` is the stripe's base offset; `GC0` the cumulative-length stripe's.
+float pathLerpStripe(int gn, int B0, int GC0, float s) {
+	int i = max(gn - 2, 0);
+	for (int k = 0; k < gn - 1; k++) {
+		if (s <= g[GC0 + k + 1]) { i = k; break; }
+	}
+	int last = gn - 1;
+	float v0 = g[B0 + min(i, last)];
+	float v1 = g[B0 + min(i + 1, last)];
+	float seg = g[GC0 + i + 1] - g[GC0 + i];
+	float f = (seg <= 0.0) ? 0.0 : clamp((s - g[GC0 + i]) / seg, 0.0, 1.0);
+	return v0 + (v1 - v0) * f;
+}
+
+// The same rule again, over the VERTEX-GROUND array, which lives in buffer `b` because it is produced by
+// a dispatch rather than uploaded. Two functions rather than one with a flag: GLSL has no pointer to an
+// SSBO, and a branch inside the inner interpolation would cost more than the duplication.
+float pathLerpGround(int gn, int GC0, float s) {
+	int i = max(gn - 2, 0);
+	for (int k = 0; k < gn - 1; k++) {
+		if (s <= g[GC0 + k + 1]) { i = k; break; }
+	}
+	int last = gn - 1;
+	float v0 = b[min(i, last)];
+	float v1 = b[min(i + 1, last)];
+	float seg = g[GC0 + i + 1] - g[GC0 + i];
+	float f = (seg <= 0.0) ? 0.0 : clamp((s - g[GC0 + i]) / seg, 0.0, 1.0);
+	return v0 + (v1 - v0) * f;
+}
+
+// Bilinear sample of the input surface at a WORLD position, NaN-aware and edge-clamped -- a transcription
+// of sample_surface() in pasture_3d_path_carve.cpp, including both of its unobvious choices. Clamped
+// rather than refused, because a path vertex a little outside the evaluated rect is normal and a NaN
+// there would step the crest at the tile boundary; and weighted over only the FINITE corners, because one
+// missing corner would otherwise notch the ground reference the whole crest is hung from.
+float carveSampleSurface(float wx, float wz) {
+	float fx = ((wx - p.ox) / p.dx) - 0.5;
+	float fz = ((wz - p.oz) / p.dz) - 0.5;
+	int x0 = int(floor(fx));
+	int z0 = int(floor(fz));
+	float tx = fx - float(x0);
+	float tz = fz - float(z0);
+	float sum = 0.0;
+	float wt = 0.0;
+	for (int k = 0; k < 4; k++) {
+		int cx = clamp(x0 + (k & 1), 0, p.gw - 1);
+		int cz = clamp(z0 + (k >> 1), 0, p.gh - 1);
+		float w = ((k & 1) == 0 ? (1.0 - tx) : tx) * ((k >> 1) == 0 ? (1.0 - tz) : tz);
+		float v = a[cz * p.gw + cx];
+		if (!isnan(v) && !isinf(v)) { sum += v * w; wt += w; }
+	}
+	return (wt > 0.0) ? (sum / wt) : (0.0 / 0.0);
+}
+
+// The profile ramp, reading the LUT bound at `c`. A transcription of raster_ramp in
+// pasture_3d_brush_raster.cpp, fallback included: an EMPTY LUT is smoothstep, not zero, and a carve that
+// answered zero for a missing curve would silently stop carving.
+float carveRamp(float x) {
+	x = clamp(x, 0.0, 1.0);
+	int n = int(p.f6);
+	if (n <= 0) { return x * x * (3.0 - 2.0 * x); }
+	if (n == 1) { return c[0]; }
+	float f = x * float(n - 1);
+	int i0 = int(f);
+	if (i0 >= n - 1) { return c[n - 1]; }
+	return mix(c[i0], c[i0 + 1], f - float(i0));
 }
 
 // Contrast's AUTO height window needs the input's min/max over the WHOLE grid, which no pointwise
@@ -809,6 +894,115 @@ static const char *GRAPH_GRID_GLSL_3 = R"(	if (p.mode == GKM_FLOOD_LEVEL) { // F
 		return;
 	}
 
+	// ---- PATH CARVE (spec S3b, §7.7) ---------------------------------------------------------------
+	//
+	// TWO dispatches. This one samples the terrain under each path VERTEX and writes one float per vertex;
+	// the carve below reads them back. That indirection is not an optimisation -- it is the two-reference
+	// rule: the crest's SHAPE is anchored to a few dozen samples taken along the path, while the flank
+	// descends to each cell's actual ground. Sampling per cell instead scallops the crest wherever the
+	// flank crosses a bump, which looks like noise in the terrain and is not.
+	//
+	// Dispatched at the grid's own size and indexed LINEARLY, so vertex v is written by cell v and every
+	// invocation past the vertex count idles. The same trick GKM_MINMAX_FINAL uses, for the same reason:
+	// a second dispatch size would have to be threaded through a plan that assumes one.
+	if (p.mode == GKM_PATH_VERTEX_GROUND) {
+		int gn = p.ip;
+		if (i >= gn) { return; }
+		o[i] = carveSampleSurface(g[2 + 2 * i], g[3 + 2 * i]);
+		return;
+	}
+
+	if (p.mode == GKM_PATH_CARVE) {
+		// a = the incoming surface, b = the per-vertex ground from the dispatch above, c = the profile
+		// LUT, g = the path. ip = vertex count, ip2 = the packed enums, f0..f6 the scalars.
+		int gn = p.ip;
+		float ground = a[i];
+		// An empty path carves nothing, and NaN is "no data" in a HEIGHT grid -- a carve is not entitled
+		// to invent ground. Both pass the surface through, exactly as the CPU kernel does.
+		if (gn < 2 || isnan(ground) || isinf(ground)) { o[i] = ground; return; }
+
+		int GW0 = 2 + 2 * gn; // half-widths
+		int GC0 = 2 + 3 * gn; // cumulative arc length
+		int GH0 = 2 + 4 * gn; // drawn heights (NaN throughout when the path carries none)
+
+		bool isBed      = (p.ip2 & 1) != 0;
+		bool byAngle    = (p.ip2 & 2) != 0;
+		bool fromPath   = (p.ip2 & 4) == 0; // bit CLEAR = PATH, matching PATH_CARVE_WIDTH_PATH == 0
+		bool follow     = (p.ip2 & 8) != 0;
+		int  blendMode  = (p.ip2 >> 4) & 3;
+
+		float flatHw   = max(p.f1, 0.0);
+		float slopeTan = p.f2;      // pre-clamped and pre-tanned on the CPU side
+		float falloff  = max(p.f5, 0.0);
+		float falloffD = max(falloff, 1.0e-3);
+		float edgeVal  = carveRamp(1.0);
+		float signedOffset = isBed ? -p.f0 : p.f0;
+
+		float qx = p.ox + (float(ix) + 0.5) * p.dx;
+		float qz = p.oz + (float(iz) + 0.5) * p.dz;
+
+		// Nearest point on the ring, brute force over the segments -- the same definition, and the same
+		// STRICTLY-less-than tie rule, the two path modes above use. See their note: on a path that
+		// doubles back, the other tie order gives a plausible distance and an `s` half a spline out.
+		float best = 1.0e30;
+		int bseg = 0;
+		float bf = 0.0;
+		for (int si = 0; si < gn - 1; si++) {
+			float ax = g[2 + 2 * si];
+			float az = g[3 + 2 * si];
+			float abx = g[4 + 2 * si] - ax;
+			float abz = g[5 + 2 * si] - az;
+			float len2 = abx * abx + abz * abz;
+			float f = (len2 <= 0.0) ? 0.0 : clamp(((qx - ax) * abx + (qz - az) * abz) / len2, 0.0, 1.0);
+			float ddx = qx - (ax + abx * f);
+			float ddz = qz - (az + abz * f);
+			float d = sqrt(ddx * ddx + ddz * ddz);
+			if (d < best) { best = d; bseg = si; bf = f; }
+		}
+		float lat = best;
+		float sarc = g[GC0 + bseg] + (g[GC0 + bseg + 1] - g[GC0 + bseg]) * bf;
+
+		float reach = fromPath ? max(pathLerpStripe(gn, GW0, GC0, sarc) * p.f3, 0.0) : max(p.f4, 0.0);
+		float span = flatHw + reach;
+		if (lat > span + falloff) { o[i] = ground; return; }
+
+		// Reference 1: the ground UNDER THE PATH. Falls back to this cell's own ground where the path
+		// crossed a hole, which keeps a carve over a gap continuous rather than NaN-poisoned.
+		float gs = pathLerpGround(gn, GC0, sarc);
+		float groundRef = (isnan(gs) || isinf(gs)) ? ground : gs;
+
+		// Reference 2: the crest or floor. A path carrying no heights answers NaN and falls back to the
+		// ground reference, which is what makes an unelevated spline behave as "offset from the terrain"
+		// rather than as a carve to sea level.
+		float top = groundRef;
+		if (follow) {
+			float py = pathLerpStripe(gn, GH0, GC0, sarc);
+			if (!isnan(py) && !isinf(py)) { top = py; }
+		}
+		top += signedOffset;
+		float diff = top - groundRef;
+
+		float wEff = span;
+		if (byAngle) { wEff = clamp(flatHw + abs(diff) / slopeTan, flatHw, span); }
+		if (lat > wEff + falloff) { o[i] = ground; return; }
+
+		float pr;
+		if (lat <= flatHw) { pr = 1.0; }
+		else if (lat <= wEff) { pr = carveRamp((lat - flatHw) / max(wEff - flatHw, 1.0e-3)); }
+		else { pr = edgeVal * (1.0 - clamp((lat - wEff) / falloffD, 0.0, 1.0)); }
+		if (pr <= 0.0) { o[i] = ground; return; }
+
+		// The drape. `ground`, not `groundRef`: the flank meets the terrain WHERE IT ACTUALLY IS, while
+		// only the shape -- `diff` and `wEff` -- is anchored to the vertex reference. That split is the
+		// whole two-reference rule in one line, and it is the line most likely to be "simplified".
+		float carved = ground + diff * pr;
+		float result = carved;
+		if (blendMode == 1) { result = max(carved, ground); }
+		else if (blendMode == 2) { result = min(carved, ground); }
+		o[i] = result;
+		return;
+	}
+
 	// ---- MUDSLIDE (spec §8.3) ------------------------------------------------------------------------
 	// A GATHER, where the CPU kernel accumulates deltas. The two are the same algorithm: a dispatch has no
 	// defined cell order and no atomics here, so instead of scattering material out of a cell, every cell
@@ -1221,9 +1415,16 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 		}
 		const Pasture3DPathGeom &pg = p_prog.geom[(size_t)gi].geom;
 		const int gn = (int)pg.px.size();
-		std::vector<float> flat((size_t)(2 + 4 * std::max(gn, 1)), 0.f);
+		// FIVE stripes since S3b: x/z pairs, half-width, cumulative arc length, drawn height.
+		std::vector<float> flat((size_t)(2 + 5 * std::max(gn, 1)), 0.f);
 		flat[0] = (float)gn;
 		flat[1] = pg.closed ? 1.f : 0.f;
+		// A path with no drawn heights uploads a stripe of NaN rather than being omitted or zeroed. NaN is
+		// "no data" in a HEIGHT grid (PASTURE3D_NODE_VOCABULARY.md §1) and the shader tests for it exactly
+		// as the CPU tests `height_at`'s NaN; a zero stripe would read as sea level and drag a ridge drawn
+		// at 400 m down to the water.
+		const float nan_v = std::numeric_limits<float>::quiet_NaN();
+		const bool has_h = !pg.height.empty();
 		for (int v = 0; v < gn; v++) {
 			flat[(size_t)(2 + 2 * v)] = pg.px[(size_t)v];
 			flat[(size_t)(3 + 2 * v)] = pg.pz[(size_t)v];
@@ -1232,6 +1433,12 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 																	  : pg.width[(size_t)std::min(v, (int)pg.width.size() - 1)]);
 			flat[(size_t)(2 + 2 * gn + v)] = (float)w;
 			flat[(size_t)(2 + 3 * gn + v)] = (float)(v < (int)pg.cum.size() ? pg.cum[(size_t)v] : 0.0);
+			// Clamped to the last entry for the ring-closing vertex, which `path_close_ring` appends
+			// without extending the height array -- and whose height IS the first vertex's, because a
+			// closed ring's last point is its first. The same clamp `lerp_vertex` makes on the CPU.
+			flat[(size_t)(2 + 4 * gn + v)] = has_h
+					? pg.height[(size_t)std::min(v, (int)pg.height.size() - 1)]
+					: nan_v;
 		}
 		const int gb = (int)(flat.size() * sizeof(float));
 		PackedByteArray pb;
@@ -1925,6 +2132,80 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				d.f0 = P[0]; // width_scale
 				d.f1 = PH[1] ? P[1] : 0.f; // feather
 				d.f2 = PH[2] ? P[2] : 0.f; // invert
+				plan.push_back(d);
+				slot_buf[s] = out;
+			} break;
+			case GRAPH_OP_PATH_CARVE: {
+				// S3b, spec §7.7. HEIGHT ONLY: `bed` / `flank` / `cut` / `fill` are channels 1-4 and the
+				// guard at the top of this function has already refused any program whose wires read them,
+				// so reaching here means channel 0 and nothing else. A graph that wants a mask keeps the
+				// CPU evaluator, correctly.
+				const RID gb = geo_of(s);
+				const int gn = gb.is_valid() && p_prog.in_g.size() == p_prog.count
+						? (int)p_prog.geom[(size_t)p_prog.in_g[s]].geom.px.size()
+						: 0;
+				// An unwired `surface` binds the shared zero buffer, which is what every other op here does
+				// and what the lowered CPU evaluator's get_grid_packed answers for an unwired operand.
+				const RID src = in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf;
+				if (gn < 2) {
+					// No path is not a failure -- an unresolved Spline Source is a normal state while one
+					// is being renamed. Pass the surface through, the same answer the CPU kernel gives.
+					const RID out = empty_buf();
+					plan.push_back({ out, src, zero_buf, zero_buf, GKM_COPY, 0 });
+					slot_buf[s] = out;
+					break;
+				}
+				// The per-vertex ground array is written by a dispatch indexed LINEARLY over the grid, so
+				// it needs at least one cell per vertex. A spline with more vertices than the bake has
+				// cells is pathological, but silently truncating it would bend the crest, so refuse.
+				if (gn > n) {
+					return fail();
+				}
+				// THE PROFILE LUT, bound at `c`. Uploaded per node rather than shared: two carves in one
+				// graph legitimately have different curves, and a shared buffer would give the second the
+				// first's cross-section.
+				const PackedFloat32Array &lut = p_prog.luts[(size_t)s];
+				RID lut_buf = zero_buf;
+				if (lut.size() > 0) {
+					PackedByteArray lb;
+					lb.resize(lut.size() * (int)sizeof(float));
+					std::memcpy(lb.ptrw(), lut.ptr(), (size_t)lb.size());
+					lut_buf = _rd->storage_buffer_create((uint32_t)lb.size(), lb);
+					if (!lut_buf.is_valid()) {
+						return fail();
+					}
+					to_free.push_back(lut_buf);
+				}
+
+				// PASS 1: the terrain under each path vertex. Reads the SAME surface the carve reads, so
+				// the two references come from one grid by construction rather than by agreement.
+				const RID gvb = empty_buf();
+				GraphDispatch dv{ gvb, src, zero_buf, zero_buf, GKM_PATH_VERTEX_GROUND, gn };
+				dv.geo = gb;
+				plan.push_back(dv);
+
+				// PASS 2: the carve itself.
+				const Pasture3DPathCarveParams cp = path_carve_params_from(P, 16);
+				const RID out = empty_buf();
+				GraphDispatch d{ out, src, gvb, lut_buf, GKM_PATH_CARVE, gn };
+				d.geo = gb;
+				// The enums and flags, packed the way the push-constant block documents. Spending a float
+				// slot each on five values that are 0 or 1 would have run the block out.
+				d.ip2 = (cp.cross_section == PATH_CARVE_BED ? 1 : 0)
+						| (cp.flank_mode == PATH_CARVE_SLOPE_ANGLE ? 2 : 0)
+						| (cp.width_source == PATH_CARVE_WIDTH_CONST ? 4 : 0)
+						| (cp.follow_path_height ? 8 : 0)
+						| ((cp.blend & 3) << 4);
+				d.f0 = (float)cp.offset;
+				d.f1 = (float)std::max(cp.flat_width, 0.0);
+				// tan() is taken HERE, with the CPU kernel's own clamp and floor, so the shader cannot
+				// reach an infinite flank from a zero angle and the two sides cannot disagree about where
+				// the clamp sits.
+				d.f2 = (float)std::max(std::tan(std::clamp(cp.slope_angle, 0.5, 89.5) * Math_PI / 180.0), 1.0e-4);
+				d.f3 = (float)cp.width_scale;
+				d.f4 = (float)cp.width;
+				d.f5 = (float)std::max(cp.falloff, 0.0);
+				d.f6 = (float)lut.size();
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;

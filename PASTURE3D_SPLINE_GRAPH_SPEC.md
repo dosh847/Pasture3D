@@ -1,7 +1,7 @@
 # Pasture3D Spline & Graph Geometry Operations Specification
 
 **Document:** `PASTURE3D_SPLINE_GRAPH_SPEC.md`
-**Status:** **S1 + S2 + S3 BUILT 2026-09-05** (`SplineSourceGate` 6/6, `PathHeightGate` 4/4, `PathCarveGate` 5/5 — [D] and [E] respectively need a windowed run for their GPU halves; both verified windowed). S4–S8 specified, unbuilt.
+**Status:** **S1 + S2 + S3 + S3b BUILT 2026-09-05** (`SplineSourceGate` 6/6, `PathHeightGate` 4/4, `PathCarveGate` 5/5, `PathCarveGpuGate` 4/4 — the last is windowed-only and reports SKIPPED headless; `PathHeightGate` [D] and `PathCarveGate` [E] likewise need a windowed run, and all were verified windowed). S4–S8 specified, unbuilt.
 **Target:** Pasture3D Terrain Graph + brush system (Godot 4.7 GDExtension, C++20, GDScript)
 **Builds on:** `PASTURE3D_GRAPH_GEOMETRY_PORTS_SPEC.md` (the PATH port, the geometry table, §8.1 Shape
 Source, §8.2 rivers) — this document is the general-geometry half of the family that spec's §1 lists and
@@ -649,11 +649,19 @@ what holds that line, and its control is that the lowered program actually moved
 
 ---
 
-### 7.7 S3b — a GPU geometry-aware carve (planned; between S6 and S8)
+### 7.7 S3b — a GPU geometry-aware carve (BUILT)
 
-Requested after S3 landed, scheduled **after the Ridge/Trough rebuild (S6) and before the Lake & River
-spec (S8)**, on the reasoning that S6 is what makes the carve the thing every mountain in a scene runs
-through — which is when its being CPU-only starts to cost, and before then it does not.
+Requested after S3 landed and originally scheduled after the Ridge/Trough rebuild (S6). **Built
+immediately instead**, at the user's direction: a Plow carving through the graph in the editor was
+already slow enough to be worth fixing, which settles the question the S6-first reasoning was guessing at.
+
+**One prediction in the plan below was wrong, and the correction is the interesting part.** The
+vertex-sample pre-pass was expected to force a second dispatch SIZE through a plan that assumes one. It
+does not: the pass is dispatched at the grid's own size and indexed linearly, so vertex `v` is written by
+cell `v` and every invocation past the vertex count idles — the same trick `GKM_MINMAX_FINAL` already
+uses. What remains is a second dispatch, not a second dispatch size, and the plan needed no new concept
+at all. The only guard it costs is a refusal when a path has more vertices than the bake has cells, which
+is pathological but would otherwise silently truncate the crest.
 
 **Scope: `height` only.** Per §7.6 (3) the plan holds one buffer per slot, so `bed` / `flank` / `cut` /
 `fill` cannot be served and this phase does not pretend to. A graph wiring a mask keeps taking the CPU,
@@ -674,15 +682,31 @@ Three pieces, in order:
    paraphrase: `carved = ground + (top - ground_ref) * p`, with `ground` per cell and `ground_ref` from
    (2).
 
-**Gate — `PathCarveGpuGate`:** [A] GPU vs CPU on the same four cross-sections `PathCarveGate` [A] uses,
+**What was built**, against the three steps above: (1) the height stripe is appended as a fifth
+per-vertex stripe, filled with NaN when the path carries none, so every offset Path Distance and Path
+Mask were compiled against is unchanged; (2) `GKM_PATH_VERTEX_GROUND` writes one float per vertex,
+linearly indexed as described; (3) `GKM_PATH_CARVE` reads the surface at `a`, that array at `b`, the
+profile LUT at `c` and the path at `g`, with the five enums packed into `ip2` because five float slots
+for five 0-or-1 values would have run the push-constant block out. `tan(slope_angle)` is taken host-side,
+inside the CPU kernel's own clamp, so the two sides cannot disagree about where the clamp sits.
+
+**Gate — `PathCarveGpuGate` (4/4, windowed):** [A] GPU vs CPU on the same four cross-sections `PathCarveGate` [A] uses,
 control: the GPU route is live (a bare in→out graph returns a field) and the carve MOVED the ground, so a
 silent CPU fallback cannot pass as agreement; [B] a graph wiring `bed` still bails — control: the same
 graph wiring `height` does not, or [B] is measuring the guard rather than the channel; [C] a path with no
 heights and `follow_path_height` on behaves identically on both routes (the NaN stripe), control: the same
-path WITH heights differs from it; [D] the vertex-sampled ground reference is what the GPU uses too —
-measured as crest smoothness over deliberately bumpy ground, because a per-cell reference scallops and a
-per-vertex one does not, and that difference is the whole point of (2). Windowed, reporting NO-SIGNAL
-headless, as `PathCarveGate` [E] already does.
+path WITH heights differs from it; [D] the vertex-sampled ground reference is what the GPU uses too.
+Windowed, reporting NO-SIGNAL headless, as `PathCarveGate` [E] already does.
+
+**[D] needed rewriting once, and the reason is worth keeping.** The intuitive fixture — a big offset over
+bumpy ground, checking the crest comes out smooth — measures *nothing*: with `follow_path_height` off,
+`diff = (ground_ref + offset) - ground_ref` is the offset whatever the reference is, so it cancels and a
+per-cell implementation passes unharmed. It only fails to cancel when the crest is pinned to a DRAWN
+height: `crest = ground + (drawn - ground_ref)`, where a per-cell reference cancels to the drawn height
+exactly and gives a dead-flat crest, while the per-vertex one lets the terrain's own variation through.
+So the discriminator is that the crest **is** rough — carrying 98% of the terrain's roughness as
+measured, with 0 of 94 crest cells sitting at the drawn height — which is the opposite of the intuition
+the first draft was built on.
 
 ---
 
@@ -938,7 +962,7 @@ silent criteria — a criterion that threw before asserting must be reported as 
 | **S4** | The geometry pre-pass (§8.2-8.3): `eval_path`, the PATH-sub-DAG topological order in `compile_graph_program`, the cache. Plus `Path Width` (§7.3) as its first customer. | `PathPrePassGate`: [A] a `Spline Source → Path Width → Path Carve` chain lowers **natively** and matches the GDScript evaluator — control: the same graph with the pre-pass disabled falls to GDScript, proving the route was actually taken (`graph-gpu-bail-is-graph-wide`: only a direct native call proves it); [B] fanout is one table entry for two consumers of one produced path; [C] `eval_path` is not re-run when nothing changed — count the calls — control: editing the width does re-run it. |
 | **S5** | The reshape family (§7.4): five PATH→PATH nodes, metres not fractions, stable seeds. | `PathShapeGate`: [A] each node changes the path — control: at zero strength each is the identity, byte for byte; [B] the same seed twice gives the same path, and a different seed a different one; [C] arc length after `Path Resample` at 1 m step is within a cell of the input's; [D] `Meanderize` with `remove_loops` produces a non-self-intersecting path — control: without it, on a fixture chosen to loop, it does not. |
 | **S6** | **Ridge and Trough rebuilt** (§9): reparent onto `Pasture3DPlow`, the preset, loop auto-fit + Fit to Splines, the `_set` migration shim, deletion of `stamp_ridge_line` / `stamp_trough_line` and the old bodies. | `SplineBrushPresetGate`: [A] a fresh Ridge bakes a raised crest along its child spline without any wiring — control: with the Spline Source unwired it bakes nothing, not a wall; [B] auto-fit grows the loop when the spline leaves it and **never shrinks** — control: a spline pulled well inside leaves the loop alone; [C] `Fit to Splines` is one undo action that restores both loop and terrain; [D] a migrated legacy Ridge's crest line is within 0.05 m of the old rasteriser's and its flank reach within one cell — controls: the fixture is not flat, and the *unmigrated* parameters produce a measurably different surface; [E] a duplicated Ridge carves its own spline, not the original's; [F] the deleted kernels are gone — `ClassDB` no longer exposes `stamp_ridge_line`; [G] **Add Water on a rebuilt Trough still builds a `Pasture3DStream`, not a `Pasture3DPool`** (§12.2) — control: Add Water on a plain Plow still builds a Pool, so the test is measuring the override and not a blanket change. |
-| **S3b** | **A GPU geometry-aware carve, `height` only** (§7.7): heights into the binding-4 layout, a vertex-sample pre-dispatch, the carve shader. Scheduled AFTER S6 and BEFORE S8. The four masks stay CPU — the one-buffer-per-slot limit is not this phase's to lift. | `PathCarveGpuGate`: [A] GPU vs CPU on `PathCarveGate` [A]'s four cross-sections — control: the GPU route is live AND the carve moved the ground, so a silent CPU fallback cannot pass as agreement; [B] a graph wiring `bed` still bails — control: the same graph wiring `height` does not; [C] a heightless path with `follow_path_height` on matches across routes — control: the same path WITH heights differs; [D] the vertex-sampled ground reference is used on the GPU too, measured as crest smoothness over bumpy ground. |
+| **S3b** ✅ | **A GPU geometry-aware carve, `height` only** (§7.7): heights into the binding-4 layout, a vertex-sample pre-dispatch, the carve shader. BUILT — brought forward to directly after S3 at the user's request, the Plow carve being slow in the editor. The four masks stay CPU — the one-buffer-per-slot limit is not this phase's to lift. | `PathCarveGpuGate`: [A] GPU vs CPU on `PathCarveGate` [A]'s four cross-sections — control: the GPU route is live AND the carve moved the ground, so a silent CPU fallback cannot pass as agreement; [B] a graph wiring `bed` still bails — control: the same graph wiring `height` does not; [C] a heightless path with `follow_path_height` on matches across routes — control: the same path WITH heights differs; [D] the vertex-sampled ground reference is used on the GPU too — measured as the crest carrying the terrain's roughness, NOT as its smoothness; see §7.7 for why the intuitive fixture measures nothing. |
 | **S7a** | Grid-reading geometry (§8.4): `Path Drape` (+ force-downhill), `Path Width` field mode, `Path from Flow`. Correct on the GDScript evaluator; `blocks_native()` true. | `PathDeriveGate`: [A] a draped path's heights equal the surface sampled at its vertices — control: an undraped path does not; [B] force-downhill produces a monotonically non-increasing height sequence — control: without it, on the same uphill fixture, it does not; [C] width from `Erosion.flow` widens downstream — control: a constant field does not; [D] each of the three takes the graph off the native path, *and is checked to* — a bail nobody verifies is a bail that quietly stopped happening. |
 | **S7b** | The staged compile (§8.4): cut the program at each grid-reading geometry node, evaluate, produce the path, compile the remainder. Removes S7a's graph-wide bail. | `PathStagedCompileGate`: [A] the S7a fixtures now lower natively and match their own GDScript results to the erosion gates' thresholds — control: the S7a bail path, still reachable, gives the same answer more slowly; [B] a two-stage graph's cache invalidates when *either* stage's inputs change — control: changing nothing re-serves without re-solving. |
 
