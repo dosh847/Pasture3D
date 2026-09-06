@@ -331,6 +331,13 @@ bench/PathPrePassGate.tscn
 #       at the water.
 #   [F] a reshape drops the solved road profile and Path Width keeps it. A stale alignment describes the
 #       line the path used to be, while can_grade() still answers true.
+#   [G] the query cost of a reshaped path follows its vertex count, not its square. The only criterion
+#       here that measures what the reshape costs SOMEBODY ELSE: Path Carve receives a polyline and
+#       cannot tell 4000 vertices from 250, so a path index sized wrong for a dense line is invisible in
+#       every criterion above. It was: the native bucket grid sized its cell from the mean segment
+#       length, floored at 0.5 m, and a meandered river made a 128x128 query take 11.8 s while
+#       native_supported() answered true throughout. A RATIO, not a millisecond budget -- the budget
+#       measures the machine, the ratio measures the index.
 #
 # [D]'s knot fixture is the SPARSE nine-point line, not the dense one: this gate's `_self_intersects` is
 # deliberately the naive pairwise scan, kept as an independent definition rather than growing the bucket

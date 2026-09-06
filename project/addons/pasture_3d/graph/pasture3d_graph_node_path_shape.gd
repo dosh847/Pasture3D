@@ -40,6 +40,15 @@ func role() -> Role:
 	return Role.FILTER
 
 
+## Declared rather than inherited, even though the base already answers false: it is one of the four
+## declarations PASTURE3D_NODE_ACCELERATION_GUIDE.md Step 1 asks every node for, and "no grid" is a claim
+## about this family worth reading in the family's own file. A PATH filter has no grid domain at all — it
+## runs once per compile over a few hundred vertices, host-side, and its grid SLOT is the zero placeholder
+## `eval_cell` fills.
+func needs_grid() -> bool:
+	return false
+
+
 func input_count() -> int:
 	return 1
 
@@ -50,6 +59,11 @@ func input_names() -> PackedStringArray:
 
 func input_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.PATH])
+
+
+## One path out. Same reason as `needs_grid` for spelling out the default.
+func output_count() -> int:
+	return 1
 
 
 func output_names() -> PackedStringArray:

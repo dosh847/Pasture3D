@@ -64,12 +64,6 @@ bool Pasture3DPathGeom::build(const PackedVector2Array &p_points, const PackedFl
 		return true; // no index: every query is brute force, exactly as the GDScript does
 	}
 
-	// One cell per segment on average, floored — a path of very short segments must not explode into
-	// millions of buckets, and a path of one huge segment must not put everything into one. Same formula
-	// as Pasture3DGraphPath._ensure, because the ring stopping rule is only correct against the cell size
-	// the buckets were built with.
-	cell = std::max(cum.back() / (double)n_seg, 0.5);
-
 	double min_x = px[0], max_x = px[0], min_z = pz[0], max_z = pz[0];
 	for (int i = 1; i < n_pts; i++) {
 		min_x = std::min(min_x, (double)px[i]);
@@ -77,13 +71,35 @@ bool Pasture3DPathGeom::build(const PackedVector2Array &p_points, const PackedFl
 		min_z = std::min(min_z, (double)pz[i]);
 		max_z = std::max(max_z, (double)pz[i]);
 	}
+
+	// ---- THE CELL IS SIZED BY THE BOX, NOT BY THE SEGMENT ----
+	//
+	// This used to be `max(mean segment length, 0.5)`, which sounds right and is the wrong quantity. A
+	// uniform grid's cost is not paid per segment, it is paid per RING: a query cell `d` metres from the
+	// line walks `d / cell` shells before the stopping rule can fire, and visits O((d / cell)^2) buckets
+	// doing it. So the segment length sets the cost of the queries FAR from the path, which is almost all
+	// of them — the path covers a sliver of the terrain and every cell of it asks.
+	//
+	// A meandering river makes that vivid: Path Meanderize turns a 250-point line into 4000, the mean
+	// segment falls to 13 cm, the floor pins `cell` at 0.5 m, and a query 150 m away walks 300 shells —
+	// 90 000 bucket coordinates, for one cell of a 512x512 grid. Measured: 11.8 s at 128x128, and at 512
+	// it does not finish. The old count was already quadratic in distance; the reshape family only made
+	// the constant big enough to see.
+	//
+	// So size the cell the way a uniform grid is normally sized: about one segment per cell BY AREA,
+	// which puts roughly sqrt(n_seg) cells across the box and bounds `max_ring` at that. Bucket occupancy
+	// rises to a handful, which `resolve` pays linearly and once.
+	const double extent = std::max(max_x - min_x, max_z - min_z);
+	const int axis_cells = std::max(1, (int)std::floor(std::sqrt((double)n_seg)));
+	cell = std::max(extent / (double)axis_cells, 1e-4);
+
 	ox = min_x;
 	oz = min_z;
 	bw = (int)std::floor((max_x - min_x) / cell) + 1;
 	bh = (int)std::floor((max_z - min_z) / cell) + 1;
 	bw = std::max(bw, 1);
 	bh = std::max(bh, 1);
-	max_ring = (int)std::ceil(std::max(max_x - min_x, max_z - min_z) / cell) + 2;
+	max_ring = (int)std::ceil(extent / cell) + 2;
 
 	// CSR build: count, prefix-sum, fill. Two passes over the same bucket spans so the counting and the
 	// filling cannot disagree about which buckets a segment covers.
@@ -302,15 +318,35 @@ Pasture3DPathHit Pasture3DPathGeom::nearest(double p_x, double p_z, std::vector<
 	// A segment sitting in a bucket `ring` rings out from the query cell is at least (ring - 1) * cell
 	// away, so once best <= (ring - 1) * cell no unexamined bucket can hold anything nearer. Stopping one
 	// ring later than that bound keeps the off-by-one on the safe side; see the header.
-	for (int ring = 0; ring <= max_ring; ring++) {
-		for (int gz = cz - ring; gz <= cz + ring; gz++) {
-			if (gz < 0 || gz >= bh) {
-				continue;
-			}
-			for (int gx = cx - ring; gx <= cx + ring; gx++) {
-				if (gx < 0 || gx >= bw) {
-					continue;
-				}
+	//
+	// ---- THE WALK STARTS AT THE GRID, NOT AT THE QUERY ----
+	//
+	// A query cell can sit far OUTSIDE the bucket grid: every cell of the terrain is asked, and the path
+	// covers a fraction of it. Walking rings from such a cell spends the first `ring_min` shells visiting
+	// nothing but out-of-bounds coordinates, and `best` stays INFINITY the whole way so the stopping rule
+	// cannot fire — O(ring_min^2) of pure skipping, per cell, over the whole grid.
+	//
+	// That is a cliff, not a slope, because `cell` floors at 0.5 m: a path whose vertex count has been
+	// multiplied (Path Meanderize's business) has short segments, so `cell` bottoms out, so `ring_min`
+	// counts HALF-METRES to the path. A 250 m gap is 500 shells is 250 000 bucket coordinates, times a
+	// 512x512 grid. That is the hang, and it is why the reshape family made a pre-existing cost visible.
+	//
+	// So: start at the first ring that can intersect the grid at all (its Chebyshev distance to the box),
+	// and clamp each shell to the box instead of testing coordinates one at a time. Skipping the earlier
+	// rings cannot change the answer -- by construction they contain no in-grid cell, so the old loop
+	// examined nothing in them either.
+	int ring_min = 0;
+	ring_min = std::max(ring_min, -cx);
+	ring_min = std::max(ring_min, cx - (bw - 1));
+	ring_min = std::max(ring_min, -cz);
+	ring_min = std::max(ring_min, cz - (bh - 1));
+	for (int ring = ring_min; ring <= max_ring; ring++) {
+		const int gz0 = std::max(cz - ring, 0);
+		const int gz1 = std::min(cz + ring, bh - 1);
+		const int gx0 = std::max(cx - ring, 0);
+		const int gx1 = std::min(cx + ring, bw - 1);
+		for (int gz = gz0; gz <= gz1; gz++) {
+			for (int gx = gx0; gx <= gx1; gx++) {
 				// Only this ring's own shell; the interior was collected on an earlier pass.
 				if (ring > 0 && std::abs(gx - cx) != ring && std::abs(gz - cz) != ring) {
 					continue;
@@ -318,19 +354,14 @@ Pasture3DPathHit Pasture3DPathGeom::nearest(double p_x, double p_z, std::vector<
 				const size_t b = (size_t)gz * (size_t)bw + (size_t)gx;
 				for (int k = bucket_start[b]; k < bucket_start[b + 1]; k++) {
 					const int si = bucket_items[(size_t)k];
-					// The GDScript de-duplicates with a `seen` Dictionary. Here a linear scan of the
-					// candidate list does it: the list is a handful of segments (that is what the index is
-					// for), and a hash set per cell would cost more than the scan it replaces.
-					bool seen = false;
-					for (size_t q = 0; q < r_scratch.size(); q++) {
-						if (r_scratch[q] == si) {
-							seen = true;
-							break;
-						}
-					}
-					if (seen) {
-						continue;
-					}
+					// NOT de-duplicated. A segment spanning two buckets is offered twice and `resolve`
+					// measures it twice, which costs one extra distance and changes nothing: its tie rule
+					// is "lowest segment index wins", so it is independent of both order and multiplicity
+					// (that is the whole reason it is index-based -- see `resolve`).
+					//
+					// What was here was a linear scan of the candidate list, on the argument that the list
+					// is a handful. It is a handful near the path and hundreds far from it, and the scan
+					// is O(m^2) in exactly the case that was already the expensive one.
 					r_scratch.push_back(si);
 					best = std::min(best, segment_distance(si, p_x, p_z));
 				}

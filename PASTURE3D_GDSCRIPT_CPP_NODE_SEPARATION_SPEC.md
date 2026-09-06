@@ -100,6 +100,14 @@ Two consequences that are easy to get wrong:
 2. **Existing production-visible GDScript nodes are debts, not precedent.** They are listed in the
    playbook's Step 0 table with the work that clears each one. Nothing is added to that table to avoid
    writing a kernel.
+3. **The rule is about the GRID.** Everything above and in §1 measures a per-cell cost — a solver on a
+   1024² grid, 50×–250×, the editor locked. `PATH -> PATH` nodes (`Pasture3DGraphNodePathShape` and its
+   subclasses) run once per compile over a few hundred vertices, host-side, and lower to `CONST` so the
+   graph around them stays native. They are production-visible in GDScript, they are deliberately **not**
+   in the Step 0 table, and the playbook states the carve-out and its condition in full. It also states
+   the counter-example, which is the part worth carrying here: a PATH node's own cost being negligible
+   says nothing about what its OUTPUT costs the native kernel downstream — Path Meanderize's 220 ms of
+   GDScript produced a polyline that made the native per-cell query take 11.8 s.
 
 ---
 

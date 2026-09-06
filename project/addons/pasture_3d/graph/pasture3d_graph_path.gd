@@ -184,6 +184,10 @@ var _index: Dictionary = {}
 var _cell: float = 0.0
 var _origin: Vector2 = Vector2.ZERO
 var _max_ring: int = 0
+# The bucket grid's extent in cells. Kept so the ring walk can start at the grid rather than at a query
+# cell that may be thousands of cells outside it — see _candidates.
+var _bw: int = 0
+var _bh: int = 0
 var _built: bool = false
 
 ## Below this many segments the index is not built and every query is brute force. Building buckets for a
@@ -346,10 +350,17 @@ func _candidates(p_at: Vector2) -> PackedInt32Array:
 	var seen := {}
 	var out := PackedInt32Array()
 	var best := INF
-	var ring := 0
+	# Start at the first ring that can intersect the bucket grid at all — its Chebyshev distance to the
+	# box. A query cell far outside the grid (most of the terrain, for most paths) would otherwise spend
+	# that many shells visiting coordinates the index has never heard of, with `best` still INF so the
+	# stopping rule cannot fire. See the C++ twin in pasture_3d_path_query.cpp, which had the same walk and
+	# where it was a hang rather than a slowdown. Skipping those rings cannot change the answer: they
+	# contain no indexed cell, so the old loop found nothing in them either.
+	var ring: int = maxi(maxi(-cx, cx - (_bw - 1)), maxi(-cy, cy - (_bh - 1)))
+	ring = maxi(ring, 0)
 	while ring <= _max_ring:
-		for gy in range(cy - ring, cy + ring + 1):
-			for gx in range(cx - ring, cx + ring + 1):
+		for gy in range(maxi(cy - ring, 0), mini(cy + ring, _bh - 1) + 1):
+			for gx in range(maxi(cx - ring, 0), mini(cx + ring, _bw - 1) + 1):
 				# Only this ring's own shell; the interior was collected on an earlier pass.
 				if ring > 0 and absi(gx - cx) != ring and absi(gy - cy) != ring:
 					continue
@@ -427,15 +438,21 @@ func _ensure() -> void:
 	var n := maxi(_ring.size() - 1, 0)
 	if n < INDEX_MIN_SEGMENTS:
 		return
-	# One cell per segment on average, floored: a path of very short segments must not explode into
-	# millions of buckets, and a path of one huge segment must not put everything into one.
-	var total: float = _cum[_cum.size() - 1]
-	_cell = maxf(total / float(n), 0.5)
 	var bounds := Rect2(_ring[0], Vector2.ZERO)
 	for p in _ring:
 		bounds = bounds.expand(p)
 	_origin = bounds.position
-	_max_ring = int(ceil(maxf(bounds.size.x, bounds.size.y) / _cell)) + 2
+	# About one segment per cell BY AREA, so roughly sqrt(n) cells span the box. NOT the mean segment
+	# length, which is what this used to be: the cost of a uniform grid is paid per RING, so a fine cell
+	# makes every query FAR from the path expensive, and far is where almost all of them are. See the C++
+	# twin in pasture_3d_path_query.cpp, where the same formula is spelled out with the measurement that
+	# forced it.
+	var extent: float = maxf(bounds.size.x, bounds.size.y)
+	var axis_cells: int = maxi(1, int(floor(sqrt(float(n)))))
+	_cell = maxf(extent / float(axis_cells), 0.0001)
+	_max_ring = int(ceil(extent / _cell)) + 2
+	_bw = int(floor(bounds.size.x / _cell)) + 1
+	_bh = int(floor(bounds.size.y / _cell)) + 1
 	for si in n:
 		var a: Vector2 = _ring[si]
 		var b: Vector2 = _ring[si + 1]

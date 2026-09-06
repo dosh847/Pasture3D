@@ -29,9 +29,11 @@
 #       that helpfully filled it with 0.0 would drag a ridge drawn at 400 m to sea level.
 #   [F] a reshape DROPS a solved road profile and Path Width KEEPS it. A stale alignment describes the
 #       line the path used to be, and `can_grade()` would still answer true.
+#   [G] the query cost of a reshaped path grows no worse than its vertex count. Measured as a RATIO
+#       against the same line before the reshape, so it says nothing about how fast this machine is.
 extends Node
 
-const CRITERIA: Array[String] = ["A", "B", "C", "D", "E", "F"]
+const CRITERIA: Array[String] = ["A", "B", "C", "D", "E", "F", "G"]
 
 var _fail: int = 0
 var _seen: Dictionary = {}
@@ -47,6 +49,7 @@ func _ready() -> void:
 	_d_meanderize_lengthens_and_removes_loops()
 	_e_values_survive_a_reshape()
 	_f_a_reshape_drops_the_road_profile()
+	_g_a_reshaped_path_is_still_cheap_to_query()
 
 	for name in CRITERIA:
 		if not _seen.has(name):
@@ -367,3 +370,61 @@ func _f_a_reshape_drops_the_road_profile() -> void:
 			% [str(graded_before), str(smoothed.can_grade()), str(widened.can_grade())])
 	_check("F", graded_before and not smoothed.can_grade() and widened.can_grade(),
 			"the reshape dropped the profile and the width filter kept it")
+
+
+## [G] A reshaped path does not cost more to QUERY than the vertices it added.
+##
+## ---- WHY THIS CRITERION EXISTS ----
+##
+## Everything above measures the shape of the answer. This measures what the answer costs the node that
+## consumes it, which is the thing nobody downstream can see: Path Carve receives a polyline and has no
+## way to tell 4000 vertices from 250, and the user sees only that the graph stopped responding.
+##
+## It caught a real one. `Pasture3DPathGeom` sized its bucket grid from the MEAN SEGMENT LENGTH, floored
+## at 0.5 m. Meanderize turns a 250-point line into ~4000, the mean segment falls to 13 cm, the floor pins
+## the cell at 0.5 m — and a uniform grid's cost is paid per RING, so a query 150 m from the line then
+## walks 300 shells and visits ~90 000 bucket coordinates. For ONE cell. Measured at 128x128: 11.8 s, and
+## at 512x512 it did not finish. The cell is now sized by the bounding box (about one segment per cell by
+## area), and the same query is 47 ms.
+##
+## ---- WHY A RATIO AND NOT A BUDGET ----
+##
+## A millisecond budget measures the machine and fails on somebody else's laptop. The ratio against the
+## SAME LINE before the reshape is the property that was actually wrong: 16x the vertices cost 2800x the
+## query, and it should cost about 16x. The bound is set well above what a correct index does (~11x) and
+## far below what the old one did, so the number in the print is the interesting part and the threshold
+## only has to separate two answers three orders of magnitude apart.
+func _g_a_reshaped_path_is_still_cheap_to_query() -> void:
+	print("[G] a reshaped path costs no more to query than the vertices it added")
+	var drawn := Pasture3DGraphPath.new()
+	var pts := PackedVector2Array()
+	var w := PackedFloat32Array()
+	for i in 250:
+		var f := float(i) / 249.0
+		pts.append(Vector2(-200.0 + f * 400.0, 80.0 * sin(f * PI * 1.3)))
+		w.append(20.0)
+	drawn.points = pts
+	drawn.half_widths = w
+
+	var mea := Pasture3DGraphNodePathMeanderize.new()
+	var river := _run(mea, drawn)
+	var grew := float(river.points.size()) / float(drawn.points.size())
+
+	var rect := Rect2(-256.0, -256.0, 512.0, 512.0)
+	var t0 := Time.get_ticks_usec()
+	Pasture3DUtil.path_query_grid(drawn.points, drawn.half_widths, 128, 128, rect, 1.0e9, 1.0e9,
+			PackedFloat32Array())
+	var t1 := Time.get_ticks_usec()
+	Pasture3DUtil.path_query_grid(river.points, river.half_widths, 128, 128, rect, 1.0e9, 1.0e9,
+			PackedFloat32Array())
+	var t2 := Time.get_ticks_usec()
+	var before: float = maxf(float(t1 - t0), 1.0)
+	var after: float = float(t2 - t1)
+	var slowdown: float = after / before
+
+	print("    %d -> %d vertices (x%.1f); 128x128 query %.1f ms -> %.1f ms (x%.1f)"
+			% [drawn.points.size(), river.points.size(), grew, before / 1000.0, after / 1000.0,
+				slowdown])
+	print("    control, the bound: x%.0f. The formula this replaced measured x2800 here." % 40.0)
+	_check("G", river.points.size() > drawn.points.size() * 4 and slowdown < 40.0,
+			"the reshape multiplied the vertices and the query cost followed them, not their square")

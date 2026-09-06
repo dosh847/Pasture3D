@@ -114,6 +114,46 @@ The two rows are kept in the history rather than the table — an entry is a pro
 
 An entry in that table is a promise to someone. Do not add one to avoid writing Steps 3–5.
 
+#### PATH nodes are not an exception, because the rule is about the grid
+
+The rule above says "a node whose mathematics runs in GDScript". Everything it then argues is about a
+**per-cell** cost: a solver on a 1024² grid, 50×–250× the kernel, the editor locked up. That is the
+domain the sentence was written in, and until S4 it was the only domain there was.
+
+A `PATH -> PATH` node (`Pasture3DGraphNodePathShape` and its six subclasses — Path Width, Resample,
+Smooth, Decimate, Fractalize, Meanderize) does not have that cost, and not by a small margin:
+
+- it runs **once per compile**, in the S4 host-side pre-pass, over a few hundred to a few thousand
+  vertices — not `gw × gh` times;
+- it lowers to `GRAPH_OP_CONST` and its grid slot is a zero placeholder, so the graph around it stays
+  fully native (`blocks_native()` is false — that is the part that would actually cost the user);
+- what reaches the kernel is one flat polyline, indistinguishable from a drawn one.
+
+So these are production-visible with no C++ kernel of their own, and they are **not** listed above,
+because the debt the table records — a per-cell GDScript loop, or a graph dragged off the native tier —
+is not one they carry. Writing them in C++ would move a millisecond.
+
+**The condition, and it is the whole carve-out:** the node's work must be bounded by its VERTEX count and
+run once per compile. A PATH node that reached per-cell — one that answered queries rather than producing
+a polyline — is a grid node wearing a PATH port, and Steps 3–5 apply to it in full.
+
+#### The cost a PATH node can still hand to somebody else
+
+The exemption is about where the node's own maths runs. It is not a statement that the node is free,
+and S5 produced the counter-example in the same week it was written.
+
+Path Meanderize turns a 250-vertex line into ~4000. Its own GDScript ran in 220 ms, once — exactly as the
+carve-out promises. But every one of those vertices is a segment the **native** per-cell path query then
+considers, and `Pasture3DPathGeom` sized its bucket grid from the mean segment length: 13 cm, floored at
+0.5 m. A uniform grid's query cost is paid per RING, so a cell 150 m from the line walked 300 shells.
+Measured: 11.8 s at 128², and 512² did not finish. Nothing was falling back — `native_supported()` was
+true the whole time — and the node that caused it was, by this section's own argument, correctly written.
+
+So a PATH node's review question is not "is its maths native", it is **"what does its output cost the
+kernel that consumes it"**. `PathShapeGate` [G] is that question asked as a ratio: the query cost of a
+reshaped path against the same line before the reshape, which must follow the vertex count and not its
+square. The fix was in the index, not in the node.
+
 **The table is short because the rule was applied rather than argued with, and the second row is what
 applying it looks like from the other end.** The four road nodes were the first candidates for a
 production-visible exception and did not survive the argument: `road_source`, `path_distance`,
