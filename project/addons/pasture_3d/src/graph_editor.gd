@@ -113,6 +113,8 @@ func edit_graph(p_graph: Pasture3DTerrainGraph, p_mod: Pasture3DNodeGraph = null
 		# hosted it. A binding must not outlive the graph it was made for.
 		host_brush = null
 	_host_candidate_count = 0
+	# The ground read is memoised per host; a new binding must not serve the previous brush's terrain.
+	_ground_cache.clear()
 
 	if graph == p_graph:
 		_on_graph_changed()
@@ -488,6 +490,9 @@ func _on_brush_details_pressed() -> void:
 
 
 func _on_bake_brush_pressed() -> void:
+	# A rebake can reshape the ground inside an unchanged bounding box, which the memo's rect key cannot
+	# see. Drop it here rather than trusting the key alone.
+	_ground_cache.clear()
 	var mod := _find_host_modifier()
 	if mod != null:
 		mod.bake_graph()
@@ -521,12 +526,80 @@ func _get_preview_input_data(p_size: int = PREVIEW_SIZE) -> Dictionary:
 			"gh": mod.last_gh,
 			"rect": mod.last_rect,
 		}
+	var ground := _sample_host_ground()
+	if not ground.is_empty():
+		return ground
 	return {
 		"grid": Pasture3DUtil.sample_brush_input(p_size, p_size, PREVIEW_RECT),
 		"gw": p_size,
 		"gh": p_size,
 		"rect": PREVIEW_RECT,
 	}
+
+
+## Coarse resolution for the ground read. 64x64 = 4096 `get_height` calls, the same budget
+## `Pasture3DTerrainBrush._sample_relief` already spends on the stats panel, and the preview path resamples
+## whatever it is handed up to PREVIEW_SIZE anyway. Do NOT raise this to PREVIEW_SIZE: 16384 cross-language
+## calls on the main thread is the cost the doc comment above is warning about.
+const GROUND_SAMPLE_SIZE: int = 64
+
+## Memo for `_sample_host_ground`, keyed on the brush instance and the world rect it was read over. Cleared
+## whenever the host binding changes. Without it the read would be paid on EVERY debounced refresh, which is
+## precisely what the cached-bake tier exists to avoid.
+var _ground_cache: Dictionary = {}
+
+
+## Tier 2 of `_get_preview_input_data`: the FINISHED terrain under the host brush's footprint.
+##
+## `last_input_surface` is a runtime var, never serialised, so it is empty after every project load until the
+## host brush bakes again — and a brush whose stamp cache is warm may not bake at all. That left the Input
+## node showing the canonical dome under a correctly-bound host, which reads as "the preview is not looking
+## at my terrain" when the binding is in fact right.
+##
+## This reads `terrain.data.get_height`, i.e. the composited surface with this brush's own contribution
+## already in it. That is NOT identical to what `_apply_graph_step` hands the graph (which is the working
+## surface at the graph step's position in the modifier stack, before the modifiers above it), and the
+## difference is deliberate rather than overlooked: the exact quantity is only knowable mid-bake, and tier 1
+## serves it as soon as one bake has run. What matters for the thumbnail is that the ground has the host's
+## shape instead of a shape belonging to nothing on screen.
+##
+## Cells outside the authored regions read NaN; they become 0.0 rather than propagating, because a NaN in
+## the preview input poisons every downstream thumbnail rather than showing as a hole in this one.
+func _sample_host_ground() -> Dictionary:
+	var brush := _find_host_brush()
+	if brush == null or brush.terrain == null or brush.terrain.data == null:
+		return {}
+	var fps: Array = brush._own_footprints()
+	if fps.is_empty():
+		return {}
+	var mn := Vector2(INF, INF)
+	var mx := Vector2(-INF, -INF)
+	for a in fps:
+		var box: AABB = a
+		mn.x = minf(mn.x, box.position.x)
+		mn.y = minf(mn.y, box.position.z)
+		mx.x = maxf(mx.x, box.position.x + box.size.x)
+		mx.y = maxf(mx.y, box.position.z + box.size.z)
+	if not (mx.x > mn.x and mx.y > mn.y):
+		return {}
+	var rect := Rect2(mn, mx - mn)
+
+	if _ground_cache.get("brush") == brush and _ground_cache.get("rect", Rect2()) == rect:
+		return _ground_cache["data"]
+
+	var n := GROUND_SAMPLE_SIZE
+	var grid := PackedFloat32Array()
+	grid.resize(n * n)
+	for iz in range(n):
+		var wz: float = rect.position.y + (float(iz) + 0.5) / float(n) * rect.size.y
+		for ix in range(n):
+			var wx: float = rect.position.x + (float(ix) + 0.5) / float(n) * rect.size.x
+			var y: float = brush.terrain.data.get_height(Vector3(wx, 0.0, wz))
+			grid[iz * n + ix] = y if is_finite(y) else 0.0
+
+	var data := {"grid": grid, "gw": n, "gh": n, "rect": rect}
+	_ground_cache = {"brush": brush, "rect": rect, "data": data}
+	return data
 
 
 func _build_ui() -> void:

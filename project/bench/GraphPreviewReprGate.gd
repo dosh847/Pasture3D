@@ -8,6 +8,9 @@
 #   [C] an unserved tap renders NO_DATA and a genuinely-zero field renders black, and THE TWO IMAGES
 #       DIFFER — control: the same slot, served, renders neither.
 #
+#   [I] with a host bound but NO cached bake, the preview reads the host's real ground rather than the
+#       canonical dome — controls on both neighbouring tiers, so it measures an ORDER, not a removal.
+#
 #   [H] with TWO BRUSHES HOSTING THE SAME GRAPH RESOURCE, the preview looks through the brush the gesture
 #       named, and where the gesture named none it says so instead of picking one (§4.6, §5.6).
 #       Asserted on the rect and grid size the tap ACTUALLY ran with.
@@ -56,8 +59,9 @@ func _ready() -> void:
 	print("=== GraphPreviewReprGate: the representation & range contract (spec V1) ===\n")
 	_c_unserved_is_visible()
 	_h_host_binding_follows_the_gesture()
+	_i_the_input_preview_reads_the_hosts_ground()
 
-	if _checks < 16:
+	if _checks < 28:
 		print("\n    VACUOUS: only %d checks completed; the gate did not measure what it claims to." % _checks)
 		_fail += 1
 	print("\n=== %s (%d failures, %d checks) ===\n"
@@ -300,5 +304,138 @@ func _h_host_binding_follows_the_gesture() -> void:
 	# The panels connect to each graph's `changed` and hold TextureRects; the brushes are Node3Ds added to
 	# this scene. Free everything the criterion made, so a shutdown crash cannot be blamed on the fixture.
 	for n in [ed, ed2, ed3, a[0], b[0], _c]:
+		if is_instance_valid(n):
+			n.queue_free()
+
+
+# --- I -------------------------------------------------------------------------------------------------
+#
+# The Input node's thumbnail showed the canonical dome under a CORRECTLY BOUND host. Not a binding bug —
+# [H] covers those and the toolbar said "through: Mound" the whole time. `last_input_surface` is a plain
+# runtime var, never serialised, so it is empty after every project load until the host bakes again, and a
+# brush whose stamp cache is warm need not bake at all. The preview then fell straight through to the
+# brush-independent dome, which looks like a working thumbnail of the wrong terrain.
+#
+# The fix inserts a middle tier: read the finished ground under the host's footprint. So this criterion is
+# about TIER ORDER, and it is asserted on the domain the tap ACTUALLY dispatched over — the same
+# `last_preview_dispatch` [H] reads — not on a fresh `_get_preview_input_data()` call of the gate's own.
+#
+# The three tiers, and why each control is here:
+#   I1  cached bake present   -> tier 1. Control: proves the new tier did not DISPLACE the exact surface.
+#   I2  cache empty, host has terrain -> tier 2, at the FOOTPRINT rect, carrying the terrain's heights.
+#   I3  no host at all        -> tier 3, the canonical dome. Control: the fallback still exists, so I2 is
+#                               measuring a choice rather than the removal of an alternative.
+#
+# The rects are deliberately three DIFFERENT values. Sharing any two would make one tier indistinguishable
+# from another — the trap that made an earlier [H] fixture read as a pass while measuring nothing.
+func _i_the_input_preview_reads_the_hosts_ground() -> void:
+	print("\n[I] the preview input falls to the host's real ground before the canonical dome")
+
+	var terrain := Pasture3D.new()
+	terrain.name = "GateTerrain"
+	terrain.vertex_spacing = 1.0
+	add_child(terrain)
+	if terrain.data == null:
+		_check(false, "the fixture terrain has no data; nothing was measured")
+		terrain.queue_free()
+		return
+	terrain.data.add_region_blankp(Vector3.ZERO)
+
+	# A ramp in X, so "the grid carries the terrain" is a real measurement. A blank region is all zeros,
+	# which is exactly what an unserved / fallback read also looks like.
+	var lo := 4.0
+	var hi := 40.0
+	for iz in range(0, 64):
+		for ix in range(0, 64):
+			terrain.data.set_height(Vector3(float(ix), 0.0, float(iz)),
+					lo + (hi - lo) * float(ix) / 63.0)
+
+	var graph := _one_previewable_graph()
+	# Tier 1's rect. Distinct from the footprint rect below and from PREVIEW_RECT.
+	var bake_rect := Rect2(500.0, 500.0, 60.0, 60.0)
+	var h := _make_host("GroundHost", graph, bake_rect, 16)
+	var brush: Pasture3DTerrainBrush = h[0]
+	var mod: Pasture3DNodeGraph = h[1]
+	brush.terrain = terrain
+	# `_own_footprints` reads the brush's SPLINES, so without one there is no footprint and the ground tier
+	# declines — which would make [I2] fail for a reason that has nothing to do with the tier order. A
+	# square well inside the region written above.
+	var path := Path3D.new()
+	var curve := Curve3D.new()
+	for corner in [Vector3(8, 0, 8), Vector3(52, 0, 8), Vector3(52, 0, 52), Vector3(8, 0, 52)]:
+		curve.add_point(corner)
+	path.curve = curve
+	brush.add_child(path)
+
+	var ed = _panel()
+	_dispatch(ed, graph, mod, brush)
+	var d1: Dictionary = ed.last_preview_dispatch
+	_check(not d1.is_empty(), "control: the bound gesture produced a recorded dispatch")
+	if d1.is_empty():
+		for n in [ed, brush, terrain]:
+			if is_instance_valid(n):
+				n.queue_free()
+		return
+	_check(d1.get("rect", Rect2()) == bake_rect,
+			"[I1] control: with a cached bake, tier 1 still wins — the new tier did not displace the "
+			+ "exact surface (rect=%s)" % [d1.get("rect")])
+
+	# Now empty the cache, which is the state every project load starts in.
+	mod.last_input_surface = PackedFloat32Array()
+	ed._ground_cache.clear()
+	_dispatch(ed, graph, mod, brush)
+	var d2: Dictionary = ed.last_preview_dispatch
+	var r2: Rect2 = d2.get("rect", Rect2())
+	_check(r2 != ed.PREVIEW_RECT,
+			"[I2] with no cached bake the preview is NOT the canonical dome (rect=%s)" % [r2])
+	_check(r2 != bake_rect, "[I2] and it is not the stale bake rect either (rect=%s)" % [r2])
+
+	# The tier must have read the ground, not merely chosen a rect. These next checks call
+	# `_sample_host_ground` DIRECTLY, so on their own they would pass on a build where the tier exists and
+	# the preview never consults it — the `a-gate-that-calls-the-node-measures-nothing` trap. Watched red
+	# with the tier unwired from `_get_preview_input_data`: exactly ONE check went red, the dispatch-derived
+	# rect above, and these stayed green. They are here to say WHAT the tier read, not THAT it was used.
+	# and check the ramp survives: min and max must bracket what was written, and differ from each other.
+	var g2: Dictionary = ed._sample_host_ground()
+	var grid: PackedFloat32Array = g2.get("grid", PackedFloat32Array())
+	_check(not grid.is_empty(), "[I2] the ground tier produced a grid (%d cells)" % grid.size())
+	if not grid.is_empty():
+		var gmin := INF
+		var gmax := -INF
+		for v in grid:
+			gmin = minf(gmin, v)
+			gmax = maxf(gmax, v)
+		_check(gmax - gmin > 1.0,
+				"[I2] the grid carries the terrain's RAMP, not a flat fill (min=%.2f max=%.2f)"
+				% [gmin, gmax])
+		_check(gmax <= hi + 0.5 and gmin >= 0.0,
+				"[I2] and the values are the heights that were written, not something rescaled "
+				+ "(min=%.2f max=%.2f, wrote %.1f..%.1f)" % [gmin, gmax, lo, hi])
+		# The memo. Comparing two calls for EQUALITY would pass on a tier that re-read the terrain every
+		# time, so change the ground underneath and require the second call to be STALE — that can only
+		# happen if it never went back to `get_height`. 4096 calls on every debounced refresh is the cost
+		# the tier's doc comment forbids.
+		for iz in range(0, 64):
+			for ix in range(0, 64):
+				terrain.data.set_height(Vector3(float(ix), 0.0, float(iz)), 900.0)
+		_check(ed._sample_host_ground().get("grid") == grid,
+				"control: a second call is served from the memo — it did NOT re-read the changed ground")
+		ed._ground_cache.clear()
+		var fresh: PackedFloat32Array = ed._sample_host_ground().get("grid", PackedFloat32Array())
+		_check(not fresh.is_empty() and fresh != grid,
+				"control: and clearing the memo DOES re-read, so the staleness above is the memo and "
+				+ "not a tier that reads nothing")
+
+	# [I3] No host, no terrain: the canonical dome is still what a standalone graph gets.
+	var solo := _one_previewable_graph()
+	var ed3 = _panel()
+	_dispatch(ed3, solo, null, null)
+	var d3: Dictionary = ed3.last_preview_dispatch
+	_check(not d3.is_empty(), "control: the standalone gesture dispatched at all")
+	_check(d3.get("rect", Rect2()) == ed.PREVIEW_RECT,
+			"[I3] control: with NO host the canonical dome is still served, so [I2] measured a choice "
+			+ "between live alternatives (rect=%s)" % [d3.get("rect")])
+
+	for n in [ed, ed3, brush, terrain]:
 		if is_instance_valid(n):
 			n.queue_free()
