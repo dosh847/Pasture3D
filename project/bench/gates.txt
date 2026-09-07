@@ -630,3 +630,13 @@ bench/GraphPathOverlayGate.tscn
 # reintroduced. [B]: the histogram bins over the DECLARED range, so a 0.28–0.32 mask fills four bins of a
 # 0..1 axis and leaves the rest empty; an auto-fitting binner fails it and its control together.
 bench/GraphInspectGate.tscn
+
+# The B1 terrain channel sinks (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.1, phase V5), and the §9.1a
+# stroke-routing prerequisite they ship on top of.
+# [D] is the criterion the phase exists for and the only one that needs the C++ change: a hand stroke aimed
+# at a sink's reserved CONTROL layer must be refused with BLOCK_LOCKED. Reverting `route_to_layer` to
+# HEIGHT-only fails five checks — the stroke writes the region map directly, and the "touch-up" it lands is
+# then erased by the next re-bake, which is exactly the silent loss §9.1a predicted from a code reading.
+# [C] is the other one worth knowing: with the refusal replaced by a mask-and-clamp, -1 paints texture 31
+# on 2048 cells — `road-tier-far-paint-built` reproduced on demand.
+bench/GraphChannelSinkGate.tscn

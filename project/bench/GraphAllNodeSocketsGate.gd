@@ -76,6 +76,16 @@ func _g_every_palette_op_is_lowerable() -> void:
 		if node != null and node.has_method("blocks_native") and node.blocks_native():
 			declared += 1
 			continue
+		#   * or the node is TERMINAL -- has_output() false, so nothing can wire FROM it, so it is never
+		#     an ancestor of the graph output or of any preview root, so no compiler pass ever visits it
+		#     and no op is ever emitted for it (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.2, and §9.1's
+		#     four channel sinks are the first nodes of this shape besides Output). This is the opposite
+		#     of the S1 bug rather than an instance of it: the danger there is an op a graph DOES reach
+		#     with no kernel behind it, and a terminal node is unreachable by construction. Registering
+		#     such a tag in op_ids() would be the actual mistake -- a tag no kernel serves.
+		if node != null and node.has_method("has_output") and not node.has_output():
+			declared += 1
+			continue
 		missing.append(String(op))
 	_assert(missing.is_empty(),
 			"%d palette op(s) missing from op_ids(): %s — each drops its whole graph to GDScript"

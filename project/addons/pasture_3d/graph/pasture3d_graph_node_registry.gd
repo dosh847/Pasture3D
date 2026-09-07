@@ -86,6 +86,10 @@ const ErosionScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_nod
 const DLAScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_dla.gd")
 const RerouteScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_reroute.gd")
 const OutputScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd")
+const ControlSinkScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_control_sink.gd")
+const ColorSinkScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_color_sink.gd")
+const HoleSinkScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_hole_sink.gd")
+const NavSinkScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_nav_sink.gd")
 const TerrainBusMergeScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_terrain_bus_merge.gd")
 const TerrainBusSplitScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_terrain_bus_split.gd")
 
@@ -172,6 +176,13 @@ static func entries(p_include_dev: bool = false) -> Array[Dictionary]:
 	var list: Array[Dictionary] = [
 		{"op": &"input", "title": "Input", "category": "Routing & Structural", "role": "Source", "script": InputScript, "tags": ["surface", "incoming", "host", "read"], "description": "Reads the incoming terrain surface handed to the graph."},
 		{"op": &"output", "title": "Output", "category": "Routing & Structural", "role": "Sink", "script": OutputScript, "tags": ["sink", "result", "final", "surface"], "description": "The destination sink representing the graph's output surface."},
+		# The B1 terrain channel sinks (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.1). All four are TERMINAL:
+		# has_output() is false, so nothing wires from them, so no op is ever emitted for them and none
+		# appears in graph_op_ids(). They write at bake, through Pasture3DGraphChannelSinks.
+		{"op": &"control_sink", "title": "Control Sink", "category": "Routing & Structural", "role": "Sink", "script": ControlSinkScript, "tags": ["sink", "control", "texture", "paint", "splat", "output"], "description": "Paints base/overlay/blend into the terrain control map wherever its mask is on."},
+		{"op": &"color_sink", "title": "Color Sink", "category": "Routing & Structural", "role": "Sink", "script": ColorSinkScript, "tags": ["sink", "color", "tint", "albedo", "paint", "output"], "description": "Tints the terrain color map wherever its mask is on."},
+		{"op": &"hole_sink", "title": "Hole Sink", "category": "Routing & Structural", "role": "Sink", "script": HoleSinkScript, "tags": ["sink", "hole", "cutout", "cave", "output"], "description": "Punches terrain holes wherever its mask is on."},
+		{"op": &"nav_sink", "title": "Nav Sink", "category": "Routing & Structural", "role": "Sink", "script": NavSinkScript, "tags": ["sink", "navigation", "navmesh", "walkable", "output"], "description": "Marks terrain navigable (or not) wherever its mask is on."},
 		{"op": &"reroute", "title": "Reroute", "category": "Routing & Structural", "role": "Utility", "script": RerouteScript, "tags": ["dot", "relay", "wire", "route", "passthrough", "clean"], "description": "1-in / 1-out transparent wire routing dot."},
 		{"op": &"terrain_bus_merge", "title": "Terrain Bus Merge", "category": "Routing & Structural", "role": "Combiner", "script": TerrainBusMergeScript, "tags": ["bus", "merge", "pack", "bundle", "channels", "multichannel"], "description": "Bundles individual height, mask, water_depth, sediment, and flow channels into a single TERRAIN_BUS connection."},
 		{"op": &"terrain_bus_split", "title": "Terrain Bus Split", "category": "Routing & Structural", "role": "Filter", "script": TerrainBusSplitScript, "tags": ["bus", "split", "unpack", "unbundle", "channels", "multichannel"], "description": "Unbundles a TERRAIN_BUS wire into separate height, mask, water_depth, sediment, and flow channel outputs."},

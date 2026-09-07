@@ -933,7 +933,7 @@ func _set(property: StringName, value: Variant) -> bool:
 func _assign_layer_by_name(display_name: String) -> void:
 	var owner := _owner_for_layer_name(display_name)
 	if owner == "":
-		owner = BRUSH_OWNER_PREFIX + display_name
+		owner = BRUSH_OWNER_PREFIX + str(name)
 	_set_layer_owner(owner)
 
 
@@ -5055,6 +5055,27 @@ func _apply_road_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 ## the cell loop's (`min_x + ix*vs`), NOT the graph's own cell-centre helper, or a graph baked through a
 ## brush would land half a cell off the terrain it sits on; a half-cell-shifted rect makes
 ## Pasture3DTerrainGraph.cell_to_world reproduce `min_x + ix*vs` exactly.
+## Run the graph's B1 channel sinks over this bake grid. Split out of `_apply_graph_step` only so the
+## bake path reads as one line; every rule about what a sink does lives in Pasture3DGraphChannelSinks.
+##
+## The owner base is THIS brush's layer owner, so a sink's reserved layer belongs to the brush and
+## `bake_all_brushes()`'s per-layer-owner clearing keeps working unchanged (§9.1 rule 2). That is also
+## what makes one undo restore a graph paint: it is one brush's layer, like every other brush layer.
+func _run_graph_sinks(p_graph, p_gw: int, p_gh: int, p_rect: Rect2, p_z: PackedFloat32Array) -> void:
+	if p_graph == null or not terrain or not terrain.data:
+		return
+	if Pasture3DGraphChannelSinks.sinks_of(p_graph).is_empty():
+		return
+	var owner: String = _layer_owner if _layer_owner != "" else BRUSH_OWNER_PREFIX + str(name)
+	var report: Dictionary = Pasture3DGraphChannelSinks.run(p_graph, terrain, owner,
+			p_gw, p_gh, p_rect, p_z)
+	# A refusal is NAMED. A sink that wrote nothing because its index was negative or its mask unwired
+	# looks identical, on the terrain, to a sink that was never there -- which is the failure mode §4.4
+	# is about, and the reason this is a warning rather than a silent zero.
+	for msg in report.get("skipped", []):
+		push_warning("Pasture3D graph sink on '%s': %s" % [name, msg])
+
+
 func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 		p_ctx: Dictionary) -> PackedFloat32Array:
 	var m: Pasture3DNodeGraph = p_step["mod"]
@@ -5096,6 +5117,20 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	m.last_rect = rect
 	m.last_gw = gw
 	m.last_gh = gh
+	# ---- B1 TERRAIN CHANNEL SINKS (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.1) ----
+	#
+	# Run HERE, once, ahead of all three returns below. The frozen-cache hit, the deferred queue and the
+	# synchronous miss are every one of them a bake, and a sink that only ran on the miss path would stop
+	# painting the moment its graph was set to Frozen -- silently, and looking exactly like paint the user
+	# had asked for. Placing it above the split is what makes "the sink runs at bake" a structural fact
+	# rather than three matching branches.
+	#
+	# It does not read the graph's OUTPUT and does not touch the program this bake compiles. It taps the
+	# sinks' own INPUT slots (§9.1), so adding a sink cannot change the height field this step produces --
+	# criterion [E]'s op-count equality is a consequence of that, not of care taken here.
+	#
+	# Free on a graph without sinks: `sinks_of` returns empty and `run` returns before touching anything.
+	_run_graph_sinks(g, gw, gh, rect, z)
 	# A FILTER graph (an Input node feeds the output) depends on the surface, so the cache must key on it —
 	# a drag changes the surface and the entry goes stale, exactly as the erosion cache does. A pure
 	# generator is world-fixed, so its key is just the content revision and the cache serves across drags.
