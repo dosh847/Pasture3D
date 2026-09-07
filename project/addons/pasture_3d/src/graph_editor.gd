@@ -74,6 +74,9 @@ var _pending_drag_connection: Dictionary = {}
 # refresh costs a single eval regardless of how many previews are open, it runs off the main thread, and
 # toggling a preview is a pure show/hide of an already-built TextureRect that never triggers evaluation.
 const PREVIEW_SIZE: int = 128
+## The floor the 1:4 option may not go under. Below this a hillshade is no longer a picture of a terrain,
+## it is four grey squares, and an option that produces nothing legible is worse than no option.
+const PREVIEW_MIN_SIZE: int = 32
 const PREVIEW_RECT := Rect2(-50.0, -50.0, 100.0, 100.0)
 const PREVIEW_DEBOUNCE_SEC: float = 0.12
 
@@ -81,6 +84,9 @@ var _preview_rects: Dictionary = {}   # node index -> TextureRect, one per previ
 var _preview_buttons: Dictionary = {} # node index -> the 👁 toggle Button, so undo/redo can resync it
 ## node index -> the range chip Button overlaying that thumbnail (spec 5.2 Rule 2).
 var _preview_chips: Dictionary = {}
+## node index -> Label, the §5.4 downscale badge. Present on every thumbnail, visible only below 1:1.
+var _preview_badges: Dictionary = {}
+var _preview_scale_picker: OptionButton
 ## node index -> the range dictionary the LAST render actually used. The chip reads this and so does the
 ## lock gesture, so pinning pins the numbers that were on screen rather than numbers recomputed at click
 ## time from data that may already have moved. It is also what the gate reads: asserting on a range the
@@ -710,6 +716,18 @@ func _build_ui() -> void:
 	_graph_picker.item_selected.connect(_on_graph_picked)
 	bar.add_child(_graph_picker)
 
+	# THE PREVIEW SCALE (§5.4). Opt-in, and on the graph rather than the node — see `preview_scale`'s own
+	# comment. It sits next to the graph picker because it is a property of the graph on screen, and the
+	# badge it turns on lives on the thumbnails themselves rather than here: a toolbar setting is easy to
+	# stop seeing, and the lie a downscaled erosion preview tells is told by the picture.
+	_preview_scale_picker = OptionButton.new()
+	_preview_scale_picker.tooltip_text = "Resolution of the PREVIEW pass only. The bake is unaffected — " 			+ "but a downscaled erosion preview understates how fine the channel network really is, so " 			+ "anything below 1:1 badges every thumbnail."
+	_preview_scale_picker.add_item("Preview 1:1", 1)
+	_preview_scale_picker.add_item("Preview 1:2", 2)
+	_preview_scale_picker.add_item("Preview 1:4", 4)
+	_preview_scale_picker.item_selected.connect(_on_preview_scale_picked)
+	bar.add_child(_preview_scale_picker)
+
 	_graphedit = GraphEdit.new()
 	_graphedit.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_graphedit.right_disconnects = true
@@ -883,6 +901,11 @@ func _rebuild() -> void:
 		if c.size() >= 4:
 			_graphedit.connect_node("n%d" % int(c[0]), int(c[1]), "n%d" % int(c[2]), int(c[3]))
 
+	# The badges are recreated hidden by `_make_graphnode`; this is what turns them on for a graph that was
+	# already at 1:2 when it was opened. Without it the option would appear to forget itself on every
+	# rebuild while still quietly downscaling — a setting in effect with nothing on screen saying so.
+	_sync_preview_scale_ui()
+
 	# Fill any preview-on nodes rebuilt just now (their TextureRects start empty).
 	_schedule_preview_refresh()
 
@@ -893,6 +916,7 @@ func _clear() -> void:
 	_preview_rects.clear()
 	_preview_buttons.clear()
 	_preview_chips.clear()
+	_preview_badges.clear()
 	_preview_ranges.clear()
 	_preview_token += 1
 	_graphedit.clear_connections()
@@ -1063,6 +1087,10 @@ func _populate_node_slots_and_controls(p_gn: GraphNode, p_index: int, p_node: Pa
 		var tex_rect := TextureRect.new()
 		tex_rect.custom_minimum_size = Vector2(PREVIEW_SIZE, PREVIEW_SIZE)
 		tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		# NEAREST so a downscaled preview looks downscaled. Bilinear would smooth 32x32 into something that
+		# reads as a soft terrain rather than as a coarse one, which is precisely the lie the badge is
+		# there to prevent — and it would be a prettier lie than the badge is a warning.
+		tex_rect.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 		tex_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		box.add_child(tex_rect)
 		# The range chip (§5.2 Rule 2), overlaying the thumbnail's bottom edge. A Button rather than a
@@ -1078,10 +1106,22 @@ func _populate_node_slots_and_controls(p_gn: GraphNode, p_index: int, p_node: Pa
 		chip.tooltip_text = "The range this thumbnail is drawn against. Click to pin it — a pinned range "  				+ "is what makes a parameter change visibly move the picture instead of being "  				+ "normalised straight back out of view."
 		chip.pressed.connect(_on_range_chip_pressed.bind(p_index))
 		tex_rect.add_child(chip)
+		# The §5.4 badge. Top-left, opposite the range chip, so a thumbnail can carry both readouts at once
+		# — they answer different questions and either alone can make the picture misleading.
+		var badge := Label.new()
+		badge.add_theme_font_size_override(&"font_size", 9)
+		badge.add_theme_color_override(&"font_color", Color(1.0, 0.85, 0.35))
+		badge.set_anchors_preset(Control.PRESET_TOP_LEFT)
+		badge.offset_left = 2.0
+		badge.tooltip_text = "This preview is evaluated below full resolution. Fine detail — erosion " 				+ "channels especially — is coarser here than in the bake."
+		badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		badge.visible = false
+		tex_rect.add_child(badge)
 		box.visible = p_node.preview_on
 		p_gn.add_child(box)
 		_preview_rects[p_index] = tex_rect
 		_preview_chips[p_index] = chip
+		_preview_badges[p_index] = badge
 
 
 ## Which property each inline port widget edits, as `{op: {port: [property, ...]}}`.
@@ -2011,6 +2051,60 @@ func _on_range_chip_pressed(p_index: int) -> void:
 ## Debounce timeout: compile ONE native program covering every preview-on node, sample the canonical input,
 ## and hand the heavy evaluation + hillshade to a worker thread. All graph reads (compile, output types)
 ## happen here on the main thread; only pure C++ calls over plain arrays run off-thread.
+## Toolbar handler for the preview scale.
+##
+## Assigns and refreshes, with NO undo action and NO `emit_changed` — the same treatment the range chip's
+## lock gets, and for §12.6's reason: this is view state. An undo step for "I looked at it smaller" would
+## put a bake-invalidating entry in the same history as the edits, and a `changed` would cost a rebake for
+## a setting the bake cannot see.
+func _on_preview_scale_picked(p_i: int) -> void:
+	if graph == null or _preview_scale_picker == null:
+		return
+	graph.preview_scale = _preview_scale_picker.get_item_id(p_i)
+	_sync_preview_scale_ui()
+	_schedule_preview_refresh()
+
+
+## Put the badge on every thumbnail whenever the pass is not 1:1, and take it off when it is.
+##
+## ON THE THUMBNAIL, not on the toolbar. §5.4's whole argument is that the downscaled picture is a LIE
+## ABOUT THE NETWORK'S FINENESS — channels merge, ridges round — and the author reading that picture is
+## looking at the picture. Same discipline as the range chip: a normalised or reduced image without its
+## divisor on it is not a measurement.
+func _sync_preview_scale_ui() -> void:
+	var scale: int = 1 if graph == null else int(graph.preview_scale)
+	if _preview_scale_picker != null:
+		for i in range(_preview_scale_picker.item_count):
+			if _preview_scale_picker.get_item_id(i) == scale:
+				_preview_scale_picker.select(i)
+				break
+	for idx in _preview_badges:
+		var lbl: Label = _preview_badges[idx]
+		if not is_instance_valid(lbl):
+			continue
+		lbl.visible = scale != 1
+		lbl.text = "1:%d" % scale
+
+
+## The grid resolution THIS REFRESH will tap and render at (§5.4).
+##
+## Static and pure, so the gate can ask it the question without building a panel — and so there is exactly
+## ONE place that turns the option into a number. A second site computing `PREVIEW_SIZE >> scale` for the
+## image while this one sized the tap is the two-numbers-in-two-places shape the range chip exists to avoid.
+static func preview_pixels_for_scale(p_scale: int) -> int:
+	var s := p_scale
+	if s != 1 and s != 2 and s != 4:
+		s = 1 # an out-of-range value renders at full res rather than at some guessed fraction
+	return maxi(PREVIEW_SIZE / s, PREVIEW_MIN_SIZE)
+
+
+## The same question against the edited graph. Null-safe because `_refresh_previews` can run mid-teardown.
+func _preview_pixels() -> int:
+	if graph == null:
+		return PREVIEW_SIZE
+	return preview_pixels_for_scale(int(graph.preview_scale))
+
+
 func _refresh_previews() -> void:
 	# Cleared FIRST. A stale count surviving an early return would make [E] read the previous refresh's
 	# answer, which is the failure mode that makes a counter worse than no counter.
@@ -2107,19 +2201,24 @@ func _refresh_previews() -> void:
 	# sample where the bake really lands, not a canonical dome. Falls back to the canonical domain when the
 	# graph has no host brush. The input is resampled to PREVIEW_SIZE if the footprint came back at another
 	# resolution (e.g. the baked-surface fallback), so the native pass always sees a square PREVIEW_SIZE grid.
-	var input_data := _get_preview_input_data(PREVIEW_SIZE)
+	# `px` rather than PREVIEW_SIZE from here down: §5.4's downscale is a change to what the PREVIEW pass
+	# evaluates, and nothing else. `evaluate()` never reads `preview_scale` and criterion [F] asserts the
+	# bake is bit-identical with it at 1:1 and 1:4.
+	var px := _preview_pixels()
+	var input_data := _get_preview_input_data(px)
 	var input: PackedFloat32Array = input_data["grid"]
 	var in_gw: int = int(input_data["gw"])
 	var in_gh: int = int(input_data["gh"])
 	var rect: Rect2 = input_data["rect"]
-	if in_gw != PREVIEW_SIZE or in_gh != PREVIEW_SIZE:
-		input = Pasture3DUtil.resample_grid(input, in_gw, in_gh, PREVIEW_SIZE, PREVIEW_SIZE)
-	last_preview_dispatch = {"rect": rect, "gw": in_gw, "gh": in_gh, "brush": _find_host_brush()}
+	if in_gw != px or in_gh != px:
+		input = Pasture3DUtil.resample_grid(input, in_gw, in_gh, px, px)
+	last_preview_dispatch = {"rect": rect, "gw": in_gw, "gh": in_gh, "brush": _find_host_brush(),
+			"px": px, "scale": int(graph.preview_scale)}
 	_clear_previews_stale()
 	_preview_token += 1
 	var token := _preview_token
 	WorkerThreadPool.add_task(func():
-		_preview_worker(token, program, input, rect, tap_slots, slot_to_node, slot_view))
+		_preview_worker(token, program, input, rect, tap_slots, slot_to_node, slot_view, px))
 
 
 ## Draw each PATH-typed preview from the path the graph RESOLVED (§6.1).
@@ -2144,14 +2243,17 @@ func _render_path_previews(p_path_roots: Array) -> void:
 		if path != null:
 			pts = path.points
 			hws = path.half_widths
-		var bytes: PackedByteArray = Pasture3DUtil.preview_image_path(
-				pts, hws, PREVIEW_SIZE, PREVIEW_SIZE)
-		if bytes.size() != PREVIEW_SIZE * PREVIEW_SIZE * 4:
+		# A PATH costs no evaluation, so downscaling it saves nothing — but it is drawn at `px` anyway,
+		# because a graph at 1:4 whose path thumbnails alone stayed crisp would say the downscale is a
+		# property of some nodes. It is a property of the refresh.
+		var px := _preview_pixels()
+		var bytes: PackedByteArray = Pasture3DUtil.preview_image_path(pts, hws, px, px)
+		if bytes.size() != px * px * 4:
 			continue
-		var img := Image.create_from_data(PREVIEW_SIZE, PREVIEW_SIZE, false, Image.FORMAT_RGBA8, bytes)
+		var img := Image.create_from_data(px, px, false, Image.FORMAT_RGBA8, bytes)
 		var tr: TextureRect = _preview_rects[idx]
 		var tex := tr.texture as ImageTexture
-		if tex != null and tex.get_width() == PREVIEW_SIZE and tex.get_height() == PREVIEW_SIZE:
+		if tex != null and tex.get_width() == px and tex.get_height() == px:
 			tex.update(img)
 		else:
 			tr.texture = ImageTexture.create_from_image(img)
@@ -2168,9 +2270,10 @@ func _render_path_previews(p_path_roots: Array) -> void:
 ## statics over the plain data captured on the main thread, so it is safe off-thread; results are marshalled
 ## back with call_deferred, guarded by the dispatch token.
 func _preview_worker(p_token: int, p_program: Dictionary, p_input: PackedFloat32Array, p_rect: Rect2,
-		p_tap_slots: PackedInt32Array, p_slot_to_node: Dictionary, p_slot_view: Dictionary) -> void:
+		p_tap_slots: PackedInt32Array, p_slot_to_node: Dictionary, p_slot_view: Dictionary,
+		p_px: int) -> void:
 	var taps: Dictionary = Pasture3DUtil.graph_eval_grid_taps(
-			p_program, PREVIEW_SIZE, PREVIEW_SIZE, p_rect, p_input, p_tap_slots)
+			p_program, p_px, p_px, p_rect, p_input, p_tap_slots)
 	# The return is keyed by REQUEST INDEX now: `fields[i]` answers `p_tap_slots[i]`, and `unserved` lists
 	# the requests that were zero-filled rather than copied from a live buffer.
 	var fields: Array = taps.get("fields", [])
@@ -2189,7 +2292,7 @@ func _preview_worker(p_token: int, p_program: Dictionary, p_input: PackedFloat32
 		# could not serve, and a field that came back the wrong size. `continue` here was two of the four
 		# indistinguishable causes of a black thumbnail (spec 4.3).
 		var served := true
-		if unserved.has(i) or field.size() != PREVIEW_SIZE * PREVIEW_SIZE:
+		if unserved.has(i) or field.size() != p_px * p_px:
 			served = false
 		# A type with no grid representation (-1) is not a rendering failure, but it has nothing to draw
 		# either, so it takes the same swatch. §5.2's badge for those types is separate work.
@@ -2206,18 +2309,18 @@ func _preview_worker(p_token: int, p_program: Dictionary, p_input: PackedFloat32
 				bool(view.get("locked", false)), float(view.get("lock_min", 0.0)),
 				float(view.get("lock_max", 1.0)))
 		var bytes: PackedByteArray = Pasture3DUtil.preview_image_grid(
-				field, PREVIEW_SIZE, PREVIEW_SIZE, repr_id,
+				field, p_px, p_px, repr_id,
 				rng["min"], rng["max"], bool(rng["mark"]))
 		results[int(p_slot_to_node[slot])] = {
 			"bytes": bytes, "range": rng, "repr": repr_id, "served": served,
 		}
-	call_deferred(&"_apply_preview_textures", p_token, results)
+	call_deferred(&"_apply_preview_textures", p_token, results, p_px)
 
 
 ## Main-thread apply of a completed tap pass. Drops the result if a newer dispatch (or a rebuild/clear) has
 ## bumped the token, or if a target rect no longer exists. Reuses each TextureRect's ImageTexture in place
 ## when the size matches so a refresh does not churn GPU textures.
-func _apply_preview_textures(p_token: int, p_results: Dictionary) -> void:
+func _apply_preview_textures(p_token: int, p_results: Dictionary, p_px: int = PREVIEW_SIZE) -> void:
 	if p_token != _preview_token:
 		return # a newer refresh superseded this one, or the canvas was rebuilt
 	for idx in p_results:
@@ -2243,11 +2346,11 @@ func _apply_preview_textures(p_token: int, p_results: Dictionary) -> void:
 			chip.modulate = Color(1, 1, 1, 0.9 if (live or bool(rng.get("locked", false))) else 0.55)
 			_preview_ranges[idx] = rng
 
-		if bytes.size() != PREVIEW_SIZE * PREVIEW_SIZE * 4:
+		if bytes.size() != p_px * p_px * 4:
 			continue
-		var img := Image.create_from_data(PREVIEW_SIZE, PREVIEW_SIZE, false, Image.FORMAT_RGBA8, bytes)
+		var img := Image.create_from_data(p_px, p_px, false, Image.FORMAT_RGBA8, bytes)
 		var tex := tr.texture as ImageTexture
-		if tex != null and tex.get_width() == PREVIEW_SIZE and tex.get_height() == PREVIEW_SIZE:
+		if tex != null and tex.get_width() == p_px and tex.get_height() == p_px:
 			tex.update(img)
 		else:
 			tr.texture = ImageTexture.create_from_image(img)

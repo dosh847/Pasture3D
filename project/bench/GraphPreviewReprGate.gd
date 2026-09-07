@@ -63,11 +63,12 @@ func _ready() -> void:
 	_c_unserved_is_visible()
 	_d_a_non_lowering_graph_says_so()
 	_e_a_path_output_taps_no_grid()
+	await _f_the_downscale_is_opt_in_and_badged()
 	_g_previews_are_not_paid_for_by_evaluate()
 	_h_host_binding_follows_the_gesture()
 	_i_the_input_preview_reads_the_hosts_ground()
 
-	if _checks < 96:
+	if _checks < 114:
 		print("\n    VACUOUS: only %d checks completed; the gate did not measure what it claims to." % _checks)
 		_fail += 1
 	print("\n=== %s (%d failures, %d checks) ===\n"
@@ -1124,3 +1125,183 @@ func _g_previews_are_not_paid_for_by_evaluate() -> void:
 
 	if is_instance_valid(ed):
 		ed.queue_free()
+
+
+# --- F -------------------------------------------------------------------------------------------------
+#
+# §5.4: THE OPT-IN DOWNSCALE, AND THE BADGE THAT MAKES IT HONEST.
+#
+# The option exists because an erosion graph is slow to preview and an author tuning one wants the picture
+# back sooner. It is dangerous for exactly the same reason: at 1:4 the channel network MERGES, ridges round
+# off, and the author fixes a problem that only the preview has. So the option ships with a badge, and the
+# badge is on the thumbnail rather than on the toolbar, because the picture is what is being misread.
+#
+# Four claims, all of which can regress apart:
+#   [F1] the BAKE is bit-identical at 1:1 and at 1:4. This is the one that would be a disaster and the one
+#        a plausible implementation gets wrong, by putting the scale somewhere `evaluate()` can see it.
+#   [F2] the preview pass really did run at the reduced resolution — counted at the dispatch the editor
+#        recorded, in the [E] style, not inferred from a picture that could have been resized afterwards.
+#   [F3] the rendered thumbnail genuinely DIFFERS. This is [F1]'s indispensable control: without it the
+#        whole criterion passes on an option wired to nothing at all.
+#   [F4] choosing a scale does not bump the content revision, so it cannot invalidate a host's frozen bake.
+#        A view setting that cost a rebake would be a performance option that costs performance.
+func _f_the_downscale_is_opt_in_and_badged() -> void:
+	print("\n[F] the preview downscale changes the PREVIEW and nothing else, and says so on the picture (§5.4)")
+
+	# The resolver first, because everything below reads through it and a wrong table here would make the
+	# rest of the criterion measure a resolution nobody asked for.
+	_check(GraphEditorScript.preview_pixels_for_scale(1) == GraphEditorScript.PREVIEW_SIZE,
+			"[F] 1:1 is full resolution (%d px)" % GraphEditorScript.preview_pixels_for_scale(1))
+	_check(GraphEditorScript.preview_pixels_for_scale(2) == GraphEditorScript.PREVIEW_SIZE / 2,
+			"[F] 1:2 halves it (%d px)" % GraphEditorScript.preview_pixels_for_scale(2))
+	_check(GraphEditorScript.preview_pixels_for_scale(4) == GraphEditorScript.PREVIEW_SIZE / 4,
+			"[F] 1:4 quarters it (%d px)" % GraphEditorScript.preview_pixels_for_scale(4))
+	_check(GraphEditorScript.preview_pixels_for_scale(64) == GraphEditorScript.PREVIEW_SIZE,
+			("control: an out-of-range scale falls back to FULL resolution (%d px) rather than to some "
+			% GraphEditorScript.preview_pixels_for_scale(64)) + "guessed fraction — the safe direction is "
+			+ "slower and correct")
+
+	var rect := Rect2(0, 0, 100, 100)
+
+	# ---- [F1] the bake ----
+	# Evaluated at a resolution that is NOT any of the preview sizes, so a scale that leaked into the
+	# evaluator could not coincidentally agree.
+	var g := _f_graph()
+	g.preview_scale = 1
+	var bake_full: PackedFloat32Array = g.evaluate(48, 48, rect)
+	g.preview_scale = 4
+	var bake_quarter: PackedFloat32Array = g.evaluate(48, 48, rect)
+	_check(bake_full == bake_quarter,
+			"[F1] the bake is BIT-IDENTICAL with the preview at 1:1 and at 1:4 (%d vs %d cells)"
+			% [bake_full.size(), bake_quarter.size()])
+	# Without this, [F1] passes on two empty arrays — the exact `gate-pass-can-mean-nothing-ran` shape.
+	_check(bake_full.size() == 48 * 48 and _f_varied(bake_full),
+			("control: and that bake is a real, VARIED field (%d cells), so bit-identity is a measurement "
+			% bake_full.size()) + "and not two empty arrays comparing equal")
+
+	# ---- [F2] the preview pass, counted at the dispatch ----
+	var ed = _panel()
+	g.preview_scale = 1
+	ed.edit_graph(g, null, null)
+	ed._refresh_previews()
+	var px_full: int = int(ed.last_preview_dispatch.get("px", -1))
+	_check(px_full == GraphEditorScript.PREVIEW_SIZE,
+			"[F2] at 1:1 the tap pass ran at %d px" % px_full)
+	g.preview_scale = 4
+	ed._refresh_previews()
+	var px_quarter: int = int(ed.last_preview_dispatch.get("px", -1))
+	_check(px_quarter == GraphEditorScript.PREVIEW_SIZE / 4,
+			"[F2] at 1:4 the SAME panel and the SAME graph tapped at %d px" % px_quarter)
+	_check(px_quarter > 0 and px_quarter < px_full,
+			("[F2] so the option reached the evaluator's grid size (%d -> %d), which is where the time is "
+			% [px_full, px_quarter]) + "actually spent — a downscale applied only to the image would save "
+			+ "nothing, and this is what tells the two apart")
+
+	# ---- [F3] the picture really changes ----
+	# Rendered through the editor's own worker and read back off the TextureRect, so this is the thumbnail
+	# the author sees rather than a render the gate performed for itself.
+	var img_q: Image = await _f_thumbnail(ed, 0)
+	g.preview_scale = 1
+	ed._refresh_previews()
+	var img_f: Image = await _f_thumbnail(ed, 0)
+	if img_q == null or img_f == null:
+		_check(false, "[F3] the panel produced no thumbnail to compare; nothing was measured")
+	else:
+		_check(img_q.get_width() == GraphEditorScript.PREVIEW_SIZE / 4
+				and img_f.get_width() == GraphEditorScript.PREVIEW_SIZE,
+				"[F3] the thumbnails carry their pass's resolution (%d px at 1:4, %d px at 1:1)"
+				% [img_q.get_width(), img_f.get_width()])
+		# Compared at a common size, nearest, so the difference measured is CONTENT and not the trivial
+		# fact that two images of different dimensions have different byte counts.
+		var up := Image.create_from_data(img_q.get_width(), img_q.get_height(), false,
+				img_q.get_format(), img_q.get_data())
+		up.resize(img_f.get_width(), img_f.get_height(), Image.INTERPOLATE_NEAREST)
+		var diff: int = _max_byte_diff(up.get_data(), img_f.get_data())
+		_check(diff > 8,
+				("control: and the two thumbnails genuinely DIFFER (max byte delta %d), so [F1]'s "
+				% diff) + "bit-identity is the bake being protected from a live option, not an option "
+				+ "wired to nothing")
+		_check(_is_varied(img_f.get_data()),
+				"control: the full-resolution thumbnail is a varied picture, so the difference above is "
+				+ "between two real renders rather than against a blank one")
+
+	# ---- [F3b] the badge ----
+	var badge = ed._preview_badges.get(0)
+	_check(badge != null and is_instance_valid(badge),
+			"[F3b] every thumbnail carries a downscale badge, so the check below is about its VISIBILITY "
+			+ "and not about whether the control exists")
+	if badge != null and is_instance_valid(badge):
+		_check(not badge.visible,
+				"[F3b] at 1:1 the badge is hidden — an always-on badge would be ignored within a day")
+		g.preview_scale = 2
+		ed._sync_preview_scale_ui()
+		_check(badge.visible and badge.text == "1:2",
+				("[F3b] below 1:1 the badge appears ON THE THUMBNAIL and names the ratio (visible=%s, "
+				% badge.visible) + "text=\"%s\"), because the picture is what is being misread"
+				% badge.text)
+		g.preview_scale = 4
+		ed._sync_preview_scale_ui()
+		_check(badge.text == "1:4",
+				"control: the badge follows the setting rather than printing a constant (got \"%s\")"
+				% badge.text)
+
+	# ---- [F4] view state, not content ----
+	var rev_before: int = g.content_key()
+	g.preview_scale = 1
+	g.preview_scale = 4
+	g.preview_scale = 2
+	_check(g.content_key() == rev_before,
+			("[F4] changing the preview scale does not bump the content revision (%d -> %d), so it cannot "
+			% [rev_before, g.content_key()]) + "invalidate a host's frozen bake — §12.6")
+	g.nodes[0].muted = not g.nodes[0].muted
+	_check(g.content_key() != rev_before,
+			("control: a real content edit DOES bump it (%d -> %d), so [F4] measured the exemption and not "
+			% [rev_before, g.content_key()]) + "a revision that never moves")
+
+	if is_instance_valid(ed):
+		ed.queue_free()
+
+
+## Read back the thumbnail the editor actually put on node `p_idx`, after letting the async tap pass land.
+##
+## The refresh dispatches to a WorkerThreadPool task and applies through `call_deferred`, so a synchronous
+## read would see the PREVIOUS pass's texture — which would make [F3] compare 1:1 against 1:1 and pass by
+## measuring nothing.
+func _f_thumbnail(p_editor, p_idx: int) -> Image:
+	for i in range(120):
+		await get_tree().process_frame
+	if not p_editor._preview_rects.has(p_idx):
+		return null
+	var tr: TextureRect = p_editor._preview_rects[p_idx]
+	if not is_instance_valid(tr) or tr.texture == null:
+		return null
+	return tr.texture.get_image()
+
+
+## [F]'s fixture, and NOT `_one_previewable_graph()`: that one leaves the Noise node's `noise` resource
+## unassigned, which the node documents as a defined flat 0. A flat field makes every claim here vacuous —
+## the bake compares equal because it is constant, and the two thumbnails match because both are one
+## colour. The first run of this criterion failed on exactly that, which is why the fixture is explicit.
+func _f_graph() -> Pasture3DTerrainGraph:
+	var g := Pasture3DTerrainGraph.new()
+	var n := Pasture3DGraphNodeRegistry.create(&"noise")
+	var fnl := FastNoiseLite.new()
+	fnl.seed = 12345
+	fnl.frequency = 0.05
+	n.noise = fnl
+	n.amplitude = 20.0
+	g.add_node(n, Vector2.ZERO)
+	g.output_node = 0
+	n.preview_on = true
+	return g
+
+
+func _f_varied(p_field: PackedFloat32Array) -> bool:
+	if p_field.is_empty():
+		return false
+	var lo := INF
+	var hi := -INF
+	for v in p_field:
+		lo = minf(lo, v)
+		hi = maxf(hi, v)
+	return hi - lo > 1e-6

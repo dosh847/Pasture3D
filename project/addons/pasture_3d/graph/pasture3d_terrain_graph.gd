@@ -80,6 +80,28 @@ signal node_changed(index: int)
 ## Maximum total memory in bytes allowed for per-node cached output grids (default 256 MB).
 @export var max_cache_bytes: int = 268435456
 
+
+## Preview evaluation scale (spec §5.4). 1 = 1:1 (default), 2 = 1:2, 4 = 1:4.
+##
+## ON THE GRAPH, NOT THE NODE, because it is a property of how expensive THIS GRAPH is to preview, not of
+## how one thumbnail should look. A per-node scale would let two thumbnails in one refresh disagree about
+## their resolution, and the tap pass is a single dispatch precisely so they cannot.
+##
+## IT TOUCHES THE PREVIEW ONLY. `evaluate()` never reads it and must never read it: the bake is
+## bit-identical with this at 1 and at 4, and criterion [F] asserts exactly that rather than trusting the
+## sentence. Painting stays at full resolution — isolating an area and working at full res is the point of
+## the brush system, and this option does not change it.
+##
+## A PLAIN `@export` WITH NO SETTER, for §12.6's reason: view state must not participate in invalidation
+## or caching. GDScript export assignment fires no `Resource.changed`, so this cannot reach
+## `_bump_revision` and cannot cost a bake.
+##
+## Anything but 1 PUTS A BADGE ON SCREEN, and that is not decoration. A downscaled preview of an erosion
+## network is a LIE ABOUT THE NETWORK'S FINENESS: channels merge, ridges round off, and the author tunes
+## the wrong parameter to fix a problem only the preview has. Same discipline as the range chip — a
+## normalised picture without its divisor is not a measurement.
+@export_enum("1:1:1", "1:2:2", "1:4:4") var preview_scale: int = 1
+
 var _global_access_tick: int = 0
 
 # ---- Topology memoization ----------------------------------------------------------------------------
