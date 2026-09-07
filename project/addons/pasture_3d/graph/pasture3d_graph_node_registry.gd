@@ -90,6 +90,11 @@ const ControlSinkScript = preload("res://addons/pasture_3d/graph/pasture3d_graph
 const ColorSinkScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_color_sink.gd")
 const HoleSinkScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_hole_sink.gd")
 const NavSinkScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_nav_sink.gd")
+const ExportHeightmapScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_export_heightmap.gd")
+const ExportMaskScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_export_mask.gd")
+const ExportNormalMapScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_export_normal_map.gd")
+const ExportSplatScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_export_splat.gd")
+const ExportIndexMapScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_export_index_map.gd")
 const TerrainBusMergeScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_terrain_bus_merge.gd")
 const TerrainBusSplitScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_terrain_bus_split.gd")
 
@@ -183,6 +188,16 @@ static func entries(p_include_dev: bool = false) -> Array[Dictionary]:
 		{"op": &"color_sink", "title": "Color Sink", "category": "Routing & Structural", "role": "Sink", "script": ColorSinkScript, "tags": ["sink", "color", "tint", "albedo", "paint", "output"], "description": "Tints the terrain color map wherever its mask is on."},
 		{"op": &"hole_sink", "title": "Hole Sink", "category": "Routing & Structural", "role": "Sink", "script": HoleSinkScript, "tags": ["sink", "hole", "cutout", "cave", "output"], "description": "Punches terrain holes wherever its mask is on."},
 		{"op": &"nav_sink", "title": "Nav Sink", "category": "Routing & Structural", "role": "Sink", "script": NavSinkScript, "tags": ["sink", "navigation", "navmesh", "walkable", "output"], "description": "Marks terrain navigable (or not) wherever its mask is on."},
+		# The B2 export sinks (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.2). Terminal for the same reason
+		# the B1 sinks are, and with the same consequence: no op, no graph_op_ids() entry, no native risk,
+		# and a compiled program that is byte-identical with them present. They write from
+		# Pasture3DGraphExportSinks.export_graph_outputs(), an entry point the evaluator cannot reach --
+		# which is why there is no auto_export flag to register here or anywhere else (§12.7).
+		{"op": &"export_heightmap", "title": "Export Heightmap", "category": "Routing & Structural", "role": "Sink", "script": ExportHeightmapScript, "tags": ["export", "sink", "heightmap", "elevation", "r16", "exr", "file", "output"], "description": "Writes the wired height field to an elevation raster (r16, exr or png16)."},
+		{"op": &"export_mask", "title": "Export Mask", "category": "Routing & Structural", "role": "Sink", "script": ExportMaskScript, "tags": ["export", "sink", "mask", "png", "file", "output"], "description": "Writes the wired mask to a single-channel image."},
+		{"op": &"export_normal_map", "title": "Export Normal Map", "category": "Routing & Structural", "role": "Sink", "script": ExportNormalMapScript, "tags": ["export", "sink", "normal", "bump", "tangent", "png", "file", "output"], "description": "Writes tangent-space normals derived from the wired height field."},
+		{"op": &"export_splat", "title": "Export Splat", "category": "Routing & Structural", "role": "Sink", "script": ExportSplatScript, "tags": ["export", "sink", "splat", "weights", "rgba", "png", "file", "output"], "description": "Packs four masks into one RGBA weight map."},
+		{"op": &"export_index_map", "title": "Export Index Map", "category": "Routing & Structural", "role": "Sink", "script": ExportIndexMapScript, "tags": ["export", "sink", "index", "material", "region", "nearest", "png", "file", "output"], "description": "Writes per-cell material or region indices, unscaled and never filtered."},
 		{"op": &"reroute", "title": "Reroute", "category": "Routing & Structural", "role": "Utility", "script": RerouteScript, "tags": ["dot", "relay", "wire", "route", "passthrough", "clean"], "description": "1-in / 1-out transparent wire routing dot."},
 		{"op": &"terrain_bus_merge", "title": "Terrain Bus Merge", "category": "Routing & Structural", "role": "Combiner", "script": TerrainBusMergeScript, "tags": ["bus", "merge", "pack", "bundle", "channels", "multichannel"], "description": "Bundles individual height, mask, water_depth, sediment, and flow channels into a single TERRAIN_BUS connection."},
 		{"op": &"terrain_bus_split", "title": "Terrain Bus Split", "category": "Routing & Structural", "role": "Filter", "script": TerrainBusSplitScript, "tags": ["bus", "split", "unpack", "unbundle", "channels", "multichannel"], "description": "Unbundles a TERRAIN_BUS wire into separate height, mask, water_depth, sediment, and flow channel outputs."},

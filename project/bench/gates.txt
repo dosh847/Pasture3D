@@ -640,3 +640,18 @@ bench/GraphInspectGate.tscn
 # [C] is the other one worth knowing: with the refusal replaced by a mask-and-clamp, -1 paints texture 31
 # on 2048 cells — `road-tier-far-paint-built` reproduced on demand.
 bench/GraphChannelSinkGate.tscn
+
+# GraphExportGate — V6 of PASTURE3D_GRAPH_VISUALIZATION_SPEC.md: the B2 export sinks and Export All (§9.2).
+# Five terminal file sinks, `export_graph_outputs()`, the sidecar range record, and the cancellable
+# registry walk modelled on `bake_all_brushes()`.
+#
+# [A]/[A2] measure TERMINALITY, which is the whole mechanism: no op, no graph_op_ids() entry, a
+# byte-identical compiled program. Making one sink non-terminal fails ten checks here AND makes
+# GraphAllNodeSocketsGate name all five as ops with no kernel behind them.
+# [C] is the one that needed real work. Godot's Image.save_png() is 8-bit only — every float format
+# round-trips at 1/255 — so png16 is written by our own encoder (addons/pasture_3d/src/graph_png.gd).
+# One writer serves both depths, so the png8 control differs by one integer: measured 0.001961 against
+# png16's 0.0000076, a ratio of 257.
+# [B] is the negative: nine compiles and nine taps with a configured sink present leave the disk empty.
+# The structural half — no evaluator references the exporter at all — is in the gate's header.
+bench/GraphExportGate.tscn

@@ -54,6 +54,7 @@ var _frame_button: Button
 var _minimap_button: Button
 var _arrange_button: Button
 var _bake_brush_button: Button
+var _export_all_button: Button
 var _brush_details_button: Button
 var _host_label: Label
 var _graph_picker: OptionButton
@@ -524,6 +525,33 @@ func _on_brush_details_pressed() -> void:
 	EditorInterface.edit_node(brush)
 
 
+## Ask for a folder, then write every export sink into it. The base path belongs to the ACTION and the
+## leaf filenames belong to the nodes (§9.2) — so a batch run rewrites nothing in the graph, and running
+## it twice into two folders is two sets of files rather than a graph edited twice.
+func _on_export_all_pressed() -> void:
+	if graph == null:
+		return
+	var dlg := FileDialog.new()
+	dlg.file_mode = FileDialog.FILE_MODE_OPEN_DIR
+	dlg.access = FileDialog.ACCESS_FILESYSTEM
+	dlg.title = "Export All — choose the folder the sinks write into"
+	dlg.dir_selected.connect(_on_export_dir_chosen)
+	dlg.close_requested.connect(dlg.queue_free)
+	add_child(dlg)
+	dlg.popup_centered_ratio(0.6)
+
+
+func _on_export_dir_chosen(p_dir: String) -> void:
+	var brush := _find_host_brush()
+	var report := Pasture3DGraphExportSinks.export_graph_outputs(graph, p_dir,
+			brush.terrain if brush != null else null)
+	# The report is printed by the exporter itself, naming every file. Surfaced here as well so a run
+	# that wrote nothing is visible without opening the Output panel.
+	if int(report["written"]) == 0:
+		push_warning("Pasture3D: Export All wrote no files — %s"
+				% [report["reason"] if String(report.get("reason", "")) != "" else report["skipped"]])
+
+
 func _on_bake_brush_pressed() -> void:
 	# A rebake can reshape the ground inside an unchanged bounding box, which the memo's rect key cannot
 	# see. Drop it here rather than trusting the key alone.
@@ -700,6 +728,22 @@ func _build_ui() -> void:
 	_bake_brush_button.visible = false
 	bar.add_child(_bake_brush_button)
 
+	# EXPORT ALL (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.2). Hidden rather than disabled on a graph with
+	# no export sinks: a button that can never do anything is worse than no button, and the same reasoning
+	# hides Brush Details below.
+	#
+	# There is no auto-export toggle here or anywhere else, and that is the point (§12.7). An export sink
+	# is terminal, so the evaluator cannot reach a file write, so there is nothing for a flag to suppress.
+	# Hesiod needs a flag, a button that flips and restores it, and a JSON pre-pass that rewrites it for
+	# batch runs; this is one button and a base path.
+	_export_all_button = Button.new()
+	_export_all_button.text = "Export All"
+	_export_all_button.tooltip_text = ("Write every export sink in this graph. Each sink carries its own "
+			+ "relative filename, format, resolution and world rect; you choose the folder they land in.")
+	_export_all_button.pressed.connect(_on_export_all_pressed)
+	_export_all_button.visible = false
+	bar.add_child(_export_all_button)
+
 	_brush_details_button = Button.new()
 	_brush_details_button.text = "Brush Details"
 	_brush_details_button.tooltip_text = "Select the brush hosting this graph and show it in the Inspector"
@@ -867,6 +911,8 @@ func _rebuild() -> void:
 	# to show, and a button reading "Brush Details" that can never do anything is worse than no button.
 	if _brush_details_button != null:
 		_brush_details_button.visible = (has and brush != null)
+	if _export_all_button != null:
+		_export_all_button.visible = has and not Pasture3DGraphExportSinks.sinks_of(graph).is_empty()
 	_update_host_label(brush)
 	_populate_graph_picker(brush)
 	if _hint != null: _hint.visible = not has
