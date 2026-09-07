@@ -57,11 +57,14 @@ var _checks := 0
 
 func _ready() -> void:
 	print("=== GraphPreviewReprGate: the representation & range contract (spec V1) ===\n")
+	_a_a_mask_does_not_rescale()
+	_a2_the_rest_of_the_taxonomy()
+	_b_the_range_is_reported_and_lockable()
 	_c_unserved_is_visible()
 	_h_host_binding_follows_the_gesture()
 	_i_the_input_preview_reads_the_hosts_ground()
 
-	if _checks < 28:
+	if _checks < 57:
 		print("\n    VACUOUS: only %d checks completed; the gate did not measure what it claims to." % _checks)
 		_fail += 1
 	print("\n=== %s (%d failures, %d checks) ===\n"
@@ -439,3 +442,341 @@ func _i_the_input_preview_reads_the_hosts_ground() -> void:
 	for n in [ed, ed3, brush, terrain]:
 		if is_instance_valid(n):
 			n.queue_free()
+
+
+# --- A -------------------------------------------------------------------------------------------------
+#
+# §5.2 Rule 1, the load-bearing rule of V1: THE RANGE IS CHOSEN BY THE PORT TYPE, NOT BY THE DATA.
+#
+# A MASK renders on an absolute 0..1 scale, always. The bug this closes (§4.2) is that min/max
+# normalisation makes a mask spanning 0.28..0.32 look identical to one spanning 0..1 — full black to full
+# white either way — so the author cannot see that a threshold is barely doing anything, and the parameter
+# that would fix it appears to have no effect.
+#
+# Asserted on the RENDERED BYTES, because that is the artifact the author reads. Two controls, and both
+# are load-bearing:
+#
+#   * a HEIGHT output given the same two fields must render IDENTICALLY under its auto range. Without it
+#     the criterion passes on a renderer that returns a different image for every call — "these two
+#     differ" is trivially true of a renderer that never repeats itself.
+#   * the mask fixture is asserted NON-UNIFORM. Two all-black squares are also identical.
+func _a_a_mask_does_not_rescale() -> void:
+	print("\n[A] a MASK renders on its absolute range; a HEIGHT rescales to its own (§5.2 Rule 1)")
+
+	if not ClassDB.class_has_method("Pasture3DUtil", "preview_image_grid"):
+		_check(false, "preview_image_grid is not bound — the DLL is stale; nothing was measured")
+		return
+
+	var n := 32
+	# The SAME SHAPE at two different scales. Same pattern, so any difference in the rendered bytes is the
+	# range rule and not a different picture: `narrow` is `wide` squeezed into 0.28..0.32.
+	var wide := PackedFloat32Array()
+	var narrow := PackedFloat32Array()
+	wide.resize(n * n)
+	narrow.resize(n * n)
+	for iz in range(n):
+		for ix in range(n):
+			var t: float = float(ix) / float(n - 1)
+			wide[iz * n + ix] = t
+			narrow[iz * n + ix] = 0.28 + 0.04 * t
+
+	# The fixture must vary, or "identical" and "both blank" are the same answer.
+	var wmin := INF
+	var wmax := -INF
+	for v in wide:
+		wmin = minf(wmin, v)
+		wmax = maxf(wmax, v)
+	_check(wmax - wmin > 0.5, "control: the fixture is non-uniform (%.2f..%.2f), so two identical images "
+			% [wmin, wmax] + "cannot pass by both being blank")
+
+	# The types drive everything. Nothing below names a representation directly.
+	var mask_repr: int = GraphEditorScript.preview_repr_for_type(Pasture3DGraphNode.PortType.MASK)
+	var height_repr: int = GraphEditorScript.preview_repr_for_type(Pasture3DGraphNode.PortType.HEIGHT)
+	_check(mask_repr == Pasture3DUtil.PREVIEW_MASK_ALPHA and height_repr == Pasture3DUtil.PREVIEW_HILLSHADE,
+			"the representation comes from the declared type (MASK->%d, HEIGHT->%d)"
+			% [mask_repr, height_repr])
+
+	var img_mask_wide := _render(mask_repr, wide)
+	var img_mask_narrow := _render(mask_repr, narrow)
+	_check(img_mask_wide != img_mask_narrow,
+			"[A] the two MASK fields are NOT rendered identically — 0.28..0.32 stays dim against an "
+			+ "absolute scale, which is the whole point of one")
+
+	# And the ranges themselves: a mask's range must not move with its data.
+	var r_wide: Dictionary = GraphEditorScript.resolve_preview_range(mask_repr, wide, false, 0.0, 1.0)
+	var r_narrow: Dictionary = GraphEditorScript.resolve_preview_range(mask_repr, narrow, false, 0.0, 1.0)
+	_check(r_wide["min"] == 0.0 and r_wide["max"] == 1.0
+			and r_narrow["min"] == 0.0 and r_narrow["max"] == 1.0,
+			"[A] a MASK's range is 0..1 for BOTH fields (wide=%.2f..%.2f narrow=%.2f..%.2f)"
+			% [r_wide["min"], r_wide["max"], r_narrow["min"], r_narrow["max"]])
+
+	# THE CONTROL. A HEIGHT output on the same two fields rescales, so its two ranges differ — and once
+	# rescaled its two IMAGES agree. That agreement is the normalisation bug, reproduced deliberately, on
+	# the type where it is correct behaviour. Without it the criterion cannot tell the type rule from a
+	# renderer that ignores its range argument.
+	var h_wide: Dictionary = GraphEditorScript.resolve_preview_range(height_repr, wide, false, 0.0, 1.0)
+	var h_narrow: Dictionary = GraphEditorScript.resolve_preview_range(height_repr, narrow, false, 0.0, 1.0)
+	_check(absf(h_narrow["min"] - 0.28) < 0.001 and absf(h_narrow["max"] - 0.32) < 0.001,
+			"control: a HEIGHT output DOES take its range from the data (%.3f..%.3f)"
+			% [h_narrow["min"], h_narrow["max"]])
+	_check(h_wide["min"] != h_narrow["min"],
+			"control: and the two HEIGHT ranges differ, so the type rule is what makes the mask's equal")
+
+	# The rendered half of the same control, and TWO corrections worth recording, because each was a wrong
+	# assumption about the renderer rather than about the rule:
+	#
+	#   1. HILLSHADE is relief-LIT. Its pixels depend on the field's GRADIENT in real units as well as on
+	#      the normalised value, so two auto-ranged hillshades of differently-scaled data differ even
+	#      though the normalisation collapsed them.
+	#   2. RAW_GRAY does not normalise AT ALL — by design, it is the "show me the actual numbers as
+	#      brightness" escape hatch and ignores the measured range. Reaching for it here made this control
+	#      pass in [B] for a while by saturating both fields to white: two identical images, measuring
+	#      nothing. That is the third vacuous fixture this session and the reason the guard below is here.
+	#
+	# RAMP_SEQ is the representation that is unlit AND normalises, so it isolates the rescale.
+	var img_g_wide := _render_ranged(Pasture3DUtil.PREVIEW_RAMP_SEQ, wide, h_wide)
+	var img_g_narrow := _render_ranged(Pasture3DUtil.PREVIEW_RAMP_SEQ, narrow, h_narrow)
+	var d_rescaled := _max_byte_diff(img_g_wide, img_g_narrow)
+	var d_mask := _max_byte_diff(img_mask_wide, img_mask_narrow)
+	_check(d_rescaled <= 2,
+			"control: rescaled to their own extremes the two fields render to the SAME image under an "
+			+ "unlit normalising representation (max channel difference %d) — the same rescale, on a "
+			% d_rescaled + "type where it is correct")
+	_check(d_mask > 20 * maxi(d_rescaled, 1),
+			"control: and the MASK difference (%d) is orders larger than that float-precision residue "
+			% d_mask + "(%d), so [A] is measuring the type rule and not rounding" % d_rescaled)
+	_check(_is_varied(img_g_wide),
+			"control: and that shared image is NOT uniform, so the two did not agree by both saturating")
+
+
+## True when a rendered thumbnail actually varies. Two IDENTICAL images prove a rescale only if the image
+## is not a single flat colour — "both all-white" is also identical, and it is how a control that means to
+## measure normalisation ends up measuring saturation instead.
+func _is_varied(p_bytes: PackedByteArray) -> bool:
+	if p_bytes.size() < 8:
+		return false
+	for i in range(4, p_bytes.size(), 4):
+		if p_bytes[i] != p_bytes[0] or p_bytes[i + 1] != p_bytes[1] or p_bytes[i + 2] != p_bytes[2]:
+			return true
+	return false
+
+
+## Largest per-channel difference between two rendered thumbnails, or 256 if they are not comparable.
+##
+## Byte equality is the wrong test for "the rescale collapsed these two". Normalising 0.28 + 0.04t back to
+## t in float32 does not reproduce t bit-for-bit — subtracting an offset and dividing by a small span
+## loses the low bits — so two images that agree about everything the rule governs still differ by an LSB
+## here and there. This reports the magnitude instead, and the callers assert against it with the
+## comparison that makes the tolerance meaningful: the difference the RULE produces is two orders larger
+## than the difference the arithmetic produces, and a threshold is only honest when both are printed.
+func _max_byte_diff(p_a: PackedByteArray, p_b: PackedByteArray) -> int:
+	if p_a.size() != p_b.size() or p_a.is_empty():
+		return 256
+	var worst := 0
+	for i in range(p_a.size()):
+		if (i & 3) == 3:
+			continue # alpha is a constant 255 in every representation
+		worst = maxi(worst, absi(int(p_a[i]) - int(p_b[i])))
+	return worst
+
+
+func _render(p_repr: int, p_field: PackedFloat32Array) -> PackedByteArray:
+	var rng: Dictionary = GraphEditorScript.resolve_preview_range(p_repr, p_field, false, 0.0, 1.0)
+	return _render_ranged(p_repr, p_field, rng)
+
+
+func _render_ranged(p_repr: int, p_field: PackedFloat32Array, p_rng: Dictionary) -> PackedByteArray:
+	var n := int(round(sqrt(float(p_field.size()))))
+	return Pasture3DUtil.preview_image_grid(p_field, n, n, p_repr,
+			p_rng["min"], p_rng["max"], bool(p_rng["mark"]))
+
+
+# --- A2 ------------------------------------------------------------------------------------------------
+#
+# The rest of §5.3's table, and the reason the 2026-09-06 port audit had to come first: FIELD and SIGNED
+# did not exist, so RAMP_SEQ and RAMP_DIV had no type to be the default for and could only ever have been
+# manual choices. A signed field's ramp must be SYMMETRIC about zero, or the neutral hue lands somewhere
+# other than 0 and the ramp reports a convexity as a concavity.
+func _a2_the_rest_of_the_taxonomy() -> void:
+	print("\n[A2] every field type maps to its representation, and SIGNED is symmetric about zero (§5.3)")
+
+	var want := {
+		Pasture3DGraphNode.PortType.HEIGHT: Pasture3DUtil.PREVIEW_HILLSHADE,
+		Pasture3DGraphNode.PortType.MASK: Pasture3DUtil.PREVIEW_MASK_ALPHA,
+		Pasture3DGraphNode.PortType.FIELD: Pasture3DUtil.PREVIEW_RAMP_SEQ,
+		Pasture3DGraphNode.PortType.SIGNED: Pasture3DUtil.PREVIEW_RAMP_DIV,
+	}
+	var all_ok := true
+	var distinct := {}
+	for t in want:
+		var got: int = GraphEditorScript.preview_repr_for_type(t)
+		distinct[got] = true
+		if got != want[t]:
+			all_ok = false
+			print("        type %d -> %d, expected %d" % [t, got, want[t]])
+	_check(all_ok, "[A2] the four field types map to their §5.3 representations")
+	_check(distinct.size() == 4, "control: the four map to four DISTINCT representations (%d), so a "
+			% distinct.size() + "function returning one constant cannot pass")
+
+	# A value type has no grid, so it must decline rather than render one. "A grid render of a non-grid
+	# is a lie shaped like data."
+	var declined := true
+	for t in [Pasture3DGraphNode.PortType.VECTOR, Pasture3DGraphNode.PortType.CURVE,
+			Pasture3DGraphNode.PortType.BOOL, Pasture3DGraphNode.PortType.FLOAT,
+			Pasture3DGraphNode.PortType.INT, Pasture3DGraphNode.PortType.COLOR]:
+		if GraphEditorScript.preview_repr_for_type(t) >= 0:
+			declined = false
+			print("        value type %d was given representation %d"
+					% [t, GraphEditorScript.preview_repr_for_type(t)])
+	_check(declined, "[A2] the VALUE types get no thumbnail representation at all")
+
+	# The symmetric range. A field running -2..+8 must render against -8..+8, not -2..+8.
+	var n := 16
+	var signed_field := PackedFloat32Array()
+	signed_field.resize(n * n)
+	for i in range(n * n):
+		signed_field[i] = -2.0 + 10.0 * (float(i) / float(n * n - 1))
+	var sr: Dictionary = GraphEditorScript.resolve_preview_range(
+			Pasture3DUtil.PREVIEW_RAMP_DIV, signed_field, false, 0.0, 1.0)
+	_check(absf(sr["min"] + 8.0) < 0.001 and absf(sr["max"] - 8.0) < 0.001,
+			"[A2] a SIGNED field's range is symmetric about zero (%.2f..%.2f for data -2..+8)"
+			% [sr["min"], sr["max"]])
+	# Control: the same data on an unsigned FIELD is NOT symmetrised, or "symmetric" is just what this
+	# function always returns.
+	var ur: Dictionary = GraphEditorScript.resolve_preview_range(
+			Pasture3DUtil.PREVIEW_RAMP_SEQ, signed_field, false, 0.0, 1.0)
+	_check(absf(ur["min"] + 2.0) < 0.001,
+			"control: an unsigned FIELD keeps its own minimum (%.2f), so the symmetry is the SIGNED "
+			% ur["min"] + "rule and not a blanket transform")
+
+
+# --- B -------------------------------------------------------------------------------------------------
+#
+# §5.2 Rules 2, 3 and 4: the range is on screen, it is lockable, and a locked range marks its overflow.
+#
+# The chip is a READOUT, not a second source. `check-derived-values-outside-the-chain` says comparing a
+# derived value against the number it came from proves only that the derivation is a function — so [B1]
+# computes min and max HERE, independently, and compares them against the numbers the chip shows.
+#
+# [B2] is the criterion that matters for the bug. Locking is the fix for "the slider does nothing": with
+# the range pinned, moving the data must MOVE THE PICTURE. So it asserts the opposite of [A]'s control —
+# under AUTO the two fields render the same, under LOCK they must not.
+func _b_the_range_is_reported_and_lockable() -> void:
+	print("\n[B] the range chip reads the data, and locking makes the picture move (§5.2 Rules 2-4)")
+
+	var n := 32
+	var lo_field := PackedFloat32Array()
+	var hi_field := PackedFloat32Array()
+	lo_field.resize(n * n)
+	hi_field.resize(n * n)
+	for iz in range(n):
+		for ix in range(n):
+			var t: float = float(ix) / float(n - 1)
+			lo_field[iz * n + ix] = 10.0 + 5.0 * t      # 10 .. 15
+			hi_field[iz * n + ix] = 10.0 + 40.0 * t     # 10 .. 50
+
+	var height_repr: int = GraphEditorScript.preview_repr_for_type(Pasture3DGraphNode.PortType.HEIGHT)
+
+	# [B1] the chip's numbers, against a min/max this gate computed for itself.
+	var indep_min := INF
+	var indep_max := -INF
+	for v in lo_field:
+		indep_min = minf(indep_min, v)
+		indep_max = maxf(indep_max, v)
+	var auto_rng: Dictionary = GraphEditorScript.resolve_preview_range(height_repr, lo_field, false, 0.0, 1.0)
+	var chip: String = GraphEditorScript.range_chip_text(auto_rng)
+	_check(absf(auto_rng["min"] - indep_min) < 0.0001 and absf(auto_rng["max"] - indep_max) < 0.0001,
+			"[B1] the reported range equals a min/max computed OUTSIDE the preview path "
+			+ "(%.3f..%.3f vs %.3f..%.3f)" % [auto_rng["min"], auto_rng["max"], indep_min, indep_max])
+	_check(chip.begins_with("AUTO") and chip.contains("10.00") and chip.contains("15.00"),
+			"[B1] and the chip TEXT carries those numbers and says which rule made them (got '%s')" % chip)
+
+	# Control: the chip is not a constant string. A different field must produce a different chip.
+	var chip2: String = GraphEditorScript.range_chip_text(
+			GraphEditorScript.resolve_preview_range(height_repr, hi_field, false, 0.0, 1.0))
+	_check(chip != chip2, "control: a different field gives a different chip, so [B1] is not comparing "
+			+ "against a fixed string (got '%s')" % chip2)
+
+	# A mask says MASK, not AUTO — its 0.00 - 1.00 is not a measurement of this grid and labelling it
+	# AUTO would claim it was.
+	var mask_chip: String = GraphEditorScript.range_chip_text(GraphEditorScript.resolve_preview_range(
+			Pasture3DUtil.PREVIEW_MASK_ALPHA, lo_field, false, 0.0, 1.0))
+	_check(mask_chip.begins_with("MASK"),
+			"[B1] a mask's chip names the rule rather than claiming a measurement (got '%s')" % mask_chip)
+
+	# [B2] AUTO hides the change; LOCK shows it. This pair IS the §4.2 bug and its fix.
+	# Under AUTO the parameter change is invisible. RAMP_SEQ for the reasons recorded in [A]: HILLSHADE
+	# carries gradient as well as range, and RAW_GRAY does not normalise at all.
+	var img_auto_lo := _render(Pasture3DUtil.PREVIEW_RAMP_SEQ, lo_field)
+	var img_auto_hi := _render(Pasture3DUtil.PREVIEW_RAMP_SEQ, hi_field)
+	var d_auto := _max_byte_diff(img_auto_lo, img_auto_hi)
+	_check(d_auto <= 2,
+			"control: under AUTO the two fields render to the SAME image (max channel difference %d) — "
+			% d_auto + "the parameter change is invisible, which is the defect §4.2 opens with")
+	_check(_is_varied(img_auto_lo),
+			"control: and that image is NOT uniform, so the agreement is a rescale and not two "
+			+ "saturated squares")
+
+	# The lock must come OUT of `resolve_preview_range`, not be written here. Handing the renderer a
+	# dictionary this gate composed would test the renderer's range argument — which [B3] already does —
+	# and would pass with the lock mechanism deleted entirely. Watched exactly that way: with the lock
+	# branch removed, a hand-built dictionary kept every [B] check green.
+	var lock: Dictionary = GraphEditorScript.resolve_preview_range(
+			Pasture3DUtil.PREVIEW_RAMP_SEQ, hi_field, true, 10.0, 15.0)
+	_check(bool(lock.get("locked", false)) and lock["min"] == 10.0 and lock["max"] == 15.0,
+			"[B2] a locked node resolves to ITS pinned range, not the data's (%s %.2f..%.2f over a "
+			% ["LOCK" if lock.get("locked") else "AUTO", lock["min"], lock["max"]]
+			+ "field spanning 10..50)")
+	_check(bool(lock.get("mark", false)),
+			"[B2] and a locked range asks for out-of-range marking (Rule 4), which an auto range does not")
+	_check(not bool(GraphEditorScript.resolve_preview_range(
+			Pasture3DUtil.PREVIEW_RAMP_SEQ, hi_field, false, 10.0, 15.0).get("locked", true)),
+			"control: the same call UNLOCKED does not report a lock, so the flag is what decides")
+	var img_lock_lo := _render_ranged(Pasture3DUtil.PREVIEW_RAMP_SEQ, lo_field, lock)
+	var img_lock_hi := _render_ranged(Pasture3DUtil.PREVIEW_RAMP_SEQ, hi_field, lock)
+	var d_lock := _max_byte_diff(img_lock_lo, img_lock_hi)
+	_check(d_lock > 20 * maxi(d_auto, 1),
+			"[B2] under LOCK the SAME two fields render DIFFERENTLY (max channel difference %d vs %d "
+			% [d_lock, d_auto] + "under AUTO) — the parameter change is now visible")
+
+	# And the lock's RANGE must be what did it, not the mark flag alone.
+	var lock_wide: Dictionary = GraphEditorScript.resolve_preview_range(
+			Pasture3DUtil.PREVIEW_RAMP_SEQ, hi_field, true, 10.0, 50.0)
+	_check(_render_ranged(Pasture3DUtil.PREVIEW_RAMP_SEQ, hi_field, lock_wide) != img_lock_hi,
+			"control: moving the LOCKED range also moves the image, so [B2] is measuring the range and "
+			+ "not merely that two fields differ")
+
+	# [B3] Rule 4: a value outside a LOCKED range is marked, not clamped to the endpoint. `hi_field` runs
+	# to 50 against a 10..15 lock, so most of it is over.
+	var marked := _render_ranged(Pasture3DUtil.PREVIEW_RAMP_SEQ, hi_field, lock)
+	var unmarked := Pasture3DUtil.preview_image_grid(
+			hi_field, n, n, Pasture3DUtil.PREVIEW_RAMP_SEQ, 10.0, 15.0, false)
+	_check(marked != unmarked,
+			"[B3] out-of-range pixels under a LOCK are MARKED rather than clamped to the endpoint")
+	# Control: with everything inside the range there is nothing to mark, so the flag changes nothing.
+	var inside := Pasture3DUtil.preview_image_grid(
+			lo_field, n, n, Pasture3DUtil.PREVIEW_RAMP_SEQ, 0.0, 100.0, true)
+	var inside_nomark := Pasture3DUtil.preview_image_grid(
+			lo_field, n, n, Pasture3DUtil.PREVIEW_RAMP_SEQ, 0.0, 100.0, false)
+	_check(inside == inside_nomark,
+			"control: with no value outside the range the mark flag changes NOTHING, so [B3] measured "
+			+ "overflow and not the flag's mere presence")
+
+	# [B4] the lock must not touch invalidation (§12.6). The three properties have no setters, so an
+	# assignment must leave the graph's revision where it was — otherwise choosing how to LOOK at a field
+	# would cost a bake, and `preview_on` would stop being the instant show/hide it is documented to be.
+	var g := _one_previewable_graph()
+	var node: Pasture3DGraphNode = g.nodes[0]
+	var rev_before: int = g.content_key()
+	node.preview_range_locked = true
+	node.preview_range_min = 3.0
+	node.preview_range_max = 9.0
+	node.preview_repr = Pasture3DUtil.PREVIEW_RAW_GRAY
+	_check(g.content_key() == rev_before,
+			"[B4] pinning a range and choosing a representation do NOT bump the graph revision "
+			+ "(%d -> %d) — view state stays out of invalidation (§12.6)" % [rev_before, g.content_key()])
+	# Control: something that IS content must bump it, or [B4] passes on a revision that never moves.
+	node.muted = not node.muted
+	_check(g.content_key() != rev_before,
+			("control: a real content edit DOES bump the revision (%d -> %d), so [B4] measured the "
+			+ "view-state exemption and not a dead counter") % [rev_before, g.content_key()])

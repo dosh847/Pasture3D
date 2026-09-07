@@ -79,6 +79,13 @@ const PREVIEW_DEBOUNCE_SEC: float = 0.12
 
 var _preview_rects: Dictionary = {}   # node index -> TextureRect, one per previewable (has_output) node
 var _preview_buttons: Dictionary = {} # node index -> the 👁 toggle Button, so undo/redo can resync it
+## node index -> the range chip Button overlaying that thumbnail (spec 5.2 Rule 2).
+var _preview_chips: Dictionary = {}
+## node index -> the range dictionary the LAST render actually used. The chip reads this and so does the
+## lock gesture, so pinning pins the numbers that were on screen rather than numbers recomputed at click
+## time from data that may already have moved. It is also what the gate reads: asserting on a range the
+## gate computed for itself would prove the gate can find a min and a max, not that the preview used one.
+var _preview_ranges: Dictionary = {}
 var _preview_timer: Timer = null      # debounces refreshes; one-shot, restarted on each graph change
 var _preview_token: int = 0           # bumped per dispatch so a stale async result is dropped on apply
 
@@ -863,6 +870,8 @@ func _clear() -> void:
 	# async tap result so it cannot apply to a stale rect.
 	_preview_rects.clear()
 	_preview_buttons.clear()
+	_preview_chips.clear()
+	_preview_ranges.clear()
 	_preview_token += 1
 	_graphedit.clear_connections()
 	for c in _graphedit.get_children():
@@ -1034,9 +1043,23 @@ func _populate_node_slots_and_controls(p_gn: GraphNode, p_index: int, p_node: Pa
 		tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 		tex_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		box.add_child(tex_rect)
+		# The range chip (§5.2 Rule 2), overlaying the thumbnail's bottom edge. A Button rather than a
+		# Label because Rule 3 makes it the lock control, and putting the lock on the readout is what
+		# makes "these are the numbers" and "pin these numbers" the same gesture.
+		var chip := Button.new()
+		chip.flat = true
+		chip.focus_mode = Control.FOCUS_NONE
+		chip.add_theme_font_size_override(&"font_size", 9)
+		chip.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
+		chip.offset_top = -14.0
+		chip.text = ""
+		chip.tooltip_text = "The range this thumbnail is drawn against. Click to pin it — a pinned range "  				+ "is what makes a parameter change visibly move the picture instead of being "  				+ "normalised straight back out of view."
+		chip.pressed.connect(_on_range_chip_pressed.bind(p_index))
+		tex_rect.add_child(chip)
 		box.visible = p_node.preview_on
 		p_gn.add_child(box)
 		_preview_rects[p_index] = tex_rect
+		_preview_chips[p_index] = chip
 
 
 ## Which property each inline port widget edits, as `{op: {port: [property, ...]}}`.
@@ -1793,6 +1816,131 @@ func _schedule_preview_refresh() -> void:
 	_preview_timer.start(PREVIEW_DEBOUNCE_SEC)
 
 
+# ---- THE NORMALISATION CONTRACT (visualization spec §5.2, §5.3) ---------------------------------------
+#
+# Two functions, deliberately static and deliberately pure: the representation comes from the DECLARED
+# TYPE, and the range comes from the representation plus the data. Neither reads a widget, and neither is
+# a second place where a number lives — §9 of the graph guide ("never restate a range in the editor")
+# found 37 of 41 widget/property range pairs drifted, 16 destructively. The range chip below is a READOUT
+# of what `resolve_preview_range` returned, and `resolve_preview_range` is what the renderer was given.
+# One value, computed once, shown and used. If the chip and the image ever disagree, that is a bug in the
+# plumbing rather than a second opinion.
+
+
+## The §5.3 representation for a declared `PortType`, or -1 for a type that gets no thumbnail at all.
+##
+## -1 is not a failure: `VECTOR`, `CURVE`, `BOOL`, `FLOAT`, `INT` and `COLOR` are VALUE types — one value
+## per port, not one per cell — so there is no grid to draw and "a grid render of a non-grid is a lie
+## shaped like data". §5.2's table lists INT under `INDEX_PALETTE`, which predates the 2026-09-06 port
+## audit that separated field types from value types; `INDEX_PALETTE` stays in the taxonomy for a future
+## INT-typed FIELD (a material-index grid) and is reachable today only as a manual override.
+##
+## TERRAIN_BUS taps its channel 0, which is a height, so it hillshades. That is the bus's primary channel
+## and the only one V1 can address — V2's channel-addressable taps are what make the rest reachable.
+static func preview_repr_for_type(p_type: int) -> int:
+	match p_type:
+		Pasture3DGraphNode.PortType.HEIGHT:
+			return Pasture3DUtil.PREVIEW_HILLSHADE
+		Pasture3DGraphNode.PortType.MASK:
+			return Pasture3DUtil.PREVIEW_MASK_ALPHA
+		Pasture3DGraphNode.PortType.FIELD:
+			return Pasture3DUtil.PREVIEW_RAMP_SEQ
+		Pasture3DGraphNode.PortType.SIGNED:
+			return Pasture3DUtil.PREVIEW_RAMP_DIV
+		Pasture3DGraphNode.PortType.TERRAIN_BUS:
+			return Pasture3DUtil.PREVIEW_HILLSHADE
+	return -1
+
+
+## The range a field is rendered against, as `{"min", "max", "locked", "mark", "auto"}`.
+##
+## §5.2 Rule 1 — the range is chosen by the TYPE, not by the data:
+##
+##   * `MASK_ALPHA` is **absolute 0..1 and never rescaled**. A mask's range is what makes it a mask; a
+##     mask spanning 0.28..0.32 that renders full-black-to-full-white asserts something false about the
+##     data, and it is exactly the bug §4.2 opens with. `auto` is false here and stays false.
+##   * `RAMP_DIV` is auto but **symmetric about zero** — `±max(|min|,|max|)`. Zero must land at the
+##     ramp's neutral hue or the ramp lies about sign, which for curvature means reading a convexity as
+##     a concavity.
+##   * everything else is auto over the grid's own extremes.
+##
+## Rule 3 — a LOCK overrides all of that with the node's pinned numbers, which is the direct fix for "the
+## gain slider does nothing": with the range pinned the picture moves when the parameter does. Rule 4 —
+## under a lock, and ONLY under a lock, out-of-range values are marked rather than clamped to the
+## endpoint, because a lock that silently flattens its own overflow trades one lie for another. An auto
+## range cannot be exceeded by the data it was measured from, so marking there would be unreachable code
+## dressed as a safety net.
+##
+## NaN is skipped rather than propagated: one NaN cell would otherwise make min and max NaN and take the
+## whole thumbnail with it. A grid that is entirely NaN or empty reports 0..1 and `auto` true.
+static func resolve_preview_range(p_repr: int, p_field: PackedFloat32Array,
+		p_locked: bool, p_lock_min: float, p_lock_max: float) -> Dictionary:
+	if p_locked and p_lock_max > p_lock_min:
+		return {"min": p_lock_min, "max": p_lock_max, "locked": true, "mark": true, "auto": false}
+	if p_repr == Pasture3DUtil.PREVIEW_MASK_ALPHA:
+		return {"min": 0.0, "max": 1.0, "locked": false, "mark": false, "auto": false}
+
+	var lo := INF
+	var hi := -INF
+	for v in p_field:
+		if is_finite(v):
+			lo = minf(lo, v)
+			hi = maxf(hi, v)
+	if not (hi >= lo):
+		return {"min": 0.0, "max": 1.0, "locked": false, "mark": false, "auto": true}
+	if p_repr == Pasture3DUtil.PREVIEW_RAMP_DIV:
+		var half: float = maxf(absf(lo), absf(hi))
+		return {"min": -half, "max": half, "locked": false, "mark": false, "auto": true}
+	return {"min": lo, "max": hi, "locked": false, "mark": false, "auto": true}
+
+
+## The chip's text: a leading glyph saying WHICH rule produced the range, then the range itself.
+##
+## `MASK` rather than `AUTO` for a mask, because a mask's 0.00 - 1.00 is not a measurement of this grid
+## and labelling it `AUTO` would say it was. The three glyphs are the whole point of the chip: an image
+## with `LOCK 0.00 - 1.00` under it and an image with `AUTO -2.40 - 87.10` under it are different claims,
+## and today they are the same picture.
+static func range_chip_text(p_range: Dictionary) -> String:
+	var glyph := "AUTO"
+	if bool(p_range.get("locked", false)):
+		glyph = "LOCK"
+	elif not bool(p_range.get("auto", true)):
+		glyph = "MASK"
+	return "%s %.2f - %.2f" % [glyph, float(p_range.get("min", 0.0)), float(p_range.get("max", 1.0))]
+
+
+## Rule 3's gesture: a click on the chip pins the range that is currently on screen; a second click
+## releases it back to AUTO.
+##
+## It pins `_preview_ranges[idx]` — what the last render ACTUALLY used — not a range recomputed here. Those
+## are the same number only until the data moves, and pinning a freshly measured range would silently pin
+## something the author never saw.
+##
+## No `emit_changed()`, no undo action, no `_schedule_refresh`. §12.6: view state must not participate in
+## invalidation or caching, or choosing how to LOOK at a field would cost a bake and `preview_on` would
+## stop being the instant show/hide it is documented to be. The three properties have no setters for the
+## same reason, so assigning them here is inert by construction rather than by remembering to be careful.
+## Only the thumbnail is re-rendered, through the ordinary debounce.
+func _on_range_chip_pressed(p_index: int) -> void:
+	if graph == null or p_index < 0 or p_index >= graph.nodes.size():
+		return
+	var node: Pasture3DGraphNode = graph.nodes[p_index]
+	if node == null:
+		return
+	if node.preview_range_locked:
+		node.preview_range_locked = false
+	else:
+		var rng: Dictionary = _preview_ranges.get(p_index, {})
+		var lo: float = float(rng.get("min", 0.0))
+		var hi: float = float(rng.get("max", 1.0))
+		if not (hi > lo):
+			return # nothing measured yet, or a degenerate range; a lock on it would render nothing
+		node.preview_range_min = lo
+		node.preview_range_max = hi
+		node.preview_range_locked = true
+	_schedule_preview_refresh()
+
+
 ## Debounce timeout: compile ONE native program covering every preview-on node, sample the canonical input,
 ## and hand the heavy evaluation + hillshade to a worker thread. All graph reads (compile, output types)
 ## happen here on the main thread; only pure C++ calls over plain arrays run off-thread.
@@ -1815,13 +1963,27 @@ func _refresh_previews() -> void:
 	var slot_of: Dictionary = compiled["slot_of"]
 	var tap_slots := PackedInt32Array()
 	var slot_to_node: Dictionary = {}
-	var slot_is_mask: Dictionary = {}
+	# Everything the worker needs to render a slot, resolved HERE because these are graph reads and the
+	# worker runs off-thread. `preview_repr` >= 0 is the node's explicit override; -1 asks for the type
+	# default, which is §5.3's whole rule — representation comes from the declared type, never from the
+	# port's name. A type with no thumbnail (-1 both ways) still taps: it is the range chip and the badge
+	# that differ, and dropping the tap here would change what [E] counts.
+	var slot_view: Dictionary = {}
 	for i in roots:
 		if slot_of.has(i):
 			var slot: int = int(slot_of[i])
+			var n: Pasture3DGraphNode = graph.nodes[i]
+			var repr_id: int = n.preview_repr
+			if repr_id < 0:
+				repr_id = preview_repr_for_type(n.output_port_type())
 			tap_slots.append(slot)
 			slot_to_node[slot] = i
-			slot_is_mask[slot] = graph.nodes[i].output_port_type() == Pasture3DGraphNode.PortType.MASK
+			slot_view[slot] = {
+				"repr": repr_id,
+				"locked": n.preview_range_locked,
+				"lock_min": n.preview_range_min,
+				"lock_max": n.preview_range_max,
+			}
 	if tap_slots.is_empty():
 		return
 	# Evaluate over the host brush's ACTUAL footprint (its live spline shape + world rect) so generators
@@ -1839,14 +2001,14 @@ func _refresh_previews() -> void:
 	_preview_token += 1
 	var token := _preview_token
 	WorkerThreadPool.add_task(func():
-		_preview_worker(token, program, input, rect, tap_slots, slot_to_node, slot_is_mask))
+		_preview_worker(token, program, input, rect, tap_slots, slot_to_node, slot_view))
 
 
 ## Worker-thread body: one native tap pass, then a hillshade per tapped buffer. Touches only stateless C++
 ## statics over the plain data captured on the main thread, so it is safe off-thread; results are marshalled
 ## back with call_deferred, guarded by the dispatch token.
 func _preview_worker(p_token: int, p_program: Dictionary, p_input: PackedFloat32Array, p_rect: Rect2,
-		p_tap_slots: PackedInt32Array, p_slot_to_node: Dictionary, p_slot_is_mask: Dictionary) -> void:
+		p_tap_slots: PackedInt32Array, p_slot_to_node: Dictionary, p_slot_view: Dictionary) -> void:
 	var taps: Dictionary = Pasture3DUtil.graph_eval_grid_taps(
 			p_program, PREVIEW_SIZE, PREVIEW_SIZE, p_rect, p_input, p_tap_slots)
 	# The return is keyed by REQUEST INDEX now: `fields[i]` answers `p_tap_slots[i]`, and `unserved` lists
@@ -1858,19 +2020,37 @@ func _preview_worker(p_token: int, p_program: Dictionary, p_input: PackedFloat32
 		var slot: int = int(p_tap_slots[i])
 		if not p_slot_to_node.has(slot):
 			continue
-		var repr_id: int = Pasture3DUtil.PREVIEW_MASK_ALPHA if bool(p_slot_is_mask.get(slot, false)) 				else Pasture3DUtil.PREVIEW_HILLSHADE
+		var view: Dictionary = p_slot_view.get(slot, {})
+		var repr_id: int = int(view.get("repr", Pasture3DUtil.PREVIEW_HILLSHADE))
 		var field := PackedFloat32Array()
 		if i < fields.size() and fields[i] is PackedFloat32Array:
 			field = fields[i]
 		# Both failures now SAY so instead of leaving the last thumbnail in place: a slot the evaluator
 		# could not serve, and a field that came back the wrong size. `continue` here was two of the four
 		# indistinguishable causes of a black thumbnail (spec 4.3).
+		var served := true
 		if unserved.has(i) or field.size() != PREVIEW_SIZE * PREVIEW_SIZE:
+			served = false
+		# A type with no grid representation (-1) is not a rendering failure, but it has nothing to draw
+		# either, so it takes the same swatch. §5.2's badge for those types is separate work.
+		if repr_id < 0:
+			served = false
+		if not served:
 			repr_id = Pasture3DUtil.PREVIEW_NO_DATA
 			field = PackedFloat32Array()
+
+		# ONE range, resolved once, used by the renderer AND reported to the chip. Splitting these — a
+		# range for the image and a separately computed one for the label — is precisely the drift §9 of
+		# the graph guide catalogues, and it would be invisible because both halves would look right.
+		var rng: Dictionary = resolve_preview_range(repr_id, field,
+				bool(view.get("locked", false)), float(view.get("lock_min", 0.0)),
+				float(view.get("lock_max", 1.0)))
 		var bytes: PackedByteArray = Pasture3DUtil.preview_image_grid(
-				field, PREVIEW_SIZE, PREVIEW_SIZE, repr_id, 0.0, 0.0, false)
-		results[int(p_slot_to_node[slot])] = bytes
+				field, PREVIEW_SIZE, PREVIEW_SIZE, repr_id,
+				rng["min"], rng["max"], bool(rng["mark"]))
+		results[int(p_slot_to_node[slot])] = {
+			"bytes": bytes, "range": rng, "repr": repr_id, "served": served,
+		}
 	call_deferred(&"_apply_preview_textures", p_token, results)
 
 
@@ -1886,7 +2066,23 @@ func _apply_preview_textures(p_token: int, p_results: Dictionary) -> void:
 		var tr: TextureRect = _preview_rects[idx]
 		if not is_instance_valid(tr):
 			continue
-		var bytes: PackedByteArray = p_results[idx]
+		var res: Dictionary = p_results[idx]
+		var bytes: PackedByteArray = res.get("bytes", PackedByteArray())
+
+		# The range chip (§5.2 Rule 2). An unserved tap gets "NO DATA" rather than the 0.00 - 1.00 that
+		# `resolve_preview_range` returns for an empty field: reporting a range for a field that was never
+		# served would put a measurement under a picture that measured nothing.
+		if _preview_chips.has(idx) and is_instance_valid(_preview_chips[idx]):
+			var chip: Button = _preview_chips[idx]
+			var rng: Dictionary = res.get("range", {})
+			chip.text = "NO DATA" if not bool(res.get("served", true)) else range_chip_text(rng)
+			# Dimmed when the numbers are not a measurement of THIS grid — a mask's fixed 0..1, or a swatch
+			# with no data behind it. The lock is drawn at full strength because it is an author's choice
+			# that is actively shaping the image, and it is the one state worth noticing at a glance.
+			var live := bool(res.get("served", true)) and bool(rng.get("auto", true))
+			chip.modulate = Color(1, 1, 1, 0.9 if (live or bool(rng.get("locked", false))) else 0.55)
+			_preview_ranges[idx] = rng
+
 		if bytes.size() != PREVIEW_SIZE * PREVIEW_SIZE * 4:
 			continue
 		var img := Image.create_from_data(PREVIEW_SIZE, PREVIEW_SIZE, false, Image.FORMAT_RGBA8, bytes)
