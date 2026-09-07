@@ -41,6 +41,11 @@ var host_brush: Pasture3DTerrainBrush = null
 ## Written where the tap arguments are formed, and nowhere else.
 var last_preview_dispatch: Dictionary = {}
 
+## §7's inspector dock, when the plugin made one. The panel drives its SELECTION and its REFRESH and
+## reads nothing back: the dock owns its own tap, at its own resolution, and a panel that started reading
+## the dock's field would have quietly reintroduced the shared-tap upsample §7 exists to refuse.
+var inspect_dock = null
+
 var _graphedit: GraphEdit
 var _search_dialog: PopupPanel
 var _add_button: Button
@@ -2219,6 +2224,11 @@ func _refresh_previews() -> void:
 	var token := _preview_token
 	WorkerThreadPool.add_task(func():
 		_preview_worker(token, program, input, rect, tap_slots, slot_to_node, slot_view, px))
+	# The inspector's second pass rides the SAME debounce (§7) rather than keeping a timer of its own:
+	# two debounces over one graph would let the numbers and the picture disagree about which edit they
+	# are showing, and the numbers would win the argument because they look precise.
+	if inspect_dock != null and is_instance_valid(inspect_dock):
+		inspect_dock.refresh()
 
 
 ## Draw each PATH-typed preview from the path the graph RESOLVED (§6.1).
@@ -2392,6 +2402,8 @@ func _on_node_selected(p_node: Node) -> void:
 		return
 	var i := _idx(p_node.name)
 	if i >= 0 and i < graph.nodes.size() and graph.nodes[i] != null:
+		if inspect_dock != null and is_instance_valid(inspect_dock):
+			inspect_dock.set_target(i) # a no-op while pinned, which is what the pin is for
 		if plugin != null:
 			# Offer the road list BEFORE the inspector builds, not after. The keys used to arrive only
 			# from a bake or a preview render, which means the first time you click a Road Source — the

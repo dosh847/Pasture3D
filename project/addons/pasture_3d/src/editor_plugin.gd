@@ -23,6 +23,7 @@ var ui: Node # Pasture3DUI see Godot #75388
 var asset_dock: PanelContainer
 var layers_dock: PanelContainer
 var graph_editor: Pasture3DGraphEditor # bottom-panel visual node-graph editor
+var graph_inspect_dock: Pasture3DGraphInspector # §7's probe/histogram/profile dock (V4)
 var graph_inspector: Pasture3DGraphInspectorPlugin # "Edit in Graph Editor" button
 var brush_gizmo: EditorNode3DGizmoPlugin # Clickable origin markers for brush nodes
 ## The selected Pasture3D brush, re-derived on `selection_changed` rather than per input event —
@@ -104,6 +105,21 @@ func _enter_tree() -> void:
 	# "Edit in Graph Editor" button the inspector plugin adds to a graph / graph modifier / plow brush.
 	graph_editor = Pasture3DGraphEditor.new()
 	graph_editor.initialize(self)
+	# The quantitative surface (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §7, phase V4). A real dock rather
+	# than a pane inside the bottom panel, because §7 makes it pinnable and selection-following: it has to
+	# stay readable while the author works in the graph, which a panel sharing the bottom slot cannot do.
+	#
+	# `dock_open` is driven from visibility here rather than read inside the inspector, because §7's rule
+	# is that the 512 px second pass is dispatched ONLY while the dock is open, and a Control that is not
+	# in a tree reports `visible == true` — which would leave a headless gate unable to measure the closed
+	# case at all.
+	graph_inspect_dock = Pasture3DGraphInspector.new()
+	graph_inspect_dock.editor = graph_editor
+	graph_editor.inspect_dock = graph_inspect_dock
+	add_control_to_dock(DOCK_SLOT_RIGHT_BL, graph_inspect_dock)
+	graph_inspect_dock.visibility_changed.connect(_on_inspect_dock_visibility)
+	graph_inspect_dock.dock_open = graph_inspect_dock.is_visible_in_tree()
+
 	graph_inspector = Pasture3DGraphInspectorPlugin.new()
 	graph_inspector.editor = graph_editor
 	graph_inspector.plugin = self
@@ -171,6 +187,9 @@ func _exit_tree() -> void:
 	layers_dock.queue_free()
 	if graph_inspector:
 		remove_inspector_plugin(graph_inspector)
+	if graph_inspect_dock:
+		remove_control_from_docks(graph_inspect_dock)
+		graph_inspect_dock.queue_free()
 	if graph_editor:
 		graph_editor.remove_dock()
 		graph_editor.queue_free()
@@ -1084,3 +1103,17 @@ func add_do_method(p_method: Callable) -> void:
 
 func commit_action(p_execute: bool) -> void:
 	get_undo_redo().commit_action(p_execute)
+
+
+## Keep the inspector's dispatch rule tied to what is actually on screen (§7).
+##
+## A closed dock that kept tapping would spend up to a third of the preview debounce on a picture nobody
+## is looking at — which arrives as "the editor got slower" with no commit to bisect. Re-opening refreshes
+## immediately rather than waiting for the next graph edit, so the dock is never blank on the strength of
+## a rule about performance.
+func _on_inspect_dock_visibility() -> void:
+	if graph_inspect_dock == null:
+		return
+	graph_inspect_dock.dock_open = graph_inspect_dock.is_visible_in_tree()
+	if graph_inspect_dock.dock_open:
+		graph_inspect_dock.refresh()

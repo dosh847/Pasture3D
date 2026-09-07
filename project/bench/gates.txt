@@ -622,3 +622,11 @@ bench/RoadSmoothGate.tscn
 # instead of reading `derived_path()` would draw a confident, plausible, wrong line — and an undraped path
 # on terrain does not look broken. The gate fails on exactly that substitution.
 bench/GraphPathOverlayGate.tscn
+
+# The inspector dock (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §7, phase V4) — probe, histogram, statistics,
+# PATH profiles, the pin, and the channel selector §7 assigned to this phase on 2026-09-07.
+# Two criteria carry the weight. [A2]: the inspector taps at its OWN 512 px, never the thumbnail's 128
+# upsampled — sharing one tap looks like pure savings and is how the quantitative-while-wrong defect gets
+# reintroduced. [B]: the histogram bins over the DECLARED range, so a 0.28–0.32 mask fills four bins of a
+# 0..1 axis and leaves the rest empty; an auto-fitting binner fails it and its control together.
+bench/GraphInspectGate.tscn
