@@ -103,9 +103,16 @@ void Pasture3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 		return;
 	}
 
-	// _stroke_layer is captured in start_operation when this is a non-destructive height-layer edit.
-	// When set, height writes go into that layer and the touched rects are recomposited (see below).
-	const bool route_to_layer = _stroke_layer.is_valid() && map_type == TYPE_HEIGHT;
+	// _stroke_layer is captured in start_operation when this is a non-destructive layer edit. When set,
+	// writes go into that layer and the touched rects are recomposited (see below).
+	//
+	// The test is "the active layer is of the map type this TOOL writes", not "the map type is HEIGHT".
+	// It was the latter until the graph channel sinks needed it (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md
+	// §9.1a): a control or colour layer could be reserved, and the refusal in start_operation sat inside
+	// the height branch, so a reserved control layer refused nothing and a texture stroke went straight
+	// past it into the region map. Extending the test is what gives §12.16's rule -- a tool layer is never
+	// hand-painted, touch-ups go on a layer above it -- a mechanism for the map types the sinks use.
+	const bool route_to_layer = _stroke_layer.is_valid() && _stroke_layer->get_map_type() == map_type;
 	// Erase is purely a non-destructive layer op: it lowers the active layer's coverage so the
 	// composite reveals the layers beneath. With no routed overlay layer there is nothing to reveal,
 	// so the stroke is a no-op (and must not fall through to the destructive region-map write below).
@@ -578,17 +585,38 @@ void Pasture3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 					}
 					_backup_layer_tile(region_loc);
 					const real_t new_weight = CLAMP(cur_weight - brush_alpha * strength, 0.f, 1.f);
-					real_t keep_value = _stroke_layer->get_value(region_loc, map_pixel_position);
-					if (std::isnan(keep_value)) {
-						keep_value = dest.r;
+					if (map_type == TYPE_COLOR) {
+						// Same erase rule for colour: keep the authored RGB and lower only the coverage,
+						// so the composite re-derives the pixel from the layers beneath.
+						Color keep = _stroke_layer->get_sample(region_loc, map_pixel_position);
+						keep.a = 1.f; // set_sample_color takes coverage separately; A here is unused.
+						_stroke_layer->set_sample_color(region_loc, map_pixel_position, keep, new_weight);
+					} else {
+						real_t keep_value = _stroke_layer->get_value(region_loc, map_pixel_position);
+						if (std::isnan(keep_value)) {
+							keep_value = dest.r;
+						}
+						_stroke_layer->set_sample(region_loc, map_pixel_position, keep_value, new_weight);
 					}
-					_stroke_layer->set_sample(region_loc, map_pixel_position, keep_value, new_weight);
 				} else {
 					// Non-destructive: author the brush-computed height into the active layer (full
 					// coverage), then recomposite the touched rect below. srcf was read from the live
 					// composited region map above, so the brush feels identical to direct editing.
 					_backup_layer_tile(region_loc);
-					_stroke_layer->set_sample(region_loc, map_pixel_position, dest.r, 1.f);
+					if (map_type == TYPE_COLOR) {
+						// Colour overlays are RGBA8 tiles: RGB is the albedo, A is the coverage weight.
+						// dest.a carries roughness here (read from the composited region map), which is
+						// NOT what an overlay's alpha means -- so it is dropped and full coverage is
+						// authored instead. The ROUGHNESS tool never reaches this branch (see
+						// start_operation), so no roughness edit is lost by doing so.
+						_stroke_layer->set_sample_color(region_loc, map_pixel_position, dest, 1.f);
+					} else {
+						// Height authors metres; control authors the packed uint32 as float bits, which
+						// is the same encoding dest.r already holds (the TYPE_CONTROL branch above ends
+						// in `dest = Color(as_float(bits), ...)`) and the same one set_control_on_layer
+						// writes. Nothing needs re-packing.
+						_stroke_layer->set_sample(region_loc, map_pixel_position, dest.r, 1.f);
+					}
 				}
 				Rect2i px_rect(map_pixel_position, V2I(1));
 				if (_stroke_dirty.has(region_loc)) {
@@ -1035,12 +1063,20 @@ void Pasture3DEditor::start_operation(const Vector3 &p_global_position) {
 	_layer_undo_tiles.clear();
 	_layer_redo_tiles.clear();
 	_stroke_dirty.clear();
-	if ((_tool == SCULPT || _tool == HEIGHT) && _terrain->get_data()->is_layer_routing()) {
+	// Which map type this tool writes; a layer of that type is the stroke's target. ROUGHNESS is the one
+	// deliberate hole: it authors the colour map's ALPHA, and on a colour OVERLAY alpha is the coverage
+	// weight -- roughness comes from the colour Base and _composite_color_region leaves A untouched
+	// (pasture_3d_data.cpp:1606). There is no per-overlay place to put a roughness value, so a roughness
+	// stroke keeps writing the region map directly rather than being silently dropped into a weight.
+	const MapType tool_type = _get_map_type();
+	const bool routable_tool = tool_type != TYPE_MAX && _tool != ROUGHNESS;
+	if (routable_tool && _terrain->get_data()->is_layer_routing()) {
 		Ref<Pasture3DLayerStack> stack = _terrain->get_data()->get_layer_stack();
 		Ref<Pasture3DLayer> active = stack.is_valid() ? stack->get_layer(stack->get_active_layer()) : Ref<Pasture3DLayer>();
-		// Only height layers receive sculpt/height strokes. A control/color active layer is simply not a
-		// height-edit target, so the stroke writes the region height map directly (as on a plain terrain).
-		if (active.is_valid() && active->get_map_type() == TYPE_HEIGHT) {
+		// The active layer receives the stroke only when it is of the type this tool writes. A colour
+		// layer is not a sculpt target and a height layer is not a texture target; in either case the
+		// stroke writes the region map directly, as it does on a plain terrain.
+		if (active.is_valid() && active->get_map_type() == tool_type) {
 			// A hidden active layer also swallows the stroke: editing geometry the user can't see is
 			// confusing, and the compositor skips hidden layers anyway so the edit would silently vanish.
 			if (!active->is_visible()) {
