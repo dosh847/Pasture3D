@@ -65,10 +65,6 @@ func input_names() -> PackedStringArray:
 	return PackedStringArray()
 
 
-func output_port_type() -> int:
-	return PortType.CURVE
-
-
 func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.CURVE])
 

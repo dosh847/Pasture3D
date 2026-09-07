@@ -109,7 +109,7 @@ func input_port_types() -> PackedInt32Array:
 		PortType.VECTOR,
 		PortType.FLOAT,
 		PortType.FLOAT,
-		PortType.MASK,
+		PortType.FLOAT,
 	])
 
 

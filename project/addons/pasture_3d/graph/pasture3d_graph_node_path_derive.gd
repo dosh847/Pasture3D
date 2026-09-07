@@ -95,10 +95,6 @@ func output_names() -> PackedStringArray:
 	return PackedStringArray(["path"])
 
 
-func output_port_type() -> int:
-	return PortType.PATH
-
-
 func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.PATH])
 

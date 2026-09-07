@@ -90,8 +90,11 @@ func needs_grid() -> bool:
 	return true
 
 
-func output_port_type() -> int:
-	return PortType.MASK
+## MASK, and it used to say so only through the singular `output_port_type()` while inheriting `[HEIGHT]`
+## from the plural. The editor colours a socket from the plural and the preview typed it from the
+## singular, so this node's output port was drawn HEIGHT-blue and rendered as a mask.
+func output_port_types() -> PackedInt32Array:
+	return PackedInt32Array([PortType.MASK])
 
 
 func input_count() -> int:
@@ -109,7 +112,7 @@ func input_port_types() -> PackedInt32Array:
 		PortType.FLOAT,
 		PortType.FLOAT,
 		PortType.FLOAT,
-		PortType.MASK,
+		PortType.FLOAT,
 	])
 
 

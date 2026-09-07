@@ -31,9 +31,9 @@ func input_port_types() -> PackedInt32Array:
 	return PackedInt32Array([
 		PortType.HEIGHT,
 		PortType.MASK,
-		PortType.HEIGHT,
-		PortType.MASK,
-		PortType.MASK,
+		PortType.FIELD,
+		PortType.FIELD,
+		PortType.FIELD,
 	])
 
 
@@ -55,9 +55,9 @@ func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([
 		PortType.TERRAIN_BUS,
 		PortType.MASK,
-		PortType.HEIGHT,
-		PortType.MASK,
-		PortType.MASK,
+		PortType.FIELD,
+		PortType.FIELD,
+		PortType.FIELD,
 	])
 
 

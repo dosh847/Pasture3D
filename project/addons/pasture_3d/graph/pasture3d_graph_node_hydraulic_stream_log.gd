@@ -144,7 +144,7 @@ func output_names() -> PackedStringArray:
 
 
 func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.MASK])
+	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.FIELD])
 
 
 func node_warnings() -> PackedStringArray:

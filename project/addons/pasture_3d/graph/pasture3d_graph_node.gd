@@ -208,17 +208,52 @@ func has_output() -> bool:
 
 
 ## Port data types for visual wiring and validation.
+##
+## ---- FIELD TYPES vs VALUE TYPES ----
+##
+## The type says whether a port carries a GRID or a NUMBER, and that is not a convention — it is the
+## declaration every other consumer reads. FIELD types (HEIGHT, MASK, FIELD, SIGNED, TERRAIN_BUS, PATH)
+## carry one value per cell; VALUE types (FLOAT, INT, BOOL, VECTOR, CURVE, COLOR) carry one value for the
+## whole port. `native_param_ports()` must agree: a value-typed input declares a params slot >= 0, a
+## field-typed input declares -1. GraphPortTypeGate [C] asserts exactly that correspondence.
+##
+## Getting it wrong is silent and looks like a feature: an `amount` port typed MASK is coloured amber, so
+## the editor tells the author they may wire a mask FIELD in for per-cell blending. The native evaluator
+## reads cell 0 of that buffer and blends uniformly. Seven ports shipped that way.
+##
+## ---- WHY FOUR SCALAR-FIELD TYPES AND NOT ONE ----
+##
+## A grid of floats is not self-describing, and the difference decides how it is RENDERED and whether a
+## range may be rescaled (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §5.2):
+##
+##   HEIGHT  terrain, in metres above sea level. Lighting it means something, so it is hillshaded.
+##   MASK    bounded [0,1] BY CONSTRUCTION. Rescaling one asserts something false.
+##   FIELD   an unsigned quantity in its own units, unbounded — distance, depth, flow, metres eroded.
+##   SIGNED  the same, but signed, so zero is meaningful and must land mid-ramp.
+##
+## The operative test for MASK vs FIELD, arrived at by auditing every channel in the registry: a channel
+## is a MASK only if something DIVIDED it into [0,1], and then the divisor is part of its meaning and has
+## to be reachable (`Pasture3DGraphNodeMudslide.deposition_divisor()` and `smooth_fill`'s
+## `last_deposition_divisor` are the two that do this correctly). A channel that was never divided is a
+## FIELD no matter how small its numbers happen to be on the fixture in front of you.
+##
+## ---- ADDING A TYPE ----
+##
+## Four steps, and PASTURE3D_GRAPH_PORT_TYPES_GUIDE.md is the long form. Port colour is
+## `PORT_COLORS[type % size]`, so a type without a colour silently reuses another's rather than failing.
 enum PortType {
 	HEIGHT = 0,       # Scalar elevation field (meters) - Sky Blue
-	MASK = 1,         # Normalized scalar [0.0, 1.0] - Amber
-	VECTOR = 2,       # Directional 2D/3D vector / angle field - Purple
+	MASK = 1,         # Normalized scalar FIELD [0.0, 1.0], by construction - Amber
+	VECTOR = 2,       # Directional 2D/3D vector / angle value - Purple
 	CURVE = 3,        # Spline / transfer curve - Emerald
-	FLOAT = 4,        # General scalar float value / factor - Cyan
-	INT = 5,          # Discrete count / integer - Cobalt Blue
+	FLOAT = 4,        # General scalar float VALUE / factor (never a grid) - Cyan
+	INT = 5,          # Discrete count / integer value - Cobalt Blue
 	COLOR = 6,        # RGBA color / tint / gradient band - Magenta/Pink
 	BOOL = 7,         # Boolean toggle / gate switch - Lime Yellow
 	TERRAIN_BUS = 8,  # Bundled multi-channel stream - Warm Gold
 	PATH = 9,         # World-space polyline with per-vertex width (Pasture3DGraphPath) - Slate
+	FIELD = 10,       # Unsigned scalar field in its OWN units, unbounded - Yellow-Green
+	SIGNED = 11,      # Signed scalar field in its own units; zero is meaningful - Magenta
 }
 
 
@@ -313,8 +348,25 @@ func input_port_types() -> PackedInt32Array:
 
 ## Output port type of the PRIMARY (port 0) output. Defaults to HEIGHT. Kept as the single-output
 ## shorthand; `output_port_types()[0]` is the same value.
+## FINAL — do not override. The type of output port 0, derived from `output_port_types()`.
+##
+## This used to be overridable and 14 nodes did, which made it a SECOND declaration of a fact that
+## already had one. They drifted, exactly as `PASTURE3D_TERRAIN_GRAPH_GUIDE.md` §9 says two numbers kept
+## in two places always do: `Pasture3DGraphNodeMask` overrode this to MASK and inherited `[HEIGHT]` from
+## the plural, so the editor coloured its output socket HEIGHT-blue (it reads the plural) while the
+## preview treated it as a mask (it reads this). One node's face disagreed with its own render.
+##
+## Declare `output_port_types()` and only that.
 func output_port_type() -> int:
-	return output_port_types()[0]
+	var t := output_port_types()
+	return int(t[0]) if t.size() > 0 else PortType.HEIGHT
+
+
+## True when `p_type` carries one value per CELL rather than one value for the port. See the PortType
+## header: this is the split `native_param_ports()` must agree with, and the gate asserts it.
+static func is_field_type(p_type: int) -> bool:
+	return p_type == PortType.HEIGHT or p_type == PortType.MASK or p_type == PortType.FIELD \
+			or p_type == PortType.SIGNED or p_type == PortType.TERRAIN_BUS or p_type == PortType.PATH
 
 
 ## How many output ports this node exposes. 1 for every node except a multi-output SOLVER, which returns

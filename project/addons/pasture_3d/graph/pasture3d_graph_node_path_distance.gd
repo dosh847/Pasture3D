@@ -98,7 +98,7 @@ func output_names() -> PackedStringArray:
 ## two are not. `t` is normalised but SIGNED and unbounded off the carriageway, which is also not a mask.
 ## `height` is metres above sea level, which is what HEIGHT means most literally of the four.
 func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.HEIGHT, PortType.HEIGHT, PortType.HEIGHT])
+	return PackedInt32Array([PortType.FIELD, PortType.FIELD, PortType.SIGNED, PortType.HEIGHT])
 
 
 func reads_paths() -> bool:

@@ -86,7 +86,7 @@ func output_names() -> PackedStringArray:
 
 
 func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.HEIGHT, PortType.MASK])
+	return PackedInt32Array([PortType.HEIGHT, PortType.FIELD, PortType.MASK])
 
 
 func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, _p_rect: Rect2) -> Array:

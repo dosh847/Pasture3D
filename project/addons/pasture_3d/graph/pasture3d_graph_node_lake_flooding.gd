@@ -120,7 +120,7 @@ func output_names() -> PackedStringArray:
 
 
 func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.MASK])
+	return PackedInt32Array([PortType.HEIGHT, PortType.FIELD, PortType.MASK])
 
 
 func _param_changed() -> void:

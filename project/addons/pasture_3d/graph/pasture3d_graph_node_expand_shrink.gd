@@ -100,7 +100,7 @@ func input_names() -> PackedStringArray:
 func input_port_types() -> PackedInt32Array:
 	# `in` is HEIGHT, but the kernel is a pure local min/max and is equally correct on a mask. Typing it
 	# HEIGHT keeps the editor's connection rules simple without restricting what it actually does.
-	return PackedInt32Array([PortType.HEIGHT, PortType.FLOAT, PortType.MASK])
+	return PackedInt32Array([PortType.HEIGHT, PortType.FLOAT, PortType.FLOAT])
 
 
 func input_unwired_default(p_port: int) -> float:

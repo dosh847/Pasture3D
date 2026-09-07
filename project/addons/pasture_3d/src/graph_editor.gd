@@ -23,6 +23,8 @@ const PORT_COLORS: Array[Color] = [
 	Color(0.66, 0.90, 0.81), # 7: BOOL (#a8e6cf) - Lime Yellow
 	Color(0.95, 0.77, 0.06), # 8: TERRAIN_BUS (#f1c40f) - Warm Gold
 	Color(0.58, 0.65, 0.71), # 9: PATH (#95a5a6) - Slate: road-coloured, and the only non-field port
+	Color(0.65, 0.85, 0.25), # 10: FIELD (#a6d940) - Yellow-Green: an unsigned quantity, not a mask
+	Color(0.85, 0.35, 0.75), # 11: SIGNED (#d959bf) - Magenta: signed, so zero is mid-ramp
 ]
 
 var plugin: EditorPlugin
@@ -522,23 +524,7 @@ func _build_ui() -> void:
 	_graphedit.right_disconnects = true
 	_graphedit.minimap_enabled = false
 	
-	# Register Phase 4 Valid Port Connection Types
-	_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.HEIGHT, Pasture3DGraphNode.PortType.HEIGHT)
-	_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.MASK, Pasture3DGraphNode.PortType.MASK)
-	_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.HEIGHT, Pasture3DGraphNode.PortType.MASK)
-	_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.MASK, Pasture3DGraphNode.PortType.HEIGHT)
-	_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.VECTOR, Pasture3DGraphNode.PortType.VECTOR)
-	_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.CURVE, Pasture3DGraphNode.PortType.CURVE)
-	# PATH connects ONLY to PATH. Every other type pair here is float-to-float underneath and a mismatch is
-	# merely wrong-looking; a PATH wire carries a resource, so a HEIGHT plugged into it would be a null the
-	# consumer has to defend against on every cell.
-	_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.PATH, Pasture3DGraphNode.PortType.PATH)
-
-	_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.HEIGHT)
-	_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.MASK)
-	_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.VECTOR)
-	_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.CURVE)
-	_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.PATH)
+	register_connection_types(_graphedit)
 
 	_graphedit.connection_request.connect(_on_connection_request)
 	_graphedit.disconnection_request.connect(_on_disconnection_request)
@@ -2107,3 +2093,43 @@ func _idx(p_name) -> int:
 func _frame_idx(p_name) -> int:
 	var s := String(p_name)
 	return int(s.substr(1)) if s.begins_with("f") else -1
+
+
+## Register every legal cross-type wire on a GraphEdit. STATIC and separate so GraphPortTypeGate can
+## exercise the real matrix instead of a copy of it — a gate that restated these pairs would agree
+## with itself forever while the editor refused wires.
+static func register_connection_types(p_graphedit: GraphEdit) -> void:
+	# Valid port connection pairs.
+	#
+	# THIS MATRIX HAS TO GROW WITH THE ENUM, and that is the whole reason it is written as a loop rather
+	# than as a list of pairs. GraphEdit permits same-type wires on its own; `add_valid_connection_type` is
+	# only for CROSS-type pairs. So a new PortType that nobody adds here connects to nothing but itself —
+	# and the failure arrives late and looks unrelated, as "I can't re-make a wire that is already in my
+	# graph", because a stored connection is a pair of indices and keeps evaluating either way.
+	#
+	# The four scalar FIELD types are one grid of floats underneath and interconvert freely; the type says
+	# how to READ and RENDER the numbers (PASTURE3D_GRAPH_PORT_TYPES_GUIDE.md), not how they are stored, so
+	# refusing the wire would buy nothing and cost the author a Reroute.
+	var scalar_fields: Array[int] = [
+		Pasture3DGraphNode.PortType.HEIGHT,
+		Pasture3DGraphNode.PortType.MASK,
+		Pasture3DGraphNode.PortType.FIELD,
+		Pasture3DGraphNode.PortType.SIGNED,
+	]
+	for from_t in scalar_fields:
+		for to_t in scalar_fields:
+			p_graphedit.add_valid_connection_type(from_t, to_t)
+	p_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.VECTOR, Pasture3DGraphNode.PortType.VECTOR)
+	p_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.CURVE, Pasture3DGraphNode.PortType.CURVE)
+	# PATH and TERRAIN_BUS connect ONLY to themselves. Every pair above is float-to-float underneath and a
+	# mismatch is merely wrong-looking; a PATH wire carries a resource, so a HEIGHT plugged into it would be
+	# a null the consumer has to defend against on every cell, and a BUS is a bundle rather than a field.
+	p_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.PATH, Pasture3DGraphNode.PortType.PATH)
+	p_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.TERRAIN_BUS, Pasture3DGraphNode.PortType.TERRAIN_BUS)
+
+	for t in scalar_fields:
+		p_graphedit.add_valid_right_disconnect_type(t)
+	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.VECTOR)
+	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.CURVE)
+	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.PATH)
+	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.TERRAIN_BUS)

@@ -128,7 +128,7 @@ func output_names() -> PackedStringArray:
 
 
 func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.MASK, PortType.MASK])
+	return PackedInt32Array([PortType.HEIGHT, PortType.FIELD, PortType.FIELD, PortType.FIELD])
 
 
 ## The oracle is what this node IS, so it has to be what this node RUNS. Without these two, the class

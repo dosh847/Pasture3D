@@ -90,10 +90,6 @@ func output_names() -> PackedStringArray:
 	return PackedStringArray(["mask"])
 
 
-func output_port_type() -> int:
-	return PortType.MASK
-
-
 func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.MASK])
 
