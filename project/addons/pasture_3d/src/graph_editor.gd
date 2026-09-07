@@ -86,6 +86,13 @@ var _preview_chips: Dictionary = {}
 ## time from data that may already have moved. It is also what the gate reads: asserting on a range the
 ## gate computed for itself would prove the gate can find a min and a max, not that the preview used one.
 var _preview_ranges: Dictionary = {}
+## Why the LAST refresh produced nothing, as `{"reason", "node", "op", "detail"}` — empty when it produced
+## something. Written at every early return in `_refresh_previews`, which is what §5.5 is about: those
+## returns used to leave the previous thumbnails on screen with nothing saying they were frozen, and a
+## stale thumbnail that looks live is worse than no thumbnail. Read by the gate for the same reason
+## `last_preview_dispatch` is: asserting on a fresh `native_supported()` call would measure the graph, not
+## what the editor did about it.
+var last_preview_block: Dictionary = {}
 var _preview_timer: Timer = null      # debounces refreshes; one-shot, restarted on each graph change
 var _preview_token: int = 0           # bumped per dispatch so a stale async result is dropped on apply
 
@@ -549,6 +556,11 @@ func _get_preview_input_data(p_size: int = PREVIEW_SIZE) -> Dictionary:
 ## whatever it is handed up to PREVIEW_SIZE anyway. Do NOT raise this to PREVIEW_SIZE: 16384 cross-language
 ## calls on the main thread is the cost the doc comment above is warning about.
 const GROUND_SAMPLE_SIZE: int = 64
+
+## What a frozen thumbnail is tinted to. Desaturated and dimmed, far enough from the live range that it
+## reads as "not current" at a glance across a canvas of eight nodes — which is the only distance at which
+## anyone actually looks at these.
+const STALE_MODULATE := Color(0.45, 0.48, 0.55, 0.75)
 
 ## Memo for `_sample_host_ground`, keyed on the brush instance and the world rect it was read over. Cleared
 ## whenever the host binding changes. Without it the read would be paid on EVERY debounced refresh, which is
@@ -1909,6 +1921,49 @@ static func range_chip_text(p_range: Dictionary) -> String:
 	return "%s %.2f - %.2f" % [glyph, float(p_range.get("min", 0.0)), float(p_range.get("max", 1.0))]
 
 
+## Mark every VISIBLE thumbnail as frozen, and say why on its chip (§5.5).
+##
+## Desaturated rather than blanked: the last image is still the most informative thing available, and
+## throwing it away would cost the author the only picture they have. What must not survive is the
+## IMPRESSION that it is current — so the modulate drops it out of the live range and the chip stops
+## reporting a measurement and reports the block instead.
+##
+## `p_report` is the graph's own `native_block_report()` where there is one. The node it names is looked up
+## and its title used, because "erosion_thermal" means something to the author and node index 7 does not.
+func _mark_previews_stale(p_report: Dictionary) -> void:
+	last_preview_block = p_report
+	if p_report.is_empty():
+		return
+	var label := String(p_report.get("reason", "the preview could not be evaluated"))
+	var ni: int = int(p_report.get("node", -1))
+	if ni >= 0 and graph != null and ni < graph.nodes.size() and graph.nodes[ni] != null:
+		var op := String(p_report.get("op", ""))
+		label = "%s: %s" % [op if not op.is_empty() else "node %d" % ni, label]
+	for idx in _preview_rects:
+		var tr = _preview_rects[idx]
+		if is_instance_valid(tr):
+			tr.modulate = STALE_MODULATE
+		if _preview_chips.has(idx) and is_instance_valid(_preview_chips[idx]):
+			var chip: Button = _preview_chips[idx]
+			chip.text = "STALE"
+			chip.tooltip_text = label
+			chip.modulate = Color(1.0, 0.75, 0.4, 1.0)
+	# Once, to Output, rather than once per thumbnail: ten stale nodes are one broken graph.
+	push_warning("Pasture3D graph preview is stale — %s%s" % [label,
+			("  (%s)" % p_report["detail"]) if not String(p_report.get("detail", "")).is_empty() else ""])
+
+
+## Undo `_mark_previews_stale`. Called when a refresh gets far enough to dispatch, so a graph that starts
+## lowering again stops looking frozen without needing a rebuild.
+func _clear_previews_stale() -> void:
+	if last_preview_block.is_empty():
+		return
+	last_preview_block = {}
+	for idx in _preview_rects:
+		if is_instance_valid(_preview_rects[idx]):
+			_preview_rects[idx].modulate = Color(1, 1, 1, 1)
+
+
 ## Rule 3's gesture: a click on the chip pins the range that is currently on screen; a second click
 ## releases it back to AUTO.
 ##
@@ -1948,17 +2003,37 @@ func _refresh_previews() -> void:
 	if graph == null or _preview_rects.is_empty():
 		return
 	if not ClassDB.class_has_method("Pasture3DUtil", "graph_eval_grid_taps"):
-		return # extension without the multi-tap primitive; skip previews rather than fall back to a re-eval
+		# Skip rather than fall back to a re-evaluation — but SAY so. This is a stale or missing DLL, and
+		# it used to present as thumbnails that simply never updated.
+		_mark_previews_stale({"reason": "this build has no graph_eval_grid_taps; the extension is stale",
+				"node": -1, "op": &"", "detail": "rebuild the GDExtension"})
+		return
 	var roots: Array = []
 	for i in range(graph.nodes.size()):
 		var n: Pasture3DGraphNode = graph.nodes[i]
 		if n != null and n.preview_on and _preview_rects.has(i):
 			roots.append(i)
 	if roots.is_empty():
+		# NOT a failure and deliberately not marked stale: nothing is preview-on, so there is no visible
+		# thumbnail to mislead anyone. Clearing is right — a graph whose previews were all switched off
+		# must not keep a stale badge from the last time one was on.
+		_clear_previews_stale()
 		return
 	var compiled: Dictionary = graph.compile_graph_program_multi(roots)
 	if compiled.is_empty():
-		return # non-native graph (e.g. a solver mask wire); leave the last thumbnails in place this tick
+		# THE bail §5.5 is about. `compile_graph_program_multi` returning empty means this graph does not
+		# lower, so every thumbnail on screen is frozen at whatever it last managed — and the comment that
+		# used to be here ("leave the last thumbnails in place") described the defect rather than a policy.
+		# The report names the responsible node where one node is responsible.
+		var report: Dictionary = graph.native_block_report()
+		if report.is_empty():
+			# The scan found nothing but the compile still failed. Say exactly that rather than inventing
+			# a cause: a disagreement between the two is a real bug and hiding it would cost the next
+			# session the clue.
+			report = {"reason": "the graph did not compile, and the native block scan found no cause",
+					"node": -1, "op": &"", "detail": "these two disagree; that is itself a defect"}
+		_mark_previews_stale(report)
+		return
 	var program: Dictionary = compiled["program"]
 	var slot_of: Dictionary = compiled["slot_of"]
 	var tap_slots := PackedInt32Array()
@@ -1985,6 +2060,10 @@ func _refresh_previews() -> void:
 				"lock_max": n.preview_range_max,
 			}
 	if tap_slots.is_empty():
+		# Compiled, but no preview-on node survived into the program with a slot of its own — folded away,
+		# or dropped. Distinct from the bail above and worth its own words.
+		_mark_previews_stale({"reason": "the graph compiled but no previewed node has a slot in it",
+				"node": -1, "op": &"", "detail": "%d node(s) were previewed" % roots.size()})
 		return
 	# Evaluate over the host brush's ACTUAL footprint (its live spline shape + world rect) so generators
 	# sample where the bake really lands, not a canonical dome. Falls back to the canonical domain when the
@@ -1998,6 +2077,7 @@ func _refresh_previews() -> void:
 	if in_gw != PREVIEW_SIZE or in_gh != PREVIEW_SIZE:
 		input = Pasture3DUtil.resample_grid(input, in_gw, in_gh, PREVIEW_SIZE, PREVIEW_SIZE)
 	last_preview_dispatch = {"rect": rect, "gw": in_gw, "gh": in_gh, "brush": _find_host_brush()}
+	_clear_previews_stale()
 	_preview_token += 1
 	var token := _preview_token
 	WorkerThreadPool.add_task(func():

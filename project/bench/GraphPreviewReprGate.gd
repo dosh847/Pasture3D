@@ -61,10 +61,11 @@ func _ready() -> void:
 	_a2_the_rest_of_the_taxonomy()
 	_b_the_range_is_reported_and_lockable()
 	_c_unserved_is_visible()
+	_d_a_non_lowering_graph_says_so()
 	_h_host_binding_follows_the_gesture()
 	_i_the_input_preview_reads_the_hosts_ground()
 
-	if _checks < 57:
+	if _checks < 76:
 		print("\n    VACUOUS: only %d checks completed; the gate did not measure what it claims to." % _checks)
 		_fail += 1
 	print("\n=== %s (%d failures, %d checks) ===\n"
@@ -780,3 +781,151 @@ func _b_the_range_is_reported_and_lockable() -> void:
 	_check(g.content_key() != rev_before,
 			("control: a real content edit DOES bump the revision (%d -> %d), so [B4] measured the "
 			+ "view-state exemption and not a dead counter") % [rev_before, g.content_key()])
+
+
+# --- D -------------------------------------------------------------------------------------------------
+#
+# §5.5, second half: "a frozen thumbnail must never be indistinguishable from a live one".
+#
+# A graph that does not lower makes `compile_graph_program_multi` return empty, and `_refresh_previews`
+# used to `return` on that with the comment "leave the last thumbnails in place this tick". Which is what
+# it did — forever, silently, showing whatever the graph last managed to render. Per
+# `op-ids-omission-drops-graph-to-gdscript` the usual cause is ONE node, and until now nothing said which.
+#
+# What is asserted, and why in this order:
+#
+#   [D1] the graph's own report names the blocking node and its op. Asserted through `native_supported()`
+#        as the spec asks, so the report is checked to AGREE with the decision rather than to be
+#        plausible — the two read one scan, and a report that disagreed with the answer would be the
+#        worst possible outcome.
+#   [D2] the EDITOR marked its thumbnails. Read off `last_preview_block`, which the editor writes at the
+#        early return — not off a fresh `native_block_report()` call, which would pass whether or not the
+#        editor ever consulted it (`a-gate-that-calls-the-node-measures-nothing`).
+#   [D3] the visible mark: the chips say STALE and the images are tinted out of the live range.
+#
+# Control: a LOWERING graph marks nothing, reports nothing, and leaves its thumbnails untinted. Without it
+# every check here passes on an editor that marks everything stale unconditionally.
+func _d_a_non_lowering_graph_says_so() -> void:
+	print("\n[D] a graph that does not lower marks its thumbnails stale and names the blocker (§5.5)")
+
+	# ---- the blocking graph. `dla` is the fixture on purpose: its op is genuinely absent from
+	# `graph_op_ids()`, which is the historical case `op-ids-omission-drops-graph-to-gdscript` records —
+	# DLA ran unlowered for as long as it did precisely because nothing said so. A fabricated blocker
+	# would test the report; this tests it against the failure it was written for.
+	#
+	# A FROZEN solver was the first fixture here and does NOT work, which is worth recording: 
+	# `compile_graph_program_multi` does not bail on `blocks_native()`, only on an unimplemented op, the
+	# channel rule and an empty order. So a frozen solver compiles and previews through a live re-solve.
+	# That is a real disagreement between `native_supported()` and the multi-root compile, it is out of
+	# V1's scope, and changing lowering to fix it is exactly what standing constraint 1 warns against.
+	var g := Pasture3DTerrainGraph.new()
+	var src := Pasture3DGraphNodeRegistry.create(&"noise")
+	var blocker := Pasture3DGraphNodeRegistry.create(&"dla")
+	if src == null or blocker == null:
+		_check(false, "the registry could not create the fixture nodes; nothing was measured")
+		return
+	g.add_node(src, Vector2.ZERO)
+	g.add_node(blocker, Vector2(200, 0))
+	g.connect_ports(0, 0, 1, 0)
+	g.output_node = 1
+	src.preview_on = true
+	blocker.preview_on = true
+
+	# The fixture must actually block, or [D] measures a graph that was never in trouble.
+	var native_ops: Dictionary = Pasture3DUtil.graph_op_ids()
+	_check(not native_ops.has(blocker.op()),
+			"control: the fixture's op '%s' really is absent from graph_op_ids(), so [D] is not "
+			% blocker.op() + "asserting about a healthy graph")
+	_check(native_ops.has(src.op()),
+			"control: and the OTHER node in the same graph IS native, so one node is dropping the whole "
+			+ "graph — which is the defect being surfaced")
+	_check(not g.native_supported(),
+			"control: and the graph as a whole does not lower, which is the state §5.5 is about")
+
+	# [D1] the report, checked against the decision it must agree with.
+	var report: Dictionary = g.native_block_report()
+	_check(not report.is_empty(),
+			"[D1] the graph reports a reason rather than merely answering false")
+	_check(int(report.get("node", -1)) == 1,
+			"[D1] and it names the responsible NODE (got %d, expected 1)" % int(report.get("node", -1)))
+	_check(String(report.get("op", "")) == String(blocker.op()),
+			"[D1] and its op (got '%s', expected '%s')" % [report.get("op", ""), blocker.op()])
+	_check(not String(report.get("reason", "")).is_empty(),
+			"[D1] and gives a reason in words: '%s'" % report.get("reason", ""))
+
+	# The editor's early return is the one at `compile_graph_program_multi`, so that call must actually be
+	# returning empty. Without this control [D2] cannot tell "the editor did not mark" from "the editor
+	# was never in the state that marks".
+	var compiled: Dictionary = g.compile_graph_program_multi([0, 1])
+	_check(compiled.is_empty(),
+			"control: the multi-root compile really does return empty for this graph (keys=%s), which is "
+			% [compiled.keys()] + "the branch §5.5 is about")
+
+	# [D2] the EDITOR's record, written where it gave up — not a fresh call of the gate's own.
+	var ed = _panel()
+	ed.edit_graph(g, null, null)
+	ed._refresh_previews()
+	var blocked: Dictionary = ed.last_preview_block
+	_check(not blocked.is_empty(),
+			"[D2] the editor recorded WHY its refresh produced nothing (%s)" % [blocked.get("reason", "")])
+	_check(int(blocked.get("node", -1)) == 1,
+			"[D2] and the editor's record names the same node the graph does (got %d)"
+			% int(blocked.get("node", -1)))
+
+	# [D3] the visible mark. A record nobody can see is not what §5.5 asked for.
+	var tinted := 0
+	var stale_chips := 0
+	for idx in ed._preview_rects:
+		if is_instance_valid(ed._preview_rects[idx]) and ed._preview_rects[idx].modulate != Color(1, 1, 1, 1):
+			tinted += 1
+		if ed._preview_chips.has(idx) and is_instance_valid(ed._preview_chips[idx]) 				and ed._preview_chips[idx].text == "STALE":
+			stale_chips += 1
+	_check(ed._preview_rects.size() >= 2,
+			"control: the panel built %d thumbnails, so there is something to mark" % ed._preview_rects.size())
+	_check(tinted == ed._preview_rects.size() and tinted > 0,
+			"[D3] every visible thumbnail is tinted out of the live range (%d of %d)"
+			% [tinted, ed._preview_rects.size()])
+	_check(stale_chips == ed._preview_rects.size() and stale_chips > 0,
+			"[D3] and every chip says STALE instead of reporting a range it did not measure (%d of %d)"
+			% [stale_chips, ed._preview_rects.size()])
+
+	# ---- THE CONTROL. A lowering graph must mark NOTHING. Without this, an editor that tinted every
+	# thumbnail unconditionally would pass every check above.
+	var ok_graph := _one_previewable_graph()
+	_check(ok_graph.native_supported(),
+			"control: the healthy fixture DOES lower, so the comparison below is between two live states")
+	_check(ok_graph.native_block_report().is_empty(),
+			"control: and it reports NO block, so the report distinguishes rather than always answering")
+
+	var ed2 = _panel()
+	ed2.edit_graph(ok_graph, null, null)
+	ed2._refresh_previews()
+	_check(ed2.last_preview_block.is_empty(),
+			"control: the editor records no block for a lowering graph (got %s)" % [ed2.last_preview_block])
+	var ok_tinted := 0
+	for idx in ed2._preview_rects:
+		if is_instance_valid(ed2._preview_rects[idx]) and ed2._preview_rects[idx].modulate != Color(1, 1, 1, 1):
+			ok_tinted += 1
+	_check(ed2._preview_rects.size() > 0 and ok_tinted == 0,
+			"control: and none of its %d thumbnails is tinted, so [D3] measured the block and not a "
+			% ed2._preview_rects.size() + "panel that dims everything")
+
+	# [D4] the mark must LIFT. A graph that starts lowering again has to stop looking frozen, or the badge
+	# becomes the new permanent lie. Unblocking by MUTING the offending node — the remedy the report's own
+	# `detail` suggests — so this also checks that the advice works.
+	blocker.muted = true
+	ed.edit_graph(null, null, null)
+	ed.edit_graph(g, null, null)
+	ed._refresh_previews()
+	_check(ed.last_preview_block.is_empty(),
+			"[D4] muting the blocking node clears the editor's stale record — the remedy the report "
+			+ "names actually works (got %s)" % [ed.last_preview_block])
+	var still := 0
+	for idx in ed._preview_rects:
+		if is_instance_valid(ed._preview_rects[idx]) 				and ed._preview_rects[idx].modulate != Color(1, 1, 1, 1):
+			still += 1
+	_check(still == 0, "[D4] and un-tints the thumbnails (%d still tinted)" % still)
+
+	for n in [ed, ed2]:
+		if is_instance_valid(n):
+			n.queue_free()

@@ -1857,19 +1857,59 @@ func _native_supported_if_staged(p_out: int) -> bool:
 	return _native_supported_uncached(p_out, true)
 
 
+## True when this graph lowers to the native evaluator, and NOTHING ELSE. The reason it does not is
+## `native_block_report`'s business, and both read the same scan below — one rule, one place. A second
+## implementation of "why did this not lower" would drift from the one that decides, and it would drift
+## silently, because the report is only read when the answer is already "no".
 func _native_supported_uncached(p_out: int, p_ignore_derives: bool = false) -> bool:
+	return _native_block_scan(p_out, p_ignore_derives).is_empty()
+
+
+## WHY a graph does not lower, as `{"reason", "node", "op", "detail"}`, or `{}` when it does.
+##
+## Spec §5.5, the second half: "a frozen thumbnail must never be indistinguishable from a live one". A
+## graph that does not lower leaves the preview showing whatever it last managed to render, forever, with
+## nothing on screen saying so — and per `op-ids-omission-drops-graph-to-gdscript` the usual cause is a
+## single node, which this can name.
+##
+## `node` is -1 when no single node is responsible (an empty evaluation order, a wiring-level refusal).
+## Callers must not treat -1 as "no block": the presence of `reason` is the answer.
+##
+## This walks; it does not consult `_native_ok_cache`. It is called when something has already gone wrong
+## and a thumbnail is about to be marked stale, which is not a path worth memoising.
+func native_block_report(p_root_node: int = -1) -> Dictionary:
+	if force_gdscript_evaluation:
+		return {"reason": "force_gdscript_evaluation is on", "node": -1, "op": &"", "detail": ""}
+	var out := p_root_node if (p_root_node >= 0 and p_root_node < nodes.size()) else output_index()
+	if out < 0 or out >= nodes.size() or nodes[out] == null:
+		return {"reason": "the graph has no output node", "node": -1, "op": &"", "detail": ""}
+	return _native_block_scan(out, false)
+
+
+## The single scan both of the above read. Returns `{}` when the graph lowers, or the FIRST block found,
+## in the order the original guards ran — the order matters, because a graph can be blocked in more than
+## one way and the first is the one worth naming.
+func _native_block_scan(p_out: int, p_ignore_derives: bool = false) -> Dictionary:
 	var out := p_out
 	var order := _eval_order(out)
 	if order.is_empty():
-		return false
+		return {"reason": "the graph has no evaluation order (empty, or a cycle)",
+				"node": -1, "op": &"", "detail": ""}
 	# The allow-list used to be restated here as 63 op tags. It is `op_ids()` now — the same C++ list the
 	# lowering reads its id from, so "the native evaluator implements this op" is one fact rather than two
 	# that had to be kept in step. Forgetting an entry used to be silent: it did not fail, it dropped the
 	# WHOLE graph onto the script evaluator, which is how DLA ran unlowered for as long as it did.
 	var supported := op_ids()
 	for ni in order:
-		if nodes[ni] == null or (not nodes[ni].muted and not supported.has(nodes[ni].op())):
-			return false
+		if nodes[ni] == null:
+			return {"reason": "a node in the evaluation order is null", "node": ni, "op": &"", "detail": ""}
+		if not nodes[ni].muted and not supported.has(nodes[ni].op()):
+			# THE common case, and the one worth naming loudest: an op the native evaluator does not
+			# implement, or one simply missing from `graph_op_ids()`. Either way the WHOLE graph drops to
+			# the GDScript evaluator — erosion included — and until now it did so without a word.
+			return {"reason": "the native evaluator has no op for this node",
+					"node": ni, "op": nodes[ni].op(),
+					"detail": "add it to graph_op_ids() in src/pasture_3d_util.cpp, or mute the node"}
 		# A FROZEN solver owns a cache the native program knows nothing about. Lowering it silently re-solved
 		# on every evaluation and never reported itself stale, so the freeze looked like it worked while doing
 		# nothing at all — which is worse than being slow. Only DLA escaped it, and only because its op was
@@ -1879,7 +1919,9 @@ func _native_supported_uncached(p_out: int, p_ignore_derives: bool = false) -> b
 			# path is produced before the remainder is compiled and travels in the geometry table, so
 			# what reaches the kernel is one flat polyline -- the same thing an S4 filter hands it.
 			if not (p_ignore_derives and nodes[ni].derives_path_from_grid()):
-				return false
+				return {"reason": "this node owns a cache the native program cannot see (frozen solver "
+						+ "or grid-to-path derive)", "node": ni, "op": nodes[ni].op(),
+						"detail": "unfreeze it, or accept the GDScript evaluator for this graph"}
 	# A wire out of a secondary port (port >= 1, e.g. a solver's flow field) used to drop the whole graph
 	# to the GDScript evaluator unconditionally. Since P2b the program can carry channels, so the bail
 	# narrows to the case that is still unlowerable: reading a channel the NATIVE op does not write.
@@ -1897,7 +1939,10 @@ func _native_supported_uncached(p_out: int, p_ignore_derives: bool = false) -> b
 			var to_node := int(c[2])
 			var from_node := int(c[0])
 			if order.has(to_node) and order.has(from_node) 					and (int(c[1]) >= native_out_count(from_node) or int(c[3]) >= 4):
-				return false
+				return {"reason": "a wire reads a secondary channel the native op does not write",
+						"node": from_node, "op": nodes[from_node].op() if nodes[from_node] != null else &"",
+						"detail": "channel %d of %d native channels, into port %d"
+								% [int(c[1]), native_out_count(from_node), int(c[3])]}
 	# A compiled program carries four GRID slots, in0..in3, so a wire into port 4 or beyond has no in-slot.
 	# A driven SCALAR does not need one — the native evaluator reads cell 0 of the source buffer, and those
 	# ports now travel in the flat pdrv_* overflow table (see `native_param_ports`). A port >= 4 the node
@@ -1909,12 +1954,16 @@ func _native_supported_uncached(p_out: int, p_ignore_derives: bool = false) -> b
 			if not order.has(to_node) or nodes[to_node] == null:
 				continue
 			if nodes[to_node].muted:
-				return false # muted lowers to passthrough, which carries no params at all
+				# muted lowers to passthrough, which carries no params at all
+				return {"reason": "a wire drives a high port on a MUTED node, which lowers to passthrough",
+						"node": to_node, "op": nodes[to_node].op(), "detail": "port %d" % int(c[3])}
 			var pm := nodes[to_node].native_param_ports()
 			var port := int(c[3])
 			if port >= pm.size() or int(pm[port]) < 0:
-				return false
-	return true
+				return {"reason": "a wire drives a port the native op has no parameter slot for",
+						"node": to_node, "op": nodes[to_node].op(),
+						"detail": "port %d is not in native_param_ports()" % port}
+	return {}
 
 
 
