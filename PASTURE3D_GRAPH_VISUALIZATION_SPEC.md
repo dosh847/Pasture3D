@@ -1,7 +1,7 @@
 # Pasture3D Graph Visualization & Output Specification
 
 **Document:** `PASTURE3D_GRAPH_VISUALIZATION_SPEC.md`
-**Status:** **V1–V7b specified, unbuilt (2026-09-06).** Four open questions answered 2026-09-06 (§14.1). The substrate V1 and V2 extend — editor-owned
+**Status:** **V1–V7b specified, unbuilt (2026-09-06).** Ten open questions answered 2026-09-06 — eight in §14.1/§14.1b, plus §14.2 items 1 (measured) and 3 (settled). Two remain open (§14.2 items 2 and 4). The substrate V1 and V2 extend — editor-owned
 multi-tap previews, `graph_eval_grid_taps`, `GraphPreviewTapGate` — is BUILT and passing. V3's dependency
 (`derived_path()` on the derive family) is BUILT. V7's consumers (`Pasture3DRoadRuntime`,
 `Pasture3DWaterBody`) are BUILT and in use; V7a is the arrow back to them, not the consumers. V7b's seam
@@ -18,14 +18,16 @@ family §7.5, and §12.3's named-but-unclosed producer→consumer gap), `PASTURE
 
 ### Reading map
 
-Every section below opens with a **Read first** block naming what to review before working on it. This is
-the same information by phase, for planning:
+Every *working* section below opens with a **Read first** block naming what to review before working on it
+(§13 and §14 carry none — they are a scope boundary and a question log, not work). This is the same
+information by phase, for planning:
 
 | Guide | Needed by | Why |
 | :--- | :--- | :--- |
 | `PASTURE3D_TERRAIN_GRAPH_GUIDE.md` | **All** | The graph as built, not as planned. §8 (the editor) is this document's starting position; §9 (sockets, `SLOT_SPINS`, never restate a range) constrains V1 and V6; §10 says which existing gate owns which claim; **§11 lists three bugs that are earlier instances of §4's defects** |
 | `PASTURE3D_NODE_ACCELERATION_GUIDE.md` | V2, V5, V6, V7b | §2 Step 0 (is this node allowed to exist), §3.2 (lowering safety), §3.4 + §3.8 (gate discipline every gate here is written against), §5 (the memory pool V2 changes) |
 | `PASTURE3D_LAYERS_GUIDE.md` | **V5**, V6 | §10.7 already built the control/colour write path V5 calls; §8.1 is the four-step contract every sink follows; §4.3 + §5.1 are why the mask is coverage, not opacity |
+| `src/pasture_3d_editor.cpp` + `src/pasture_3d_data.cpp` | **V5** | Not a guide, but §9.1a's prerequisite lives here: `:108` / `:1043` gate stroke routing on `TYPE_HEIGHT`, and `_ensure_typed_base` / `composite_region` are why a control overlay changes what the region map *means*. Read before touching a sink |
 | `PASTURE3D_SPLINE_GRAPH_SPEC.md` | **V3**, V7a | §7.5 + §8 define what "the path the graph resolved" means, without which §6.3's trap reads as pedantry; §12.3 is the open item V7a closes |
 | `PASTURE3D_WATER_GUIDE.md` | **V7b**, V7a | §6 (querying water from code) and §5 (`Pasture3DBuoy`) are the live contract V7b must not break, and §9.4 is why the seam already exists |
 | `PASTURE3D_ROAD_CONNECTOR_GUIDE.md` | V5, V7a | The `#holes` control layer is the working precedent for a graph-owned typed layer |
@@ -266,8 +268,8 @@ Four conclusions:
 | `bake_all_brushes()` | `connectors/pasture3d_sim_manager.gd:1525` | Registry walk, per **layer owner**, one undo, cancellable, reports. V6's model |
 | Control word layout | `src/pasture_3d_util.h:654–697` | base(5)@27, overlay(5)@22, blend(8)@14, uv_rot(4)@10, uv_scale(3)@7, **free(4)@3–6**, hole@2, nav@1, auto@0 |
 
-**A preview system exists and is editor-owned.** Nothing below proposes replacing it. §4 lists five
-defects; V1 and V2 fix them in place.
+**A preview system exists and is editor-owned.** Nothing below proposes replacing it. §4 lists six
+defects; V1 fixes (i), (ii), (iii), (v) and (vi), and V2 fixes (iv).
 
 ---
 
@@ -341,7 +343,7 @@ if compiled.is_empty():
 until the wire is removed. Four more silent returns sit around it (no extension method at :1654, no roots
 at :1661, no tap slots at :1677).
 
-This is the worst of the five, because the graph editor is the one place in the plugin that *already knows*
+This is the worst of the six, because the graph editor is the one place in the plugin that *already knows*
 the graph did not lower and *can name the op* — `native_supported()` is right there
 (`pasture3d_terrain_graph.gd:1816`) — and it says nothing. Per `op-ids-omission-drops-graph-to-gdscript`,
 a single missing entry in `graph_op_ids()` puts the whole graph on the GDScript evaluator, and the symptom
@@ -693,6 +695,12 @@ output and back. It is also the prerequisite for V4's histogram being useful on 
 
 ## 9. (B) Output — three owners, not one
 
+> **Read first:** this section's three subsections each carry their own list, and they differ sharply —
+> §9.1 is the layer stack, §9.2 is the exporter, §9.3/§9.4 are the water and road runtimes. For the section
+> as a whole: `PASTURE3D_NODE_VOCABULARY.md` for what a "sink" is called here, and
+> `PASTURE3D_TERRAIN_GRAPH_GUIDE.md` §4 (adding a node) — every node below is terminal, which §10 explains
+> is a different mechanism from muting.
+
 The single most important structural claim in this document: **"output" names three unrelated things**, and
 building one mechanism for all three would produce a system that is wrong for at least two of them.
 
@@ -994,6 +1002,13 @@ So V7a is a **publish + staleness contract**, not a file format:
 
 ### 9.4 The sloped water surface (V7b)
 
+> **Read first:** `PASTURE3D_WATER_GUIDE.md` §6 (querying water from code) and §5 (`Pasture3DBuoy`) — the
+> live contract V7b must not break — then `pasture3d_stream.gd` around `_apply_bank_surface`, `_bank_crest`
+> and `_effective_bank_search` (the code §9.4.3 deletes), and `water_surface.gdshaderinc`, which carries
+> **no level uniform**: parity with the shader is structural, through `_ribbon_rows`, not transcribed.
+> Phase 7's existing water gate for criterion [B]'s 0.009 m budget and its 400 kg boat fixture.
+
+
 **The risk here was overstated when this was asked, and the code says so.** `Pasture3DWaterBody` does not
 assume a plane at the level that matters. `get_water_height` is already two terms:
 
@@ -1104,9 +1119,14 @@ Required by the brief: for every proposed node, whether it blocks native and why
 
 | Node | `blocks_native()` | New `graph_op_ids()` entry? | Reasoning |
 | :--- | :--- | :--- | :--- |
-| Every B1 sink (§9.1) | **false** | **No** | Compiled out; contributes no op |
-| Every B2 export sink (§9.2) | **false** | **No** | Compiled out; contributes no op |
-| `Path Publish`, `Water Surface Publish` (§9.3) | **false** | **No** | Compiled out; contributes no op |
+| Every B1 sink (§9.1) | **false** | **No** | Terminal: `has_output()` false, so the compiler never **visits** it |
+| Every B2 export sink (§9.2) | **false** | **No** | Same — and note this is *not* the mute mechanism |
+| `Path Publish`, `Water Surface Publish` (§9.3) | **false** | **No** | Same |
+
+> **Not "compiled out" — the distinction costs an op if you get it wrong.** A muted node is *not* rewired
+> away: `pasture3d_terrain_graph.gd:1304` lowers it to op 12 (passthrough), so a mute still occupies a slot
+> and still costs an op. A terminal sink is different in kind — it is never an ancestor of a root, so the
+> compiler's walk never reaches it and there is nothing to lower. Do not implement a sink by muting.
 
 **Every node this document proposes is terminal — `has_output()` false — so the compiler never emits an op
 for it.** That is not a coincidence, it is the design: nothing can wire from a sink, so a sink is never an
