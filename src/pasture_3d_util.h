@@ -448,7 +448,29 @@ public:
 			const Rect2 &p_rect, const int p_property, const double p_band_min, const double p_band_max,
 			const double p_falloff_lo, const double p_falloff_hi, const bool p_invert, const double p_strength);
 
-	// Native 2D hillshade relief image generator for graph node preview thumbnails.
+	// Thumbnail representations (spec §5.3). The enum is the contract between graph_editor.gd's
+	// type->representation defaults and the renderer; the editor never passes a raw integer it made up.
+	enum PreviewRepr {
+		PREVIEW_HILLSHADE = 0,     // relief-lit, for HEIGHT
+		PREVIEW_RAMP_SEQ = 1,      // perceptually sequential dark->light, for unsigned FIELD
+		PREVIEW_RAMP_DIV = 2,      // two-hued, neutral at 0, for SIGNED
+		PREVIEW_MASK_ALPHA = 3,    // tint at alpha=value over a checkerboard, for MASK
+		PREVIEW_INDEX_PALETTE = 4, // nearest colour, never interpolated, for INT
+		PREVIEW_NO_DATA = 5,       // "asked and not served" - not a choice, a report
+		PREVIEW_RAW_GRAY = 6,      // absolute 0..1 grayscale, manual only
+	};
+
+	// Native 2D preview image generator for graph node thumbnails.
+	//
+	// The range is passed IN rather than measured here: spec §5.2 rule 1 makes the range a property of the
+	// port TYPE (a MASK is absolute 0..1 whatever its data does), and rule 3 makes it lockable. A renderer
+	// that measured its own min/max could not honour either, which is the normalisation defect §4.2.
+	// Pass p_range_max <= p_range_min to mean "measure this grid" (AUTO).
+	static PackedByteArray preview_image_grid(const PackedFloat32Array &p_surface, const int p_gw,
+			const int p_gh, const int p_repr, const double p_range_min, const double p_range_max,
+			const bool p_mark_clamped);
+
+	// Back-compat wrapper: HILLSHADE, or MASK_ALPHA when p_is_mask, both on an auto range.
 	static PackedByteArray hillshade_image_grid(const PackedFloat32Array &p_surface, const int p_gw,
 			const int p_gh, const bool p_is_mask);
 
@@ -462,6 +484,8 @@ public:
 protected:
 	static void _bind_methods();
 };
+
+VARIANT_ENUM_CAST(Pasture3DUtil::PreviewRepr);
 
 using Util = Pasture3DUtil;
 

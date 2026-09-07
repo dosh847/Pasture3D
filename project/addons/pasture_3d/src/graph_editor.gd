@@ -1776,13 +1776,27 @@ func _preview_worker(p_token: int, p_program: Dictionary, p_input: PackedFloat32
 		p_tap_slots: PackedInt32Array, p_slot_to_node: Dictionary, p_slot_is_mask: Dictionary) -> void:
 	var taps: Dictionary = Pasture3DUtil.graph_eval_grid_taps(
 			p_program, PREVIEW_SIZE, PREVIEW_SIZE, p_rect, p_input, p_tap_slots)
+	# The return is keyed by REQUEST INDEX now: `fields[i]` answers `p_tap_slots[i]`, and `unserved` lists
+	# the requests that were zero-filled rather than copied from a live buffer.
+	var fields: Array = taps.get("fields", [])
+	var unserved: PackedInt32Array = taps.get("unserved", PackedInt32Array())
 	var results: Dictionary = {}
-	for slot in taps:
-		var field: PackedFloat32Array = taps[slot]
-		if field.size() != PREVIEW_SIZE * PREVIEW_SIZE:
+	for i in range(p_tap_slots.size()):
+		var slot: int = int(p_tap_slots[i])
+		if not p_slot_to_node.has(slot):
 			continue
-		var is_mask: bool = bool(p_slot_is_mask.get(slot, false))
-		var bytes: PackedByteArray = Pasture3DUtil.hillshade_image_grid(field, PREVIEW_SIZE, PREVIEW_SIZE, is_mask)
+		var repr_id: int = Pasture3DUtil.PREVIEW_MASK_ALPHA if bool(p_slot_is_mask.get(slot, false)) 				else Pasture3DUtil.PREVIEW_HILLSHADE
+		var field := PackedFloat32Array()
+		if i < fields.size() and fields[i] is PackedFloat32Array:
+			field = fields[i]
+		# Both failures now SAY so instead of leaving the last thumbnail in place: a slot the evaluator
+		# could not serve, and a field that came back the wrong size. `continue` here was two of the four
+		# indistinguishable causes of a black thumbnail (spec 4.3).
+		if unserved.has(i) or field.size() != PREVIEW_SIZE * PREVIEW_SIZE:
+			repr_id = Pasture3DUtil.PREVIEW_NO_DATA
+			field = PackedFloat32Array()
+		var bytes: PackedByteArray = Pasture3DUtil.preview_image_grid(
+				field, PREVIEW_SIZE, PREVIEW_SIZE, repr_id, 0.0, 0.0, false)
 		results[int(p_slot_to_node[slot])] = bytes
 	call_deferred(&"_apply_preview_textures", p_token, results)
 

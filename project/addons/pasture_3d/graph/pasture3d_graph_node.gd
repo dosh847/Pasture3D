@@ -61,8 +61,35 @@ enum Role { GENERATOR, FILTER, COMBINER, SOLVER }
 @export var collapsed: bool = false
 
 ## When true, the graph editor shows this node's inline 2D thumbnail. Pure toggle state — the editor owns
-## all preview rendering; the node stores nothing about the preview beyond this flag.
+## all preview rendering; the node stores nothing about the preview beyond these flags.
 @export var preview_on: bool = false
+
+# ---- Preview VIEW STATE (visualization spec §5.6, §12.6) ----------------------------------------------
+#
+# These live on the resource, beside `preview_on`, rather than in an editor-side side table: one
+# serialization site, and no lifetime question about what happens to an entry when a node is deleted.
+#
+# EVERY ONE OF THEM IS A PLAIN `@export` WITH NO SETTER, AND THAT IS THE POINT (§12.6). A setter that
+# called `emit_changed()` would put the choice of how to LOOK at a field into the graph revision, which
+# would invalidate the cache and re-evaluate the graph — so changing a ramp would cost a bake, and
+# `preview_on` would stop being the instant show/hide it is documented to be. View state must never
+# participate in invalidation or caching.
+
+## Which representation the thumbnail draws (a `Pasture3DUtil.PreviewRepr`). -1 means "choose from the
+## port type", which is the default and what §12.3 wants: representation comes from the declared TYPE,
+## never from the port's name. A value >= 0 is an explicit per-node override from the right-click menu.
+@export var preview_repr: int = -1
+
+## When true the thumbnail renders against `preview_range_min/max` instead of the field's own extremes.
+## This is §5.2 rule 3, and it is the direct fix for "the slider does nothing": with the range pinned, a
+## gain change visibly moves the picture instead of being normalised straight back out of view.
+@export var preview_range_locked: bool = false
+
+## The pinned range, meaningful only while `preview_range_locked`. Values outside it render in the
+## reserved out-of-range colour rather than as the endpoint (§5.2 rule 4) — otherwise the lock would
+## trade one silent lie for another.
+@export var preview_range_min: float = 0.0
+@export var preview_range_max: float = 1.0
 
 # ---- Per-Node Output Buffer Caching (Milestone 1) ----------------------------------------------------
 var _cached_grid: PackedFloat32Array = PackedFloat32Array()

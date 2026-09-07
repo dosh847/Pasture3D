@@ -59,12 +59,22 @@ func _a_taps_match_single_root() -> void:
 		tap_slots.append(int(slot_of[r]))
 		node_of_slot[int(slot_of[r])] = r
 	var taps: Dictionary = Pasture3DUtil.graph_eval_grid_taps(program, GW, GH, RECT, input, tap_slots)
-	if taps.size() != roots.size():
-		_fail += 1; print("    !! expected %d tapped fields, got %d" % [roots.size(), taps.size()])
+	# The return is keyed by REQUEST INDEX (spec V1 5.5): `fields[i]` answers `tap_slots[i]`, and
+	# `unserved` lists the requests that were zero-filled rather than copied from a live buffer. It used
+	# to be keyed by SLOT, which silently collapsed duplicate slots in one request and gave the caller no
+	# way to tell a zero-filled tap from a genuinely flat field.
+	var fields: Array = taps.get("fields", [])
+	var unserved: PackedInt32Array = taps.get("unserved", PackedInt32Array())
+	if fields.size() != tap_slots.size():
+		_fail += 1; print("    !! expected %d tapped fields, got %d" % [tap_slots.size(), fields.size()])
 		return
+	# Every one of these roots is a live slot in the program, so NONE may come back unserved. This is the
+	# criterion that would catch a compiler that stopped protecting tap slots.
+	if unserved.size() != 0:
+		_fail += 1; print("    !! %d of %d requested taps were unserved" % [unserved.size(), tap_slots.size()])
 	var by_node := {}
-	for slot in taps:
-		by_node[int(node_of_slot[slot])] = taps[slot]
+	for i in range(tap_slots.size()):
+		by_node[int(node_of_slot[int(tap_slots[i])])] = fields[i]
 	for r in roots:
 		var tapped: PackedFloat32Array = by_node.get(r, PackedFloat32Array())
 		var oracle: PackedFloat32Array = Pasture3DUtil.graph_eval_grid(g.compile_graph_program(r), GW, GH, RECT, input)

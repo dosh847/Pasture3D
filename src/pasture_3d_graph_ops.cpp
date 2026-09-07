@@ -1520,9 +1520,27 @@ PackedFloat32Array graph_eval_grid(const GraphProgram &p_prog, int p_gw, int p_g
 	return out;
 }
 
-// Multi-tap: evaluate once and copy out every slot in p_tap_slots. Returns a Dictionary {slot(int) ->
-// PackedFloat32Array}; a slot out of range or with no live buffer yields a zero field of size gw*gh so
-// the caller always gets one field per requested tap. Empty when the program is empty or no taps given.
+// Multi-tap: evaluate once and copy out every slot in p_tap_slots.
+//
+// RETURN SHAPE, and why it is keyed by REQUEST INDEX rather than by slot:
+//
+//   { "fields":   Array of PackedFloat32Array, one per request, in request order
+//     "unserved": PackedInt32Array of the REQUEST INDICES that were zero-filled }
+//
+// A slot out of range, or with no live buffer, still yields a zero field of size gw*gh — callers rely on
+// there being one field per requested tap, and that does not change. What changes is that the caller can
+// now TELL. Previously a zero-filled tap and a genuinely-flat field were the same bytes with no way to
+// distinguish them, which is two of the four causes of a black thumbnail in spec §4.3.
+//
+// Keyed by request index, not by slot, for two reasons:
+//   * duplicate slots in one request used to COLLAPSE, because `result[slot]` overwrote. One field per
+//     request is what the signature promises, and now it is what it delivers.
+//   * spec §8's V2 packs `slot * 4 + channel` into the key. Against slot-keyed ints that silently changes
+//     the meaning of every existing key; against request indices it changes nothing, because the request
+//     array grows a parallel `channels` array and the keys stay ordinals.
+//
+// Empty Dictionary when the program is empty or no taps were asked for — "nothing to do" is still
+// distinct from "asked and not served".
 Dictionary graph_eval_grid_taps(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect,
 		const PackedFloat32Array &p_input, const PackedInt32Array &p_tap_slots) {
 	Dictionary result;
@@ -1542,6 +1560,8 @@ Dictionary graph_eval_grid_taps(const GraphProgram &p_prog, int p_gw, int p_gh, 
 	std::vector<std::vector<float>> pool;
 	std::vector<int> slot_buffer;
 	graph_eval_grid_core(p_prog, p_gw, p_gh, p_rect, p_input, protect, pool, slot_buffer);
+	Array fields;
+	PackedInt32Array unserved;
 	for (int i = 0; i < tap_n; i++) {
 		const int slot = p_tap_slots[i];
 		PackedFloat32Array field;
@@ -1556,9 +1576,12 @@ Dictionary graph_eval_grid_taps(const GraphProgram &p_prog, int p_gw, int p_gh, 
 			for (int j = 0; j < n; j++) {
 				w[j] = 0.f;
 			}
+			unserved.push_back(i);
 		}
-		result[slot] = field;
+		fields.push_back(field);
 	}
+	result["fields"] = fields;
+	result["unserved"] = unserved;
 	return result;
 }
 

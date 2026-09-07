@@ -35,9 +35,12 @@ func _a_bus_port_definitions() -> void:
 	_assert(split_node.output_count() == 5, "TerrainBusSplit has 5 output channels")
 	_assert(split_node.output_port_types()[0] == Pasture3DGraphNode.PortType.HEIGHT, "Channel 0 is HEIGHT")
 	_assert(split_node.output_port_types()[1] == Pasture3DGraphNode.PortType.MASK, "Channel 1 is MASK")
-	_assert(split_node.output_port_types()[2] == Pasture3DGraphNode.PortType.HEIGHT, "Channel 2 is HEIGHT (water_depth)")
-	_assert(split_node.output_port_types()[3] == Pasture3DGraphNode.PortType.MASK, "Channel 3 is MASK (sediment)")
-	_assert(split_node.output_port_types()[4] == Pasture3DGraphNode.PortType.MASK, "Channel 4 is MASK (flow)")
+	# The bus carries QUANTITIES, and the 2026-09-06 port audit retyped all three. water_depth is metres
+	# (HEIGHT was wrong too - it is a depth, not an elevation), and sediment and flow are in their own
+	# units with nothing dividing them into [0,1]. PASTURE3D_GRAPH_PORT_TYPES_GUIDE.md 4.
+	_assert(split_node.output_port_types()[2] == Pasture3DGraphNode.PortType.FIELD, "Channel 2 is FIELD (water_depth, metres)")
+	_assert(split_node.output_port_types()[3] == Pasture3DGraphNode.PortType.FIELD, "Channel 3 is FIELD (sediment)")
+	_assert(split_node.output_port_types()[4] == Pasture3DGraphNode.PortType.FIELD, "Channel 4 is FIELD (flow)")
 
 
 func _b_bus_merge_and_split_data_flow() -> void:

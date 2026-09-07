@@ -134,8 +134,12 @@ func _e_metadata_and_ports() -> void:
 		_fail += 1; print("    !! output_count != 3")
 	if lake.output_port_types()[0] != Pasture3DGraphNode.PortType.HEIGHT:
 		_fail += 1; print("    !! port 0 should be HEIGHT")
-	if lake.output_port_types()[1] != Pasture3DGraphNode.PortType.MASK:
-		_fail += 1; print("    !! port 1 should be MASK")
+	# Port 1 is water DEPTH, in metres. It was typed MASK until the 2026-09-06 port audit, and nothing
+	# divides it into [0,1] - a MASK renders on an absolute 0..1 scale, which for a depth field means a
+	# lake of any real depth shows solid white. Port 2 (shoreline) IS a mask and stays one, which is why
+	# this node is a useful check: it carries one of each.
+	if lake.output_port_types()[1] != Pasture3DGraphNode.PortType.FIELD:
+		_fail += 1; print("    !! port 1 (water depth, metres) should be FIELD")
 
 
 func _make_bowl_grid(gw: int, gh: int, center_z: float, rim_z: float) -> PackedFloat32Array:

@@ -5,6 +5,9 @@
 # Criteria [A]-[H] are the V1 row of §11. They are being brought up one at a time, RED FIRST where the
 # spec says a criterion must fail on the pre-change build.
 #
+#   [C] an unserved tap renders NO_DATA and a genuinely-zero field renders black, and THE TWO IMAGES
+#       DIFFER — control: the same slot, served, renders neither.
+#
 #   [H] with TWO BRUSHES HOSTING THE SAME GRAPH RESOURCE, the preview looks through the brush the gesture
 #       named, and where the gesture named none it says so instead of picking one (§4.6, §5.6).
 #       Asserted on the rect and grid size the tap ACTUALLY ran with.
@@ -51,9 +54,10 @@ var _checks := 0
 
 func _ready() -> void:
 	print("=== GraphPreviewReprGate: the representation & range contract (spec V1) ===\n")
+	_c_unserved_is_visible()
 	_h_host_binding_follows_the_gesture()
 
-	if _checks < 10:
+	if _checks < 16:
 		print("\n    VACUOUS: only %d checks completed; the gate did not measure what it claims to." % _checks)
 		_fail += 1
 	print("\n=== %s (%d failures, %d checks) ===\n"
@@ -67,6 +71,93 @@ func _check(p_ok: bool, p_what: String) -> void:
 		_fail += 1
 	print("    %s %s" % ["ok  " if p_ok else "FAIL", p_what])
 
+
+# --- C -------------------------------------------------------------------------------------------------
+#
+# Spec 4.3: a black thumbnail had FOUR indistinguishable causes, and two of them were "the tap was not
+# served". `graph_eval_grid_taps` zero-fills an unservable slot — callers rely on one field per request —
+# so a zero-filled tap and a genuinely flat field were the same bytes. The fix is not to stop zero-filling
+# but to REPORT it: `unserved` carries the request indices, and the worker renders those NO_DATA.
+#
+# This asserts on the tap's own report, not on a size check the gate performs itself. A gate that decided
+# "unserved" by its own rule would pass whether or not the C++ ever said anything.
+func _c_unserved_is_visible() -> void:
+	print("[C] an unserved tap is visibly different from a field that is genuinely zero (4.3)")
+
+	if not ClassDB.class_has_method("Pasture3DUtil", "preview_image_grid"):
+		_check(false, "preview_image_grid is not bound — the DLL is stale; nothing was measured")
+		return
+
+	# Built explicitly rather than through the registry: a registry-default Noise node carries no
+	# FastNoiseLite and evaluates FLAT, which makes every "differs from an all-zero field" comparison
+	# below vacuous. The non-flat control caught exactly that.
+	var g := Pasture3DTerrainGraph.new()
+	var fnl := FastNoiseLite.new()
+	fnl.seed = 11
+	fnl.frequency = 0.05
+	var src := Pasture3DGraphNodeNoise.new()
+	src.noise = fnl
+	src.amplitude = 7.0
+	g.nodes = [src] as Array[Pasture3DGraphNode]
+	g.output_node = 0
+
+	var compiled: Dictionary = g.compile_graph_program_multi([0])
+	if compiled.is_empty() or not compiled.get("slot_of", {}).has(0):
+		_check(false, "the one-node graph did not compile; nothing was measured")
+		return
+	var live_slot: int = int(compiled["slot_of"][0])
+	# A slot the program does not have. The evaluator cannot serve it, which is exactly the case that used
+	# to arrive as an indistinguishable black square.
+	var dead_slot: int = 9999
+
+	var size := 32
+	# A RAMP, not zeros. The first version of this fixture fed a flat input, and the served tap came back
+	# flat too — at which point "the served tap differs from an all-zero field" is comparing zero with
+	# zero. The control below is what caught it.
+	var input := PackedFloat32Array()
+	input.resize(size * size)
+	for i in range(size * size):
+		input[i] = float(i % size) / float(size) * 20.0
+	var taps: Dictionary = Pasture3DUtil.graph_eval_grid_taps(
+			compiled["program"], size, size, Rect2(0, 0, 100, 100), input,
+			PackedInt32Array([live_slot, dead_slot]))
+
+	var fields: Array = taps.get("fields", [])
+	var unserved: PackedInt32Array = taps.get("unserved", PackedInt32Array())
+	_check(fields.size() == 2, "the tap returned one field per request (got %d for 2)" % fields.size())
+	if fields.size() != 2:
+		return
+
+	# The report itself, by REQUEST INDEX: request 1 is the dead slot, request 0 is live.
+	_check(unserved.has(1), "[C] the unservable slot is reported unserved (unserved=%s)" % [unserved])
+	_check(not unserved.has(0), "control: the LIVE slot is not reported unserved, so the report "
+			+ "distinguishes rather than flagging everything")
+
+	# Now the images. A genuinely-zero field is rendered by the same representation the live tap would use.
+	var zero_field := PackedFloat32Array()
+	zero_field.resize(size * size)
+	zero_field.fill(0.0)
+	var img_zero: PackedByteArray = Pasture3DUtil.preview_image_grid(
+			zero_field, size, size, Pasture3DUtil.PREVIEW_MASK_ALPHA, 0.0, 1.0, false)
+	var img_nodata: PackedByteArray = Pasture3DUtil.preview_image_grid(
+			PackedFloat32Array(), size, size, Pasture3DUtil.PREVIEW_NO_DATA, 0.0, 0.0, false)
+	var img_live: PackedByteArray = Pasture3DUtil.preview_image_grid(
+			fields[0], size, size, Pasture3DUtil.PREVIEW_MASK_ALPHA, 0.0, 1.0, false)
+
+	_check(img_zero.size() == size * size * 4 and img_nodata.size() == size * size * 4,
+			"both images are full RGBA8 thumbnails (%d, %d bytes)" % [img_zero.size(), img_nodata.size()])
+	_check(img_nodata != img_zero,
+			"[C] NO_DATA and a genuinely-zero field are DIFFERENT images")
+
+	# CONTROL. Without this, [C] would pass on a renderer that returned a different image for every call —
+	# including one that never rendered the served tap correctly at all.
+	_check(img_live != img_nodata and img_live != img_zero,
+			"control: the SERVED tap renders as neither NO_DATA nor an all-zero field")
+	# And the served field must actually carry something, or "differs from zero" is measuring noise.
+	var mag := 0.0
+	for v in (fields[0] as PackedFloat32Array):
+		mag = maxf(mag, absf(v))
+	_check(mag > 0.0, "control: the served tap is non-flat (|max| = %.4f), so the comparison is real" % mag)
 
 # --- H -------------------------------------------------------------------------------------------------
 

@@ -8,7 +8,13 @@
 # extension was not rebuilt. The native solver is the SAME one the brush erosion modifier and Pasture3DSim
 # run and is already covered by the SimPhase gates, so THIS gate does not re-derive stream power — it tests
 # the graph plumbing around it:
-#   [A] Erosion declares five outputs (height HEIGHT + flow/erosion/deposition/wetness MASK), role SOLVER.
+#   [A] Erosion declares five outputs (height HEIGHT + flow/erosion/deposition/wetness FIELD), role SOLVER.
+#
+# The four channels were typed MASK until the 2026-09-06 port audit. They are NOT masks: flow is in
+# square metres and erosion/deposition/wetness in metres (src/pasture_3d_util.cpp:1353 states the units
+# contract), and nothing divides them into [0,1]. Under the visualization spec's type-to-representation
+# rule a MASK renders on an absolute 0..1 scale, so typed MASK all four would have rendered solid white
+# - a fictional flow map that looks like a finished result. PASTURE3D_GRAPH_PORT_TYPES_GUIDE.md 4.
 #   [B] A solve actually erodes a real surface (some erosion channel > 0, height moves). Control: with both
 #       Erosion Rate and Hillslope Diffusion at 0 the height is unchanged — the solver routed water and cut
 #       nothing.
@@ -84,8 +90,8 @@ func _a_declares_five_outputs() -> void:
 	var in_types: PackedInt32Array = e.input_port_types()
 	var ok: bool = e.output_count() == 5 and names.size() == 5 and types.size() == 5 \
 			and types[0] == Pasture3DGraphNode.PortType.HEIGHT \
-			and types[1] == Pasture3DGraphNode.PortType.MASK \
-			and types[4] == Pasture3DGraphNode.PortType.MASK \
+			and types[1] == Pasture3DGraphNode.PortType.FIELD \
+			and types[4] == Pasture3DGraphNode.PortType.FIELD \
 			and e.role() == Pasture3DGraphNode.Role.SOLVER and e.needs_grid() \
 			and in_types.size() == e.input_count() and e.input_names().size() == e.input_count() \
 			and in_types.size() > 0 and in_types[0] == Pasture3DGraphNode.PortType.HEIGHT \
@@ -95,7 +101,7 @@ func _a_declares_five_outputs() -> void:
 	print("    output_count=%d names=%s types=%s role=%d needs_grid=%s input_count=%d in_types=%s" % [
 		e.output_count(), names, types, e.role(), e.needs_grid(), e.input_count(), in_types])
 	if not ok:
-		_fail += 1; print("    !! Erosion did not declare [HEIGHT, MASK*4] outputs as a grid SOLVER")
+		_fail += 1; print("    !! Erosion did not declare [HEIGHT, FIELD*4] outputs as a grid SOLVER")
 
 
 # ---- [B] --------------------------------------------------------------------------------------------

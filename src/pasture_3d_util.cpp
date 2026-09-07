@@ -1908,83 +1908,235 @@ PackedFloat32Array Pasture3DUtil::mask_grid(const PackedFloat32Array &p_surface,
 			p_falloff_lo, p_falloff_hi, p_invert, p_strength);
 }
 
-PackedByteArray Pasture3DUtil::hillshade_image_grid(const PackedFloat32Array &p_surface, const int p_gw,
-		const int p_gh, const bool p_is_mask) {
-	int n = p_gw * p_gh;
+// The four causes of a black thumbnail (spec 4.3) are not distinguishable by looking at the pixels, so
+// each one gets a look of its own. NO_DATA is a checkerboard with a slash; MASK_ALPHA sits on the same
+// checkerboard, so "mask reading zero" and "no field at all" stop being the same image.
+static inline void checker_px(const int p_ix, const int p_iz, uint8_t *p_dst) {
+	const bool light = (((p_ix >> 3) + (p_iz >> 3)) & 1) != 0;
+	const uint8_t v = light ? 58 : 38;
+	p_dst[0] = v;
+	p_dst[1] = v;
+	p_dst[2] = (uint8_t)(v + 6);
+	p_dst[3] = 255;
+}
+
+// Perceptually sequential, dark -> teal -> warm. Flow, distance, wetness: quantities where only
+// magnitude means anything and zero is simply the low end.
+static inline void ramp_seq(const float p_t, uint8_t *p_dst) {
+	const float t = std::clamp(p_t, 0.0f, 1.0f);
+	p_dst[0] = (uint8_t)std::clamp((0.05f + t * t * 0.95f) * 255.0f, 0.0f, 255.0f);
+	p_dst[1] = (uint8_t)std::clamp((0.02f + t * 0.93f) * 255.0f, 0.0f, 255.0f);
+	p_dst[2] = (uint8_t)std::clamp((0.18f + t * 0.62f) * 255.0f, 0.0f, 255.0f);
+	p_dst[3] = 255;
+}
+
+// Two-hued about a NEUTRAL MIDPOINT: warm for negative, cool for positive, pale at exactly zero. The
+// midpoint is the whole point - a signed field on a sequential ramp reads as "more of something" where
+// it should read as "the other direction", which is why SIGNED is its own port type.
+static inline void ramp_div(const float p_t, uint8_t *p_dst) {
+	const float t = std::clamp(p_t, 0.0f, 1.0f);
+	const float d = (t - 0.5f) * 2.0f; // -1 .. +1
+	const float m = std::fabs(d);
+	const float lo = 0.92f - m * 0.30f; // the neutral end, never pure white
+	if (d < 0.0f) {
+		p_dst[0] = (uint8_t)std::clamp((lo + m * 0.08f) * 255.0f, 0.0f, 255.0f);
+		p_dst[1] = (uint8_t)std::clamp((lo - m * 0.42f) * 255.0f, 0.0f, 255.0f);
+		p_dst[2] = (uint8_t)std::clamp((lo - m * 0.72f) * 255.0f, 0.0f, 255.0f);
+	} else {
+		p_dst[0] = (uint8_t)std::clamp((lo - m * 0.66f) * 255.0f, 0.0f, 255.0f);
+		p_dst[1] = (uint8_t)std::clamp((lo - m * 0.34f) * 255.0f, 0.0f, 255.0f);
+		p_dst[2] = (uint8_t)std::clamp((lo + m * 0.08f) * 255.0f, 0.0f, 255.0f);
+	}
+	p_dst[3] = 255;
+}
+
+// Nearest colour, never interpolated. An index halfway between 3 and 4 is not a colour, it is a bug, so
+// the value is ROUNDED to an integer before it selects - not scaled into a gradient.
+static inline void index_palette(const float p_value, uint8_t *p_dst) {
+	static const uint8_t PAL[16][3] = {
+		{ 92, 92, 100 }, { 214, 92, 76 }, { 92, 168, 214 }, { 118, 196, 108 },
+		{ 226, 176, 68 }, { 168, 112, 200 }, { 74, 190, 182 }, { 224, 132, 176 },
+		{ 148, 148, 60 }, { 96, 120, 208 }, { 200, 120, 60 }, { 120, 200, 160 },
+		{ 176, 84, 120 }, { 84, 148, 120 }, { 208, 208, 208 }, { 56, 56, 64 },
+	};
+	int idx = (int)std::lround((double)p_value);
+	if (idx < 0) {
+		idx = 0;
+	}
+	const uint8_t *c = PAL[idx & 15];
+	p_dst[0] = c[0];
+	p_dst[1] = c[1];
+	p_dst[2] = c[2];
+	p_dst[3] = 255;
+}
+
+// Reserved out-of-range colour, spec 5.2 rule 4. Under a LOCK a value outside the range must not render
+// as the endpoint - that trades one silent lie for another - so it renders as itself.
+static inline void clamped_px(uint8_t *p_dst) {
+	p_dst[0] = 255;
+	p_dst[1] = 0;
+	p_dst[2] = 220;
+	p_dst[3] = 255;
+}
+
+PackedByteArray Pasture3DUtil::preview_image_grid(const PackedFloat32Array &p_surface, const int p_gw,
+		const int p_gh, const int p_repr, const double p_range_min, const double p_range_max,
+		const bool p_mark_clamped) {
+	const int n = p_gw * p_gh;
 	PackedByteArray out;
 	out.resize(n * 4);
-	if (p_surface.size() < n || p_gw <= 0 || p_gh <= 0) {
+	if (p_gw <= 0 || p_gh <= 0) {
+		return out;
+	}
+	uint8_t *dst = out.ptrw();
+
+	// NO_DATA needs no field at all - it is the report that a tap was asked for and not served, so it
+	// must render even when the caller has nothing to hand it.
+	if (p_repr == PREVIEW_NO_DATA) {
+		for (int iz = 0; iz < p_gh; iz++) {
+			for (int ix = 0; ix < p_gw; ix++) {
+				uint8_t *px = dst + (iz * p_gw + ix) * 4;
+				checker_px(ix, iz, px);
+				// A diagonal slash, so NO_DATA and an all-zero MASK_ALPHA on the same checkerboard are
+				// told apart at a glance rather than by staring at two dim squares.
+				if (std::abs(ix - iz) < 2) {
+					px[0] = 190;
+					px[1] = 90;
+					px[2] = 90;
+				}
+			}
+		}
 		return out;
 	}
 
+	if (p_surface.size() < n) {
+		return out;
+	}
 	const float *src = p_surface.ptr();
-	uint8_t *dst = out.ptrw();
 
-	float min_h = 1e30f;
-	float max_h = -1e30f;
-	for (int i = 0; i < n; i++) {
-		float v = src[i];
-		if (!std::isnan(v)) {
-			if (v < min_h) min_h = v;
-			if (v > max_h) max_h = v;
+	// AUTO means "measure this grid"; an explicit range means the caller has decided, and the caller is
+	// where the type rule and the lock live.
+	float min_h = (float)p_range_min;
+	float max_h = (float)p_range_max;
+	const bool measured = !(p_range_max > p_range_min);
+	if (measured) {
+		min_h = 1e30f;
+		max_h = -1e30f;
+		for (int i = 0; i < n; i++) {
+			const float v = src[i];
+			if (!std::isnan(v)) {
+				if (v < min_h) min_h = v;
+				if (v > max_h) max_h = v;
+			}
+		}
+		if (min_h > max_h) {
+			min_h = 0.0f;
+			max_h = 1.0f;
 		}
 	}
-	float h_range = std::max(max_h - min_h, 0.001f);
+	const float h_range = std::max(max_h - min_h, 0.001f);
 
+	// INDEX_PALETTE never normalises - it reads the raw value as an index.
+	if (p_repr == PREVIEW_INDEX_PALETTE) {
+		for (int i = 0; i < n; i++) {
+			const float v = src[i];
+			if (std::isnan(v)) {
+				checker_px(i % p_gw, i / p_gw, dst + i * 4);
+			} else {
+				index_palette(v, dst + i * 4);
+			}
+		}
+		return out;
+	}
+
+	const bool lit = (p_repr == PREVIEW_HILLSHADE);
 	const float lx = -0.57735f;
 	const float lz = -0.57735f;
 	const float ly = 0.57735f;
 
 	for (int iz = 0; iz < p_gh; iz++) {
-		int zm = std::max(iz - 1, 0) * p_gw;
-		int zp = std::min(iz + 1, p_gh - 1) * p_gw;
-		int row = iz * p_gw;
+		const int zm = std::max(iz - 1, 0) * p_gw;
+		const int zp = std::min(iz + 1, p_gh - 1) * p_gw;
+		const int row = iz * p_gw;
 		for (int ix = 0; ix < p_gw; ix++) {
-			int xm = std::max(ix - 1, 0);
-			int xp = std::min(ix + 1, p_gw - 1);
-			int i = row + ix;
-			int ptr = i * 4;
-
-			float val = src[i];
+			const int i = row + ix;
+			uint8_t *px = dst + i * 4;
+			const float val = src[i];
 			if (std::isnan(val)) {
-				dst[ptr] = 20;
-				dst[ptr + 1] = 20;
-				dst[ptr + 2] = 26;
-				dst[ptr + 3] = 128;
+				checker_px(ix, iz, px);
 				continue;
 			}
+			// Rule 4: outside a DECLARED range, say so. Only under an explicit range - an auto range
+			// cannot be exceeded by the data it was measured from.
+			if (p_mark_clamped && !measured && (val < min_h || val > max_h)) {
+				clamped_px(px);
+				continue;
+			}
+			const float norm_h = std::clamp((val - min_h) / h_range, 0.0f, 1.0f);
 
-			float norm_h = std::clamp((val - min_h) / h_range, 0.0f, 1.0f);
+			float shade = 1.0f;
+			if (lit) {
+				const int xm = std::max(ix - 1, 0);
+				const int xp = std::min(ix + 1, p_gw - 1);
+				float vx_p = src[row + xp];
+				float vx_m = src[row + xm];
+				float vz_p = src[zp + ix];
+				float vz_m = src[zm + ix];
+				if (std::isnan(vx_p)) vx_p = val;
+				if (std::isnan(vx_m)) vx_m = val;
+				if (std::isnan(vz_p)) vz_p = val;
+				if (std::isnan(vz_m)) vz_m = val;
+				const float dx = (vx_p - vx_m) * 0.5f;
+				const float dz = (vz_p - vz_m) * 0.5f;
+				shade = std::clamp(0.5f + 0.5f * (-dx * lx - dz * lz + ly), 0.1f, 1.0f);
+			}
 
-			float vx_p = src[row + xp];
-			float vx_m = src[row + xm];
-			float vz_p = src[zp + ix];
-			float vz_m = src[zm + ix];
-			if (std::isnan(vx_p)) vx_p = val;
-			if (std::isnan(vx_m)) vx_m = val;
-			if (std::isnan(vz_p)) vz_p = val;
-			if (std::isnan(vz_m)) vz_m = val;
-
-			float dx = (vx_p - vx_m) * 0.5f;
-			float dz = (vz_p - vz_m) * 0.5f;
-			float shade = std::clamp(0.5f + 0.5f * (-dx * lx - dz * lz + ly), 0.1f, 1.0f);
-
-			if (p_is_mask) {
-				dst[ptr] = (uint8_t)std::clamp(0.95f * shade * norm_h * 255.0f, 0.0f, 255.0f);
-				dst[ptr + 1] = (uint8_t)std::clamp(0.60f * shade * norm_h * 255.0f, 0.0f, 255.0f);
-				dst[ptr + 2] = (uint8_t)std::clamp(0.10f * shade * norm_h * 255.0f, 0.0f, 255.0f);
-				dst[ptr + 3] = 255;
-			} else {
-				float lum = norm_h * shade;
-				dst[ptr] = (uint8_t)std::clamp((lum * 0.85f + 0.10f) * 255.0f, 0.0f, 255.0f);
-				dst[ptr + 1] = (uint8_t)std::clamp((lum * 0.90f + 0.08f) * 255.0f, 0.0f, 255.0f);
-				dst[ptr + 2] = (uint8_t)std::clamp((lum * 0.80f + 0.05f) * 255.0f, 0.0f, 255.0f);
-				dst[ptr + 3] = 255;
+			switch (p_repr) {
+				case PREVIEW_MASK_ALPHA: {
+					// Tint at alpha = value, composited over the checkerboard HERE rather than left to
+					// the caller: a thumbnail is an opaque RGBA8 blit, so an alpha the caller ignores
+					// would render a zero mask and a missing mask as the same black square (spec 4.3).
+					checker_px(ix, iz, px);
+					const float a = std::clamp(norm_h, 0.0f, 1.0f);
+					const float tr = 0.98f, tg = 0.66f, tb = 0.13f;
+					px[0] = (uint8_t)std::clamp((px[0] / 255.0f * (1.0f - a) + tr * a) * 255.0f, 0.0f, 255.0f);
+					px[1] = (uint8_t)std::clamp((px[1] / 255.0f * (1.0f - a) + tg * a) * 255.0f, 0.0f, 255.0f);
+					px[2] = (uint8_t)std::clamp((px[2] / 255.0f * (1.0f - a) + tb * a) * 255.0f, 0.0f, 255.0f);
+					px[3] = 255;
+				} break;
+				case PREVIEW_RAMP_SEQ:
+					ramp_seq(norm_h, px);
+					break;
+				case PREVIEW_RAMP_DIV:
+					ramp_div(norm_h, px);
+					break;
+				case PREVIEW_RAW_GRAY: {
+					// Absolute 0..1, no lighting and no rescale: the escape hatch for "show me the actual
+					// numbers as brightness", so it deliberately ignores the measured range.
+					const uint8_t g = (uint8_t)std::clamp(val * 255.0f, 0.0f, 255.0f);
+					px[0] = g;
+					px[1] = g;
+					px[2] = g;
+					px[3] = 255;
+				} break;
+				default: {
+					const float lum = norm_h * shade;
+					px[0] = (uint8_t)std::clamp((lum * 0.85f + 0.10f) * 255.0f, 0.0f, 255.0f);
+					px[1] = (uint8_t)std::clamp((lum * 0.90f + 0.08f) * 255.0f, 0.0f, 255.0f);
+					px[2] = (uint8_t)std::clamp((lum * 0.80f + 0.05f) * 255.0f, 0.0f, 255.0f);
+					px[3] = 255;
+				} break;
 			}
 		}
 	}
-
 	return out;
+}
+
+// Back-compat wrapper. Every existing caller asked one of two questions and this keeps asking them.
+PackedByteArray Pasture3DUtil::hillshade_image_grid(const PackedFloat32Array &p_surface, const int p_gw,
+		const int p_gh, const bool p_is_mask) {
+	return preview_image_grid(p_surface, p_gw, p_gh,
+			p_is_mask ? PREVIEW_MASK_ALPHA : PREVIEW_HILLSHADE, 0.0, 0.0, false);
 }
 
 PackedFloat32Array Pasture3DUtil::resample_grid(const PackedFloat32Array &p_src, const int p_src_w,
@@ -2369,6 +2521,19 @@ void Pasture3DUtil::_bind_methods() {
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("hillshade_image_grid", "surface", "gw", "gh", "is_mask"),
 			&Pasture3DUtil::hillshade_image_grid);
+	// Terrain graph - the thumbnail renderer (spec 5.3). The range is passed in because it belongs to the
+	// port TYPE and to the lock, not to the data; see preview_image_grid's header.
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("preview_image_grid", "surface", "gw", "gh", "repr", "range_min", "range_max",
+					"mark_clamped"),
+			&Pasture3DUtil::preview_image_grid);
+	BIND_ENUM_CONSTANT(PREVIEW_HILLSHADE);
+	BIND_ENUM_CONSTANT(PREVIEW_RAMP_SEQ);
+	BIND_ENUM_CONSTANT(PREVIEW_RAMP_DIV);
+	BIND_ENUM_CONSTANT(PREVIEW_MASK_ALPHA);
+	BIND_ENUM_CONSTANT(PREVIEW_INDEX_PALETTE);
+	BIND_ENUM_CONSTANT(PREVIEW_NO_DATA);
+	BIND_ENUM_CONSTANT(PREVIEW_RAW_GRAY);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("resample_grid", "src", "src_w", "src_h", "dst_w", "dst_h"),
 			&Pasture3DUtil::resample_grid);
