@@ -405,12 +405,27 @@ bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 // p_extra_protect get the same recycle-protection the output slot gets (an extra ref count that never
 // reaches zero), so a multi-tap caller can read several intermediate buffers from one pass. File-local;
 // the public graph_eval_grid / graph_eval_grid_taps wrappers own the copy-out.
+//
+// V2 (spec 8): p_extra_protect is a (slot, CHANNEL) pair, and a channel > 0 does two things rather than
+// one. It protects the aux buffer from recycling, as before -- and it also DEMANDS it, by adding a
+// reference in exactly the place a wire would. That second half is the whole phase. Aux allocation here is
+// demand-driven from consumers, and a tap is not a consumer, so want_aux() below returned nullptr and the
+// producing op then SKIPPED WRITING THE CHANNEL. Erosion goes further: `want_diagnostics` is set from
+// want_aux's answer, so an undemanded flow field is never computed at all. Widening the tap API without
+// this would return a field of zeros for `flow`, which renders as a plausible, calm, entirely fictional
+// map of still water (spec 4.4). r_slot_aux is returned for the same reason: the copy-out cannot find an
+// aux buffer that the evaluator kept to itself.
 static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect,
-		const PackedFloat32Array &p_input, const std::vector<int> &p_extra_protect,
-		std::vector<std::vector<float>> &r_pool, std::vector<int> &r_slot_buffer) {
+		const PackedFloat32Array &p_input, const std::vector<std::pair<int, int>> &p_extra_protect,
+		std::vector<std::vector<float>> &r_pool, std::vector<int> &r_slot_buffer,
+		std::vector<std::vector<int>> &r_slot_aux, std::vector<int> *r_aux_demanded = nullptr) {
 	const int n = (p_gw > 0 ? p_gw : 0) * (p_gh > 0 ? p_gh : 0);
 	r_pool.clear();
 	r_slot_buffer.clear();
+	r_slot_aux.clear();
+	if (r_aux_demanded != nullptr) {
+		r_aux_demanded->clear();
+	}
 	if (n == 0 || p_prog.is_empty()) {
 		return;
 	}
@@ -499,10 +514,34 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 		ref_counts[p_prog.output]++; // protect final output buffer
 	}
 	for (size_t pi = 0; pi < p_extra_protect.size(); pi++) {
-		const int slot = p_extra_protect[pi];
-		if (slot >= 0 && slot < p_prog.count) {
-			ref_counts[slot]++; // protect a tapped preview buffer from recycling
+		const int slot = p_extra_protect[pi].first;
+		const int chan = p_extra_protect[pi].second;
+		if (slot < 0 || slot >= p_prog.count) {
+			continue;
 		}
+		if (chan <= 0) {
+			ref_counts[slot]++; // protect a tapped preview buffer from recycling
+		} else if (chan <= (int)aux_ref[(size_t)slot].size()) {
+			// DEMAND, not merely protection. This is the reference that makes want_aux() hand the op a
+			// buffer instead of nullptr, and it is counted in the same array a wire would count in, so the
+			// op cannot tell a tap from a downstream consumer -- which is what keeps the tapped field and
+			// the wired field the same field rather than two code paths that agree today.
+			aux_ref[(size_t)slot][(size_t)(chan - 1)]++;
+			// THE RESERVATION RECORD, written at the point of the reservation and nowhere else. A gate
+			// that re-derived "was this channel allocated" from the same rule would agree with a broken
+			// allocator for the same reason it agrees with a working one
+			// (`check-derived-values-outside-the-chain`); and a gate that inferred it from a non-zero
+			// field would be unable to tell an unreserved channel from a genuinely calm one, which is
+			// the exact confusion this phase exists to end.
+			if (r_aux_demanded != nullptr) {
+				r_aux_demanded->push_back(slot * 8 + chan);
+			}
+		}
+		// A channel at or beyond this slot's out_count is deliberately NOT redirected to channel 0. The
+		// wire pass above does redirect, because the compiler refuses to lower such a wire and the
+		// redirect is unreachable there; a TAP can ask for anything, and answering channel 4 of a
+		// one-output node with its height would be the impostor this whole area keeps producing. It is
+		// left unprotected and reported `unserved` at the copy-out.
 	}
 
 	// 2. Scratch Buffer Pool (owned by the caller so tapped buffers survive the return)
@@ -510,10 +549,11 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 	std::vector<int> free_buffers;
 	r_slot_buffer.assign(p_prog.count, -1);
 	std::vector<int> &slot_buffer = r_slot_buffer;
-	// Buffer index per aux channel, -1 until the producing op writes one. Not returned to the caller:
-	// a tap and the graph output are both channel 0 by construction, and a program's aux channels live
-	// only as long as the operands that read them.
-	std::vector<std::vector<int>> slot_aux((size_t)p_prog.count);
+	// Buffer index per aux channel, -1 until the producing op writes one. RETURNED to the caller since V2:
+	// a tap is no longer channel 0 by construction, and a channel the caller demanded above outlives the
+	// operands because its reference never reaches zero.
+	r_slot_aux.assign((size_t)p_prog.count, std::vector<int>());
+	std::vector<std::vector<int>> &slot_aux = r_slot_aux;
 	for (int s = 0; s < p_prog.count; s++) {
 		slot_aux[(size_t)s].assign(aux_ref[(size_t)s].size(), -1);
 	}
@@ -1508,7 +1548,9 @@ PackedFloat32Array graph_eval_grid(const GraphProgram &p_prog, int p_gw, int p_g
 	}
 	std::vector<std::vector<float>> pool;
 	std::vector<int> slot_buffer;
-	graph_eval_grid_core(p_prog, p_gw, p_gh, p_rect, p_input, std::vector<int>(), pool, slot_buffer);
+	std::vector<std::vector<int>> slot_aux;
+	graph_eval_grid_core(p_prog, p_gw, p_gh, p_rect, p_input, std::vector<std::pair<int, int>>(), pool,
+			slot_buffer, slot_aux);
 	const int out_slot = p_prog.output;
 	if (out_slot >= 0 && out_slot < (int)slot_buffer.size() && slot_buffer[out_slot] >= 0) {
 		const float *res = pool[slot_buffer[out_slot]].data();
@@ -1525,7 +1567,8 @@ PackedFloat32Array graph_eval_grid(const GraphProgram &p_prog, int p_gw, int p_g
 // RETURN SHAPE, and why it is keyed by REQUEST INDEX rather than by slot:
 //
 //   { "fields":   Array of PackedFloat32Array, one per request, in request order
-//     "unserved": PackedInt32Array of the REQUEST INDICES that were zero-filled }
+//     "unserved": PackedInt32Array of the REQUEST INDICES that were zero-filled
+//     "reserved": PackedInt32Array of the REQUEST INDICES whose channel got an aux buffer (V2) }
 //
 // A slot out of range, or with no live buffer, still yields a zero field of size gw*gh — callers rely on
 // there being one field per requested tap, and that does not change. What changes is that the caller can
@@ -1537,38 +1580,77 @@ PackedFloat32Array graph_eval_grid(const GraphProgram &p_prog, int p_gw, int p_g
 //     request is what the signature promises, and now it is what it delivers.
 //   * spec §8's V2 packs `slot * 4 + channel` into the key. Against slot-keyed ints that silently changes
 //     the meaning of every existing key; against request indices it changes nothing, because the request
-//     array grows a parallel `channels` array and the keys stay ordinals.
+//     array grows a parallel `channels` array and the keys stay ordinals. That is what happened: V2 added
+//     `p_tap_channels` and every existing caller and every existing key is untouched.
+//
+// CHANNELS (V2, spec §8). `p_tap_channels[i]` is the output channel of `p_tap_slots[i]`; a short or empty
+// array reads as channel 0, which is every caller written before V2. Channel 0 is the slot's own buffer;
+// 1.. are the aux channels an op writes through want_aux (Erosion: 1=flow, 2=ero, 3=dep, 4=wet).
+//
+// A channel at or beyond the slot's out_count is reported `unserved` rather than served as zeros. That
+// distinction is the point of the phase: `PASTURE3D_TERRAIN_GRAPH_GUIDE.md` §11 item 4 is this same bug
+// one layer down -- "a channel the kernel never writes is served as zeros, which looks like a real
+// answer" -- and zeros are this system's universal impostor.
 //
 // Empty Dictionary when the program is empty or no taps were asked for — "nothing to do" is still
 // distinct from "asked and not served".
 Dictionary graph_eval_grid_taps(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect,
-		const PackedFloat32Array &p_input, const PackedInt32Array &p_tap_slots) {
+		const PackedFloat32Array &p_input, const PackedInt32Array &p_tap_slots,
+		const PackedInt32Array &p_tap_channels) {
 	Dictionary result;
 	const int n = (p_gw > 0 ? p_gw : 0) * (p_gh > 0 ? p_gh : 0);
 	const int tap_n = p_tap_slots.size();
 	if (n == 0 || p_prog.is_empty() || tap_n == 0) {
 		return result;
 	}
-	std::vector<int> protect;
+	const int chan_n = p_tap_channels.size();
+	auto chan_at = [&](int p_i) -> int {
+		if (p_i >= chan_n) {
+			return 0; // a short or absent channels array is every pre-V2 caller
+		}
+		const int c = p_tap_channels[p_i];
+		return c > 0 ? c : 0;
+	};
+	std::vector<std::pair<int, int>> protect;
 	protect.reserve(tap_n);
 	for (int i = 0; i < tap_n; i++) {
 		const int slot = p_tap_slots[i];
 		if (slot >= 0 && slot < p_prog.count) {
-			protect.push_back(slot);
+			protect.push_back(std::make_pair(slot, chan_at(i)));
 		}
 	}
 	std::vector<std::vector<float>> pool;
 	std::vector<int> slot_buffer;
-	graph_eval_grid_core(p_prog, p_gw, p_gh, p_rect, p_input, protect, pool, slot_buffer);
+	std::vector<std::vector<int>> slot_aux;
+	std::vector<int> aux_demanded;
+	graph_eval_grid_core(p_prog, p_gw, p_gh, p_rect, p_input, protect, pool, slot_buffer, slot_aux,
+			&aux_demanded);
 	Array fields;
 	PackedInt32Array unserved;
+	PackedInt32Array reserved;
 	for (int i = 0; i < tap_n; i++) {
 		const int slot = p_tap_slots[i];
+		const int chan = chan_at(i);
+		// -1 means "no live buffer": an out-of-range slot, a channel this slot does not produce, or a
+		// channel demanded above whose op bailed before writing. All three are `unserved`, and none of
+		// them is a field of zeros presented as an answer.
+		int buf = -1;
+		if (slot >= 0 && chan == 0 && slot < (int)slot_buffer.size()) {
+			buf = slot_buffer[slot];
+		} else if (slot >= 0 && chan > 0 && slot < (int)slot_aux.size()
+				&& chan <= (int)slot_aux[(size_t)slot].size()) {
+			buf = slot_aux[(size_t)slot][(size_t)(chan - 1)];
+		}
+		if (chan > 0
+				&& std::find(aux_demanded.begin(), aux_demanded.end(), slot * 8 + chan)
+						!= aux_demanded.end()) {
+			reserved.push_back(i);
+		}
 		PackedFloat32Array field;
 		field.resize(n);
 		float *w = field.ptrw();
-		if (slot >= 0 && slot < (int)slot_buffer.size() && slot_buffer[slot] >= 0) {
-			const float *src = pool[slot_buffer[slot]].data();
+		if (buf >= 0) {
+			const float *src = pool[buf].data();
 			for (int j = 0; j < n; j++) {
 				w[j] = src[j];
 			}
@@ -1582,6 +1664,12 @@ Dictionary graph_eval_grid_taps(const GraphProgram &p_prog, int p_gw, int p_gh, 
 	}
 	result["fields"] = fields;
 	result["unserved"] = unserved;
+	// The request indices whose CHANNEL the evaluator actually reserved an aux buffer for. Empty for a
+	// pre-V2 caller, since channel 0 needs no reservation. Distinct from `unserved` on purpose: unserved
+	// says the copy-out found nothing, reserved says the demand pass ran -- and the failure this phase is
+	// built around (a tapped channel nobody allocated) shows up as reserved-but-never-written only if the
+	// two are reported separately.
+	result["reserved"] = reserved;
 	return result;
 }
 

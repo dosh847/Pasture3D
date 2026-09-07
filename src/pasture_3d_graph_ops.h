@@ -306,8 +306,14 @@ PackedFloat32Array graph_eval_grid(const GraphProgram &p_prog, int p_gw, int p_g
 // Evaluate the whole graph ONCE and tap several intermediate node buffers from the single pass. Each slot
 // in p_tap_slots is protected from the scratch-arena recycle (the same +1 ref count the output gets), so
 // the cost is one evaluation regardless of how many taps are requested — the enabling primitive for the
-// editor's inline node previews. Returns {slot(int) -> PackedFloat32Array of size p_gw*p_gh}.
+// editor's inline node previews. Returns {"fields": Array, "unserved": PackedInt32Array} keyed by REQUEST
+// INDEX; see the definition for why it is not keyed by slot.
+//
+// p_tap_channels[i] is the OUTPUT CHANNEL of p_tap_slots[i] (V2, spec §8). Short or empty reads as channel
+// 0 everywhere, so every pre-V2 caller is unaffected. A channel > 0 is not merely read: it is DEMANDED, in
+// the same reference array a wire counts in, which is what makes the producing op write it at all.
 Dictionary graph_eval_grid_taps(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect,
-		const PackedFloat32Array &p_input, const PackedInt32Array &p_tap_slots);
+		const PackedFloat32Array &p_input, const PackedInt32Array &p_tap_slots,
+		const PackedInt32Array &p_tap_channels = PackedInt32Array());
 
 } // namespace godot

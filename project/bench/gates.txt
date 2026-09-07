@@ -222,6 +222,14 @@ bench/GraphPhase1BrushTest.tscn
 bench/GraphAllNodeSocketsGate.tscn
 bench/GraphPortTypeGate.tscn
 bench/GraphPreviewReprGate.tscn
+# --- V2: channel-addressable taps (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §8) ---
+# graph_eval_grid_taps takes a (slot, CHANNEL) pair, and a tapped channel is ALLOCATED because it was
+# tapped -- the second half is the phase. Without it want_aux returns nullptr, the op skips writing the
+# channel, and Erosion never computes its diagnostics at all, so `flow` comes back as a plausible, calm,
+# entirely fictional map of still water. [B] asserts on the evaluator's own reservation record rather than
+# on the field being non-zero, because an unreserved channel and a genuinely calm one are the same bytes.
+# Needs the freshly built DLL; says so rather than passing.
+bench/GraphPreviewChannelGate.tscn
 
 # --- Modifier Margin: the band's mask must not step at the loop rim (§6.8.1) ---
 # The generator and filter masks have opposite boundary values; folding them into one grid ringed every

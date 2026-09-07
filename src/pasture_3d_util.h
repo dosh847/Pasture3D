@@ -123,8 +123,13 @@ public:
 	// Single-pass multi-tap graph evaluator: evaluate one program ONCE and return several nodes' buffers at
 	// once, keyed by SSA slot ({int -> PackedFloat32Array}). Backs the graph editor's inline node previews —
 	// N open previews cost one evaluation, not N. Empty Dictionary when the program cannot be built.
+	// `tap_channels` names the output CHANNEL of each requested slot (V2, spec §8) — 0 (or absent) is the
+	// slot's own output, 1.. are the aux channels a multi-output op publishes (Erosion: 1=flow, 2=ero,
+	// 3=dep, 4=wet). A tapped channel is ALLOCATED because it was tapped; without that half the op skips
+	// writing it and the tap returns zeros, which for `flow` reads as calm water rather than as no answer.
 	static Dictionary graph_eval_grid_taps(const Dictionary &p_program, const int p_gw, const int p_gh,
-			const Rect2 &p_rect, const PackedFloat32Array &p_input, const PackedInt32Array &p_tap_slots);
+			const Rect2 &p_rect, const PackedFloat32Array &p_input, const PackedInt32Array &p_tap_slots,
+			const PackedInt32Array &p_tap_channels = PackedInt32Array());
 
 	// GPU whole-graph evaluator (RenderingDevice). Same program/inputs as graph_eval_grid, run on a local
 	// RD. Returns an EMPTY array when the GPU path is unavailable (headless/no driver) or fails, so a caller

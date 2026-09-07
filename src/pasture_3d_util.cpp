@@ -1297,12 +1297,13 @@ PackedFloat32Array Pasture3DUtil::graph_eval_grid(const Dictionary &p_program, c
 // and read them all from a single call, so opening more previews never adds evaluation passes. Returns an
 // empty Dictionary when the program cannot be built (the caller treats that as "no previews this tick").
 Dictionary Pasture3DUtil::graph_eval_grid_taps(const Dictionary &p_program, const int p_gw, const int p_gh,
-		const Rect2 &p_rect, const PackedFloat32Array &p_input, const PackedInt32Array &p_tap_slots) {
+		const Rect2 &p_rect, const PackedFloat32Array &p_input, const PackedInt32Array &p_tap_slots,
+		const PackedInt32Array &p_tap_channels) {
 	godot::GraphProgram prog;
 	if (!godot::graph_build(p_program, prog)) {
 		return Dictionary();
 	}
-	return godot::graph_eval_grid_taps(prog, p_gw, p_gh, p_rect, p_input, p_tap_slots);
+	return godot::graph_eval_grid_taps(prog, p_gw, p_gh, p_rect, p_input, p_tap_slots, p_tap_channels);
 }
 
 // GPU whole-graph evaluator binding. A persistent instance so the local RD + shader compile ONCE across
@@ -2441,8 +2442,9 @@ void Pasture3DUtil::_bind_methods() {
 			&Pasture3DUtil::graph_eval_grid);
 	// Terrain graph — single-pass multi-tap; one eval, several node buffers keyed by slot (inline previews).
 	ClassDB::bind_static_method("Pasture3DUtil",
-			D_METHOD("graph_eval_grid_taps", "program", "gw", "gh", "rect", "input", "tap_slots"),
-			&Pasture3DUtil::graph_eval_grid_taps);
+			D_METHOD("graph_eval_grid_taps", "program", "gw", "gh", "rect", "input", "tap_slots",
+					"tap_channels"),
+			&Pasture3DUtil::graph_eval_grid_taps, DEFVAL(PackedInt32Array()));
 	// Terrain graph — the GPU whole-graph evaluator (RenderingDevice); empty return => unavailable/failed.
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("graph_eval_grid_gpu", "program", "gw", "gh", "rect", "input"),
