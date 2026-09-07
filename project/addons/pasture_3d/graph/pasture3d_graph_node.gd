@@ -327,6 +327,36 @@ func eval_path(_p_inputs: Array) -> Pasture3DGraphPath:
 	return path_output()
 
 
+## The path this node last HANDED THE GRAPH, or null if it has never been asked.
+##
+## LIFTED HERE FROM THE DERIVE FAMILY (visualization spec §6.3, V3). It was written for the gates, and its
+## own doc-comment said why: "a test that calls `eval_path` itself measures a fresh call rather than the
+## graph's". That reasoning is one layer up from where it was written — it applies to the FEATURE, and the
+## thing that would measure nothing is now the author's own eyes.
+##
+## THE TRAP, concretely. `Pasture3DGraphNodePathDerive.derive_without_grid` returns the input path
+## UNCHANGED, which is the right answer for an evaluation that has no grid yet. So a viewport overlay that
+## asked a Path Drape for its path outside an evaluation would get the UNDRAPED line and draw it,
+## confidently, as the answer. An undraped line on terrain does not look broken. It looks like a path. The
+## overlay would pass a naive test and be wrong exactly when the author most needs it — when the drape is
+## not working.
+##
+## So: never resolved means NULL, and a consumer draws nothing. Not the input, not a guess. Absence is the
+## honest render.
+##
+## Written by `Pasture3DTerrainGraph._resolved_path_of` at its every return, which is the only place that
+## knows. Not by `eval_path`: a PATH SOURCE is answered by the short-circuit and never reaches `eval_path`
+## at all, so recording there would leave every Spline Source and Road Source permanently unresolved, and a
+## memo HIT returns without calling it either — which would make the record go stale precisely when the
+## memo is doing its job.
+var _returned: Pasture3DGraphPath = null
+
+
+## See `_returned`. Read by the gates and by the V3 viewport overlay; never by an evaluator.
+func derived_path() -> Pasture3DGraphPath:
+	return _returned
+
+
 ## True when this node produces a PATH out of a GRID it reads (spec 8.4). Only the S7a derive family
 ## answers true.
 ##

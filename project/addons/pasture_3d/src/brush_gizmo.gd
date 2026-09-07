@@ -31,6 +31,20 @@ const TANGENT_R: float = 0.8
 ## Orange tangent handles, distinct from cyan points and purple origin.
 const TANGENT_COLOR := Color(1.0, 0.66, 0.2)
 
+## The V3 viewport PATH overlay (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §6.2). A plain RefCounted for the
+## same reason `brush_handles.gd` is one: a gate can drive it headless and assert on the vertices it
+## returns, where an EditorNode3DGizmoPlugin could only be asserted to have been CALLED.
+const PathOverlay: Script = preload("res://addons/pasture_3d/src/graph_path_overlay.gd")
+## The resolved centreline. Warm yellow-green: distinct from the cyan spline points it will often be drawn
+## beside, because "the line you authored" and "the line the graph resolved" differing is the whole point.
+const PATH_LINE_COLOR := Color(0.75, 1.0, 0.45)
+## The vertices, brighter still — a 1 m resample shows 1 m spacing or it did not run.
+const PATH_POINT_COLOR := Color(1.0, 0.95, 0.55)
+## The width envelope, dimmer: it is context for the centreline, not a second centreline.
+const PATH_ENVELOPE_COLOR := Color(0.35, 0.62, 0.95)
+## The drop lines. Red because a visible drop is a FAILED DRAPE, and the correct state is none at all.
+const PATH_DROP_COLOR := Color(1.0, 0.35, 0.3)
+
 
 ## Per-drag capture of the true pre-drag value of each touched subgizmo (id -> Vector3): position for a
 ## point handle, in/out offset for a tangent. Lets undo restore exactly (esp. a stubbed zero tangent
@@ -70,6 +84,12 @@ func _init() -> void:
 	create_material("marker", MARKER_COLOR, false, true)
 	create_material("points", POINT_COLOR, false, true)
 	create_material("tangents", TANGENT_COLOR, false, true)
+	# The overlay's four. NOT on_top, unlike the markers above: the whole value of drop lines is seeing
+	# where the path sits relative to the ground, and a line drawn through the terrain regardless of depth
+	# would show a path under a hill as if it were over it.
+	create_material("path_line", PATH_LINE_COLOR, false, false)
+	create_material("path_envelope", PATH_ENVELOPE_COLOR, false, false)
+	create_material("path_drop", PATH_DROP_COLOR, false, false)
 
 
 ## The marker material for one colour, registering it the first time it is asked for.
@@ -201,6 +221,35 @@ func _redraw(p_gizmo: EditorNode3DGizmo) -> void:
 						Sprites._dot_sprite(p_gizmo, hc, Sprites.TANGENT_SIZE, TANGENT_COLOR,
 								_h.is_selected(node, gpi, kind))
 				gpi += 1
+
+		# THE VIEWPORT PATH OVERLAY (§6.2). Inside `_brush_selected` with the loop handles, because both
+		# answer the same question -- "what is this brush actually doing" -- and neither should clutter
+		# every brush in the scene.
+		#
+		# It draws what `derived_path()` returned and nothing else. A previewed PATH node the graph has not
+		# resolved yet contributes NOTHING rather than its input; see graph_path_overlay.gd's header for
+		# why drawing the input would be worse than drawing nothing.
+		_draw_path_overlay(p_gizmo, node)
+
+
+## Add the V3 overlay's four contributions. Geometry comes from `PathOverlay.build`, which is where the
+## rules live; this function is only the drawing, so a gate measuring the rules never has to build a gizmo.
+func _draw_path_overlay(p_gizmo: EditorNode3DGizmo, p_node: Node3D) -> void:
+	var ov: Dictionary = PathOverlay.build(p_node)
+	var centre: PackedVector3Array = ov.get("centreline", PackedVector3Array())
+	if centre.size() >= 2:
+		p_gizmo.add_lines(centre, get_material("path_line", p_gizmo))
+	var env: PackedVector3Array = ov.get("envelope", PackedVector3Array())
+	if env.size() >= 2:
+		p_gizmo.add_lines(env, get_material("path_envelope", p_gizmo))
+	var drops: PackedVector3Array = ov.get("drops", PackedVector3Array())
+	if drops.size() >= 2:
+		p_gizmo.add_lines(drops, get_material("path_drop", p_gizmo))
+	# Dots last, so they sit on top of the lines that pass through them. The same `_dot_sprite` the loop
+	# points use, at a constant screen size, because counting them is the resample check and a vertex that
+	# shrinks with distance cannot be counted.
+	for v in ov.get("vertices", PackedVector3Array()):
+		Sprites._dot_sprite(p_gizmo, v, Sprites.POINT_SIZE, PATH_POINT_COLOR, false)
 
 
 # ---- Loop points + tangents as subgizmos ----

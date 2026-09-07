@@ -1659,7 +1659,24 @@ var _path_eval_cache: Dictionary = {}
 ## graph on every bake and hand back a new instance each time, which costs the geometry table's fanout
 ## dedup as well as the work. `content_digest` is one native hash per path (§ its own comment) and it is
 ## the same measure `Pasture3DGraphPath` already uses to decide whether it changed at all.
+## Records what this node HANDED THE GRAPH, then answers with it (visualization spec §6.3, V3).
+##
+## A wrapper rather than four assignments inside the body, because the record has to hold at EVERY return
+## — the source short-circuit, the cycle break, the memo hit and the fresh `eval_path` alike — and a rule
+## that has to be remembered at four returns is a rule that will be forgotten at the fifth.
+##
+## This is the only place that knows. `eval_path` cannot record for a SOURCE, which the short-circuit
+## answers without ever calling it, and cannot record a memo HIT, which returns without calling it either.
+## An overlay reading a record written by `eval_path` would therefore show every Spline Source as "not yet
+## resolved" and would go stale exactly while the memo was working.
 func _resolved_path_of(p_ni: int, p_inputs_of: Dictionary, p_stack: Dictionary = {}) -> Pasture3DGraphPath:
+	var made := _resolved_path_of_uncached(p_ni, p_inputs_of, p_stack)
+	if p_ni >= 0 and p_ni < nodes.size() and nodes[p_ni] != null:
+		nodes[p_ni]._returned = made
+	return made
+
+
+func _resolved_path_of_uncached(p_ni: int, p_inputs_of: Dictionary, p_stack: Dictionary = {}) -> Pasture3DGraphPath:
 	if p_ni < 0 or p_ni >= nodes.size() or nodes[p_ni] == null:
 		return null
 	var node: Pasture3DGraphNode = nodes[p_ni]

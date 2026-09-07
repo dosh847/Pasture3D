@@ -165,22 +165,12 @@ func derive_without_grid(p_src: Pasture3DGraphPath) -> Pasture3DGraphPath:
 	return p_src
 
 
-## The path this node last HANDED THE GRAPH, or null if it has never been asked.
-##
-## Exists for the gates, and it is not a convenience. A test that calls `eval_path` itself measures a
-## fresh call rather than the graph's — so it passes whether or not `_resolved_path_of` ever reached this
-## node, and whether or not the memo served a stale answer. Both of those are real failure modes with no
-## other symptom (PathDeriveGate [E] and [F]), so the only honest thing to read is what the graph got.
-func derived_path() -> Pasture3DGraphPath:
-	return _returned
-
-
-# The above. Written on every return, which is why `eval_path` is final here and subclasses override
-# `_derive_path` instead.
-var _returned: Pasture3DGraphPath = null
-
-
 ## FINAL. Subclasses override `_derive_path` (or, normally, just `derive`).
+##
+## `_returned` and `derived_path()` moved to `Pasture3DGraphNode` for V3 (visualization spec §6.3): the
+## reshape family needs them too, and the user's requirement names Path Resample first. Still written here
+## as well as by `_resolved_path_of`, because `PathDeriveGate` [E] drives `eval_path` directly and the
+## record must mean the same thing on both routes.
 func eval_path(p_inputs: Array) -> Pasture3DGraphPath:
 	_returned = _derive_path(p_inputs)
 	return _returned

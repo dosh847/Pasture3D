@@ -615,3 +615,10 @@ bench/RoadSmoothGate.tscn
 #                        Water*/WaterBodies* family still awaits RenderingServer.frame_post_draw
 #                        unconditionally, so it is windowed-only until somebody applies the
 #                        WaterBodiesPhase4Gate _settle fix to each.
+
+# The viewport PATH overlay (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §6, phase V3).
+# The criterion that matters is [A]'s control: with nothing resolved the overlay must draw NOTHING, not the
+# undraped input. `derive_without_grid` returns its input unchanged, so an overlay that asked the node
+# instead of reading `derived_path()` would draw a confident, plausible, wrong line — and an undraped path
+# on terrain does not look broken. The gate fails on exactly that substitution.
+bench/GraphPathOverlayGate.tscn
