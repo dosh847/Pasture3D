@@ -32,6 +32,15 @@ var graph: Pasture3DTerrainGraph
 var host_modifier: Pasture3DNodeGraph = null
 var host_brush: Pasture3DTerrainBrush = null
 
+## The domain the LAST preview dispatch actually ran the tap over: `{"rect", "gw", "gh", "brush"}`, or
+## empty until one has run.
+##
+## Exists for the gates, and it is not a convenience — same reason as `Pasture3DGraphNode._returned`
+## (spec §6.3). A test that calls `_get_preview_input_data()` itself measures a FRESH lookup rather than
+## the one the preview used, so it passes whether or not the dispatch ever consulted the host binding.
+## Written where the tap arguments are formed, and nowhere else.
+var last_preview_dispatch: Dictionary = {}
+
 var _graphedit: GraphEdit
 var _search_dialog: PopupPanel
 var _add_button: Button
@@ -41,6 +50,7 @@ var _minimap_button: Button
 var _arrange_button: Button
 var _bake_brush_button: Button
 var _brush_details_button: Button
+var _host_label: Label
 var _graph_picker: OptionButton
 var _hint: Label
 
@@ -95,8 +105,14 @@ func edit_graph(p_graph: Pasture3DTerrainGraph, p_mod: Pasture3DNodeGraph = null
 
 	if p_brush != null:
 		host_brush = p_brush
-	elif host_brush != null and p_graph == null:
+	elif host_brush != null and (p_graph == null or not _brush_hosts(host_brush, p_graph)):
+		# `host_brush` used to be released only when the graph went null, so it was STICKY: open a graph
+		# from a brush, then select an unrelated standalone graph, and that brush stayed bound. The rect
+		# fell back to the canonical dome (which looks right), but `Pasture3DGraphSources.resolve(graph,
+		# host_brush)` went on resolving the new graph's scene-naming sources through a brush that never
+		# hosted it. A binding must not outlive the graph it was made for.
 		host_brush = null
+	_host_candidate_count = 0
 
 	if graph == p_graph:
 		_on_graph_changed()
@@ -263,6 +279,16 @@ func _find_brush_for_modifier(p_mod: Pasture3DNodeGraph) -> Pasture3DTerrainBrus
 	return null
 
 
+## Does this brush's modifier stack contain a graph modifier pointing at `p_graph`?
+static func _brush_hosts(p_brush: Pasture3DTerrainBrush, p_graph: Pasture3DTerrainGraph) -> bool:
+	if p_brush == null or p_graph == null:
+		return false
+	for m in p_brush.modifiers:
+		if m is Pasture3DNodeGraph and (m as Pasture3DNodeGraph).graph == p_graph:
+			return true
+	return false
+
+
 func _find_host_brush() -> Pasture3DTerrainBrush:
 	if host_brush != null:
 		return host_brush
@@ -279,12 +305,42 @@ func _find_host_brush() -> Pasture3DTerrainBrush:
 					for m in (nd as Pasture3DTerrainBrush).modifiers:
 						if m is Pasture3DNodeGraph and (m as Pasture3DNodeGraph).graph == graph:
 							return nd as Pasture3DTerrainBrush
+		# The last tier, and the only one that can be WRONG rather than merely empty. It matches on GRAPH
+		# identity, and a graph resource can be shared by any number of brushes, so it used to return
+		# whichever brush the scene happened to list first — silently previewing one brush's graph over
+		# another brush's terrain (spec §4.6). Collect every candidate instead of taking the first: one is
+		# an answer, several is a question the gesture did not answer, and inventing one is the defect.
+		var candidates: Array[Pasture3DTerrainBrush] = []
 		for b in get_tree().get_nodes_in_group(Pasture3DTerrainBrush.BRUSH_GROUP):
 			if b is Pasture3DTerrainBrush:
 				for m in b.modifiers:
 					if m is Pasture3DNodeGraph and (m as Pasture3DNodeGraph).graph == graph:
-						return b
+						candidates.append(b as Pasture3DTerrainBrush)
+						break
+		if candidates.size() == 1:
+			return candidates[0]
+		if candidates.size() > 1:
+			# Ambiguous: fall back to the canonical domain and let the panel say so. Picking would be a
+			# lie about whose terrain is on screen, and it is the lie that is expensive — the author tunes
+			# against a preview taken through the wrong brush and the bake does something else.
+			_host_candidate_count = candidates.size()
+			return null
+		_host_candidate_count = 0
 	return null
+
+
+## How many brushes host the current graph, when NO gesture named one. 0 or 1 is unambiguous; >1 means the
+## preview is deliberately on the canonical domain because the question has no answer. Reset on every
+## `_find_host_brush` fallback so it never reports a stale count.
+var _host_candidate_count: int = 0
+
+
+## True when the graph has several possible host brushes and nothing chose between them (§5.6). The panel
+## says so rather than showing one brush's terrain under another's name.
+func host_ambiguous() -> bool:
+	if host_brush != null or host_modifier != null:
+		return false
+	return _host_candidate_count > 1
 
 
 func _find_host_modifier() -> Pasture3DNodeGraph:
@@ -297,6 +353,32 @@ func _find_host_modifier() -> Pasture3DNodeGraph:
 				host_modifier = m
 				return m
 	return null
+
+
+## Say whose terrain the preview is looking through — the host brush's name, "(no host)" for a standalone
+## graph on the canonical dome, or "(ambiguous host)" when several brushes share this graph and no gesture
+## chose between them (§5.6). The last case is the one worth naming: the preview is deliberately on the
+## canonical domain, and without the label that is indistinguishable from having no host at all.
+func _update_host_label(p_brush: Pasture3DTerrainBrush) -> void:
+	if _host_label == null:
+		return
+	if graph == null:
+		_host_label.visible = false
+		return
+	_host_label.visible = true
+	if p_brush != null:
+		_host_label.text = "through: %s" % p_brush.name
+		_host_label.tooltip_text = "Previews evaluate over this brush's footprint."
+		_host_label.modulate = Color(1, 1, 1, 0.75)
+		return
+	if host_ambiguous():
+		_host_label.text = "through: (ambiguous host)"
+		_host_label.tooltip_text = "%d brushes host this graph and nothing chose between them, so " 				% _host_candidate_count 				+ "previews use the canonical domain. Open the graph from a brush to bind one."
+		_host_label.modulate = Color(1.0, 0.75, 0.35)
+		return
+	_host_label.text = "through: (no host)"
+	_host_label.tooltip_text = "No brush hosts this graph, so previews use the canonical domain."
+	_host_label.modulate = Color(1, 1, 1, 0.6)
 
 
 ## Fill the picker from the host brush's modifier stack and select the graph being edited.
@@ -511,6 +593,13 @@ func _build_ui() -> void:
 	_brush_details_button.pressed.connect(_on_brush_details_pressed)
 	_brush_details_button.visible = false
 	bar.add_child(_brush_details_button)
+
+	# WHOSE TERRAIN IS ON SCREEN (§5.6). "This is your brush's ground" and "this is a synthetic dome"
+	# produce different pictures and used to look identical, so the panel now always says which. It reads
+	# the same binding the dispatch uses, so it cannot drift from what the thumbnails were rendered over.
+	_host_label = Label.new()
+	_host_label.add_theme_font_size_override(&"font_size", 11)
+	bar.add_child(_host_label)
 	
 	# Replaces the read-only "editing: ..." label. It still NAMES the graph in the same place, and when the
 	# host brush carries several it is also how you switch between them without going back to the Inspector.
@@ -653,6 +742,7 @@ func _rebuild() -> void:
 	# to show, and a button reading "Brush Details" that can never do anything is worse than no button.
 	if _brush_details_button != null:
 		_brush_details_button.visible = (has and brush != null)
+	_update_host_label(brush)
 	_populate_graph_picker(brush)
 	if _hint != null: _hint.visible = not has
 	if not has:
@@ -1672,6 +1762,7 @@ func _refresh_previews() -> void:
 	var rect: Rect2 = input_data["rect"]
 	if in_gw != PREVIEW_SIZE or in_gh != PREVIEW_SIZE:
 		input = Pasture3DUtil.resample_grid(input, in_gw, in_gh, PREVIEW_SIZE, PREVIEW_SIZE)
+	last_preview_dispatch = {"rect": rect, "gw": in_gw, "gh": in_gh, "brush": _find_host_brush()}
 	_preview_token += 1
 	var token := _preview_token
 	WorkerThreadPool.add_task(func():

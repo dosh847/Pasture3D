@@ -221,6 +221,7 @@ bench/GraphPhase1BrushTest.tscn
 # under test was fine and the node beside it was the one un-accelerating everything.
 bench/GraphAllNodeSocketsGate.tscn
 bench/GraphPortTypeGate.tscn
+bench/GraphPreviewReprGate.tscn
 
 # --- Modifier Margin: the band's mask must not step at the loop rim (§6.8.1) ---
 # The generator and filter masks have opposite boundary values; folding them into one grid ringed every
