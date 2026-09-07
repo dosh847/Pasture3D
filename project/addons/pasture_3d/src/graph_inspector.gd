@@ -406,6 +406,20 @@ func refresh() -> bool:
 		_refresh_labels()
 		return false
 
+	# A TERMINAL node — a sink — has no output, so there is nothing to tap and never will be, however it
+	# is wired. Named here rather than falling through, because the generic branch below reports "the
+	# graph does not lower", which is the wording for the graph-wide native bail (§10) and sends an author
+	# hunting for a missing kernel. Selecting a sink is a completely ordinary thing to do; it is not a
+	# fault, and it must not read as one.
+	if not node.has_output():
+		last_reading = {
+			"no_data": true,
+			"terminal": true,
+			"reason": _terminal_reason(graph, node),
+		}
+		_refresh_labels()
+		return false
+
 	var compiled: Dictionary = graph.compile_graph_program_multi([node_index])
 	if compiled.is_empty():
 		last_reading = {"no_data": true, "reason": "the graph does not lower"}
@@ -483,6 +497,27 @@ func probe(p_wx: float, p_wz: float) -> float:
 		return NAN
 	return probe_at(last_reading["field"], int(last_reading["gw"]), int(last_reading["gh"]),
 			last_reading["rect"], p_wx, p_wz)
+
+
+## What to say about a sink, and where to look instead.
+##
+## The dock reads a node's OUTPUT, so it can say nothing about a node that has none — but the field the
+## author actually wants to see is on the node wired INTO the sink, and naming it is the difference
+## between a dead end and a redirect. Falls back to the plain statement when nothing is wired yet.
+func _terminal_reason(p_graph, p_node) -> String:
+	var here := "this is a sink — it writes, and has no output to inspect"
+	var types: PackedInt32Array = p_node.input_port_types()
+	var names: PackedStringArray = p_node.input_names()
+	for port in range(p_node.input_count()):
+		if port >= types.size() or not Pasture3DGraphNode.is_field_type(int(types[port])):
+			continue
+		for c in p_graph.connections:
+			if c.size() >= 4 and int(c[2]) == node_index and int(c[3]) == port:
+				var src = p_graph.nodes[int(c[0])]
+				if src == null:
+					continue
+				return "%s. Select '%s' to read what reaches its `%s`." 						% [here, src.display_name(), String(names[port]) if port < names.size() else "input"]
+	return "%s. Wire a field into it, then select that node to read it." % here
 
 
 func _refresh_labels() -> void:

@@ -59,8 +59,9 @@ func _ready() -> void:
 	_d_a_heightless_profile_is_a_gap()
 	_e_pinning_holds_the_node()
 	_f_the_channel_selector_moves_everything()
+	_g_a_sink_says_it_is_a_sink()
 
-	if _checks < 43:
+	if _checks < 47:
 		print("\n    VACUOUS: only %d checks completed; the gate did not measure what it claims to."
 				% _checks)
 		_fail += 1
@@ -613,3 +614,59 @@ func _varied(p_field: PackedFloat32Array) -> bool:
 			lo = minf(lo, v)
 			hi = maxf(hi, v)
 	return hi - lo > 1e-6
+
+
+# --- G --------------------------------------------------------------------------------------------------
+#
+# A SINK IS NOT A FAULT. Reported by the user on 2026-09-07: a Color Sink selected in the graph made the
+# dock say "NO DATA — the graph does not lower", which is the wording for the graph-wide native bail
+# (§10) — so it read as a broken graph, twice, and sent them looking for a missing material connection
+# that does not exist. Wiring more into the sink cannot help: the dock reads a node's OUTPUT and a sink
+# has none, by the same `has_output()` false that is the whole terminality mechanism.
+#
+# The criterion is therefore about the WORDS, because the words were the defect. Its control is the
+# criterion: an ordinary node must still be able to produce the native-bail message, or "the sink no
+# longer says it" would also be true of a dock that had stopped reporting causes at all.
+func _g_a_sink_says_it_is_a_sink() -> void:
+	print("
+[G] a terminal node reports what it IS, not that the graph failed (user report, 2026-09-07)")
+
+	var g := _noise_graph()
+	var sink = Pasture3DGraphNodeRegistry.create(&"color_sink")
+	if g == null or sink == null:
+		_check(false, "[G] fixture: the registry produced no color_sink")
+		return
+	g.add_node(sink, Vector2(600, 0))
+	var si: int = g.nodes.size() - 1
+	g.connect_ports(0, 0, si, 0) # Noise -> sink.mask, so the sink is WIRED and still has no output.
+
+	var ed = _panel(g)
+	var d = _dock(ed, si)
+	d.refresh()
+	var reading: Dictionary = d.last_reading
+	var reason := String(reading.get("reason", ""))
+
+	_check(bool(reading.get("no_data", false)),
+			"[G] a wired sink still reports NO DATA (it has no output; that is the mechanism)")
+	_check(bool(reading.get("terminal", false)),
+			"[G] and flags itself TERMINAL rather than falling through to the generic branch")
+	_check(reason.contains("sink") and not reason.contains("does not lower"),
+			"[G] the reason names what it is and not a native bail: '%s'" % reason)
+	_check(reason.contains("Select") or reason.contains("Wire"),
+			"[G] and points somewhere: '%s'" % reason)
+
+	# CONTROL: the ordinary node in the SAME graph still reads a field and is not flagged terminal — so
+	# [G] measured the sink branch rather than a dock that had stopped reporting, or one that flags
+	# everything. Deliberately NOT a "graph that does not lower" fixture: a node with no path to the
+	# Output still compiles as its own root, and the FROZEN-solver case cannot serve either, because
+	# `compile_graph_program_multi` ignores `blocks_native()` (the open item V1 recorded). So the
+	# native-bail wording's reachability is asserted nowhere here, and this criterion does not claim it.
+	var d2 = _dock(ed, 0)
+	d2.refresh()
+	_check(not bool(d2.last_reading.get("no_data", true))
+			and not bool(d2.last_reading.get("terminal", false)),
+			"control: the ordinary node in the same graph reads a field and is NOT flagged terminal")
+
+	ed.queue_free()
+	d.queue_free()
+	d2.queue_free()
