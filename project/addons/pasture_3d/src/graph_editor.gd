@@ -2394,8 +2394,8 @@ func _on_node_selected(p_node: Node) -> void:
 	if i >= 0 and i < graph.nodes.size() and graph.nodes[i] != null:
 		if plugin != null:
 			# Offer the road list BEFORE the inspector builds, not after. The keys used to arrive only
-			# from a bake or a preview render, which means the first time you click a Road Source """ + EM + u""" the
-			# one moment you actually need to choose a road """ + EM + u""" the list is empty and `_validate_property`
+			# from a bake or a preview render, which means the first time you click a Road Source — the
+			# one moment you actually need to choose a road — the list is empty and `_validate_property`
 			# leaves the field a plain String. Resolving on selection costs one walk of the graph and
 			# makes the dropdown present whenever a network is reachable.
 			_offer_source_keys()
