@@ -537,6 +537,7 @@ static func cell_to_world(p_ix: int, p_iz: int, p_gw: int, p_gh: int, p_rect: Re
 ## a pass. `_eval_unfolded` is the reference this matches (to float32 rounding — the fold keeps
 ## intermediates in double, so it is in fact slightly more accurate); GraphFoldGate holds the two together.
 func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null, p_root_node: int = -1) -> PackedFloat32Array:
+	evaluate_count += 1
 	# NO Pasture3DTerrainGraph METHOD MAY BE CALLED OFF THE MAIN THREAD, and this is where that is
 	# enforced rather than documented. evaluate() mutates the shared resource on BOTH of its routes --
 	# store_cache below, _global_access_tick, each node's _last_access_tick, _evict_cache_if_needed -- so
@@ -1833,6 +1834,16 @@ var force_no_staged_compile := false
 ## "the terrain is right" is equally true of a staged run and of one that fell through to GDScript, and
 ## the whole point of S7b is WHICH of those happened.
 var staged_compile_count: int = 0
+
+
+## Counts `evaluate()` calls that actually ran. Read by criterion [G] of the visualization spec, which
+## exists to hold the line standing constraint 2 draws: PREVIEWS ARE NEVER PAID FOR BY `evaluate()`. The
+## thumbnail path taps a compiled program directly (`graph_eval_grid_taps`) and the `preview_on` toggle is
+## an instant show/hide, so a preview refresh — and every toggle — must leave this number where it was.
+##
+## Counted rather than reasoned about, because "the preview looked instant on my machine" is not a
+## measurement, and a regression here would present as an editor that merely got slower.
+var evaluate_count: int = 0
 
 
 ## Memoised per [root, revision]. The answer is a function of TOPOLOGY, the op set, and mute state, all of

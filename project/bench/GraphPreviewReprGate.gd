@@ -63,10 +63,11 @@ func _ready() -> void:
 	_c_unserved_is_visible()
 	_d_a_non_lowering_graph_says_so()
 	_e_a_path_output_taps_no_grid()
+	_g_previews_are_not_paid_for_by_evaluate()
 	_h_host_binding_follows_the_gesture()
 	_i_the_input_preview_reads_the_hosts_ground()
 
-	if _checks < 89:
+	if _checks < 96:
 		print("\n    VACUOUS: only %d checks completed; the gate did not measure what it claims to." % _checks)
 		_fail += 1
 	print("\n=== %s (%d failures, %d checks) ===\n"
@@ -1046,3 +1047,80 @@ func _e_a_path_output_taps_no_grid() -> void:
 	for n in [ed, ed2, ed3]:
 		if is_instance_valid(n):
 			n.queue_free()
+
+
+# --- G -------------------------------------------------------------------------------------------------
+#
+# Standing constraint 2, and the line the whole preview design rests on: PREVIEWS ARE NEVER PAID FOR BY
+# `evaluate()`. The thumbnail path taps a compiled program directly, and `preview_on` is an instant
+# show/hide rather than a re-evaluate. If that ever stops being true it will present as "the editor got
+# slower", which nobody bisects.
+#
+# COUNTED, not reasoned about. `evaluate_count` is bumped at the top of `evaluate()` itself, so it cannot
+# be satisfied by a route that avoids one particular caller.
+#
+# Three separate claims, because they can regress independently:
+#   [G1] toggling `preview_on` runs no evaluation.
+#   [G2] a whole preview REFRESH — the tap pass, the render, the apply — runs none either. This is the
+#        stronger one and the one a future change is likelier to break.
+#   [G3] toggling does not bump the content revision, so it cannot invalidate a host's frozen bake.
+#        A toggle that cost a cache would be "free" by [G1]'s measure and expensive in fact.
+#
+# Controls: a real `evaluate()` DOES increment the counter, and a real parameter edit DOES bump the
+# revision. Without those, every check above passes on a dead counter and a frozen revision — which is
+# `gate-pass-can-mean-nothing-ran` exactly.
+func _g_previews_are_not_paid_for_by_evaluate() -> void:
+	print("\n[G] toggling a preview, and refreshing one, perform NO evaluation (standing constraint 2)")
+
+	var g := _one_previewable_graph()
+	var node: Pasture3DGraphNode = g.nodes[0]
+	var ed = _panel()
+	ed.edit_graph(g, null, null)
+
+	# [G1] the toggle. Driven through `_apply_preview_flag`, which is the toggle action's own body — not
+	# by assigning `preview_on` here, which would bypass the very code path being measured.
+	var before: int = g.evaluate_count
+	ed._apply_preview_flag(0, false)
+	ed._apply_preview_flag(0, true)
+	ed._apply_preview_flag(0, false)
+	ed._apply_preview_flag(0, true)
+	_check(g.evaluate_count == before,
+			"[G1] four preview_on toggles ran %d evaluations (expected 0)" % [g.evaluate_count - before])
+
+	# [G2] a full refresh. The whole point of the tap architecture.
+	var before_refresh: int = g.evaluate_count
+	ed._refresh_previews()
+	_check(g.evaluate_count == before_refresh,
+			"[G2] a complete preview refresh ran %d evaluations (expected 0)"
+			% [g.evaluate_count - before_refresh])
+	# ...and it must have actually DONE something, or [G2] is measuring a refresh that returned early.
+	_check(int(ed.last_preview_taps.get("count", 0)) > 0,
+			"control: that refresh really did tap the evaluator (%d taps), so [G2] measured a working "
+			% int(ed.last_preview_taps.get("count", 0)) + "preview rather than one that bailed")
+
+	# THE COUNTER CONTROL. Without this every check above passes on a counter that never moves.
+	var eval_before: int = g.evaluate_count
+	var produced: PackedFloat32Array = g.evaluate(16, 16, Rect2(0, 0, 100, 100))
+	_check(g.evaluate_count == eval_before + 1,
+			"control: a real evaluate() DOES increment the counter (%d -> %d), so the zeros above are "
+			% [eval_before, g.evaluate_count] + "measurements and not a dead counter")
+	_check(produced.size() == 16 * 16,
+			"control: and that evaluation produced a real field (%d cells), so the counter is not being "
+			% produced.size() + "incremented by a call that failed immediately")
+
+	# [G3] the toggle must not invalidate. `preview_on` has no emitting setter, which is what makes this
+	# true — but "has no setter" is a fact about today's source and this is a fact about behaviour.
+	var rev_before: int = g.content_key()
+	ed._apply_preview_flag(0, false)
+	ed._apply_preview_flag(0, true)
+	_check(g.content_key() == rev_before,
+			"[G3] toggling preview_on does not bump the content revision (%d -> %d), so it cannot "
+			% [rev_before, g.content_key()] + "invalidate a host's frozen bake")
+	# Control: a real content edit does bump it.
+	node.muted = not node.muted
+	_check(g.content_key() != rev_before,
+			"control: a parameter/content edit DOES bump the revision (%d -> %d), so [G3] measured the "
+			% [rev_before, g.content_key()] + "exemption and not a revision that never moves")
+
+	if is_instance_valid(ed):
+		ed.queue_free()
