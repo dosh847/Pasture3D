@@ -458,6 +458,7 @@ public:
 		PREVIEW_INDEX_PALETTE = 4, // nearest colour, never interpolated, for INT
 		PREVIEW_NO_DATA = 5,       // "asked and not served" - not a choice, a report
 		PREVIEW_RAW_GRAY = 6,      // absolute 0..1 grayscale, manual only
+		PREVIEW_PATH_GEOM = 7,     // draws the polyline; taps NO grid. See preview_image_path
 	};
 
 	// Native 2D preview image generator for graph node thumbnails.
@@ -466,6 +467,15 @@ public:
 	// port TYPE (a MASK is absolute 0..1 whatever its data does), and rule 3 makes it lockable. A renderer
 	// that measured its own min/max could not honour either, which is the normalisation defect §4.2.
 	// Pass p_range_max <= p_range_min to mean "measure this grid" (AUTO).
+	// PATH_GEOM. A separate entry point because its input is not a grid and never can be: a PATH node's
+	// grid slot is zeros by construction, so rendering it renders nothing, and asking for a tap to get
+	// those zeros is work spent to produce a black square. Draws the centreline, the vertices, and the
+	// width envelope at +/- half width, fitted to the path's OWN bounds so a short path is legible.
+	// `p_half_widths` may be empty (a half width of 1.0 everywhere) or shorter than `p_points`, in which
+	// case the last entry extends.
+	static PackedByteArray preview_image_path(const PackedVector2Array &p_points,
+			const PackedFloat32Array &p_half_widths, const int p_gw, const int p_gh);
+
 	static PackedByteArray preview_image_grid(const PackedFloat32Array &p_surface, const int p_gw,
 			const int p_gh, const int p_repr, const double p_range_min, const double p_range_max,
 			const bool p_mark_clamped);

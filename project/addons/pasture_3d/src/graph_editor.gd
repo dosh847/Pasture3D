@@ -93,6 +93,16 @@ var _preview_ranges: Dictionary = {}
 ## `last_preview_dispatch` is: asserting on a fresh `native_supported()` call would measure the graph, not
 ## what the editor did about it.
 var last_preview_block: Dictionary = {}
+
+## What the LAST refresh asked the evaluator for: `{"count", "path_count"}`. `count` is the number of GRID
+## taps in the `tap_slots` array handed to `graph_eval_grid_taps`; `path_count` is the number of PATH nodes
+## drawn without one.
+##
+## Exists for criterion [E], which §6.1 requires to COUNT the request rather than infer it from the
+## picture — an editor that tapped a PATH's zeros, discarded them and then drew the path would look
+## identical on screen while paying exactly the cost the rule forbids. Written where the argument is
+## formed, for the same reason `last_preview_dispatch` is.
+var last_preview_taps: Dictionary = {}
 var _preview_timer: Timer = null      # debounces refreshes; one-shot, restarted on each graph change
 var _preview_token: int = 0           # bumped per dispatch so a stale async result is dropped on apply
 
@@ -1861,6 +1871,8 @@ static func preview_repr_for_type(p_type: int) -> int:
 			return Pasture3DUtil.PREVIEW_RAMP_DIV
 		Pasture3DGraphNode.PortType.TERRAIN_BUS:
 			return Pasture3DUtil.PREVIEW_HILLSHADE
+		Pasture3DGraphNode.PortType.PATH:
+			return Pasture3DUtil.PREVIEW_PATH_GEOM
 	return -1
 
 
@@ -2000,6 +2012,9 @@ func _on_range_chip_pressed(p_index: int) -> void:
 ## and hand the heavy evaluation + hillshade to a worker thread. All graph reads (compile, output types)
 ## happen here on the main thread; only pure C++ calls over plain arrays run off-thread.
 func _refresh_previews() -> void:
+	# Cleared FIRST. A stale count surviving an early return would make [E] read the previous refresh's
+	# answer, which is the failure mode that makes a counter worse than no counter.
+	last_preview_taps = {}
 	if graph == null or _preview_rects.is_empty():
 		return
 	if not ClassDB.class_has_method("Pasture3DUtil", "graph_eval_grid_taps"):
@@ -2044,7 +2059,18 @@ func _refresh_previews() -> void:
 	# port's name. A type with no thumbnail (-1 both ways) still taps: it is the range chip and the badge
 	# that differ, and dropping the tap here would change what [E] counts.
 	var slot_view: Dictionary = {}
+	# §6.1 / standing constraint 3: a PATH-typed output requests NO grid tap. Its grid slot is zeros by
+	# construction — that is what a sideband IS — so a tap would spend the evaluator's time to fetch the
+	# zeros that made `PathDrape`'s thumbnail black in the first place. Diverted HERE, before `tap_slots`
+	# is appended to, so criterion [E] can count the request at the tap call rather than infer it from
+	# the picture.
+	var path_roots: Array = []
 	for i in roots:
+		if graph.nodes[i] != null 				and graph.nodes[i].output_port_type() == Pasture3DGraphNode.PortType.PATH:
+			path_roots.append(i)
+	for i in roots:
+		if path_roots.has(i):
+			continue
 		if slot_of.has(i):
 			var slot: int = int(slot_of[i])
 			var n: Pasture3DGraphNode = graph.nodes[i]
@@ -2059,7 +2085,19 @@ func _refresh_previews() -> void:
 				"lock_min": n.preview_range_min,
 				"lock_max": n.preview_range_max,
 			}
+	# Drawn on the MAIN thread, deliberately. `resolved_path_of` walks the graph and reads node state, and
+	# the worker's whole contract is that it touches only plain data captured before it started. A path is
+	# a few hundred vertices into a 128 px bitmap; the grid pass is what needed a thread.
+	last_preview_taps = {"count": tap_slots.size(), "path_count": path_roots.size()}
+	_render_path_previews(path_roots)
+
 	if tap_slots.is_empty():
+		if not path_roots.is_empty():
+			# Every previewed node was a PATH. Nothing was tapped and nothing SHOULD have been — this is
+			# the success case for §6.1, not a bail, and marking it stale would report a failure that did
+			# not happen.
+			_clear_previews_stale()
+			return
 		# Compiled, but no preview-on node survived into the program with a slot of its own — folded away,
 		# or dropped. Distinct from the bail above and worth its own words.
 		_mark_previews_stale({"reason": "the graph compiled but no previewed node has a slot in it",
@@ -2082,6 +2120,48 @@ func _refresh_previews() -> void:
 	var token := _preview_token
 	WorkerThreadPool.add_task(func():
 		_preview_worker(token, program, input, rect, tap_slots, slot_to_node, slot_view))
+
+
+## Draw each PATH-typed preview from the path the graph RESOLVED (§6.1).
+##
+## `resolved_path_of` rather than the node's own `path_output()`: those differ by exactly the upstream
+## filter chain, so drawing the latter would show a Path Resample's INPUT and label it the output —
+## `a-gate-that-calls-the-node-measures-nothing` in picture form.
+##
+## A node with no path yet draws the empty checkerboard, not NO_DATA. An unwired or not-yet-baked Road
+## Source is a normal state rather than a failed tap, and the slash badge is reserved for the failure.
+func _render_path_previews(p_path_roots: Array) -> void:
+	if p_path_roots.is_empty():
+		return
+	if not ClassDB.class_has_method("Pasture3DUtil", "preview_image_path"):
+		return # older extension; the PATH nodes keep whatever they had rather than showing a wrong picture
+	for idx in p_path_roots:
+		if not _preview_rects.has(idx) or not is_instance_valid(_preview_rects[idx]):
+			continue
+		var path: Pasture3DGraphPath = graph.resolved_path_of(idx)
+		var pts := PackedVector2Array()
+		var hws := PackedFloat32Array()
+		if path != null:
+			pts = path.points
+			hws = path.half_widths
+		var bytes: PackedByteArray = Pasture3DUtil.preview_image_path(
+				pts, hws, PREVIEW_SIZE, PREVIEW_SIZE)
+		if bytes.size() != PREVIEW_SIZE * PREVIEW_SIZE * 4:
+			continue
+		var img := Image.create_from_data(PREVIEW_SIZE, PREVIEW_SIZE, false, Image.FORMAT_RGBA8, bytes)
+		var tr: TextureRect = _preview_rects[idx]
+		var tex := tr.texture as ImageTexture
+		if tex != null and tex.get_width() == PREVIEW_SIZE and tex.get_height() == PREVIEW_SIZE:
+			tex.update(img)
+		else:
+			tr.texture = ImageTexture.create_from_image(img)
+		# The chip reports the path, because "0.00 - 1.00" would be a range for a grid this node does not
+		# have. Vertex count is what a Path Resample is judged by, so it is what the chip carries.
+		if _preview_chips.has(idx) and is_instance_valid(_preview_chips[idx]):
+			var chip: Button = _preview_chips[idx]
+			chip.text = "PATH %d pts" % pts.size() if pts.size() >= 2 else "PATH (empty)"
+			chip.modulate = Color(1, 1, 1, 0.9 if pts.size() >= 2 else 0.55)
+			chip.tooltip_text = "A PATH draws its geometry and taps no grid."
 
 
 ## Worker-thread body: one native tap pass, then a hillshade per tapped buffer. Touches only stateless C++

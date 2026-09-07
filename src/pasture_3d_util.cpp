@@ -2132,6 +2132,166 @@ PackedByteArray Pasture3DUtil::preview_image_grid(const PackedFloat32Array &p_su
 	return out;
 }
 
+// ---- PATH_GEOM ---------------------------------------------------------------------------------------
+//
+// The one representation that does not read a grid. A PATH travels as a sideband precisely because
+// rasterising it into a wire would fix its resolution at the wire instead of at the consumer, and its
+// grid slot is therefore zeros -- which is why PathDrape's thumbnail was black. Drawing the geometry is
+// the only honest answer, and it costs zero taps.
+
+// One line into the RGBA8 buffer, Bresenham, clipped. No anti-aliasing: at 128 px a crisp line reads
+// better than a soft one, and the vertices below are what carry the detail anyway.
+static void path_line_px(uint8_t *p_dst, const int p_gw, const int p_gh, int x0, int y0, int x1, int y1,
+		const uint8_t p_r, const uint8_t p_g, const uint8_t p_b) {
+	const int dx = std::abs(x1 - x0);
+	const int dy = -std::abs(y1 - y0);
+	const int sx = x0 < x1 ? 1 : -1;
+	const int sy = y0 < y1 ? 1 : -1;
+	int err = dx + dy;
+	// A degenerate path can put both ends outside; cap the walk so a bad input cannot spin.
+	const int guard = (p_gw + p_gh) * 4;
+	for (int step = 0; step < guard; step++) {
+		if (x0 >= 0 && x0 < p_gw && y0 >= 0 && y0 < p_gh) {
+			uint8_t *px = p_dst + (y0 * p_gw + x0) * 4;
+			px[0] = p_r;
+			px[1] = p_g;
+			px[2] = p_b;
+			px[3] = 255;
+		}
+		if (x0 == x1 && y0 == y1) {
+			break;
+		}
+		const int e2 = 2 * err;
+		if (e2 >= dy) {
+			err += dy;
+			x0 += sx;
+		}
+		if (e2 <= dx) {
+			err += dx;
+			y0 += sy;
+		}
+	}
+}
+
+PackedByteArray Pasture3DUtil::preview_image_path(const PackedVector2Array &p_points,
+		const PackedFloat32Array &p_half_widths, const int p_gw, const int p_gh) {
+	const int n = p_gw * p_gh;
+	PackedByteArray out;
+	if (p_gw <= 0 || p_gh <= 0) {
+		return out;
+	}
+	out.resize(n * 4);
+	uint8_t *dst = out.ptrw();
+	for (int iz = 0; iz < p_gh; iz++) {
+		for (int ix = 0; ix < p_gw; ix++) {
+			checker_px(ix, iz, dst + (iz * p_gw + ix) * 4);
+		}
+	}
+	const int pc = p_points.size();
+	// Fewer than two vertices is not a path. It is also a NORMAL state -- an unwired or not-yet-baked
+	// Road Source -- so it returns the empty checkerboard rather than the NO_DATA slash, which would
+	// claim a tap had failed.
+	if (pc < 2) {
+		return out;
+	}
+	const Vector2 *pts = p_points.ptr();
+	const int hw_count = p_half_widths.size();
+	const float *hws = hw_count > 0 ? p_half_widths.ptr() : nullptr;
+
+	// Fitted to the path's OWN bounds, envelope included, not to the brush rect: a 40 m path inside a
+	// 2 km footprint would otherwise be three pixels of nothing.
+	float min_x = 1e30f, max_x = -1e30f, min_z = 1e30f, max_z = -1e30f;
+	for (int i = 0; i < pc; i++) {
+		const float hw = hws ? hws[std::min(i, hw_count - 1)] : 1.0f;
+		const float pad = std::max(hw, 0.0f);
+		min_x = std::min(min_x, (float)pts[i].x - pad);
+		max_x = std::max(max_x, (float)pts[i].x + pad);
+		min_z = std::min(min_z, (float)pts[i].y - pad);
+		max_z = std::max(max_z, (float)pts[i].y + pad);
+	}
+	// One scale for both axes, so the drawing is not stretched -- a resampled path's even spacing is a
+	// thing the author is looking FOR, and anisotropic scaling would hide it.
+	const float span = std::max(std::max(max_x - min_x, max_z - min_z), 0.001f);
+	const float margin = 6.0f;
+	const float scale = (std::min(p_gw, p_gh) - 2.0f * margin) / span;
+	const float cx = 0.5f * (min_x + max_x);
+	const float cz = 0.5f * (min_z + max_z);
+
+	// World XZ to pixel. Z grows downward in the image, which matches how the brush footprint is drawn
+	// everywhere else in the editor.
+	auto to_px = [&](const float wx, const float wz, int &ox, int &oy) {
+		ox = (int)std::lround(p_gw * 0.5f + (wx - cx) * scale);
+		oy = (int)std::lround(p_gh * 0.5f + (wz - cz) * scale);
+	};
+
+	// ---- the width envelope, first so the centreline draws over it ----
+	// Offset each vertex along the segment normal. Per-vertex rather than a true mitred offset: at 128 px
+	// the difference is invisible, and a mitre that folds on a tight corner would draw a false spike.
+	for (int pass = 0; pass < 2; pass++) {
+		const float side = pass == 0 ? 1.0f : -1.0f;
+		int prev_x = 0, prev_y = 0;
+		for (int i = 0; i < pc; i++) {
+			const int a = std::max(i - 1, 0);
+			const int b = std::min(i + 1, pc - 1);
+			float tx = (float)(pts[b].x - pts[a].x);
+			float tz = (float)(pts[b].y - pts[a].y);
+			const float tl = std::sqrt(tx * tx + tz * tz);
+			if (tl > 1e-6f) {
+				tx /= tl;
+				tz /= tl;
+			} else {
+				tx = 1.0f;
+				tz = 0.0f;
+			}
+			const float hw = hws ? hws[std::min(i, hw_count - 1)] : 1.0f;
+			const float ox = (float)pts[i].x + (-tz) * hw * side;
+			const float oz = (float)pts[i].y + (tx) * hw * side;
+			int px_x, px_y;
+			to_px(ox, oz, px_x, px_y);
+			if (i > 0) {
+				path_line_px(dst, p_gw, p_gh, prev_x, prev_y, px_x, px_y, 90, 120, 165);
+			}
+			prev_x = px_x;
+			prev_y = px_y;
+		}
+	}
+
+	// ---- the centreline ----
+	int prev_x = 0, prev_y = 0;
+	for (int i = 0; i < pc; i++) {
+		int px_x, px_y;
+		to_px((float)pts[i].x, (float)pts[i].y, px_x, px_y);
+		if (i > 0) {
+			path_line_px(dst, p_gw, p_gh, prev_x, prev_y, px_x, px_y, 235, 235, 240);
+		}
+		prev_x = px_x;
+		prev_y = px_y;
+	}
+
+	// ---- the vertices, last so they sit on top ----
+	// A 3x3 dot. The vertex COUNT and spacing are what a Path Resample is judged by, so they have to
+	// survive the drawing rather than be implied by it.
+	for (int i = 0; i < pc; i++) {
+		int px_x, px_y;
+		to_px((float)pts[i].x, (float)pts[i].y, px_x, px_y);
+		for (int dy = -1; dy <= 1; dy++) {
+			for (int dx = -1; dx <= 1; dx++) {
+				const int x = px_x + dx;
+				const int y = px_y + dy;
+				if (x < 0 || x >= p_gw || y < 0 || y >= p_gh) {
+					continue;
+				}
+				uint8_t *px = dst + (y * p_gw + x) * 4;
+				px[0] = 250;
+				px[1] = 180;
+				px[2] = 60;
+				px[3] = 255;
+			}
+		}
+	}
+	return out;
+}
+
 // Back-compat wrapper. Every existing caller asked one of two questions and this keeps asking them.
 PackedByteArray Pasture3DUtil::hillshade_image_grid(const PackedFloat32Array &p_surface, const int p_gw,
 		const int p_gh, const bool p_is_mask) {
@@ -2524,6 +2684,9 @@ void Pasture3DUtil::_bind_methods() {
 	// Terrain graph - the thumbnail renderer (spec 5.3). The range is passed in because it belongs to the
 	// port TYPE and to the lock, not to the data; see preview_image_grid's header.
 	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("preview_image_path", "points", "half_widths", "gw", "gh"),
+			&Pasture3DUtil::preview_image_path);
+	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("preview_image_grid", "surface", "gw", "gh", "repr", "range_min", "range_max",
 					"mark_clamped"),
 			&Pasture3DUtil::preview_image_grid);
@@ -2534,6 +2697,7 @@ void Pasture3DUtil::_bind_methods() {
 	BIND_ENUM_CONSTANT(PREVIEW_INDEX_PALETTE);
 	BIND_ENUM_CONSTANT(PREVIEW_NO_DATA);
 	BIND_ENUM_CONSTANT(PREVIEW_RAW_GRAY);
+	BIND_ENUM_CONSTANT(PREVIEW_PATH_GEOM);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("resample_grid", "src", "src_w", "src_h", "dst_w", "dst_h"),
 			&Pasture3DUtil::resample_grid);

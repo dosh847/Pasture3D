@@ -1574,6 +1574,39 @@ func _path_operand_of(p_ni: int, p_inputs_of: Dictionary) -> Pasture3DGraphPath:
 	return null
 
 
+## The PATH a node actually produces, resolved through the whole upstream filter chain — or null.
+##
+## The editor's door to the pre-pass. `_resolved_path_of` needs an `inputs_of` map and every existing
+## caller already has one built for another purpose; this builds the same map for the one-node question a
+## thumbnail asks, so the preview reads the path the BAKE would resolve rather than the raw
+## `path_output()` a node happens to be holding. Those differ by exactly the filter chain, which is the
+## whole of §7.5 — previewing the unfiltered path would draw the input to a Path Resample and call it the
+## output (`PathDeriveGate`'s trap, in a new place).
+##
+## Costs one memoised pre-pass walk. Called from the preview refresh, which is debounced, and only for
+## nodes whose declared output type is PATH.
+func resolved_path_of(p_ni: int) -> Pasture3DGraphPath:
+	if p_ni < 0 or p_ni >= nodes.size() or nodes[p_ni] == null:
+		return null
+	# Same construction as `compile_graph_program_multi`'s, over every node rather than an ancestor set:
+	# a single query does not know which ancestors it needs until the recursion asks for them.
+	var inputs_of := {}
+	for ni in range(nodes.size()):
+		if nodes[ni] == null:
+			continue
+		var arr: Array = []
+		arr.resize(nodes[ni].input_count())
+		arr.fill(-1)
+		inputs_of[ni] = arr
+	for c in connections:
+		if c.size() >= 4:
+			var to := int(c[2])
+			var tp := int(c[3])
+			if inputs_of.has(to) and tp >= 0 and tp < (inputs_of[to] as Array).size():
+				inputs_of[to][tp] = int(c[0])
+	return _resolved_path_of(p_ni, inputs_of)
+
+
 ## ---- THE PATH PRE-PASS (spec §8.2-8.3) ----------------------------------------------------------
 ##
 ## Set to make `_resolved_path_of` degenerate to the pre-S4 single hop: every node answers with the path

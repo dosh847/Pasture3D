@@ -62,10 +62,11 @@ func _ready() -> void:
 	_b_the_range_is_reported_and_lockable()
 	_c_unserved_is_visible()
 	_d_a_non_lowering_graph_says_so()
+	_e_a_path_output_taps_no_grid()
 	_h_host_binding_follows_the_gesture()
 	_i_the_input_preview_reads_the_hosts_ground()
 
-	if _checks < 76:
+	if _checks < 89:
 		print("\n    VACUOUS: only %d checks completed; the gate did not measure what it claims to." % _checks)
 		_fail += 1
 	print("\n=== %s (%d failures, %d checks) ===\n"
@@ -927,5 +928,121 @@ func _d_a_non_lowering_graph_says_so() -> void:
 	_check(still == 0, "[D4] and un-tints the thumbnails (%d still tinted)" % still)
 
 	for n in [ed, ed2]:
+		if is_instance_valid(n):
+			n.queue_free()
+
+
+# --- E -------------------------------------------------------------------------------------------------
+#
+# §6.1 and standing constraint 3: A PATH-TYPED OUTPUT REQUESTS ZERO GRID TAPS.
+#
+# A PATH producer still occupies a grid slot, and that slot is filled with zeros — that is what a sideband
+# IS, and it is exactly why `PathDrape`'s thumbnail was black. So the fix is not a better renderer for
+# those zeros; it is not to ask for them. `PATH_GEOM` rasterises the resolved path into the thumbnail's
+# own bitmap and requests nothing from the evaluator.
+#
+# COUNTED AT THE TAP CALL, not inferred from the picture. The spec is explicit about this and it matters:
+# a criterion that looked at the rendered image would pass on an editor that tapped the zeros, threw them
+# away, and then drew the path anyway — which is the whole cost the rule exists to avoid, invisible.
+#
+# `last_preview_taps` is written by `_refresh_previews` where it forms the argument, for the same reason
+# `last_preview_dispatch` is.
+func _e_a_path_output_taps_no_grid() -> void:
+	print("\n[E] a PATH output requests ZERO grid taps, counted at the tap call (§6.1)")
+
+	if not ClassDB.class_has_method("Pasture3DUtil", "preview_image_path"):
+		_check(false, "preview_image_path is not bound — the DLL is stale; nothing was measured")
+		return
+
+	# `shape_source` is a registered PATH GENERATOR. Headless and unbound it resolves to an EMPTY path,
+	# and that is fine for what [E] measures: the tap exclusion is driven by the declared output TYPE, not
+	# by whether the path has vertices yet — a Road Source that has not baked must not start tapping a
+	# grid just because it is empty. [E3] below exercises the drawing with explicit geometry.
+	var g := Pasture3DTerrainGraph.new()
+	var pathnode := Pasture3DGraphNodeRegistry.create(&"shape_source")
+	if pathnode == null:
+		_check(false, "the registry could not create a `shape_source` node; nothing was measured")
+		return
+	g.add_node(pathnode, Vector2.ZERO)
+	g.output_node = 0
+	pathnode.preview_on = true
+
+	_check(pathnode.output_port_type() == Pasture3DGraphNode.PortType.PATH,
+			"control: the fixture really does declare a PATH output (got %d), so [E] is about the type "
+			% pathnode.output_port_type() + "rule and not about this one node")
+	_check(GraphEditorScript.preview_repr_for_type(Pasture3DGraphNode.PortType.PATH)
+			== Pasture3DUtil.PREVIEW_PATH_GEOM,
+			"control: and PATH maps to PATH_GEOM in the §5.3 table")
+
+	var ed = _panel()
+	ed.edit_graph(g, null, null)
+	ed._refresh_previews()
+	_check(ed.last_preview_taps.has("count"),
+			"control: the refresh recorded a tap count at all, so [E] is reading a measurement rather "
+			+ "than an absent key that defaults to zero")
+	_check(int(ed.last_preview_taps.get("count", -1)) == 0,
+			"[E] the PATH-only refresh requested %d grid taps"
+			% int(ed.last_preview_taps.get("count", -1)))
+	_check(int(ed.last_preview_taps.get("path_count", 0)) == 1,
+			"[E] and it drew %d path preview(s), so the node was previewed rather than skipped"
+			% int(ed.last_preview_taps.get("path_count", 0)))
+
+	# THE CONTROL. A HEIGHT output in the same panel requests one. Without it, "zero taps" passes on a
+	# refresh that never ran, on a panel with no thumbnails, or on a tap counter wired to a constant.
+	var gh_ := _one_previewable_graph()
+	var ed2 = _panel()
+	ed2.edit_graph(gh_, null, null)
+	ed2._refresh_previews()
+	_check(int(ed2.last_preview_taps.get("count", -1)) == 1,
+			"control: a HEIGHT output in the same panel requests exactly one tap (got %d)"
+			% int(ed2.last_preview_taps.get("count", -1)))
+	_check(int(ed2.last_preview_taps.get("path_count", -1)) == 0,
+			"control: and draws no path preview, so the two counters are not the same number")
+
+	# [E2] a MIXED graph: the PATH node is excluded and the grid node is not. This is the case that would
+	# quietly regress into "taps everything" or "taps nothing", and neither pure fixture above can see it.
+	var gm := Pasture3DTerrainGraph.new()
+	var noise := Pasture3DGraphNodeRegistry.create(&"noise")
+	var p2 := Pasture3DGraphNodeRegistry.create(&"shape_source")
+	gm.add_node(noise, Vector2.ZERO)
+	gm.add_node(p2, Vector2(200, 0))
+	gm.output_node = 0
+	noise.preview_on = true
+	p2.preview_on = true
+	var ed3 = _panel()
+	ed3.edit_graph(gm, null, null)
+	ed3._refresh_previews()
+	_check(int(ed3.last_preview_taps.get("count", -1)) == 1,
+			"[E2] with one PATH and one HEIGHT previewed, exactly ONE tap is requested (got %d)"
+			% int(ed3.last_preview_taps.get("count", -1)))
+	_check(int(ed3.last_preview_taps.get("path_count", -1)) == 1,
+			"[E2] and exactly one path is drawn (got %d), so the split is per-node and not per-graph"
+			% int(ed3.last_preview_taps.get("path_count", -1)))
+
+	# [E3] the drawing itself, and the reason `resolved_path_of` exists rather than `path_output()`: the
+	# thumbnail must show the path the graph RESOLVED. Asserted on the bytes differing between a path with
+	# geometry and one without — an empty path is a normal state and draws the bare checkerboard.
+	var pts := PackedVector2Array([Vector2(0, 0), Vector2(10, 0), Vector2(10, 10)])
+	var drawn: PackedByteArray = Pasture3DUtil.preview_image_path(
+			pts, PackedFloat32Array(), 32, 32)
+	var empty: PackedByteArray = Pasture3DUtil.preview_image_path(
+			PackedVector2Array(), PackedFloat32Array(), 32, 32)
+	_check(drawn.size() == 32 * 32 * 4 and empty.size() == 32 * 32 * 4,
+			"[E3] PATH_GEOM returns a full RGBA8 thumbnail with no grid input at all (%d, %d bytes)"
+			% [drawn.size(), empty.size()])
+	_check(drawn != empty,
+			"[E3] a path with geometry draws something an empty one does not")
+	# Control: the drawing follows the GEOMETRY, not merely the vertex count. A different shape with the
+	# same number of points must differ, or PATH_GEOM could be drawing a fixed glyph.
+	var other := PackedVector2Array([Vector2(0, 0), Vector2(0, 10), Vector2(10, 10)])
+	_check(Pasture3DUtil.preview_image_path(other, PackedFloat32Array(), 32, 32) != drawn,
+			"control: a DIFFERENT path of the same vertex count draws differently, so PATH_GEOM follows "
+			+ "the geometry rather than stamping a glyph")
+	# And the width envelope is drawn, or "the centreline" would be the whole feature.
+	var wide := PackedFloat32Array([4.0, 4.0, 4.0])
+	_check(Pasture3DUtil.preview_image_path(pts, wide, 32, 32) != drawn,
+			"[E3] the half-width envelope changes the drawing, so widths are rendered and not ignored")
+
+	for n in [ed, ed2, ed3]:
 		if is_instance_valid(n):
 			n.queue_free()
