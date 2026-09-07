@@ -655,3 +655,22 @@ bench/GraphChannelSinkGate.tscn
 # [B] is the negative: nine compiles and nine taps with a configured sink present leave the disk empty.
 # The structural half — no evaluator references the exporter at all — is in the gate's header.
 bench/GraphExportGate.tscn
+
+# GraphRuntimeSinkGate — V7a of PASTURE3D_GRAPH_VISUALIZATION_SPEC.md: the B3 publish sinks (§9.3).
+# The arrow BACK from the graph to the two runtime consumers that already ship: Path Publish fills a
+# Pasture3DRoadRun, Water Surface Publish routes a CLOSED path to a Pasture3DPool and an OPEN one to a
+# Pasture3DStream. Same terminality mechanism as the B2 file sinks, so V7a adds no op.
+#
+# [B] is the criterion the phase exists for, and its CONTROL is the whole measurement: the same 40 m edit
+# 200 m away leaves the consumer fresh, so what is being detected is a re-derivation and not "a bake
+# happened". Removing the staging pass makes the near edit report fresh AND flattens [F]'s rim control.
+# Two real defects were caught here rather than reasoned about:
+#   * the digest was stamped on the Pasture3DRoadNetwork, but `locate()` is on the Pasture3DRoadRuntime
+#     it holds — so the flag sat on a node nobody queries and every consumer read stale forever. Hence
+#     `Pasture3DGraphNodeRuntimeSink.digest_target()`.
+#   * `run()` resolved its path WITHOUT the caller's surface while `check_staleness` resolved it with,
+#     so the publish stamped the un-draped path and the very next check disagreed with it. [C]'s
+#     unchanged-republish control is what named it.
+# [G] needed rebuilding: the program-identity check passes with `has_output()` flipped to true, because
+# a sink nothing wires FROM changes no program either way. Terminality is now asserted directly.
+bench/GraphRuntimeSinkGate.tscn

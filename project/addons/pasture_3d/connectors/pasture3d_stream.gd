@@ -82,6 +82,24 @@ const CHOP_SAMPLES_PER_WAVELENGTH: float = 6.0
 		bank_smoothing = clampi(v, 0, 20)
 		_schedule_rebuild()
 
+# --- Published surface (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.3 / §9.4) ----
+
+## The resolved PATH a graph's Water Surface Publish sink handed this stream, or null.
+##
+## When set, its per-vertex heights become the still surface and its per-vertex half-widths become the
+## waterline -- see `_apply_bank_surface`. When null the stream falls back to `c.y + fill_offset`, which
+## is the tier a stream over a bare mesh with no terrain has always used and which must keep working.
+##
+## Not `@export`ed on purpose. It is DERIVED OUTPUT: the graph rebuilds it at every bake, and a saved
+## copy would come back from disk as a second source that disagrees with the graph the moment the
+## terrain under it moves (`memoised-programs-hide-invalidation`, and `road-built-output-persistence`
+## for the shape of the mistake). `published_digest` IS saved, so a scene that reopens knows what it was
+## published from and can say it is stale.
+var published_path: Pasture3DGraphPath = null:
+	set(v):
+		published_path = v
+		_schedule_rebuild()
+
 # --- Flow ---------------------------------------------------------------------
 
 @export_group("Flow")

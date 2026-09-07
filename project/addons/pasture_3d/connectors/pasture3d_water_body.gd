@@ -29,6 +29,33 @@ class_name Pasture3DWaterBody
 extends Node3D
 
 const WATER_DIR := "res://addons/pasture_3d/extras/shaders/water/"
+
+# ---- THE PUBLISH CONTRACT (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.3) --------------------------------
+#
+# A graph's Water Surface Publish sink hands this body a resolved PATH and stamps what it handed over.
+# The digest is stored HERE, on the consumer, because comparing a producer's digest to itself proves only
+# that hashing is a function (`check-derived-values-outside-the-chain`).
+#
+# `published_stale` withholds nothing. `get_water_height()` is on the physics path — Pasture3DBuoy asks
+# twice a tick — and none of this touches it: it keeps answering from the last good geometry while the
+# flag is set, and the flag is read out of band through `publish_status()`. Water that started answering
+# NAN because somebody edited terrain in the editor would be a drowned boat in a shipped game.
+
+## Content digest of the path this body was last published from. 0 when nothing published it.
+@export var published_digest: int = 0
+
+## Which publish sink published it, for the warning text. A label, never resolved.
+@export var published_by: String = ""
+
+## Set when the producer's content has moved since the publish. See above: it withholds nothing.
+@export var published_stale: bool = false
+
+
+## What was published here and whether it is still current — {digest, by, stale}. §9.3's out-of-band
+## read: the query path stays a float, and a caller that wants to know asks separately.
+func publish_status() -> Dictionary:
+	return {"digest": published_digest, "by": published_by, "stale": published_stale}
+
 ## Group every water body joins, so tools can find them without a tree walk. Named for the pool
 ## because it predates the split and is written into saved scenes; Pasture3DStream joins the SAME
 ## group, which is what keeps the selection gizmo, the brush's idempotence check and the Phase 4

@@ -1742,6 +1742,25 @@ func _resolved_path_of_uncached(p_ni: int, p_inputs_of: Dictionary, p_stack: Dic
 ##
 ## Returns false when a stage could not be produced, which sends `evaluate` down the ordinary routes
 ## rather than compiling a program whose geometry table names a path nobody made.
+## Public door to the staging pass, for a caller that wants a PATH resolved against a surface it holds
+## rather than against whatever the last `evaluate` happened to capture.
+##
+## The B3 publish sinks (§9.3) need exactly this. A Path Drape captures its surface during `eval_grid`,
+## so `resolved_path_of` on its own re-derives from the PREVIOUS bake's grid — which would publish a
+## river draped over the terrain as it was before the edit that triggered the publish, and, worse, would
+## make the staleness check agree with it. Staging first is what makes "the digest moves when the ground
+## under the path moves" true at the bake that moved it.
+##
+## Returns false when nothing could be staged, which leaves the caller resolving against the capture —
+## the honest fallback, since a graph with no derive nodes has nothing to stage and every other one has
+## already reported why.
+func stage_paths_for(p_root: int, p_gw: int, p_gh: int, p_rect: Rect2,
+		p_input: PackedFloat32Array) -> bool:
+	if p_gw <= 0 or p_gh <= 0 or p_root < 0 or p_root >= nodes.size():
+		return false
+	return _stage_derives(p_root, p_gw, p_gh, p_rect, null, p_input)
+
+
 func _stage_derives(p_out: int, p_gw: int, p_gh: int, p_rect: Rect2, p_mask, p_input) -> bool:
 	var order := _eval_order(p_out)
 	if order.is_empty():

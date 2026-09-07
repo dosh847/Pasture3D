@@ -35,7 +35,50 @@ static func resolve(p_graph: Pasture3DTerrainGraph, p_host: Node = null) -> int:
 			filled += net.resolve_graph_paths(p_graph, p_host)
 	filled += resolve_shapes(p_graph, p_host)
 	filled += resolve_splines(p_graph, p_host)
+	filled += resolve_publish_targets(p_graph, p_host)
 	return filled
+
+
+## The B3 publish sinks (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.3). Same mechanism as the source nodes
+## above, pointed the other way: a sink NAMES its consumer and the host is the only thing that can turn a
+## name into a node. Filling the dropdown here rather than in the sink is what keeps this file's promise —
+## one place decides what resolution means, so a graph cannot preview with its targets listed and bake
+## with them empty.
+##
+## Only `editor_consumer_keys` is filled. The publish itself resolves the key again at bake, through
+## `Pasture3DGraphRuntimeSinks.find_consumer`, and both walk the same `candidates()` list — so the names
+## you can choose from and the names that resolve cannot drift apart.
+static func resolve_publish_targets(p_graph: Pasture3DTerrainGraph, p_host: Node = null) -> int:
+	if p_graph == null:
+		return 0
+	var filled := 0
+	var by_class := {}
+	for node in p_graph.nodes:
+		if node == null or not (node is Pasture3DGraphNodeRuntimeSink):
+			continue
+		var sink: Pasture3DGraphNodeRuntimeSink = node
+		var cls: StringName = sink.consumer_class()
+		if not by_class.has(cls):
+			var names := PackedStringArray()
+			if p_host != null:
+				for n in Pasture3DGraphRuntimeSinks.candidates(_scene_root(p_host), cls):
+					names.append(String(n.name))
+				names.sort()
+			by_class[cls] = names
+		sink.editor_consumer_keys = by_class[cls]
+		filled += 1
+	return filled
+
+
+## The scene a host belongs to. Mirrors `Pasture3DGraphRuntimeSinks.find_consumer`'s walk so a name
+## offered here is a name that resolves there.
+static func _scene_root(p_host: Node) -> Node:
+	if p_host == null or not p_host.is_inside_tree() or p_host.get_tree() == null:
+		return p_host
+	var root: Node = p_host.get_tree().get_edited_scene_root() if Engine.is_editor_hint() else null
+	if root == null:
+		root = p_host.get_tree().current_scene
+	return root if root != null else p_host
 
 
 ## The shape half. Split out so it can be gated on its own, and called with an explicit terrain by hosts

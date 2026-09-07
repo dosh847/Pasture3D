@@ -5076,6 +5076,37 @@ func _run_graph_sinks(p_graph, p_gw: int, p_gh: int, p_rect: Rect2, p_z: PackedF
 		push_warning("Pasture3D graph sink on '%s': %s" % [name, msg])
 
 
+# ---- B3 RUNTIME PUBLISH SINKS (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.3) ----
+#
+# Same placement rule as `_run_graph_sinks` above and for the same reason: the frozen hit, the deferred
+# queue and the synchronous miss are all bakes, and a publish that only fired on the miss path would stop
+# republishing the moment its graph was set to Frozen — leaving a road runtime answering `locate()` from an
+# alignment the graph no longer produces, with nothing on screen to say so.
+#
+# `self` is the host, which is how the sink's consumer KEY becomes a node: a graph is a Resource and cannot
+# reach the scene (`graph-source-resolution-is-host-side`). It needs no grid and no surface — a publish
+# hands over a resolved PATH, not a field — so unlike the channel sinks it is not passed the tap context.
+#
+# The staleness sweep runs AFTER the publish, where it finds everything it just wrote fresh. That is not
+# wasted work: a graph can hold a publish sink whose consumer key names nothing this bake, or one whose
+# `path` port is unwired, and those consumers keep whatever they were published from last time. The sweep
+# is what notices they have drifted, and it is the same call an editor or a gate makes out of band.
+func _run_graph_runtime_sinks(p_graph, p_gw: int, p_gh: int, p_rect: Rect2,
+		p_z: PackedFloat32Array) -> void:
+	if p_graph == null:
+		return
+	if Pasture3DGraphRuntimeSinks.sinks_of(p_graph).is_empty():
+		return
+	# The tap domain, so a Path Drape resolves against THIS bake's surface and not the last one's. The
+	# same grid the channel sinks tap, for the same reason: a sink reads the bake it is part of.
+	var ctx := {"gw": p_gw, "gh": p_gh, "rect": p_rect, "input": p_z}
+	var report: Dictionary = Pasture3DGraphRuntimeSinks.run(p_graph, self, ctx)
+	for msg in report.get("skipped", []):
+		push_warning("Pasture3D graph publish on '%s': %s" % [name, msg])
+	for msg in Pasture3DGraphRuntimeSinks.check_staleness(p_graph, self, ctx):
+		push_warning("Pasture3D graph publish on '%s': %s" % [name, msg])
+
+
 func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 		p_ctx: Dictionary) -> PackedFloat32Array:
 	var m: Pasture3DNodeGraph = p_step["mod"]
@@ -5131,6 +5162,8 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	#
 	# Free on a graph without sinks: `sinks_of` returns empty and `run` returns before touching anything.
 	_run_graph_sinks(g, gw, gh, rect, z)
+	# The B3 publish sinks, above the same split and for the same reason. See `_run_graph_runtime_sinks`.
+	_run_graph_runtime_sinks(g, gw, gh, rect, z)
 	# A FILTER graph (an Input node feeds the output) depends on the surface, so the cache must key on it —
 	# a drag changes the surface and the entry goes stale, exactly as the erosion cache does. A pure
 	# generator is world-fixed, so its key is just the content revision and the cache serves across drags.

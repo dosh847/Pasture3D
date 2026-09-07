@@ -26,6 +26,31 @@ extends Resource
 ## Bake stamp, so a stale runtime can be recognised rather than silently driven.
 @export var built_at: String = ""
 
+# ---- THE PUBLISH CONTRACT (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.3) --------------------------------
+#
+# A graph can publish a run into this runtime, and these three record what was published. The digest is
+# stored on the CONSUMER, not compared against the producer's own — a producer's digest matched to itself
+# proves only that hashing is a function (`check-derived-values-outside-the-chain`).
+#
+# `published_stale` is a FLAG BESIDE the data and never a reason to withhold it. Everything below keeps
+# answering from the last good runs while it is set; a runtime that started returning nulls because
+# somebody moved a spline in the editor is a crash in a shipped game, arriving weeks after the edit.
+
+## Content digest of the path this runtime was last published from. 0 when nothing published it.
+@export var published_digest: int = 0
+
+## Which publish sink published it, for the warning text. A label, never resolved.
+@export var published_by: String = ""
+
+## Set when the producer's content has moved since the publish. See above: it withholds nothing.
+@export var published_stale: bool = false
+
+
+## What was published here and whether it is still current — {digest, by, stale}. The out-of-band read,
+## so a caller that wants to know can ask without going through a query.
+func publish_status() -> Dictionary:
+	return {"digest": published_digest, "by": published_by, "stale": published_stale}
+
 
 func run_by_id(p_id: int) -> Pasture3DRoadRun:
 	for r in runs:
@@ -56,6 +81,11 @@ func locate(p_world: Vector3) -> Dictionary:
 			best = hit.duplicate()
 			best["run_id"] = r.id
 			best["surface"] = r.surface_at(float(hit["s"]))
+	# The stale report rides along with the answer rather than replacing it (§9.3). A caller that does
+	# not read the key is unaffected; one that does can decide for itself whether the data is good
+	# enough for what it is doing, which is a judgement this resource cannot make for it.
+	if not best.is_empty():
+		best["stale"] = published_stale
 	return best
 
 

@@ -95,6 +95,8 @@ const ExportMaskScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_
 const ExportNormalMapScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_export_normal_map.gd")
 const ExportSplatScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_export_splat.gd")
 const ExportIndexMapScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_export_index_map.gd")
+const PathPublishScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_path_publish.gd")
+const WaterSurfacePublishScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_water_surface_publish.gd")
 const TerrainBusMergeScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_terrain_bus_merge.gd")
 const TerrainBusSplitScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_terrain_bus_split.gd")
 
@@ -198,6 +200,13 @@ static func entries(p_include_dev: bool = false) -> Array[Dictionary]:
 		{"op": &"export_normal_map", "title": "Export Normal Map", "category": "Routing & Structural", "role": "Sink", "script": ExportNormalMapScript, "tags": ["export", "sink", "normal", "bump", "tangent", "png", "file", "output"], "description": "Writes tangent-space normals derived from the wired height field."},
 		{"op": &"export_splat", "title": "Export Splat", "category": "Routing & Structural", "role": "Sink", "script": ExportSplatScript, "tags": ["export", "sink", "splat", "weights", "rgba", "png", "file", "output"], "description": "Packs four masks into one RGBA weight map."},
 		{"op": &"export_index_map", "title": "Export Index Map", "category": "Routing & Structural", "role": "Sink", "script": ExportIndexMapScript, "tags": ["export", "sink", "index", "material", "region", "nearest", "png", "file", "output"], "description": "Writes per-cell material or region indices, unscaled and never filtered."},
+		# The B3 publish sinks (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.3). Terminal like every other
+		# sink. They do not write files: they hand a resolved PATH to a runtime consumer that already
+		# ships -- Pasture3DRoadRuntime answers locate() with no editor and no terrain, a water body
+		# answers get_water_height() twice a physics tick -- and stamp the content digest on the consumer
+		# so an edit under a published surface can be seen rather than silently desynchronising.
+		{"op": &"path_publish", "title": "Path Publish", "category": "Routing & Structural", "role": "Sink", "script": PathPublishScript, "tags": ["publish", "sink", "runtime", "road", "route", "locate", "output"], "description": "Publishes the wired path into a road network's runtime as a run a game can load."},
+		{"op": &"water_surface_publish", "title": "Water Surface Publish", "category": "Routing & Structural", "role": "Sink", "script": WaterSurfacePublishScript, "tags": ["publish", "sink", "runtime", "water", "river", "lake", "pool", "stream", "output"], "description": "Publishes the wired path to a water body: a closed loop fills a Pool, an open course runs a Stream."},
 		{"op": &"reroute", "title": "Reroute", "category": "Routing & Structural", "role": "Utility", "script": RerouteScript, "tags": ["dot", "relay", "wire", "route", "passthrough", "clean"], "description": "1-in / 1-out transparent wire routing dot."},
 		{"op": &"terrain_bus_merge", "title": "Terrain Bus Merge", "category": "Routing & Structural", "role": "Combiner", "script": TerrainBusMergeScript, "tags": ["bus", "merge", "pack", "bundle", "channels", "multichannel"], "description": "Bundles individual height, mask, water_depth, sediment, and flow channels into a single TERRAIN_BUS connection."},
 		{"op": &"terrain_bus_split", "title": "Terrain Bus Split", "category": "Routing & Structural", "role": "Filter", "script": TerrainBusSplitScript, "tags": ["bus", "split", "unpack", "unbundle", "channels", "multichannel"], "description": "Unbundles a TERRAIN_BUS wire into separate height, mask, water_depth, sediment, and flow channel outputs."},
