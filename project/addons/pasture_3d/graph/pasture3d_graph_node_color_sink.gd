@@ -67,6 +67,16 @@ func sink_layer_label() -> String:
 	return "Graph Color"
 
 
-func color_at(p_values: Dictionary, _p_cell: int) -> Color:
+## The tint for one cell.
+##
+## The `color` value is a single Color from a Const Color or a Color Mix, or a PackedColorArray from a
+## Color Blend, whose mask chooses between two colours per cell. This method has taken a cell index
+## since it was written and ignored it; the per-cell case is what it was for.
+func color_at(p_values: Dictionary, p_cell: int) -> Color:
 	var c = p_values.get("color", null)
+	if c is PackedColorArray:
+		# A short array is a resolver that produced fewer cells than the bake grid, which is a bug
+		# rather than an author's choice — so fall back to the declared tint instead of wrapping the
+		# index round and painting a plausible, wrong pattern.
+		return c[p_cell] if p_cell >= 0 and p_cell < c.size() else color
 	return c if c is Color else color

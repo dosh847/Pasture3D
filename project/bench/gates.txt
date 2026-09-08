@@ -723,6 +723,17 @@ bench/GraphSinkBakeGate.tscn
 # not got (GraphGpuParityGate skips itself for the same reason), so the fourth copy of the mode arithmetic
 # is reviewed and not measured. [D] stops at `_resolve_ports`; whether the colour lands on a layer is
 # GraphSinkBakeGate's claim.
+# [F] Color Blend, added after Color Mix: a MASK chooses between two colours PER CELL. Color Mix folds to
+# one colour for the whole footprint, which is all a scalar SSA program can carry through a COLOR wire --
+# so Color Blend has its mask TAPPED as a real field and publishes a PackedColorArray, which the Color
+# Sink reads through the cell index its `color_at` has taken since it was written and ignored.
+# The endpoint checks (uniform 0 -> A, uniform 1 -> B) are not enough on their own: a resolver that fell
+# back to the uniform path satisfies both. The noise-mask check is what separates them -- 541 distinct
+# colours across 1120 cells. Red watches: removing the per-cell branch gives 4 failures, and ignoring
+# `strength` gives 1.
+# THE COST, said in the node rather than hidden: the mask is a SECOND evaluation pass over the bake grid,
+# because it hangs off the Blend and the sink reaches the Blend only through a COLOR wire the program
+# does not carry. Paid once per Color Blend per bake, and only by graphs containing one.
 bench/GraphOperatorGate.tscn
 
 # GraphAuxChannelGate — the twelve solvers whose secondary channels the native kernel used to discard.

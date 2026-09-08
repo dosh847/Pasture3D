@@ -205,7 +205,8 @@ static func _resolve_ports(p_graph, p_sink, p_index: int, p_gw: int, p_gh: int, 
 		var src := source_of(p_graph, p_index, port)
 		if src.is_empty():
 			continue
-		var col = _color_of(p_graph, int(src["node"]))
+		var col = _color_of(p_graph, int(src["node"]),
+				{"gw": p_gw, "gh": p_gh, "rect": p_rect, "input": p_input})
 		if col != null:
 			values[String(names[port])] = col
 		else:
@@ -213,6 +214,39 @@ static func _resolve_ports(p_graph, p_sink, p_index: int, p_gw: int, p_gh: int, 
 					+ "field cannot travel a COLOR port; wire a Const Color or leave it unwired.")
 					% String(names[port])}
 	return {"mask": mask, "values": values}
+
+
+## Evaluate the field wired into `p_port` of the node at `p_to`, over the bake grid in `p_ctx`.
+##
+## A SECOND PASS, and deliberately so. The sink's own ports are tapped in one multi-root pass because
+## they all hang off the sink; a Color Blend's mask hangs off the Blend, which the sink reaches only
+## through a COLOR wire the program does not carry. Folding it into the sink's pass would mean the
+## colour walk and the tap compile knowing about each other. This is paid once per Color Blend per bake,
+## and only by graphs that contain one.
+##
+## Empty when the port is unwired, when the graph does not lower, or when the channel is unserved —
+## three different failures that all mean the same thing to the caller: there is no field, fall back to
+## the uniform colour rather than to a grid of zeros (section 4.4).
+static func _tap_field(p_graph, p_to: int, p_port: int, p_ctx: Dictionary) -> PackedFloat32Array:
+	var src := source_of(p_graph, p_to, p_port)
+	if src.is_empty():
+		return PackedFloat32Array()
+	var compiled: Dictionary = p_graph.compile_graph_program_multi([int(src["node"])])
+	if compiled.is_empty():
+		return PackedFloat32Array()
+	var slot_of: Dictionary = compiled["slot_of"]
+	if not slot_of.has(int(src["node"])):
+		return PackedFloat32Array()
+	var res: Dictionary = Pasture3DUtil.graph_eval_grid_taps(compiled["program"],
+			int(p_ctx["gw"]), int(p_ctx["gh"]), p_ctx["rect"], p_ctx.get("input", PackedFloat32Array()),
+			PackedInt32Array([int(slot_of[int(src["node"])])]), PackedInt32Array([int(src["port"])]))
+	var unserved: PackedInt32Array = res.get("unserved", PackedInt32Array())
+	if unserved.has(0):
+		return PackedFloat32Array()
+	var fields: Array = res.get("fields", [])
+	if fields.is_empty() or not (fields[0] is PackedFloat32Array):
+		return PackedFloat32Array()
+	return fields[0]
 
 
 ## The COLOR produced by the node at `p_index`, or null if it produces none.
@@ -233,7 +267,7 @@ static func _resolve_ports(p_graph, p_sink, p_index: int, p_gw: int, p_gh: int, 
 ## `p_upstream` maps its own COLOR input NAMES to the resolved Colors. An input that resolves to nothing
 ## is ABSENT from the dictionary rather than present as a default — the node decides what an unwired port
 ## means, exactly as `input_unwired_default` lets a field node decide.
-static func _color_of(p_graph, p_index: int, p_depth: int = 0) -> Variant:
+static func _color_of(p_graph, p_index: int, p_ctx: Dictionary = {}, p_depth: int = 0) -> Variant:
 	if p_graph == null or p_index < 0 or p_index >= p_graph.nodes.size():
 		return null
 	var node = p_graph.nodes[p_index]
@@ -252,9 +286,23 @@ static func _color_of(p_graph, p_index: int, p_depth: int = 0) -> Variant:
 				var src := source_of(p_graph, p_index, port)
 				if src.is_empty():
 					continue
-				var up = _color_of(p_graph, int(src["node"]), p_depth + 1)
+				var up = _color_of(p_graph, int(src["node"]), p_ctx, p_depth + 1)
 				if up != null and port < names.size():
 					upstream[String(names[port])] = up
+		# ---- THE PER-CELL BRANCH ----
+		#
+		# A node that answers `graph_color_cells` wants a FIELD, not just its upstream colours: a Color
+		# Blend chooses between A and B per cell from a mask. The field is tapped from the program the
+		# same way the sink's own mask is, so a wire cannot mean one thing here and another to the
+		# kernel — and when it cannot be tapped (no grid context, or an unwired mask) the node's own
+		# uniform `graph_color` answers instead, which is why that method is not optional.
+		if node.has_method("graph_color_cells") and node.has_method("color_mask_port") and not p_ctx.is_empty():
+			var field := _tap_field(p_graph, p_index, int(node.color_mask_port()), p_ctx)
+			var cells: int = int(p_ctx.get("gw", 0)) * int(p_ctx.get("gh", 0))
+			if field.size() == cells and cells > 0:
+				var per_cell = node.graph_color_cells(upstream, field, cells)
+				if per_cell is PackedColorArray and per_cell.size() == cells:
+					return per_cell
 		var g = node.graph_color(upstream)
 		return g if g is Color else null
 	if "color" in node and node.color is Color:

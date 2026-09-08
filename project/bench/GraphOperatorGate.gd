@@ -15,6 +15,9 @@
 #       survives every downstream op.
 #   [D] The COLOUR sideband resolves. Const Color — the only producer of a COLOR port in the registry —
 #       reaches a Color Sink, Color Mix folds two of them, and a node carrying no colour is still refused.
+#   [F] A MASK can choose between two colours per cell. Color Mix folds to ONE colour for the whole
+#       footprint — that is all a scalar SSA program can carry through a COLOR wire — so Color Blend
+#       taps its mask as a real field and publishes a Color per cell instead.
 #   [E] Color Mix costs the graph nothing. It is not in `graph_op_ids()` and a graph containing one still
 #       reports `native_supported()`, because a COLOR port is never tapped and so the node is never an
 #       ancestor of a compile root. §10: one op the kernel does not know drops the WHOLE graph.
@@ -48,8 +51,9 @@ func _ready() -> void:
 	_c_degenerate_cases_are_defined()
 	_d_the_colour_sideband_resolves()
 	_e_color_mix_costs_nothing()
+	_f_a_mask_can_choose_between_colours()
 	print("\n    completed checks: %d" % _checks)
-	if _checks < 36:
+	if _checks < 44:
 		print("    !! FEWER CHECKS COMPLETED THAN EXPECTED — a criterion threw before it asserted.")
 		_fail += 1
 	print("\n=== %s (%d failures) ===\n" % ["GRAPH OPERATOR PASS" if _fail == 0 else "GRAPH OPERATOR FAIL", _fail])
@@ -252,6 +256,78 @@ func _e_color_mix_costs_nothing() -> void:
 	var sup2: bool = g.native_supported()
 	print("    control: the same graph forced to GDScript reports %s (want false)" % str(sup2))
 	_ok(not sup2, "native_supported() answers true unconditionally — [E] measured nothing")
+
+
+# --- F. A mask can choose between two colours, per cell ------------------------------------------------
+func _f_a_mask_can_choose_between_colours() -> void:
+	print("[F] Color Blend: a mask field chooses between two colours per cell")
+	var A := Color(1.0, 0.0, 0.0, 1.0)
+	var B := Color(0.0, 0.0, 1.0, 1.0)
+
+	# THE ENDPOINTS, exactly. A uniform mask of 0 must give A everywhere and 1 must give B everywhere;
+	# anything in between is the node interpolating, which the variation check below is for.
+	for pair in [[0.0, A, "0 -> A"], [1.0, B, "1 -> B"]]:
+		var got = _blend_colour(float(pair[0]), A, B, 1.0)
+		var want: Color = pair[1]
+		var ok: bool = got is PackedColorArray and got.size() == GW * GH \
+				and got[0].is_equal_approx(want) and got[GW * GH - 1].is_equal_approx(want)
+		print("    uniform mask %s: first cell %s, last %s" % [pair[2],
+				str(got[0]) if got is PackedColorArray and got.size() > 0 else str(got),
+				str(got[GW * GH - 1]) if got is PackedColorArray and got.size() == GW * GH else "-"])
+		_ok(ok, "a uniform mask of %s did not give the endpoint colour in every cell" % pair[2])
+
+	# PER CELL, not per footprint. A varying mask must produce more than one distinct colour — this is
+	# the whole difference from Color Mix, and a resolver that fell back to the uniform path would
+	# still satisfy both endpoint checks above.
+	var varied = _blend_colour(INF, A, B, 1.0) # INF selects the noise mask, see _blend_colour
+	var distinct := {}
+	if varied is PackedColorArray:
+		for c in varied:
+			distinct[str(c)] = true
+	print("    noise mask: %s distinct colours across %d cells (want > 8)"
+			% [distinct.size() if varied is PackedColorArray else "not a field", GW * GH])
+	_ok(varied is PackedColorArray and distinct.size() > 8,
+			"a varying mask produced a uniform colour — the blend is not per cell")
+
+	# CONTROL 1: `strength` is not decorative. The same varying mask at strength 0 must be pure A.
+	var muted = _blend_colour(INF, A, B, 0.0)
+	var all_a := muted is PackedColorArray
+	if all_a:
+		for c in muted:
+			if not c.is_equal_approx(A):
+				all_a = false
+				break
+	print("    control: the same mask at strength 0 is pure A = %s (want true)" % str(all_a))
+	_ok(all_a, "strength changed nothing — the mask is applied unscaled")
+
+	# CONTROL 2: with the mask UNWIRED there is no field to tap, and the node must fall back to a single
+	# uniform Color rather than publish a grid of zeros wearing a colour (section 4.4).
+	var blend := Pasture3DGraphNodeColorBlend.new()
+	blend.color_a = A
+	blend.color_b = B
+	var res := _resolve_sink([_mask_source(), _const_color(A), _const_color(B), blend], true,
+			[[1, 0, 3, 0], [2, 0, 3, 1]], 3)
+	var fallback = res.get("values", {}).get("color", null)
+	print("    control: mask unwired -> %s (want a single Color, not a field)" % str(fallback))
+	_ok(fallback is Color, "an unwired mask still produced a field — there was nothing to tap")
+
+
+## Resolve a Color Blend through a Color Sink and return whatever reached the writer.
+##
+## `p_mask` is the uniform value to drive the mask with, or INF to use a NOISE field instead — the one
+## fixture that can tell a per-cell blend from a uniform one.
+func _blend_colour(p_mask: float, p_a: Color, p_b: Color, p_strength: float):
+	var blend := Pasture3DGraphNodeColorBlend.new()
+	blend.color_a = p_a
+	blend.color_b = p_b
+	blend.strength = p_strength
+	var mask_node: Pasture3DGraphNode = _noise(1.0) if is_inf(p_mask) else _const(p_mask)
+	# 0 sink-mask source, 1 colour A, 2 colour B, 3 the mask field, 4 the Blend.
+	var res := _resolve_sink([_mask_source(), _const_color(p_a), _const_color(p_b), mask_node, blend],
+			true, [[1, 0, 4, 0], [2, 0, 4, 1], [3, 0, 4, 2]], 4)
+	if res.has("error"):
+		print("    !! resolve failed: %s" % str(res["error"]))
+	return res.get("values", {}).get("color", null)
 
 
 # --- fixtures ------------------------------------------------------------------------------------------

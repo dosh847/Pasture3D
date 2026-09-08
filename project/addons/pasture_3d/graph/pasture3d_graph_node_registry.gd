@@ -38,6 +38,7 @@ const ConstIntScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_no
 const ConstVectorScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_const_vector.gd")
 const ConstColorScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_const_color.gd")
 const ColorMixScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_color_mix.gd")
+const ColorBlendScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_color_blend.gd")
 const ConstCurveScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_const_curve.gd")
 const ConstBoolScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_const_bool.gd")
 const FurrowsScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_furrows.gd")
@@ -259,6 +260,7 @@ static func entries(p_include_dev: bool = false) -> Array[Dictionary]:
 		{"op": &"curvature", "title": "Curvature Mask", "category": "Filters & Modifiers", "role": "Filter", "script": CurvatureScript, "tags": ["curvature", "convexity", "concavity", "ridge", "valley", "basin", "laplacian", "hessian", "mask", "crests"], "description": "Calculates local terrain convexity/concavity to mask mountain ridges vs valley basins."},
 		
 		{"op": &"blend", "title": "Blend", "category": "Math & Combiners", "role": "Combiner", "script": BlendScript, "tags": ["math", "add", "sub", "mul", "max", "min", "combine", "mix", "divide", "power", "difference", "screen", "overlay"], "description": "Combines two fields per cell: add, sub, mul, max, min, mix, div, pow, difference, screen or overlay, gated by an optional mask. Its ports accept any scalar field — height, mask, signed or field."},
+		{"op": &"color_blend", "title": "Color Blend", "category": "Math & Combiners", "role": "Combiner", "script": ColorBlendScript, "tags": ["color", "blend", "mask", "mix", "tint", "rgba", "combine", "stencil"], "description": "Chooses between two Colors PER CELL from a mask field \u2014 snow above the line, rock below. Unlike Color Mix, whose result is one colour for the whole footprint."},
 		{"op": &"color_mix", "title": "Color Mix", "category": "Math & Combiners", "role": "Combiner", "script": ColorMixScript, "tags": ["color", "tint", "mix", "blend", "rgba", "palette", "combine"], "description": "Combines two Colors into one — mix, add, sub, mul, screen or overlay, by a factor. The colour is uniform over the footprint; the Color Sink's mask decides where it lands."},
 		
 		{"op": &"lake_flooding", "title": "Lake Flooding", "category": "Solvers & Realism", "role": "Solver", "script": LakeFloodingScript, "tags": ["lake", "pond", "water", "basin", "flood", "spillway", "depth", "shoreline", "pool", "hydrology"], "description": "Floods closed basins or fills water levels; outputs lake surface + water depth + shoreline masks and spawns Pasture3DPond bodies."},
