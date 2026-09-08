@@ -135,14 +135,22 @@ static func _label_of(p_sink, p_index: int) -> String:
 static func _resolve_ports(p_graph, p_sink, p_index: int, p_gw: int, p_gh: int, p_rect: Rect2,
 		p_input: PackedFloat32Array) -> Dictionary:
 	var mask_port: int = p_sink.mask_port()
-	var mask_src := source_of(p_graph, p_index, mask_port)
-	if mask_src.is_empty():
-		# An unwired stencil is not "paint everywhere"; it is "paint nowhere", and saying so is cheaper
-		# than a bake that silently covers the footprint in texture 0.
-		return {"error": "the mask port is unwired, so it writes nothing"}
-
 	var names: PackedStringArray = p_sink.input_names()
 	var types: PackedInt32Array = p_sink.input_port_types()
+
+	# EACH SINK NAMES WHAT IT CANNOT WRITE WITHOUT. This used to be the mask for every sink, on the
+	# grounds that an unwired stencil is "paint nowhere" rather than "paint everywhere". That rule
+	# predates the Blend nodes: mixing is what a Blend does and writing is what a sink does, so
+	# requiring a stencil in order to write a flat default made the ordinary case unexpressible. See
+	# Pasture3DGraphNodeChannelSink.required_ports.
+	var required: PackedInt32Array = p_sink.required_ports() if p_sink.has_method("required_ports") \
+			else PackedInt32Array([mask_port])
+	for req in required:
+		if source_of(p_graph, p_index, int(req)).is_empty():
+			var nm: String = String(names[int(req)]) if int(req) < names.size() else str(req)
+			return {"error": "the `%s` port is unwired, and this sink has nothing to write without it" % nm}
+	var mask_required: bool = required.has(mask_port)
+	var ctx := {"gw": p_gw, "gh": p_gh, "rect": p_rect, "input": p_input}
 	var roots: Array = []
 	var port_of_root := {} # port -> {"node","port"}
 	for port in range(p_sink.input_count()):
@@ -154,6 +162,20 @@ static func _resolve_ports(p_graph, p_sink, p_index: int, p_gw: int, p_gh: int, 
 		port_of_root[port] = src
 		if not roots.has(int(src["node"])):
 			roots.append(int(src["node"]))
+
+	var values := {}
+	var mask := PackedFloat32Array()
+
+	# NO TAPPABLE ROOT IS NOT AN ERROR any more. A Color Sink whose only wire is a Const Color into its
+	# COLOR port has nothing to compile: a colour travels the sideband, not the program. The old code
+	# reached `compile_graph_program_multi` with an empty root list and reported a graph that does not
+	# lower -- which is why "paint the footprint this colour" could not be expressed even after the mask
+	# stopped being required.
+	if roots.is_empty():
+		var err := _resolve_colours(p_graph, p_sink, p_index, ctx, values)
+		if err != "":
+			return {"error": err}
+		return {"mask": _whole_footprint(p_gw, p_gh, p_input), "values": values}
 
 	var compiled: Dictionary = p_graph.compile_graph_program_multi(roots)
 	if compiled.is_empty():
@@ -176,15 +198,13 @@ static func _resolve_ports(p_graph, p_sink, p_index: int, p_gw: int, p_gh: int, 
 			p_input, slots, chans)
 	var unserved: PackedInt32Array = result.get("unserved", PackedInt32Array())
 	var fields: Array = result.get("fields", [])
-	var values := {}
-	var mask := PackedFloat32Array()
 	for r in range(order.size()):
 		var port: int = order[r]
 		if unserved.has(r) or r >= fields.size() or not (fields[r] is PackedFloat32Array):
 			# §4.4: an unserved channel is NOT zeros. A mask that could not be served writes nothing; a
 			# value port that could not be served falls back to the node's own property, which is the
 			# declared default rather than an impostor.
-			if port == p_sink.mask_port():
+			if port == mask_port and mask_required:
 				return {"error": "the mask channel is not served by this graph"}
 			continue
 		var field: PackedFloat32Array = fields[r]
@@ -196,24 +216,57 @@ static func _resolve_ports(p_graph, p_sink, p_index: int, p_gw: int, p_gh: int, 
 			values[String(names[port])] = int(round(field[0])) \
 					if int(types[port]) == Pasture3DGraphNode.PortType.INT else field[0]
 	if mask.size() != p_gw * p_gh:
-		return {"error": "the mask tap returned %d cells, not %d" % [mask.size(), p_gw * p_gh]}
+		# A REQUIRED mask that did not arrive is still a refusal, and so is a WIRED one that the graph
+		# could not serve -- a stencil the author drew and the bake could not honour is a bug, not a
+		# default. An optional mask that was never wired is the whole footprint.
+		if mask_required or not source_of(p_graph, p_index, mask_port).is_empty():
+			return {"error": "the mask tap returned %d cells, not %d" % [mask.size(), p_gw * p_gh]}
+		mask = _whole_footprint(p_gw, p_gh, p_input)
 
-	# The COLOR port, read from the wired node rather than from a slot. See the Color Sink's header.
+	var cerr := _resolve_colours(p_graph, p_sink, p_index, ctx, values)
+	if cerr != "":
+		return {"error": cerr}
+	return {"mask": mask, "values": values}
+
+
+## Fill `r_values` with every COLOR port's colour, read from the wired node rather than from a slot.
+## Returns "" or the error to report. See the Color Sink's header for why a colour is not tapped.
+##
+## Shared by both exits of `_resolve_ports`: the tapped path and the no-tappable-root path a sink takes
+## when its only wire is a colour. One copy, because two would be two chances to disagree about what a
+## COLOR port means.
+static func _resolve_colours(p_graph, p_sink, p_index: int, p_ctx: Dictionary, r_values: Dictionary) -> String:
+	var names: PackedStringArray = p_sink.input_names()
+	var types: PackedInt32Array = p_sink.input_port_types()
 	for port in range(p_sink.input_count()):
-		if int(types[port]) != Pasture3DGraphNode.PortType.COLOR:
+		if port >= types.size() or int(types[port]) != Pasture3DGraphNode.PortType.COLOR:
 			continue
 		var src := source_of(p_graph, p_index, port)
 		if src.is_empty():
 			continue
-		var col = _color_of(p_graph, int(src["node"]),
-				{"gw": p_gw, "gh": p_gh, "rect": p_rect, "input": p_input})
-		if col != null:
-			values[String(names[port])] = col
-		else:
-			return {"error": ("the `%s` port is wired to a node that carries no colour. A vector or "
-					+ "field cannot travel a COLOR port; wire a Const Color or leave it unwired.")
-					% String(names[port])}
-	return {"mask": mask, "values": values}
+		var col = _color_of(p_graph, int(src["node"]), p_ctx)
+		if col == null:
+			return ("the `%s` port is wired to a node that carries no colour. A vector or field cannot "
+					+ "travel a COLOR port; wire a Const Color or leave it unwired.") % String(names[port])
+		r_values[String(names[port])] = col
+	return ""
+
+
+## The mask a sink writes with when its stencil port is unwired and optional: on everywhere the brush
+## actually put ground.
+##
+## NOT a flat 1.0. A cell the brush loop never wrote is NaN in the input surface, and painting there
+## would spill the sink outside the footprint the rest of the bake respects -- so a no-data cell is off.
+## With no surface to consult (an empty p_input) there is no footprint to be outside of, and the whole
+## grid is on.
+static func _whole_footprint(p_gw: int, p_gh: int, p_input: PackedFloat32Array) -> PackedFloat32Array:
+	var n := p_gw * p_gh
+	var out := PackedFloat32Array()
+	out.resize(n)
+	var have_surface: bool = p_input.size() == n
+	for i in range(n):
+		out[i] = 1.0 if (not have_surface or is_finite(p_input[i])) else 0.0
+	return out
 
 
 ## Evaluate the field wired into `p_port` of the node at `p_to`, over the bake grid in `p_ctx`.

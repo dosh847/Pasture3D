@@ -109,6 +109,32 @@ func mask_port() -> int:
 	return 0
 
 
+## The ports this sink cannot write without, by index. Everything else is optional.
+##
+## ---- WHY THE MASK STOPPED BEING THE REQUIRED ONE ----
+##
+## It used to be, for every sink, and the reasoning was that an unwired stencil is "paint nowhere" rather
+## than "paint everywhere" -- better to refuse than to silently cover the footprint in texture 0.
+##
+## That was the right rule when the mask was the only way to say anything. It is the wrong one now the
+## Blend nodes exist: MIXING is what a Blend does, and a sink is the thing that WRITES. Requiring a
+## stencil in order to write a flat default made the ordinary case -- "paint this whole brush footprint
+## that colour" -- unexpressible, and a sink is already bounded by the footprint, so "everywhere" was
+## never unbounded.
+##
+## So each sink names what it actually needs in order to have a value at all, and for most of them the
+## answer is NOTHING: a Color Sink has a `color` export and a Control Sink a `base_texture`, so their
+## payload exists whether or not a wire overrides it, and a bare one writes that default across the
+## whole footprint. Nav and Hole are the exception -- their only input IS the mask, so for them it is
+## the payload rather than the stencil and it stays required.
+##
+## A REQUIRED port that is unwired is refused by name. An unwired OPTIONAL mask means the whole
+## footprint (see Pasture3DGraphChannelSinks._whole_footprint) -- which is bounded by the brush's own
+## extent, so it was never the unbounded "paint everything" the old rule was written to prevent.
+func required_ports() -> PackedInt32Array:
+	return PackedInt32Array([mask_port()])
+
+
 ## Compose the control word this sink wants at one cell, given what is already composited beneath it
 ## (`p_below`) and the resolved per-port values. Control sinks only; a colour sink overrides
 ## `color_at` instead. Returning -1 means "author nothing here", which is distinct from authoring 0.

@@ -734,6 +734,26 @@ bench/GraphSinkBakeGate.tscn
 # THE COST, said in the node rather than hidden: the mask is a SECOND evaluation pass over the bake grid,
 # because it hangs off the Blend and the sink reaches the Blend only through a COLOR wire the program
 # does not carry. Paid once per Color Blend per bake, and only by graphs containing one.
+# [G] A sink requires its PAYLOAD, not its stencil. Every sink used to refuse to resolve without a wired
+# mask, on the grounds that an unwired stencil is "paint nowhere" rather than "paint everywhere". That
+# rule predates the Blend nodes: mixing is what a Blend does and writing is what a sink does, so demanding
+# a stencil in order to write a flat default made the ordinary case -- "paint this whole footprint that
+# colour" -- unexpressible. Each sink now names its required ports; Nav and Hole keep the mask because
+# their ONLY input is the mask, which makes it their payload rather than their stencil.
+# COLOR SINK AND CONTROL SINK REQUIRE NOTHING, and that is not the request being declined. `color` and
+# `base_texture` are @export properties that the ports OVERRIDE, so requiring the PORT blocks the default
+# output exactly as the mask requirement did -- GraphSinkBakeGate and GraphChannelSinkGate, whose fixtures
+# wire only a mask and set the texture inline, both failed the moment the port was made required. The
+# payload has to EXIST; it does not have to arrive on a wire.
+# Two more things had to change with it: a Color Sink whose only wire is a Const Color has NO tappable
+# root, and the old code reached compile_graph_program_multi with an empty root list and reported a graph
+# that does not lower; and an unwired optional mask now means _whole_footprint, which is NOT a flat 1.0 --
+# a cell the brush never wrote is NaN in the input surface, and painting there spills the sink outside the
+# footprint the rest of the bake respects.
+# Red watches, three: restoring [mask_port()] on the Color Sink (3 failures, including the whole-footprint
+# mask never being built); dropping required_ports() from the Nav Sink so it writes with nothing wired
+# (1); and making _whole_footprint a flat 1.0, which paints all 1120 cells of a half-NaN surface instead
+# of the 560 the brush actually wrote (1).
 bench/GraphOperatorGate.tscn
 
 # GraphAuxChannelGate — the twelve solvers whose secondary channels the native kernel used to discard.

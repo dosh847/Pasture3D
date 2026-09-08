@@ -69,6 +69,16 @@ func native_param_ports() -> PackedInt32Array:
 	return PackedInt32Array([-1, 0, 1, -1])
 
 
+## NOTHING is required. `base_texture` is an export and `base` is the port that overrides it, so this
+## node always has a payload; overlay, blend and mask are all optional too. A bare Control Sink writes
+## its base texture across the whole brush footprint at full strength.
+##
+## Requiring the `base` PORT would have blocked the default output exactly as the old mask requirement
+## did. What the sink needs is a base texture VALUE, and it has one whether or not anything is wired.
+func required_ports() -> PackedInt32Array:
+	return PackedInt32Array()
+
+
 func sink_map_type() -> int:
 	return MAPTYPE_CONTROL
 

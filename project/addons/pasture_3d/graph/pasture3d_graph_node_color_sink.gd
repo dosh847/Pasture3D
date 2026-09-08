@@ -55,6 +55,17 @@ func native_param_ports() -> PackedInt32Array:
 	return PackedInt32Array([-1, 0])
 
 
+## NOTHING is required, because the payload is a colour and this node always has one: the `color` export
+## is the declared default and the `color` PORT overrides it. So a bare Color Sink writes its own tint
+## across the whole brush footprint, which is the "give me a default output" case.
+##
+## Requiring the colour PORT would have blocked that exactly as the old mask requirement did -- a value
+## port falling back to its inline property is the rule everywhere else in the graph, and a sink is not
+## the place to make an exception to it.
+func required_ports() -> PackedInt32Array:
+	return PackedInt32Array()
+
+
 func sink_map_type() -> int:
 	return MAPTYPE_COLOR
 

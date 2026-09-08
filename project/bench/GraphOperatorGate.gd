@@ -18,6 +18,9 @@
 #   [F] A MASK can choose between two colours per cell. Color Mix folds to ONE colour for the whole
 #       footprint — that is all a scalar SSA program can carry through a COLOR wire — so Color Blend
 #       taps its mask as a real field and publishes a Color per cell instead.
+#   [G] A sink requires its PAYLOAD, not its stencil. Every sink used to refuse to write without a mask;
+#       a Color Sink now requires a colour, a Control Sink a base texture, and Nav and Hole still require
+#       the mask because the mask IS their payload. An unwired optional mask means the whole footprint.
 #   [E] Color Mix costs the graph nothing. It is not in `graph_op_ids()` and a graph containing one still
 #       reports `native_supported()`, because a COLOR port is never tapped and so the node is never an
 #       ancestor of a compile root. §10: one op the kernel does not know drops the WHOLE graph.
@@ -52,8 +55,9 @@ func _ready() -> void:
 	_d_the_colour_sideband_resolves()
 	_e_color_mix_costs_nothing()
 	_f_a_mask_can_choose_between_colours()
+	_g_a_sink_requires_its_payload_not_its_stencil()
 	print("\n    completed checks: %d" % _checks)
-	if _checks < 44:
+	if _checks < 55:
 		print("    !! FEWER CHECKS COMPLETED THAN EXPECTED — a criterion threw before it asserted.")
 		_fail += 1
 	print("\n=== %s (%d failures) ===\n" % ["GRAPH OPERATOR PASS" if _fail == 0 else "GRAPH OPERATOR FAIL", _fail])
@@ -328,6 +332,114 @@ func _blend_colour(p_mask: float, p_a: Color, p_b: Color, p_strength: float):
 	if res.has("error"):
 		print("    !! resolve failed: %s" % str(res["error"]))
 	return res.get("values", {}).get("color", null)
+
+
+# --- G. A sink requires its payload, not its stencil ---------------------------------------------------
+func _g_a_sink_requires_its_payload_not_its_stencil() -> void:
+	print("[G] each sink requires what it cannot write without")
+
+	# 1 — A Color Sink with a colour and NO mask writes. This is the case the old rule refused, and it is
+	# also the case with NO TAPPABLE ROOT at all: a colour travels the sideband, so there is nothing to
+	# compile, and the resolver used to report a graph that does not lower.
+	var res := _sink_ports(Pasture3DGraphNodeColorSink.new(), {1: _const_color(Color.CYAN)})
+	print("    Color Sink, colour only -> %s" % ("error: " + str(res.get("error")) if res.has("error")
+			else "mask %d cells, colour %s" % [res["mask"].size(), str(res["values"].get("color"))]))
+	_ok(not res.has("error"), "a Color Sink with a colour and no mask was refused: %s" % str(res.get("error", "")))
+	_ok(res.get("mask", PackedFloat32Array()).size() == GW * GH,
+			"the unwired mask did not become a whole-footprint mask")
+	_ok(_all_on(res.get("mask", PackedFloat32Array())),
+			"the whole-footprint mask is not on everywhere over a surface with no holes")
+
+	# 2 — A BARE Color Sink writes its own tint. Requiring the colour PORT would have blocked the default
+	# output exactly as the old mask requirement did: a value port falling back to its inline property is
+	# the rule everywhere else in the graph.
+	var bare_color := Pasture3DGraphNodeColorSink.new()
+	bare_color.color = Color(0.2, 0.9, 0.1, 1.0)
+	var res2 := _sink_ports(bare_color, {})
+	print("    Color Sink, nothing wired -> %s" % ("error: " + str(res2.get("error")) if res2.has("error")
+			else "mask %d cells, writer falls back to %s" % [res2["mask"].size(),
+					str(bare_color.color_at(res2["values"], 0))]))
+	_ok(not res2.has("error"), "a bare Color Sink was refused: %s" % str(res2.get("error", "")))
+	_ok(not res2.has("error") and bare_color.color_at(res2["values"], 0).is_equal_approx(bare_color.color),
+			"a bare Color Sink did not fall back to its own declared tint")
+
+	# 3 — A Control Sink writes from a base texture alone; overlay, blend and mask are all optional.
+	var res3 := _sink_ports(Pasture3DGraphNodeControlSink.new(), {1: _const(3.0)})
+	print("    Control Sink, base only -> %s" % ("error: " + str(res3.get("error")) if res3.has("error")
+			else "base %s, mask %d cells" % [str(res3["values"].get("base")), res3["mask"].size()]))
+	_ok(not res3.has("error"), "a Control Sink with a base and no mask was refused: %s" % str(res3.get("error", "")))
+	_ok(int(res3.get("values", {}).get("base", -1)) == 3,
+			"the base texture did not reach the writer as the value that was wired")
+
+	# 4 — A BARE Control Sink writes its inline base_texture, at full strength, over the footprint.
+	var bare_ctrl := Pasture3DGraphNodeControlSink.new()
+	bare_ctrl.base_texture = 7
+	var res4 := _sink_ports(bare_ctrl, {})
+	var word: int = bare_ctrl.control_word(0, res4.get("values", {}), 0) if not res4.has("error") else -1
+	print("    Control Sink, nothing wired -> %s (base of the composed word = %s)"
+			% [str(res4.get("error", "accepted")), str(Pasture3DUtil.get_base(word)) if word >= 0 else "-"])
+	_ok(not res4.has("error"), "a bare Control Sink was refused: %s" % str(res4.get("error", "")))
+	_ok(word >= 0 and Pasture3DUtil.get_base(word) == 7,
+			"a bare Control Sink did not compose its own declared base texture")
+
+	# 5 — Nav and Hole have ONLY a mask, so for them the mask is the payload and stays required. If the
+	# change had been "no sink requires anything", these two would have started writing nothing, silently.
+	for entry in [["Nav", Pasture3DGraphNodeNavSink.new()], ["Hole", Pasture3DGraphNodeHoleSink.new()]]:
+		var bare := _sink_ports(entry[1], {})
+		var wired := _sink_ports(entry[1], {0: _const(1.0)})
+		print("    %s Sink: unwired -> %s | wired -> %s" % [entry[0], str(bare.get("error", "<accepted>")),
+				"ok" if not wired.has("error") else str(wired.get("error"))])
+		_ok(bare.has("error") and String(bare.get("error", "")).contains("mask"),
+				"%s Sink wrote with no mask — the mask is its payload" % entry[0])
+		_ok(not wired.has("error"), "%s Sink was refused with its mask wired: %s" % [entry[0], str(wired.get("error", ""))])
+
+	# 6 — CONTROL: the whole-footprint mask is not a flat 1.0. A cell the brush never wrote is NaN in
+	# the input surface, and painting there would spill the sink outside the footprint the rest of the
+	# bake respects. Half this surface is no-data.
+	var holed := PackedFloat32Array()
+	holed.resize(GW * GH)
+	for i in range(GW * GH):
+		holed[i] = NAN if i < (GW * GH) / 2 else 10.0
+	var res6 := _sink_ports(Pasture3DGraphNodeColorSink.new(), {1: _const_color(Color.CYAN)}, holed)
+	var m: PackedFloat32Array = res6.get("mask", PackedFloat32Array())
+	var on := 0
+	for v in m:
+		if v > 0.5:
+			on += 1
+	print("    control: over a half-NaN surface the footprint mask is on in %d of %d cells (want half)"
+			% [on, GW * GH])
+	_ok(on == (GW * GH) / 2, "the whole-footprint mask painted into no-data cells")
+
+
+func _all_on(p: PackedFloat32Array) -> bool:
+	if p.is_empty():
+		return false
+	for v in p:
+		if v < 0.999:
+			return false
+	return true
+
+
+## Resolve one sink whose ports are wired per `p_wires` (sink port -> source node). Every source is
+## appended as its own node, so a sink can be tested with any subset of its ports wired — including none.
+func _sink_ports(p_sink, p_wires: Dictionary, p_surface := PackedFloat32Array()) -> Dictionary:
+	var nodes: Array[Pasture3DGraphNode] = []
+	var conns: Array = []
+	for port in p_wires:
+		nodes.append(p_wires[port])
+		conns.append([nodes.size() - 1, 0, -1, int(port)]) # sink index patched below
+	var si := nodes.size()
+	nodes.append(p_sink)
+	var fixed: Array = []
+	for c in conns:
+		fixed.append([c[0], c[1], si, c[3]])
+	var g := _graph(nodes, fixed, -1)
+	var surf := p_surface
+	if surf.size() != GW * GH:
+		surf = PackedFloat32Array()
+		surf.resize(GW * GH)
+		surf.fill(5.0)
+	return Pasture3DGraphChannelSinks._resolve_ports(g, p_sink, si, GW, GH, RECT, surf)
 
 
 # --- fixtures ------------------------------------------------------------------------------------------
