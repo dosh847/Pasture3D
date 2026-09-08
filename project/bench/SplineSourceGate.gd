@@ -19,7 +19,7 @@
 @tool
 extends Node
 
-const CRITERIA: Array[String] = ["A", "B", "C", "D", "E", "F"]
+const CRITERIA: Array[String] = ["A", "B", "C", "D", "E", "F", "G"]
 
 var _fail: int = 0
 var _reported: Dictionary = {}
@@ -33,6 +33,7 @@ func _ready() -> void:
 	_d_an_edit_reaches_its_consumers_and_no_one_else()
 	_e_resolving_an_unchanged_spline_changes_nothing()
 	_f_a_spline_is_offered_in_exactly_one_dropdown()
+	_g_sample_points_toggle_and_interval()
 	_account_for_silent_criteria()
 	print("\n=== %s (%d failures) ===\n"
 			% ["SPLINE SOURCE PASS" if _fail == 0 else "SPLINE SOURCE FAIL", _fail])
@@ -392,3 +393,37 @@ func _f_a_spline_is_offered_in_exactly_one_dropdown() -> void:
 		_fail += 1
 		print("    !! one of the two collectors returned nothing, so the exclusion proved nothing")
 	_drop(t)
+
+
+# --- G. Point sampling by default imports authored points; opt-in resamples by interval ------------
+func _g_sample_points_toggle_and_interval() -> void:
+	var t := _terrain()
+	var host := _mound_under(t, "Consumer", Vector3.ZERO)
+	var sp := _spline_under(t, "River", Vector3(0.0, 0.0, 0.0))
+	var src := _give_graph(host, sp.spline_key())
+
+	# 1. Default (sample_points = false): must take exact 3 authored points
+	sp._refresh_consumers()
+	var default_pts: int = src.path.points.size() if src.path != null else 0
+	var default_ok := default_pts == 3
+
+	# 2. Enable sampling at 2m interval along ~20m curve
+	src.sample_points = true
+	src.sample_interval = 2.0
+	sp._refresh_consumers()
+	var dense_pts: int = src.path.points.size() if src.path != null else 0
+	var dense_ok := dense_pts >= 10
+
+	# 3. Increase interval to 5m: fewer points
+	src.sample_interval = 5.0
+	sp._refresh_consumers()
+	var sparse_pts: int = src.path.points.size() if src.path != null else 0
+	var sparse_ok := sparse_pts < dense_pts and sparse_pts >= 4
+
+	print("    default points: %d (want 3); sample 2m: %d (want >= 10); sample 5m: %d"
+			% [default_pts, dense_pts, sparse_pts])
+	_check("G", default_ok and dense_ok and sparse_ok,
+			"default imported authored points (%d), sample_points scaled point count (%d -> %d)"
+					% [default_pts, dense_pts, sparse_pts])
+	_drop(t)
+

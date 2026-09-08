@@ -167,12 +167,12 @@ static func resolve_splines(p_graph: Pasture3DTerrainGraph, p_host: Node = null)
 		src.editor_spline_keys = keys
 		if src.spline_key.is_empty():
 			if own != null:
-				_assign(src, own.graph_spline_path(src.spline_index))
+				_assign(src, own.graph_spline_path(src.spline_index, src.sample_points, src.sample_interval))
 				filled += 1
 			continue
 		if by_key.has(src.spline_key):
 			var sp: Pasture3DSpline = by_key[src.spline_key]
-			_assign(src, sp.graph_spline_path(src.spline_index))
+			_assign(src, sp.graph_spline_path(src.spline_index, src.sample_points, src.sample_interval))
 			filled += 1
 	return filled
 

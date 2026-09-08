@@ -48,6 +48,9 @@ extends Pasture3DTerrainBrush
 @export var closed: bool = false:
 	set(v):
 		closed = v
+		for sp in _get_splines():
+			if is_instance_valid(sp) and sp.curve != null:
+				sp.curve.closed = v
 		_schedule_refresh()
 		if is_inside_tree():
 			update_gizmos() # redraw the loop wrap segment + its tangents
@@ -176,25 +179,44 @@ func graph_spline_count() -> int:
 ##
 ## An index past the end resolves to an EMPTY path, never clamped: a deleted spline must not leave a
 ## graph quietly pointing at a line nobody chose.
-func graph_spline_path(p_index: int = 0) -> Pasture3DGraphPath:
+func graph_spline_path(p_index: int = 0, p_sample: bool = false, p_sample_interval: float = 4.0) -> Pasture3DGraphPath:
 	var out := Pasture3DGraphPath.new()
 	out.source_label = spline_key()
 	var splines := _get_splines()
 	if p_index < 0 or p_index >= splines.size():
 		return out
 	var sp: Path3D = splines[p_index]
-	if not is_instance_valid(sp):
+	if not is_instance_valid(sp) or sp.curve == null or sp.curve.point_count < 2:
 		return out
-	var wpts := _baked_world_points(sp)
-	if wpts.size() < 2:
-		return out
-	# Decimated to about one vertex per terrain cell, exactly as every rasteriser does before stamping.
-	# Curve3D bakes at a fixed 0.2 m interval, so a 40 m straight line arrives as two hundred collinear
-	# points — an index the query builds, walks and caches for no gain. Decimating HERE rather than in each
-	# consumer also means the graph and the brushes see the SAME polyline: two decimations of one curve
-	# would disagree in the corners, and the disagreement would read as a solver bug.
-	if terrain != null and terrain.vertex_spacing > 0.0:
-		wpts = _decimate3(wpts, terrain.vertex_spacing)
+
+	var c: Curve3D = sp.curve
+	var xf := sp.global_transform if sp.is_inside_tree() else sp.transform
+	var wpts := PackedVector3Array()
+
+	if not p_sample:
+		# By default, take in the authored control points exactly as imported
+		var n_pts := c.point_count
+		wpts.resize(n_pts)
+		for i in range(n_pts):
+			wpts[i] = xf * c.get_point_position(i)
+	else:
+		# Point sampling enabled and controlled by inspector parameters
+		var baked := _bake_curve(c)
+		var total_len := baked.get_baked_length()
+		var step := maxf(p_sample_interval, 0.05)
+		if closed and total_len > 0.001:
+			var count := maxi(3, int(round(total_len / step)))
+			wpts.resize(count)
+			for i in range(count):
+				var offset := (float(i) / float(count)) * total_len
+				wpts[i] = xf * baked.sample_baked(offset)
+		else:
+			var count := maxi(2, int(ceil(total_len / step)) + 1)
+			wpts.resize(count)
+			for i in range(count):
+				var offset := minf(i * step, total_len)
+				wpts[i] = xf * baked.sample_baked(offset)
+
 	if wpts.size() < 2:
 		return out
 
@@ -205,8 +227,7 @@ func graph_spline_path(p_index: int = 0) -> Pasture3DGraphPath:
 	if carry_heights:
 		hts.resize(n)
 	# Arc length as we go, so `width_along` is sampled by DISTANCE along the line rather than by vertex
-	# index. Baked points are not evenly spaced — a tight curve gets many and a straight run gets few —
-	# so an index-parameterised taper would bunch up in the corners.
+	# index.
 	var cum := PackedFloat32Array()
 	cum.resize(n)
 	cum[0] = 0.0

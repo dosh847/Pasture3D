@@ -52,6 +52,19 @@ extends Pasture3DGraphNode
 		spline_index = maxi(v, 0)
 		emit_changed()
 
+## Whether to resample points along the spline curve. When false (default), the exact authored
+## control points of the spline are imported.
+@export var sample_points: bool = false:
+	set(v):
+		sample_points = v
+		_param_changed()
+
+## Distance in metres between sampled points along the curve when `sample_points` is enabled.
+@export_range(0.25, 200.0, 0.05, "or_greater", "suffix:m") var sample_interval: float = 4.0:
+	set(v):
+		sample_interval = maxf(v, 0.05)
+		_param_changed()
+
 ## The resolved geometry. Written by the host at bake (or at the moment the spline is edited — see
 ## Pasture3DTerrainBrush._refresh_consumers), or assigned directly. Null until then.
 ##

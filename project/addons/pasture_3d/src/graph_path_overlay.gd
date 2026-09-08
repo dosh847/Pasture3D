@@ -76,6 +76,13 @@ static func build(p_brush) -> Dictionary:
 	var data = null
 	if p_brush.terrain != null and p_brush.terrain.data != null:
 		data = p_brush.terrain.data
+	if p_brush is Pasture3DSpline:
+		var sp: Pasture3DSpline = p_brush as Pasture3DSpline
+		var path: Pasture3DGraphPath = sp.graph_spline_path(0)
+		if path != null and path.points.size() >= 2:
+			_append_path(out, p_brush, path, data)
+			out["drawn"].append(0)
+		return out
 	for m in p_brush.modifiers:
 		if not (m is Pasture3DNodeGraph):
 			continue
@@ -217,6 +224,9 @@ static func _append_path(r_out: Dictionary, p_brush, p_path: Pasture3DGraphPath,
 	for i in range(1, n):
 		env.append(left[i - 1]); env.append(left[i])
 		env.append(right[i - 1]); env.append(right[i])
+	if p_path.closed and n > 2:
+		env.append(left[n - 1]); env.append(left[0])
+		env.append(right[n - 1]); env.append(right[0])
 
 	# ---- the drop lines (§6.2 item 4) ----
 	#

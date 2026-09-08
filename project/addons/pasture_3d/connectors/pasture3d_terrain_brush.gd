@@ -1069,6 +1069,8 @@ func _on_refresh_timer() -> void:
 	if not _paints():
 		_refresh_consumers()
 		_last_baked_xform = global_transform
+		if is_inside_tree():
+			update_gizmos()
 		return
 	var bake: Callable = (_refresh_owner.bind(_layer_owner, false, []) if full or splines.is_empty()
 			else _refresh_owner_rect.bind(_layer_owner, splines, moved_node))
@@ -6254,6 +6256,10 @@ func _refresh_consumers() -> void:
 			if mg != null and mg.graph != null:
 				Pasture3DGraphSources.resolve(mg.graph, b)
 		b._schedule_refresh()
+		if b.is_inside_tree():
+			b.update_gizmos()
+	if is_inside_tree():
+		update_gizmos()
 
 
 ## Does `p_brush`'s modifier stack hold a graph with a Spline Source that names `p_key`?

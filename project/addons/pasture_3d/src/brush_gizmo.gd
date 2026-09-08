@@ -344,6 +344,7 @@ func _set_subgizmo_transform(p_gizmo: EditorNode3DGizmo, p_id: int, p_transform:
 			# "seat it" here would fight the camera. Alt seats on the two CLICK gestures instead.
 			world = brush.editor_seat_on_surface(world, false)
 		path.curve.set_point_position(idx, path.to_local(world))
+		node.update_gizmos()
 		return
 	# Tangent (in/out).
 	var gpi: int = p_id / 3
@@ -372,6 +373,7 @@ func _set_subgizmo_transform(p_gizmo: EditorNode3DGizmo, p_id: int, p_transform:
 			path.curve.set_point_in(idx, -new_off)
 		else:
 			path.curve.set_point_out(idx, -new_off)
+	node.update_gizmos()
 
 
 ## Commit the drag(s) as one undoable action. The curve change fires curve.changed → the brush repaints
@@ -387,6 +389,7 @@ func _commit_subgizmos(p_gizmo: EditorNode3DGizmo, p_ids: PackedInt32Array, p_re
 		_orig.clear()
 		_start.clear()
 		_smooth_drag.clear()
+		node.update_gizmos()
 		return
 	var has_tangent := false
 	for id in p_ids:
@@ -440,6 +443,7 @@ func _commit_subgizmos(p_gizmo: EditorNode3DGizmo, p_ids: PackedInt32Array, p_re
 	_orig.clear()
 	_start.clear()
 	_smooth_drag.clear()
+	node.update_gizmos()
 
 
 ## Put one handle back to a transform (used on drag-cancel), preferring the captured pre-drag value.
