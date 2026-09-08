@@ -709,6 +709,26 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 		};
 		(void)want_aux;
 
+		// ---- COPYING A SOLVER'S AUX FIELD OUT (P-V8) ----
+		//
+		// Twelve solvers already COMPUTED their secondary channels -- the talus, the shore band, the
+		// channel mask, the sediment -- and threw them away, because the op wrote only `height` and the
+		// node then declared `native_out_count() == 1`. Reading `flow` off any of them refused to lower,
+		// which took the WHOLE graph, erosion included, onto the GDScript evaluator (see spec section 10).
+		//
+		// Silent when the channel was not demanded: `want_aux` returns nullptr and the field costs
+		// nothing, which is the allocation contract this sits on top of. Silent too when the solver
+		// returned a short or empty array -- a demanded channel the solver did not fill stays the zeros
+		// `want_aux` initialised it to, which is the same answer the GDScript node gives for the same
+		// failed solve, rather than a mismatched-length copy.
+		auto copy_aux = [&](int p_chan, const PackedFloat32Array &p_src) {
+			float *dst = want_aux(p_chan);
+			if (dst != nullptr && p_src.size() == n) {
+				std::copy_n(p_src.ptr(), n, dst);
+			}
+		};
+		(void)copy_aux;
+
 		// This slot's sixteen parameters, resolved. Every op below reads P[] rather than the program's
 		// params arrays directly, because a parameter can be DRIVEN: a wire into a parameter port overrides
 		// the value baked at compile time with the driving node's output. Doing it once, generically, is
@@ -1002,9 +1022,15 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				// The deposition channel is dropped here. This evaluator produces ONE grid per slot; a
 				// graph that wires the deposition port is routed to the multi-channel path instead, so
 				// nothing is lost by not computing it.
+				// See Mudslide on the divisor: `deposition` comes back normalised by it.
+				PackedFloat32Array depo;
+				double depo_div = 0.0;
+				const bool want_depo = want_aux(1) != nullptr;
 				PackedFloat32Array res = smooth_fill_solve(in_arr, msk_arr, p_gw, p_gh, p_rect,
-						(int)P[0], P[1], P[2], P[3], nullptr, nullptr);
+						(int)P[0], P[1], P[2], P[3], want_depo ? &depo : nullptr,
+						want_depo ? &depo_div : nullptr);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
+				copy_aux(1, depo);
 			} break;
 
 			case GRAPH_OP_RECAST_CLIFF: {
@@ -1026,16 +1052,27 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 
 			case GRAPH_OP_FLOODING_UNIFORM_LEVEL: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
+				PackedFloat32Array depth;
+				PackedFloat32Array wmask;
+				const bool want_depth = want_aux(1) != nullptr;
+				const bool want_wmask = want_aux(2) != nullptr;
 				PackedFloat32Array res = flooding_uniform_level_solve(in_arr, p_gw, p_gh, P[0],
-						P[1] > 0.5f, nullptr, nullptr);
+						P[1] > 0.5f, want_depth ? &depth : nullptr, want_wmask ? &wmask : nullptr);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
+				copy_aux(1, depth);
+				copy_aux(2, wmask);
 			} break;
 
 			case GRAPH_OP_WATER_MASK: {
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
+				// The shore band is a SIGNED DISTANCE TRANSFORM the solver runs only when handed a pointer,
+				// so an undemanded channel 1 still costs nothing.
+				PackedFloat32Array shore;
+				const bool want_shore = want_aux(1) != nullptr;
 				PackedFloat32Array res = water_mask_solve(in_arr, p_gw, p_gh, p_rect, P[0],
-						P[1], (int)P[2], nullptr);
+						P[1], (int)P[2], want_shore ? &shore : nullptr);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
+				copy_aux(1, shore);
 			} break;
 
 			case GRAPH_OP_MUDSLIDE: {
@@ -1043,9 +1080,18 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				// Mudslide is the one op whose mask really is on port 1, so this reads the same buffer it
 				// always did -- through the declared port rather than by coincidence.
 				PackedFloat32Array msk_arr = aux_grid_of(s);
+				// THE DIVISOR IS NOT OPTIONAL. `deposition` comes back NORMALISED by it, so a channel taken
+				// without asking for the divisor is a field of numbers with no unit. The solver applies it
+				// internally; asking for it here is what keeps this route reading the same units the
+				// GDScript node publishes (it stores the divisor as `last_deposition_divisor`).
+				PackedFloat32Array depo;
+				double depo_div = 0.0;
+				const bool want_depo = want_aux(1) != nullptr;
 				PackedFloat32Array res = mudslide_solve(in_arr, msk_arr, p_gw, p_gh, p_rect, P[0],
-						P[1], P[2], P[3], P[4], P[5], nullptr, nullptr);
+						P[1], P[2], P[3], P[4], P[5], want_depo ? &depo : nullptr,
+						want_depo ? &depo_div : nullptr);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
+				copy_aux(1, depo);
 			} break;
 
 			// ---- Geometry consumers (P2c). These read `geo`, never a scratch buffer, for a path. ----
@@ -1211,6 +1257,8 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				LakeFloodingResult res = lake_flooding_solve(in_arr, p_gw, p_gh, p_rect, (LakeFloodMode)(int)P[0], P[1], P[2], P[3]);
 				if (res.ok && res.height.size() == n) {
 					std::copy_n(res.height.ptr(), n, g_ptr);
+					copy_aux(1, res.water_depth);
+					copy_aux(2, res.shoreline);
 				}
 			} break;
 
@@ -1219,6 +1267,8 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				StreamExtractionResult res = stream_extraction_solve(in_arr, p_gw, p_gh, p_rect, P[0], P[1], P[2], P[3]);
 				if (res.ok && res.height.size() == n) {
 					std::copy_n(res.height.ptr(), n, g_ptr);
+					copy_aux(1, res.channel_mask);
+					copy_aux(2, res.flow_rate);
 				}
 			} break;
 
@@ -1235,6 +1285,8 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				ErosionHydraulicResult res = erosion_hydraulic_solve_best(in_arr, p_gw, p_gh, p_rect, p);
 				if (res.ok && res.height.size() == n) {
 					std::copy_n(res.height.ptr(), n, g_ptr);
+					copy_aux(1, res.sediment);
+					copy_aux(2, res.flow);
 				}
 			} break;
 
@@ -1244,6 +1296,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				ErosionThermalResult res = erosion_thermal_solve(in_arr, in_hard, p_gw, p_gh, p_rect, P[0], (int)P[1], P[2]);
 				if (res.ok && res.height.size() == n) {
 					std::copy_n(res.height.ptr(), n, g_ptr);
+					copy_aux(1, res.talus);
 				}
 			} break;
 
@@ -1253,6 +1306,9 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				if (res.size() > 0) {
 					PackedFloat32Array h = res[0];
 					if (h.size() == n) std::copy_n(h.ptr(), n, g_ptr);
+					if (res.size() > 1) {
+						copy_aux(1, (PackedFloat32Array)res[1]); // the `shed` gate
+					}
 				}
 			} break;
 
@@ -1327,6 +1383,9 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				}
 				HydraulicParticleResult res = hydraulic_particle_solve(in_arr, p_gw, p_gh, p_rect, p);
 				if (res.ok && res.height.size() == n) {
+					copy_aux(1, res.sediment);
+					copy_aux(2, res.flow);
+					copy_aux(3, res.water_depth);
 					std::copy_n(res.height.ptr(), n, g_ptr);
 				}
 			} break;
@@ -1348,6 +1407,8 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				HydraulicStreamLogResult res = hydraulic_stream_log_solve(in_arr, p_gw, p_gh, p_rect, p);
 				if (res.ok && res.height.size() == n) {
 					std::copy_n(res.height.ptr(), n, g_ptr);
+					copy_aux(1, res.channel_mask);
+					copy_aux(2, res.flow_accumulation);
 				}
 			} break;
 
@@ -1382,6 +1443,8 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				HydraulicSaleveResult res = hydraulic_saleve_solve(in_arr, p_gw, p_gh, p_rect, p);
 				if (res.ok && res.height.size() == n) {
 					std::copy_n(res.height.ptr(), n, g_ptr);
+					copy_aux(1, res.eroded_rock);
+					copy_aux(2, res.sediment);
 				}
 			} break;
 

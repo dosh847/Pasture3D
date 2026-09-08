@@ -724,3 +724,33 @@ bench/GraphSinkBakeGate.tscn
 # is reviewed and not measured. [D] stops at `_resolve_ports`; whether the colour lands on a layer is
 # GraphSinkBakeGate's claim.
 bench/GraphOperatorGate.tscn
+
+# GraphAuxChannelGate — the twelve solvers whose secondary channels the native kernel used to discard.
+# Sixteen non-dev nodes declare more than one output port. Twelve had solvers that ALREADY computed the
+# extra fields -- talus, shore band, channel mask, flow accumulation, sediment, deposition -- and the
+# graph op wrote only `height`, so the node declared native_out_count() == 1. That declaration was honest
+# (the compiler refuses to lower a graph reading an unwritten channel rather than serving zeros, §4.4),
+# and its cost was graph-wide: wiring `flow` out of a Stream Log dropped the WHOLE graph, erosion
+# included, onto the GDScript evaluator with no error. Reading a solver's diagnostic is the normal way to
+# use one, so most interesting graphs paid it.
+# EXCLUDED, on purpose: dla and the two terrain_bus nodes have no kernel op at all, so 1 is right for
+# them; mountain_range_radial's second output is a VECTOR, not a grid; path_distance is left out of the
+# table because its four channels are all zero without a PATH wired, and a fixture that cannot make a
+# field move measures nothing.
+#
+# THE ORACLE'S PARAMS ARE ROUNDED TO FLOAT32, and that is not a loosened tolerance. A lowered node's
+# params travel in a PackedFloat32Array; the node passes GDScript doubles. ErosionHydraulicParams' own
+# header records the consequence -- the solver computes in double and its `sed_c < cap` test turns a ULP
+# into a whole erode-or-deposit decision. Measured: identical at 1 and 3 iterations, 0.060 m apart at 25,
+# and 0.000000 once the oracle reads the same float32 numbers. So the gate asks "does the kernel compute
+# the right thing from the numbers it was given", and measures the other question separately in [gap]:
+# whether a float32 program should carry a double-precision solver's parameters at all. That is a real
+# defect, older than this phase, not fixed here, and BOUNDED at 1 m so it cannot quietly grow.
+#
+# A FLAT channel is excluded from the distinctness control and counted. Erosion's deposition and wetness
+# are flat on this ramp: both routes agree exactly, and the gate claims only that. Counting them as
+# "distinct fields" would have made the control easier to satisfy the flatter the kernel got.
+# Red watches, both bite: scree back to native_out_count() == 1 gives 2 failures; the talus copy removed
+# from the kernel reports the channel UNSERVED rather than zeros -- the allocator is demand-driven, so a
+# channel the op does not write is never materialised, which is why the impostor case cannot arise.
+bench/GraphAuxChannelGate.tscn

@@ -81,6 +81,16 @@ func output_count() -> int:
 	return 3
 
 
+## The channels the NATIVE op writes, which is now every channel this node offers.
+##
+## It used to answer 1, and the compiler then refused to lower any graph that read a channel above 0 --
+## correctly, since serving zeros for a field nobody computed is the impostor of spec section 4.4. But the
+## refusal is graph-wide: reading `depth` off this node dropped the whole graph, erosion and all, onto
+## the GDScript evaluator. The solver had already computed the field and the op was discarding it.
+func native_out_count() -> int:
+	return 3 # height, depth, mask
+
+
 func output_names() -> PackedStringArray:
 	return PackedStringArray(["height", "depth", "mask"])
 
