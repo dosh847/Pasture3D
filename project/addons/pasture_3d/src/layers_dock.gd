@@ -35,6 +35,7 @@ var terrain: Pasture3D
 
 var _list: VBoxContainer
 var _add_btn: Button
+var _add_menu: PopupMenu
 var _dup_btn: Button
 var _clear_btn: Button
 var _del_btn: Button
@@ -66,7 +67,11 @@ func initialize(p_plugin: EditorPlugin) -> void:
 	title.text = "Layers"
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	bar.add_child(title)
-	_add_btn = _make_tool_button(bar, "Add", "Add", "Add a new layer above the active one")
+	_add_btn = _make_tool_button(bar, "Add", "Add",
+		"Add a new layer above the active one.
+"
+		+ "Pick its type: Height stores elevation, Control stores painted texture indices, Color stores "
+		+ "albedo tint. The type is fixed once the layer has tiles, because it chooses the tile format.")
 	_dup_btn = _make_tool_button(bar, "Duplicate", "Duplicate", "Duplicate the active layer")
 	_clear_btn = _make_tool_button(bar, "Clear", "Clear",
 		"Clear the active layer's baked data, keeping the layer.\n"
@@ -76,6 +81,14 @@ func initialize(p_plugin: EditorPlugin) -> void:
 	_up_btn = _make_tool_button(bar, "MoveUp", "ArrowUp", "Move the active layer up (composites later)")
 	_down_btn = _make_tool_button(bar, "MoveDown", "ArrowDown", "Move the active layer down")
 	_add_btn.pressed.connect(_on_add)
+	# The type menu. A layer's map type decides its TILE FORMAT (RGF vs RGBA8) and so cannot be changed
+	# after the fact — which is why this is a choice made at creation and not a dropdown on the row.
+	_add_menu = PopupMenu.new()
+	for t in range(MAP_TYPE_BADGES.size()):
+		_add_menu.add_item("Add %s Layer" % MAP_TYPE_BADGES[t]["text"], t)
+		_add_menu.set_item_tooltip(t, MAP_TYPE_BADGES[t]["tip"])
+	_add_menu.id_pressed.connect(_on_add_typed)
+	bar.add_child(_add_menu)
 	_dup_btn.pressed.connect(_on_duplicate)
 	_clear_btn.pressed.connect(_on_clear)
 	_del_btn.pressed.connect(_on_remove)
@@ -567,20 +580,50 @@ func _apply_layer_property(p_idx: int, p_setter: String, p_value: Variant, p_rec
 ## snapshot cannot capture, so it deep-copies the tiles instead (see _on_clear).
 
 
+## The + button opens the type menu rather than adding a layer, because the type is not editable later:
+## `set_map_type` picks the tile format and a layer that already has tiles cannot change it. Adding a
+## Height layer and then discovering it cannot become a Control layer was the previous behaviour, and it
+## was silent — the dock only ever called `layer_add`, which has no type parameter at all and therefore
+## could produce nothing but Height layers no matter what the user wanted.
 func _on_add() -> void:
+	if _data() == null:
+		return
+	_add_menu.position = _add_btn.get_screen_position() + Vector2(0.0, _add_btn.size.y)
+	_add_menu.reset_size()
+	_add_menu.popup()
+
+
+## Add one hand-authored layer of `p_map_type` (a Pasture3DData.MapType, mirrored by MAP_TYPE_BADGES's
+## indices).
+##
+## Through `layer_add_typed`, NOT `create_owned_layer_typed`. The second reserves the layer to a tool,
+## which blocks sculpt strokes and hands its contents to whatever bakes into it — so a "control layer I
+## made to paint on" would refuse every stroke and be cleared by the next bake. A layer made here has no
+## owner and is not reserved: it is the user's, and it composites in the same stack as the tool layers,
+## which is what makes layering a graph sink's output under hand-painted touch-ups work.
+func _on_add_typed(p_map_type: int) -> void:
 	var d := _data()
 	if not d:
+		return
+	if not d.has_method("layer_add_typed"):
+		_warning.text = ("This build has no layer_add_typed, so only Height layers can be created. "
+				+ "Rebuild the GDExtension.")
+		_warning.visible = true
+		_warning_timer.start()
 		return
 	var before := _stack_snapshot()
 	var stack := _stack()
 	var n: int = stack.get_layer_count() if stack else 0
-	# Hand-sculpt layers author absolute heights, so REPLACE is the sane default (§11).
-	var idx: int = d.layer_add("Layer %d" % n, Pasture3DLayer.REPLACE)
+	var type_name: String = MAP_TYPE_BADGES[p_map_type]["text"] if p_map_type < MAP_TYPE_BADGES.size() 			else "Layer"
+	# Hand-sculpt layers author absolute heights, so REPLACE is the sane default (§11). It is also the
+	# only honest default for CONTROL: a packed uint32 is not blendable, so ADD/MAX/MIN on one would be
+	# arithmetic on a bit field (`control-word-as-float-bits-can-be-nan`).
+	var idx: int = d.layer_add_typed("%s %d" % [type_name, n], Pasture3DLayer.REPLACE, p_map_type)
 	if idx >= 0:
 		d.get_layer_stack().set_active_layer(idx)
 	refresh()
 	_mark_unsaved()
-	_commit_stack_action("Add Pasture3D Layer", before)
+	_commit_stack_action("Add Pasture3D %s Layer" % type_name, before)
 
 
 func _on_duplicate() -> void:

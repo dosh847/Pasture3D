@@ -753,6 +753,29 @@ void brush_mod_graph(BrushModStep &p_step, std::vector<float> &r_vals, const std
 	}
 	const double amount = p_step.graph_amount;
 
+	// ---- THE SINK SURFACE, HANDED BACK ABOVE THE SPLIT ----
+	//
+	// The B1 channel sinks and the B3 publish sinks tap the graph's INPUT, not its output, and they run on
+	// every bake — the frozen hit, the deferred hand-back and the synchronous miss alike. GDScript's
+	// `_apply_graph_step` records exactly this on the modifier, above its own three-way split, for that
+	// reason. Recording it here as well is what makes the sink pass RASTER-INDEPENDENT: whichever
+	// evaluator ran, the modifier carries the surface its graph read, and `_commit_modifier_caches` runs
+	// the sinks once from that.
+	//
+	// It is emitted BEFORE the split below, so the two early returns cannot skip it. Without this the
+	// sinks fired only on the GDScript route, which means they fired only on graphs slow enough to be
+	// refused native support — silently inert on exactly the graphs that work.
+	if (p_step.has_out) {
+		PackedFloat32Array sink_in;
+		sink_in.resize((int)n);
+		std::memcpy(sink_in.ptrw(), z.data(), n * sizeof(float));
+		p_step.out["sink_input"] = sink_in;
+		p_step.out["sink_gw"] = p_gw;
+		p_step.out["sink_gh"] = p_gh;
+		p_step.out["sink_rect"] = Rect2((real_t)(p_min_x - 0.5 * p_vs), (real_t)(p_min_z - 0.5 * p_vs),
+				(real_t)((double)p_gw * p_vs), (real_t)((double)p_gh * p_vs));
+	}
+
 	// FROZEN (§6.3): a missing cache evaluates, a matching one is served, a stale one is served AND flagged.
 	const bool want_key = p_step.frozen && p_step.has_out;
 	const int64_t key = want_key ? brush_mod_graph_key(p_step, z) : 0;

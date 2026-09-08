@@ -674,3 +674,20 @@ bench/GraphExportGate.tscn
 # [G] needed rebuilding: the program-identity check passes with `has_output()` flipped to true, because
 # a sink nothing wires FROM changes no program either way. Terminality is now asserted directly.
 bench/GraphRuntimeSinkGate.tscn
+
+# GraphSinkBakeGate — the sink pass reaches the terrain THROUGH A BAKE, on both raster routes.
+# GraphChannelSinkGate and GraphRuntimeSinkGate both call the writer directly and never bake, so both
+# passed for as long as they existed while the wiring that calls them from a bake was absent entirely:
+# `_run_graph_sinks` lived inside `_apply_graph_step`, which is the GDScript rasteriser only, so every
+# graph that lowered natively had inert sinks. `component-gates-miss-wiring`, in a new place.
+# [A] asserts the route BEFORE asserting the write, or it would silently become a second [B].
+# [B]'s parity is bounded by the loop rim and not equal, and the note in the gate says why: the two mound
+# rasterisers disagree about 124 cells of footprint edge (native leaves 1062 cells NaN, GDScript 938) on
+# the same grid and rect. That predates the sink pass — NaN is "the brush wrote nothing here" — and the
+# sinks only make it visible because an ALTITUDE mask is NaN-off. Recorded, not absorbed: the red watch
+# on [A] produces a difference of 6458 against a rim of 344, so the tolerance cannot hide the bug.
+# [C]/[D] are the `layer_key` feature: sharing a key shares a layer, and the clear moved to once per
+# LAYER per bake to make that mean anything. A scratch grid of authored words was also written for the
+# carry-forward and REMOVED again — its red watch passed with the grid cut out, because step 4
+# recomposites per sink and `get_control` already saw the earlier sink's write.
+bench/GraphSinkBakeGate.tscn

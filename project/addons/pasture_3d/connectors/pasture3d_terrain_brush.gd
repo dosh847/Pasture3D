@@ -4602,6 +4602,14 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 			blk["defer"] = _erosion_suppress or (_erosion_defer and bool(blk["frozen"]))
 			blk["out"] = slot
 		if m is Pasture3DNodeGraph and m.graph != null:
+			# HOST-SIDE SOURCE RESOLUTION, before the program is compiled and before either rasteriser
+			# runs. `_apply_graph_step` also calls this, which is where it used to live alone -- and that
+			# function is the GDScript route only, so on a natively-supported graph nothing resolved a
+			# Road Source, a Shape Source or a publish sink's consumer at bake at all. Doing it at compile
+			# is doing it on both routes, on the main thread, once per bake per graph
+			# (`graph-source-resolution-is-host-side`). The second call is then a repeat, not a
+			# disagreement: one entry point still fills every scene-naming source.
+			Pasture3DGraphSources.resolve(m.graph, self)
 			# The native rasteriser needs the whole-graph program (Pasture3DUtil.graph_eval_grid reads it),
 			# the amount, and the two freeze inputs its key folds in — reads_input decides whether the input
 			# surface is in the key. GDScript's _apply_graph_step ignores these; only the native path reads them.
@@ -4707,6 +4715,14 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 				else:
 					push_error("Pasture3D: %s deferred a solve to the unknown queue '%s', so it will "
 							% [m.display_name(), queue] + "never be solved.")
+		# The native rasteriser's copy of what `_apply_graph_step` records on the GDScript side. Adopted
+		# onto the modifier so that from here down there is ONE place the sink surface is read from, and
+		# it does not know which evaluator produced it. See `_run_stack_graph_sinks`.
+		if out.has("sink_input"):
+			m.last_input_surface = out["sink_input"]
+			m.last_gw = int(out.get("sink_gw", 0))
+			m.last_gh = int(out.get("sink_gh", 0))
+			m.last_rect = out.get("sink_rect", m.last_rect)
 		if out.has("grid"):
 			m.store_cache(p_extent, {
 				"key": out["key"], "grid": out["grid"],
@@ -4726,6 +4742,45 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 	# hash matches, and nothing more is scheduled.
 	if reseeded and not _erosion_running and not _growth_defer:
 		_schedule_refresh()
+	# EVERY route ends here: both brushes call this after the native stamp and after the GDScript loop.
+	# That is why the sink pass hangs off it rather than off either rasteriser.
+	_run_stack_graph_sinks(p_stack)
+
+
+## Run every graph modifier's sinks over the surface that modifier's graph actually read, whichever
+## rasteriser read it.
+##
+## ---- WHY THIS IS NOT INSIDE EITHER RASTERISER ----
+##
+## It was, and only inside one of them. `_apply_graph_step` called the two sink passes directly, which
+## reads as the right place until you notice that `_native_raster()` decides whether that function is
+## ever entered. A graph whose every op the native evaluator implements takes `BrushModStep::GRAPH` in
+## C++ instead, and every sink on it wrote nothing, cleared nothing, published nothing, and said nothing
+## about it. The failure was invisible in the gates for the reason `component-gates-miss-wiring` names:
+## `GraphChannelSinkGate` and `GraphRuntimeSinkGate` both call the writer directly and never bake.
+##
+## So the pass hangs off the one point both routes reach. `last_input_surface` and its rect are written
+## by GDScript's step above its split and by the native step through its `out` slot above the same split,
+## which makes them the interface rather than an implementation detail of one path.
+##
+## ---- WHY THE SURFACE COMES FROM THE MODIFIER AND NOT FROM THE TERRAIN ----
+##
+## Reading the terrain back here would tap a DIFFERENT surface: the sinks tap the graph's input, which is
+## the stack partway through -- after the modifiers above this one and before this graph's own output is
+## composited. Post-bake heights are neither. A sink masking on ALTITUDE would answer about ground the
+## graph never saw, and it would answer differently depending on where in the stack the graph sat.
+func _run_stack_graph_sinks(p_stack: Dictionary) -> void:
+	for step in p_stack.get("gd", []):
+		var m = step.get("mod")
+		if m == null or not (m is Pasture3DNodeGraph) or m.graph == null:
+			continue
+		if m.last_gw <= 0 or m.last_gh <= 0 or m.last_input_surface.size() != m.last_gw * m.last_gh:
+			# No surface was recorded, so no graph step ran for this modifier this bake -- a road-complete
+			# stack, or a step the compiler dropped. Skipping is correct; writing from a stale surface
+			# would paint last bake's answer onto this bake's ground.
+			continue
+		_run_graph_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface)
+		_run_graph_runtime_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface)
 
 
 ## The deferred queues by name, so `_commit_modifier_caches` can file an entry without knowing the
@@ -5148,22 +5203,20 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	m.last_rect = rect
 	m.last_gw = gw
 	m.last_gh = gh
-	# ---- B1 TERRAIN CHANNEL SINKS (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.1) ----
+	# ---- THE SINK SURFACE IS RECORDED HERE; THE SINKS THEMSELVES RUN AFTER THE RASTER ----
 	#
-	# Run HERE, once, ahead of all three returns below. The frozen-cache hit, the deferred queue and the
-	# synchronous miss are every one of them a bake, and a sink that only ran on the miss path would stop
-	# painting the moment its graph was set to Frozen -- silently, and looking exactly like paint the user
-	# had asked for. Placing it above the split is what makes "the sink runs at bake" a structural fact
-	# rather than three matching branches.
+	# The four assignments above are not bookkeeping for the preview. They are the sink pass's input, and
+	# they are written above the three-way split below for the reason the sinks need: the frozen-cache
+	# hit, the deferred queue and the synchronous miss are every one of them a bake, and a sink that only
+	# ran on the miss path would stop painting the moment its graph was set to Frozen -- silently, and
+	# looking exactly like paint the user had asked for.
 	#
-	# It does not read the graph's OUTPUT and does not touch the program this bake compiles. It taps the
-	# sinks' own INPUT slots (§9.1), so adding a sink cannot change the height field this step produces --
-	# criterion [E]'s op-count equality is a consequence of that, not of care taken here.
-	#
-	# Free on a graph without sinks: `sinks_of` returns empty and `run` returns before touching anything.
-	_run_graph_sinks(g, gw, gh, rect, z)
-	# The B3 publish sinks, above the same split and for the same reason. See `_run_graph_runtime_sinks`.
-	_run_graph_runtime_sinks(g, gw, gh, rect, z)
+	# The sinks used to be CALLED here, which made them a property of this function -- and this function
+	# is only one of the two rasterisers. `brush_mod_graph` in src/pasture_3d_brush_raster.cpp is the
+	# other, it is the one a natively-supported graph takes, and it does not call GDScript. So every sink
+	# was inert on exactly the graphs that lower cleanly. The native step now records the same surface
+	# through its `out` slot, and `_commit_modifier_caches` -- which BOTH routes reach -- runs the pass
+	# once from whichever one wrote it. See `_run_stack_graph_sinks`.
 	# A FILTER graph (an Input node feeds the output) depends on the surface, so the cache must key on it —
 	# a drag changes the surface and the entry goes stale, exactly as the erosion cache does. A pure
 	# generator is world-fixed, so its key is just the content revision and the cache serves across drags.

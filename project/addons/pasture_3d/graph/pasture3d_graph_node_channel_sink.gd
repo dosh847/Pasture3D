@@ -48,6 +48,33 @@ const MASK_EPSILON: float = 0.001
 ## The highest legal texture index. 5 bits, and Terrain3D allows all 32 (§9.1).
 const MAX_TEXTURE_INDEX: int = 31
 
+## WHICH LAYER THIS SINK OWNS. Empty means "one of my own", which is the default and the historical
+## behaviour: the writer keys the layer on this node's INDEX, so two Control Sinks in a graph get two
+## layers and neither clears the other's paint.
+##
+## A non-empty key replaces the index in that owner id, which makes it a NAME two sinks can agree on. Two
+## sinks sharing a key share one layer, and that is the point: control composites topmost-covered-wins,
+## so the only way to have one sink lay rock and another lay grass over the top of it IN ONE LAYER is for
+## both to author into it. They write in graph order, later over earlier.
+##
+## ---- WHY SHARING NEEDED THE CLEAR TO MOVE, NOT JUST THE OWNER ID ----
+##
+## Step 2 of every sink write clears the layer's footprint before authoring (PASTURE3D_LAYERS_GUIDE.md
+## §8.1) — that clear is what makes a re-bake idempotent and stops a moved brush leaving stale paint
+## behind forever. Two sinks on one layer each doing that would mean the second cleared away the first's
+## work every single bake, and the layer would only ever show the last sink. So the clear is now once per
+## LAYER per bake rather than once per sink, tracked by the writer. That is the whole mechanism; the
+## owner id alone would have shipped a feature that silently discards everything but the last write.
+##
+## The key does NOT name a hand-made layer in the Layers dock. A sink's layer is `reserved` and is cleared
+## and re-authored on every bake; pointing one at a layer somebody paints by hand would erase that paint
+## on the next refresh with nothing said about why. Layer up instead — a hand layer above a sink layer
+## composites over it, which is the arrangement `brush-layers-are-not-hand-paintable` describes.
+@export var layer_key: String = "":
+	set(v):
+		layer_key = v.strip_edges()
+		emit_changed()
+
 
 ## Terminal. See the header — this one override is the entire native story.
 func has_output() -> bool:

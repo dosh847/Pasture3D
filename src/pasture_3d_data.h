@@ -226,6 +226,7 @@ public:
 	// the dock showing a stale row list until the user re-selected the terrain. Structural changes only,
 	// never per-sample writes, so a bake does not drag the UI along with it.
 	int layer_add(const String &p_name, const int p_blend_mode);
+	int layer_add_typed(const String &p_name, const int p_blend_mode, const int p_map_type);
 	int layer_duplicate(const int p_idx);
 	void layer_remove(const int p_idx);
 	void layer_move(const int p_from, const int p_to);

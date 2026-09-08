@@ -165,6 +165,41 @@ int Pasture3DData::layer_add(const String &p_name, const int p_blend_mode) {
 	return idx;
 }
 
+// A HAND-AUTHORED layer of any map type. The typed twin of layer_add, and deliberately NOT
+// create_owned_layer_typed: that one reserves the layer to a tool, which blocks sculpt strokes (§6) and
+// hands the layer's contents to whatever bakes into it. This one leaves owner_id empty and reserved
+// false, so the layer is the user's to paint. The two differ in exactly that, which is why they are two
+// functions rather than one with a flag — a wrong flag here is a control layer the user can paint that a
+// brush then clears on the next bake.
+int Pasture3DData::layer_add_typed(const String &p_name, const int p_blend_mode, const int p_map_type) {
+	if (p_map_type < 0 || p_map_type >= TYPE_MAX) {
+		LOG(ERROR, "Invalid map type ", p_map_type, " for layer '", p_name, "'");
+		return -1;
+	}
+	if (!ensure_layer_stack()) {
+		LOG(ERROR, "Cannot add a layer: no region data to anchor a Base layer");
+		return -1;
+	}
+	// Control/color overlays need a dense base of their type beneath them, or the composite has no
+	// hand-authored source distinct from the region map it writes into. Same requirement, same call, as
+	// create_owned_layer_typed — see §5.1.
+	if (p_map_type == TYPE_CONTROL || p_map_type == TYPE_COLOR) {
+		_ensure_typed_base((MapType)p_map_type);
+	}
+	int idx = _layer_stack->add_layer(p_name, Pasture3DLayer::BlendMode(p_blend_mode));
+	if (idx < 0) {
+		return -1;
+	}
+	if (Pasture3DLayer *layer = _layer_stack->get_layer_ptr(idx)) {
+		layer->set_map_type((MapType)p_map_type); // Before any tiles: picks the tile format (RGF / RGBA8).
+	}
+	if (idx > 0) {
+		_unalias_base_layer();
+	}
+	emit_signal("layers_changed");
+	return idx;
+}
+
 int Pasture3DData::layer_duplicate(const int p_idx) {
 	if (_layer_stack.is_null()) {
 		return -1;
@@ -2955,6 +2990,7 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_layer_routing"), &Pasture3DData::is_layer_routing);
 	ClassDB::bind_method(D_METHOD("ensure_layer_stack"), &Pasture3DData::ensure_layer_stack);
 	ClassDB::bind_method(D_METHOD("layer_add", "name", "blend_mode"), &Pasture3DData::layer_add);
+	ClassDB::bind_method(D_METHOD("layer_add_typed", "name", "blend_mode", "map_type"), &Pasture3DData::layer_add_typed);
 	ClassDB::bind_method(D_METHOD("layer_duplicate", "index"), &Pasture3DData::layer_duplicate);
 	ClassDB::bind_method(D_METHOD("layer_remove", "index"), &Pasture3DData::layer_remove);
 	ClassDB::bind_method(D_METHOD("layer_move", "from", "to"), &Pasture3DData::layer_move);

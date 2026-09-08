@@ -88,6 +88,18 @@ static func run(p_graph, p_terrain, p_owner_base: String, p_gw: int, p_gh: int, 
 		report["skipped"].append("this build has no graph_eval_grid_taps")
 		return report
 
+	# Layer ids whose footprint has already been cleared THIS run. Two sinks sharing a `layer_key` share a
+	# layer, and the clear is per LAYER per bake, not per sink — see `layer_key`. Without this the second
+	# sink on a shared layer would clear the first's work every bake and the layer would only ever show
+	# the last write.
+	#
+	# The CARRY-FORWARD on a shared layer needs nothing here, which is worth stating because it looks like
+	# it should. Step 3 reads the composited word beneath so the bits a sink does not author survive, and
+	# step 4 recomposites at the end of `_write_one` — per SINK, not at the end of this loop. So by the
+	# time the second sink on a shared layer reads `get_control`, the first sink's write is already in the
+	# composite. A scratch grid of authored words was written here to solve that and removed again: its
+	# red watch passed with the grid cut out, because there was nothing for it to fix.
+	var cleared := {}
 	for ni in idx:
 		var sink: Pasture3DGraphNodeChannelSink = p_graph.nodes[ni]
 		var warn := sink.sink_warnings()
@@ -102,7 +114,7 @@ static func run(p_graph, p_terrain, p_owner_base: String, p_gw: int, p_gh: int, 
 			continue
 		var mask: PackedFloat32Array = resolved["mask"]
 		var n := _write_one(sink, ni, data, p_owner_base, p_gw, p_gh, p_rect, mask, resolved["values"],
-				report)
+				report, cleared)
 		report["written"] = int(report["written"]) + n
 		report["sinks"] = int(report["sinks"]) + 1
 	return report
@@ -205,11 +217,17 @@ static func _resolve_ports(p_graph, p_sink, p_index: int, p_gw: int, p_gh: int, 
 
 ## Resolve/clear/write/recomposite one sink. Returns the number of cells authored.
 static func _write_one(p_sink, p_index: int, p_data, p_owner_base: String, p_gw: int, p_gh: int,
-		p_rect: Rect2, p_mask: PackedFloat32Array, p_values: Dictionary, p_report: Dictionary) -> int:
+		p_rect: Rect2, p_mask: PackedFloat32Array, p_values: Dictionary, p_report: Dictionary,
+		p_cleared: Dictionary) -> int:
 	# STEP 1 — resolve/create. The node index is in the owner id so two Control Sinks in one graph own
 	# two layers; without it the second's clear would wipe the first's paint on every bake.
-	var owner: String = "%s%s%d" % [p_owner_base, p_sink.sink_owner_suffix(), p_index]
-	var label: String = "%s %d" % [p_sink.sink_layer_label(), p_index]
+	#
+	# A `layer_key` REPLACES the index, which is how two sinks name the same layer on purpose. The
+	# suffix stays either way, so a Control Sink and a Color Sink that happen to share a key still get
+	# their own layers — they have different map types and could not share a tile format anyway.
+	var key: String = p_sink.layer_key if "layer_key" in p_sink else ""
+	var owner: String = ("%s%s:%s" % [p_owner_base, p_sink.sink_owner_suffix(), key]) if key != "" 			else ("%s%s%d" % [p_owner_base, p_sink.sink_owner_suffix(), p_index])
+	var label: String = key if key != "" else "%s %d" % [p_sink.sink_layer_label(), p_index]
 	var layer_id: int = p_data.create_owned_layer_typed(owner, label, Pasture3DGraphNodeChannelSink.BLEND_REPLACE,
 			p_sink.sink_map_type())
 	if layer_id < 0:
@@ -223,13 +241,18 @@ static func _write_one(p_sink, p_index: int, p_data, p_owner_base: String, p_gw:
 	# would push a frame of bare ground to the GPU and then overwrite it, for two full passes.
 	var area := AABB(Vector3(p_rect.position.x, -100000.0, p_rect.position.y),
 			Vector3(p_rect.size.x, 200000.0, p_rect.size.y))
-	p_data.clear_layer_in_area(layer_id, area, false)
-	clear_count += 1
+	# ONCE PER LAYER PER BAKE, not once per sink. On a shared `layer_key` the second sink must find the
+	# first's paint still there to composite over — see `layer_key`. On the unshared default this is
+	# exactly the old behaviour, because each sink is the only one that ever names its layer.
+	var is_color: bool = p_sink.sink_map_type() == Pasture3DGraphNodeChannelSink.MAPTYPE_COLOR
+	if not p_cleared.has(layer_id):
+		p_data.clear_layer_in_area(layer_id, area, false)
+		p_cleared[layer_id] = true
+		clear_count += 1
 
 	# STEP 3 — write, and ONLY where the mask is on. Outside it nothing is authored, so the cell stays
 	# uncovered in this layer and the composite leaves whatever is beneath byte-identical. That is the
 	# write-stencil rule, and it is why this is an `if` and not a weight.
-	var is_color: bool = p_sink.sink_map_type() == Pasture3DGraphNodeChannelSink.MAPTYPE_COLOR
 	var written := 0
 	for iz in range(p_gh):
 		var wz: float = p_rect.position.y + (float(iz) + 0.5) * p_rect.size.y / float(p_gh)
