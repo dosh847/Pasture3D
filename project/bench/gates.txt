@@ -690,6 +690,23 @@ bench/GraphRuntimeSinkGate.tscn
 # LAYER per bake to make that mean anything. A scratch grid of authored words was also written for the
 # carry-forward and REMOVED again — its red watch passed with the grid cut out, because step 4
 # recomposites per sink and `get_control` already saw the earlier sink's write.
+# [D]/[F] A SINK'S LAYER IDENTITY IS ITS `layer_key` OR THE DEFAULT FOR ITS KIND -- never its position
+# in the node array. The owner id used to end in the sink's node index, so adding a node above the sink,
+# deleting one, or reordering changed the id, create_owned_layer_typed found no layer for it, and minted
+# another; the abandoned one stayed in the dock holding whatever paint it had when it was left. One more
+# layer per graph edit. [F] reproduces it: bake, insert a node ahead of the sink, re-index the
+# connections, bake again -- the red watch that puts the index back reports "1 before, 2 after".
+# [F] cannot measure that without asserting the index ACTUALLY MOVED first: if it did not, re-using the
+# layer is free and the criterion only proves two identical bakes agree.
+# [D] CHANGED ITS CLAIM with this. It used to assert that two keyless sinks own two layers, which was a
+# statement of the index scheme; it now asserts they compose into the one default layer, cleared once,
+# later over earlier. Safe for the same reason a shared `layer_key` is safe -- the footprint clear moved
+# to once per LAYER per bake when keys were added. [F] part 1 is the control: a keyed sink and a keyless
+# one still own two layers, so [D] is not passing because sinks always land on one layer regardless.
+# [F] part 3 is the MIGRATION. A layer saved under the old indexed owner is adopted -- renamed to the
+# stable owner, same layer id, paint and dock position kept -- rather than orphaned beside a fresh one,
+# which would be the same duplication arrived at once instead of once per edit. Red watch: delete the
+# adopt call, 2 failures.
 bench/GraphSinkBakeGate.tscn
 
 # GraphOperatorGate — the operator expansion: value ports, the five new Blend modes, the COLOUR sideband.

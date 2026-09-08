@@ -95,12 +95,13 @@ func _ready() -> void:
 	await _a_the_native_route_bakes_a_sink_layer()
 	await _b_the_gdscript_route_agrees()
 	await _c_a_shared_layer_key_is_one_layer()
-	await _d_an_empty_layer_key_is_one_layer_per_sink()
+	await _d_an_empty_layer_key_is_the_default_layer()
+	await _f_identity_is_the_key_or_the_default_never_the_index()
 	_e_a_hand_layer_and_a_tool_layer_differ()
 
 	print("--- %d checks, %d failures" % [_checks, _fail])
-	if _checks < 23:
-		print("!! GATE INCOMPLETE: %d checks ran, expected at least 23 — a criterion threw before asserting"
+	if _checks < 32:
+		print("!! GATE INCOMPLETE: %d checks ran, expected at least 32 — a criterion threw before asserting"
 				% _checks)
 		_fail += 1
 	print("=== GraphSinkBakeGate: %s ===" % ("PASS" if _fail == 0 else "FAIL"))
@@ -355,10 +356,10 @@ func _c_a_shared_layer_key_is_one_layer() -> void:
 
 
 # ---------------------------------------------------------------------------------------------------
-# [D] An empty layer_key is one layer per sink
+# [D] An empty layer_key is THE DEFAULT LAYER for that kind of sink
 # ---------------------------------------------------------------------------------------------------
-func _d_an_empty_layer_key_is_one_layer_per_sink() -> void:
-	print("  [D] the default empty layer_key still gives each sink its own layer")
+func _d_an_empty_layer_key_is_the_default_layer() -> void:
+	print("  [D] with no key, sinks of one kind compose into the one default layer")
 	var t := _terrain()
 	var m := _mound(t)
 	var a := _control_sink("A", 3, "")
@@ -370,14 +371,100 @@ func _d_an_empty_layer_key_is_one_layer_per_sink() -> void:
 	Pasture3DGraphChannelSinks.clear_count = 0
 	await _bake(m)
 
+	# A sink names its layer_key or it names the default. It used to name neither: the owner id ended in
+	# the node's index, so two keyless sinks got two layers and A MOVED SINK GOT A THIRD -- see [F].
 	var owned := _owned_control_layers(t)
-	_check(owned.size() == 2, "two sinks with no key own two layers (%d)" % owned.size())
-	_check(Pasture3DGraphChannelSinks.clear_count == 2,
-			"each layer was cleared once (%d clears)" % Pasture3DGraphChannelSinks.clear_count)
-	# CONTROL for [C]: the owner ids differ, so sharing in [C] was the KEY doing it and not two sinks
-	# happening to land on one layer whatever they are told.
-	_check(owned.size() == 2 and owned[0]["owner"] != owned[1]["owner"],
-			"control: the two layers have different owner ids")
+	_check(owned.size() == 1, "two keyless sinks own ONE default layer (%d)" % owned.size())
+	_check(Pasture3DGraphChannelSinks.clear_count == 1,
+			"the default layer was cleared once, not once per sink (%d)"
+					% Pasture3DGraphChannelSinks.clear_count)
+	# Same composition rule as a shared key, and the same reason it holds: the clear moved to per-layer.
+	_check(_base_at(t, LOW_X) == 3,
+			"the earlier sink's paint survives outside the later sink's mask (base %d, want 3)"
+					% _base_at(t, LOW_X))
+	_check(_base_at(t, HIGH_X) == 7,
+			"the later sink composites over the earlier one where both write (base %d, want 7)"
+					% _base_at(t, HIGH_X))
+	_drop([t, m])
+
+
+# ---------------------------------------------------------------------------------------------------
+# [F] A key SPLITS what the default shares, and an edited graph re-uses its layer
+# ---------------------------------------------------------------------------------------------------
+func _f_identity_is_the_key_or_the_default_never_the_index() -> void:
+	print("  [F] a layer_key splits the default; moving a sink in the node array does not")
+
+	# 1 -- CONTROL FOR [D]. If sinks always landed on one layer, [D] would pass whatever it was told.
+	# One key, one default: two layers.
+	var t := _terrain()
+	var m := _mound(t)
+	var mod := Pasture3DNodeGraph.new()
+	mod.graph = _graph([_control_sink("A", 3, ""), _control_sink("B", 7, "split")], [5.0, 35.0])
+	m.modifiers = [mod] as Array[Pasture3DNode]
+	await _bake(m)
+	var owned := _owned_control_layers(t)
+	_check(owned.size() == 2,
+			"control: a keyed sink and a keyless one own two layers (%d)" % owned.size())
+	_drop([t, m])
+
+	# 2 -- THE CRITERION. Bake, then edit the graph so the sink's index moves, and bake again. The owner
+	# id used to end in that index, so the second bake found no layer for it and minted another -- one
+	# more per edit, each holding the paint it had when it was abandoned.
+	t = _terrain()
+	m = _mound(t)
+	var sink := _control_sink("A", 3, "")
+	mod = Pasture3DNodeGraph.new()
+	mod.graph = _graph([sink], [5.0])
+	m.modifiers = [mod] as Array[Pasture3DNode]
+	await _bake(m)
+	var before := _owned_control_layers(t)
+	var i_before: int = mod.graph.nodes.find(sink)
+
+	# The edit: a node inserted ahead of the sink, exactly as adding one in the editor would. The
+	# connections are re-indexed so the graph still bakes -- this is a MOVE, not a broken graph.
+	var nodes: Array[Pasture3DGraphNode] = mod.graph.nodes.duplicate()
+	nodes.insert(0, Pasture3DGraphNodeConst.new())
+	var conns: Array = []
+	for c in mod.graph.connections:
+		conns.append([int(c[0]) + 1, int(c[1]), int(c[2]) + 1, int(c[3])])
+	mod.graph.nodes = nodes
+	mod.graph.connections = conns
+	mod.graph.output_node = int(mod.graph.output_node) + 1
+	var i_after: int = mod.graph.nodes.find(sink)
+	# WITHOUT THIS the criterion measures nothing: if the index did not move, re-using the layer is
+	# free and proves only that two identical bakes agree.
+	_check(i_after != i_before and i_after >= 0,
+			"control: the edit moved the sink in the node array (%d -> %d)" % [i_before, i_after])
+
+	await _bake(m)
+	var after := _owned_control_layers(t)
+	_check(after.size() == before.size() and before.size() == 1,
+			"the moved sink re-used its layer (%d before, %d after)" % [before.size(), after.size()])
+	_check(after.size() == 1 and before.size() == 1 and after[0]["owner"] == before[0]["owner"],
+			"the layer owner id survived the edit, so it is not keyed on the index")
+	_check(_base_at(t, HIGH_X) == 3, "the re-used layer still holds the sink's paint (base %d, want 3)"
+			% _base_at(t, HIGH_X))
+	_drop([t, m])
+
+	# 3 -- MIGRATION. Scenes saved before this have layers under the old indexed owner id. That layer is
+	# ADOPTED -- renamed to the stable owner -- rather than left in the dock beside a fresh one, which
+	# would be the very duplication this is here to stop, arrived at once instead of once per edit.
+	t = _terrain()
+	m = _mound(t)
+	sink = _control_sink("A", 3, "")
+	mod = Pasture3DNodeGraph.new()
+	mod.graph = _graph([sink], [5.0])
+	m.modifiers = [mod] as Array[Pasture3DNode]
+	var legacy: String = "%s%s%d" % [m._layer_owner, sink.sink_owner_suffix(),
+			mod.graph.nodes.find(sink)]
+	var legacy_id: int = t.data.create_owned_layer_typed(legacy, "Legacy", 0, 1)
+	_check(legacy_id >= 0, "control: the legacy-owned layer was created (%d)" % legacy_id)
+	await _bake(m)
+	var adopted := _owned_control_layers(t)
+	_check(adopted.size() == 1, "the legacy layer was adopted, not orphaned beside a new one (%d)"
+			% adopted.size())
+	_check(adopted.size() == 1 and adopted[0]["id"] == legacy_id,
+			"the adopted layer is the SAME layer, so its paint and its dock position are kept")
 	_drop([t, m])
 
 

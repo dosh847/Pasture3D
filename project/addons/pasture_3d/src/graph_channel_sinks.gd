@@ -366,18 +366,60 @@ static func _color_of(p_graph, p_index: int, p_ctx: Dictionary = {}, p_depth: in
 
 
 ## Resolve/clear/write/recomposite one sink. Returns the number of cells authored.
+## A layer this sink owned under the pre-`layer_key` owner id is RE-USED, not orphaned.
+##
+## The owner id used to end in the sink's node index. Existing scenes have layers keyed that way, and
+## without this every one of them would be left in the dock holding stale paint while the sink quietly
+## created a fresh layer beside it — the exact duplication this change is here to stop. So the legacy
+## layer is re-labelled to the stable owner and carries on, with its paint intact.
+##
+## Only ever a rename, and only when the stable owner has no layer yet: if both exist the stable one wins
+## and the legacy one is left alone rather than silently merged, because merging would mean deciding
+## whose paint survives, and that is the author's call and not this function's.
+static func _adopt_legacy_indexed_layer(p_data, p_owner: String, p_owner_base: String, p_sink,
+		p_index: int) -> void:
+	if not p_data.has_method("get_layer_stack") or p_data.find_layer_by_owner(p_owner) >= 0:
+		return
+	var stack = p_data.get_layer_stack()
+	if stack == null:
+		return
+	var legacy: String = "%s%s%d" % [p_owner_base, p_sink.sink_owner_suffix(), p_index]
+	var idx: int = p_data.find_layer_by_owner(legacy)
+	if idx < 0:
+		return
+	var layer = stack.get_layer(idx)
+	if layer != null:
+		layer.set_owner_id(p_owner)
+
+
 static func _write_one(p_sink, p_index: int, p_data, p_owner_base: String, p_gw: int, p_gh: int,
 		p_rect: Rect2, p_mask: PackedFloat32Array, p_values: Dictionary, p_report: Dictionary,
 		p_cleared: Dictionary) -> int:
-	# STEP 1 — resolve/create. The node index is in the owner id so two Control Sinks in one graph own
-	# two layers; without it the second's clear would wipe the first's paint on every bake.
+	# STEP 1 — resolve/create. A sink has exactly TWO possible layer identities: its `layer_key`, or the
+	# DEFAULT for its kind on this brush. It creates a layer only when the one it names does not exist.
 	#
-	# A `layer_key` REPLACES the index, which is how two sinks name the same layer on purpose. The
-	# suffix stays either way, so a Control Sink and a Color Sink that happen to share a key still get
-	# their own layers — they have different map types and could not share a tile format anyway.
+	# ---- WHY THE NODE INDEX CAME OUT OF THE OWNER ID ----
+	#
+	# It used to be `owner_base + suffix + index`, so that two Control Sinks in one graph owned two
+	# layers rather than clearing each other's paint. That index is the node's position in the graph's
+	# node ARRAY, and it moves: add a node above the sink, delete one, reorder — and the sink's owner id
+	# changes, `create_owned_layer_typed` finds no layer for the new id, and mints another one. The old
+	# layer stays in the dock holding the last paint it was given, and the stack grows one layer per
+	# graph edit. That is the churn this replaces.
+	#
+	# Sharing is safe now for the reason a shared `layer_key` is safe: the footprint clear is once per
+	# LAYER per bake (step 2), not once per sink. So two keyless Control Sinks compose into the one
+	# default layer, in graph order, later over earlier — the same arrangement two sinks get by naming
+	# the same key. Give one of them a `layer_key` to split them apart again.
+	#
+	# The suffix stays in both forms, so a Control Sink and a Color Sink that happen to share a key
+	# still get their own layers — different map types could not share a tile format anyway.
 	var key: String = p_sink.layer_key if "layer_key" in p_sink else ""
-	var owner: String = ("%s%s:%s" % [p_owner_base, p_sink.sink_owner_suffix(), key]) if key != "" 			else ("%s%s%d" % [p_owner_base, p_sink.sink_owner_suffix(), p_index])
-	var label: String = key if key != "" else "%s %d" % [p_sink.sink_layer_label(), p_index]
+	var owner: String = "%s%s" % [p_owner_base, p_sink.sink_owner_suffix()]
+	if key != "":
+		owner += ":" + key
+	var label: String = key if key != "" else p_sink.sink_layer_label()
+	_adopt_legacy_indexed_layer(p_data, owner, p_owner_base, p_sink, p_index)
 	var layer_id: int = p_data.create_owned_layer_typed(owner, label, Pasture3DGraphNodeChannelSink.BLEND_REPLACE,
 			p_sink.sink_map_type())
 	if layer_id < 0:

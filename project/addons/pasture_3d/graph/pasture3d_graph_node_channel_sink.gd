@@ -52,7 +52,7 @@ const MAX_TEXTURE_INDEX: int = 31
 ## behaviour: the writer keys the layer on this node's INDEX, so two Control Sinks in a graph get two
 ## layers and neither clears the other's paint.
 ##
-## A non-empty key replaces the index in that owner id, which makes it a NAME two sinks can agree on. Two
+## A non-empty key REPLACES the default owner id, which makes it a NAME two sinks can agree on. Two
 ## sinks sharing a key share one layer, and that is the point: control composites topmost-covered-wins,
 ## so the only way to have one sink lay rock and another lay grass over the top of it IN ONE LAYER is for
 ## both to author into it. They write in graph order, later over earlier.
@@ -92,9 +92,10 @@ func sink_map_type() -> int:
 
 ## The suffix appended to the host brush's `owner_id` to key this sink's reserved layer. Sinks of
 ## different kinds must not collide on one layer: `create_owned_layer_typed` is idempotent PER OWNER ID,
-## so two sinks sharing a suffix would share a layer, and the second's clear-first step would wipe the
-## first's paint every bake. The node's own index is appended by the writer so two Control Sinks in one
-## graph get two layers.
+## so two sinks sharing a suffix share one layer. That is deliberate for sinks of the same KIND: they
+## compose into the one default layer in graph order, and the clear is once per layer per bake so the
+## second does not wipe the first. Set a `layer_key` to split them. The writer used to append the node's
+## index here, which minted a new layer every time a graph edit moved the sink up or down the node array.
 func sink_owner_suffix() -> String:
 	return "#graph_control"
 
