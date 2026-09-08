@@ -36,9 +36,10 @@
 #   [J] closed ring attribute projection in carry_values covers the closing seam without NaN or distortion.
 #   [K] Meanderize wavelength controls spatial bend frequency along the channel.
 #   [L] Fractalize wavelength controls feature scale independently of input vertex density.
+#   [M] min_segment_length and edge_divisions = 1 prevent point explosion on dense inputs.
 extends Node
 
-const CRITERIA: Array[String] = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]
+const CRITERIA: Array[String] = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"]
 
 var _fail: int = 0
 var _seen: Dictionary = {}
@@ -60,6 +61,7 @@ func _ready() -> void:
 	_j_closed_ring_attribute_projection()
 	_k_meanderize_wavelength_scale()
 	_l_fractalize_wavelength_scale()
+	_m_point_control_contract()
 
 	for name in CRITERIA:
 		if not _seen.has(name):
@@ -427,6 +429,8 @@ func _g_a_reshaped_path_is_still_cheap_to_query() -> void:
 	drawn.half_widths = w
 
 	var mea := Pasture3DGraphNodePathMeanderize.new()
+	mea.edge_divisions = 2
+	mea.min_segment_length = 0.0
 	var river := _run(mea, drawn)
 	var grew := float(river.points.size()) / float(drawn.points.size())
 
@@ -656,5 +660,34 @@ func _l_fractalize_wavelength_scale() -> void:
 	print("    sparse max displacement: %.2f m; dense max displacement: %.2f m" % [max_y_s, max_y_d])
 	var ok := max_y_s >= 4.0 and max_y_d >= 4.0
 	_check("L", ok, "both sparse and dense inputs developed macro fractal features at 100m wavelength")
+
+
+## [M] min_segment_length and edge_divisions = 1 prevent point explosion on dense inputs.
+func _m_point_control_contract() -> void:
+	print("[M] min_segment_length and edge_divisions=1 prevent point explosion")
+	var dense := _dense() # 250 points
+	var n_in := dense.points.size()
+
+	# With edge_divisions = 1, vertex count does not explode
+	var m_no_sub := Pasture3DGraphNodePathMeanderize.new()
+	m_no_sub.iterations = 4
+	m_no_sub.edge_divisions = 1
+	m_no_sub.ratio = 0.4
+	var out_no_sub := _run(m_no_sub, dense)
+
+	# With min_segment_length = 10.0m on dense path (1.3m spacing), subdivision stops
+	var m_clamped := Pasture3DGraphNodePathMeanderize.new()
+	m_clamped.iterations = 4
+	m_clamped.edge_divisions = 2
+	m_clamped.min_segment_length = 10.0
+	m_clamped.ratio = 0.4
+	var out_clamped := _run(m_clamped, dense)
+
+	print("    input: %d; edge_divisions=1: %d; min_segment_length=10m: %d"
+			% [n_in, out_no_sub.points.size(), out_clamped.points.size()])
+	# Both should have vertex counts very close to input, NOT 16x (4000)
+	var ok := out_no_sub.points.size() <= n_in * 2 and out_clamped.points.size() <= n_in * 2
+	_check("M", ok, "point counts stayed within 2x rather than 16x multiplying")
+
 
 

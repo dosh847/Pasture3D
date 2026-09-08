@@ -75,11 +75,18 @@ extends Pasture3DGraphNodePathShape
 		iterations = clampi(v, 1, 10)
 		_param_changed()
 
-## How many vertices each edge becomes per iteration. Two is the minimum that can bend at all; more gives
-## a smoother bend for the same number of iterations, at a cost that multiplies rather than adds.
-@export_range(2, 8, 1) var edge_divisions: int = 2:
+## Minimum segment length in metres below which edges will not be subdivided.
+## Prevents vertex explosion on already-dense or repeatedly iterated paths.
+@export_range(1.0, 100.0, 0.5, "or_greater", "suffix:m") var min_segment_length: float = 5.0:
 	set(v):
-		edge_divisions = clampi(v, 2, 8)
+		min_segment_length = maxf(v, 0.1)
+		_param_changed()
+
+## How many pieces each edge becomes per iteration (1 = no in-loop subdivision, only bend amplification).
+## 2 or more subdivides edges longer than `min_segment_length`.
+@export_range(1, 8, 1) var edge_divisions: int = 1:
+	set(v):
+		edge_divisions = clampi(v, 1, 8)
 		_param_changed()
 
 ## Cut out any loop the amplification produces. See the header.
@@ -120,7 +127,7 @@ func reshape(p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -> void:
 	# Sinuous macro-wave generation: establishes physical wavelength and amplitude along arc length.
 	var eff_amp := amplitude * (ratio + noise_ratio)
 	if eff_amp > 0.0:
-		var max_seg_len := maxf(wavelength / 8.0, 5.0)
+		var max_seg_len := maxf(wavelength / 4.0, min_segment_length)
 		pts = _subdivide_long_edges(pts, max_seg_len, p_src.closed)
 		var n := pts.size()
 		var s_arr := arc_lengths(pts, p_src.closed)
@@ -183,21 +190,24 @@ func reshape(p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -> void:
 	carry_values(p_src, p_out)
 
 
-## Split every edge into `edge_divisions` pieces. Straight subdivision: the bending is `_amplify`'s job,
-## and doing both in one pass would make the displacement depend on how many pieces an edge became.
-func _subdivide(p_pts: PackedVector2Array, _p_closed: bool) -> PackedVector2Array:
+## Split edges longer than `min_segment_length` into `edge_divisions` pieces.
+## When edge_divisions == 1, leaves the vertices unchanged.
+func _subdivide(p_pts: PackedVector2Array, p_closed: bool) -> PackedVector2Array:
+	if edge_divisions <= 1:
+		return p_pts
 	var n := p_pts.size()
-	var target_count := (n - 1) * edge_divisions + 1
 	var out := PackedVector2Array()
-	out.resize(target_count)
-	var idx := 0
 	for i in range(n - 1):
 		var a := p_pts[i]
 		var b := p_pts[i + 1]
-		for k in edge_divisions:
-			out[idx] = a.lerp(b, float(k) / float(edge_divisions))
-			idx += 1
-	out[idx] = p_pts[n - 1]
+		out.append(a)
+		var d := (b - a).length()
+		if d > min_segment_length:
+			for k in range(1, edge_divisions):
+				out.append(a.lerp(b, float(k) / float(edge_divisions)))
+	out.append(p_pts[n - 1])
+	if p_closed and out.size() >= 2:
+		out[out.size() - 1] = out[0]
 	return out
 
 
