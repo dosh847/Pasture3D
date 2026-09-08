@@ -359,7 +359,7 @@ void main() {
 		o[i] = a[i];
 		return;
 	}
-	if (p.mode == GKM_BLEND) { // BLEND: a, b, c mask. ip = mode 0..5, f0 = is a mask wired.
+	if (p.mode == GKM_BLEND) { // BLEND: a, b, c mask. ip = mode 0..10, f0 = is a mask wired.
 		float av = a[i];
 		float bv = b[i];
 		float r;
@@ -371,6 +371,14 @@ void main() {
 		// MIX is `b`, and the mask fold below makes it lerp(a, b, mask) — which IS the mode. An
 		// unwired mask leaves it as plain b, matching the CPU op and the GDScript node.
 		else if (p.ip == 5) { r = bv; }
+		// The generic operators (P-V8). Degenerate cases are DEFINED here exactly as they are in
+		// GraphBlendMode's header comment -- an inf or a NaN from this shader is a hole in the terrain,
+		// and a GPU-only divergence is invisible until someone diffs the two routes.
+		else if (p.ip == 6) { r = (bv != 0.0) ? av / bv : 0.0; }
+		else if (p.ip == 7) { r = (av > 0.0) ? pow(av, bv) : 0.0; }
+		else if (p.ip == 8) { r = abs(av - bv); }
+		else if (p.ip == 9) { r = 1.0 - (1.0 - av) * (1.0 - bv); }
+		else if (p.ip == 10) { r = (av < 0.5) ? 2.0 * av * bv : 1.0 - 2.0 * (1.0 - av) * (1.0 - bv); }
 		else { r = av; }
 		// THE MASK PORT, which this shader used not to read at all: a Blend with a mask wired ran on the
 		// GPU and ignored it, silently, for every mode. Harmless-looking until MIX, where the mask is the

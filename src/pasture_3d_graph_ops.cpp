@@ -120,6 +120,14 @@ double graph_cell_eval(const GraphCellProgram &p_prog, double p_wx, double p_wz,
 					case GRAPH_BLEND_MUL: val = a * b; break;
 					case GRAPH_BLEND_MAX: val = a > b ? a : b; break;
 					case GRAPH_BLEND_MIN: val = a < b ? a : b; break;
+					// MIX is `b`; the cell kernel has no mask fold, so it is plain b — the same answer
+					// the grid kernel gives for an unwired mask.
+					case GRAPH_BLEND_MIX: val = b; break;
+					case GRAPH_BLEND_DIV: val = b != 0.0 ? a / b : 0.0; break;
+					case GRAPH_BLEND_POW: val = a > 0.0 ? std::pow(a, b) : 0.0; break;
+					case GRAPH_BLEND_DIFFERENCE: val = std::fabs(a - b); break;
+					case GRAPH_BLEND_SCREEN: val = 1.0 - (1.0 - a) * (1.0 - b); break;
+					case GRAPH_BLEND_OVERLAY: val = a < 0.5 ? 2.0 * a * b : 1.0 - 2.0 * (1.0 - a) * (1.0 - b); break;
 					default: val = a; break; // matches the GDScript fallthrough `return a`
 				}
 			} break;
@@ -775,6 +783,14 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 							// the right arithmetic; an unwired mask leaves it as plain `b`, matching the
 							// GDScript node whose unwired mask is a filled 1.0.
 							case GRAPH_BLEND_MIX: val = b; break;
+							// The generic operators. Degenerate cases are defined in the enum's header
+							// comment and must read identically here, in the cell kernel, in the GPU
+							// shader and in Pasture3DGraphNodeBlend.
+							case GRAPH_BLEND_DIV: val = b != 0.0 ? a / b : 0.0; break;
+							case GRAPH_BLEND_POW: val = a > 0.0 ? std::pow(a, b) : 0.0; break;
+							case GRAPH_BLEND_DIFFERENCE: val = std::fabs(a - b); break;
+							case GRAPH_BLEND_SCREEN: val = 1.0 - (1.0 - a) * (1.0 - b); break;
+							case GRAPH_BLEND_OVERLAY: val = a < 0.5 ? 2.0 * a * b : 1.0 - 2.0 * (1.0 - a) * (1.0 - b); break;
 							default: val = a; break;
 						}
 						if (gc) {

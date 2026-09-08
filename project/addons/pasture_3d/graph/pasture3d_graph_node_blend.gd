@@ -19,7 +19,10 @@ extends Pasture3DGraphNode
 ## envelope (a hill that never digs, a valley that never bulges).
 ## MIX is APPENDED, not inserted in its alphabetical place. The enum value is what gets serialised, so
 ## reordering these would silently turn every saved Blend into a different operation.
-enum Mode { ADD, SUB, MUL, MAX, MIN, MIX }
+## DIV/POW/DIFFERENCE/SCREEN/OVERLAY are APPENDED for the same reason MIX was, and their degenerate
+## cases are DEFINED rather than left to the FPU — see GraphBlendMode in src/pasture_3d_graph_ops.h,
+## which is the same list, and whose four implementations GraphBlendModeGate compares.
+enum Mode { ADD, SUB, MUL, MAX, MIN, MIX, DIV, POW, DIFFERENCE, SCREEN, OVERLAY }
 
 @export var mode: Mode = Mode.ADD:
 	set(v):
@@ -74,6 +77,13 @@ func eval_cell(_p_wx: float, _p_wz: float, p_inputs: PackedFloat32Array) -> floa
 		# Section 8's second road wiring is exactly this and cannot be built out of the other five --
 		# a masked ADD keeps the base underneath, which is not "use the eroded hillside off the road".
 		Mode.MIX: blended = b
+		# b == 0 is 0, not INF: an infinity here is a hole that survives every downstream op.
+		Mode.DIV: blended = (a / b) if b != 0.0 else 0.0
+		# pow(negative, fractional) is NAN, so a <= 0 is defined as 0.
+		Mode.POW: blended = pow(a, b) if a > 0.0 else 0.0
+		Mode.DIFFERENCE: blended = absf(a - b)
+		Mode.SCREEN: blended = 1.0 - (1.0 - a) * (1.0 - b)
+		Mode.OVERLAY: blended = (2.0 * a * b) if a < 0.5 else (1.0 - 2.0 * (1.0 - a) * (1.0 - b))
 	# A gates how much of the combine replaces the base. m == 1 (the unwired default) is the plain blend.
 	# A non-finite mask cell is "no opinion", which means 1.0 -- the same answer an unwired port gives.
 	# clampf uses the same three-way comparison as std::clamp, so clampf(NAN, 0, 1) is NAN and this used

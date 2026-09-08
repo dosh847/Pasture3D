@@ -205,14 +205,63 @@ static func _resolve_ports(p_graph, p_sink, p_index: int, p_gw: int, p_gh: int, 
 		var src := source_of(p_graph, p_index, port)
 		if src.is_empty():
 			continue
-		var node = p_graph.nodes[int(src["node"])]
-		if node != null and "color" in node:
-			values[String(names[port])] = node.color
+		var col = _color_of(p_graph, int(src["node"]))
+		if col != null:
+			values[String(names[port])] = col
 		else:
 			return {"error": ("the `%s` port is wired to a node that carries no colour. A vector or "
 					+ "field cannot travel a COLOR port; wire a Const Color or leave it unwired.")
 					% String(names[port])}
 	return {"mask": mask, "values": values}
+
+
+## The COLOR produced by the node at `p_index`, or null if it produces none.
+##
+## ---- WHY THIS IS NOT `"color" in node`, AND WHY IT RECURSES ----
+##
+## It was `"color" in node`, and that read Const Color — the ONE producer of a COLOR port in the whole
+## registry — as carrying no colour, because its export is named `value`, not `color`. Wiring the only
+## legal source into a Color Sink returned the "wired to a node that carries no colour" refusal. The
+## refusal itself is right (see the Color Sink's header); it was asking the wrong question.
+##
+## The recursion is what makes a COLOR OPERATOR possible at all. The SSA program's buffers are scalar, so
+## a colour cannot flow through the evaluator; it is a COMPILE-TIME sideband, folded here by walking
+## upstream. That is the whole reason a Color Mix is safe: it never lowers, never appears in
+## `graph_op_ids()`, and so cannot cost the graph its native path (§10).
+##
+## A node whose colour is computed rather than stored implements `graph_color(p_upstream)`, where
+## `p_upstream` maps its own COLOR input NAMES to the resolved Colors. An input that resolves to nothing
+## is ABSENT from the dictionary rather than present as a default — the node decides what an unwired port
+## means, exactly as `input_unwired_default` lets a field node decide.
+static func _color_of(p_graph, p_index: int, p_depth: int = 0) -> Variant:
+	if p_graph == null or p_index < 0 or p_index >= p_graph.nodes.size():
+		return null
+	var node = p_graph.nodes[p_index]
+	if node == null:
+		return null
+	if node.has_method("graph_color"):
+		var upstream := {}
+		# The depth cap is a cycle guard. The graph editor refuses to author a cycle, but a hand-edited
+		# .tres can carry one and a colour fold has no visited set of its own.
+		if p_depth < 16:
+			var names: PackedStringArray = node.input_names()
+			var types: PackedInt32Array = node.input_port_types()
+			for port in range(node.input_count()):
+				if port >= types.size() or int(types[port]) != Pasture3DGraphNode.PortType.COLOR:
+					continue
+				var src := source_of(p_graph, p_index, port)
+				if src.is_empty():
+					continue
+				var up = _color_of(p_graph, int(src["node"]), p_depth + 1)
+				if up != null and port < names.size():
+					upstream[String(names[port])] = up
+		var g = node.graph_color(upstream)
+		return g if g is Color else null
+	if "color" in node and node.color is Color:
+		return node.color
+	if "value" in node and node.value is Color:
+		return node.value
+	return null
 
 
 ## Resolve/clear/write/recomposite one sink. Returns the number of cells authored.

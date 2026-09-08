@@ -691,3 +691,36 @@ bench/GraphRuntimeSinkGate.tscn
 # carry-forward and REMOVED again — its red watch passed with the grid cut out, because step 4
 # recomposites per sink and `get_control` already saw the earlier sink's write.
 bench/GraphSinkBakeGate.tscn
+
+# GraphOperatorGate — the operator expansion: value ports, the five new Blend modes, the COLOUR sideband.
+# [A] The FLOAT plumbing. Measured before the fix: 107 input ports of type FLOAT across the registry and
+# ZERO nodes producing one — `Const Float` never overrode `output_port_types()`, so it emitted HEIGHT and
+# every FLOAT port in the plugin was unwireable. The two ports with no inline property either (a Salève's
+# `dx`/`dy`, declared FLOAT and read as `p_inputs[n] as PackedFloat32Array`) could not be set at all.
+# The driven-port check runs on BOTH routes: the native evaluator reads a driven param through
+# `native_param_ports()`, the GDScript one as `p_inputs[n][0]`, and `evaluate()` picks native silently.
+# [B] Every Blend mode across the CPU cell kernel, the CPU grid kernel and the GDScript node. The five new
+# modes (DIV, POW, DIFFERENCE, SCREEN, OVERLAY) are each defined in FOUR places — those three plus the GPU
+# shader in src/pasture_3d_graph_gpu.cpp — and a divergence in any one is silent in ordinary use.
+#
+# THE ORACLE IS FORCED. `evaluate()` takes the native route whenever `native_supported()` allows, so the
+# first version of [B] compared the kernel with itself: the red watch moved the GDScript node's OVERLAY
+# threshold to 0.4 and [B] still reported 1e-7 agreement. With `force_gdscript_evaluation` the same watch
+# produces 0.078 on both kernels. Any parity gate written against a bare `evaluate()` has this hole.
+# [C] DIV by zero and POW of a negative are DEFINED as 0 in all four implementations, not left to the FPU.
+# An inf or a NaN from a blend is a hole in the terrain that survives every downstream op.
+# [D] The COLOUR sideband. The resolver asked `"color" in node`; Const Color's export is named `value`, so
+# the ONE producer of a COLOR port in the whole registry was refused as carrying no colour. It now asks
+# `graph_color(upstream)` and recurses, which is what makes Color Mix possible: a colour never flows
+# through the SSA program (its buffers are one float per cell), it is folded at bake time by walking
+# upstream. The consequence, stated in the node: a colour is UNIFORM over the footprint. The Color Sink's
+# mask decides WHERE, the Mix decides WHAT, and "tint by the erosion mask" is not expressible.
+# [E] Color Mix therefore never lowers — not in `graph_op_ids()`, never an ancestor of a compile root —
+# so it cannot be the one op that drops the whole graph onto the GDScript evaluator (§10). This is why the
+# FIELD vocabulary grew inside Blend's existing mode enum instead of gaining a new op id.
+#
+# WHAT IT CANNOT SAY: the GPU shader is not run. It needs a local RenderingDevice, which --headless has
+# not got (GraphGpuParityGate skips itself for the same reason), so the fourth copy of the mode arithmetic
+# is reviewed and not measured. [D] stops at `_resolve_ports`; whether the colour lands on a layer is
+# GraphSinkBakeGate's claim.
+bench/GraphOperatorGate.tscn

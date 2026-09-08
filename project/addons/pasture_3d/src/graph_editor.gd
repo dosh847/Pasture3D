@@ -2814,6 +2814,37 @@ static func register_connection_types(p_graphedit: GraphEdit) -> void:
 	for from_t in scalar_fields:
 		for to_t in scalar_fields:
 			p_graphedit.add_valid_connection_type(from_t, to_t)
+	# ---- THE SCALAR VALUE TYPES, AND WHY THEY CROSS WITH THE FIELDS ----
+	#
+	# A driven VALUE port has always been read as CELL 0 of the source buffer — by the native evaluator
+	# through `native_param_ports()`, and by every GDScript `eval_grid` as `p_inputs[n][0]`. So a wire
+	# from a field into a FLOAT port is not a new semantic being invented here; it is the semantic the
+	# evaluator already implements, finally reachable.
+	#
+	# Until this existed, FLOAT connected to nothing. Measured across the registry: 107 input ports of
+	# type FLOAT, and ZERO nodes producing one — so every scalar port in the plugin could only ever be set
+	# inline, and the 2 that have no inline property (a Salève's `dx`/`dy`, since fixed) could not be set
+	# at all. INT is in the same shape but had `Const Int` to drive it.
+	#
+	# The footgun is real and is accepted deliberately: cell 0 of a NOISE field is an arbitrary number,
+	# so wiring a generator into a `direction` port gives a value nobody chose. The alternative is 107
+	# ports that no wire can reach, and the node's own inline property remains the obvious way to set one.
+	var scalar_values: Array[int] = [
+		Pasture3DGraphNode.PortType.FLOAT,
+		Pasture3DGraphNode.PortType.INT,
+	]
+	for from_t in scalar_values:
+		for to_t in scalar_values:
+			p_graphedit.add_valid_connection_type(from_t, to_t)
+		for to_t in scalar_fields:
+			# A constant fills every cell, so it is a legal flat FIELD. This is the direction `Const
+			# Float` has always been used in, and it is why changing that node's output type to FLOAT
+			# does not break a graph that already wires it into a HEIGHT port.
+			p_graphedit.add_valid_connection_type(from_t, to_t)
+	for from_t in scalar_fields:
+		for to_t in scalar_values:
+			p_graphedit.add_valid_connection_type(from_t, to_t)
+
 	p_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.VECTOR, Pasture3DGraphNode.PortType.VECTOR)
 	p_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.CURVE, Pasture3DGraphNode.PortType.CURVE)
 	# PATH and TERRAIN_BUS connect ONLY to themselves. Every pair above is float-to-float underneath and a
@@ -2823,6 +2854,8 @@ static func register_connection_types(p_graphedit: GraphEdit) -> void:
 	p_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.TERRAIN_BUS, Pasture3DGraphNode.PortType.TERRAIN_BUS)
 
 	for t in scalar_fields:
+		p_graphedit.add_valid_right_disconnect_type(t)
+	for t in scalar_values:
 		p_graphedit.add_valid_right_disconnect_type(t)
 	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.VECTOR)
 	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.CURVE)

@@ -103,6 +103,22 @@ enum GraphBlendMode {
 	// lerp(a, b, mask). Added in P2c because the §8 road wiring is built out of it and the op's
 	// `default: val = a` would otherwise have answered a MIX with `a` — plausible, silent and wrong.
 	GRAPH_BLEND_MIX = 5,
+	// ---- THE GENERIC OPERATORS (P-V8), APPENDED FOR THE SAME REASON MIX WAS ----
+	//
+	// The enum value is what a saved Blend serialises, so these go on the end and nothing above moves.
+	// Every one of them is defined identically in FOUR places and a divergence is silent: this enum's
+	// consumers are the CPU cell kernel, the CPU grid kernel, the GPU shader in
+	// pasture_3d_graph_gpu.cpp, and Pasture3DGraphNodeBlend.eval_cell. GraphBlendModeGate compares them.
+	//
+	// The degenerate cases are DEFINED, not left to the FPU, because an inf or a NaN here is a hole in
+	// the terrain that survives every downstream op:
+	//   DIV  — b == 0 yields 0, not inf.
+	//   POW  — a <= 0 yields 0, because pow(negative, fractional) is NaN.
+	GRAPH_BLEND_DIV = 6,
+	GRAPH_BLEND_POW = 7,
+	GRAPH_BLEND_DIFFERENCE = 8, // |a - b|
+	GRAPH_BLEND_SCREEN = 9, // 1 - (1-a)(1-b)
+	GRAPH_BLEND_OVERLAY = 10, // a < 0.5 ? 2ab : 1 - 2(1-a)(1-b)
 };
 
 // One entry of the program's GEOMETRY TABLE (PASTURE3D_GRAPH_GEOMETRY_PORTS_SPEC.md §4.1).

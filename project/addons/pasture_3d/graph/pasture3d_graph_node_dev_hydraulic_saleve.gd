@@ -132,8 +132,14 @@ func input_names() -> PackedStringArray:
 func input_port_types() -> PackedInt32Array:
 	return PackedInt32Array([
 		PortType.HEIGHT,
-		PortType.FLOAT,
-		PortType.FLOAT,
+		# SIGNED, not FLOAT. `dx`/`dy` are read as GRIDS — `p_inputs[1] as PackedFloat32Array` in
+		# `eval_grid` below, handed straight to the solver as displacement fields — so declaring them
+		# FLOAT described them as one value per port when they are one value per CELL. The consequence
+		# was not cosmetic: a FLOAT port connects to nothing but another FLOAT, so these two could not be
+		# wired at all, and being fields they have no inline property either. They were inert sockets.
+		# SIGNED because a displacement is signed and zero is meaningful.
+		PortType.SIGNED,
+		PortType.SIGNED,
 		PortType.MASK,
 	])
 
