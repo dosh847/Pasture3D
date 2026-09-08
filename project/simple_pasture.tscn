@@ -264,6 +264,7 @@ output_node = 8
 resource_name = "Terrain Graph"
 script = ExtResource("8_6pcwc")
 graph = SubResource("Resource_mayxm")
+evaluation = 1
 
 [sub_resource type="Curve3D" id="Curve3D_r5vgm"]
 closed = true
@@ -376,16 +377,9 @@ script = ExtResource("4_6pcwc")
 graph_position = Vector2(-600, 20)
 preview_on = true
 
-[sub_resource type="Resource" id="Resource_nnq34"]
-script = ExtResource("21_vfv27")
-ratio = 0.647
-noise_ratio = 0.729
-iterations = 10
-graph_position = Vector2(-140, 420)
-preview_on = true
-
 [sub_resource type="Resource" id="Resource_qe7gh"]
 script = ExtResource("22_cyndd")
+step = 16.0
 graph_position = Vector2(-600, 280)
 preview_on = true
 
@@ -397,18 +391,26 @@ persistence = 0.678
 graph_position = Vector2(-120, 160)
 preview_on = true
 
+[sub_resource type="Resource" id="Resource_wnovj"]
+script = ExtResource("21_vfv27")
+wavelength = 129.0
+amplitude = 50.0
+edge_divisions = 2
+graph_position = Vector2(-120, 460)
+preview_on = true
+
 [sub_resource type="Resource" id="Resource_lbwnp"]
 script = ExtResource("7_wv1iv")
-nodes = Array[ExtResource("4_4khcl")]([SubResource("Resource_2wp0u"), SubResource("Resource_fdeh7"), SubResource("Resource_nync1"), SubResource("Resource_rup21"), SubResource("Resource_umoq4"), SubResource("Resource_nnq34"), SubResource("Resource_qe7gh"), SubResource("Resource_eudfm")])
-connections = [PackedInt32Array(3, 0, 1, 0), PackedInt32Array(4, 0, 3, 0), PackedInt32Array(2, 0, 6, 0), PackedInt32Array(6, 0, 5, 0), PackedInt32Array(6, 0, 7, 0), PackedInt32Array(5, 0, 3, 1)]
+nodes = Array[ExtResource("4_4khcl")]([SubResource("Resource_2wp0u"), SubResource("Resource_fdeh7"), SubResource("Resource_nync1"), SubResource("Resource_rup21"), SubResource("Resource_umoq4"), SubResource("Resource_qe7gh"), SubResource("Resource_eudfm"), SubResource("Resource_wnovj")])
+connections = [PackedInt32Array(3, 0, 1, 0), PackedInt32Array(4, 0, 3, 0), PackedInt32Array(2, 0, 5, 0), PackedInt32Array(5, 0, 6, 0), PackedInt32Array(5, 0, 7, 0), PackedInt32Array(7, 0, 3, 1)]
 output_node = 3
 output_override = 3
+metadata/_editor_selected_node = -1
 
 [sub_resource type="Resource" id="Resource_vugto"]
 resource_name = "Terrain Graph"
 script = ExtResource("8_6pcwc")
 graph = SubResource("Resource_lbwnp")
-evaluation = 1
 
 [sub_resource type="Curve3D" id="Curve3D_ba6c1"]
 closed = true
