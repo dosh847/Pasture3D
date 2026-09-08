@@ -156,22 +156,26 @@ func eval_path(p_inputs: Array) -> Pasture3DGraphPath:
 ## because `Pasture3DGraphPath._cum` is the RING's — one vertex longer on a closed line — while
 ## `half_widths` and `heights` are indexed by `points`. Mixing the two shifts every value by one on a
 ## closed path and by nothing on an open one, which is a bug that only appears on closed fixtures.
-static func arc_lengths(p_pts: PackedVector2Array) -> PackedFloat32Array:
+static func arc_lengths(p_pts: PackedVector2Array, p_closed: bool = false) -> PackedFloat32Array:
 	var n := p_pts.size()
+	var count := n + 1 if (p_closed and n >= 2) else n
 	var cum := PackedFloat32Array()
-	cum.resize(n)
-	if n == 0:
+	cum.resize(count)
+	if count == 0:
 		return cum
 	cum[0] = 0.0
 	for i in range(1, n):
 		cum[i] = cum[i - 1] + p_pts[i].distance_to(p_pts[i - 1])
+	if p_closed and n >= 2:
+		cum[n] = cum[n - 1] + p_pts[0].distance_to(p_pts[n - 1])
 	return cum
 
 
 ## Sample a per-vertex array at an arc length, linearly. Returns NAN for an empty array, which is the
 ## vocabulary's "no data" and is what `heights` means when a spline carries none — returning 0.0 would
 ## drag a ridge drawn at 400 m down to sea level (PASTURE3D_NODE_VOCABULARY.md §1).
-static func sample_along(p_vals: PackedFloat32Array, p_cum: PackedFloat32Array, p_s: float) -> float:
+## On a closed path, arc lengths past `last` or wrapping the seam interpolate between the last and first vertex.
+static func sample_along(p_vals: PackedFloat32Array, p_cum: PackedFloat32Array, p_s: float, p_closed: bool = false) -> float:
 	var n := p_vals.size()
 	if n == 0:
 		return NAN
@@ -181,7 +185,7 @@ static func sample_along(p_vals: PackedFloat32Array, p_cum: PackedFloat32Array, 
 	if p_s <= 0.0 or last <= 0.0:
 		return p_vals[0]
 	if p_s >= last:
-		return p_vals[mini(p_cum.size() - 1, n - 1)]
+		return p_vals[0] if p_closed else p_vals[mini(p_cum.size() - 1, n - 1)]
 	# Linear scan. The alternative is a binary search, and these arrays are a few hundred entries walked
 	# in increasing `s` by every caller, so the scan is already the faster one.
 	var i := 1
@@ -190,8 +194,8 @@ static func sample_along(p_vals: PackedFloat32Array, p_cum: PackedFloat32Array, 
 	var s0: float = p_cum[i - 1]
 	var s1: float = p_cum[i]
 	var t: float = 0.0 if s1 <= s0 else (p_s - s0) / (s1 - s0)
-	var v0: float = p_vals[mini(i - 1, n - 1)]
-	var v1: float = p_vals[mini(i, n - 1)]
+	var v0: float = p_vals[(i - 1) % n]
+	var v1: float = p_vals[i % n]
 	return lerpf(v0, v1, t)
 
 
@@ -214,7 +218,7 @@ static func carry_values(p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -
 		p_out.half_widths = PackedFloat32Array()
 		p_out.heights = PackedFloat32Array()
 		return
-	var cum := arc_lengths(p_src.points)
+	var cum := arc_lengths(p_src.points, p_src.closed)
 	var n := p_out.points.size()
 	var w := PackedFloat32Array()
 	var h := PackedFloat32Array()
@@ -223,11 +227,11 @@ static func carry_values(p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -
 	if have_h:
 		h.resize(n)
 	for i in n:
-		var s := project_s(p_src.points, cum, p_out.points[i])
+		var s := project_s(p_src.points, cum, p_out.points[i], p_src.closed)
 		if have_w:
-			w[i] = sample_along(p_src.half_widths, cum, s)
+			w[i] = sample_along(p_src.half_widths, cum, s, p_src.closed)
 		if have_h:
-			h[i] = sample_along(p_src.heights, cum, s)
+			h[i] = sample_along(p_src.heights, cum, s, p_src.closed)
 	p_out.half_widths = w
 	p_out.heights = h
 
@@ -235,19 +239,22 @@ static func carry_values(p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -
 ## Arc length of the point on polyline `p_pts` nearest to `p_q`. Brute force over segments: these are a
 ## few hundred vertices resampled a few hundred times, once per edit, against a per-cell query run
 ## `gw x gh` times — the cost is not measurable next to a single bake.
-static func project_s(p_pts: PackedVector2Array, p_cum: PackedFloat32Array, p_q: Vector2) -> float:
+## When `p_closed` is true, also checks the closing segment connecting the last vertex back to the first.
+static func project_s(p_pts: PackedVector2Array, p_cum: PackedFloat32Array, p_q: Vector2, p_closed: bool = false) -> float:
 	var best := INF
 	var best_s := 0.0
-	for i in range(1, p_pts.size()):
-		var a := p_pts[i - 1]
-		var b := p_pts[i]
+	var n := p_pts.size()
+	var seg_count := n if (p_closed and n >= 2) else (n - 1)
+	for i in seg_count:
+		var a := p_pts[i]
+		var b := p_pts[(i + 1) % n]
 		var ab := b - a
 		var len2 := ab.length_squared()
 		var t: float = 0.0 if len2 <= 0.0 else clampf((p_q - a).dot(ab) / len2, 0.0, 1.0)
 		var d: float = p_q.distance_squared_to(a + ab * t)
 		if d < best:
 			best = d
-			best_s = p_cum[i - 1] + (p_cum[i] - p_cum[i - 1]) * t
+			best_s = p_cum[i] + (p_cum[i + 1] - p_cum[i]) * t
 	return best_s
 
 

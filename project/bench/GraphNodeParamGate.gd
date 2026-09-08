@@ -26,7 +26,16 @@ const MIN_PROPS := 120
 ## defect, so their absence from the sweep is deliberate and named rather than a skip that grew.
 ## `muted` is not on this list: it changes the result, and it invalidates through
 ## `_compute_node_inputs_hash` as well as through the revision.
-const PRESENTATION := ["graph_position", "collapsed", "preview_on", "label"]
+const PRESENTATION := [
+	"graph_position",
+	"collapsed",
+	"preview_on",
+	"label",
+	"preview_repr",
+	"preview_range_locked",
+	"preview_range_min",
+	"preview_range_max",
+]
 
 var _fail := 0
 

@@ -82,20 +82,76 @@ static func build(p_brush) -> Dictionary:
 		var g: Pasture3DTerrainGraph = (m as Pasture3DNodeGraph).graph
 		if g == null:
 			continue
-		for ni in range(g.nodes.size()):
-			var node: Pasture3DGraphNode = g.nodes[ni]
-			if node == null or not node.preview_on:
-				continue
-			if node.output_port_type() != Pasture3DGraphNode.PortType.PATH:
-				continue
-			# THE ONE READ. `derived_path()`, never `eval_path()` — see the header.
-			var path: Pasture3DGraphPath = node.derived_path()
-			if path == null or path.points.size() < 2:
-				out["unresolved"].append(ni)
-				continue
-			_append_path(out, p_brush, path, data)
-			out["drawn"].append(ni)
+		var active_ni := _pick_active_path_node(g)
+		if active_ni >= 0 and active_ni < g.nodes.size():
+			var node: Pasture3DGraphNode = g.nodes[active_ni]
+			if node != null:
+				# THE ONE READ. `derived_path()`, never `eval_path()` — see the header.
+				var path: Pasture3DGraphPath = node.derived_path()
+				if path == null or path.points.size() < 2:
+					out["unresolved"].append(active_ni)
+				else:
+					_append_path(out, p_brush, path, data)
+					out["drawn"].append(active_ni)
+					# Strictly one version of the path at a time.
+					break
 	return out
+
+
+## Select exactly ONE active PATH node to preview for this graph.
+## Priority:
+##   1. Explicit Solo override (g.output_override)
+##   2. Selected node in Graph Editor (_editor_selected_node metadata)
+##   3. Explicit preview_on toggle (most downstream / last previewed node)
+##   4. Fallback to output node if it is a PATH node
+static func _pick_active_path_node(g: Pasture3DTerrainGraph) -> int:
+	if g == null or g.nodes.is_empty():
+		return -1
+
+	# 1. Solo override (highest priority)
+	if g.output_override >= 0 and g.output_override < g.nodes.size():
+		var sn: Pasture3DGraphNode = g.nodes[g.output_override]
+		if sn != null:
+			if sn.output_port_type() == Pasture3DGraphNode.PortType.PATH:
+				return g.output_override
+			var up_solo := _find_upstream_path_node(g, g.output_override)
+			if up_solo >= 0:
+				return up_solo
+
+	# 2. Selected node in Graph Editor
+	var sel: int = int(g.get_meta(&"_editor_selected_node", -1))
+	if sel >= 0 and sel < g.nodes.size():
+		var sel_node: Pasture3DGraphNode = g.nodes[sel]
+		if sel_node != null:
+			if sel_node.output_port_type() == Pasture3DGraphNode.PortType.PATH:
+				return sel
+			var up_sel := _find_upstream_path_node(g, sel)
+			if up_sel >= 0:
+				return up_sel
+
+	# 3. Explicit preview_on toggle (most downstream PATH node with preview_on)
+	var last_preview := -1
+	for ni in range(g.nodes.size()):
+		var node: Pasture3DGraphNode = g.nodes[ni]
+		if node != null and node.preview_on and node.output_port_type() == Pasture3DGraphNode.PortType.PATH:
+			last_preview = ni
+	if last_preview >= 0:
+		return last_preview
+
+	return -1
+
+
+## Trace incoming connections to find the upstream PATH-output node feeding p_target.
+static func _find_upstream_path_node(g: Pasture3DTerrainGraph, p_target: int) -> int:
+	if g == null or p_target < 0:
+		return -1
+	for c in g.connections:
+		if int(c[2]) == p_target:
+			var from_idx := int(c[0])
+			if from_idx >= 0 and from_idx < g.nodes.size() and g.nodes[from_idx] != null:
+				if g.nodes[from_idx].output_port_type() == Pasture3DGraphNode.PortType.PATH:
+					return from_idx
+	return -1
 
 
 ## One path's four contributions. Split out so the loop above reads as the SELECTION rule and this reads as

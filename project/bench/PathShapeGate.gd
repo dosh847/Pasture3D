@@ -31,9 +31,14 @@
 #       line the path used to be, and `can_grade()` would still answer true.
 #   [G] the query cost of a reshaped path grows no worse than its vertex count. Measured as a RATIO
 #       against the same line before the reshape, so it says nothing about how fast this machine is.
+#   [H] pin_ends = false moves endpoints in Fractalize and Meanderize; pin_ends = true keeps them fixed.
+#   [I] remove_loops on a closed ring excises seam-crossing loops while preserving the main polygon body.
+#   [J] closed ring attribute projection in carry_values covers the closing seam without NaN or distortion.
+#   [K] Meanderize wavelength controls spatial bend frequency along the channel.
+#   [L] Fractalize wavelength controls feature scale independently of input vertex density.
 extends Node
 
-const CRITERIA: Array[String] = ["A", "B", "C", "D", "E", "F", "G"]
+const CRITERIA: Array[String] = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]
 
 var _fail: int = 0
 var _seen: Dictionary = {}
@@ -41,7 +46,7 @@ var _seen: Dictionary = {}
 
 func _ready() -> void:
 	print("=== PathShapeGate: the reshape family (S5) ===")
-	print("    spec: PASTURE3D_SPLINE_GRAPH_SPEC.md §7.4")
+	print("    spec: PASTURE3D_SPLINE_GRAPH_SPEC.md §7.4, PASTURE3D_PATH_RESHAPE_REMEDIATION_SPEC.md")
 
 	_a_each_node_reshapes_and_is_the_identity_at_zero()
 	_b_seeds_are_stable()
@@ -50,6 +55,11 @@ func _ready() -> void:
 	_e_values_survive_a_reshape()
 	_f_a_reshape_drops_the_road_profile()
 	_g_a_reshaped_path_is_still_cheap_to_query()
+	_h_unpinned_endpoints_move()
+	_i_closed_ring_loop_excision()
+	_j_closed_ring_attribute_projection()
+	_k_meanderize_wavelength_scale()
+	_l_fractalize_wavelength_scale()
 
 	for name in CRITERIA:
 		if not _seen.has(name):
@@ -121,10 +131,20 @@ func _same_points(p_a: Pasture3DGraphPath, p_b: Pasture3DGraphPath) -> bool:
 ## intersection routines agree rather than whether the path has a loop.
 func _self_intersects(p_path: Pasture3DGraphPath) -> int:
 	var pts := p_path.points
+	var n := pts.size()
+	if n < 4:
+		return 0
+	var segs := n if p_path.closed else (n - 1)
 	var hits := 0
-	for i in range(pts.size() - 1):
-		for j in range(i + 2, pts.size() - 1):
-			if Geometry2D.segment_intersects_segment(pts[i], pts[i + 1], pts[j], pts[j + 1]) != null:
+	for i in segs:
+		var a1 := pts[i]
+		var a2 := pts[(i + 1) % n]
+		for j in range(i + 2, segs):
+			if p_path.closed and i == 0 and j == segs - 1:
+				continue
+			var b1 := pts[j]
+			var b2 := pts[(j + 1) % n]
+			if Geometry2D.segment_intersects_segment(a1, a2, b1, b2) != null:
 				hits += 1
 	return hits
 
@@ -428,3 +448,213 @@ func _g_a_reshaped_path_is_still_cheap_to_query() -> void:
 	print("    control, the bound: x%.0f. The formula this replaced measured x2800 here." % 40.0)
 	_check("G", river.points.size() > drawn.points.size() * 4 and slowdown < 40.0,
 			"the reshape multiplied the vertices and the query cost followed them, not their square")
+
+
+## [H] pin_ends = false moves endpoints in Fractalize and Meanderize; pin_ends = true keeps them fixed.
+func _h_unpinned_endpoints_move() -> void:
+	print("[H] pin_ends = false moves endpoints; pin_ends = true preserves them")
+	var dense := _dense()
+	var in_start := dense.points[0]
+	var in_end := dense.points[dense.points.size() - 1]
+
+	# Fractalize
+	var f_free := Pasture3DGraphNodePathFractalize.new()
+	f_free.iterations = 3
+	f_free.sigma = 5.0
+	f_free.pin_ends = false
+	var f_free_out := _run(f_free, dense)
+
+	var f_pinned := Pasture3DGraphNodePathFractalize.new()
+	f_pinned.iterations = 3
+	f_pinned.sigma = 5.0
+	f_pinned.pin_ends = true
+	var f_pinned_out := _run(f_pinned, dense)
+
+	var f_free_moved := (f_free_out.points[0] != in_start and f_free_out.points[f_free_out.points.size() - 1] != in_end)
+	var f_pinned_fixed := (f_pinned_out.points[0] == in_start and f_pinned_out.points[f_pinned_out.points.size() - 1] == in_end)
+
+	# Meanderize
+	var m_free := Pasture3DGraphNodePathMeanderize.new()
+	m_free.iterations = 3
+	m_free.ratio = 0.4
+	m_free.noise_ratio = 0.2
+	m_free.pin_ends = false
+	var m_free_out := _run(m_free, dense)
+
+	var m_pinned := Pasture3DGraphNodePathMeanderize.new()
+	m_pinned.iterations = 3
+	m_pinned.ratio = 0.4
+	m_pinned.noise_ratio = 0.2
+	m_pinned.pin_ends = true
+	var m_pinned_out := _run(m_pinned, dense)
+
+	var m_free_moved := (m_free_out.points[0] != in_start and m_free_out.points[m_free_out.points.size() - 1] != in_end)
+	var m_pinned_fixed := (m_pinned_out.points[0] == in_start and m_pinned_out.points[m_pinned_out.points.size() - 1] == in_end)
+
+	print("    Fractalize: free moved=%s, pinned fixed=%s" % [str(f_free_moved), str(f_pinned_fixed)])
+	print("    Meanderize: free moved=%s, pinned fixed=%s" % [str(m_free_moved), str(m_pinned_fixed)])
+	_check("H", f_free_moved and f_pinned_fixed and m_free_moved and m_pinned_fixed,
+			"pin_ends=false displaced endpoints, pin_ends=true pinned them")
+
+
+## [I] remove_loops on closed ring excises seam loop without collapsing polygon.
+func _i_closed_ring_loop_excision() -> void:
+	print("[I] remove_loops on closed ring excises seam loop without collapsing polygon")
+	var ring_pts := PackedVector2Array()
+	# 16-point circle of radius 100
+	for k in 16:
+		var a := float(k) * TAU / 16.0
+		ring_pts.append(Vector2(cos(a) * 100.0, sin(a) * 100.0))
+	# Pull vertex 1 across segment 15 (between vertex 15 and 0):
+	ring_pts[1] = Vector2(105.0, -50.0)
+
+	var p := Pasture3DGraphPath.new()
+	p.closed = true
+	p.points = ring_pts
+
+	var m_cut := Pasture3DGraphNodePathMeanderize.new()
+	m_cut.iterations = 1
+	m_cut.ratio = 0.001
+	m_cut.noise_ratio = 0.0
+	m_cut.edge_divisions = 2
+	m_cut.remove_loops = true
+	var cut := _run(m_cut, p)
+
+	var m_uncut := Pasture3DGraphNodePathMeanderize.new()
+	m_uncut.iterations = 1
+	m_uncut.ratio = 0.001
+	m_uncut.noise_ratio = 0.0
+	m_uncut.edge_divisions = 2
+	m_uncut.remove_loops = false
+	var uncut := _run(m_uncut, p)
+
+	var self_uncut := _self_intersects(uncut)
+	var self_cut := _self_intersects(cut)
+	var body_preserved := cut.points.size() >= 20 and cut.points.size() < uncut.points.size()
+
+	print("    uncut crossings: %d, cut crossings: %d; points: %d (in) -> %d (uncut) -> %d (cut)"
+			% [self_uncut, self_cut, ring_pts.size(), uncut.points.size(), cut.points.size()])
+	_check("I", self_uncut > 0 and self_cut == 0 and body_preserved,
+			"seam crossing loop excised while preserving main polygon (%d vertices kept)" % cut.points.size())
+
+
+## [J] closed ring attribute projection across the closing seam.
+func _j_closed_ring_attribute_projection() -> void:
+	print("[J] closed ring attribute projection across the closing seam")
+	var sq := Pasture3DGraphPath.new()
+	sq.closed = true
+	sq.points = PackedVector2Array([
+		Vector2(0, 0),
+		Vector2(100, 0),
+		Vector2(100, 100),
+		Vector2(0, 100),
+	])
+	sq.half_widths = PackedFloat32Array([10.0, 20.0, 30.0, 40.0])
+	sq.heights = PackedFloat32Array([100.0, 200.0, 300.0, 400.0])
+
+	var res := Pasture3DGraphNodePathResample.new()
+	res.step = 10.0
+	var out := _run(res, sq)
+
+	var has_seam_pts := false
+	var seam_attr_ok := true
+	for i in out.points.size():
+		var pt := out.points[i]
+		# The closing segment is x = 0, y from 100 down to 0
+		if is_equal_approx(pt.x, 0.0) and pt.y > 5.0 and pt.y < 95.0:
+			has_seam_pts = true
+			var w := out.half_widths[i]
+			var h := out.heights[i]
+			if is_nan(w) or is_nan(h) or w < 9.9 or w > 40.1 or h < 99.9 or h > 400.1:
+				seam_attr_ok = false
+
+	# CONTROL: an open path with the same points has NO closing segment
+	var open_sq := Pasture3DGraphPath.new()
+	open_sq.closed = false
+	open_sq.points = sq.points
+	open_sq.half_widths = sq.half_widths
+	open_sq.heights = sq.heights
+	var open_out := _run(res, open_sq)
+	var open_has_seam_pts := false
+	for pt in open_out.points:
+		if is_equal_approx(pt.x, 0.0) and pt.y > 5.0 and pt.y < 95.0:
+			open_has_seam_pts = true
+
+	print("    closed seam points found=%s, attributes valid=%s; control, open path seam points=%s"
+			% [str(has_seam_pts), str(seam_attr_ok), str(open_has_seam_pts)])
+	_check("J", has_seam_pts and seam_attr_ok and not open_has_seam_pts,
+			"closing seam segment attributes interpolated properly on closed ring")
+
+
+## [K] Meanderize wavelength governs bend frequency: a 50 m wavelength produces more bends than 200 m.
+func _k_meanderize_wavelength_scale() -> void:
+	print("[K] Meanderize wavelength controls spatial bend frequency")
+	var p := Pasture3DGraphPath.new()
+	p.points = PackedVector2Array([Vector2(0, 0), Vector2(500, 0)])
+
+	var m_short := Pasture3DGraphNodePathMeanderize.new()
+	m_short.wavelength = 50.0
+	m_short.amplitude = 25.0
+	m_short.ratio = 0.4
+	m_short.noise_ratio = 0.0
+	m_short.iterations = 1
+	var out_short := _run(m_short, p)
+
+	var m_long := Pasture3DGraphNodePathMeanderize.new()
+	m_long.wavelength = 200.0
+	m_long.amplitude = 25.0
+	m_long.ratio = 0.4
+	m_long.noise_ratio = 0.0
+	m_long.iterations = 1
+	var out_long := _run(m_long, p)
+
+	var crossings_short := 0
+	for i in range(1, out_short.points.size()):
+		if (out_short.points[i - 1].y * out_short.points[i].y) < -1.0e-4:
+			crossings_short += 1
+
+	var crossings_long := 0
+	for i in range(1, out_long.points.size()):
+		if (out_long.points[i - 1].y * out_long.points[i].y) < -1.0e-4:
+			crossings_long += 1
+
+	print("    50 m wavelength crossings: %d; 200 m wavelength crossings: %d" % [crossings_short, crossings_long])
+	_check("K", crossings_short >= crossings_long * 2 and crossings_long > 0,
+			"wavelength=50m produced at least 2x more bends than wavelength=200m on straight channel")
+
+
+## [L] Fractalize wavelength governs feature scale independently of vertex density.
+func _l_fractalize_wavelength_scale() -> void:
+	print("[L] Fractalize wavelength controls feature scale independently of input vertex density")
+	var p_sparse := Pasture3DGraphPath.new()
+	var p_dense := Pasture3DGraphPath.new()
+	var pts_s := PackedVector2Array()
+	var pts_d := PackedVector2Array()
+	for i in 11:
+		pts_s.append(Vector2(float(i) * 50.0, 0.0))
+	for i in 101:
+		pts_d.append(Vector2(float(i) * 5.0, 0.0))
+	p_sparse.points = pts_s
+	p_dense.points = pts_d
+
+	var f := Pasture3DGraphNodePathFractalize.new()
+	f.wavelength = 100.0
+	f.sigma = 10.0
+	f.iterations = 3
+	f.seed = 42
+
+	var out_s := _run(f, p_sparse)
+	var out_d := _run(f, p_dense)
+
+	var max_y_s := 0.0
+	for pt in out_s.points:
+		max_y_s = maxf(max_y_s, absf(pt.y))
+	var max_y_d := 0.0
+	for pt in out_d.points:
+		max_y_d = maxf(max_y_d, absf(pt.y))
+
+	print("    sparse max displacement: %.2f m; dense max displacement: %.2f m" % [max_y_s, max_y_d])
+	var ok := max_y_s >= 4.0 and max_y_d >= 4.0
+	_check("L", ok, "both sparse and dense inputs developed macro fractal features at 100m wavelength")
+
+

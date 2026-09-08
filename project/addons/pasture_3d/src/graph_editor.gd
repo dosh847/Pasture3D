@@ -159,6 +159,8 @@ func edit_graph(p_graph: Pasture3DTerrainGraph, p_mod: Pasture3DNodeGraph = null
 		graph.changed.disconnect(_on_graph_changed)
 	if graph != null and graph.has_signal(&"structure_changed") and graph.structure_changed.is_connected(_on_graph_changed):
 		graph.structure_changed.disconnect(_on_graph_changed)
+	if graph != null and graph.has_meta(&"_editor_selected_node"):
+		graph.set_meta(&"_editor_selected_node", -1)
 	graph = p_graph
 	if graph != null:
 		if not graph.changed.is_connected(_on_graph_changed):
@@ -790,6 +792,7 @@ func _build_ui() -> void:
 	_graphedit.connection_from_empty.connect(_on_connection_from_empty)
 	_graphedit.delete_nodes_request.connect(_on_delete_request)
 	_graphedit.node_selected.connect(_on_node_selected)
+	_graphedit.node_deselected.connect(_on_node_deselected)
 	_graphedit.begin_node_move.connect(_on_node_move_begin)
 	_graphedit.end_node_move.connect(_on_node_move_end)
 	_graphedit.popup_request.connect(_on_popup_request)
@@ -1388,6 +1391,17 @@ func _add_inline_node_controls(p_gn: GraphNode, p_index: int, p_node: Pasture3DG
 				_auto_fit_node_range(p_index)
 			)
 			btn_row.add_child(auto_btn)
+			p_gn.add_child(btn_row)
+
+		&"path_fractalize", &"path_meanderize":
+			var btn_row := HBoxContainer.new()
+			var seed_btn := Button.new()
+			seed_btn.text = "🎲"
+			seed_btn.tooltip_text = "Randomize seed"
+			seed_btn.pressed.connect(func():
+				p_node.set("seed", randi() % 100000)
+			)
+			btn_row.add_child(seed_btn)
 			p_gn.add_child(btn_row)
 
 
@@ -2448,6 +2462,10 @@ func _on_node_selected(p_node: Node) -> void:
 		return
 	var i := _idx(p_node.name)
 	if i >= 0 and i < graph.nodes.size() and graph.nodes[i] != null:
+		graph.set_meta(&"_editor_selected_node", i)
+		var host_b := _find_host_brush()
+		if host_b != null and is_instance_valid(host_b) and host_b.has_method("update_gizmos"):
+			host_b.update_gizmos()
 		if inspect_dock != null and is_instance_valid(inspect_dock):
 			inspect_dock.set_target(i) # a no-op while pinned, which is what the pin is for
 		if plugin != null:
@@ -2458,6 +2476,17 @@ func _on_node_selected(p_node: Node) -> void:
 			# makes the dropdown present whenever a network is reachable.
 			_offer_source_keys()
 			EditorInterface.edit_resource(graph.nodes[i])
+
+
+func _on_node_deselected(p_node: Node) -> void:
+	if graph == null:
+		return
+	var i := _idx(p_node.name)
+	if int(graph.get_meta(&"_editor_selected_node", -1)) == i:
+		graph.set_meta(&"_editor_selected_node", -1)
+		var host_b := _find_host_brush()
+		if host_b != null and is_instance_valid(host_b) and host_b.has_method("update_gizmos"):
+			host_b.update_gizmos()
 
 
 ## Stamp every scene-naming source node with the keys it can choose from, for the inspector dropdown.
