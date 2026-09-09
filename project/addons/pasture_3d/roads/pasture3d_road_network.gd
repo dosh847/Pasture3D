@@ -825,6 +825,7 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 	for b in brushes:
 		by_key[b.road_key()] = b
 	var aprons: Array = []
+	var active_ids := {}
 	for j in junctions:
 		if not j.detected or j.radius <= 0.01:
 			continue
@@ -832,13 +833,40 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 		if not by_key.has(major_key):
 			continue
 		var b = by_key[major_key]
+		var t: Pasture3DRoadType = b.resolved_road_type()
+		var mat_id: int = t.surface_material.get_instance_id() if (t != null and t.surface_material != null) else 0
+
+		var jid := str(j.id)
+		active_ids[jid] = true
+		var arm_dirs_snap: Array = []
+		for ad: Vector2 in j.arm_dirs:
+			arm_dirs_snap.append(Vector2(snapped(ad.x, 0.001), snapped(ad.y, 0.001)))
+		var trim_snap: Array = []
+		for tb: float in j.trim_backs:
+			trim_snap.append(snapped(tb, 0.001))
+		var halfs_snap: Array = []
+		for hf: float in j.arm_halfs:
+			halfs_snap.append(snapped(hf, 0.001))
+
+		var j_hash: int = hash([
+			jid,
+			snapped(j.center.x, 0.001), snapped(j.center.y, 0.001),
+			snapped(j.elevation, 0.001),
+			arm_dirs_snap, halfs_snap, trim_snap,
+			snapped(j.effective_corner_radius(), 0.001),
+			j.priorities,
+			default_control,
+			mat_id
+		])
+
+		if _apron_spec_hashes.get(jid) == j_hash and _apron_spec_cache.has(jid):
+			aprons.append(_apron_spec_cache[jid])
+			continue
+
 		var run: Dictionary = b.build_run()
 		if run.is_empty():
 			continue
-		# Still the major road's, and only for the two things priority actually decides: what the surface
-		# is MADE of, and how high the whole thing sits. The SHAPE comes from the arms below — see
-		# `footprint_boundary_heights`, and the tie two same-type roads used to lose to scene order.
-		var t: Pasture3DRoadType = b.resolved_road_type()
+
 		# A junction whose arms the solver could not describe (a pre-P9a-0 record loaded from disk, or a
 		# degenerate group) produces no polygon, and is SKIPPED rather than falling back to a disc. A
 		# silent fallback would hide exactly the case this replaced the disc for.
@@ -847,7 +875,7 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 		if boundary.size() < 3:
 			continue
 		var heights: PackedFloat32Array = junction_surface(j)["heights"]
-		aprons.append({
+		var spec := {
 			"id": j.id,
 			"center": j.center,
 			"boundary": boundary,
@@ -862,7 +890,17 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 			"heights": heights,
 			"center_h": j.elevation,
 			"material": t.surface_material if t != null else null,
-		})
+		}
+		_apron_spec_cache[jid] = spec
+		_apron_spec_hashes[jid] = j_hash
+		aprons.append(spec)
+
+	# Evict stale aprons from cache
+	for k in _apron_spec_cache.keys():
+		if not active_ids.has(k):
+			_apron_spec_cache.erase(k)
+			_apron_spec_hashes.erase(k)
+
 	var host := ensure_junction_host()
 	if host == null:
 		return 0
@@ -1205,6 +1243,8 @@ func paint_order(p_brushes: Array) -> Array:
 ## of what S7 is removing; and the cost of being wrong is one extra full repaint on the first resolve
 ## after a load, which is the pass that used to run every time anyway.
 var _painted: Dictionary = {}
+var _apron_spec_cache: Dictionary = {}
+var _apron_spec_hashes: Dictionary = {}
 
 
 func _paint_layer_key(p_brush) -> String:

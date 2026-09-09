@@ -74,6 +74,7 @@ static func find_crossings(p_runs: Array, p_opts: Dictionary = {}) -> Array:
 			var cb: PackedFloat32Array = rb["cum"]
 			if pa.size() < 2 or pb.size() < 2:
 				continue
+			var pair_start_idx := out.size()
 			for i in range(pa.size() - 1):
 				for j in range(pb.size() - 1):
 					var hit := _segment_crossing(pa[i], pa[i + 1], pb[j], pb[j + 1])
@@ -151,10 +152,9 @@ static func find_crossings(p_runs: Array, p_opts: Dictionary = {}) -> Array:
 					var phi := acos(clampf(-dir_a.dot(dir_b), -1.0, 1.0))
 
 					var matched := false
-					for oi in range(out.size()):
+					for oi in range(pair_start_idx, out.size()):
 						var oc: Dictionary = out[oi]
-						if ((oc["a"] == ia and oc["b"] == ib) or (oc["a"] == ib and oc["b"] == ia)) and \
-								(oc["point"] as Vector2).distance_to(p_meet) <= endpoint_tol + 0.5:
+						if (oc["point"] as Vector2).distance_to(p_meet) <= endpoint_tol + 0.5:
 							out[oi]["point"] = p_meet
 							out[oi]["s_a"] = sa_t if oc["a"] == ia else sb_t
 							out[oi]["s_b"] = sb_t if oc["a"] == ia else sa_t
@@ -367,6 +367,7 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 
 	# ---- END-TO-END CLASSIFICATION (P10) -----------------------------------------------------------
 	var is_e2e := false
+	var e2e_phi := 0.0
 	if idx.size() == 2:
 		var r0: Dictionary = p_runs[idx[0]]
 		var r1: Dictionary = p_runs[idx[1]]
@@ -383,6 +384,7 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 			var d1: Vector2 = t1 if s1 <= ARM_MIN_LENGTH else -t1
 			if d0.length_squared() > 0.5 and d1.length_squared() > 0.5 and d0.dot(d1) < 0.95:
 				is_e2e = true
+				e2e_phi = acos(clampf(-d0.dot(d1), -1.0, 1.0))
 	if is_e2e:
 		j.kind = Pasture3DRoadJunction.JunctionKind.END_TO_END
 
@@ -396,11 +398,7 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 		# End-to-end connection: closed-form trim calculation bypassing 1/sin θ divergence (§2.3).
 		var r0: Dictionary = p_runs[idx[0]]
 		var r1: Dictionary = p_runs[idx[1]]
-		var t0 := _tangent_at(r0, arcs[0])
-		var t1 := _tangent_at(r1, arcs[1])
-		var d0: Vector2 = t0 if arcs[0] <= ARM_MIN_LENGTH else -t0
-		var d1: Vector2 = t1 if arcs[1] <= ARM_MIN_LENGTH else -t1
-		var phi := acos(clampf(-d0.dot(d1), -1.0, 1.0))
+		var phi := e2e_phi
 		var w0: float = float(r0.get("half_width", 4.0))
 		var w1: float = float(r1.get("half_width", 4.0))
 		if phi < MIN_CROSSING_ANGLE:

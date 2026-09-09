@@ -110,6 +110,10 @@ var last_rebuilt: bool = false
 var _pick_meshes: Array[TriangleMesh] = []
 var _pick_digest: String = ""
 
+## Apron chunks and content digests for junction surface caching.
+var _apron_chunks: Dictionary = {}
+var _apron_digests: Dictionary = {}
+
 
 func _ready() -> void:
 	set_process(true)
@@ -375,10 +379,102 @@ func _place_props(p_brush: Pasture3DRoadBrush, p_type: Pasture3DRoadType, p_tran
 ## Each apron carries one mesh repeated across the LOD slots. A footprint of a few dozen triangles has nothing
 ## worth decimating, and sharing the resource costs nothing — what it buys is that aprons go through the
 ## same distance culling and the same far-hide as everything else, with no second code path.
+## Stable, hashable digest of one apron's geometry, markings, and display parameters.
+func _apron_digest(a: Dictionary, p_lift: float) -> String:
+	if a.has("_cached_digest"):
+		var cd: Dictionary = a["_cached_digest"]
+		if cd.get("lift") == p_lift and cd.get("col") == collision_enabled and cd.get("marks") == markings_enabled and cd.get("col_lay") == collision_layer and cd.get("col_mask") == collision_mask:
+			return cd.get("digest", "")
+
+	var parts: Array = []
+	var c: Vector2 = a.get("center", Vector2.ZERO)
+	parts.append("%.3f,%.3f" % [c.x, c.y])
+	parts.append("%.3f" % float(a.get("center_h", 0.0)))
+	parts.append("%.3f" % p_lift)
+	parts.append(str(collision_enabled))
+	if collision_enabled:
+		parts.append(str(collision_layer))
+		parts.append(str(collision_mask))
+	parts.append(str(markings_enabled))
+	var mat: Material = a.get("material")
+	parts.append(str(mat.get_instance_id()) if mat != null else "0")
+	var mmat: Material = markings_material
+	parts.append(str(mmat.get_instance_id()) if mmat != null else "0")
+	var b: PackedVector2Array = a.get("boundary", PackedVector2Array())
+	parts.append(str(b.size()))
+	for pt in b:
+		parts.append("%.3f,%.3f" % [pt.x, pt.y])
+	var h: PackedFloat32Array = a.get("heights", PackedFloat32Array())
+	parts.append(str(h.size()))
+	for y in h:
+		parts.append("%.3f" % y)
+	var marks: Array = a.get("markings", [])
+	parts.append(str(marks.size()))
+	for m in marks:
+		if m is Dictionary:
+			parts.append(str(m.get("kind", 0)))
+			parts.append("%.3f" % float(m.get("y", 0.0)))
+			var quad: PackedVector2Array = m.get("quad", PackedVector2Array())
+			parts.append(str(quad.size()))
+			for qp in quad:
+				parts.append("%.3f,%.3f" % [qp.x, qp.y])
+	var res: String = ":".join(parts)
+	a["_cached_digest"] = {
+		"digest": res,
+		"lift": p_lift,
+		"col": collision_enabled,
+		"marks": markings_enabled,
+		"col_lay": collision_layer,
+		"col_mask": collision_mask,
+	}
+	return res
+
+
+## Build one apron per junction. `p_aprons` is prepared by the network, each entry
+## `{center, radius, plan, cum, alignment, crown, material}` — the host does no lookups of its own.
+##
+## Hosted here rather than on a road's own host because a junction belongs to no single road: it is where
+## several stop being separate. Put on the network's host, it is rebuilt once per resolve instead of once
+## per participant, and there is no question of which road owns it.
+##
+## Each apron carries one mesh repeated across the LOD slots. A footprint of a few dozen triangles has nothing
+## worth decimating, and sharing the resource costs nothing — what it buys is that aprons go through the
+## same distance culling and the same far-hide as everything else, with no second code path.
 func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_LIFT) -> int:
-	_clear()
 	depth_lift = p_lift
+	var active_jids := {}
 	for a: Dictionary in p_aprons:
+		var jid: String = str(a.get("id", "?"))
+		active_jids[jid] = true
+
+	# Drop aprons that are no longer present in p_aprons
+	for jid in _apron_chunks.keys():
+		if not active_jids.has(jid):
+			var old_c: Dictionary = _apron_chunks[jid]
+			var n: Node = old_c.get("node")
+			if is_instance_valid(n):
+				if n.get_parent() != null:
+					n.get_parent().remove_child(n)
+				n.queue_free()
+			_apron_chunks.erase(jid)
+			_apron_digests.erase(jid)
+
+	for a: Dictionary in p_aprons:
+		var jid: String = str(a.get("id", "?"))
+		var d := _apron_digest(a, p_lift)
+		if _apron_chunks.has(jid) and _apron_digests.get(jid) == d and is_instance_valid(_apron_chunks[jid].get("node")):
+			continue # Unchanged: retain existing mesh, collision, and markings intact
+
+		if _apron_chunks.has(jid):
+			var old_c: Dictionary = _apron_chunks[jid]
+			var n: Node = old_c.get("node")
+			if is_instance_valid(n):
+				if n.get_parent() != null:
+					n.get_parent().remove_child(n)
+				n.queue_free()
+			_apron_chunks.erase(jid)
+			_apron_digests.erase(jid)
+
 		var arrays := Pasture3DRoadMesher.build_footprint(a["center"], a["boundary"], a["heights"],
 				float(a["center_h"]), p_lift)
 		if arrays.is_empty():
@@ -389,7 +485,7 @@ func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_L
 		if mat != null:
 			mesh.surface_set_material(0, mat)
 		var mi := MeshInstance3D.new()
-		mi.name = "Junction_%s" % str(a.get("id", "?"))
+		mi.name = "Junction_%s" % jid
 		mi.mesh = mesh
 		mi.top_level = true
 		add_child(mi)
@@ -408,14 +504,23 @@ func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_L
 			meshes.append(mesh)
 		var c: Vector2 = a["center"]
 		var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-		_chunks.append({
+		_apron_chunks[jid] = {
 			"node": mi,
 			"centre": Vector3(c.x, verts[0].y, c.y),
 			"bounds": mesh.get_aabb(),
 			"meshes": meshes,
 			"lod": 0,
 			"markings": markings,
-		})
+		}
+		_apron_digests[jid] = d
+
+	_chunks = _apron_chunks.values()
+	var col_count := 0
+	for ch in _chunks:
+		var n: Node = ch.get("node")
+		if is_instance_valid(n) and n.has_node("Collision"):
+			col_count += 1
+	_colliders = col_count
 	_dirty_lod = true
 	_report = true
 	return _chunks.size()
@@ -446,6 +551,8 @@ func _clear() -> void:
 				n.get_parent().remove_child(n)
 			n.queue_free()
 	_chunks.clear()
+	_apron_chunks.clear()
+	_apron_digests.clear()
 	_colliders = 0
 
 

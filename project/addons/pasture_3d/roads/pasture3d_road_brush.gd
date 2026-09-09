@@ -1154,12 +1154,13 @@ func _formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: float, p_vs:
 				maxi(int(ceil(b_total / b_ds)) + 1, 2))["skip"]
 		var r_cells := int(ceil(radius / p_vs))
 		var r2 := radius * radius
+		var step_dist: float = maxf(PROTECT_STEP, radius * 0.4)
 		for i in range(plan.size() - 1):
 			var a := plan[i]
 			var c := plan[i + 1]
 			var seg := a.distance_to(c)
 			var s0: float = b_cum[i]
-			var steps := maxi(int(ceil(seg / PROTECT_STEP)), 1)
+			var steps := maxi(int(ceil(seg / step_dist)), 1)
 			for k in range(steps + 1):
 				var f := float(k) / float(steps)
 				var si := clampi(int(round((s0 + seg * f) / b_ds)), 0, b_skip.size() - 1)
@@ -1171,10 +1172,18 @@ func _formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: float, p_vs:
 				for iz in range(maxi(cz - r_cells, 0), mini(cz + r_cells + 1, p_gh)):
 					var wz := p_min_z + float(iz) * p_vs
 					var row := iz * p_gw
+					var dy := wz - at.y
+					var dy2 := dy * dy
+					if dy2 > r2:
+						continue
 					for ix in range(maxi(cx - r_cells, 0), mini(cx + r_cells + 1, p_gw)):
+						var idx := row + ix
+						if out[idx] != 0:
+							continue
 						var wx := p_min_x + float(ix) * p_vs
-						if Vector2(wx - at.x, wz - at.y).length_squared() <= r2:
-							out[row + ix] = 1
+						var dx := wx - at.x
+						if dx * dx + dy2 <= r2:
+							out[idx] = 1
 	return out
 
 
@@ -1220,6 +1229,10 @@ func _merge_junction_earthwork(p_out: PackedFloat32Array, p_ground: PackedFloat3
 	var mine := road_key()
 	var partners := {}
 	for j in net.junctions_for(mine):
+		# END_TO_END connections meet flush at a single seam rather than laterally crossing;
+		# re-grading the foreign road over the entire terrain grid is redundant and expensive.
+		if j.kind == Pasture3DRoadJunction.JunctionKind.END_TO_END:
+			continue
 		for k in j.road_keys:
 			if k != mine:
 				partners[k] = true
@@ -1228,22 +1241,73 @@ func _merge_junction_earthwork(p_out: PackedFloat32Array, p_ground: PackedFloat3
 	for b in net.road_brushes():
 		if b == null or b == self or not partners.has(b.road_key()):
 			continue
-		var theirs := b.earthwork_over(p_ground, p_gw, p_gh, p_min_x, p_min_z, p_vs)
-		if theirs.size() != p_out.size():
+
+		# Compute conflict bounding box of all crossing junctions between mine and b
+		var conflict_lo := Vector2(INF, INF)
+		var conflict_hi := Vector2(-INF, -INF)
+		for j in net.junctions_for(mine):
+			if j.kind == Pasture3DRoadJunction.JunctionKind.END_TO_END:
+				continue
+			if not j.road_keys.has(b.road_key()):
+				continue
+			var surf := net.junction_surface(j)
+			var bnd: PackedVector2Array = surf.get("boundary", PackedVector2Array())
+			if not bnd.is_empty():
+				for pt in bnd:
+					conflict_lo.x = minf(conflict_lo.x, pt.x)
+					conflict_lo.y = minf(conflict_lo.y, pt.y)
+					conflict_hi.x = maxf(conflict_hi.x, pt.x)
+					conflict_hi.y = maxf(conflict_hi.y, pt.y)
+			else:
+				var r: float = maxf(j.radius, 15.0)
+				conflict_lo.x = minf(conflict_lo.x, j.center.x - r)
+				conflict_lo.y = minf(conflict_lo.y, j.center.y - r)
+				conflict_hi.x = maxf(conflict_hi.x, j.center.x + r)
+				conflict_hi.y = maxf(conflict_hi.y, j.center.y + r)
+
+		if not is_finite(conflict_lo.x):
 			continue
-		for k in p_out.size():
-			var g: float = p_ground[k]
-			var t: float = theirs[k]
-			if not (is_finite(g) and is_finite(t)):
-				continue
-			var m: float = p_out[k]
-			if not is_finite(m):
-				# A cell outside THIS road's corridor but inside theirs. It is not ours to write —
-				# their own bake covers it — and inventing ground here would paint the whole of their
-				# corridor from our brush.
-				continue
-			if absf(t - g) > absf(m - g):
-				p_out[k] = t
+
+		# Restrict foreign grade and merge strictly to the localized intersection conflict zone
+		const CONFLICT_MARGIN: float = 30.0
+		var c_ix0 := clampi(int(floor((conflict_lo.x - CONFLICT_MARGIN - p_min_x) / p_vs)), 0, p_gw - 1)
+		var c_ix1 := clampi(int(ceil((conflict_hi.x + CONFLICT_MARGIN - p_min_x) / p_vs)), 0, p_gw - 1)
+		var c_iz0 := clampi(int(floor((conflict_lo.y - CONFLICT_MARGIN - p_min_z) / p_vs)), 0, p_gh - 1)
+		var c_iz1 := clampi(int(ceil((conflict_hi.y + CONFLICT_MARGIN - p_min_z) / p_vs)), 0, p_gh - 1)
+
+		var sub_gw := c_ix1 - c_ix0 + 1
+		var sub_gh := c_iz1 - c_iz0 + 1
+		if sub_gw <= 0 or sub_gh <= 0:
+			continue
+		var sub_min_x := p_min_x + float(c_ix0) * p_vs
+		var sub_min_z := p_min_z + float(c_iz0) * p_vs
+
+		var sub_ground := PackedFloat32Array()
+		sub_ground.resize(sub_gw * sub_gh)
+		for liz in sub_gh:
+			var src_row := (c_iz0 + liz) * p_gw + c_ix0
+			var dst_row := liz * sub_gw
+			for lix in sub_gw:
+				sub_ground[dst_row + lix] = p_ground[src_row + lix]
+
+		var theirs := b.earthwork_over(sub_ground, sub_gw, sub_gh, sub_min_x, sub_min_z, p_vs)
+		if theirs.size() != sub_ground.size():
+			continue
+
+		for liz in sub_gh:
+			var src_row := (c_iz0 + liz) * p_gw + c_ix0
+			var dst_row := liz * sub_gw
+			for lix in sub_gw:
+				var k := src_row + lix
+				var g: float = p_ground[k]
+				var t: float = theirs[dst_row + lix]
+				if not (is_finite(g) and is_finite(t)):
+					continue
+				var m: float = p_out[k]
+				if not is_finite(m):
+					continue
+				if absf(t - g) > absf(m - g):
+					p_out[k] = t
 	return p_out
 
 
@@ -1270,8 +1334,6 @@ func earthwork_over(p_ground: PackedFloat32Array, p_gw: int, p_gh: int, p_min_x:
 				"crown": prof["crown"],
 				"cut_batter": prof["cut_batter"],
 				"fill_batter": prof["fill_batter"],
-				"exclude": _junction_exclusion_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs),
-				"protect": _foreign_formation_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs),
 			})
 	return res["height"]
 
@@ -1299,12 +1361,16 @@ func grade_junction_footprints(p_z: PackedFloat32Array, p_gw: int, p_gh: int, p_
 	if net == null or p_vs <= 0.0:
 		return p_z
 	var out := p_z
-	# Built once for the whole pass, not once per junction: it walks every road's plan.
-	var formation := _all_formation_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs)
+	# Built lazily only if at least one junction has a non-empty footprint surface to batter.
+	var formation := PackedByteArray()
 	for j in net.junctions_for(road_key()):
+		if j.kind == Pasture3DRoadJunction.JunctionKind.END_TO_END and j.radius <= 0.01:
+			continue
 		var surf := net.junction_surface(j)
 		if surf.is_empty():
 			continue
+		if formation.is_empty():
+			formation = _all_formation_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs)
 		var boundary: PackedVector2Array = surf["boundary"]
 		var heights: PackedFloat32Array = surf["heights"]
 		var centre: Vector2 = surf["center"]
@@ -1425,12 +1491,24 @@ func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_g
 		hi = Vector2(maxf(hi.x, boundary[i].x), maxf(hi.y, boundary[i].y))
 		z_lo = minf(z_lo, heights[i])
 		z_hi = maxf(z_hi, heights[i])
+
+	# Localize the rise scan to the junction's local footprint neighborhood instead of scanning
+	# all 187k+ cells across the entire terrain grid in GDScript.
+	const MAX_LOCAL_BATTER_RADIUS: float = 35.0
+	var local_ix0 := clampi(int(floor((lo.x - MAX_LOCAL_BATTER_RADIUS - p_min_x) / p_vs)), 0, p_gw - 1)
+	var local_ix1 := clampi(int(ceil((hi.x + MAX_LOCAL_BATTER_RADIUS - p_min_x) / p_vs)), 0, p_gw - 1)
+	var local_iz0 := clampi(int(floor((lo.y - MAX_LOCAL_BATTER_RADIUS - p_min_z) / p_vs)), 0, p_gh - 1)
+	var local_iz1 := clampi(int(ceil((hi.y + MAX_LOCAL_BATTER_RADIUS - p_min_z) / p_vs)), 0, p_gh - 1)
+
 	var rise := 0.0
-	for idx in p_ground.size():
-		var h: float = p_ground[idx]
-		if is_finite(h):
-			rise = maxf(rise, maxf(h - z_lo, z_hi - h))
-	var reach: float = rise / minf(cut_batter, fill_batter) + verge
+	for liz in range(local_iz0, local_iz1 + 1):
+		var lrow := liz * p_gw
+		for lix in range(local_ix0, local_ix1 + 1):
+			var h: float = p_ground[lrow + lix]
+			if is_finite(h):
+				rise = maxf(rise, maxf(h - z_lo, z_hi - h))
+	var reach: float = minf(rise / minf(cut_batter, fill_batter) + verge, MAX_LOCAL_BATTER_RADIUS)
+	var reach_sq := reach * reach
 
 	var ix0 := clampi(int(floor((lo.x - reach - p_min_x) / p_vs)), 0, p_gw - 1)
 	var ix1 := clampi(int(ceil((hi.x + reach - p_min_x) / p_vs)), 0, p_gw - 1)
@@ -1440,6 +1518,10 @@ func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_g
 	for iz in range(iz0, iz1 + 1):
 		var row := iz * p_gw
 		var wz := p_min_z + float(iz) * p_vs
+		var dy: float = maxf(0.0, maxf(lo.y - wz, wz - hi.y))
+		var dy_sq := dy * dy
+		if dy_sq > reach_sq:
+			continue
 		for ix in range(ix0, ix1 + 1):
 			var idx := row + ix
 			var here: float = out[idx]
@@ -1463,7 +1545,11 @@ func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_g
 			# nothing there and that ground is the junction's to grade.
 			if idx < p_formation.size() and p_formation[idx] != 0:
 				continue
-			var at := Vector2(p_min_x + float(ix) * p_vs, wz)
+			var at_x := p_min_x + float(ix) * p_vs
+			var dx: float = maxf(0.0, maxf(lo.x - at_x, at_x - hi.x))
+			if dx * dx + dy_sq > reach_sq:
+				continue
+			var at := Vector2(at_x, wz)
 			if Geometry2D.is_point_in_polygon(at, boundary):
 				continue # the junction's surface, already written
 			var edge := Pasture3DRoadMesher.footprint_edge_at(at, boundary, heights)
@@ -2188,10 +2274,21 @@ func junction_digest() -> String:
 		# crossing, and the apron MESH meanwhile rebuilt to the fresh numbers, so the ground and the
 		# pavement disagreed by exactly the amount the last bake had moved the road.
 		#
-		# Including the surface closes the loop: a resolve that moved it schedules one more bake, and the
-		# fixed point is reached on the next pass rather than never.
-		parts.append("%s|%.3f|%.3f|%.3f|%.3f|%s|%s" % [j.id, j.arc_length_for(key), j.pin_for(key),
-				j.trim_back_for(key), j.elevation, j.arm_z, j.arm_banks])
+		if j.kind == Pasture3DRoadJunction.JunctionKind.END_TO_END:
+			# End-to-end connections meet flush without an apron polygon or crossing cut-face mesh.
+			# Only depend on this road's pin, trim, and the junction elevation, decoupling from the partner's
+			# cut-face height to prevent multi-frame rebake ping-pong cascades across connected roads.
+			parts.append("%s|%.3f|%.3f|%.3f|%.3f" % [j.id, j.arc_length_for(key), j.pin_for(key),
+					j.trim_back_for(key), j.elevation])
+		else:
+			var z_strs: PackedStringArray = []
+			for z in j.arm_z:
+				z_strs.append("%.3f" % float(z))
+			var bank_strs: PackedStringArray = []
+			for b in j.arm_banks:
+				bank_strs.append("%.3f" % float(b))
+			parts.append("%s|%.3f|%.3f|%.3f|%.3f|%s|%s" % [j.id, j.arc_length_for(key), j.pin_for(key),
+					j.trim_back_for(key), j.elevation, ",".join(z_strs), ",".join(bank_strs)])
 	parts.sort()
 	return "\n".join(parts)
 
@@ -2199,7 +2296,10 @@ func junction_digest() -> String:
 ## Bake again because the junctions moved. Records the digest FIRST, so the bake it triggers is credited
 ## with the pins it is about to use and the next resolve does not ask for another one.
 func schedule_junction_rebake() -> void:
-	last_junction_digest = junction_digest()
+	var d := junction_digest()
+	if d == last_junction_digest:
+		return
+	last_junction_digest = d
 	_schedule_refresh()
 
 
