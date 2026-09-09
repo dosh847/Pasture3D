@@ -449,7 +449,11 @@ func _resolve_lane_graphs(p_brushes: Array) -> void:
 		var arms := _arms_for(j, by_key)
 		if arms.size() < 2:
 			continue
-		var res := Pasture3DRoadLaneSolver.solve(arms, j.connectors, {"left_hand": left_hand})
+		var is_e2e: bool = (j.kind == Pasture3DRoadJunction.JunctionKind.END_TO_END)
+		var res := Pasture3DRoadLaneSolver.solve(arms, j.connectors, {
+			"left_hand": left_hand,
+			"is_end_to_end": is_e2e,
+		})
 		j.connectors = _typed_connectors(res["connectors"])
 		j.stop_lines = _typed_stop_lines(res["stop_lines"])
 		# Right of way is built from the connectors that were just resolved, not alongside them: a
@@ -481,7 +485,12 @@ func _arms_for(p_junction: Pasture3DRoadJunction, p_by_key: Dictionary) -> Array
 		var trim: float = p_junction.trim_back_for(String(key))
 		if not is_finite(s):
 			continue
+		var total: float = brush.total_arc_length()
 		for end in [Pasture3DRoadLaneConnector.End.BEFORE, Pasture3DRoadLaneConnector.End.AFTER]:
+			if end == Pasture3DRoadLaneConnector.End.AFTER and total - s <= Pasture3DRoadJunctionSolver.ARM_MIN_LENGTH:
+				continue
+			if end == Pasture3DRoadLaneConnector.End.BEFORE and s <= Pasture3DRoadJunctionSolver.ARM_MIN_LENGTH:
+				continue
 			var at: float = s - trim if end == Pasture3DRoadLaneConnector.End.BEFORE else s + trim
 			var y: float = brush.height_at_arc(at)
 			if not is_finite(y):

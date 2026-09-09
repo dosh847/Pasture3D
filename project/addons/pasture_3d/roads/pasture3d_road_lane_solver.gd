@@ -92,17 +92,21 @@ static func solve(p_arms: Array, p_existing: Array = [], p_opts: Dictionary = {}
 				continue
 			connectors.append(_connector(from_ep, to_ep, by_id, left_hand))
 
+	var is_e2e := bool(p_opts.get("is_end_to_end", false))
+	var suppress_stop_lines := bool(p_opts.get("suppress_stop_lines", false)) or is_e2e
+
 	var stop_lines: Array = []
-	for ep: Dictionary in incoming:
-		var sl := Pasture3DRoadStopLine.new()
-		sl.road_key = ep["key"]
-		sl.lane = int(ep["lane"])
-		sl.end = int(ep["end"])
-		sl.point = Vector3(ep["pos"].x, ep["y"], ep["pos"].y)
-		sl.heading = ep["heading"]
-		sl.width = float(ep["width"])
-		sl.distance = float(ep.get("distance", NAN))
-		stop_lines.append(sl)
+	if not suppress_stop_lines:
+		for ep: Dictionary in incoming:
+			var sl := Pasture3DRoadStopLine.new()
+			sl.road_key = ep["key"]
+			sl.lane = int(ep["lane"])
+			sl.end = int(ep["end"])
+			sl.point = Vector3(ep["pos"].x, ep["y"], ep["pos"].y)
+			sl.heading = ep["heading"]
+			sl.width = float(ep["width"])
+			sl.distance = float(ep.get("distance", NAN))
+			stop_lines.append(sl)
 
 	return {"connectors": connectors, "stop_lines": stop_lines}
 

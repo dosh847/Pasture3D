@@ -44,6 +44,9 @@ const ARM_MIN_LENGTH: float = 0.5
 ## meeting at 2° are running alongside each other, not crossing.
 const MIN_CROSSING_ANGLE: float = 0.12 # radians, about 7°
 
+## Proximity tolerance within which two road terminals form an end-to-end connection, metres (P10).
+const DEFAULT_ENDPOINT_TOLERANCE: float = 1.5
+
 
 ## Find every crossing between the given runs.
 ##
@@ -56,9 +59,10 @@ const MIN_CROSSING_ANGLE: float = 0.12 # radians, about 7°
 ##   priority   int                   — higher wins the junction (§5.2)
 ##   half_width float                 — half the formation, metres
 ##
-## Returns raw crossings: `[{a, b, point, s_a, s_b, angle}, …]`, indices into `p_runs`.
+## Returns raw crossings: `[{a, b, point, s_a, s_b, angle, endpoint}, …]`, indices into `p_runs`.
 static func find_crossings(p_runs: Array, p_opts: Dictionary = {}) -> Array:
 	var clearance: float = float(p_opts.get("clearance", DEFAULT_CLEARANCE))
+	var endpoint_tol: float = float(p_opts.get("endpoint_tolerance", DEFAULT_ENDPOINT_TOLERANCE))
 	var out: Array = []
 	for ia in range(p_runs.size()):
 		for ib in range(ia + 1, p_runs.size()):
@@ -68,6 +72,8 @@ static func find_crossings(p_runs: Array, p_opts: Dictionary = {}) -> Array:
 			var pb: PackedVector2Array = rb["plan"]
 			var ca: PackedFloat32Array = ra["cum"]
 			var cb: PackedFloat32Array = rb["cum"]
+			if pa.size() < 2 or pb.size() < 2:
+				continue
 			for i in range(pa.size() - 1):
 				for j in range(pb.size() - 1):
 					var hit := _segment_crossing(pa[i], pa[i + 1], pb[j], pb[j + 1])
@@ -98,6 +104,70 @@ static func find_crossings(p_runs: Array, p_opts: Dictionary = {}) -> Array:
 						"a": ia, "b": ib, "point": pa[i].lerp(pa[i + 1], ta),
 						"s_a": s_a, "s_b": s_b, "angle": cross_ang,
 					})
+
+			# ---- ENDPOINT PROXIMITY DETECTION (P10) -----------------------------------------------
+			# Two road ends that meet or touch within `endpoint_tolerance` connect end-to-end rather than
+			# being discarded as parallel or non-crossing.
+			var terms_a: Array = [
+				{"s": 0.0, "p": pa[0]},
+				{"s": ca[ca.size() - 1], "p": pa[pa.size() - 1]}
+			]
+			var terms_b: Array = [
+				{"s": 0.0, "p": pb[0]},
+				{"s": cb[cb.size() - 1], "p": pb[pb.size() - 1]}
+			]
+			for ta_info: Dictionary in terms_a:
+				for tb_info: Dictionary in terms_b:
+					var pt_a: Vector2 = ta_info["p"]
+					var pt_b: Vector2 = tb_info["p"]
+					if pt_a.distance_to(pt_b) > endpoint_tol:
+						continue
+					var sa_t: float = float(ta_info["s"])
+					var sb_t: float = float(tb_info["s"])
+					if _is_bridged(ra, sa_t) or _is_bridged(rb, sb_t):
+						continue
+					var za_t := _height_of(ra, sa_t)
+					var zb_t := _height_of(rb, sb_t)
+					if is_finite(za_t) and is_finite(zb_t) and absf(za_t - zb_t) > clearance:
+						continue
+					var pa_prio: int = int(ra.get("priority", 0))
+					var pb_prio: int = int(rb.get("priority", 0))
+					var p_meet: Vector2
+					if pa_prio > pb_prio:
+						p_meet = pt_a
+					elif pb_prio > pa_prio:
+						p_meet = pt_b
+					else:
+						p_meet = (pt_a + pt_b) * 0.5
+
+					var tang_a := _tangent_at(ra, sa_t)
+					var tang_b := _tangent_at(rb, sb_t)
+					var dir_a: Vector2 = tang_a if sa_t <= ARM_MIN_LENGTH else -tang_a
+					var dir_b: Vector2 = tang_b if sb_t <= ARM_MIN_LENGTH else -tang_b
+					if dir_a.length_squared() < 0.5 or dir_b.length_squared() < 0.5:
+						continue
+					if dir_a.dot(dir_b) > 0.95:
+						continue
+					var phi := acos(clampf(-dir_a.dot(dir_b), -1.0, 1.0))
+
+					var matched := false
+					for oi in range(out.size()):
+						var oc: Dictionary = out[oi]
+						if ((oc["a"] == ia and oc["b"] == ib) or (oc["a"] == ib and oc["b"] == ia)) and \
+								(oc["point"] as Vector2).distance_to(p_meet) <= endpoint_tol + 0.5:
+							out[oi]["point"] = p_meet
+							out[oi]["s_a"] = sa_t if oc["a"] == ia else sb_t
+							out[oi]["s_b"] = sb_t if oc["a"] == ia else sa_t
+							out[oi]["angle"] = phi
+							out[oi]["endpoint"] = true
+							matched = true
+							break
+					if not matched:
+						out.append({
+							"a": ia, "b": ib, "point": p_meet,
+							"s_a": sa_t, "s_b": sb_t, "angle": phi,
+							"endpoint": true,
+						})
 	return out
 
 
@@ -142,6 +212,7 @@ static func resolve(p_runs: Array, p_existing: Array = [], p_opts: Dictionary = 
 			# key, which is what the author actually chose; an override naming a road that has left the
 			# junction returns to -1, the value that means "no opinion".
 			prior.major_override = _remap_major_override(prior, j.road_keys)
+			prior.kind = j.kind
 			prior.center = j.center
 			prior.road_keys = j.road_keys
 			prior.arc_lengths = j.arc_lengths
@@ -294,20 +365,69 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 	j.arc_lengths = arcs
 	j.id = Pasture3DRoadJunction.make_id(keys, center)
 
+	# ---- END-TO-END CLASSIFICATION (P10) -----------------------------------------------------------
+	var is_e2e := false
+	if idx.size() == 2:
+		var r0: Dictionary = p_runs[idx[0]]
+		var r1: Dictionary = p_runs[idx[1]]
+		var tot0 := _run_length(r0)
+		var tot1 := _run_length(r1)
+		var s0: float = arcs[0]
+		var s1: float = arcs[1]
+		var term0 := (s0 <= ARM_MIN_LENGTH or tot0 - s0 <= ARM_MIN_LENGTH)
+		var term1 := (s1 <= ARM_MIN_LENGTH or tot1 - s1 <= ARM_MIN_LENGTH)
+		if term0 and term1:
+			var t0 := _tangent_at(r0, s0)
+			var t1 := _tangent_at(r1, s1)
+			var d0: Vector2 = t0 if s0 <= ARM_MIN_LENGTH else -t0
+			var d1: Vector2 = t1 if s1 <= ARM_MIN_LENGTH else -t1
+			if d0.length_squared() > 0.5 and d1.length_squared() > 0.5 and d0.dot(d1) < 0.95:
+				is_e2e = true
+	if is_e2e:
+		j.kind = Pasture3DRoadJunction.JunctionKind.END_TO_END
+
 	# TRIM-BACK. Each participant is pushed back far enough to clear EVERY other participant's edge, so
 	# the binding constraint is the widest road at the sharpest angle — which is why this is a max over
 	# pairs rather than a single computation.
 	var trims := PackedFloat32Array()
 	trims.resize(idx.size())
 	trims.fill(0.0)
-	for gi in range(idx.size()):
-		for gj in range(idx.size()):
-			if gi == gj:
-				continue
-			var ang := _angle_between(p_crossings, p_group, idx[gi], idx[gj])
-			var other_w: float = float((p_runs[idx[gj]] as Dictionary).get("half_width", 4.0))
-			var s: float = sin(maxf(ang, MIN_CROSSING_ANGLE))
-			trims[gi] = maxf(trims[gi], other_w / s)
+	if is_e2e:
+		# End-to-end connection: closed-form trim calculation bypassing 1/sin θ divergence (§2.3).
+		var r0: Dictionary = p_runs[idx[0]]
+		var r1: Dictionary = p_runs[idx[1]]
+		var t0 := _tangent_at(r0, arcs[0])
+		var t1 := _tangent_at(r1, arcs[1])
+		var d0: Vector2 = t0 if arcs[0] <= ARM_MIN_LENGTH else -t0
+		var d1: Vector2 = t1 if arcs[1] <= ARM_MIN_LENGTH else -t1
+		var phi := acos(clampf(-d0.dot(d1), -1.0, 1.0))
+		var w0: float = float(r0.get("half_width", 4.0))
+		var w1: float = float(r1.get("half_width", 4.0))
+		if phi < MIN_CROSSING_ANGLE:
+			if absf(w0 - w1) < 0.01:
+				trims[0] = 0.0
+				trims[1] = 0.0
+			else:
+				var taper := maxf(absf(w0 - w1) * 3.0, 2.0)
+				trims[0] = taper * 0.5
+				trims[1] = taper * 0.5
+		else:
+			if absf(w0 - w1) >= 0.01:
+				var taper := maxf(absf(w0 - w1) * 3.0, 2.0)
+				trims[0] = taper * 0.5
+				trims[1] = taper * 0.5
+			else:
+				trims[0] = 0.0
+				trims[1] = 0.0
+	else:
+		for gi in range(idx.size()):
+			for gj in range(idx.size()):
+				if gi == gj:
+					continue
+				var ang := _angle_between(p_crossings, p_group, idx[gi], idx[gj], p_runs, arcs[gi], arcs[gj])
+				var other_w: float = float((p_runs[idx[gj]] as Dictionary).get("half_width", 4.0))
+				var s: float = sin(maxf(ang, MIN_CROSSING_ANGLE))
+				trims[gi] = maxf(trims[gi], other_w / s)
 	# PRIORITY DECIDES ELEVATION (§5.2). The junction sits at the major road's own solved height, so the
 	# road with right of way keeps the profile it solved and the minor roads bend to meet it. Averaging
 	# would put a dip or a hump in the major road, which is the one road that must not have one.
@@ -484,13 +604,20 @@ static func _run_length(p_run: Dictionary) -> float:
 	return cum[cum.size() - 1] if cum.size() > 0 else 0.0
 
 
-## The crossing angle recorded between two participants, or a right angle when they never crossed each
-## other directly (a three-way cluster where A meets B and B meets C, but A never meets C).
-static func _angle_between(p_crossings: Array, p_group: Array, p_i: int, p_j: int) -> float:
+## The crossing angle recorded between two participants, or a fallback to tangent dot-product
+## at the junction arc lengths when they never crossed each other directly (a three-way cluster
+## where A meets B and B meets C, but A never meets C).
+static func _angle_between(p_crossings: Array, p_group: Array, p_i: int, p_j: int,
+		p_runs: Array = [], s_i: float = NAN, s_j: float = NAN) -> float:
 	for ci: int in p_group:
 		var c: Dictionary = p_crossings[ci]
 		if (c["a"] == p_i and c["b"] == p_j) or (c["a"] == p_j and c["b"] == p_i):
 			return float(c["angle"])
+	if p_i < p_runs.size() and p_j < p_runs.size() and is_finite(s_i) and is_finite(s_j):
+		var da := _tangent_at(p_runs[p_i], s_i)
+		var db := _tangent_at(p_runs[p_j], s_j)
+		if da.length_squared() > 0.5 and db.length_squared() > 0.5:
+			return acos(clampf(absf(da.dot(db)), 0.0, 1.0))
 	return PI * 0.5
 
 

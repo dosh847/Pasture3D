@@ -959,10 +959,11 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 			if is_finite(jpin):
 				pins[ji] = jpin
 			var trim: float = j.trim_back_for(jkey)
-			var lo := clampi(int(floor((js - trim) / p_ds)), 0, p_n_s - 1)
-			var hi := clampi(int(ceil((js + trim) / p_ds)), 0, p_n_s - 1)
-			for i in range(lo, hi + 1):
-				skip[i] = 1
+			if trim > 0.0:
+				var lo := clampi(int(floor((js - trim) / p_ds)), 0, p_n_s - 1)
+				var hi := clampi(int(ceil((js + trim) / p_ds)), 0, p_n_s - 1)
+				for i in range(lo, hi + 1):
+					skip[i] = 1
 	return {
 		"half": half, "shoulder": shoulder, "verge": verge, "suppress": suppress,
 		"pins": pins, "skip": skip,
@@ -2316,6 +2317,12 @@ func road_length() -> float:
 	if mod == null or mod.last_alignment == null or mod.last_alignment.count() == 0:
 		return NAN
 	return float(mod.last_alignment.count() - 1) * mod.last_alignment.ds
+
+
+## Total arc length of this road's plan centreline, metres.
+func total_arc_length() -> float:
+	var cum := _plan_cum()
+	return float(cum[cum.size() - 1]) if cum.size() > 0 else 0.0
 
 
 func point_at_arc(p_s: float) -> Vector2:

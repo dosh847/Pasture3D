@@ -466,6 +466,16 @@ static func plan_footprint(p_center: Vector2, p_arms: Array, p_corner_radius: fl
 	var out := PackedVector2Array()
 	if arms.size() < 2:
 		return out
+	if arms.size() == 2:
+		var d0: Vector2 = arms[0]["dir"]
+		var d1: Vector2 = arms[1]["dir"]
+		if d0.dot(d1) < -0.99:
+			var t0: float = float(arms[0].get("trim", 0.0))
+			var t1: float = float(arms[1].get("trim", 0.0))
+			var h0: float = float(arms[0].get("half", 0.0))
+			var h1: float = float(arms[1].get("half", 0.0))
+			if t0 <= 1e-3 and t1 <= 1e-3 and absf(h0 - h1) <= 0.01:
+				return PackedVector2Array()
 	for i in arms.size():
 		var a: Dictionary = arms[i]
 		var b: Dictionary = arms[(i + 1) % arms.size()]

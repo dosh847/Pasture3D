@@ -26,11 +26,14 @@ extends Resource
 # NOT named `Control`: that is a built-in Godot Node class, and the annotation silently resolved to it
 # rather than to this enum — five parse errors, none of which named the collision.
 enum ControlType { INHERIT = -1, UNCONTROLLED = 0, PRIORITY = 1, STOP = 2, SIGNALS = 3 }
+enum JunctionKind { CROSSING = 0, END_TO_END = 1 }
 
 @export_group("Identity")
 ## Stable across re-resolves. Derived from the participants rather than from an index, so inserting an
 ## unrelated road elsewhere in the scene does not renumber every junction and detach every override.
 @export var id: StringName = &""
+## Whether this is an intersecting crossing or a continuous end-to-end connection (P10).
+@export var kind: JunctionKind = JunctionKind.CROSSING
 
 @export_group("Resolved")
 ## Solver output — overwritten on every resolve. Do not hand-edit; use the Overrides below.
@@ -288,9 +291,11 @@ func pin_for(p_key: String) -> float:
 # geometry: `signal_state` reads the cycle, `yields_to` filters the conflict set.
 
 
-## What kind of control this junction has, resolving INHERIT against the world default.
+## What kind of control this junction has, resolving INHERIT against the world default (or UNCONTROLLED for END_TO_END).
 func effective_control(p_default: ControlType = ControlType.PRIORITY) -> ControlType:
-	return p_default if control == ControlType.INHERIT else control
+	if control != ControlType.INHERIT:
+		return control
+	return ControlType.UNCONTROLLED if kind == JunctionKind.END_TO_END else p_default
 
 
 ## Advance the signal cycle by `p_delta` seconds. Does nothing at a junction that is not signalised, so

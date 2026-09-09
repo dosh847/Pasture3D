@@ -111,6 +111,9 @@ static func plan_junction(p_junction: Pasture3DRoadJunction, p_arms: Array = [],
 	var out: Array = []
 	if p_junction == null or not p_junction.detected or p_junction.disabled:
 		return out
+	if p_junction.kind == Pasture3DRoadJunction.JunctionKind.END_TO_END:
+		out.append_array(_plan_connectors(p_junction, p_arms, p_opts))
+		return out
 	for sl: Pasture3DRoadStopLine in p_junction.stop_lines:
 		if sl == null or sl.width <= 0.0:
 			continue
