@@ -67,41 +67,28 @@ func op() -> StringName:
 func reshape(p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -> void:
 	if window <= 0 or intensity <= 0.0:
 		return
-	var ring := ring_of(p_src)
-	var n := ring.size()
-	var closed := p_src.closed
-	var out := PackedVector2Array()
-	out.resize(n)
-	var prev := ring[0]
-	for i in n:
-		# The average. Indices WRAP on a closed ring and CLAMP on an open one, which is the difference
-		# between a smoothed loop and a loop with a flat spot where its seam used to be. `ring` repeats
-		# vertex 0 at the end, so the wrap is over n-1 distinct vertices.
-		var acc := Vector2.ZERO
-		var cnt := 0
-		for k in range(-window, window + 1):
-			var j := i + k
-			if closed:
-				j = posmod(j, n - 1)
-			else:
-				j = clampi(j, 0, n - 1)
-			acc += ring[j]
-			cnt += 1
-		var avg := acc / float(cnt)
-		var moved := ring[i].lerp(avg, intensity)
-		if inertia > 0.0 and i > 0:
-			moved = moved.lerp(prev, inertia)
-		if pin_ends and not closed and (i == 0 or i == n - 1):
-			moved = ring[i]
-		out[i] = moved
-		prev = moved
-	if closed:
-		# The ring's repeated vertex was smoothed independently of vertex 0 (its neighbours differ once
-		# `inertia` has a direction), so writing both back would leave a hairline gap at the seam. The
-		# first one wins and `unring` drops the other.
-		out[n - 1] = out[0]
-	p_out.points = unring(out, closed)
-	carry_values(p_src, p_out)
+
+	if not ClassDB.class_has_method("Pasture3DUtil", "path_smooth_solve"):
+		push_error("Pasture3DGraphNodePathSmooth: Pasture3DUtil.path_smooth_solve is missing from GDExtension!")
+		return
+
+	var res: Dictionary = Pasture3DUtil.path_smooth_solve(
+		p_src.points,
+		p_src.half_widths,
+		p_src.heights,
+		p_src.closed,
+		window,
+		intensity,
+		inertia,
+		pin_ends
+	)
+
+	if res.is_empty():
+		return
+
+	p_out.points = res.get("points", PackedVector2Array())
+	p_out.half_widths = res.get("half_widths", PackedFloat32Array())
+	p_out.heights = res.get("heights", PackedFloat32Array())
 
 
 func node_warnings() -> PackedStringArray:

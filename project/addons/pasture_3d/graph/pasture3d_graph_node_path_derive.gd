@@ -224,6 +224,11 @@ func sample_grid(p_grid: PackedFloat32Array, p_wx: float, p_wz: float) -> float:
 	var dz: float = _rect.size.y / float(_gh)
 	if dx <= 0.0 or dz <= 0.0:
 		return NAN
+	# Outside the captured domain the surface says nothing. Return NAN so consumers can fall back to
+	# the vertex's existing height rather than clamping to border cells.
+	if p_wx < _rect.position.x - 1.0e-4 or p_wx > _rect.position.x + _rect.size.x + 1.0e-4 \
+			or p_wz < _rect.position.y - 1.0e-4 or p_wz > _rect.position.y + _rect.size.y + 1.0e-4:
+		return NAN
 	# Cell CENTRES, matching the evaluator's own `min_x = rect.position.x + 0.5 * dx`. Sampling as though
 	# the values sat on vertices shifts every drape half a cell, which on a slope is a real offset and on
 	# a flat fixture is invisible.

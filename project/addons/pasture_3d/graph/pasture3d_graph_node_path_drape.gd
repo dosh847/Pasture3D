@@ -38,13 +38,13 @@ extends Pasture3DGraphNodePathDerive
 @export_range(-200.0, 200.0, 0.1, "or_greater", "or_less", "suffix:m") var offset: float = 0.0:
 	set(v):
 		offset = v
-		emit_changed()
+		_param_changed()
 
 ## Clamp the height sequence so it never rises along the line. See the header.
 @export var force_downhill: bool = false:
 	set(v):
 		force_downhill = v
-		emit_changed()
+		_param_changed()
 
 ## With `force_downhill`, the minimum fall per metre of line — a gradient, not a step, so redistributing
 ## a line's vertices does not change its profile.
@@ -55,7 +55,7 @@ extends Pasture3DGraphNodePathDerive
 @export_range(0.0, 0.5, 0.0001, "or_greater", "suffix:m/m") var min_drop: float = 0.001:
 	set(v):
 		min_drop = maxf(v, 0.0)
-		emit_changed()
+		_param_changed()
 
 
 func op() -> StringName:
@@ -82,33 +82,43 @@ func input_unwired_default(p_port: int) -> float:
 
 
 func derive(_p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -> void:
+	# A drape replaces the vertical profile of the line. Drop any pre-existing road alignment
+	# and sample arrays so downstream graders do not grade to a stale vertical solve.
+	p_out.alignment = null
+	p_out.sample_half_widths = PackedFloat32Array()
+	p_out.sample_shoulders = PackedFloat32Array()
+	p_out.sample_verges = PackedFloat32Array()
+	p_out.sample_suppress = PackedByteArray()
+	p_out.sample_skip = PackedByteArray()
+
 	if port_unwired(1):
 		# Nothing to drape ONTO. The path passes through carrying whatever heights it already had, which
 		# for a spline with `carry_heights` is the authored line — the pre-drape answer, not a flat one.
 		return
+
+	if not ClassDB.class_has_method("Pasture3DUtil", "path_drape_solve"):
+		push_error("[Pasture3D] Pasture3DUtil.path_drape_solve is not bound. Rebuild GDExtension.")
+		return
+
 	var surf: PackedFloat32Array = _grids[1]
-	var pts := p_out.points
-	var n := pts.size()
-	var hs := PackedFloat32Array()
-	hs.resize(n)
-	for i in n:
-		var h: float = sample_grid(surf, pts[i].x, pts[i].y)
-		# Outside the domain the surface says nothing. Carrying the vertex's existing height is better
-		# than NAN: a path that leaves the brush's extent at one end would otherwise poison the carve's
-		# whole interpolated crest, and a height that is merely stale is a visible, local wrongness.
-		if not is_finite(h):
-			h = p_out.heights[i] if i < p_out.heights.size() else 0.0
-		hs[i] = h + offset
-	if force_downhill and n > 1:
-		for i in range(1, n):
-			var run: float = pts[i].distance_to(pts[i - 1])
-			hs[i] = minf(hs[i], hs[i - 1] - min_drop * run)
-	p_out.heights = hs
+	p_out.heights = Pasture3DUtil.path_drape_solve(p_out.points, p_out.heights, p_out.closed,
+			surf, _gw, _gh, _rect, offset, force_downhill, min_drop)
 
 
 func node_warnings() -> PackedStringArray:
 	var out := PackedStringArray()
-	if _gw > 0 and port_unwired(1):
+	if port_unwired(1):
 		out.append("Path Drape has no surface wired, so it passes the path through unchanged. Wire the "
 				+ "terrain you want it to sit on into `surface`.")
+	if force_downhill:
+		if _out != null and _out.closed:
+			out.append("Path is closed: Force Downhill is suppressed because a closed loop cannot be "
+					+ "monotonically downhill without creating a vertical cliff at the seam.")
+		elif _out != null and _out.points.size() >= 2 and _grids.size() > 1 and not _grids[1].is_empty():
+			var h0: float = sample_grid(_grids[1], _out.points[0].x, _out.points[0].y)
+			var h_end: float = sample_grid(_grids[1], _out.points[-1].x, _out.points[-1].y)
+			if is_finite(h0) and is_finite(h_end) and h_end > h0 + 5.0:
+				out.append("The terrain rises along this path from vertex 0 to the end. Force Downhill "
+						+ "clamps from vertex 0, which will carve deeply into the terrain. Reverse the spline "
+						+ "so vertex 0 sits at the upstream head.")
 	return out

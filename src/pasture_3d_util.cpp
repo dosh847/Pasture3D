@@ -11,6 +11,7 @@
 #include "logger.h"
 #include "pasture_3d_curvature.h"
 #include "pasture_3d_path_carve.h"
+#include "pasture_3d_path_ops.h"
 #include "pasture_3d_path_query.h"
 #include "pasture_3d_road_grade.h"
 #include "pasture_3d_depression_filling.h"
@@ -1712,6 +1713,82 @@ PackedFloat32Array Pasture3DUtil::path_mask_grid(const PackedVector2Array &p_poi
 			p_feather, p_invert);
 }
 
+PackedFloat32Array Pasture3DUtil::path_drape_solve(const PackedVector2Array &p_points,
+		const PackedFloat32Array &p_existing_heights, const bool p_closed,
+		const PackedFloat32Array &p_grid, const int p_gw, const int p_gh, const Rect2 &p_rect,
+		const double p_offset, const bool p_force_downhill, const double p_min_drop) {
+	return godot::path_drape_solve(p_points, p_existing_heights, p_closed, p_grid, p_gw, p_gh, p_rect,
+			p_offset, p_force_downhill, p_min_drop);
+}
+
+PackedFloat32Array Pasture3DUtil::path_width_field_solve(const PackedVector2Array &p_points,
+		const PackedFloat32Array &p_existing_widths,
+		const PackedFloat32Array &p_field, const int p_gw, const int p_gh, const Rect2 &p_rect,
+		const double p_field_min, const double p_field_max, const double p_half_width_min,
+		const double p_half_width_max, const PackedFloat32Array &p_curve_lut,
+		const bool p_scale_existing, const double p_min_half_width) {
+	return godot::path_width_field_solve(p_points, p_existing_widths, p_field, p_gw, p_gh, p_rect,
+			p_field_min, p_field_max, p_half_width_min, p_half_width_max, p_curve_lut,
+			p_scale_existing, p_min_half_width);
+}
+
+Dictionary Pasture3DUtil::path_from_flow_solve(const PackedFloat32Array &p_flow,
+		const PackedFloat32Array &p_surface, const int p_gw, const int p_gh, const Rect2 &p_rect,
+		const int p_seed_mode, const Vector2 &p_seed_point, const double p_seed_radius,
+		const double p_min_flow, const int p_step_cells, const int p_max_points,
+		const double p_half_width) {
+	return godot::path_from_flow_solve(p_flow, p_surface, p_gw, p_gh, p_rect, p_seed_mode,
+			p_seed_point, p_seed_radius, p_min_flow, p_step_cells, p_max_points, p_half_width);
+}
+
+Dictionary Pasture3DUtil::path_resample_solve(const PackedVector2Array &p_points,
+		const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights,
+		const bool p_closed, const int p_method, const double p_step, const bool p_close) {
+	return godot::path_resample_solve(p_points, p_widths, p_heights, p_closed, p_method, p_step, p_close);
+}
+
+Dictionary Pasture3DUtil::path_smooth_solve(const PackedVector2Array &p_points,
+		const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights,
+		const bool p_closed, const int p_window, const double p_intensity,
+		const double p_inertia, const bool p_pin_ends) {
+	return godot::path_smooth_solve(p_points, p_widths, p_heights, p_closed, p_window, p_intensity,
+			p_inertia, p_pin_ends);
+}
+
+Dictionary Pasture3DUtil::path_decimate_solve(const PackedVector2Array &p_points,
+		const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights,
+		const bool p_closed, const int p_target_points, const double p_min_area) {
+	return godot::path_decimate_solve(p_points, p_widths, p_heights, p_closed, p_target_points, p_min_area);
+}
+
+Dictionary Pasture3DUtil::path_fractalize_solve(const PackedVector2Array &p_points,
+		const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights,
+		const bool p_closed, const int p_orientation, const double p_wavelength,
+		const double p_lacunarity, const int p_iterations, const double p_sigma,
+		const double p_persistence, const int p_seed, const bool p_pin_ends) {
+	return godot::path_fractalize_solve(p_points, p_widths, p_heights, p_closed, p_orientation,
+			p_wavelength, p_lacunarity, p_iterations, p_sigma, p_persistence, p_seed, p_pin_ends);
+}
+
+Dictionary Pasture3DUtil::path_meanderize_solve(const PackedVector2Array &p_points,
+		const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights,
+		const bool p_closed, const double p_wavelength, const double p_amplitude,
+		const double p_ratio, const double p_noise_ratio, const int p_seed,
+		const int p_iterations, const double p_min_segment_length,
+		const int p_edge_divisions, const bool p_remove_loops, const bool p_pin_ends) {
+	return godot::path_meanderize_solve(p_points, p_widths, p_heights, p_closed, p_wavelength,
+			p_amplitude, p_ratio, p_noise_ratio, p_seed, p_iterations, p_min_segment_length,
+			p_edge_divisions, p_remove_loops, p_pin_ends);
+}
+
+PackedFloat32Array Pasture3DUtil::path_width_solve(const PackedVector2Array &p_points,
+		const PackedFloat32Array &p_existing_widths, const bool p_closed,
+		const int p_mode, const double p_half_width, const PackedFloat32Array &p_along_lut,
+		const double p_min_half_width) {
+	return godot::path_width_solve(p_points, p_existing_widths, p_closed, p_mode, p_half_width,
+			p_along_lut, p_min_half_width);
+}
+
 Dictionary Pasture3DUtil::road_grade_grid(const PackedFloat32Array &p_height, const int p_gw,
 		const int p_gh, const double p_min_x, const double p_min_z, const double p_vs,
 		const PackedVector2Array &p_plan, const double p_align_ds, const double p_align_s0,
@@ -2600,6 +2677,46 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("path_mask_grid", "points", "widths", "closed", "gw", "gh", "rect", "width_scale",
 					"feather", "invert"),
 			&Pasture3DUtil::path_mask_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("path_drape_solve", "points", "existing_heights", "closed", "grid", "gw", "gh",
+					"rect", "offset", "force_downhill", "min_drop"),
+			&Pasture3DUtil::path_drape_solve);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("path_width_field_solve", "points", "existing_widths", "field", "gw", "gh",
+					"rect", "field_min", "field_max", "half_width_min", "half_width_max",
+					"curve_lut", "scale_existing", "min_half_width"),
+			&Pasture3DUtil::path_width_field_solve, DEFVAL(PackedFloat32Array()), DEFVAL(false), DEFVAL(0.5));
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("path_from_flow_solve", "flow", "surface", "gw", "gh", "rect", "seed_mode",
+					"seed_point", "seed_radius", "min_flow", "step_cells", "max_points",
+					"half_width"),
+			&Pasture3DUtil::path_from_flow_solve);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("path_resample_solve", "points", "widths", "heights", "closed", "method",
+					"step", "close"),
+			&Pasture3DUtil::path_resample_solve, DEFVAL(false));
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("path_smooth_solve", "points", "widths", "heights", "closed", "window",
+					"intensity", "inertia", "pin_ends"),
+			&Pasture3DUtil::path_smooth_solve, DEFVAL(true));
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("path_decimate_solve", "points", "widths", "heights", "closed", "target_points",
+					"min_area"),
+			&Pasture3DUtil::path_decimate_solve, DEFVAL(0.0));
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("path_fractalize_solve", "points", "widths", "heights", "closed", "orientation",
+					"wavelength", "lacunarity", "iterations", "sigma", "persistence", "seed",
+					"pin_ends"),
+			&Pasture3DUtil::path_fractalize_solve, DEFVAL(true));
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("path_meanderize_solve", "points", "widths", "heights", "closed", "wavelength",
+					"amplitude", "ratio", "noise_ratio", "seed", "iterations", "min_segment_length",
+					"edge_divisions", "remove_loops", "pin_ends"),
+			&Pasture3DUtil::path_meanderize_solve, DEFVAL(true));
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("path_width_solve", "points", "existing_widths", "closed", "mode", "half_width",
+					"along_lut", "min_half_width"),
+			&Pasture3DUtil::path_width_solve, DEFVAL(PackedFloat32Array()), DEFVAL(0.1));
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("road_grade_grid", "height", "gw", "gh", "min_x", "min_z", "vs", "plan", "align_ds",
 					"align_s0", "align_z", "align_bank", "half_width", "shoulder", "verge", "suppress",

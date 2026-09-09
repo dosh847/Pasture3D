@@ -865,8 +865,16 @@ bool Pasture3DData::load_layers(const String &p_dir) {
 		base->set_modified(false);
 	}
 	_layer_stack = manifest;
+	for (const Vector2i &region_loc : _regions.keys()) {
+
+		Pasture3DRegion *region = get_region_ptr(region_loc);
+		if (region && !region->is_deleted()) {
+			_adopt_region_into_bases(region);
+		}
+	}
 	LOG(INFO, "Loaded layer stack (", layer_count, " layers) from ", p_dir);
 	return true;
+
 }
 
 void Pasture3DData::load_directory(const String &p_dir) {

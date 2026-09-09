@@ -802,3 +802,8 @@ bench/GraphOperatorGate.tscn
 # from the kernel reports the channel UNSERVED rather than zeros -- the allocator is demand-driven, so a
 # channel the op does not write is never materialised, which is why the impostor case cannot arise.
 bench/GraphAuxChannelGate.tscn
+
+# --- Native Path Operations Parity (PASTURE3D_GDSCRIPT_CPP_NODE_SEPARATION_SPEC.md) ---
+# Validates mathematical parity between native C++ kernels (Pasture3DUtil) and pure GDScript
+# [Dev/GD] reference oracles across all 9 PATH family nodes (3 derive + 6 reshape).
+bench/PathOpsParityGate.tscn

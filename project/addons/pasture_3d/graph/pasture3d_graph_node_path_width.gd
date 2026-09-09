@@ -93,27 +93,25 @@ func moves_the_line() -> bool:
 ## Rewrite the widths. See Pasture3DGraphNodePathShape.reshape — `p_out` already carries the input's
 ## points, heights and road profile, so this writes `half_widths` and nothing else.
 func reshape(p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -> void:
-	# Arc length per vertex, from the base helper, which explains why it is not the path's own `_cum`.
-	var n := p_src.points.size()
-	var cum := arc_lengths(p_src.points)
-	var total: float = cum[n - 1]
+	if not ClassDB.class_has_method("Pasture3DUtil", "path_width_solve"):
+		push_error("Pasture3DGraphNodePathWidth: Pasture3DUtil.path_width_solve is missing from GDExtension!")
+		return
 
-	var hw := PackedFloat32Array()
-	hw.resize(n)
-	for i in n:
-		var base: float = half_width
-		if mode == Mode.SCALE:
-			# An empty `half_widths` means 1.0 everywhere (the path resource says so), so SCALE over a
-			# widthless path gives `half_width` metres — the same answer SET gives, which is the only
-			# reading of "scale nothing" that is not a surprise.
-			var was: float = 1.0
-			if p_src.half_widths.size() > 0:
-				was = p_src.half_widths[mini(i, p_src.half_widths.size() - 1)]
-			base = was * half_width
-		if along != null:
-			var x: float = (cum[i] / total) if total > 0.0 else 0.0
-			base *= maxf(along.sample_baked(clampf(x, 0.0, 1.0)), 0.0)
-		hw[i] = maxf(base, min_half_width)
+	var along_lut := PackedFloat32Array()
+	if along != null:
+		along_lut.resize(256)
+		for i in 256:
+			along_lut[i] = maxf(along.sample_baked(float(i) / 255.0), 0.0)
+
+	var hw: PackedFloat32Array = Pasture3DUtil.path_width_solve(
+		p_src.points,
+		p_src.half_widths,
+		p_src.closed,
+		mode,
+		half_width,
+		along_lut,
+		min_half_width
+	)
 	p_out.half_widths = hw
 
 

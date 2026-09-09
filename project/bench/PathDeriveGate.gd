@@ -28,7 +28,7 @@
 #       traced once and served forever (`memoised-programs-hide-invalidation`).
 extends Node
 
-const CRITERIA: Array[String] = ["A", "B", "C", "D", "E", "F"]
+const CRITERIA: Array[String] = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
 
 const GW := 96
 const GH := 96
@@ -48,6 +48,10 @@ func _ready() -> void:
 	_d_each_derive_takes_the_graph_off_native()
 	_e_a_traced_river_follows_the_main_stem()
 	_f_the_memo_re_derives_only_when_the_field_moves()
+	_g_out_of_domain_vertices_preserve_authored_height()
+	_h_closed_paths_suppress_force_downhill()
+	_i_drape_clears_stale_road_alignment()
+	_j_diagnostic_warnings_fire_accurately()
 
 	for name in CRITERIA:
 		if not _seen.has(name):
@@ -480,3 +484,147 @@ func _f_the_memo_re_derives_only_when_the_field_moves() -> void:
 	_check("F", absf((h_second - h_first) - 25.0) < 1.0e-3,
 			"and the new heights are the NEW ground: %.3f m -> %.3f m (want +25.000)"
 			% [h_first, h_second])
+
+
+## [G] vertices outside the terrain domain preserve their authored heights. Control: vertices within
+## the domain match the sampled ground.
+func _g_out_of_domain_vertices_preserve_authored_height() -> void:
+	var surf := _falling_surface()
+	var d := _drape(false)
+	var p := Pasture3DGraphPath.new()
+	# 4 points: 0 and 1 are inside RECT ([-200, 200]), 2 and 3 are outside RECT (e.g. at x = 250, 350).
+	p.points = PackedVector2Array([
+		Vector2(-50.0, 0.0),
+		Vector2(50.0, 0.0),
+		Vector2(250.0, 0.0),
+		Vector2(350.0, 0.0),
+	])
+	# Authored heights: 42.0 for all vertices
+	p.heights = PackedFloat32Array([42.0, 42.0, 42.0, 42.0])
+	p.half_widths = PackedFloat32Array([5.0, 5.0, 5.0, 5.0])
+	var g := _chain(d, p)
+	g.evaluate(GW, GH, RECT, null, surf)
+	var out := d.derived_path()
+	_check("G", out != null and out.heights.size() == 4, "derived path has 4 vertices")
+	if out == null or out.heights.size() != 4:
+		return
+	# Vertices 0 and 1 are inside domain: should match sampled surface (which is ~100m, NOT 42m)
+	var in_ok := absf(out.heights[0] - _sample(surf, p.points[0])) < 1.0e-3 \
+			and absf(out.heights[1] - _sample(surf, p.points[1])) < 1.0e-3
+	_check("G", in_ok, "in-domain vertices match sampled surface (not authored height)")
+	# Vertices 2 and 3 are outside domain: should keep authored height 42.0
+	var out_ok := absf(out.heights[2] - 42.0) < 1.0e-3 and absf(out.heights[3] - 42.0) < 1.0e-3
+	_check("G", out_ok, "out-of-domain vertices preserve authored height 42.0 m (got %.2f, %.2f)"
+			% [out.heights[2], out.heights[3]])
+	# Control: without our domain guard, out-of-domain vertices would clamp to edge and be ~70m (not 42m)
+	_check("G", absf(out.heights[2] - _sample(surf, Vector2(199.0, 0.0))) > 5.0,
+			"CONTROL out-of-domain vertex does NOT clamp to boundary elevation")
+
+
+## [H] a closed ring suppresses force_downhill: a closed path cannot be monotonically downhill without
+## inducing an abrupt vertical cliff at the closing seam. Control: an open path with force_downhill does descend.
+func _h_closed_paths_suppress_force_downhill() -> void:
+	var surf := _rising_surface()
+	var d := _drape(true, 0.05)
+	var p := Pasture3DGraphPath.new()
+	# A closed triangle loop on rising terrain
+	p.points = PackedVector2Array([
+		Vector2(-50.0, -50.0),
+		Vector2(50.0, -50.0),
+		Vector2(0.0, 50.0),
+	])
+	p.heights = PackedFloat32Array([0.0, 0.0, 0.0])
+	p.half_widths = PackedFloat32Array([5.0, 5.0, 5.0])
+	p.closed = true
+
+	var g := _chain(d, p)
+	g.evaluate(GW, GH, RECT, null, surf)
+	var out := d.derived_path()
+	_check("H", out != null and out.closed, "draped path is closed")
+	if out == null:
+		return
+	# On rising surface, vertex 1 (x=50) is higher than vertex 0 (x=-50).
+	# With downhill clamping suppressed, vertex 1 is HIGHER than vertex 0 (matching ground).
+	_check("H", out.heights[1] > out.heights[0],
+			"closed ring suppresses force_downhill: vertex 1 (%.2f m) sits on terrain above vertex 0 (%.2f m)"
+			% [out.heights[1], out.heights[0]])
+
+	# Control: with closed = false on the same points, force_downhill forces vertex 1 below vertex 0
+	var p_open := Pasture3DGraphPath.new()
+	p_open.points = p.points.duplicate()
+	p_open.heights = p.heights.duplicate()
+	p_open.half_widths = p.half_widths.duplicate()
+	p_open.closed = false
+	var d2 := _drape(true, 0.05)
+	var g2 := _chain(d2, p_open)
+	g2.evaluate(GW, GH, RECT, null, surf)
+	var out_open := d2.derived_path()
+	_check("H", out_open != null and out_open.heights[1] < out_open.heights[0],
+			"CONTROL open path with force_downhill DOES descend: vertex 1 (%.2f m) < vertex 0 (%.2f m)"
+			% [out_open.heights[1], out_open.heights[0]])
+
+
+## [I] Path Drape drops any pre-existing road alignment profile, because it defines new heights.
+## Control: Path Width from Field retains the alignment, because it modifies widths and not heights.
+func _i_drape_clears_stale_road_alignment() -> void:
+	var surf := _falling_surface()
+	var line := _line()
+	var dummy_align := Pasture3DRoadAlignment.new()
+	dummy_align.z = PackedFloat32Array([100.0, 105.0, 110.0])
+	line.alignment = dummy_align
+	line.sample_half_widths = PackedFloat32Array([4.0, 4.0, 4.0])
+
+	var d := _drape(false)
+	var g := _chain(d, line)
+	g.evaluate(GW, GH, RECT, null, surf)
+	var out := d.derived_path()
+	_check("I", out != null and out.alignment == null and out.sample_half_widths.is_empty(),
+			"Path Drape clears alignment and grading sample arrays")
+
+	# Control: Path Width from Field preserves alignment
+	var w := Pasture3DGraphNodePathWidthField.new()
+	var g_w := _chain(w, line)
+	g_w.evaluate(GW, GH, RECT, null, _ramp_field())
+	var out_w := w.derived_path()
+	_check("I", out_w != null and out_w.alignment == dummy_align,
+			"CONTROL Path Width from Field preserves road alignment")
+
+
+## [J] diagnostic warnings in node_warnings() report unwired surface, closed loop downhill clamp,
+## and uphill-drawn paths. Control: healthy downhill line produces zero warnings.
+func _j_diagnostic_warnings_fire_accurately() -> void:
+	# 1. Unwired surface
+	var d_unwired := Pasture3DGraphNodePathDrape.new()
+	var w1 := d_unwired.node_warnings()
+	_check("J", w1.size() > 0 and w1[0].contains("no surface wired"),
+			"unwired surface produces immediate warning: '%s'" % (w1[0] if w1.size() > 0 else "none"))
+
+	# 2. Closed path with force_downhill
+	var surf := _rising_surface()
+	var d_closed := _drape(true)
+	var p_closed := _line()
+	p_closed.closed = true
+	var g_closed := _chain(d_closed, p_closed)
+	g_closed.evaluate(GW, GH, RECT, null, surf)
+	var w2 := d_closed.node_warnings()
+	_check("J", w2.size() > 0 and w2[0].contains("closed"),
+			"closed loop with force_downhill produces warning: '%s'" % (w2[0] if w2.size() > 0 else "none"))
+
+	# 3. Uphill line on rising terrain with force_downhill
+	var d_uphill := _drape(true)
+	var p_uphill := _line() # goes from -150 to +150 along +x, and rising_surface rises along +x
+	var g_uphill := _chain(d_uphill, p_uphill)
+	g_uphill.evaluate(GW, GH, RECT, null, surf)
+	var w3 := d_uphill.node_warnings()
+	_check("J", w3.size() > 0 and w3[0].contains("rises along this path"),
+			"uphill path with force_downhill warns: '%s'" % (w3[0] if w3.size() > 0 else "none"))
+
+	# Control: healthy downhill line on falling_surface with surface wired produces NO warnings
+	var d_healthy := _drape(true)
+	var p_downhill := _line() # falling_surface falls along +x
+	var g_healthy := _chain(d_healthy, p_downhill)
+	g_healthy.evaluate(GW, GH, RECT, null, _falling_surface())
+	var w_healthy := d_healthy.node_warnings()
+	_check("J", w_healthy.is_empty(),
+			"CONTROL healthy downhill path produces zero warnings (got %d)" % w_healthy.size())
+

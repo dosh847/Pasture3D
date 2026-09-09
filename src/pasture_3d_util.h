@@ -323,6 +323,56 @@ public:
 			const PackedFloat32Array &p_widths, const bool p_closed, const int p_gw, const int p_gh,
 			const Rect2 &p_rect, const double p_width_scale, const double p_feather, const bool p_invert);
 
+	// PATH Operations: Derive family (GRID -> PATH) and Reshape family (PATH -> PATH)
+	static PackedFloat32Array path_drape_solve(const PackedVector2Array &p_points,
+			const PackedFloat32Array &p_existing_heights, const bool p_closed,
+			const PackedFloat32Array &p_grid, const int p_gw, const int p_gh, const Rect2 &p_rect,
+			const double p_offset, const bool p_force_downhill, const double p_min_drop);
+
+	static PackedFloat32Array path_width_field_solve(const PackedVector2Array &p_points,
+			const PackedFloat32Array &p_existing_widths,
+			const PackedFloat32Array &p_field, const int p_gw, const int p_gh, const Rect2 &p_rect,
+			const double p_field_min, const double p_field_max, const double p_half_width_min,
+			const double p_half_width_max, const PackedFloat32Array &p_curve_lut,
+			const bool p_scale_existing, const double p_min_half_width);
+
+	static Dictionary path_from_flow_solve(const PackedFloat32Array &p_flow,
+			const PackedFloat32Array &p_surface, const int p_gw, const int p_gh, const Rect2 &p_rect,
+			const int p_seed_mode, const Vector2 &p_seed_point, const double p_seed_radius,
+			const double p_min_flow, const int p_step_cells, const int p_max_points,
+			const double p_half_width);
+
+	static Dictionary path_resample_solve(const PackedVector2Array &p_points,
+			const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights,
+			const bool p_closed, const int p_method, const double p_step, const bool p_close);
+
+	static Dictionary path_smooth_solve(const PackedVector2Array &p_points,
+			const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights,
+			const bool p_closed, const int p_window, const double p_intensity,
+			const double p_inertia, const bool p_pin_ends);
+
+	static Dictionary path_decimate_solve(const PackedVector2Array &p_points,
+			const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights,
+			const bool p_closed, const int p_target_points, const double p_min_area);
+
+	static Dictionary path_fractalize_solve(const PackedVector2Array &p_points,
+			const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights,
+			const bool p_closed, const int p_orientation, const double p_wavelength,
+			const double p_lacunarity, const int p_iterations, const double p_sigma,
+			const double p_persistence, const int p_seed, const bool p_pin_ends);
+
+	static Dictionary path_meanderize_solve(const PackedVector2Array &p_points,
+			const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights,
+			const bool p_closed, const double p_wavelength, const double p_amplitude,
+			const double p_ratio, const double p_noise_ratio, const int p_seed,
+			const int p_iterations, const double p_min_segment_length,
+			const int p_edge_divisions, const bool p_remove_loops, const bool p_pin_ends);
+
+	static PackedFloat32Array path_width_solve(const PackedVector2Array &p_points,
+			const PackedFloat32Array &p_existing_widths, const bool p_closed,
+			const int p_mode, const double p_half_width, const PackedFloat32Array &p_along_lut,
+			const double p_min_half_width);
+
 	// The road grader (PASTURE3D_GRAPH_GEOMETRY_PORTS_SPEC.md §5.2). Pasture3DRoadGrader.grade forwards
 	// here, so the brush's own step and the graph's Road Grade node are ONE implementation rather than two
 	// that agree. The alignment arrives as four numbers — ds, s0, the solved heights and the bank ratios

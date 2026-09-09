@@ -1159,16 +1159,21 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 		var blend := _layer_blend_for(layer_id)
 		# Union of everything this bake will write, so the deferred composite below covers all of it.
 		var painted_box := AABB()
+		var aff_layers := _all_layers_for_owner(owner)
 		for box: AABB in extra_clears:
 			if box.size != Vector3.ZERO:
-				terrain.data.clear_layer_in_area(layer_id, box)
+				for lyr_idx in aff_layers:
+					terrain.data.clear_layer_in_area(lyr_idx, box, false)
 				painted_box = box if painted_box.size == Vector3.ZERO else painted_box.merge(box)
 		for s in sibs:
 			for box: AABB in s._own_footprints():
 				if box.size != Vector3.ZERO:
-					terrain.data.clear_layer_in_area(layer_id, box)
+					for lyr_idx in aff_layers:
+						terrain.data.clear_layer_in_area(lyr_idx, box, false)
 					painted_box = box if painted_box.size == Vector3.ZERO else painted_box.merge(box)
 			s._last_paint_aabb.clear()
+		if painted_box.size != Vector3.ZERO:
+			terrain.data.composite_area(painted_box, false)
 		# (B) Snap AFTER the clear: with this tool's influence removed and the region recomposited,
 		# get_height reads the BASE the points should sit on — not the tool's own ridge — so points
 		# can't climb their own contribution on each refresh. Snapping moves Y only, so the footprints
@@ -1208,10 +1213,21 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 
 	# GPU push — targeted (edited-regions-only) for placement/edit, full all-regions for detach/rebind and
 	# the destructive fallback (see targeted_push above).
+	var stack = terrain.data.get_layer_stack() if (terrain and terrain.data and terrain.data.has_method("get_layer_stack")) else null
 	if targeted_push:
 		terrain.data.update_maps(_map_type(), false, false)
+		if stack != null:
+			if stack.has_overlay_of_type(PASTURE_3D_MAPTYPE_COLOR):
+				terrain.data.update_maps(PASTURE_3D_MAPTYPE_COLOR, false, false)
+			if stack.has_overlay_of_type(PASTURE_3D_MAPTYPE_CONTROL):
+				terrain.data.update_maps(PASTURE_3D_MAPTYPE_CONTROL, false, false)
 	else:
 		terrain.data.update_maps(_map_type())
+		if stack != null:
+			if stack.has_overlay_of_type(PASTURE_3D_MAPTYPE_COLOR):
+				terrain.data.update_maps(PASTURE_3D_MAPTYPE_COLOR)
+			if stack.has_overlay_of_type(PASTURE_3D_MAPTYPE_CONTROL):
+				terrain.data.update_maps(PASTURE_3D_MAPTYPE_CONTROL)
 	update_gizmos() # re-float the origin marker onto the new surface height
 
 	if ur != null:
@@ -1706,10 +1722,13 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 	# this bake touches. composite_region sets is_edited but update_maps never clears it, so without this
 	# every later partial would re-push every region edited this session (the far-spline slowdown).
 	_clear_region_edited_flags()
-	# Clear the dropped tiles AND composite the (tile-bounded) box back to base. This composite is required
-	# before painting: the rasterisers read get_height per cell for relative_to_terrain / follow_spline_height,
-	# so they must see the cleared base (not this tool's own previous dome) or the feature climbs each edit.
-	terrain.data.clear_layer_in_area(layer_id, clip_box)
+	# Clear the dropped tiles across all affiliated layers and composite the (tile-bounded) box back to base.
+	# This composite is required before painting: the rasterisers read get_height per cell for
+	# relative_to_terrain / follow_spline_height, so they must see the cleared base (not this tool's
+	# own previous dome) or the feature climbs each edit.
+	for lyr_idx in _all_layers_for_owner(owner):
+		terrain.data.clear_layer_in_area(lyr_idx, clip_box, false)
+	terrain.data.composite_area(clip_box, false)
 	var t_clear := Time.get_ticks_usec()
 	# Re-seat ONLY the points the user actually moved, against the freshly-cleared base inside the box.
 	# Snapping every point here is the snap-to-self regression: an unmoved point elsewhere reads terrain
@@ -1752,6 +1771,12 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 	# Push only the regions this bake actually edited. (The bound default is all_regions=TRUE, which
 	# rebuilds the whole height texture array from every region — the reason a far-away spline was slow.)
 	terrain.data.update_maps(_map_type(), false, false)
+	var stack = terrain.data.get_layer_stack() if (terrain and terrain.data and terrain.data.has_method("get_layer_stack")) else null
+	if stack != null:
+		if stack.has_overlay_of_type(PASTURE_3D_MAPTYPE_COLOR):
+			terrain.data.update_maps(PASTURE_3D_MAPTYPE_COLOR, false, false)
+		if stack.has_overlay_of_type(PASTURE_3D_MAPTYPE_CONTROL):
+			terrain.data.update_maps(PASTURE_3D_MAPTYPE_CONTROL, false, false)
 	update_gizmos() # re-float the origin marker onto the new surface height
 	# Only the tools that were actually repainted inside the box: the rest of the layer's
 	# height is untouched, so waking their listeners would be a rebuild for nothing.
@@ -2442,6 +2467,28 @@ func _resolve_layer_for(owner: String) -> Pasture3DLayer:
 	return _layer_at(idx) if idx >= 0 else null
 
 
+## Find all layer indices in the terrain data owned by or affiliated with this layer owner.
+## This includes the primary height layer (`owner`) and any secondary channel/sink layers
+## created by graph sinks (e.g. `owner + "#graph_color"`).
+func _all_layers_for_owner(owner: String) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	if not is_instance_valid(terrain) or not terrain.data or not terrain.data.has_method("get_layer_stack"):
+		return out
+	var stack = terrain.data.get_layer_stack()
+	if stack == null:
+		return out
+	var prefix: String = owner + "#"
+	for i in range(stack.get_layer_count()):
+		var l = stack.get_layer(i)
+		if l == null:
+			continue
+		var oid: String = l.get_owner_id()
+		if oid == owner or oid.begins_with(prefix):
+			out.append(i)
+	return out
+
+
+
 ## Every reserved brush tool layer in the stack (owner in the brush namespace).
 func _brush_layers() -> Array:
 	var out: Array = []
@@ -2641,31 +2688,78 @@ func _editor_undo() -> EditorUndoRedoManager:
 	return EditorInterface.get_editor_undo_redo()
 
 
-## Deep snapshot of a tool layer's tiles (empty Dictionary if no layer yet = the initial state).
+## Deep snapshot of all tool layers' tiles for owner and affiliated channels (empty Dictionary if no layer yet = the initial state).
 func _snapshot_owner(owner: String) -> Dictionary:
-	var layer := _resolve_layer_for(owner)
-	return _copy_tiles(layer.get_tiles()) if layer else {}
+	var out := {}
+	if not is_instance_valid(terrain) or not terrain.data or not terrain.data.has_method("get_layer_stack"):
+		var layer := _resolve_layer_for(owner)
+		return _copy_tiles(layer.get_tiles()) if layer else {}
+	var stack = terrain.data.get_layer_stack()
+	if stack == null:
+		return out
+	var aff_indices := _all_layers_for_owner(owner)
+	for idx in aff_indices:
+		var l = stack.get_layer(idx)
+		if l != null:
+			out[l.get_owner_id()] = _copy_tiles(l.get_tiles())
+	return out
 
 
-## Restore a tile snapshot into a tool layer, then recomposite + push to GPU. Registered as the do/undo
+## Restore a tile snapshot into tool layers, then recomposite + push to GPU. Registered as the do/undo
 ## method of the bake action; re-resolves the layer by owner each call. Recomposites the UNION of the
-## regions the layer covered before and after the swap — recompositing only the layer's current regions
+## regions the layers covered before and after the swap — recompositing only the current regions
 ## would leave a region the restore *emptied* still showing the old contribution.
+## Supports both legacy single-layer snapshots (keyed by Vector2i) and multi-layer snapshots (keyed by String owner_id).
 func _restore_owner(owner: String, snapshot: Dictionary) -> void:
-	var layer := _resolve_layer_for(owner)
-	if not layer or not terrain.data.has_method("composite_region"):
+	if not is_instance_valid(terrain) or not terrain.data or not terrain.data.has_method("composite_region"):
 		return
-	var regions := {}
-	for loc in layer.get_tiles():
-		regions[loc] = true
-	for loc in snapshot:
-		regions[loc] = true
-	layer.set_tiles(_copy_tiles(snapshot))
-	for loc in regions:
-		terrain.data.composite_region(loc, Rect2i(), false)
+	var stack = terrain.data.get_layer_stack() if terrain.data.has_method("get_layer_stack") else null
+	var is_legacy := false
+	if not snapshot.is_empty():
+		var first_key = snapshot.keys()[0]
+		if first_key is Vector2i:
+			is_legacy = true
+
+	if is_legacy:
+		var layer := _resolve_layer_for(owner)
+		if layer:
+			var regions := {}
+			for loc in layer.get_tiles():
+				regions[loc] = true
+			for loc in snapshot:
+				regions[loc] = true
+			layer.set_tiles(_copy_tiles(snapshot))
+			for loc in regions:
+				terrain.data.composite_region(loc, Rect2i(), false)
+	else:
+		var regions := {}
+		if stack != null:
+			var aff_indices := _all_layers_for_owner(owner)
+			for idx in aff_indices:
+				var l = stack.get_layer(idx)
+				if l == null:
+					continue
+				var oid: String = l.get_owner_id()
+				for loc in l.get_tiles():
+					regions[loc] = true
+				if snapshot.has(oid):
+					var snap_tiles: Dictionary = snapshot[oid]
+					for loc in snap_tiles:
+						regions[loc] = true
+					l.set_tiles(_copy_tiles(snap_tiles))
+				else:
+					l.set_tiles({})
+		for loc in regions:
+			terrain.data.composite_region(loc, Rect2i(), false)
+
 	# Full all-regions push: this is a bake undo/redo restore (a whole-layer state swap), the same risk
 	# class as the detach path — a targeted per-region push left distant regions visually stale on undo.
 	terrain.data.update_maps(_map_type())
+	if stack != null:
+		if stack.has_overlay_of_type(PASTURE_3D_MAPTYPE_COLOR):
+			terrain.data.update_maps(PASTURE_3D_MAPTYPE_COLOR)
+		if stack.has_overlay_of_type(PASTURE_3D_MAPTYPE_CONTROL):
+			terrain.data.update_maps(PASTURE_3D_MAPTYPE_CONTROL)
 
 
 ## ---- Placement undo (Place Brush tool): rect-scoped live detach ----
@@ -2708,7 +2802,8 @@ func detach_placement() -> bool:
 	_clear_region_edited_flags()
 	# Drop the whole box (self + any mate samples in it), then repaint ONLY the mates back into it. Self is
 	# excluded, so its contribution is gone; mates are repainted from their unchanged curves (no snap).
-	terrain.data.clear_layer_in_area(layer_id, clip_box)
+	for lyr_idx in _all_layers_for_owner(owner):
+		terrain.data.clear_layer_in_area(lyr_idx, clip_box, false)
 	var blend := _layer_blend_for(layer_id)
 	for s in _tools_on_owner(owner):
 		if s == self or not s._overlaps_box(clip_box):
@@ -2720,6 +2815,12 @@ func detach_placement() -> bool:
 		s._clip_aabb = AABB()
 	terrain.data.composite_area(clip_box, false)
 	terrain.data.update_maps(_map_type(), false, false)
+	var stack = terrain.data.get_layer_stack() if (terrain and terrain.data and terrain.data.has_method("get_layer_stack")) else null
+	if stack != null:
+		if stack.has_overlay_of_type(PASTURE_3D_MAPTYPE_COLOR):
+			terrain.data.update_maps(PASTURE_3D_MAPTYPE_COLOR, false, false)
+		if stack.has_overlay_of_type(PASTURE_3D_MAPTYPE_CONTROL):
+			terrain.data.update_maps(PASTURE_3D_MAPTYPE_CONTROL, false, false)
 	_last_paint_aabb.clear()
 	return true
 

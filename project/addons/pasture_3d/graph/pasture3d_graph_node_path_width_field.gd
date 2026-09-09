@@ -115,29 +115,21 @@ func derive(_p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -> void:
 	if port_unwired(1):
 		# The path keeps the widths it arrived with, which is the pre-node answer rather than a guess.
 		return
+
+	if not ClassDB.class_has_method("Pasture3DUtil", "path_width_field_solve"):
+		push_error("[Pasture3D] Pasture3DUtil.path_width_field_solve is not bound. Rebuild GDExtension.")
+		return
+
+	var lut := PackedFloat32Array()
+	if response != null:
+		lut.resize(256)
+		for i in 256:
+			lut[i] = response.sample_baked(float(i) / 255.0)
+
 	var field: PackedFloat32Array = _grids[1]
-	var pts := p_out.points
-	var n := pts.size()
-	var span: float = field_max - field_min
-	var was := p_out.half_widths
-	var hw := PackedFloat32Array()
-	hw.resize(n)
-	for i in n:
-		var f: float = sample_grid(field, pts[i].x, pts[i].y)
-		# Off the domain the field says nothing, and the narrow end is the safe reading: a river that
-		# thins where the data runs out is wrong in a way that looks like the map edge, and one that
-		# widens there floods a corner of the terrain for no visible reason.
-		var u: float = 0.0 if not is_finite(f) else (0.0 if span <= 0.0 else clampf((f - field_min) / span, 0.0, 1.0))
-		if response != null:
-			u = clampf(response.sample_baked(u), 0.0, 1.0)
-		var w: float = lerpf(half_width_min, half_width_max, u)
-		if scale_existing:
-			var prev: float = 1.0
-			if was.size() > 0:
-				prev = was[mini(i, was.size() - 1)]
-			w *= prev
-		hw[i] = maxf(w, min_half_width)
-	p_out.half_widths = hw
+	p_out.half_widths = Pasture3DUtil.path_width_field_solve(p_out.points, p_out.half_widths,
+			field, _gw, _gh, _rect, field_min, field_max, half_width_min, half_width_max,
+			lut, scale_existing, min_half_width)
 
 
 func node_warnings() -> PackedStringArray:

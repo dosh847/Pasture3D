@@ -161,121 +161,31 @@ func derive(_p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -> void:
 	if flow.size() < _gw * _gh:
 		return
 
-	var start := _seed_cell(flow)
-	if start < 0:
+	if not ClassDB.class_has_method("Pasture3DUtil", "path_from_flow_solve"):
+		push_error("Pasture3DGraphNodePathFromFlow: Pasture3DUtil.path_from_flow_solve is missing from GDExtension!")
 		return
 
-	# Visited as a byte per cell rather than a Dictionary: the walk asks about eight neighbours per step
-	# and a hashed lookup per ask is the whole cost of the node on a large domain.
-	var seen := PackedByteArray()
-	seen.resize(_gw * _gh)
-	var cells := PackedInt32Array()
-	var cur := start
-	seen[cur] = 1
-	cells.append(cur)
-	while cells.size() < max_points:
-		var nxt := _best_neighbour(flow, seen, cur)
-		if nxt < 0:
-			break
-		# Mark every cell the stride passes over, not just the ones emitted: without it a stride of 2 can
-		# turn around and walk back up the channel it just came down, because the cell behind it was
-		# never marked.
-		seen[nxt] = 1
-		cur = nxt
-		var stepped := 1
-		while stepped < step_cells:
-			var s2 := _best_neighbour(flow, seen, cur)
-			if s2 < 0:
-				break
-			seen[s2] = 1
-			cur = s2
-			stepped += 1
-		if flow[cur] < min_flow:
-			# The threshold is checked AFTER the step, so the vertex that crosses it is dropped rather
-			# than kept: a river should stop at its headwater, not one cell past it.
-			break
-		cells.append(cur)
+	var surf: PackedFloat32Array = _grids[1] if not port_unwired(1) else PackedFloat32Array()
+	var res: Dictionary = Pasture3DUtil.path_from_flow_solve(
+		flow,
+		surf,
+		_gw,
+		_gh,
+		_rect,
+		seed_mode,
+		seed_point,
+		seed_radius,
+		min_flow,
+		step_cells,
+		max_points,
+		half_width
+	)
 
-	# Reverse: the trace ran upstream and vertex 0 has to be the head of the line. See the header.
-	var n := cells.size()
-	var pts := PackedVector2Array()
-	pts.resize(n)
-	var hw := PackedFloat32Array()
-	hw.resize(n)
-	for i in n:
-		var c: int = cells[n - 1 - i]
-		pts[i] = cell_centre(c % _gw, c / _gw)
-		hw[i] = half_width
-	p_out.points = pts
-	p_out.half_widths = hw
-	if not port_unwired(1):
-		var surf: PackedFloat32Array = _grids[1]
-		var hs := PackedFloat32Array()
-		hs.resize(n)
-		for i in n:
-			var h: float = sample_grid(surf, pts[i].x, pts[i].y)
-			hs[i] = 0.0 if not is_finite(h) else h
-		p_out.heights = hs
-
-
-## The cell the walk starts from, or -1 when the field offers none.
-func _seed_cell(p_flow: PackedFloat32Array) -> int:
-	var best := -1
-	var best_v: float = -INF
-	if seed_mode == Seed.POINT:
-		var dx: float = _rect.size.x / float(maxi(_gw, 1))
-		var dz: float = _rect.size.y / float(maxi(_gh, 1))
-		var cx := int(floor((seed_point.x - _rect.position.x) / maxf(dx, 1e-6)))
-		var cz := int(floor((seed_point.y - _rect.position.y) / maxf(dz, 1e-6)))
-		var rx := maxi(int(ceil(seed_radius / maxf(dx, 1e-6))), 0)
-		var rz := maxi(int(ceil(seed_radius / maxf(dz, 1e-6))), 0)
-		for iz in range(maxi(cz - rz, 0), mini(cz + rz + 1, _gh)):
-			for ix in range(maxi(cx - rx, 0), mini(cx + rx + 1, _gw)):
-				var v: float = p_flow[iz * _gw + ix]
-				if is_finite(v) and v > best_v:
-					best_v = v
-					best = iz * _gw + ix
-	else:
-		for i in range(p_flow.size()):
-			var v: float = p_flow[i]
-			if is_finite(v) and v > best_v:
-				best_v = v
-				best = i
-	# A seed already under the threshold is not a river's mouth, it is dry ground, and tracing from it
-	# would emit a one-vertex path the caller then has to recognise as nothing.
-	if best >= 0 and best_v < min_flow:
-		return -1
-	return best
-
-
-## The unvisited 8-neighbour with the highest accumulation, or -1 when there is none.
-##
-## Ties break on the lowest cell index — arbitrary, but FIXED, which is the property that matters
-## (`nearest-segment-tie-order`): an unspecified tie order is two implementations that agree until the
-## day a symmetric fixture makes them disagree.
-func _best_neighbour(p_flow: PackedFloat32Array, p_seen: PackedByteArray, p_cell: int) -> int:
-	var cx := p_cell % _gw
-	var cz := p_cell / _gw
-	var best := -1
-	var best_v: float = -INF
-	for oz in range(-1, 2):
-		var z := cz + oz
-		if z < 0 or z >= _gh:
-			continue
-		for ox in range(-1, 2):
-			if ox == 0 and oz == 0:
-				continue
-			var x := cx + ox
-			if x < 0 or x >= _gw:
-				continue
-			var idx := z * _gw + x
-			if p_seen[idx] != 0:
-				continue
-			var v: float = p_flow[idx]
-			if is_finite(v) and v > best_v:
-				best_v = v
-				best = idx
-	return best
+	if res.is_empty():
+		return
+	p_out.points = res.get("points", PackedVector2Array())
+	p_out.half_widths = res.get("half_widths", PackedFloat32Array())
+	p_out.heights = res.get("heights", PackedFloat32Array())
 
 
 func _validate_property(p_property: Dictionary) -> void:

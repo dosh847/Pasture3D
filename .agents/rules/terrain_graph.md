@@ -43,3 +43,36 @@ When implementing or modifying path reshaping nodes (e.g. `PathMeanderize`, `Pat
 ### B. Editor State Synchronization
 - Connect `node_selected` and `node_deselected` in `GraphEdit` to update `_editor_selected_node` on the graph resource and call `brush.update_gizmos()`.
 - Clear `_editor_selected_node` when switching or unloading graphs in `edit_graph()`.
+
+---
+
+## 3. Color Nodes & Inline Previews (`ConstColor`, `ColorMix`, `ColorBlend`)
+
+### A. Sideband Architecture & Spec Contracts
+- **Decline Scalar Grid Lowering**: `PortType.COLOR` cannot flow through the SSA evaluator. `GraphEditorScript.preview_repr_for_type(PortType.COLOR)` must always return `-1`.
+- **Topological Sideband Evaluation**: Evaluate color nodes via compile-time upstream traversal (`_resolve_color_node`) rather than SSA program execution.
+- **Alpha Checkerboard Compositing**: Any color with $a < 1.0$ must be composited over an 8x8 checkerboard (`Color8(58,58,64)` / `Color8(38,38,44)`) before creating textures.
+
+### B. Node-Specific Preview Rules
+- **`ConstColor`**: Render a solid square matching `value: Color`. Range chip displays hex code (`#RRGGBB` or `#RRGGBBAA`).
+- **`ColorMix`**: Compute folded color from upstream sources `a` and `b` using `mode` and `factor`. Range chip displays `MODE #HEX` (e.g., `MIX #800080`).
+- **`ColorBlend`**:
+  - **Wired Mask**: Piggyback the mask's SSA slot into the worker's `tap_slots` pass. Render a 2D blended thumbnail across the preview domain modulating Color A and Color B per-cell. Range chip displays `BLEND <MODE>`.
+  - **Unwired Mask**: Fall back cleanly to uniform Color A with range chip `BLEND (unwired)` at dimmed opacity. Never freeze the main thread waiting for an unserved mask.
+
+---
+
+## 4. Channel Sinks (`ColorSink`, `ControlSink`) & Brush Invalidation
+
+### A. Affiliated Layer Convention
+- **Secondary Channel Owner IDs**: Channel sinks author into layers affiliated with the host brush, named `owner + "#graph_color"` and `owner + "#graph_control"` (or `owner + ":" + key`).
+- **Multi-Layer Discovery**: Never assume a brush owns only one layer index. Use `_all_layers_for_owner(owner)` to discover all layers matching `owner` or starting with `owner + "#"`.
+
+### B. Footprint Clearing & GPU Synchronization
+- **Multi-Layer Clear Before Paint**: In `_refresh_owner_rect`, `_refresh_owner`, and `detach_placement`, clear dropped tiles across *all* affiliated layers (`clear_layer_in_area`) and composite back to base *before* painting.
+- **Multi-Map Texture Pushes**: Check the layer stack for active overlays (`has_overlay_of_type`) and push `MAPTYPE_COLOR` and `MAPTYPE_CONTROL` via `update_maps()` whenever overlay layers exist.
+- **Multi-Layer Undo/Redo Snapshots**: `_snapshot_owner` and `_restore_owner` must capture and restore tile dictionaries across all affiliated layers indexed by owner ID, preserving backwards compatibility with legacy `Vector2i`-keyed snapshots.
+
+### C. Test Gate Invariants
+- **Footprint Separation by Translation Symmetry**: When testing that brush movement clears previous footprints, ensure test sample points are outside the new position's footprint. Moving along a uniform displacement vector ($\vec{p}_1 = \vec{p}_0 + \vec{\delta}, \vec{p}_2 = \vec{p}_1 + \vec{\delta}$) guarantees non-overlap by translation symmetry.
+- **Headless Scene Execution**: Automated bench gates extending `Node` must be accompanied by a `.tscn` root scene when executed under `--headless`.

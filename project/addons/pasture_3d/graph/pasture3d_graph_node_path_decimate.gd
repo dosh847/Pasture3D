@@ -60,47 +60,29 @@ func op() -> StringName:
 
 
 func reshape(p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -> void:
-	var pts := p_src.points
-	var n := pts.size()
+	var n := p_src.points.size()
 	if n <= maxi(target_points, 3):
 		return
-	# `keep` indexes into the INPUT, so a removed vertex leaves no gap to compact and the neighbours a
-	# triangle is measured from are always the ones that will actually be adjacent afterwards.
-	var keep := PackedInt32Array()
-	keep.resize(n)
-	for i in n:
-		keep[i] = i
 
-	var rounds := 0
-	while keep.size() > maxi(target_points, 3) and rounds < MAX_ROUNDS:
-		rounds += 1
-		var worst := INF
-		var worst_at := -1
-		# A closed ring has no ends to pin: every vertex has two neighbours, wrapping.
-		var lo := 0 if p_src.closed else 1
-		var hi := keep.size() if p_src.closed else keep.size() - 1
-		for k in range(lo, hi):
-			var a := pts[keep[posmod(k - 1, keep.size())]]
-			var b := pts[keep[k]]
-			var c := pts[keep[posmod(k + 1, keep.size())]]
-			var area: float = absf((b - a).cross(c - a)) * 0.5
-			if area < worst:
-				worst = area
-				worst_at = k
-		if worst_at < 0:
-			break
-		if min_area > 0.0 and worst >= min_area:
-			# Everything left matters. Stopping here rather than at the count is the whole point of the
-			# area floor; hitting it is a success, not a failure to reach the target.
-			break
-		keep.remove_at(worst_at)
+	if not ClassDB.class_has_method("Pasture3DUtil", "path_decimate_solve"):
+		push_error("Pasture3DGraphNodePathDecimate: Pasture3DUtil.path_decimate_solve is missing from GDExtension!")
+		return
 
-	var out := PackedVector2Array()
-	out.resize(keep.size())
-	for k in keep.size():
-		out[k] = pts[keep[k]]
-	p_out.points = out
-	carry_values(p_src, p_out)
+	var res: Dictionary = Pasture3DUtil.path_decimate_solve(
+		p_src.points,
+		p_src.half_widths,
+		p_src.heights,
+		p_src.closed,
+		target_points,
+		min_area
+	)
+
+	if res.is_empty():
+		return
+
+	p_out.points = res.get("points", PackedVector2Array())
+	p_out.half_widths = res.get("half_widths", PackedFloat32Array())
+	p_out.heights = res.get("heights", PackedFloat32Array())
 
 
 func node_warnings() -> PackedStringArray:
