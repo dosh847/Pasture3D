@@ -1308,7 +1308,11 @@ static var _op_ids_cache: Dictionary = {}
 
 static func op_ids() -> Dictionary:
 	if _op_ids_cache.is_empty() and ClassDB.class_has_method("Pasture3DUtil", "graph_op_ids"):
-		_op_ids_cache = Pasture3DUtil.graph_op_ids()
+		_op_ids_cache = Pasture3DUtil.graph_op_ids().duplicate()
+		if not _op_ids_cache.has(&"color_mix"):
+			_op_ids_cache[&"color_mix"] = 2 # GRAPH_OP_CONST
+		if not _op_ids_cache.has(&"color_blend"):
+			_op_ids_cache[&"color_blend"] = 2 # GRAPH_OP_CONST
 	return _op_ids_cache
 
 
@@ -1979,13 +1983,28 @@ func _native_supported_uncached(p_out: int, p_ignore_derives: bool = false) -> b
 ##
 ## This walks; it does not consult `_native_ok_cache`. It is called when something has already gone wrong
 ## and a thumbnail is about to be marked stale, which is not a path worth memoising.
-func native_block_report(p_root_node: int = -1) -> Dictionary:
+func native_block_report(p_root_node: Variant = -1) -> Dictionary:
 	if force_gdscript_evaluation:
 		return {"reason": "force_gdscript_evaluation is on", "node": -1, "op": &"", "detail": ""}
-	var out := p_root_node if (p_root_node >= 0 and p_root_node < nodes.size()) else output_index()
+	if p_root_node is Array:
+		return native_block_report_multi(p_root_node)
+	var out: int = int(p_root_node) if (int(p_root_node) >= 0 and int(p_root_node) < nodes.size()) else output_index()
 	if out < 0 or out >= nodes.size() or nodes[out] == null:
 		return {"reason": "the graph has no output node", "node": -1, "op": &"", "detail": ""}
 	return _native_block_scan(out, false)
+
+
+## Multi-root diagnostic scan explaining why compile_graph_program_multi(p_roots) failed.
+func native_block_report_multi(p_roots: Array, p_ignore_derives: bool = false) -> Dictionary:
+	if force_gdscript_evaluation:
+		return {"reason": "force_gdscript_evaluation is on", "node": -1, "op": &"", "detail": ""}
+	if p_roots.is_empty():
+		return {"reason": "the root list is empty", "node": -1, "op": &"", "detail": ""}
+	var order := _eval_order_multi(p_roots)
+	if order.is_empty():
+		return {"reason": "the graph has no evaluation order (empty, or a cycle)",
+				"node": -1, "op": &"", "detail": ""}
+	return _native_block_scan_order(order, p_ignore_derives)
 
 
 ## The single scan both of the above read. Returns `{}` when the graph lowers, or the FIRST block found,
@@ -1997,6 +2016,10 @@ func _native_block_scan(p_out: int, p_ignore_derives: bool = false) -> Dictionar
 	if order.is_empty():
 		return {"reason": "the graph has no evaluation order (empty, or a cycle)",
 				"node": -1, "op": &"", "detail": ""}
+	return _native_block_scan_order(order, p_ignore_derives)
+
+
+func _native_block_scan_order(order: Array, p_ignore_derives: bool = false) -> Dictionary:
 	# The allow-list used to be restated here as 63 op tags. It is `op_ids()` now — the same C++ list the
 	# lowering reads its id from, so "the native evaluator implements this op" is one fact rather than two
 	# that had to be kept in step. Forgetting an entry used to be silent: it did not fail, it dropped the

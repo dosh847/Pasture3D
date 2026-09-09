@@ -115,8 +115,11 @@ var last_preview_block: Dictionary = {}
 ## identical on screen while paying exactly the cost the rule forbids. Written where the argument is
 ## formed, for the same reason `last_preview_dispatch` is.
 var last_preview_taps: Dictionary = {}
+var _preview_color_roots: Array = []
+var _preview_blend_mask_slot: Dictionary = {}
 var _preview_timer: Timer = null      # debounces refreshes; one-shot, restarted on each graph change
 var _preview_token: int = 0           # bumped per dispatch so a stale async result is dropped on apply
+var last_preview_applied: int = 0     # token of the last successfully applied async preview pass
 
 
 func initialize(p_plugin: EditorPlugin) -> void:
@@ -162,6 +165,8 @@ func edit_graph(p_graph: Pasture3DTerrainGraph, p_mod: Pasture3DNodeGraph = null
 	if graph != null and graph.has_meta(&"_editor_selected_node"):
 		graph.set_meta(&"_editor_selected_node", -1)
 	graph = p_graph
+	_preview_color_roots.clear()
+	_preview_blend_mask_slot.clear()
 	if graph != null:
 		if not graph.changed.is_connected(_on_graph_changed):
 			graph.changed.connect(_on_graph_changed)
@@ -2171,6 +2176,8 @@ func _preview_pixels() -> int:
 
 
 func _refresh_previews() -> void:
+	if _preview_timer != null:
+		_preview_timer.stop()
 	# Cleared FIRST. A stale count surviving an early return would make [E] read the previous refresh's
 	# answer, which is the failure mode that makes a counter worse than no counter.
 	last_preview_taps = {}
@@ -2199,7 +2206,7 @@ func _refresh_previews() -> void:
 		# lower, so every thumbnail on screen is frozen at whatever it last managed — and the comment that
 		# used to be here ("leave the last thumbnails in place") described the defect rather than a policy.
 		# The report names the responsible node where one node is responsible.
-		var report: Dictionary = graph.native_block_report()
+		var report: Dictionary = graph.native_block_report(roots)
 		if report.is_empty():
 			# The scan found nothing but the compile still failed. Say exactly that rather than inventing
 			# a cause: a disagreement between the two is a real bug and hiding it would cost the next
@@ -2224,11 +2231,16 @@ func _refresh_previews() -> void:
 	# is appended to, so criterion [E] can count the request at the tap call rather than infer it from
 	# the picture.
 	var path_roots: Array = []
+	var color_roots: Array = []
 	for i in roots:
-		if graph.nodes[i] != null 				and graph.nodes[i].output_port_type() == Pasture3DGraphNode.PortType.PATH:
-			path_roots.append(i)
+		if graph.nodes[i] != null:
+			var ot: int = graph.nodes[i].output_port_type()
+			if ot == Pasture3DGraphNode.PortType.PATH:
+				path_roots.append(i)
+			elif ot == Pasture3DGraphNode.PortType.COLOR:
+				color_roots.append(i)
 	for i in roots:
-		if path_roots.has(i):
+		if path_roots.has(i) or color_roots.has(i):
 			continue
 		if slot_of.has(i):
 			var slot: int = int(slot_of[i])
@@ -2244,17 +2256,39 @@ func _refresh_previews() -> void:
 				"lock_min": n.preview_range_min,
 				"lock_max": n.preview_range_max,
 			}
+
+	# Piggyback ColorBlend mask slots into tap_slots so mask fields evaluate in the background worker
+	# rather than performing an expensive synchronous compile on the main thread.
+	var blend_mask_slot: Dictionary = {}
+	for i in color_roots:
+		var n: Pasture3DGraphNode = graph.nodes[i]
+		if n is Pasture3DGraphNodeColorBlend:
+			var mport: int = n.color_mask_port() if n.has_method("color_mask_port") else 2
+			var src := source_of(graph, i, mport)
+			if not src.is_empty():
+				var src_node: int = int(src["node"])
+				if slot_of.has(src_node):
+					var mslot: int = int(slot_of[src_node])
+					blend_mask_slot[i] = mslot
+					if not tap_slots.has(mslot):
+						tap_slots.append(mslot)
+
+	_preview_color_roots = color_roots
+	_preview_blend_mask_slot = blend_mask_slot
+	last_preview_taps = {"count": tap_slots.size(), "path_count": path_roots.size(), "color_count": color_roots.size()}
+
+	var px := _preview_pixels()
 	# Drawn on the MAIN thread, deliberately. `resolved_path_of` walks the graph and reads node state, and
 	# the worker's whole contract is that it touches only plain data captured before it started. A path is
 	# a few hundred vertices into a 128 px bitmap; the grid pass is what needed a thread.
-	last_preview_taps = {"count": tap_slots.size(), "path_count": path_roots.size()}
 	_render_path_previews(path_roots)
+	_render_color_previews(color_roots, {}, blend_mask_slot, px)
 
 	if tap_slots.is_empty():
-		if not path_roots.is_empty():
-			# Every previewed node was a PATH. Nothing was tapped and nothing SHOULD have been — this is
-			# the success case for §6.1, not a bail, and marking it stale would report a failure that did
-			# not happen.
+		if not path_roots.is_empty() or not color_roots.is_empty():
+			# Every previewed node was a PATH or unwired/constant COLOR. Nothing was tapped and nothing
+			# SHOULD have been — this is the success case for §6.1, not a bail, and marking it stale would
+			# report a failure that did not happen.
 			_clear_previews_stale()
 			return
 		# Compiled, but no preview-on node survived into the program with a slot of its own — folded away,
@@ -2269,7 +2303,6 @@ func _refresh_previews() -> void:
 	# `px` rather than PREVIEW_SIZE from here down: §5.4's downscale is a change to what the PREVIEW pass
 	# evaluates, and nothing else. `evaluate()` never reads `preview_scale` and criterion [F] asserts the
 	# bake is bit-identical with it at 1:1 and 1:4.
-	var px := _preview_pixels()
 	var input_data := _get_preview_input_data(px)
 	var input: PackedFloat32Array = input_data["grid"]
 	var in_gw: int = int(input_data["gw"])
@@ -2336,6 +2369,215 @@ func _render_path_previews(p_path_roots: Array) -> void:
 			chip.tooltip_text = "A PATH draws its geometry and taps no grid."
 
 
+## Which node/port drives `p_to`:`p_port`, as {"node": int, "port": int}, or {} when unwired.
+static func source_of(p_graph: Pasture3DTerrainGraph, p_to: int, p_port: int) -> Dictionary:
+	if p_graph == null:
+		return {}
+	for c in p_graph.connections:
+		if int(c[2]) == p_to and int(c[3]) == p_port:
+			return {"node": int(c[0]), "port": int(c[1])}
+	return {}
+
+
+## Generate a solid square Image of the given color.
+## If transparent (alpha < 1.0), alpha-blends over an 8x8 checkerboard pattern matching C++ checker_px.
+static func preview_image_solid_color(p_color: Color, p_width: int, p_height: int) -> Image:
+	var img := Image.create(p_width, p_height, false, Image.FORMAT_RGBA8)
+	if p_color.a >= 1.0:
+		img.fill(p_color)
+		return img
+	var bytes := PackedByteArray()
+	bytes.resize(p_width * p_height * 4)
+	var a: float = clampf(p_color.a, 0.0, 1.0)
+	var inv_a: float = 1.0 - a
+	var cr: float = clampf(p_color.r, 0.0, 1.0) * a * 255.0
+	var cg: float = clampf(p_color.g, 0.0, 1.0) * a * 255.0
+	var cb: float = clampf(p_color.b, 0.0, 1.0) * a * 255.0
+	var dst := 0
+	for y in range(p_height):
+		for x in range(p_width):
+			var light: bool = (((x >> 3) + (y >> 3)) & 1) != 0
+			var v: float = 58.0 if light else 38.0
+			bytes[dst] = int(clampf(cr + v * inv_a, 0.0, 255.0))
+			bytes[dst + 1] = int(clampf(cg + v * inv_a, 0.0, 255.0))
+			bytes[dst + 2] = int(clampf(cb + (v + 6.0) * inv_a, 0.0, 255.0))
+			bytes[dst + 3] = 255
+			dst += 4
+	img.set_data(p_width, p_height, false, Image.FORMAT_RGBA8, bytes)
+	return img
+
+
+## Generate an Image from per-cell colors (e.g. from ColorBlend).
+## If transparent, alpha-blends over the 8x8 checkerboard pattern.
+static func preview_image_color_cells(p_colors: PackedColorArray, p_width: int, p_height: int) -> Image:
+	var img := Image.create(p_width, p_height, false, Image.FORMAT_RGBA8)
+	var count := p_width * p_height
+	if p_colors.size() < count:
+		return img
+	var bytes := PackedByteArray()
+	bytes.resize(count * 4)
+	var dst := 0
+	for y in range(p_height):
+		for x in range(p_width):
+			var c: Color = p_colors[dst >> 2]
+			if c.a < 1.0:
+				var a: float = clampf(c.a, 0.0, 1.0)
+				var inv_a: float = 1.0 - a
+				var light: bool = (((x >> 3) + (y >> 3)) & 1) != 0
+				var v: float = 58.0 if light else 38.0
+				bytes[dst] = int(clampf(c.r * a * 255.0 + v * inv_a, 0.0, 255.0))
+				bytes[dst + 1] = int(clampf(c.g * a * 255.0 + v * inv_a, 0.0, 255.0))
+				bytes[dst + 2] = int(clampf(c.b * a * 255.0 + (v + 6.0) * inv_a, 0.0, 255.0))
+				bytes[dst + 3] = 255
+			else:
+				bytes[dst] = int(clampf(c.r * 255.0, 0.0, 255.0))
+				bytes[dst + 1] = int(clampf(c.g * 255.0, 0.0, 255.0))
+				bytes[dst + 2] = int(clampf(c.b * 255.0, 0.0, 255.0))
+				bytes[dst + 3] = int(clampf(c.a * 255.0, 0.0, 255.0))
+			dst += 4
+	img.set_data(p_width, p_height, false, Image.FORMAT_RGBA8, bytes)
+	return img
+
+
+func _resolve_color_node(p_idx: int, p_slot_to_field: Dictionary, p_blend_mask_slot: Dictionary,
+		p_px: int, r_color_of_node: Dictionary, p_depth: int = 0) -> Variant:
+	if r_color_of_node.has(p_idx):
+		return r_color_of_node[p_idx]
+	if graph == null or p_idx < 0 or p_idx >= graph.nodes.size():
+		return null
+	var node: Pasture3DGraphNode = graph.nodes[p_idx]
+	if node == null or p_depth > 16:
+		return null
+
+	if node is Pasture3DGraphNodeConstColor:
+		var col: Color = node.value if node.value is Color else Color.WHITE
+		r_color_of_node[p_idx] = col
+		return col
+
+	if node is Pasture3DGraphNodeColorMix:
+		var upstream := {}
+		var names: PackedStringArray = node.input_names()
+		for port in range(node.input_count()):
+			var src := source_of(graph, p_idx, port)
+			if not src.is_empty():
+				var up = _resolve_color_node(int(src["node"]), p_slot_to_field, p_blend_mask_slot,
+						p_px, r_color_of_node, p_depth + 1)
+				if up != null and port < names.size():
+					upstream[String(names[port])] = up
+		var col: Color = node.graph_color(upstream)
+		r_color_of_node[p_idx] = col
+		return col
+
+	if node is Pasture3DGraphNodeColorBlend:
+		var upstream := {}
+		var names: PackedStringArray = node.input_names()
+		var mport: int = node.color_mask_port() if node.has_method("color_mask_port") else 2
+		for port in range(node.input_count()):
+			if port == mport:
+				continue
+			var src := source_of(graph, p_idx, port)
+			if not src.is_empty():
+				var up = _resolve_color_node(int(src["node"]), p_slot_to_field, p_blend_mask_slot,
+						p_px, r_color_of_node, p_depth + 1)
+				if up != null and port < names.size():
+					upstream[String(names[port])] = up
+
+		var mslot: int = int(p_blend_mask_slot.get(p_idx, -1))
+		if mslot >= 0 and p_slot_to_field.has(mslot):
+			var mask_field: PackedFloat32Array = p_slot_to_field[mslot]
+			var cells := p_px * p_px
+			if mask_field.size() == cells:
+				var per_cell: PackedColorArray = node.graph_color_cells(upstream, mask_field, cells)
+				r_color_of_node[p_idx] = per_cell
+				return per_cell
+
+		var col: Color = node.graph_color(upstream)
+		r_color_of_node[p_idx] = col
+		return col
+
+	if node.has_method("graph_color"):
+		var col: Color = node.call("graph_color", {})
+		r_color_of_node[p_idx] = col
+		return col
+
+	return null
+
+
+## Draw each COLOR-typed preview from its constant value, mix fold, or blended mask cells.
+##
+## Like PATH previews, COLOR nodes are sideband visuals: they produce no scalar heightfield in C++,
+## so they decline scalar grid representations (preview_repr_for_type(COLOR) == -1).
+## ConstColor and ColorMix render instant solid color swatches on the main thread; ColorBlend renders
+## a 2D color image blended per-cell across the domain using its mask field evaluated in the worker pass.
+func _render_color_previews(p_color_roots: Array, p_slot_to_field: Dictionary,
+		p_blend_mask_slot: Dictionary, p_px: int) -> void:
+	if p_color_roots.is_empty() or graph == null:
+		return
+	var color_of_node: Dictionary = {}
+	for idx in p_color_roots:
+		if not _preview_rects.has(idx) or not is_instance_valid(_preview_rects[idx]):
+			continue
+		var n: Pasture3DGraphNode = graph.nodes[idx]
+		if n == null:
+			continue
+		var res = _resolve_color_node(idx, p_slot_to_field, p_blend_mask_slot, p_px, color_of_node)
+		if res == null:
+			continue
+		var img: Image = null
+		var chip_str: String = ""
+		var tooltip_str: String = ""
+		var chip_live: bool = true
+
+		if n is Pasture3DGraphNodeConstColor:
+			var col: Color = res if res is Color else Color.WHITE
+			img = preview_image_solid_color(col, p_px, p_px)
+			chip_str = "#%s" % col.to_html(col.a < 1.0).to_upper()
+			tooltip_str = "Constant color: %s (r=%.2f, g=%.2f, b=%.2f, a=%.2f)" % [
+				chip_str, col.r, col.g, col.b, col.a
+			]
+		elif n is Pasture3DGraphNodeColorMix:
+			var col: Color = res if res is Color else Color.WHITE
+			img = preview_image_solid_color(col, p_px, p_px)
+			var mode_names := ["MIX", "ADD", "SUB", "MUL", "SCREEN", "OVERLAY"]
+			var m_str: String = mode_names[n.mode] if n.mode >= 0 and n.mode < mode_names.size() else "MIX"
+			chip_str = "%s #%s" % [m_str, col.to_html(col.a < 1.0).to_upper()]
+			tooltip_str = "Color Mix (%s, factor=%.2f): %s" % [m_str, n.factor, chip_str]
+		elif n is Pasture3DGraphNodeColorBlend:
+			var mode_names := ["MIX", "ADD", "SUB", "MUL", "SCREEN", "OVERLAY"]
+			var m_str: String = mode_names[n.mode] if n.mode >= 0 and n.mode < mode_names.size() else "MIX"
+			if res is PackedColorArray:
+				img = preview_image_color_cells(res, p_px, p_px)
+				chip_str = "BLEND %s" % m_str
+				tooltip_str = "Color Blend (%s, strength=%.2f) masked per cell" % [m_str, n.strength]
+			else:
+				var mport: int = n.color_mask_port() if n.has_method("color_mask_port") else 2
+				var wired: bool = not source_of(graph, idx, mport).is_empty()
+				if wired and p_slot_to_field.is_empty() and _preview_rects[idx].texture != null:
+					# A live blended preview is already on screen and we are waiting for the worker pass
+					# to evaluate the new mask. Do not flash the flat fallback color while waiting!
+					continue
+				var col: Color = res if res is Color else Color.WHITE
+				img = preview_image_solid_color(col, p_px, p_px)
+				chip_str = "BLEND %s" % m_str if wired else "BLEND (unwired)"
+				chip_live = wired
+				tooltip_str = "Color Blend: %s" % ("waiting on mask tap" if wired else "unwired mask, falling back to Color A")
+		else:
+			if res is Color:
+				img = preview_image_solid_color(res, p_px, p_px)
+				chip_str = "#%s" % res.to_html(res.a < 1.0).to_upper()
+				tooltip_str = "Color: %s" % chip_str
+
+		if img != null:
+			var tr: TextureRect = _preview_rects[idx]
+			tr.texture = ImageTexture.create_from_image(img)
+
+		if _preview_chips.has(idx) and is_instance_valid(_preview_chips[idx]):
+			var chip: Button = _preview_chips[idx]
+			chip.text = chip_str
+			chip.modulate = Color(1, 1, 1, 0.9 if chip_live else 0.55)
+			chip.tooltip_text = tooltip_str
+
+
 ## Worker-thread body: one native tap pass, then a hillshade per tapped buffer. Touches only stateless C++
 ## statics over the plain data captured on the main thread, so it is safe off-thread; results are marshalled
 ## back with call_deferred, guarded by the dispatch token.
@@ -2349,8 +2591,11 @@ func _preview_worker(p_token: int, p_program: Dictionary, p_input: PackedFloat32
 	var fields: Array = taps.get("fields", [])
 	var unserved: PackedInt32Array = taps.get("unserved", PackedInt32Array())
 	var results: Dictionary = {}
+	var slot_to_field: Dictionary = {}
 	for i in range(p_tap_slots.size()):
 		var slot: int = int(p_tap_slots[i])
+		if i < fields.size() and fields[i] is PackedFloat32Array and not unserved.has(i):
+			slot_to_field[slot] = fields[i]
 		if not p_slot_to_node.has(slot):
 			continue
 		var view: Dictionary = p_slot_view.get(slot, {})
@@ -2384,6 +2629,7 @@ func _preview_worker(p_token: int, p_program: Dictionary, p_input: PackedFloat32
 		results[int(p_slot_to_node[slot])] = {
 			"bytes": bytes, "range": rng, "repr": repr_id, "served": served,
 		}
+	results["_slot_to_field"] = slot_to_field
 	call_deferred(&"_apply_preview_textures", p_token, results, p_px)
 
 
@@ -2394,6 +2640,8 @@ func _apply_preview_textures(p_token: int, p_results: Dictionary, p_px: int = PR
 	if p_token != _preview_token:
 		return # a newer refresh superseded this one, or the canvas was rebuilt
 	for idx in p_results:
+		if not (idx is int):
+			continue
 		if not _preview_rects.has(idx):
 			continue
 		var tr: TextureRect = _preview_rects[idx]
@@ -2424,6 +2672,11 @@ func _apply_preview_textures(p_token: int, p_results: Dictionary, p_px: int = PR
 			tex.update(img)
 		else:
 			tr.texture = ImageTexture.create_from_image(img)
+
+	var slot_to_field: Dictionary = p_results.get("_slot_to_field", {})
+	if not _preview_color_roots.is_empty():
+		_render_color_previews(_preview_color_roots, slot_to_field, _preview_blend_mask_slot, p_px)
+	last_preview_applied = p_token
 
 
 # ---- GraphEdit Callbacks ----------------------------------------------------------------------------

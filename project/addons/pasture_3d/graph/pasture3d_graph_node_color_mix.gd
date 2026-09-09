@@ -62,6 +62,18 @@ func op() -> StringName:
 	return &"color_mix"
 
 
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	var ca: Color = color_a if color_a is Color else Color.WHITE
+	var cb: Color = color_b if color_b is Color else Color.BLACK
+	p[0] = ca.get_luminance()
+	p[1] = cb.get_luminance()
+	p[2] = float(mode)
+	p[3] = factor
+	return {"params": p}
+
+
 func role() -> Role:
 	return Role.COMBINER
 

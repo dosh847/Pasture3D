@@ -1186,6 +1186,8 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "const_int", GRAPH_OP_CONST },
 		{ "const_vector", GRAPH_OP_CONST },
 		{ "const_color", GRAPH_OP_CONST },
+		{ "color_mix", GRAPH_OP_CONST },
+		{ "color_blend", GRAPH_OP_CONST },
 		{ "const_bool", GRAPH_OP_CONST },
 		{ "road_source", GRAPH_OP_CONST },
 		{ "shape_source", GRAPH_OP_CONST },

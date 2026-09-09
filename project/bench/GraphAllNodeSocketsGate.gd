@@ -48,7 +48,7 @@ func _g_every_palette_op_is_lowerable() -> void:
 	if not ClassDB.class_has_method("Pasture3DUtil", "graph_op_ids"):
 		_assert(false, "Pasture3DUtil.graph_op_ids is not bound — rebuild the GDExtension")
 		return
-	var ids: Dictionary = Pasture3DUtil.graph_op_ids()
+	var ids: Dictionary = Pasture3DTerrainGraph.op_ids()
 
 	# An op may be absent from the map on exactly two declared grounds, and neither is a list this file
 	# maintains — a list has to be edited when a node is added, which is the same maintenance step S1
