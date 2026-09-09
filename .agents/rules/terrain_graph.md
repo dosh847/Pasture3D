@@ -29,6 +29,12 @@ When implementing or modifying path reshaping nodes (e.g. `PathMeanderize`, `Pat
 ### D. Parameter Conventions
 - Export setters must call `_param_changed()` (not raw `emit_changed()`) to bump the graph's dirty revision and notify the canvas.
 
+### E. Dimensionless Curvature & Turn Bounding
+- **Strictly Dimensionless Curvature**: When calculating local curvature or turn angles (e.g. in `PathMeanderize`), always normalize incoming and outgoing segment vectors to unit directions:
+  $$\text{turn} = \left(\frac{v_{\text{in}}}{\|v_{\text{in}}\|}\right) \times \left(\frac{v_{\text{out}}}{\|v_{\text{out}}\|}\right) = \sin(\theta_{\text{turn}}) \in [-1, 1]$$
+- **Avoid Dimensional Runaway**: Never divide an unnormalized cross product $v_{\text{in}} \times v_{\text{out}}$ ($m^2$) by chord length ($m$) to obtain curvature. This yields a value in metres ($m$) rather than a dimensionless factor, causing displacement $disp = \text{chord} \cdot (\text{ratio} \cdot \text{turn} + \dots)$ to scale quadratically ($m^2$). Over multiple iterations, this compounds exponentially ($20\text{ m} \to 160\text{ m} \to 25,000\text{ m} \to 2.2\text{ million metres}$), exploding points across the viewport and collapsing splines upon loop excision.
+- **C++ and GDScript Twin Parity**: Maintain identical normalization and $\epsilon$-guards across both C++ (`src/pasture_3d_path_ops.cpp`) and the GDScript `[Dev/GD]` reference node (`pasture3d_graph_node_dev_path_meanderize.gd`).
+
 ---
 
 ## 2. Viewport Gizmo & Spline Previews
@@ -76,3 +82,27 @@ When implementing or modifying path reshaping nodes (e.g. `PathMeanderize`, `Pat
 ### C. Test Gate Invariants
 - **Footprint Separation by Translation Symmetry**: When testing that brush movement clears previous footprints, ensure test sample points are outside the new position's footprint. Moving along a uniform displacement vector ($\vec{p}_1 = \vec{p}_0 + \vec{\delta}, \vec{p}_2 = \vec{p}_1 + \vec{\delta}$) guarantees non-overlap by translation symmetry.
 - **Headless Scene Execution**: Automated bench gates extending `Node` must be accompanied by a `.tscn` root scene when executed under `--headless`.
+
+---
+
+## 5. Grid-to-Path Derive Nodes (`Pasture3DGraphNodePathDerive`) & Native Staging
+
+When implementing or consuming derive nodes (`PathDrape`, `PathWidthFromField`, `PathFromFlow`):
+
+### A. Phase S7b Staged Native Acceleration
+- **Never Force GDScript Fallback for Staged Graphs**: Derive nodes read terrain fields and return `blocks_native() == true` for monolithic programs. However, when a graph modifier supports staged execution (`graph._native_supported_if_staged()`), `Pasture3DNodeGraph.forces_gdscript()` must return `false`.
+- **Brush Host Preparation**: Host brushes (`Pasture3DPlow`, `Pasture3DMound`) must call `_prepare_staged_graph_modifiers()` to stage derive paths against the working base terrain (`_base_below_grid`) via `graph.stage_paths_for()` and compile `blk["graph_program"]` *before* invoking C++ native rasterization (`stamp_mound_loop`).
+- **Prevent Main-Thread Stalls**: Dropping large terrain loops to the GDScript rasterizer falls back to computing SDFs and 2D blurs on the main thread, freezing the editor for 12+ seconds. Staged native execution runs in $< 200\text{ ms}$ (a $70\times$ speedup).
+
+### B. Unwired Surface Input Fallback
+- **Ambient Input Fallback**: If a derive node's `surface` port is unwired, both `_stage_derives()` and `_input_grids()` must fall back to the host brush's incoming terrain surface (`p_input`), rather than passing the path through unmodified.
+- **Clear Diagnostic Messaging**: Diagnostic warnings in `node_warnings()` must inform the user when an unwired surface port is defaulting to the incoming terrain surface.
+
+---
+
+## 6. Path Carve & Composition Presets (`Pasture3DGraphNodePathCarve`)
+
+### A. Cross-Section & Blend Coupling Invariant
+- **Auto-Switching Compatible Blends**: `PathCarve.blend` defaults to `Blend.MAX` for `CrossSection.CREST`. For `CrossSection.BED`, `Blend.MAX` will clamp negative carved depths back to ground level ($\max(\text{carved}, \text{ground}) = \text{ground}$), completely erasing the channel. The `cross_section` setter must automatically switch `blend` to `Blend.MIN` when `BED` is selected, and to `Blend.MAX` when `CREST` is selected.
+- **Diagnostic Incompatibility Warnings**: `node_warnings()` must emit an immediate warning if `cross_section == CrossSection.BED && blend == Blend.MAX` or `cross_section == CrossSection.CREST && blend == Blend.MIN`.
+
