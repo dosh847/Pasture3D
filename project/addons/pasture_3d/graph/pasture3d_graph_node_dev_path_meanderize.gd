@@ -154,7 +154,9 @@ func reshape(p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -> void:
 			var nrm := Vector2(chord_v.y, -chord_v.x) / chord
 			var v_in := p1 - p0
 			var v_out := p2 - p1
-			var turn: float = (v_in.cross(v_out) / chord) if chord > 1e-4 else 0.0
+			var l_in := v_in.length()
+			var l_out := v_out.length()
+			var turn: float = (v_in.cross(v_out) / (l_in * l_out)) if (l_in > 1e-4 and l_out > 1e-4) else 0.0
 			var jitter: float = _hash1d(i * 31 + it * 7, cur_seed)
 
 			var disp: float = chord * (ratio * turn + noise_ratio * jitter)

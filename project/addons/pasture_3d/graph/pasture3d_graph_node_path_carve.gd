@@ -57,6 +57,10 @@ enum Blend { REPLACE, MAX, MIN }
 @export var cross_section: CrossSection = CrossSection.CREST:
 	set(v):
 		cross_section = v
+		if cross_section == CrossSection.BED and blend == Blend.MAX:
+			blend = Blend.MIN
+		elif cross_section == CrossSection.CREST and blend == Blend.MIN:
+			blend = Blend.MAX
 		emit_changed()
 
 ## Metres above (CREST) or below (BED) the reference. With Follow Path Height on the path IS the

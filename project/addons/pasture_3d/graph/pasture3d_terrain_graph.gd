@@ -698,10 +698,10 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 			var sp0: int = input_ports_of[ni][0] if not input_ports_of[ni].is_empty() else 0
 			grids[ni] = _read_channel(s0, sp0, grids, aux, n).duplicate()
 		elif node.op() == &"noise_jordan" or node.op() == &"noise_swiss" or node.op() == &"furrows" or node.op() == &"dunes":
-			var in_grids := _input_grids(ni, grids, aux, n)
+			var in_grids := _input_grids(ni, grids, aux, n, p_input)
 			grids[ni] = node.eval_grid(in_grids, p_gw, p_gh, p_mask, p_rect)
 		elif node.needs_grid():
-			var in_grids := _input_grids(ni, grids, aux, n)
+			var in_grids := _input_grids(ni, grids, aux, n, p_input)
 			if node.reads_paths():
 				node.set_path_inputs(_path_inputs(ni, inputs_of))
 			if node.output_count() > 1:
@@ -716,7 +716,7 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 		else:
 			var g := PackedFloat32Array()
 			g.resize(n)
-			var in_grids := _input_grids(ni, grids, aux, n)
+			var in_grids := _input_grids(ni, grids, aux, n, p_input)
 			var in_count: int = in_grids.size()
 			var cell_in := PackedFloat32Array()
 			cell_in.resize(in_count)
@@ -1792,7 +1792,10 @@ func _stage_derives(p_out: int, p_gw: int, p_gh: int, p_rect: Rect2, p_mask, p_i
 			var dv: float = node.input_unwired_default(port)
 			var src: int = int(srcs[port]) if port < srcs.size() else -1
 			if src < 0 or port >= types.size() or int(types[port]) == Pasture3DGraphNode.PortType.PATH:
-				ins[port] = Pasture3DGraphOps.zeros(n) if is_zero_approx(dv) else Pasture3DGraphOps.filled(n, dv)
+				if src < 0 and port < types.size() and int(types[port]) == Pasture3DGraphNode.PortType.HEIGHT and p_input != null and (p_input is PackedFloat32Array) and not (p_input as PackedFloat32Array).is_empty():
+					ins[port] = _surface_grid(p_input, n)
+				else:
+					ins[port] = Pasture3DGraphOps.zeros(n) if is_zero_approx(dv) else Pasture3DGraphOps.filled(n, dv)
 				continue
 			var g: PackedFloat32Array = evaluate(p_gw, p_gh, p_rect, p_mask, p_input, src)
 			if g.size() != n:
@@ -2109,7 +2112,7 @@ func _eval_unfolded(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input 
 		if node.op() == &"input":
 			grids[ni] = _surface_grid(p_input, n)
 			continue
-		var in_grids := _input_grids(ni, grids, aux, n)
+		var in_grids := _input_grids(ni, grids, aux, n, p_input)
 		if node.muted:
 			grids[ni] = (in_grids[0] as PackedFloat32Array) if not in_grids.is_empty() else Pasture3DGraphOps.zeros(n)
 		elif node.op() == &"noise_jordan" or node.op() == &"noise_swiss" or node.op() == &"furrows" or node.op() == &"dunes":
@@ -2118,7 +2121,7 @@ func _eval_unfolded(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input 
 			# `eval_grid(in_grids, ...)` — the previous version called the Pasture3DUtil kernel directly with
 			# `node.<property>`, which threw away every wire into a parameter port. A Const driving an
 			# amplitude did nothing, silently. Matches the same branch in `evaluate()`.
-			grids[ni] = node.eval_grid(_input_grids(ni, grids, aux, n), p_gw, p_gh, p_mask, p_rect)
+			grids[ni] = node.eval_grid(_input_grids(ni, grids, aux, n, p_input), p_gw, p_gh, p_mask, p_rect)
 		elif node.needs_grid() and node.output_count() > 1:
 			var chans: Array = node.eval_grid_channels(in_grids, p_gw, p_gh, p_mask, p_rect)
 			grids[ni] = chans[0]
@@ -2147,7 +2150,7 @@ func _eval_unfolded(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input 
 ## The input grids for node `p_ni`, one per input port in port order; an unwired port reads zeros so a
 ## missing connection is a clean 0, not an error. Channel-aware: a connection from a multi-output source's
 ## port >= 1 reads that channel out of `p_aux[from]`, so a grid node can consume a solver's mask channel.
-func _input_grids(p_ni: int, p_grids: Dictionary, p_aux: Dictionary, p_n: int) -> Array:
+func _input_grids(p_ni: int, p_grids: Dictionary, p_aux: Dictionary, p_n: int, p_input = null) -> Array:
 	var node: Pasture3DGraphNode = nodes[p_ni]
 	var count: int = node.input_count()
 	var types: PackedInt32Array = node.input_port_types()
@@ -2155,7 +2158,10 @@ func _input_grids(p_ni: int, p_grids: Dictionary, p_aux: Dictionary, p_n: int) -
 	out.resize(count)
 	for p in range(count):
 		var dv: float = node.input_unwired_default(p)
-		out[p] = Pasture3DGraphOps.zeros(p_n) if is_zero_approx(dv) else Pasture3DGraphOps.filled(p_n, dv)
+		if node.derives_path_from_grid() and p < types.size() and int(types[p]) == Pasture3DGraphNode.PortType.HEIGHT and p_input != null and (p_input is PackedFloat32Array) and not (p_input as PackedFloat32Array).is_empty():
+			out[p] = _surface_grid(p_input, p_n)
+		else:
+			out[p] = Pasture3DGraphOps.zeros(p_n) if is_zero_approx(dv) else Pasture3DGraphOps.filled(p_n, dv)
 	for c in connections:
 		if c.size() >= 4 and int(c[2]) == p_ni:
 			var to_port := int(c[3])

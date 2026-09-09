@@ -4778,6 +4778,40 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 	return out
 
 
+func _stack_has_staged_graphs(p_stack: Dictionary) -> bool:
+	if not p_stack.has("list"):
+		return false
+	for blk in p_stack["list"]:
+		var m = blk.get("mod", null)
+		if m is Pasture3DNodeGraph and m.graph != null:
+			if m.graph._native_supported_if_staged(m.graph.output_index()) or m.graph.reads_input():
+				return true
+	return false
+
+
+## Prepares any graph modifiers in the stack that require staged compilation (e.g. derive nodes
+## like PathDrape). If any graph modifier has derives that are native-supported once staged,
+## this stages its paths against the current ground surface and recompiles its graph_program,
+## allowing the C++ native rasteriser (stamp_mound_loop) to run at full native speed.
+func _prepare_staged_graph_modifiers(p_stack: Dictionary, p_min_x: float, p_min_z: float, p_vs: float, p_gw: int, p_gh: int, p_base_in: PackedFloat32Array = PackedFloat32Array()) -> PackedFloat32Array:
+	if not p_stack.has("list"):
+		return p_base_in
+	var rect := Rect2(p_min_x - 0.5 * p_vs, p_min_z - 0.5 * p_vs, float(p_gw) * p_vs, float(p_gh) * p_vs)
+	var base_in: PackedFloat32Array = p_base_in
+	for blk in p_stack["list"]:
+		var m = blk.get("mod", null)
+		if m is Pasture3DNodeGraph and m.graph != null:
+			var g: Pasture3DTerrainGraph = m.graph
+			if not g.native_supported() and g._native_supported_if_staged(g.output_index()):
+				if base_in.is_empty():
+					base_in = _base_below_grid(p_min_x, p_min_z, p_vs, p_gw, p_gh)
+				g.stage_paths_for(g.output_index(), p_gw, p_gh, rect, base_in)
+				blk["graph_program"] = g.compile_graph_program()
+				blk["content_key"] = g.content_key()
+				blk["reads_input"] = g.reads_input()
+	return base_in
+
+
 ## Identifies one bake grid, so a brush with several loops caches one frozen solve PER LOOP rather than
 ## thrashing a single slot between them.
 func _extent_key(p_min_x: float, p_min_z: float, p_vs: float, p_gw: int, p_gh: int) -> String:
@@ -5370,7 +5404,12 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	# cannot run has no program, and the only other way to solve it is `evaluate()`, which may not be
 	# called off the main thread. Such a graph falls through to the synchronous MISS path below — slower,
 	# and correct — rather than being handed to a worker that would have to touch the resource.
-	var prog: Dictionary = g.compile_graph_program() if g.native_supported() else {}
+	var prog: Dictionary = {}
+	if g.native_supported():
+		prog = g.compile_graph_program()
+	elif g._native_supported_if_staged(g.output_index()):
+		g.stage_paths_for(g.output_index(), gw, gh, rect, z)
+		prog = g.compile_graph_program()
 	if (bool(p_step.get("defer", false)) or _graph_defer) and frozen and not prog.is_empty():
 		out_slot["pending"] = z.duplicate()
 		out_slot["pending_key"] = key

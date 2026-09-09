@@ -351,7 +351,7 @@ func apply_field(p_step: Dictionary, p_vals: PackedFloat32Array, p_ctx: Dictiona
 ## Pasture3DNode.forces_gdscript(). The native evaluator runs a graph only when it implements every node
 ## in it; an unsupported op would otherwise be dropped in silence.
 func forces_gdscript(_p_host) -> bool:
-	return graph == null or not graph.native_supported()
+	return graph == null or not (graph.native_supported() or graph._native_supported_if_staged(graph.output_index()))
 
 
 ## Pasture3DNode.make_pending().

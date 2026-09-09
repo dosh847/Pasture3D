@@ -264,6 +264,8 @@ func _paint_spline(path: Path3D) -> void:
 	# Native rasteriser (Round 2): same SDF + per-cell math in C++ (~15-40x faster than this GDScript loop
 	# on large edits). The GDScript reference below runs on builds without it (and is the A/B oracle).
 	if _native_raster("stamp_mound_loop"):
+		var base_in: PackedFloat32Array = _base_below_grid(min_x, min_z, vs, gw, gh) if (relative_to_terrain or use_fields or _stack_has_staged_graphs(stack)) else PackedFloat32Array()
+		base_in = _prepare_staged_graph_modifiers(stack, min_x, min_z, vs, gw, gh, base_in)
 		var params := {
 			"min_x": min_x, "min_z": min_z, "vs": vs, "gw": gw, "gh": gh,
 			"crease_smoothing": crease_smoothing,
@@ -284,11 +286,8 @@ func _paint_spline(path: Path3D) -> void:
 			# (0 = §6.8's no-margin behaviour). The grid was already widened to match by `_total_padding`.
 			"modifier_margin": _effective_modifier_margin(),
 		}
-		# C++ derives the slope/curvature/gradient grids itself (same formula, same input, so the two paths
-		# agree) — but only if it is handed the below-layer heights, which otherwise travel only when the
-		# brush is stamping relative to the terrain.
-		if relative_to_terrain or use_fields:
-			params["base_below"] = _base_below_grid(min_x, min_z, vs, gw, gh)
+		if not base_in.is_empty():
+			params["base_below"] = base_in
 		terrain.data.stamp_mound_loop(_layer_id, poly, _clip_aabb, params, _ramp_lut(falloff_curve))
 		# The rasteriser writes each frozen modifier's solve into the `out` dictionary it was handed, so
 		# there is something to collect the moment it returns.

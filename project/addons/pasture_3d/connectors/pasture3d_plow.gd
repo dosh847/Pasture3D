@@ -181,6 +181,8 @@ func _paint_spline(path: Path3D) -> void:
 	# Native rasteriser: same SDF + per-cell modifier math in C++ (~15-40x faster than GDScript loop
 	# on large edits).
 	if _native_raster("stamp_mound_loop"):
+		var base_in: PackedFloat32Array = _base_below_grid(min_x, min_z, vs, gw, gh) if (relative_to_terrain or use_fields or _stack_has_staged_graphs(stack)) else PackedFloat32Array()
+		base_in = _prepare_staged_graph_modifiers(stack, min_x, min_z, vs, gw, gh, base_in)
 		var params := {
 			"min_x": min_x, "min_z": min_z, "vs": vs, "gw": gw, "gh": gh,
 			"crease_smoothing": crease_smoothing,
@@ -200,8 +202,8 @@ func _paint_spline(path: Path3D) -> void:
 			# (0 = §6.8's no-margin behaviour). The grid was already widened to match by `_total_padding`.
 			"modifier_margin": _effective_modifier_margin(),
 		}
-		if relative_to_terrain or use_fields:
-			params["base_below"] = _base_below_grid(min_x, min_z, vs, gw, gh)
+		if not base_in.is_empty():
+			params["base_below"] = base_in
 		terrain.data.stamp_mound_loop(_layer_id, poly, _clip_aabb, params, _ramp_lut(falloff_curve))
 		_commit_modifier_caches(stack, extent,
 				[fcx, fcz, fcos, fsin, frame[4], frame[5], min_x, min_z, vs])

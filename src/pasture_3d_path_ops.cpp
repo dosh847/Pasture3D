@@ -989,7 +989,9 @@ Dictionary path_meanderize_solve(const PackedVector2Array &p_points,
 			Vector2 nrm = Vector2(chord_v.y, -chord_v.x) / chord;
 			Vector2 v_in = p1 - p0;
 			Vector2 v_out = p2 - p1;
-			float turn = (chord > 1e-4f) ? (v_in.cross(v_out) / chord) : 0.0f;
+			float l_in = v_in.length();
+			float l_out = v_out.length();
+			float turn = (l_in > 1e-4f && l_out > 1e-4f) ? ((v_in / l_in).cross(v_out / l_out)) : 0.0f;
 			float jitter = path_hash1d(i * 31 + it * 7, seed);
 
 			float disp = chord * ((float)p_ratio * turn + (float)p_noise_ratio * jitter);

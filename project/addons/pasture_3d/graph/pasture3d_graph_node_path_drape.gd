@@ -108,7 +108,7 @@ func derive(_p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -> void:
 func node_warnings() -> PackedStringArray:
 	var out := PackedStringArray()
 	if port_unwired(1):
-		out.append("Path Drape has no surface wired, so it passes the path through unchanged. Wire the "
+		out.append("Path Drape has no surface wired; it will drape onto the incoming terrain surface if available, or pass through unchanged. Wire the "
 				+ "terrain you want it to sit on into `surface`.")
 	if force_downhill:
 		if _out != null and _out.closed:
