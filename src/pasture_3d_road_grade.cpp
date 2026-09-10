@@ -718,12 +718,44 @@ static inline double road_mesh_align_bank_at(const float *p_bank, int n_bank, do
 	return (double)p_bank[si];
 }
 
+inline double kerb_displacement(int p_kerb_type, double p_xi, double p_s,
+		double p_height, double p_pitch, double p_depth) {
+	if (p_kerb_type <= 0 || p_xi <= 0.0 || p_xi >= 1.0) {
+		return 0.0;
+	}
+	switch (p_kerb_type) {
+		case 1: { // FIA_BEVEL
+			const double bevel = (p_xi < 0.2) ? (p_xi / 0.2) : ((p_xi <= 0.7) ? 1.0 : (1.0 - p_xi) / 0.3);
+			return p_height * bevel;
+		}
+		case 2: { // SAWTOOTH
+			const double bevel = (p_xi < 0.2) ? (p_xi / 0.2) : ((p_xi <= 0.7) ? 1.0 : (1.0 - p_xi) / 0.3);
+			const double pitch = p_pitch > 0.01 ? p_pitch : 0.4;
+			const double x = p_s / pitch;
+			const double saw = 2.0 * (x - std::floor(0.5 + x));
+			return (p_height + p_depth * saw) * bevel;
+		}
+		case 3: { // FLAT_SLAB
+			const double slab_h = std::min(p_height, 0.01);
+			const double bevel = (p_xi < 0.2) ? (p_xi / 0.2) : ((p_xi <= 0.7) ? 1.0 : (1.0 - p_xi) / 0.3);
+			return slab_h * bevel;
+		}
+		case 4: { // DRAIN_GUTTER
+			return -4.0 * p_height * p_xi * (1.0 - p_xi);
+		}
+		default:
+			return 0.0;
+	}
+}
+
 } // namespace
 
 Array godot::road_mesh_build_chunk(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
 		double p_align_ds, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
 		double p_from, double p_to, double p_half, double p_shoulder, double p_crown,
-		int p_lod, double p_lift, double p_align_s0, int p_crown_mode, double p_max_bank) {
+		int p_lod, double p_lift, double p_align_s0, int p_crown_mode, double p_max_bank,
+		int p_left_kerb, int p_right_kerb, double p_kerb_width, double p_kerb_height,
+		double p_kerb_rumble_pitch, double p_kerb_rumble_depth) {
 	const int plan_n = p_plan.size();
 	const int cum_n = p_cum.size();
 	const int z_n = p_align_z.size();
@@ -739,21 +771,46 @@ Array godot::road_mesh_build_chunk(const PackedVector2Array &p_plan, const Packe
 
 	const double half = std::max(p_half, 0.01);
 	const double shoulder = std::max(p_shoulder, 0.0);
+	const double kw = std::max(p_kerb_width, 0.1);
 
 	std::vector<double> offsets;
-	if (p_lod <= 0) {
-		offsets = { -(half + shoulder), -half, 0.0, half, half + shoulder };
-	} else if (p_lod == 1) {
-		offsets = { -(half + shoulder), -half, half, half + shoulder };
-	} else {
+	if (p_lod >= 2) {
 		offsets = { -half, half };
+	} else {
+		// Left side
+		if (p_left_kerb > 0) {
+			offsets.push_back(-(half + kw));
+			offsets.push_back(-(half + kw * 0.7));
+			offsets.push_back(-(half + kw * 0.2));
+		} else {
+			offsets.push_back(-(half + shoulder));
+		}
+
+		offsets.push_back(-half);
+		if (p_lod == 0) {
+			offsets.push_back(0.0);
+		}
+		offsets.push_back(half);
+
+		// Right side
+		if (p_right_kerb > 0) {
+			offsets.push_back(half + kw * 0.2);
+			offsets.push_back(half + kw * 0.7);
+			offsets.push_back(half + kw);
+		} else {
+			offsets.push_back(half + shoulder);
+		}
 	}
 	const int across_count = (int)offsets.size();
 	if (across_count < 2) {
 		return Array();
 	}
 
-	const double step = std::max(p_align_ds, 0.01) * std::pow(2.0, (double)std::clamp(p_lod, 0, 3));
+	double step = std::max(p_align_ds, 0.01) * std::pow(2.0, (double)std::clamp(p_lod, 0, 3));
+	if (p_lod == 0 && (p_left_kerb == 2 || p_right_kerb == 2)) {
+		const double min_rumble_step = std::max(p_kerb_rumble_pitch * 0.5, 0.05);
+		step = std::min(step, min_rumble_step);
+	}
 	const int rows = std::max((int)std::ceil((p_to - p_from) / step), 1) + 1;
 
 	PackedVector3Array verts;
@@ -782,7 +839,16 @@ Array godot::road_mesh_build_chunk(const PackedVector2Array &p_plan, const Packe
 		for (int c = 0; c < across_count; c++) {
 			const double u = offsets[c];
 			const Vector2 xz = at + across * (float)u;
-			const double y = road_mesh_surface_height(centre, bank, p_crown, u, half, p_crown_mode, p_max_bank) + p_lift;
+			const double base_y = road_mesh_surface_height(centre, bank, p_crown, u, half, p_crown_mode, p_max_bank);
+			double dy = 0.0;
+			if (u < -half && p_left_kerb > 0) {
+				const double xi = std::clamp((-u - half) / kw, 0.0, 1.0);
+				dy = kerb_displacement(p_left_kerb, xi, s, p_kerb_height, p_kerb_rumble_pitch, p_kerb_rumble_depth);
+			} else if (u > half && p_right_kerb > 0) {
+				const double xi = std::clamp((u - half) / kw, 0.0, 1.0);
+				dy = kerb_displacement(p_right_kerb, xi, s, p_kerb_height, p_kerb_rumble_pitch, p_kerb_rumble_depth);
+			}
+			const double y = base_y + dy + p_lift;
 			v_ptr[vi] = Vector3(xz.x, (float)y, xz.y);
 			uv_ptr[vi] = Vector2((float)(u / half * 0.5 + 0.5), (float)s);
 			n_ptr[vi] = Vector3(0.0f, 1.0f, 0.0f);

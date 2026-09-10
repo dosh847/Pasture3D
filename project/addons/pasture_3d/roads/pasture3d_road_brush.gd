@@ -467,6 +467,28 @@ func is_bridge_at(p_distance: float) -> bool:
 	return s != null and s.is_bridge
 
 
+## Left kerb profile at arc length `p_distance`, resolved through Segment -> Brush -> Group -> RoadType.
+func left_kerb_at(p_distance: float) -> int:
+	var s := segment_at(p_distance)
+	if s != null and s.left_kerb != Pasture3DRoadType.KerbType.INHERIT:
+		return s.left_kerb
+	if road_defaults != null and road_defaults.left_kerb != Pasture3DRoadType.KerbType.INHERIT:
+		return road_defaults.left_kerb
+	var t := resolved_road_type()
+	return t.default_left_kerb if t != null else Pasture3DRoadType.KerbType.NONE
+
+
+## Right kerb profile at arc length `p_distance`, resolved through Segment -> Brush -> Group -> RoadType.
+func right_kerb_at(p_distance: float) -> int:
+	var s := segment_at(p_distance)
+	if s != null and s.right_kerb != Pasture3DRoadType.KerbType.INHERIT:
+		return s.right_kerb
+	if road_defaults != null and road_defaults.right_kerb != Pasture3DRoadType.KerbType.INHERIT:
+		return road_defaults.right_kerb
+	var t := resolved_road_type()
+	return t.default_right_kerb if t != null else Pasture3DRoadType.KerbType.NONE
+
+
 # ---- Brush base hooks ---------------------------------------------------------------------------
 
 ## A road IS its modifier stack — the grading step is where the whole terrain effect lives (§8), so

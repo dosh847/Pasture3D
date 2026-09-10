@@ -26,6 +26,16 @@ enum CrownMode {
 	V_ROOF,             ## Legacy sharp peak
 }
 
+## Kerb profile geometry for racing track edges and highway shoulders.
+enum KerbType {
+	INHERIT = -1,
+	NONE = 0,
+	FIA_BEVEL = 1,
+	SAWTOOTH = 2,
+	FLAT_SLAB = 3,
+	DRAIN_GUTTER = 4,
+}
+
 @export_group("Identity")
 ## Shown in pickers and in the RoadNetwork catalogue. Distinct from `resource_name` only in that it is
 ## meant to be read by a designer choosing a road, not by the inspector labelling a row.
@@ -79,6 +89,43 @@ enum CrownMode {
 @export var divider_type: DividerType = DividerType.SINGLE_DASHED:
 	set(v):
 		divider_type = v
+		emit_changed()
+
+@export_group("Kerbs")
+## Default kerb profile for the driver's left side.
+@export var default_left_kerb: KerbType = KerbType.NONE:
+	set(v):
+		default_left_kerb = v
+		emit_changed()
+
+## Default kerb profile for the driver's right side.
+@export var default_right_kerb: KerbType = KerbType.NONE:
+	set(v):
+		default_right_kerb = v
+		emit_changed()
+
+## Width of the kerb in metres beyond the carriageway edge.
+@export var kerb_width: float = 0.8:
+	set(v):
+		kerb_width = maxf(v, 0.1)
+		emit_changed()
+
+## Height of the kerb in metres above the asphalt surface.
+@export var kerb_height: float = 0.08:
+	set(v):
+		kerb_height = maxf(v, 0.0)
+		emit_changed()
+
+## Longitudinal pitch / wavelength lambda of rumble strip teeth in metres.
+@export var kerb_rumble_pitch: float = 0.4:
+	set(v):
+		kerb_rumble_pitch = maxf(v, 0.05)
+		emit_changed()
+
+## Physical displacement depth / amplitude of rumble strip teeth in metres.
+@export var kerb_rumble_depth: float = 0.02:
+	set(v):
+		kerb_rumble_depth = maxf(v, 0.0)
 		emit_changed()
 
 @export_group("Terminal Aprons")

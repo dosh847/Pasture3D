@@ -826,5 +826,11 @@ bench/RoadCrownRunoffGate.tscn
 # C++ / GDScript parity.
 bench/RoadTerminusApronGate.tscn
 
+# --- Simcade Road Upgrade Phase 4: Parametric Racing Kerbs & Rumble Geometry ---
+# Watched green 2026-09-09 (0 failures). Tests asymmetric kerb authoring, physical sawtooth rumble displacement
+# & pitch, watertight carriageway edge seams, trimesh collision parity, all kerb profiles, and C++ parity.
+bench/RoadKerbMesherGate.tscn
+
+
 
 

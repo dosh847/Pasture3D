@@ -171,7 +171,7 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 	# surface_material and depth_lift, which move no terrain vertex, and the height bake reads the batters
 	# and max_grade, which move no ribbon vertex. Collapsing them into one would make each rebuild on the
 	# other's edits — the churn the paragraph above exists to avoid.
-	var digest := "%s|%s|%.4f|%s|%s|%s|%.4f|%.4f|%.4f|%d|%.4f|%.4f|%s|%s|%s|%.4f|%.4f|%.4f" % [
+	var digest := "%s|%s|%.4f|%s|%s|%s|%.4f|%.4f|%.4f|%d|%.4f|%.4f|%s|%s|%s|%.4f|%.4f|%.4f|%d|%d|%.4f|%.4f|%.4f|%.4f|%s" % [
 		p_brush.alignment_digest(),
 		p_brush.junction_digest(),
 		depth_lift,
@@ -190,6 +190,13 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 		t.terminus_apron_length,
 		t.terminus_apron_drop,
 		t.terminus_apron_roundness,
+		t.default_left_kerb,
+		t.default_right_kerb,
+		t.kerb_width,
+		t.kerb_height,
+		t.kerb_rumble_pitch,
+		t.kerb_rumble_depth,
+		_segments_kerb_signature(p_brush),
 	]
 	if not _chunks.is_empty() and _last_digest == digest:
 		last_rebuilt = false
@@ -207,7 +214,12 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 
 	var region := _region_metres(p_brush)
 	var skips := p_brush.junction_skips()
-	var spans := Pasture3DRoadMesher.chunk_spans(plan, cum, region, skips)
+	var extra_cuts := PackedFloat32Array()
+	for seg: Pasture3DRoadSegment in p_brush.segments:
+		if seg != null and (seg.left_kerb != Pasture3DRoadType.KerbType.INHERIT or seg.right_kerb != Pasture3DRoadType.KerbType.INHERIT or seg.is_bridge):
+			extra_cuts.append(seg.from_distance)
+			extra_cuts.append(seg.to_distance)
+	var spans := Pasture3DRoadMesher.chunk_spans(plan, cum, region, skips, extra_cuts)
 	if spans.is_empty():
 		_why(p_brush, "no spans left: %.1f m of road, %.0f m regions, %d junction footprint(s)"
 				% [cum[cum.size() - 1] if cum.size() > 0 else 0.0, region, skips.size()])
@@ -234,10 +246,14 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 	for span in spans:
 		var meshes: Array = []
 		var empty := false
+		var mid := (float(span[0]) + float(span[1])) * 0.5
+		var l_kerb: int = p_brush.left_kerb_at(mid)
+		var r_kerb: int = p_brush.right_kerb_at(mid)
 		for lod in Pasture3DRoadMesher.LOD_LEVELS:
 			var arrays := Pasture3DRoadMesher.build_chunk(plan, cum, alignment, float(span[0]),
 					float(span[1]), half, shoulder, crown, lod, depth_lift, false,
-					t.crown_mode, t.max_superelevation)
+					t.crown_mode, t.max_superelevation,
+					l_kerb, r_kerb, t.kerb_width, t.kerb_height, t.kerb_rumble_pitch, t.kerb_rumble_depth)
 			if arrays.is_empty():
 				empty = true
 				break
@@ -257,11 +273,12 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 		# the graded ground where it was.
 		mi.top_level = true
 		add_child(mi)
-		var mid := (float(span[0]) + float(span[1])) * 0.5
 		var is_bridge_span: bool = p_brush.is_bridge_at(mid)
 		var should_collide: bool = collision_enabled or is_bridge_span
 		if should_collide:
-			_add_collider(mi, plan, cum, alignment, float(span[0]), float(span[1]), half, shoulder, crown, surf_info, t.crown_mode, t.max_superelevation)
+			_add_collider(mi, plan, cum, alignment, float(span[0]), float(span[1]), half, shoulder, crown, surf_info,
+					t.crown_mode, t.max_superelevation,
+					l_kerb, r_kerb, t.kerb_width, t.kerb_height, t.kerb_rumble_pitch, t.kerb_rumble_depth)
 		var markings: MeshInstance3D = null
 		if markings_enabled:
 			markings = _add_markings(mi, p_brush, plan, cum, alignment, float(span[0]), float(span[1]),
@@ -381,9 +398,13 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 func _add_collider(p_parent: Node3D, p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 		p_alignment: Pasture3DRoadAlignment, p_from: float, p_to: float, p_half: float,
 		p_shoulder: float, p_crown: float, p_surface_info: Pasture3DSurfaceInfo = null,
-		p_crown_mode: int = 0, p_max_bank: float = 0.0) -> void:
+		p_crown_mode: int = 0, p_max_bank: float = 0.0,
+		p_left_kerb: int = 0, p_right_kerb: int = 0,
+		p_kerb_width: float = 0.8, p_kerb_height: float = 0.08,
+		p_kerb_rumble_pitch: float = 0.4, p_kerb_rumble_depth: float = 0.02) -> void:
 	var arrays := Pasture3DRoadMesher.build_chunk(p_plan, p_cum, p_alignment, p_from, p_to, p_half,
-			p_shoulder, p_crown, 0, 0.0, false, p_crown_mode, p_max_bank)
+			p_shoulder, p_crown, 0, 0.0, false, p_crown_mode, p_max_bank,
+			p_left_kerb, p_right_kerb, p_kerb_width, p_kerb_height, p_kerb_rumble_pitch, p_kerb_rumble_depth)
 	if arrays.is_empty():
 		return
 	_collider_from(p_parent, arrays, p_surface_info)
@@ -652,6 +673,19 @@ func _segments_bridge_signature(p_brush: Pasture3DRoadBrush) -> String:
 	for seg: Pasture3DRoadSegment in p_brush.segments:
 		if seg != null and seg.is_bridge:
 			s += "B(%.1f,%.1f)" % [seg.from_distance, seg.to_distance]
+	return s
+
+
+## Kerb profile flags across segments and defaults.
+func _segments_kerb_signature(p_brush: Pasture3DRoadBrush) -> String:
+	if p_brush == null:
+		return ""
+	var s := ""
+	if p_brush.road_defaults != null:
+		s += "D(%d,%d)" % [p_brush.road_defaults.left_kerb, p_brush.road_defaults.right_kerb]
+	for seg: Pasture3DRoadSegment in p_brush.segments:
+		if seg != null and (seg.left_kerb != Pasture3DRoadType.KerbType.INHERIT or seg.right_kerb != Pasture3DRoadType.KerbType.INHERIT):
+			s += "K(%.1f,%.1f,%d,%d)" % [seg.from_distance, seg.to_distance, seg.left_kerb, seg.right_kerb]
 	return s
 
 

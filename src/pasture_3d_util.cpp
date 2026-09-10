@@ -1834,9 +1834,12 @@ Array Pasture3DUtil::road_mesh_build_chunk(const PackedVector2Array &p_plan, con
 		const double p_align_ds, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
 		const double p_from, const double p_to, const double p_half, const double p_shoulder,
 		const double p_crown, const int p_lod, const double p_lift, const double p_align_s0,
-		const int p_crown_mode, const double p_max_bank) {
+		const int p_crown_mode, const double p_max_bank,
+		const int p_left_kerb, const int p_right_kerb, const double p_kerb_width,
+		const double p_kerb_height, const double p_kerb_rumble_pitch, const double p_kerb_rumble_depth) {
 	return godot::road_mesh_build_chunk(p_plan, p_cum, p_align_ds, p_align_z, p_align_bank,
-			p_from, p_to, p_half, p_shoulder, p_crown, p_lod, p_lift, p_align_s0, p_crown_mode, p_max_bank);
+			p_from, p_to, p_half, p_shoulder, p_crown, p_lod, p_lift, p_align_s0, p_crown_mode, p_max_bank,
+			p_left_kerb, p_right_kerb, p_kerb_width, p_kerb_height, p_kerb_rumble_pitch, p_kerb_rumble_depth);
 }
 
 Array Pasture3DUtil::road_mesh_build_apron(const Vector2 &p_center, const double p_radius,
@@ -2754,8 +2757,8 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("resample_plan", "plan", "cum", "ds", "n_s"),
 			&Pasture3DUtil::resample_plan);
 	ClassDB::bind_static_method("Pasture3DUtil",
-			D_METHOD("road_mesh_build_chunk", "plan", "cum", "align_ds", "align_z", "align_bank", "from", "to", "half", "shoulder", "crown", "lod", "lift", "align_s0", "crown_mode", "max_bank"),
-			&Pasture3DUtil::road_mesh_build_chunk, DEFVAL(0), DEFVAL(0.02), DEFVAL(0.0), DEFVAL(0), DEFVAL(0.0));
+			D_METHOD("road_mesh_build_chunk", "plan", "cum", "align_ds", "align_z", "align_bank", "from", "to", "half", "shoulder", "crown", "lod", "lift", "align_s0", "crown_mode", "max_bank", "left_kerb", "right_kerb", "kerb_width", "kerb_height", "kerb_rumble_pitch", "kerb_rumble_depth"),
+			&Pasture3DUtil::road_mesh_build_chunk, DEFVAL(0), DEFVAL(0.02), DEFVAL(0.0), DEFVAL(0), DEFVAL(0.0), DEFVAL(0), DEFVAL(0), DEFVAL(0.8), DEFVAL(0.08), DEFVAL(0.4), DEFVAL(0.02));
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("road_mesh_build_apron", "center", "radius", "plan", "cum", "align_ds", "align_z", "align_bank", "crown", "segments", "lift", "align_s0"),
 			&Pasture3DUtil::road_mesh_build_apron, DEFVAL(24), DEFVAL(0.02), DEFVAL(0.0));

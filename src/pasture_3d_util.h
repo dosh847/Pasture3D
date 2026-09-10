@@ -405,7 +405,10 @@ public:
 			const double p_align_ds, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
 			const double p_from, const double p_to, const double p_half, const double p_shoulder,
 			const double p_crown, const int p_lod = 0, const double p_lift = 0.02,
-			const double p_align_s0 = 0.0, const int p_crown_mode = 0, const double p_max_bank = 0.0);
+			const double p_align_s0 = 0.0, const int p_crown_mode = 0, const double p_max_bank = 0.0,
+			const int p_left_kerb = 0, const int p_right_kerb = 0, const double p_kerb_width = 0.8,
+			const double p_kerb_height = 0.08, const double p_kerb_rumble_pitch = 0.4,
+			const double p_kerb_rumble_depth = 0.02);
 
 	static Array road_mesh_build_apron(const Vector2 &p_center, const double p_radius,
 			const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,

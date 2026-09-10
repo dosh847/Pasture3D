@@ -152,7 +152,9 @@ Dictionary road_align_solve_with_plan(const PackedVector2Array &p_plan, const Pa
 Array road_mesh_build_chunk(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
 		double p_align_ds, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
 		double p_from, double p_to, double p_half, double p_shoulder, double p_crown,
-		int p_lod = 0, double p_lift = 0.02, double p_align_s0 = 0.0, int p_crown_mode = 0, double p_max_bank = 0.0);
+		int p_lod = 0, double p_lift = 0.02, double p_align_s0 = 0.0, int p_crown_mode = 0, double p_max_bank = 0.0,
+		int p_left_kerb = 0, int p_right_kerb = 0, double p_kerb_width = 0.8, double p_kerb_height = 0.08,
+		double p_kerb_rumble_pitch = 0.4, double p_kerb_rumble_depth = 0.02);
 
 Array road_mesh_build_apron(const Vector2 &p_center, double p_radius,
 		const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,

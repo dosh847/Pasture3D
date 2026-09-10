@@ -82,16 +82,68 @@ static func step_for_lod(p_ds: float, p_lod: int) -> float:
 ##
 ## Left to right and NOT outward from the centre, so the triangle strip between two rings is a simple
 ## zip of equal-length arrays. Every level keeps ±half — see `Cross`.
-static func cross_offsets(p_half: float, p_shoulder: float, p_cross: Cross) -> PackedFloat32Array:
+## The signed across-distances of one cross-section, left to right.
+##
+## Left to right and NOT outward from the centre, so the triangle strip between two rings is a simple
+## zip of equal-length arrays. Every level keeps ±half — see `Cross`.
+static func cross_offsets(p_half: float, p_shoulder: float, p_cross: Cross,
+		p_left_kerb: int = 0, p_right_kerb: int = 0, p_kerb_width: float = 0.8) -> PackedFloat32Array:
 	var half := maxf(p_half, 0.01)
 	var shoulder := maxf(p_shoulder, 0.0)
-	match p_cross:
-		Cross.NO_SHOULDER:
-			return PackedFloat32Array([-half, half])
-		Cross.NO_CROWN:
-			return PackedFloat32Array([-(half + shoulder), -half, half, half + shoulder])
+	var kw := maxf(p_kerb_width, 0.1)
+	if p_cross == Cross.NO_SHOULDER:
+		return PackedFloat32Array([-half, half])
+
+	var left_offsets := PackedFloat32Array()
+	if p_left_kerb > 0:
+		left_offsets.append(-(half + kw))
+		left_offsets.append(-(half + kw * 0.7))
+		left_offsets.append(-(half + kw * 0.2))
+	else:
+		left_offsets.append(-(half + shoulder))
+
+	var right_offsets := PackedFloat32Array()
+	if p_right_kerb > 0:
+		right_offsets.append(half + kw * 0.2)
+		right_offsets.append(half + kw * 0.7)
+		right_offsets.append(half + kw)
+	else:
+		right_offsets.append(half + shoulder)
+
+	var out := PackedFloat32Array()
+	out.append_array(left_offsets)
+	out.append(-half)
+	if p_cross == Cross.FULL:
+		out.append(0.0)
+	out.append(half)
+	out.append_array(right_offsets)
+	return out
+
+
+## Height displacement above the road surface for a kerb at normalized lateral position `p_xi` in [0, 1]
+## (0 at carriageway edge, 1 at outer toe) and arc length `p_s`.
+static func kerb_displacement(p_kerb_type: int, p_xi: float, p_s: float,
+		p_height: float, p_pitch: float, p_depth: float) -> float:
+	if p_kerb_type <= 0 or p_xi <= 0.0 or p_xi >= 1.0:
+		return 0.0
+	match p_kerb_type:
+		Pasture3DRoadType.KerbType.FIA_BEVEL:
+			var bevel := p_xi / 0.2 if p_xi < 0.2 else (1.0 if p_xi <= 0.7 else (1.0 - p_xi) / 0.3)
+			return p_height * bevel
+		Pasture3DRoadType.KerbType.SAWTOOTH:
+			var bevel := p_xi / 0.2 if p_xi < 0.2 else (1.0 if p_xi <= 0.7 else (1.0 - p_xi) / 0.3)
+			var pitch := p_pitch if p_pitch > 0.01 else 0.4
+			var x := p_s / pitch
+			var saw := 2.0 * (x - floorf(0.5 + x))
+			return (p_height + p_depth * saw) * bevel
+		Pasture3DRoadType.KerbType.FLAT_SLAB:
+			var slab_h := minf(p_height, 0.01)
+			var bevel := p_xi / 0.2 if p_xi < 0.2 else (1.0 if p_xi <= 0.7 else (1.0 - p_xi) / 0.3)
+			return slab_h * bevel
+		Pasture3DRoadType.KerbType.DRAIN_GUTTER:
+			return -4.0 * p_height * p_xi * (1.0 - p_xi)
 		_:
-			return PackedFloat32Array([-(half + shoulder), -half, 0.0, half, half + shoulder])
+			return 0.0
 
 
 ## One cross-section of the ribbon at arc length `p_s`, in world space.
@@ -104,7 +156,10 @@ static func cross_offsets(p_half: float, p_shoulder: float, p_cross: Cross) -> P
 static func ring(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 		p_alignment: Pasture3DRoadAlignment, p_s: float, p_offsets: PackedFloat32Array,
 		p_crown: float, p_lift: float = 0.0,
-		p_half_width: float = 4.0, p_crown_mode: int = 0, p_max_bank: float = 0.0) -> PackedVector3Array:
+		p_half_width: float = 4.0, p_crown_mode: int = 0, p_max_bank: float = 0.0,
+		p_left_kerb: int = 0, p_right_kerb: int = 0,
+		p_kerb_width: float = 0.8, p_kerb_height: float = 0.08,
+		p_kerb_rumble_pitch: float = 0.4, p_kerb_rumble_depth: float = 0.02) -> PackedVector3Array:
 	var out := PackedVector3Array()
 	if p_alignment == null or p_plan.size() < 2:
 		return out
@@ -116,13 +171,22 @@ static func ring(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 	var centre: float = p_alignment.height_at(p_s)
 	var si := p_alignment.index_at(p_s)
 	var bank: float = p_alignment.bank[si] if si < p_alignment.bank.size() else 0.0
+	var half := maxf(p_half_width, 0.01)
+	var kw := maxf(p_kerb_width, 0.01)
 	for u in p_offsets:
 		var xz := at + across * u
+		var base_y := Pasture3DRoadGrader.surface_height(centre, bank, p_crown, u, half, p_crown_mode, p_max_bank)
+		var dy := 0.0
+		if u < -half and p_left_kerb > 0:
+			var xi := clampf((-u - half) / kw, 0.0, 1.0)
+			dy = kerb_displacement(p_left_kerb, xi, p_s, p_kerb_height, p_kerb_rumble_pitch, p_kerb_rumble_depth)
+		elif u > half and p_right_kerb > 0:
+			var xi := clampf((u - half) / kw, 0.0, 1.0)
+			dy = kerb_displacement(p_right_kerb, xi, p_s, p_kerb_height, p_kerb_rumble_pitch, p_kerb_rumble_depth)
 		# The lift is a CONSTANT added to the profile, never a scale on it: the ribbon must be the same
 		# shape as the ground, sitting above it, or the camber and the banking would drift apart from the
 		# terrain they were graded into.
-		out.append(Vector3(xz.x,
-				Pasture3DRoadGrader.surface_height(centre, bank, p_crown, u, p_half_width, p_crown_mode, p_max_bank) + p_lift, xz.y))
+		out.append(Vector3(xz.x, base_y + dy + p_lift, xz.y))
 	return out
 
 
@@ -140,7 +204,7 @@ static func ring(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 ## `p_skips` is an array of `[from, to]` arc-length pairs — the footprints, which the brush already
 ## computes as the trim-back it grades around.
 static func cut_points(p_plan: PackedVector2Array, p_cum: PackedFloat32Array, p_region_size: float,
-		p_skips: Array = []) -> PackedFloat32Array:
+		p_skips: Array = [], p_extra_cuts: PackedFloat32Array = PackedFloat32Array()) -> PackedFloat32Array:
 	var out := PackedFloat32Array()
 	if p_plan.size() < 2 or p_cum.size() < p_plan.size():
 		return out
@@ -151,6 +215,8 @@ static func cut_points(p_plan: PackedVector2Array, p_cum: PackedFloat32Array, p_
 		if pair is Array and pair.size() >= 2:
 			out.append(clampf(float(pair[0]), 0.0, total))
 			out.append(clampf(float(pair[1]), 0.0, total))
+	for cut in p_extra_cuts:
+		out.append(clampf(cut, 0.0, total))
 	if p_region_size > 0.0:
 		for i in range(1, p_plan.size()):
 			_boundaries_between(out, p_plan[i - 1], p_plan[i], p_cum[i - 1], p_cum[i], p_region_size)
@@ -194,8 +260,8 @@ static func _boundaries_between(p_into: PackedFloat32Array, p_a: Vector2, p_b: V
 ## rather than shortened — the footprint is not the mesher's to render, and a chunk that stopped at its
 ## edge would still have started inside it.
 static func chunk_spans(p_plan: PackedVector2Array, p_cum: PackedFloat32Array, p_region_size: float,
-		p_skips: Array = []) -> Array:
-	var cuts := cut_points(p_plan, p_cum, p_region_size, p_skips)
+		p_skips: Array = [], p_extra_cuts: PackedFloat32Array = PackedFloat32Array()) -> Array:
+	var cuts := cut_points(p_plan, p_cum, p_region_size, p_skips, p_extra_cuts)
 	var out: Array = []
 	for i in range(1, cuts.size()):
 		var from: float = cuts[i - 1]
@@ -231,19 +297,28 @@ static func build_chunk(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 		p_alignment: Pasture3DRoadAlignment, p_from: float, p_to: float, p_half: float,
 		p_shoulder: float, p_crown: float, p_lod: int = 0,
 		p_lift: float = DEPTH_LIFT, p_force_gdscript: bool = false,
-		p_crown_mode: int = 0, p_max_bank: float = 0.0) -> Array:
+		p_crown_mode: int = 0, p_max_bank: float = 0.0,
+		p_left_kerb: int = 0, p_right_kerb: int = 0,
+		p_kerb_width: float = 0.8, p_kerb_height: float = 0.08,
+		p_kerb_rumble_pitch: float = 0.4, p_kerb_rumble_depth: float = 0.02) -> Array:
 	if p_alignment == null or p_plan.size() < 2 or p_to - p_from <= 1e-4:
 		return []
 	if not p_force_gdscript and ClassDB.class_has_method("Pasture3DUtil", "road_mesh_build_chunk"):
 		return Pasture3DUtil.road_mesh_build_chunk(p_plan, p_cum, p_alignment.ds,
 				p_alignment.z, p_alignment.bank, p_from, p_to, p_half, p_shoulder,
-				p_crown, p_lod, p_lift, p_alignment.s0, p_crown_mode, p_max_bank)
+				p_crown, p_lod, p_lift, p_alignment.s0, p_crown_mode, p_max_bank,
+				p_left_kerb, p_right_kerb, p_kerb_width, p_kerb_height,
+				p_kerb_rumble_pitch, p_kerb_rumble_depth)
 
-	var offsets := cross_offsets(p_half, p_shoulder, cross_for_lod(p_lod))
+	var offsets := cross_offsets(p_half, p_shoulder, cross_for_lod(p_lod),
+			p_left_kerb, p_right_kerb, p_kerb_width)
 	var across_count := offsets.size()
 	if across_count < 2:
 		return []
 	var step := step_for_lod(p_alignment.ds, p_lod)
+	if p_lod == 0 and (p_left_kerb == Pasture3DRoadType.KerbType.SAWTOOTH or p_right_kerb == Pasture3DRoadType.KerbType.SAWTOOTH):
+		var min_rumble_step := maxf(p_kerb_rumble_pitch * 0.5, 0.05)
+		step = minf(step, min_rumble_step)
 	var rows := maxi(int(ceil((p_to - p_from) / step)), 1) + 1
 
 	var verts := PackedVector3Array()
@@ -256,7 +331,9 @@ static func build_chunk(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 		# The last row is `p_to` itself, not `p_from + r * step`. Rounding the final ring to the nearest
 		# sample is exactly how a seam opens.
 		var s: float = p_to if r == rows - 1 else minf(p_from + float(r) * step, p_to)
-		var line := ring(p_plan, p_cum, p_alignment, s, offsets, p_crown, p_lift, half, p_crown_mode, p_max_bank)
+		var line := ring(p_plan, p_cum, p_alignment, s, offsets, p_crown, p_lift, half,
+				p_crown_mode, p_max_bank, p_left_kerb, p_right_kerb,
+				p_kerb_width, p_kerb_height, p_kerb_rumble_pitch, p_kerb_rumble_depth)
 		if line.size() != across_count:
 			return []
 		for c in across_count:

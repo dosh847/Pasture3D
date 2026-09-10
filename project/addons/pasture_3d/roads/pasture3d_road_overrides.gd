@@ -78,11 +78,24 @@ enum TrafficFlow { INHERIT = -1, ONE_WAY = 0, TWO_WAY = 1 }
 		follow_terrain = v
 		emit_changed()
 
+## Left kerb override. INHERIT defers.
+@export var left_kerb: Pasture3DRoadType.KerbType = Pasture3DRoadType.KerbType.INHERIT:
+	set(v):
+		left_kerb = v
+		emit_changed()
+
+## Right kerb override. INHERIT defers.
+@export var right_kerb: Pasture3DRoadType.KerbType = Pasture3DRoadType.KerbType.INHERIT:
+	set(v):
+		right_kerb = v
+		emit_changed()
+
 
 ## Every field this resource inherits, in one place, so the resolver and the gate cannot drift from the
 ## export list above.
 const FIELDS: Array[StringName] = [
 	&"road_type", &"lane_count", &"traffic_flow", &"surface_id", &"speed_limit", &"follow_terrain",
+	&"left_kerb", &"right_kerb",
 ]
 
 
@@ -122,6 +135,8 @@ func clear_overrides() -> void:
 	surface_id = &""
 	speed_limit = NAN
 	follow_terrain = Tri.INHERIT
+	left_kerb = Pasture3DRoadType.KerbType.INHERIT
+	right_kerb = Pasture3DRoadType.KerbType.INHERIT
 
 
 ## True when this level has no opinion about anything — the state a freshly added Group or Brush is in,
