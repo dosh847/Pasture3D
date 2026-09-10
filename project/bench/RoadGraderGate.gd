@@ -163,7 +163,12 @@ func _b_the_road_is_flat_across_a_tilted_plane() -> void:
 	# would also pass on a grader that ignores the across-offset entirely.
 	var crowned: Dictionary = Pasture3DRoadGrader.grade(ground, gw, gh, min_x, min_z, VS,
 			_straight_plan(float(n_s - 1)), a, _widths(n_s, 5.0), _widths(n_s, 1.0),
-			_widths(n_s, 10.0), PackedByteArray(), {"crown": 0.05, "cut_batter": 1.0, "fill_batter": 1.0})
+			_widths(n_s, 10.0), PackedByteArray(), {
+				"crown": 0.05,
+				"cut_batter": 1.0,
+				"fill_batter": 1.0,
+				"crown_mode": Pasture3DRoadType.CrownMode.V_ROOF,
+			})
 	var ch: PackedFloat32Array = crowned["height"]
 	var edge := ch[_at(gw, min_x, min_z, 4.0, 20.0)]
 	print("    control: crown 0.05 at 4 m out -> %.4f (want -0.2000)" % edge)

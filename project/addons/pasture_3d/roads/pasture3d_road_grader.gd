@@ -50,10 +50,44 @@ static func cumulative_length(p_plan: PackedVector2Array) -> PackedFloat32Array:
 ## length — a defect that looks like a rendering bug and is arithmetic. So neither owns it.
 ##
 ## `p_bank` is superelevation as a rise/run ratio signed like curvature (positive across-distance is the
-## driver's RIGHT), and `p_crown` sheds water from the centreline to both edges, so it is a function of
-## |u| and the two edges come out level with each other.
-static func surface_height(p_centre: float, p_bank: float, p_crown: float, p_u: float) -> float:
-	return p_centre + p_bank * p_u - p_crown * absf(p_u)
+## driver's RIGHT), and `p_crown` sheds water from the centreline to both edges.
+## `p_crown_mode`: 0 = PARABOLIC (smooth quadratic, zero centerline slope),
+##                 1 = ONE_WAY_CROSSFALL (constant tilt for motorways/ovals),
+##                 2 = CIRCULAR_ARC (exact circular geometry),
+##                 3 = V_ROOF (legacy knife-edge peak).
+## `p_max_bank`: when > 0, dynamic superelevation runoff attenuates the crown to 0 in banked turns.
+static func surface_height(p_centre: float, p_bank: float, p_crown: float, p_u: float,
+		p_half_width: float = 4.0, p_crown_mode: int = 0, p_max_bank: float = 0.0) -> float:
+	var wh: float = p_half_width if p_half_width > 0.01 else 4.0
+	var abs_u: float = absf(p_u)
+	var z_crown := 0.0
+	match p_crown_mode:
+		1: # ONE_WAY_CROSSFALL
+			z_crown = -p_crown * p_u
+		2: # CIRCULAR_ARC
+			var hc := p_crown * wh
+			if hc > 1e-6:
+				var r := (wh * wh + hc * hc) / (2.0 * hc)
+				if abs_u <= wh and r > abs_u:
+					z_crown = sqrt(r * r - p_u * p_u) - r
+				else:
+					var slope_edge := -wh / sqrt(maxf(r * r - wh * wh, 1e-6))
+					z_crown = -hc + slope_edge * (abs_u - wh)
+		3: # V_ROOF (legacy)
+			z_crown = -p_crown * abs_u
+		_: # 0: PARABOLIC
+			var hc := p_crown * wh
+			if abs_u <= wh:
+				var ratio := p_u / wh
+				z_crown = -hc * ratio * ratio
+			else:
+				z_crown = -hc - (2.0 * p_crown) * (abs_u - wh)
+
+	var eta := 1.0
+	if p_max_bank > 1e-5:
+		eta = clampf(1.0 - absf(p_bank) / p_max_bank, 0.0, 1.0)
+
+	return p_centre + p_bank * p_u + eta * z_crown
 
 
 ## World XZ of the point `p_s` metres along the plan polyline. Clamped at both ends.
@@ -221,6 +255,8 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 		return out
 
 	var crown: float = float(p_opts.get("crown", 0.05))
+	var crown_mode: int = int(p_opts.get("crown_mode", 0))
+	var max_bank: float = float(p_opts.get("max_bank", 0.0))
 	var cut_batter: float = maxf(float(p_opts.get("cut_batter", 1.0)), 0.01)
 	var fill_batter: float = maxf(float(p_opts.get("fill_batter", 0.6)), 0.01)
 	# `skip` is NOT `p_suppress`. Suppress means "a structure carries the road here", and says so in the
@@ -339,7 +375,7 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 			var u := d * side
 			var z_road: float = p_alignment.height_at(s)
 			var bank: float = p_alignment.bank[si] if si < p_alignment.bank.size() else 0.0
-			var z_surface := surface_height(z_road, bank, crown, u)
+			var z_surface := surface_height(z_road, bank, crown, u, half, crown_mode, max_bank)
 
 			var h := ground
 			if d <= edge_d:
@@ -348,7 +384,7 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 				# Beyond the shoulder the batter runs from the edge of formation down (fill) or up (cut)
 				# until it MEETS the ground, and the meet is a max/min rather than a solved crossing —
 				# which is what makes the join continuous with no seam to chase, at any terrain slope.
-				var z_edge := surface_height(z_road, bank, crown, edge_d * side)
+				var z_edge := surface_height(z_road, bank, crown, edge_d * side, half, crown_mode, max_bank)
 				var beyond := d - edge_d
 				if z_edge > ground:
 					h = maxf(ground, z_edge - beyond * fill_batter)

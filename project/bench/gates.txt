@@ -807,3 +807,24 @@ bench/GraphAuxChannelGate.tscn
 # Validates mathematical parity between native C++ kernels (Pasture3DUtil) and pure GDScript
 # [Dev/GD] reference oracles across all 9 PATH family nodes (3 derive + 6 reshape).
 bench/PathOpsParityGate.tscn
+
+# --- Simcade Road Upgrade Phase 1: Driving Surface & Physics Telemetry ---
+# Watched green 2026-09-09 (0 failures). Tests hybrid coplanar 3D ribbon colliders at lift = 0.0,
+# unconditional bridge collision, TERRAIN_DRAPED surface mode, and PhysicsMaterial + Pasture3DSurfaceInfo
+# metadata attachment on road and junction apron colliders.
+bench/RoadDrivingSurfaceGate.tscn
+
+# --- Simcade Road Upgrade Phase 2: Parabolic Crown & Superelevation Runoff ---
+# Watched green 2026-09-09 (0 failures). Tests smooth parabolic crown (zero centerline slope crease),
+# dynamic superelevation runoff attenuation in banked turns, multi-mode crown geometry, and full
+# bit-accurate C++ / GDScript parity.
+bench/RoadCrownRunoffGate.tscn
+
+# --- Simcade Road Upgrade Phase 3: Bevelled Pavement Terminal Aprons ---
+# Watched green 2026-09-09 (0 failures). Tests watertight chunk boundary seams, smooth Hermite transition bevel,
+# lateral shoulder corner fillet roundness, upward triangle winding, trimesh collision coverage, and bit-accurate
+# C++ / GDScript parity.
+bench/RoadTerminusApronGate.tscn
+
+
+

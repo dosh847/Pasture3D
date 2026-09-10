@@ -890,6 +890,7 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 			"heights": heights,
 			"center_h": j.elevation,
 			"material": t.surface_material if t != null else null,
+			"surface_info": t.get_surface_info() if t != null else null,
 		}
 		_apron_spec_cache[jid] = spec
 		_apron_spec_hashes[jid] = j_hash

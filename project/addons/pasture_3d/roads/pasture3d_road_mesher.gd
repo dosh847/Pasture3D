@@ -103,7 +103,8 @@ static func cross_offsets(p_half: float, p_shoulder: float, p_cross: Cross) -> P
 ## produce the same vertex.
 static func ring(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 		p_alignment: Pasture3DRoadAlignment, p_s: float, p_offsets: PackedFloat32Array,
-		p_crown: float, p_lift: float = 0.0) -> PackedVector3Array:
+		p_crown: float, p_lift: float = 0.0,
+		p_half_width: float = 4.0, p_crown_mode: int = 0, p_max_bank: float = 0.0) -> PackedVector3Array:
 	var out := PackedVector3Array()
 	if p_alignment == null or p_plan.size() < 2:
 		return out
@@ -121,7 +122,7 @@ static func ring(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 		# shape as the ground, sitting above it, or the camber and the banking would drift apart from the
 		# terrain they were graded into.
 		out.append(Vector3(xz.x,
-				Pasture3DRoadGrader.surface_height(centre, bank, p_crown, u) + p_lift, xz.y))
+				Pasture3DRoadGrader.surface_height(centre, bank, p_crown, u, p_half_width, p_crown_mode, p_max_bank) + p_lift, xz.y))
 	return out
 
 
@@ -229,13 +230,14 @@ static func chunk_spans(p_plan: PackedVector2Array, p_cum: PackedFloat32Array, p
 static func build_chunk(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 		p_alignment: Pasture3DRoadAlignment, p_from: float, p_to: float, p_half: float,
 		p_shoulder: float, p_crown: float, p_lod: int = 0,
-		p_lift: float = DEPTH_LIFT, p_force_gdscript: bool = false) -> Array:
+		p_lift: float = DEPTH_LIFT, p_force_gdscript: bool = false,
+		p_crown_mode: int = 0, p_max_bank: float = 0.0) -> Array:
 	if p_alignment == null or p_plan.size() < 2 or p_to - p_from <= 1e-4:
 		return []
 	if not p_force_gdscript and ClassDB.class_has_method("Pasture3DUtil", "road_mesh_build_chunk"):
 		return Pasture3DUtil.road_mesh_build_chunk(p_plan, p_cum, p_alignment.ds,
 				p_alignment.z, p_alignment.bank, p_from, p_to, p_half, p_shoulder,
-				p_crown, p_lod, p_lift, p_alignment.s0)
+				p_crown, p_lod, p_lift, p_alignment.s0, p_crown_mode, p_max_bank)
 
 	var offsets := cross_offsets(p_half, p_shoulder, cross_for_lod(p_lod))
 	var across_count := offsets.size()
@@ -254,7 +256,7 @@ static func build_chunk(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 		# The last row is `p_to` itself, not `p_from + r * step`. Rounding the final ring to the nearest
 		# sample is exactly how a seam opens.
 		var s: float = p_to if r == rows - 1 else minf(p_from + float(r) * step, p_to)
-		var line := ring(p_plan, p_cum, p_alignment, s, offsets, p_crown, p_lift)
+		var line := ring(p_plan, p_cum, p_alignment, s, offsets, p_crown, p_lift, half, p_crown_mode, p_max_bank)
 		if line.size() != across_count:
 			return []
 		for c in across_count:
@@ -332,6 +334,120 @@ static func build_apron(p_center: Vector2, p_radius: float, p_plan: PackedVector
 		# (centre, ring i, ring i+1) with the angle INCREASING is clockwise seen from above, which is
 		# Godot's front face — the same convention as the ribbon, and wrong the same way if reversed.
 		indices.append_array(PackedInt32Array([0, 1 + i, 1 + (i + 1) % segments]))
+
+	_recompute_normals(verts, indices, normals)
+	var out := []
+	out.resize(Mesh.ARRAY_MAX)
+	out[Mesh.ARRAY_VERTEX] = verts
+	out[Mesh.ARRAY_NORMAL] = normals
+	out[Mesh.ARRAY_TEX_UV] = uvs
+	out[Mesh.ARRAY_INDEX] = indices
+	return out
+
+
+## Terminal apron generator: extrudes a smooth, rounded transition bevel ramp at road ends (P9b).
+## Blends downward from (s_end, z_road, t_road) to meet the terrain ground flush with a cubic Hermite curve.
+static func build_terminus_apron(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
+		p_alignment: Pasture3DRoadAlignment, p_s_end: float, p_half: float,
+		p_shoulder: float, p_crown: float, p_is_start: bool = false,
+		p_apron_length: float = 2.5, p_apron_drop: float = 0.08,
+		p_rings_count: int = 4, p_lift: float = 0.0,
+		p_crown_mode: int = 0, p_max_bank: float = 0.0,
+		p_roundness: float = 0.5, p_force_gdscript: bool = false) -> Array:
+	if p_alignment == null or p_plan.size() < 2 or p_cum.size() < p_plan.size() or p_alignment.z.is_empty():
+		return []
+	if p_apron_length <= 1e-4 or p_rings_count < 2:
+		return []
+
+	if not p_force_gdscript and ClassDB.class_has_method("Pasture3DUtil", "road_mesh_build_terminus_apron"):
+		return Pasture3DUtil.road_mesh_build_terminus_apron(p_plan, p_cum,
+				p_alignment.ds, p_alignment.z, p_alignment.bank,
+				p_s_end, p_half, p_shoulder, p_crown,
+				p_is_start, p_apron_length, p_apron_drop,
+				p_rings_count, p_lift, p_alignment.s0,
+				p_crown_mode, p_max_bank, p_roundness)
+
+	var total_s: float = p_cum[p_cum.size() - 1]
+	var s: float = clampf(p_s_end, 0.0, total_s)
+	var at := Pasture3DRoadGrader.plan_point_at(p_plan, p_cum, s)
+	var tangent := Pasture3DRoadGrader.plan_tangent_at(p_plan, p_cum, s)
+	var across := Vector2(-tangent.y, tangent.x)
+	var t_ext: Vector2 = -tangent if p_is_start else tangent
+
+	var centre_0: float = p_alignment.height_at(s)
+	var si := p_alignment.index_at(s)
+	var bank_0: float = p_alignment.bank[si] if si < p_alignment.bank.size() else 0.0
+
+	var delta_s := minf(maxf(p_alignment.ds, 0.5), 1.0)
+	var m0: float = 0.0
+	if p_is_start:
+		var g := (p_alignment.height_at(minf(s + delta_s, total_s)) - centre_0) / delta_s
+		m0 = -g
+	else:
+		var g := (centre_0 - p_alignment.height_at(maxf(s - delta_s, 0.0))) / delta_s
+		m0 = g
+
+	var half := maxf(p_half, 0.01)
+	var shoulder := maxf(p_shoulder, 0.0)
+	var w_total := half + shoulder
+	var offsets := PackedFloat32Array([-w_total, -half, 0.0, half, w_total])
+	var across_count := offsets.size()
+	var rows := maxi(p_rings_count, 2)
+
+	var verts := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+
+	var total_verts := rows * across_count
+	verts.resize(total_verts)
+	normals.resize(total_verts)
+	uvs.resize(total_verts)
+
+	var vi := 0
+	var L := p_apron_length
+	for r in rows:
+		var tau := float(r) / float(rows - 1)
+		var x := tau * L
+		var xz_c := at + t_ext * x
+
+		# Cubic Hermite basis functions
+		var tau2 := tau * tau
+		var tau3 := tau2 * tau
+		var h0 := 2.0 * tau3 - 3.0 * tau2 + 1.0
+		var h1 := -2.0 * tau3 + 3.0 * tau2
+		var h2 := tau3 - 2.0 * tau2 + tau
+		var h3 := tau3 - tau2
+
+		var fillet := 1.0 - sqrt(maxf(0.0, 1.0 - tau2))
+		var width_scale := maxf(0.0, 1.0 - (p_roundness / w_total) * fillet) if w_total > 1e-4 else 1.0
+
+		for c in across_count:
+			var u := offsets[c]
+			var u_scaled := u * width_scale
+			var xz := xz_c + across * u_scaled
+
+			var y0 := Pasture3DRoadGrader.surface_height(centre_0, bank_0, p_crown, u, half, p_crown_mode, p_max_bank)
+			var y1 := y0 + m0 * L - p_apron_drop
+			var m1 := 0.0
+			var y := h0 * y0 + h1 * y1 + h2 * (L * m0) + h3 * (L * m1) + p_lift
+
+			verts[vi] = Vector3(xz.x, y, xz.y)
+			var v_coord := s - x if p_is_start else s + x
+			uvs[vi] = Vector2(u / half * 0.5 + 0.5, v_coord)
+			normals[vi] = Vector3.UP
+			vi += 1
+
+	for r in range(rows - 1):
+		for c in range(across_count - 1):
+			var i0 := r * across_count + c
+			var i1 := i0 + 1
+			var i2 := i0 + across_count
+			var i3 := i2 + 1
+			if p_is_start:
+				indices.append_array(PackedInt32Array([i0, i1, i2, i1, i3, i2]))
+			else:
+				indices.append_array(PackedInt32Array([i0, i2, i1, i1, i2, i3]))
 
 	_recompute_normals(verts, indices, normals)
 	var out := []

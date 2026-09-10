@@ -1833,9 +1833,10 @@ PackedVector2Array Pasture3DUtil::resample_plan(const PackedVector2Array &p_plan
 Array Pasture3DUtil::road_mesh_build_chunk(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
 		const double p_align_ds, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
 		const double p_from, const double p_to, const double p_half, const double p_shoulder,
-		const double p_crown, const int p_lod, const double p_lift, const double p_align_s0) {
+		const double p_crown, const int p_lod, const double p_lift, const double p_align_s0,
+		const int p_crown_mode, const double p_max_bank) {
 	return godot::road_mesh_build_chunk(p_plan, p_cum, p_align_ds, p_align_z, p_align_bank,
-			p_from, p_to, p_half, p_shoulder, p_crown, p_lod, p_lift, p_align_s0);
+			p_from, p_to, p_half, p_shoulder, p_crown, p_lod, p_lift, p_align_s0, p_crown_mode, p_max_bank);
 }
 
 Array Pasture3DUtil::road_mesh_build_apron(const Vector2 &p_center, const double p_radius,
@@ -1844,6 +1845,18 @@ Array Pasture3DUtil::road_mesh_build_apron(const Vector2 &p_center, const double
 		const double p_crown, const int p_segments, const double p_lift, const double p_align_s0) {
 	return godot::road_mesh_build_apron(p_center, p_radius, p_plan, p_cum, p_align_ds, p_align_z,
 			p_align_bank, p_crown, p_segments, p_lift, p_align_s0);
+}
+
+Array Pasture3DUtil::road_mesh_build_terminus_apron(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
+		const double p_align_ds, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
+		const double p_s_end, const double p_half, const double p_shoulder,
+		const double p_crown, const bool p_is_start, const double p_apron_length,
+		const double p_apron_drop, const int p_rings_count, const double p_lift,
+		const double p_align_s0, const int p_crown_mode, const double p_max_bank,
+		const double p_roundness) {
+	return godot::road_mesh_build_terminus_apron(p_plan, p_cum, p_align_ds, p_align_z, p_align_bank,
+			p_s_end, p_half, p_shoulder, p_crown, p_is_start, p_apron_length, p_apron_drop,
+			p_rings_count, p_lift, p_align_s0, p_crown_mode, p_max_bank, p_roundness);
 }
 
 PackedFloat32Array Pasture3DUtil::curvature_grid(const PackedFloat32Array &p_surface, const int p_gw, const int p_gh,
@@ -2741,11 +2754,14 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("resample_plan", "plan", "cum", "ds", "n_s"),
 			&Pasture3DUtil::resample_plan);
 	ClassDB::bind_static_method("Pasture3DUtil",
-			D_METHOD("road_mesh_build_chunk", "plan", "cum", "align_ds", "align_z", "align_bank", "from", "to", "half", "shoulder", "crown", "lod", "lift", "align_s0"),
-			&Pasture3DUtil::road_mesh_build_chunk, DEFVAL(0), DEFVAL(0.02), DEFVAL(0.0));
+			D_METHOD("road_mesh_build_chunk", "plan", "cum", "align_ds", "align_z", "align_bank", "from", "to", "half", "shoulder", "crown", "lod", "lift", "align_s0", "crown_mode", "max_bank"),
+			&Pasture3DUtil::road_mesh_build_chunk, DEFVAL(0), DEFVAL(0.02), DEFVAL(0.0), DEFVAL(0), DEFVAL(0.0));
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("road_mesh_build_apron", "center", "radius", "plan", "cum", "align_ds", "align_z", "align_bank", "crown", "segments", "lift", "align_s0"),
 			&Pasture3DUtil::road_mesh_build_apron, DEFVAL(24), DEFVAL(0.02), DEFVAL(0.0));
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("road_mesh_build_terminus_apron", "plan", "cum", "align_ds", "align_z", "align_bank", "s_end", "half", "shoulder", "crown", "is_start", "apron_length", "apron_drop", "rings_count", "lift", "align_s0", "crown_mode", "max_bank", "roundness"),
+			&Pasture3DUtil::road_mesh_build_terminus_apron, DEFVAL(false), DEFVAL(2.5), DEFVAL(0.08), DEFVAL(4), DEFVAL(0.0), DEFVAL(0.0), DEFVAL(0), DEFVAL(0.0), DEFVAL(0.5));
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("curvature_grid", "surface", "gw", "gh", "mode", "radius", "contrast"),
 			&Pasture3DUtil::curvature_grid);

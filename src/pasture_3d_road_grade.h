@@ -36,6 +36,9 @@
 
 #include "pasture_3d_path_query.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
@@ -51,8 +54,50 @@ constexpr double ROAD_EARTHWORK_EPSILON = 0.001;
 // this describes and the grader carves the ground under it, so a millimetre of disagreement would z-fight
 // along the whole road. Positive `p_u` is the driver's right; `p_crown` is a function of |u| so both edges
 // come out level with each other.
-inline double road_surface_height(double p_centre, double p_bank, double p_crown, double p_u) {
-	return p_centre + p_bank * p_u - p_crown * (p_u < 0.0 ? -p_u : p_u);
+inline double road_surface_height(double p_centre, double p_bank, double p_crown, double p_u,
+		double p_half_width = 4.0, int p_crown_mode = 0, double p_max_bank = 0.0) {
+	const double wh = p_half_width > 0.01 ? p_half_width : 4.0;
+	const double abs_u = std::abs(p_u);
+	double z_crown = 0.0;
+	switch (p_crown_mode) {
+		case 1: // ONE_WAY_CROSSFALL
+			z_crown = -p_crown * p_u;
+			break;
+		case 2: { // CIRCULAR_ARC
+			const double hc = p_crown * wh;
+			if (hc > 1e-6) {
+				const double r = (wh * wh + hc * hc) / (2.0 * hc);
+				if (abs_u <= wh && r > abs_u) {
+					z_crown = std::sqrt(r * r - p_u * p_u) - r;
+				} else {
+					const double slope_edge = -wh / std::sqrt(std::max(r * r - wh * wh, 1e-6));
+					z_crown = -hc + slope_edge * (abs_u - wh);
+				}
+			}
+			break;
+		}
+		case 3: // V_ROOF (legacy)
+			z_crown = -p_crown * abs_u;
+			break;
+		case 0: // PARABOLIC
+		default: {
+			const double hc = p_crown * wh;
+			if (abs_u <= wh) {
+				const double ratio = p_u / wh;
+				z_crown = -hc * ratio * ratio;
+			} else {
+				z_crown = -hc - (2.0 * p_crown) * (abs_u - wh);
+			}
+			break;
+		}
+	}
+
+	double eta = 1.0;
+	if (p_max_bank > 1e-5) {
+		eta = std::clamp(1.0 - std::abs(p_bank) / p_max_bank, 0.0, 1.0);
+	}
+
+	return p_centre + p_bank * p_u + eta * z_crown;
 }
 
 // Grade a heightfield around one road. `p_height` is row-major p_gw * p_gh in METRES and may contain NaN
@@ -107,12 +152,19 @@ Dictionary road_align_solve_with_plan(const PackedVector2Array &p_plan, const Pa
 Array road_mesh_build_chunk(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
 		double p_align_ds, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
 		double p_from, double p_to, double p_half, double p_shoulder, double p_crown,
-		int p_lod = 0, double p_lift = 0.02, double p_align_s0 = 0.0);
+		int p_lod = 0, double p_lift = 0.02, double p_align_s0 = 0.0, int p_crown_mode = 0, double p_max_bank = 0.0);
 
 Array road_mesh_build_apron(const Vector2 &p_center, double p_radius,
 		const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
 		double p_align_ds, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
 		double p_crown, int p_segments = 24, double p_lift = 0.02, double p_align_s0 = 0.0);
+
+Array road_mesh_build_terminus_apron(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
+		double p_align_ds, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
+		double p_s_end, double p_half, double p_shoulder, double p_crown,
+		bool p_is_start = false, double p_apron_length = 2.5, double p_apron_drop = 0.08,
+		int p_rings_count = 4, double p_lift = 0.0, double p_align_s0 = 0.0,
+		int p_crown_mode = 0, double p_max_bank = 0.0, double p_roundness = 0.5);
 
 } // namespace godot
 

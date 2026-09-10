@@ -94,6 +94,8 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 	}
 
 	const double crown = p_opts.has("crown") ? (double)p_opts["crown"] : 0.05;
+	const int crown_mode = p_opts.has("crown_mode") ? (int)p_opts["crown_mode"] : 0;
+	const double max_bank = p_opts.has("max_bank") ? (double)p_opts["max_bank"] : 0.0;
 	const double cut_batter = std::max(p_opts.has("cut_batter") ? (double)p_opts["cut_batter"] : 1.0, 0.01);
 	const double fill_batter = std::max(p_opts.has("fill_batter") ? (double)p_opts["fill_batter"] : 0.6, 0.01);
 	const double fade = std::max(p_opts.has("surface_fade") ? (double)p_opts["surface_fade"] : 1.0, 0.0);
@@ -212,7 +214,8 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 
 				const double u = d * side;
 				const double bank = si < n_bank ? (double)bank_ptr[si] : 0.0;
-				const double z_surface = road_surface_height(z_ref, bank, crown, u);
+				const double hw = si < n_hw ? (double)hw_ptr[si] : 3.5;
+				const double z_surface = road_surface_height(z_ref, bank, crown, u, hw, crown_mode, max_bank);
 
 				double h = ground;
 				if (d <= edge_d) {
@@ -221,7 +224,7 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 					// Beyond the shoulder the batter runs from the edge of formation until it MEETS the
 					// ground, and the meet is a max/min rather than a solved crossing — which is what makes
 					// the join continuous with no seam to chase, at any terrain slope.
-					const double z_edge = road_surface_height(z_ref, bank, crown, edge_d * side);
+					const double z_edge = road_surface_height(z_ref, bank, crown, edge_d * side, hw, crown_mode, max_bank);
 					const double beyond = d - edge_d;
 					h = z_edge > ground ? std::max(ground, z_edge - beyond * fill_batter)
 										: std::min(ground, z_edge + beyond * cut_batter);
@@ -619,8 +622,9 @@ Dictionary godot::road_align_solve_with_plan(const PackedVector2Array &p_plan, c
 
 namespace {
 
-static inline double road_mesh_surface_height(double p_centre, double p_bank, double p_crown, double p_u) {
-	return p_centre + p_bank * p_u - p_crown * std::abs(p_u);
+static inline double road_mesh_surface_height(double p_centre, double p_bank, double p_crown, double p_u,
+		double p_half_width = 4.0, int p_crown_mode = 0, double p_max_bank = 0.0) {
+	return road_surface_height(p_centre, p_bank, p_crown, p_u, p_half_width, p_crown_mode, p_max_bank);
 }
 
 static inline Vector2 road_mesh_plan_point_at(const Vector2 *p_plan, const float *p_cum, int n, double p_s) {
@@ -719,7 +723,7 @@ static inline double road_mesh_align_bank_at(const float *p_bank, int n_bank, do
 Array godot::road_mesh_build_chunk(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
 		double p_align_ds, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
 		double p_from, double p_to, double p_half, double p_shoulder, double p_crown,
-		int p_lod, double p_lift, double p_align_s0) {
+		int p_lod, double p_lift, double p_align_s0, int p_crown_mode, double p_max_bank) {
 	const int plan_n = p_plan.size();
 	const int cum_n = p_cum.size();
 	const int z_n = p_align_z.size();
@@ -778,7 +782,7 @@ Array godot::road_mesh_build_chunk(const PackedVector2Array &p_plan, const Packe
 		for (int c = 0; c < across_count; c++) {
 			const double u = offsets[c];
 			const Vector2 xz = at + across * (float)u;
-			const double y = road_mesh_surface_height(centre, bank, p_crown, u) + p_lift;
+			const double y = road_mesh_surface_height(centre, bank, p_crown, u, half, p_crown_mode, p_max_bank) + p_lift;
 			v_ptr[vi] = Vector3(xz.x, (float)y, xz.y);
 			uv_ptr[vi] = Vector2((float)(u / half * 0.5 + 0.5), (float)s);
 			n_ptr[vi] = Vector3(0.0f, 1.0f, 0.0f);
@@ -901,6 +905,156 @@ Array godot::road_mesh_build_apron(const Vector2 &p_center, double p_radius,
 		idx_ptr[ii++] = 0;
 		idx_ptr[ii++] = 1 + i;
 		idx_ptr[ii++] = 1 + (i + 1) % segments;
+	}
+
+	// Recompute area-weighted normals
+	for (int i = 0; i < total_verts; i++) {
+		n_ptr[i] = Vector3(0.0f, 0.0f, 0.0f);
+	}
+	for (int tri = 0; tri + 2 < total_indices; tri += 3) {
+		const int a = idx_ptr[tri];
+		const int b = idx_ptr[tri + 1];
+		const int c = idx_ptr[tri + 2];
+		const Vector3 n = -(v_ptr[b] - v_ptr[a]).cross(v_ptr[c] - v_ptr[a]);
+		n_ptr[a] += n;
+		n_ptr[b] += n;
+		n_ptr[c] += n;
+	}
+	for (int i = 0; i < total_verts; i++) {
+		n_ptr[i] = n_ptr[i].length_squared() > 1e-12f ? n_ptr[i].normalized() : Vector3(0.0f, 1.0f, 0.0f);
+	}
+
+	Array out;
+	out.resize(Mesh::ARRAY_MAX);
+	out[Mesh::ARRAY_VERTEX] = verts;
+	out[Mesh::ARRAY_NORMAL] = normals;
+	out[Mesh::ARRAY_TEX_UV] = uvs;
+	out[Mesh::ARRAY_INDEX] = indices;
+	return out;
+}
+
+Array godot::road_mesh_build_terminus_apron(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
+		double p_align_ds, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
+		double p_s_end, double p_half, double p_shoulder, double p_crown,
+		bool p_is_start, double p_apron_length, double p_apron_drop,
+		int p_rings_count, double p_lift, double p_align_s0,
+		int p_crown_mode, double p_max_bank, double p_roundness) {
+	const int plan_n = p_plan.size();
+	const int cum_n = p_cum.size();
+	const int z_n = p_align_z.size();
+	const int bank_n = p_align_bank.size();
+	if (plan_n < 2 || cum_n < plan_n || z_n == 0 || p_apron_length <= 1e-4 || p_rings_count < 2) {
+		return Array();
+	}
+
+	const Vector2 *plan_ptr = p_plan.ptr();
+	const float *cum_ptr = p_cum.ptr();
+	const float *z_ptr = p_align_z.ptr();
+	const float *bank_ptr = p_align_bank.ptr();
+
+	const double total_s = (double)cum_ptr[cum_n - 1];
+	const double s = std::clamp(p_s_end, 0.0, total_s);
+	const Vector2 at = road_mesh_plan_point_at(plan_ptr, cum_ptr, plan_n, s);
+	const Vector2 tangent = road_mesh_plan_tangent_at(plan_ptr, cum_ptr, plan_n, s);
+	const Vector2 across(-tangent.y, tangent.x);
+	const Vector2 t_ext = p_is_start ? -tangent : tangent;
+
+	const double centre_0 = road_mesh_align_height_at(z_ptr, z_n, p_align_ds, p_align_s0, s);
+	const double bank_0 = road_mesh_align_bank_at(bank_ptr, bank_n, p_align_ds, p_align_s0, s);
+
+	const double delta_s = std::min(std::max(p_align_ds, 0.5), 1.0);
+	double m0 = 0.0;
+	if (p_is_start) {
+		const double g = (road_mesh_align_height_at(z_ptr, z_n, p_align_ds, p_align_s0, std::min(s + delta_s, total_s)) - centre_0) / delta_s;
+		m0 = -g;
+	} else {
+		const double g = (centre_0 - road_mesh_align_height_at(z_ptr, z_n, p_align_ds, p_align_s0, std::max(s - delta_s, 0.0))) / delta_s;
+		m0 = g;
+	}
+
+	const double half = std::max(p_half, 0.01);
+	const double shoulder = std::max(p_shoulder, 0.0);
+	const double w_total = half + shoulder;
+	const std::vector<double> offsets = { -w_total, -half, 0.0, half, w_total };
+	const int across_count = (int)offsets.size();
+	const int rows = std::max(p_rings_count, 2);
+
+	PackedVector3Array verts;
+	PackedVector3Array normals;
+	PackedVector2Array uvs;
+	PackedInt32Array indices;
+
+	const int total_verts = rows * across_count;
+	verts.resize(total_verts);
+	normals.resize(total_verts);
+	uvs.resize(total_verts);
+
+	Vector3 *v_ptr = verts.ptrw();
+	Vector3 *n_ptr = normals.ptrw();
+	Vector2 *uv_ptr = uvs.ptrw();
+
+	int vi = 0;
+	const double L = p_apron_length;
+	for (int r = 0; r < rows; r++) {
+		const double tau = (double)r / (double)(rows - 1);
+		const double x = tau * L;
+		const Vector2 xz_c = at + t_ext * (float)x;
+
+		// Cubic Hermite basis functions
+		const double tau2 = tau * tau;
+		const double tau3 = tau2 * tau;
+		const double h0 = 2.0 * tau3 - 3.0 * tau2 + 1.0;
+		const double h1 = -2.0 * tau3 + 3.0 * tau2;
+		const double h2 = tau3 - 2.0 * tau2 + tau;
+		const double h3 = tau3 - tau2;
+
+		const double fillet = 1.0 - std::sqrt(std::max(0.0, 1.0 - tau2));
+		const double width_scale = (w_total > 1e-4) ? std::max(0.0, 1.0 - (p_roundness / w_total) * fillet) : 1.0;
+
+		for (int c = 0; c < across_count; c++) {
+			const double u = offsets[c];
+			const double u_scaled = u * width_scale;
+			const Vector2 xz = xz_c + across * (float)u_scaled;
+
+			const double y0 = road_mesh_surface_height(centre_0, bank_0, p_crown, u, half, p_crown_mode, p_max_bank);
+			const double y1 = y0 + m0 * L - p_apron_drop;
+			const double m1 = 0.0;
+			const double y = h0 * y0 + h1 * y1 + h2 * (L * m0) + h3 * (L * m1) + p_lift;
+
+			v_ptr[vi] = Vector3(xz.x, (float)y, xz.y);
+			const double v_coord = p_is_start ? (s - x) : (s + x);
+			uv_ptr[vi] = Vector2((float)(u / half * 0.5 + 0.5), (float)v_coord);
+			n_ptr[vi] = Vector3(0.0f, 1.0f, 0.0f);
+			vi++;
+		}
+	}
+
+	const int total_indices = (rows - 1) * (across_count - 1) * 6;
+	indices.resize(total_indices);
+	int *idx_ptr = indices.ptrw();
+	int ii = 0;
+	for (int r = 0; r < rows - 1; r++) {
+		for (int c = 0; c < across_count - 1; c++) {
+			const int i0 = r * across_count + c;
+			const int i1 = i0 + 1;
+			const int i2 = i0 + across_count;
+			const int i3 = i2 + 1;
+			if (p_is_start) {
+				idx_ptr[ii++] = i0;
+				idx_ptr[ii++] = i1;
+				idx_ptr[ii++] = i2;
+				idx_ptr[ii++] = i1;
+				idx_ptr[ii++] = i3;
+				idx_ptr[ii++] = i2;
+			} else {
+				idx_ptr[ii++] = i0;
+				idx_ptr[ii++] = i2;
+				idx_ptr[ii++] = i1;
+				idx_ptr[ii++] = i1;
+				idx_ptr[ii++] = i2;
+				idx_ptr[ii++] = i3;
+			}
+		}
 	}
 
 	// Recompute area-weighted normals

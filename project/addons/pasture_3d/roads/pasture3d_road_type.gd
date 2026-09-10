@@ -18,6 +18,14 @@ extends Resource
 ## Painted line down the middle. Cosmetic in P0; drives the marking pass in P5.
 enum DividerType { NONE, SINGLE_DASHED, SINGLE_SOLID, DOUBLE_SOLID, DASHED_SOLID }
 
+## Crown cross-section camber geometry.
+enum CrownMode {
+	PARABOLIC,          ## Smooth quadratic crown: y = -c * (u / half_width)^2
+	ONE_WAY_CROSSFALL,  ## Monotonic planar tilt: y = -c * (u / half_width)
+	CIRCULAR_ARC,       ## Exact circular arc radius
+	V_ROOF,             ## Legacy sharp peak
+}
+
 @export_group("Identity")
 ## Shown in pickers and in the RoadNetwork catalogue. Distinct from `resource_name` only in that it is
 ## meant to be read by a designer choosing a road, not by the inspector labelling a row.
@@ -62,9 +70,40 @@ enum DividerType { NONE, SINGLE_DASHED, SINGLE_SOLID, DOUBLE_SOLID, DASHED_SOLID
 		crown = maxf(v, 0.0)
 		emit_changed()
 
+## Profile model of the road crown across the carriageway.
+@export var crown_mode: CrownMode = CrownMode.PARABOLIC:
+	set(v):
+		crown_mode = v
+		emit_changed()
+
 @export var divider_type: DividerType = DividerType.SINGLE_DASHED:
 	set(v):
 		divider_type = v
+		emit_changed()
+
+@export_group("Terminal Aprons")
+## Whether to generate smooth bevelled transition aprons at unconnected road ends (P9b).
+@export var terminus_apron_enabled: bool = true:
+	set(v):
+		terminus_apron_enabled = v
+		emit_changed()
+
+## Length of the terminal transition ramp in metres.
+@export var terminus_apron_length: float = 2.5:
+	set(v):
+		terminus_apron_length = maxf(v, 0.5)
+		emit_changed()
+
+## Depth in metres to which the apron lip bevels down into the terrain.
+@export var terminus_apron_drop: float = 0.08:
+	set(v):
+		terminus_apron_drop = maxf(v, 0.0)
+		emit_changed()
+
+## Corner fillet radius in metres along the lateral shoulder edges.
+@export var terminus_apron_roundness: float = 0.5:
+	set(v):
+		terminus_apron_roundness = maxf(v, 0.0)
 		emit_changed()
 
 @export_group("Verge props")
@@ -162,11 +201,33 @@ enum DividerType { NONE, SINGLE_DASHED, SINGLE_SOLID, DOUBLE_SOLID, DASHED_SOLID
 		emit_changed()
 
 @export_group("Surface")
+## How the road surface is generated and driven on: 3D ribbon collider vs terrain-draped.
+enum SurfaceMode {
+	RIBBON_PHYSICS,  ## Paved road / race track: authoritative 3D ribbon collider + visual mesh.
+	TERRAIN_DRAPED,  ## Dirt trail / footpath: no ribbon mesh; terrain heightmap is the driving surface.
+}
+
+## Whether this road generates an authoritative 3D ribbon collider or drapes directly onto the terrain.
+@export var surface_mode: SurfaceMode = SurfaceMode.RIBBON_PHYSICS:
+	set(v):
+		surface_mode = v
+		emit_changed()
+
 ## Physics surface published to consumers: &"tarmac", &"gravel", &"snow", &"dirt". A StringName rather
 ## than an enum so a project can add its own without editing the addon.
 @export var surface_id: StringName = &"tarmac":
 	set(v):
 		surface_id = v
+		emit_changed()
+
+## Detailed telemetry and friction parameters for vehicle physics. If null, derived from surface_id.
+@export var surface_info: Pasture3DSurfaceInfo = null:
+	set(v):
+		if surface_info != null and surface_info.changed.is_connected(emit_changed):
+			surface_info.changed.disconnect(emit_changed)
+		surface_info = v
+		if surface_info != null and not surface_info.changed.is_connected(emit_changed):
+			surface_info.changed.connect(emit_changed)
 		emit_changed()
 
 ## Terrain texture layer the carriageway paints into at bake (P5). -1 = do not paint.
@@ -180,6 +241,47 @@ enum DividerType { NONE, SINGLE_DASHED, SINGLE_SOLID, DOUBLE_SOLID, DASHED_SOLID
 	set(v):
 		surface_material = v
 		emit_changed()
+
+
+## Get the surface telemetry info, falling back to sensible defaults based on surface_id.
+func get_surface_info() -> Pasture3DSurfaceInfo:
+	if surface_info != null:
+		return surface_info
+	var info := Pasture3DSurfaceInfo.new()
+	info.surface_id = surface_id
+	if surface_id == &"gravel":
+		info.friction_longitudinal = 0.75
+		info.friction_lateral = 0.70
+		info.rolling_resistance = 0.035
+		info.roughness_amplitude = 0.015
+		info.roughness_frequency = 25.0
+		info.audio_surface_type = &"gravel"
+		info.particle_effect_type = &"gravel_spray"
+	elif surface_id == &"dirt":
+		info.friction_longitudinal = 0.65
+		info.friction_lateral = 0.60
+		info.rolling_resistance = 0.045
+		info.roughness_amplitude = 0.025
+		info.roughness_frequency = 15.0
+		info.audio_surface_type = &"dirt"
+		info.particle_effect_type = &"dust"
+	elif surface_id == &"snow":
+		info.friction_longitudinal = 0.35
+		info.friction_lateral = 0.30
+		info.rolling_resistance = 0.040
+		info.roughness_amplitude = 0.005
+		info.roughness_frequency = 10.0
+		info.audio_surface_type = &"snow"
+		info.particle_effect_type = &"snow_spray"
+	else:
+		info.friction_longitudinal = 1.05
+		info.friction_lateral = 1.00
+		info.rolling_resistance = 0.015
+		info.roughness_amplitude = 0.002
+		info.roughness_frequency = 18.0
+		info.audio_surface_type = &"asphalt"
+		info.particle_effect_type = &"tire_smoke"
+	return info
 
 
 ## Half the sealed width, metres — carriageway plus both shoulders, halved. The figure the grader and
@@ -212,7 +314,7 @@ func disturbed_width(p_lane_count: int = -1) -> float:
 ## part of the stamp key. A cross-check that lives somewhere else is not a key.
 func grading_signature() -> Array:
 	return [
-		lane_width, lane_count, shoulder_width, crown, verge_width,
+		lane_width, lane_count, shoulder_width, crown, crown_mode, verge_width,
 		cut_batter, fill_batter,
 		max_grade, max_superelevation, design_speed,
 		# IN, despite being a junction setting rather than a cross-section one: the kerb return is paid

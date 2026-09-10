@@ -171,7 +171,7 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 	# surface_material and depth_lift, which move no terrain vertex, and the height bake reads the batters
 	# and max_grade, which move no ribbon vertex. Collapsing them into one would make each rebuild on the
 	# other's edits — the churn the paragraph above exists to avoid.
-	var digest := "%s|%s|%.4f|%s|%s|%s|%.4f|%.4f|%.4f|%.4f|%s" % [
+	var digest := "%s|%s|%.4f|%s|%s|%s|%.4f|%.4f|%.4f|%d|%.4f|%.4f|%s|%s|%s|%.4f|%.4f|%.4f" % [
 		p_brush.alignment_digest(),
 		p_brush.junction_digest(),
 		depth_lift,
@@ -181,8 +181,15 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 		t.half_width(p_brush.resolved_lane_count()),
 		t.shoulder_width,
 		t.crown,
+		t.crown_mode,
+		t.max_superelevation,
 		_region_metres(p_brush),
 		str(t.surface_material.get_instance_id()) if t.surface_material != null else "",
+		_segments_bridge_signature(p_brush),
+		str(t.terminus_apron_enabled),
+		t.terminus_apron_length,
+		t.terminus_apron_drop,
+		t.terminus_apron_roundness,
 	]
 	if not _chunks.is_empty() and _last_digest == digest:
 		last_rebuilt = false
@@ -205,14 +212,32 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 		_why(p_brush, "no spans left: %.1f m of road, %.0f m regions, %d junction footprint(s)"
 				% [cum[cum.size() - 1] if cum.size() > 0 else 0.0, region, skips.size()])
 		return 0
+
+	# When in TERRAIN_DRAPED mode, skip building ribbon meshes and ribbon colliders.
+	# The road is purely graded and painted into the terrain heightfield.
+	if t.surface_mode == Pasture3DRoadType.SurfaceMode.TERRAIN_DRAPED:
+		_clear()
+		_last_digest = digest
+		last_rebuilt = true
+		if props_enabled:
+			var prop_transforms: Array = []
+			for span in spans:
+				prop_transforms.append_array(_prop_transforms(t, plan, cum, alignment, float(span[0]), float(span[1]), crown))
+			_place_props(p_brush, t, prop_transforms)
+		else:
+			_place_props(p_brush, t, [])
+		return 0
+
 	var rejected := 0
 	var prop_transforms: Array = []
+	var surf_info: Pasture3DSurfaceInfo = t.get_surface_info()
 	for span in spans:
 		var meshes: Array = []
 		var empty := false
 		for lod in Pasture3DRoadMesher.LOD_LEVELS:
 			var arrays := Pasture3DRoadMesher.build_chunk(plan, cum, alignment, float(span[0]),
-					float(span[1]), half, shoulder, crown, lod, depth_lift)
+					float(span[1]), half, shoulder, crown, lod, depth_lift, false,
+					t.crown_mode, t.max_superelevation)
 			if arrays.is_empty():
 				empty = true
 				break
@@ -232,8 +257,11 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 		# the graded ground where it was.
 		mi.top_level = true
 		add_child(mi)
-		if collision_enabled:
-			_add_collider(mi, plan, cum, alignment, float(span[0]), float(span[1]), half, shoulder, crown)
+		var mid := (float(span[0]) + float(span[1])) * 0.5
+		var is_bridge_span: bool = p_brush.is_bridge_at(mid)
+		var should_collide: bool = collision_enabled or is_bridge_span
+		if should_collide:
+			_add_collider(mi, plan, cum, alignment, float(span[0]), float(span[1]), half, shoulder, crown, surf_info, t.crown_mode, t.max_superelevation)
 		var markings: MeshInstance3D = null
 		if markings_enabled:
 			markings = _add_markings(mi, p_brush, plan, cum, alignment, float(span[0]), float(span[1]),
@@ -241,7 +269,6 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 		if props_enabled:
 			prop_transforms.append_array(_prop_transforms(t, plan, cum, alignment, float(span[0]),
 					float(span[1]), crown))
-		var mid := (float(span[0]) + float(span[1])) * 0.5
 		var at := Pasture3DRoadGrader.plan_point_at(plan, cum, mid)
 		_chunks.append({
 			"node": mi,
@@ -255,6 +282,81 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 			# build already knew.
 			"markings": markings,
 		})
+
+	if t.terminus_apron_enabled and not spans.is_empty():
+		var total_s: float = cum[cum.size() - 1] if cum.size() > 0 else 0.0
+		var has_start_junction := false
+		var has_end_junction := false
+		for skip in skips:
+			if float(skip[0]) <= 0.5:
+				has_start_junction = true
+			if float(skip[1]) >= total_s - 0.5:
+				has_end_junction = true
+
+		if not has_start_junction:
+			var start_arrays := Pasture3DRoadMesher.build_terminus_apron(
+					plan, cum, alignment, 0.0, half, shoulder, crown, true,
+					t.terminus_apron_length, t.terminus_apron_drop, 4, depth_lift,
+					t.crown_mode, t.max_superelevation, t.terminus_apron_roundness)
+			if not start_arrays.is_empty():
+				var mesh := ArrayMesh.new()
+				mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, start_arrays)
+				if t.surface_material != null:
+					mesh.surface_set_material(0, t.surface_material)
+				var mi := MeshInstance3D.new()
+				mi.name = "TerminusApron_Start"
+				mi.mesh = mesh
+				mi.top_level = true
+				add_child(mi)
+				if collision_enabled:
+					var col_arrays := Pasture3DRoadMesher.build_terminus_apron(
+							plan, cum, alignment, 0.0, half, shoulder, crown, true,
+							t.terminus_apron_length, t.terminus_apron_drop, 4, 0.0,
+							t.crown_mode, t.max_superelevation, t.terminus_apron_roundness)
+					if not col_arrays.is_empty():
+						_collider_from(mi, col_arrays, surf_info)
+				var at0 := Pasture3DRoadGrader.plan_point_at(plan, cum, 0.0)
+				_chunks.append({
+					"node": mi,
+					"centre": Vector3(at0.x, alignment.height_at(0.0), at0.y),
+					"bounds": mesh.get_aabb(),
+					"meshes": [mesh, mesh, mesh, mesh],
+					"lod": 0,
+					"markings": null,
+				})
+
+		if not has_end_junction:
+			var end_arrays := Pasture3DRoadMesher.build_terminus_apron(
+					plan, cum, alignment, total_s, half, shoulder, crown, false,
+					t.terminus_apron_length, t.terminus_apron_drop, 4, depth_lift,
+					t.crown_mode, t.max_superelevation, t.terminus_apron_roundness)
+			if not end_arrays.is_empty():
+				var mesh := ArrayMesh.new()
+				mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, end_arrays)
+				if t.surface_material != null:
+					mesh.surface_set_material(0, t.surface_material)
+				var mi := MeshInstance3D.new()
+				mi.name = "TerminusApron_End"
+				mi.mesh = mesh
+				mi.top_level = true
+				add_child(mi)
+				if collision_enabled:
+					var col_arrays := Pasture3DRoadMesher.build_terminus_apron(
+							plan, cum, alignment, total_s, half, shoulder, crown, false,
+							t.terminus_apron_length, t.terminus_apron_drop, 4, 0.0,
+							t.crown_mode, t.max_superelevation, t.terminus_apron_roundness)
+					if not col_arrays.is_empty():
+						_collider_from(mi, col_arrays, surf_info)
+				var at_end := Pasture3DRoadGrader.plan_point_at(plan, cum, total_s)
+				_chunks.append({
+					"node": mi,
+					"centre": Vector3(at_end.x, alignment.height_at(total_s), at_end.y),
+					"bounds": mesh.get_aabb(),
+					"meshes": [mesh, mesh, mesh, mesh],
+					"lod": 0,
+					"markings": null,
+				})
+
 	# Called even when props are OFF, with nothing to place: it clears the instancer by mesh id first, so
 	# switching props off removes the ones already out there. Skipping the call entirely would leave a
 	# verge full of props that no longer has a setting saying they should be there.
@@ -278,19 +380,20 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 ## parked at the edge of a threshold.
 func _add_collider(p_parent: Node3D, p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 		p_alignment: Pasture3DRoadAlignment, p_from: float, p_to: float, p_half: float,
-		p_shoulder: float, p_crown: float) -> void:
+		p_shoulder: float, p_crown: float, p_surface_info: Pasture3DSurfaceInfo = null,
+		p_crown_mode: int = 0, p_max_bank: float = 0.0) -> void:
 	var arrays := Pasture3DRoadMesher.build_chunk(p_plan, p_cum, p_alignment, p_from, p_to, p_half,
-			p_shoulder, p_crown, 0, 0.0)
+			p_shoulder, p_crown, 0, 0.0, false, p_crown_mode, p_max_bank)
 	if arrays.is_empty():
 		return
-	_collider_from(p_parent, arrays)
+	_collider_from(p_parent, arrays, p_surface_info)
 
 
 ## A trimesh body over one surface's triangles, on the road physics layer.
 ##
 ## Takes ARRAYS rather than building its own, so the apron and the ribbon get colliders from the same
 ## code and cannot disagree about the layer, the shape type or the winding.
-func _collider_from(p_parent: Node3D, p_arrays: Array) -> void:
+func _collider_from(p_parent: Node3D, p_arrays: Array, p_surface_info: Pasture3DSurfaceInfo = null) -> void:
 	var faces := PackedVector3Array()
 	var verts: PackedVector3Array = p_arrays[Mesh.ARRAY_VERTEX]
 	for i: int in p_arrays[Mesh.ARRAY_INDEX]:
@@ -302,6 +405,12 @@ func _collider_from(p_parent: Node3D, p_arrays: Array) -> void:
 	_colliders += 1
 	body.collision_layer = collision_layer
 	body.collision_mask = collision_mask
+	if p_surface_info != null:
+		var pm := PhysicsMaterial.new()
+		pm.friction = p_surface_info.friction_longitudinal
+		pm.bounce = 0.0
+		body.physics_material_override = pm
+		body.set_meta(&"pasture3d_surface", p_surface_info)
 	var cs := CollisionShape3D.new()
 	cs.shape = shape
 	body.add_child(cs)
@@ -498,7 +607,7 @@ func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_L
 			var solid := Pasture3DRoadMesher.build_footprint(a["center"], a["boundary"], a["heights"],
 					float(a["center_h"]), 0.0)
 			if not solid.is_empty():
-				_collider_from(mi, solid)
+				_collider_from(mi, solid, a.get("surface_info"))
 		var meshes: Array = []
 		for _lod in Pasture3DRoadMesher.LOD_LEVELS:
 			meshes.append(mesh)
@@ -533,6 +642,17 @@ func _region_metres(p_brush: Pasture3DRoadBrush) -> float:
 	if terrain == null:
 		return 0.0
 	return maxf(float(terrain.region_size) * terrain.vertex_spacing, 1.0)
+
+
+## Structure flags across segments (bridges have unconditional collision and change meshing).
+func _segments_bridge_signature(p_brush: Pasture3DRoadBrush) -> String:
+	if p_brush == null or p_brush.segments.is_empty():
+		return ""
+	var s := ""
+	for seg: Pasture3DRoadSegment in p_brush.segments:
+		if seg != null and seg.is_bridge:
+			s += "B(%.1f,%.1f)" % [seg.from_distance, seg.to_distance]
+	return s
 
 
 ## Drop the previous build.

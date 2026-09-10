@@ -1043,6 +1043,8 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	var res := Pasture3DRoadGrader.grade(p_z, p_gw, p_gh, p_min_x, p_min_z, p_vs, plan, alignment,
 			half, shoulder, verge, suppress, {
 				"crown": prof["crown"],
+				"crown_mode": t.crown_mode if t != null else 0,
+				"max_bank": t.max_superelevation if t != null else 0.0,
 				"cut_batter": prof["cut_batter"],
 				"fill_batter": prof["fill_batter"],
 				# NO `skip` FOR THE GROUND. `skip` is per arc-length sample, so it refuses at every
@@ -1329,9 +1331,12 @@ func earthwork_over(p_ground: PackedFloat32Array, p_gw: int, p_gh: int, p_min_x:
 	if n_s < 2:
 		return PackedFloat32Array()
 	var prof := grading_profile(mod, ds, n_s)
+	var t := resolved_road_type()
 	var res := Pasture3DRoadGrader.grade(p_ground.duplicate(), p_gw, p_gh, p_min_x, p_min_z, p_vs,
 			plan, alignment, prof["half"], prof["shoulder"], prof["verge"], prof["suppress"], {
 				"crown": prof["crown"],
+				"crown_mode": t.crown_mode if t != null else 0,
+				"max_bank": t.max_superelevation if t != null else 0.0,
 				"cut_batter": prof["cut_batter"],
 				"fill_batter": prof["fill_batter"],
 			})

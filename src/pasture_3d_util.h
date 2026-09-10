@@ -405,13 +405,21 @@ public:
 			const double p_align_ds, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
 			const double p_from, const double p_to, const double p_half, const double p_shoulder,
 			const double p_crown, const int p_lod = 0, const double p_lift = 0.02,
-			const double p_align_s0 = 0.0);
+			const double p_align_s0 = 0.0, const int p_crown_mode = 0, const double p_max_bank = 0.0);
 
 	static Array road_mesh_build_apron(const Vector2 &p_center, const double p_radius,
 			const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
 			const double p_align_ds, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
 			const double p_crown, const int p_segments = 24, const double p_lift = 0.02,
 			const double p_align_s0 = 0.0);
+
+	static Array road_mesh_build_terminus_apron(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
+			const double p_align_ds, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
+			const double p_s_end, const double p_half, const double p_shoulder,
+			const double p_crown, const bool p_is_start = false, const double p_apron_length = 2.5,
+			const double p_apron_drop = 0.08, const int p_rings_count = 4, const double p_lift = 0.0,
+			const double p_align_s0 = 0.0, const int p_crown_mode = 0, const double p_max_bank = 0.0,
+			const double p_roundness = 0.5);
 
 	// Native Curvature Discrete Laplacian filter.
 	static PackedFloat32Array curvature_grid(const PackedFloat32Array &p_surface, const int p_gw, const int p_gh,
