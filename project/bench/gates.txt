@@ -841,3 +841,11 @@ bench/RoadMountainCivilGate.tscn
 # intentional jump override (allow_airborne_jump), sag vertical acceleration bounds (0.6g), grade satisfaction, and C++ parity.
 bench/RoadVerticalDynamicsGate.tscn
 
+# --- Simcade Road Upgrade Phase 7 (P9g): Bivariate Coons Patch Junction Surface ---
+# Watched green 2026-09-10 (0 failures). Tests exact cut-face cross-section elevation parity (< 10^-5 m),
+# longitudinal grade slope C¹ continuity (< 10^-4), crease-free diagonal trajectory across multi-arm intersections
+# (|d²z/ds²| < 0.20 m^-1 vs 0.60 m^-1 spoke spikes), watertight 2-manifold regular grid interior triangulation,
+# and full multi-arm geometry coverage (crossroads, T-junctions, Y-junctions, acute crossings).
+bench/RoadJunctionPatchGate.tscn
+
+

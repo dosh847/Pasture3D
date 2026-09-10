@@ -224,6 +224,7 @@ static func resolve(p_runs: Array, p_existing: Array = [], p_opts: Dictionary = 
 			prior.arm_z = j.arm_z
 			prior.arm_banks = j.arm_banks
 			prior.arm_crowns = j.arm_crowns
+			prior.arm_grades = j.arm_grades
 			prior.corner_radius = j.corner_radius
 			prior.elevation = j.elevation
 			prior.major_index = j.major_index
@@ -505,6 +506,7 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 	var arm_z := PackedFloat32Array()
 	var arm_banks := PackedFloat32Array()
 	var arm_crowns := PackedFloat32Array()
+	var arm_grades := PackedFloat32Array()
 	for ai in dirs.size():
 		var gi: int = arm_roads[ai]
 		var run: Dictionary = p_runs[idx[gi]]
@@ -513,14 +515,17 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 		if alignment == null or alignment.count() == 0:
 			arm_z.append(j.elevation)
 			arm_banks.append(0.0)
+			arm_grades.append(0.0)
 		else:
 			var si := alignment.index_at(s_face)
 			arm_z.append(alignment.height_at(s_face))
 			arm_banks.append(alignment.bank[si] if si < alignment.bank.size() else 0.0)
+			arm_grades.append(alignment.grade_at(si) * arm_signs[ai])
 		arm_crowns.append(float(run.get("crown", 0.05)))
 	j.arm_z = arm_z
 	j.arm_banks = arm_banks
 	j.arm_crowns = arm_crowns
+	j.arm_grades = arm_grades
 
 	# The footprint has to contain every trimmed end, so it is the largest of them.
 	var r := 0.0

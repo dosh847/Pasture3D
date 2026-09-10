@@ -718,12 +718,14 @@ func junction_surface(p_junction: Pasture3DRoadJunction) -> Dictionary:
 			p_junction.footprint_arms(), p_junction.effective_corner_radius())
 	if boundary.size() < 3:
 		return {}
+	var faces := _arm_faces(p_junction)
 	var surf := {
 		"center": p_junction.center,
 		"center_h": p_junction.elevation,
 		"boundary": boundary,
 		"heights": Pasture3DRoadMesher.footprint_boundary_heights(p_junction.center, boundary,
-				_arm_faces(p_junction), p_junction.elevation),
+				faces, p_junction.elevation),
+		"arm_faces": faces,
 	}
 	surf.merge(_junction_batters(p_junction))
 	return surf
@@ -794,13 +796,17 @@ func _arm_faces(p_junction: Pasture3DRoadJunction, _p_by_key: Dictionary = {}) -
 	var out: Array = []
 	for i in n:
 		var key: String = p_junction.road_keys[p_junction.arm_roads[i]] 				if p_junction.arm_roads[i] >= 0 and p_junction.arm_roads[i] < p_junction.road_keys.size() 				else ""
+		var trim_dist: float = p_junction.trim_back_for(key)
+		var arm_dir: Vector2 = p_junction.arm_dirs[i]
 		out.append({
-			"dir": p_junction.arm_dirs[i],
-			"trim": p_junction.trim_back_for(key),
+			"dir": arm_dir,
+			"trim": trim_dist,
 			"half": p_junction.arm_halfs[i],
 			"z": p_junction.arm_z[i],
 			"bank": p_junction.arm_banks[i],
 			"crown": p_junction.arm_crowns[i],
+			"grade": p_junction.arm_grades[i] if i < p_junction.arm_grades.size() else 0.0,
+			"center": p_junction.center + arm_dir * trim_dist,
 		})
 	return out
 
@@ -874,7 +880,8 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 				j.effective_corner_radius())
 		if boundary.size() < 3:
 			continue
-		var heights: PackedFloat32Array = junction_surface(j)["heights"]
+		var surf_data: Dictionary = junction_surface(j)
+		var heights: PackedFloat32Array = surf_data.get("heights", PackedFloat32Array())
 		var spec := {
 			"id": j.id,
 			"center": j.center,
@@ -888,6 +895,7 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 			"markings": Pasture3DRoadJunctionMarkings.plan_junction(j, _arms_for(j, by_key),
 					{"default_control": default_control}),
 			"heights": heights,
+			"arm_faces": surf_data.get("arm_faces", []),
 			"center_h": j.elevation,
 			"material": t.surface_material if t != null else null,
 			"surface_info": t.get_surface_info() if t != null else null,

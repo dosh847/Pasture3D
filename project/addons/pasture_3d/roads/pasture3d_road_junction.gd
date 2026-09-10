@@ -86,6 +86,7 @@ enum JunctionKind { CROSSING = 0, END_TO_END = 1 }
 @export var arm_z: PackedFloat32Array = PackedFloat32Array()
 @export var arm_banks: PackedFloat32Array = PackedFloat32Array()
 @export var arm_crowns: PackedFloat32Array = PackedFloat32Array()
+@export var arm_grades: PackedFloat32Array = PackedFloat32Array()
 
 ## Resolved kerb-return radius, metres — the highest-priority participant's, or the network default when
 ## they tie and disagree. Solver output; `corner_radius_override` is the user's.

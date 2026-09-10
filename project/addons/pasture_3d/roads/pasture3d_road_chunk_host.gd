@@ -557,6 +557,12 @@ func _apron_digest(a: Dictionary, p_lift: float) -> String:
 			parts.append(str(quad.size()))
 			for qp in quad:
 				parts.append("%.3f,%.3f" % [qp.x, qp.y])
+	var faces: Array = a.get("arm_faces", [])
+	parts.append(str(faces.size()))
+	for f in faces:
+		if f is Dictionary:
+			parts.append("%.3f:%.3f:%.3f:%.3f" % [float(f.get("z", 0.0)), float(f.get("bank", 0.0)),
+					float(f.get("crown", 0.0)), float(f.get("grade", 0.0))])
 	var res: String = ":".join(parts)
 	a["_cached_digest"] = {
 		"digest": res,
@@ -614,8 +620,9 @@ func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_L
 			_apron_chunks.erase(jid)
 			_apron_digests.erase(jid)
 
+		var arm_faces: Array = a.get("arm_faces", [])
 		var arrays := Pasture3DRoadMesher.build_footprint(a["center"], a["boundary"], a["heights"],
-				float(a["center_h"]), p_lift)
+				float(a["center_h"]), p_lift, arm_faces)
 		if arrays.is_empty():
 			continue
 		var mesh := ArrayMesh.new()
@@ -635,7 +642,7 @@ func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_L
 			# at every junction: a raycast asking "am I on tarmac" answers yes along the road and no in the
 			# middle of the crossroads, which is exactly where a vehicle most needs the answer.
 			var solid := Pasture3DRoadMesher.build_footprint(a["center"], a["boundary"], a["heights"],
-					float(a["center_h"]), 0.0)
+					float(a["center_h"]), 0.0, arm_faces)
 			if not solid.is_empty():
 				_collider_from(mi, solid, a.get("surface_info"))
 		var meshes: Array = []
@@ -934,8 +941,9 @@ func _add_junction_markings(p_parent: Node3D, p_apron: Dictionary, p_lift: float
 	var boundary: PackedVector2Array = p_apron["boundary"]
 	var heights: PackedFloat32Array = p_apron["heights"]
 	var centre_h := float(p_apron["center_h"])
+	var arm_faces: Array = p_apron.get("arm_faces", [])
 	var sampler := func(at: Vector2) -> float:
-		return Pasture3DRoadMesher.footprint_height_at(at, centre, boundary, heights, centre_h)
+		return Pasture3DRoadMesher.footprint_height_at(at, centre, boundary, heights, centre_h, arm_faces)
 	var arrays := Pasture3DRoadJunctionMarkings.build_junction(prims, sampler, p_lift)
 	if arrays.is_empty():
 		return null

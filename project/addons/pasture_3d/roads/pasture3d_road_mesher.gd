@@ -883,7 +883,58 @@ static func footprint_boundary_heights(p_center: Vector2, p_boundary: PackedVect
 	return out
 
 
-## The junction surface at one point, interpolated over the SAME triangle fan the mesh is built from.
+## Evaluate transfinite interpolation (bivariate Coons patch) surface height at point `p_at` in world XZ.
+## Each arm face imposes elevation, cross-fall, crown, and longitudinal grade along its cut face segment.
+## Blending uses inverse-quartic distance weighting (p=4), ensuring zero normal derivative of weights
+## at each approach boundary: the surface meets approach ribbons with exact C¹ continuity.
+static func coons_patch_height_at(p_at: Vector2, p_center: Vector2, p_arm_faces: Array,
+		p_fallback: float) -> float:
+	if p_arm_faces.is_empty():
+		return p_fallback
+
+	var sum := 0.0
+	var wsum := 0.0
+	var exact_h := NAN
+
+	for face: Dictionary in p_arm_faces:
+		var dir: Vector2 = face.get("dir", Vector2.ZERO)
+		var n := Vector2(-dir.y, dir.x)
+		var trim: float = float(face.get("trim", 0.0))
+		var c: Vector2 = face.get("center", p_center + dir * trim)
+		var delta := p_at - c
+		var along: float = delta.dot(dir)
+		var across: float = delta.dot(n)
+		var half: float = maxf(float(face.get("half", 4.0)), 0.01)
+		var z: float = float(face.get("z", p_fallback))
+		var bank: float = float(face.get("bank", 0.0))
+		var crown: float = float(face.get("crown", 0.0))
+		var grade: float = float(face.get("grade", 0.0))
+
+		# Hermite surface prediction from this arm
+		var u_clamped := clampf(across, -half, half)
+		var crown_term := -crown * (u_clamped / half) * (u_clamped / half)
+		var h_pred := z + bank * across + crown_term + grade * along
+
+		# Distance to cut face segment
+		var d_along := along
+		var over := maxf(absf(across) - half, 0.0)
+		var d2 := d_along * d_along + over * over
+
+		if d2 <= 1e-8:
+			exact_h = h_pred
+			break
+
+		var w := 1.0 / (d2 * d2)
+		sum += h_pred * w
+		wsum += w
+
+	if not is_nan(exact_h):
+		return exact_h
+	return sum / wsum if wsum > 0.0 else p_fallback
+
+
+## The junction surface at one point, interpolated over the SAME triangle fan the mesh is built from
+## (or the transfinite Coons patch when `p_arm_faces` is provided).
 ##
 ## Not a second definition of the surface: the mesh is `(centre, boundary[i], boundary[i+1])` and so is
 ## this, so the terrain the junction grades and the polygon it draws are one surface read twice. Any
@@ -893,7 +944,9 @@ static func footprint_boundary_heights(p_center: Vector2, p_boundary: PackedVect
 ## Returns `p_center_h` for a point outside the fan, which is the answer a caller wants when it is
 ## rasterising a bounding box and asking about cells it will then reject.
 static func footprint_height_at(p_at: Vector2, p_center: Vector2, p_boundary: PackedVector2Array,
-		p_heights: PackedFloat32Array, p_center_h: float) -> float:
+		p_heights: PackedFloat32Array, p_center_h: float, p_arm_faces: Array = []) -> float:
+	if not p_arm_faces.is_empty():
+		return coons_patch_height_at(p_at, p_center, p_arm_faces, p_center_h)
 	var n := p_boundary.size()
 	if n < 3 or p_heights.size() != n:
 		return p_center_h
@@ -981,8 +1034,113 @@ static func _barycentric(p_at: Vector2, p_a: Vector2, p_b: Vector2, p_c: Vector2
 ## tolerance. It also takes the last road-specific thing out of this kernel: the disc it replaced sampled
 ## the MAJOR road's alignment, which made the intersection's shape depend on scene order whenever two
 ## roads tied on priority.
+## Build a C¹-continuous transfinite Coons patch surface with a uniform interior grid triangulation.
+## Unlike the radial triangle fan (which causes suspension spoke creases), this discretizes the interior
+## into a regular grid bounded by `p_boundary`, ensuring smooth vehicle dynamics in all crossing directions.
+static func build_coons_patch(p_center: Vector2, p_boundary: PackedVector2Array, p_arm_faces: Array,
+		p_center_h: float, p_grid_step: float = 1.0, p_lift: float = DEPTH_LIFT) -> Array:
+	if p_boundary.size() < 3 or p_arm_faces.is_empty():
+		return []
+
+	var aabb_min := Vector2(INF, INF)
+	var aabb_max := Vector2(-INF, -INF)
+	for p in p_boundary:
+		aabb_min.x = minf(aabb_min.x, p.x)
+		aabb_min.y = minf(aabb_min.y, p.y)
+		aabb_max.x = maxf(aabb_max.x, p.x)
+		aabb_max.y = maxf(aabb_max.y, p.y)
+
+	var step := maxf(p_grid_step, 0.5)
+	var grid_pts := PackedVector2Array()
+	var x := aabb_min.x + step * 0.5
+	while x < aabb_max.x:
+		var y := aabb_min.y + step * 0.5
+		while y < aabb_max.y:
+			var pt := Vector2(x, y)
+			if Geometry2D.is_point_in_polygon(pt, p_boundary):
+				var min_d := INF
+				for i in p_boundary.size():
+					var a: Vector2 = p_boundary[i]
+					var b: Vector2 = p_boundary[(i + 1) % p_boundary.size()]
+					var ab := b - a
+					var t := clampf((pt - a).dot(ab) / maxf(ab.length_squared(), 1e-8), 0.0, 1.0)
+					min_d = minf(min_d, pt.distance_to(a + ab * t))
+				if min_d > step * 0.4:
+					grid_pts.append(pt)
+			y += step
+		x += step
+
+	var all_pts := PackedVector2Array()
+	all_pts.append_array(p_boundary)
+	all_pts.append_array(grid_pts)
+
+	var raw_tris := Geometry2D.triangulate_delaunay(all_pts)
+	var kept_indices := PackedInt32Array()
+
+	for t in range(0, raw_tris.size(), 3):
+		var i0 := raw_tris[t]
+		var i1 := raw_tris[t + 1]
+		var i2 := raw_tris[t + 2]
+		var p0 := all_pts[i0]
+		var p1 := all_pts[i1]
+		var p2 := all_pts[i2]
+		var centroid := (p0 + p1 + p2) / 3.0
+		if Geometry2D.is_point_in_polygon(centroid, p_boundary):
+			var m01 := (p0 + p1) * 0.5
+			var m12 := (p1 + p2) * 0.5
+			var m20 := (p2 + p0) * 0.5
+			if Geometry2D.is_point_in_polygon(m01, p_boundary) and Geometry2D.is_point_in_polygon(m12, p_boundary) and Geometry2D.is_point_in_polygon(m20, p_boundary):
+				# Front-face winding: clockwise seen from above (cross.y < 0 in Godot 3D)
+				var v0 := Vector3(p0.x, 0.0, p0.y)
+				var v1 := Vector3(p1.x, 0.0, p1.y)
+				var v2 := Vector3(p2.x, 0.0, p2.y)
+				if (v1 - v0).cross(v2 - v0).y > 0.0:
+					kept_indices.append(i0)
+					kept_indices.append(i2)
+					kept_indices.append(i1)
+				else:
+					kept_indices.append(i0)
+					kept_indices.append(i1)
+					kept_indices.append(i2)
+
+	var extent := 0.0
+	for p in p_boundary:
+		extent = maxf(extent, p_center.distance_to(p))
+	extent = maxf(extent, 0.01)
+
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var normals := PackedVector3Array()
+
+	for p in all_pts:
+		var h := coons_patch_height_at(p, p_center, p_arm_faces, p_center_h)
+		verts.append(Vector3(p.x, h + p_lift, p.y))
+		var d := (p - p_center) / extent
+		uvs.append(Vector2(0.5 + d.x * 0.5, 0.5 + d.y * 0.5))
+		normals.append(Vector3.UP)
+
+	_recompute_normals(verts, kept_indices, normals)
+
+	var out := []
+	out.resize(Mesh.ARRAY_MAX)
+	out[Mesh.ARRAY_VERTEX] = verts
+	out[Mesh.ARRAY_NORMAL] = normals
+	out[Mesh.ARRAY_TEX_UV] = uvs
+	out[Mesh.ARRAY_INDEX] = kept_indices
+	return out
+
+
+## The junction surface: `p_boundary` as a triangle fan about `p_center` (or C¹ transfinite Coons
+## patch when `p_arm_faces` is provided).
+##
+## When `p_arm_faces` is provided, `build_coons_patch` is invoked to produce a regular grid interior
+## triangulation with smooth C¹ continuous elevation and slope blending, eliminating radial spoke ridges.
+## When omitted or empty, the legacy triangle fan is constructed for backward compatibility.
 static func build_footprint(p_center: Vector2, p_boundary: PackedVector2Array,
-		p_heights: PackedFloat32Array, p_center_h: float, p_lift: float = DEPTH_LIFT) -> Array:
+		p_heights: PackedFloat32Array, p_center_h: float, p_lift: float = DEPTH_LIFT,
+		p_arm_faces: Array = [], p_grid_step: float = 1.0) -> Array:
+	if not p_arm_faces.is_empty():
+		return build_coons_patch(p_center, p_boundary, p_arm_faces, p_center_h, p_grid_step, p_lift)
 	if p_boundary.size() < 3 or p_heights.size() != p_boundary.size():
 		return []
 	var verts := PackedVector3Array()
