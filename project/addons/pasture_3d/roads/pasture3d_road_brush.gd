@@ -640,6 +640,9 @@ func _paint_flat_footprint(path: Path3D) -> void:
 						"smooth_radius": road_mod.smooth_radius,
 						"mountain_banking_cap": mtn_cap,
 						"hairpin_grade_compensation": hairpin_comp,
+						"vertical_crest_accel_limit": t.vertical_crest_accel_limit if t != null else 0.4,
+						"vertical_sag_accel_limit": t.vertical_sag_accel_limit if t != null else 0.6,
+						"allow_airborne_jump": prof.get("allow_airborne_jump", PackedByteArray()),
 					})
 		alignment.input_digest = alignment_digest(road_mod)
 		road_mod.last_alignment = alignment
@@ -893,10 +896,12 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 	var shoulder := PackedFloat32Array()
 	var verge := PackedFloat32Array()
 	var suppress := PackedByteArray()
+	var jump_mask := PackedByteArray()
 	half.resize(p_n_s); half.fill(def_half)
 	shoulder.resize(p_n_s); shoulder.fill(def_shoulder)
 	verge.resize(p_n_s); verge.fill(def_verge)
 	suppress.resize(p_n_s); suppress.fill(0)
+	jump_mask.resize(p_n_s); jump_mask.fill(0)
 
 	# ---- WHY THE UNIFORM FILL ABOVE IS USUALLY THE WHOLE ANSWER -------------------------------------
 	#
@@ -924,10 +929,12 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 		var seg_shoulder := PackedFloat32Array()
 		var seg_verge := PackedFloat32Array()
 		var seg_bridge := PackedByteArray()
+		var seg_jump := PackedByteArray()
 		seg_half.resize(segs.size())
 		seg_shoulder.resize(segs.size())
 		seg_verge.resize(segs.size())
 		seg_bridge.resize(segs.size())
+		seg_jump.resize(segs.size())
 		for k in segs.size():
 			var seg: Pasture3DRoadSegment = segs[k]
 			var chain: Array = [seg] + tail
@@ -941,6 +948,7 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 			else:
 				seg_verge[k] = tt.verge_width if tt != null else 4.0
 			seg_bridge[k] = 1 if seg.is_bridge else 0
+			seg_jump[k] = 1 if seg.allow_airborne_jump else 0
 		for i in p_n_s:
 			var k := owner[i]
 			# -1 is "no segment here", and the uniform fill is already exactly right for those samples.
@@ -950,6 +958,7 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 			shoulder[i] = seg_shoulder[k]
 			verge[i] = seg_verge[k]
 			suppress[i] = seg_bridge[k]
+			jump_mask[i] = seg_jump[k]
 
 	if t != null and t.curve_widening_enabled:
 		var plan := _plan_points()
@@ -1011,6 +1020,7 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 					skip[i] = 1
 	return {
 		"half": half, "shoulder": shoulder, "verge": verge, "suppress": suppress,
+		"allow_airborne_jump": jump_mask,
 		"pins": pins, "skip": skip,
 		"crown": p_mod.resolved_number(p_mod.crown_override, t.crown) if p_mod != null and t != null \
 				else 0.05,
@@ -1086,6 +1096,9 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 					"smooth_radius": p_mod.smooth_radius,
 					"mountain_banking_cap": mtn_cap,
 					"hairpin_grade_compensation": hairpin_comp,
+					"vertical_crest_accel_limit": t.vertical_crest_accel_limit if t != null else 0.4,
+					"vertical_sag_accel_limit": t.vertical_sag_accel_limit if t != null else 0.6,
+					"allow_airborne_jump": prof.get("allow_airborne_jump", PackedByteArray()),
 				})
 	alignment.input_digest = alignment_digest(p_mod)
 	p_mod.last_alignment = alignment

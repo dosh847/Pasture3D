@@ -835,3 +835,9 @@ bench/RoadKerbMesherGate.tscn
 # Watched green 2026-09-10 (0 failures). Tests adaptive spline tessellation, hairpin apex curvature preservation,
 # localized transition length isolation, mountain banking cap, hairpin grade compensation, curve widening, and C++ parity.
 bench/RoadMountainCivilGate.tscn
+
+# --- Simcade Road Upgrade Phase 6: Vertical Dynamics & Velocity-Aware Curvature Limits ---
+# Watched green 2026-09-10 (0 failures). Tests crest vertical acceleration bounds (0.4g), speed-dependent crest flattening,
+# intentional jump override (allow_airborne_jump), sag vertical acceleration bounds (0.6g), grade satisfaction, and C++ parity.
+bench/RoadVerticalDynamicsGate.tscn
+

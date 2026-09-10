@@ -284,6 +284,10 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 		out["curvature"] = PackedFloat32Array();
 		out["bank"] = PackedFloat32Array();
 		out["peak_grade"] = 0.0;
+		out["peak_vertical_curvature_crest"] = 0.0;
+		out["peak_vertical_curvature_sag"] = 0.0;
+		out["peak_vertical_accel_crest"] = 0.0;
+		out["peak_vertical_accel_sag"] = 0.0;
 		out["feasible"] = true;
 		out["cut_volume"] = 0.0;
 		out["fill_volume"] = 0.0;
@@ -299,6 +303,10 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 		out["curvature"] = zeros;
 		out["bank"] = zeros;
 		out["peak_grade"] = 0.0;
+		out["peak_vertical_curvature_crest"] = 0.0;
+		out["peak_vertical_curvature_sag"] = 0.0;
+		out["peak_vertical_accel_crest"] = 0.0;
+		out["peak_vertical_accel_sag"] = 0.0;
 		out["feasible"] = true;
 		out["cut_volume"] = 0.0;
 		out["fill_volume"] = 0.0;
@@ -313,6 +321,39 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 	const int iterations = (int)p_opts.get("iterations", 240);
 	const Dictionary pins = p_opts.get("pins", Dictionary());
 	const double smooth_radius = p_opts.get("smooth_radius", 0.0);
+
+	const double v_design = p_opts.get("design_speed", 0.0);
+	const double a_crest_g = p_opts.get("vertical_crest_accel_limit", 0.4);
+	const double a_sag_g = p_opts.get("vertical_sag_accel_limit", 0.6);
+
+	double k_crest = 0.0;
+	double k_sag = 0.0;
+	if (p_opts.has("max_vertical_curvature_crest")) {
+		k_crest = (double)p_opts["max_vertical_curvature_crest"];
+	} else if (v_design > 0.0 && a_crest_g > 0.0) {
+		k_crest = (a_crest_g * 9.81) / (v_design * v_design);
+	}
+
+	if (p_opts.has("max_vertical_curvature_sag")) {
+		k_sag = (double)p_opts["max_vertical_curvature_sag"];
+	} else if (v_design > 0.0 && a_sag_g > 0.0) {
+		k_sag = (a_sag_g * 9.81) / (v_design * v_design);
+	}
+
+	std::vector<uint8_t> jump_mask((size_t)n, 0);
+	if (p_opts.has("allow_airborne_jump")) {
+		Variant jump_var = p_opts["allow_airborne_jump"];
+		if (jump_var.get_type() == Variant::BOOL && (bool)jump_var) {
+			std::fill(jump_mask.begin(), jump_mask.end(), (uint8_t)1);
+		} else if (jump_var.get_type() == Variant::PACKED_BYTE_ARRAY) {
+			PackedByteArray j_arr = jump_var;
+			const uint8_t *j_ptr = j_arr.ptr();
+			const int j_sz = std::min((int)j_arr.size(), n);
+			for (int i = 0; i < j_sz; i++) {
+				jump_mask[i] = j_ptr[i];
+			}
+		}
+	}
 
 	std::vector<bool> has_pin((size_t)n, false);
 	std::vector<float> pin_val((size_t)n, 0.0f);
@@ -360,6 +401,44 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 			}
 			pz[j] = fixed;
 			j += dir;
+		}
+	};
+
+	auto project_vertical_curvature = [&](std::vector<float> &pz, int sweeps) {
+		if (n < 3) {
+			return;
+		}
+		const bool has_crest = k_crest > 1e-7;
+		const bool has_sag = k_sag > 1e-7;
+		if (!has_crest && !has_sag) {
+			return;
+		}
+		const double ds2 = ds * ds;
+		const double kc = k_crest * ds2;
+		const double ks = k_sag * ds2;
+		const float inf_f = std::numeric_limits<float>::infinity();
+
+		for (int sw = 0; sw < sweeps; sw++) {
+			for (int i = 1; i < n - 1; i++) {
+				if (has_pin[i]) {
+					continue;
+				}
+				const bool allow_jump = (jump_mask[i] != 0);
+				const double z_mid = 0.5 * ((double)pz[i - 1] + (double)pz[i + 1]);
+				const float z_min = has_sag ? (float)(z_mid - 0.5 * ks) : -inf_f;
+				const float z_max = (has_crest && !allow_jump) ? (float)(z_mid + 0.5 * kc) : inf_f;
+				pz[i] = std::clamp(pz[i], z_min, z_max);
+			}
+			for (int i = n - 2; i >= 1; i--) {
+				if (has_pin[i]) {
+					continue;
+				}
+				const bool allow_jump = (jump_mask[i] != 0);
+				const double z_mid = 0.5 * ((double)pz[i - 1] + (double)pz[i + 1]);
+				const float z_min = has_sag ? (float)(z_mid - 0.5 * ks) : -inf_f;
+				const float z_max = (has_crest && !allow_jump) ? (float)(z_mid + 0.5 * kc) : inf_f;
+				pz[i] = std::clamp(pz[i], z_min, z_max);
+			}
 		}
 	};
 
@@ -419,6 +498,9 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 		}
 	};
 
+	if (k_crest > 1e-7 || k_sag > 1e-7) {
+		project_vertical_curvature(z, 4);
+	}
 	project_grade(z);
 
 	std::vector<float> z_prev(n);
@@ -442,6 +524,9 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 			if (has_pin[i]) {
 				z[i] = pin_val[i];
 			}
+		}
+		if (k_crest > 1e-7 || k_sag > 1e-7) {
+			project_vertical_curvature(z, 4);
 		}
 		project_grade(z);
 
@@ -517,6 +602,11 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 		project_grade(z);
 	}
 
+	if (k_crest > 1e-7 || k_sag > 1e-7) {
+		project_vertical_curvature(z, 16);
+		project_grade(z);
+	}
+
 	PackedFloat32Array out_z;
 	out_z.resize(n);
 	float *z_ptr = out_z.ptrw();
@@ -546,8 +636,27 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 	}
 	const bool feasible = (peak <= g_max + 1e-5) && (pin_err <= 1e-3);
 
+	double peak_curv_crest = 0.0;
+	double peak_curv_sag = 0.0;
+	if (n >= 3) {
+		const double ds2 = ds * ds;
+		for (int i = 1; i < n - 1; i++) {
+			const double d2 = ((double)z[i - 1] - 2.0 * (double)z[i] + (double)z[i + 1]) / ds2;
+			if (d2 < 0.0) {
+				peak_curv_crest = std::max(peak_curv_crest, -d2);
+			} else {
+				peak_curv_sag = std::max(peak_curv_sag, d2);
+			}
+		}
+	}
+	const double v2 = v_design * v_design;
+
 	out["z"] = out_z;
 	out["peak_grade"] = peak;
+	out["peak_vertical_curvature_crest"] = (float)peak_curv_crest;
+	out["peak_vertical_curvature_sag"] = (float)peak_curv_sag;
+	out["peak_vertical_accel_crest"] = (float)(peak_curv_crest * v2);
+	out["peak_vertical_accel_sag"] = (float)(peak_curv_sag * v2);
 	out["feasible"] = feasible;
 	out["cut_volume"] = cut;
 	out["fill_volume"] = fill;
@@ -645,6 +754,9 @@ Dictionary godot::road_align_solve_with_plan(const PackedVector2Array &p_plan, c
 	PackedFloat32Array curv = road_plan_curvature(p_plan);
 	Dictionary solve_opts = p_opts.duplicate();
 	solve_opts["curvature"] = curv;
+	if (!solve_opts.has("design_speed")) {
+		solve_opts["design_speed"] = p_design_speed;
+	}
 	Dictionary out = road_align_solve(p_ground, p_ds, p_max_grade, solve_opts);
 	const double trans_len = (double)p_opts.get("bank_transition_length", 25.0);
 	const double mtn_cap = (double)p_opts.get("mountain_banking_cap", -1.0);

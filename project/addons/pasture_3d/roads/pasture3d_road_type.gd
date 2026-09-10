@@ -238,6 +238,19 @@ enum KerbType {
 		design_speed = maxf(v, 1.0)
 		emit_changed()
 
+@export_group("Vertical Dynamics")
+## Maximum downward vertical acceleration over crests in g-units (0.4g = 3.92 m/s²), preventing airborne launch (P9f).
+@export_range(0.05, 2.0, 0.05) var vertical_crest_accel_limit: float = 0.4:
+	set(v):
+		vertical_crest_accel_limit = maxf(v, 0.0)
+		emit_changed()
+
+## Maximum upward vertical acceleration in sags/dips in g-units (0.6g = 5.88 m/s²), preventing suspension bottoming (P9f).
+@export_range(0.05, 3.0, 0.05) var vertical_sag_accel_limit: float = 0.6:
+	set(v):
+		vertical_sag_accel_limit = maxf(v, 0.0)
+		emit_changed()
+
 @export_group("Earthworks")
 ## Slope of the batter where the road CUTS into rising ground, rise/run. Steeper than fill: cut faces
 ## stand in material that is already consolidated.
@@ -395,6 +408,7 @@ func grading_signature() -> Array:
 		lane_width, lane_count, shoulder_width, crown, crown_mode, verge_width,
 		cut_batter, fill_batter,
 		max_grade, max_superelevation, design_speed,
+		vertical_crest_accel_limit, vertical_sag_accel_limit,
 		# IN, despite being a junction setting rather than a cross-section one: the kerb return is paid
 		# for by trimming every arm further back, and the trim-back is where the grader stops writing.
 		# So changing it moves the baked height at every junction this road takes part in, and a stamp

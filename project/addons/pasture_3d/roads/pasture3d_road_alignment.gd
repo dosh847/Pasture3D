@@ -57,6 +57,14 @@ extends Resource
 @export var max_grade_used: float = 0.08
 ## Steepest |dz/ds| in the result. Must not exceed `max_grade_used` by more than rounding.
 @export var peak_grade: float = 0.0
+## Peak downward vertical curvature across crests (1/metres).
+@export var peak_vertical_curvature_crest: float = 0.0
+## Peak upward vertical curvature across sags/dips (1/metres).
+@export var peak_vertical_curvature_sag: float = 0.0
+## Peak downward vertical acceleration over crests at design speed (m/s²).
+@export var peak_vertical_accel_crest: float = 0.0
+## Peak upward vertical acceleration in sags at design speed (m/s²).
+@export var peak_vertical_accel_sag: float = 0.0
 ## Metres³ of material removed and added (per metre of width — multiply by the road's width).
 @export var cut_volume: float = 0.0
 @export var fill_volume: float = 0.0

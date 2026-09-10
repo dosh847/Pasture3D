@@ -69,6 +69,12 @@ extends Pasture3DRoadOverrides
 		suppress_paint = v
 		emit_changed()
 
+## Allow sharp crest jumps without clamping to design-speed vertical acceleration limits (P9f).
+@export var allow_airborne_jump: bool = false:
+	set(v):
+		allow_airborne_jump = v
+		emit_changed()
+
 
 ## Metres this override covers. Zero for a range that ends where it starts.
 func length() -> float:
@@ -113,4 +119,4 @@ func range_warnings(p_spline_length: float = NAN) -> PackedStringArray:
 ## `label` is deliberately absent — it is PROPERTY_USAGE_EDITOR and a view onto `resource_name`, so it
 ## moves no vertex and including it would invalidate every cached block on a rename.
 func signature() -> Array:
-	return [super.signature(), from_distance, to_distance, is_bridge, suppress_paint]
+	return [super.signature(), from_distance, to_distance, is_bridge, suppress_paint, allow_airborne_jump]

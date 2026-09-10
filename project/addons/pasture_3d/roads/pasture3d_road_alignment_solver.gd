@@ -93,6 +93,10 @@ static func solve(p_ground: PackedFloat32Array, p_ds: float, p_max_grade: float,
 		out.curvature = res.get("curvature", _zeros(p_ground.size()))
 		out.bank = res.get("bank", _zeros(p_ground.size()))
 		out.peak_grade = float(res.get("peak_grade", 0.0))
+		out.peak_vertical_curvature_crest = float(res.get("peak_vertical_curvature_crest", 0.0))
+		out.peak_vertical_curvature_sag = float(res.get("peak_vertical_curvature_sag", 0.0))
+		out.peak_vertical_accel_crest = float(res.get("peak_vertical_accel_crest", 0.0))
+		out.peak_vertical_accel_sag = float(res.get("peak_vertical_accel_sag", 0.0))
 		out.feasible = bool(res.get("feasible", true))
 		out.cut_volume = float(res.get("cut_volume", 0.0))
 		out.fill_volume = float(res.get("fill_volume", 0.0))
@@ -132,12 +136,45 @@ static func solve(p_ground: PackedFloat32Array, p_ds: float, p_max_grade: float,
 			var reduction := clampf((abs_k - 0.02) / 0.06, 0.0, 1.0) * hairpin_comp
 			step_limits[i] = g_max * (1.0 - reduction) * ds
 
+	var v_design := float(p_opts.get("design_speed", 0.0))
+	var a_crest_g := float(p_opts.get("vertical_crest_accel_limit", 0.4))
+	var a_sag_g := float(p_opts.get("vertical_sag_accel_limit", 0.6))
+
+	var k_crest := 0.0
+	var k_sag := 0.0
+	if p_opts.has("max_vertical_curvature_crest"):
+		k_crest = float(p_opts["max_vertical_curvature_crest"])
+	elif v_design > 0.0 and a_crest_g > 0.0:
+		k_crest = (a_crest_g * 9.81) / (v_design * v_design)
+
+	if p_opts.has("max_vertical_curvature_sag"):
+		k_sag = float(p_opts["max_vertical_curvature_sag"])
+	elif v_design > 0.0 and a_sag_g > 0.0:
+		k_sag = (a_sag_g * 9.81) / (v_design * v_design)
+
+	var jump_mask := PackedByteArray()
+	if p_opts.has("allow_airborne_jump"):
+		var v_jump: Variant = p_opts["allow_airborne_jump"]
+		if typeof(v_jump) == TYPE_BOOL and bool(v_jump):
+			jump_mask.resize(n)
+			jump_mask.fill(1)
+		elif typeof(v_jump) == TYPE_PACKED_BYTE_ARRAY:
+			jump_mask = v_jump
+
 	# Start from the ground: the feasible-ish starting point closest to the earth term's optimum.
 	var z := p_ground.duplicate()
 	_apply_pins(z, pins)
+	if k_crest > 1e-7 or k_sag > 1e-7:
+		_project_vertical_curvature(z, ds, k_crest, k_sag, pins, jump_mask, GRADE_SWEEPS)
 	_project_grade(z, ds, g_max, pins, step_limits)
 
+	var z_prev := PackedFloat32Array()
+	z_prev.resize(n)
+
 	for _it in iterations:
+		for i in n:
+			z_prev[i] = z[i]
+
 		# --- relaxation: a symmetric SOR sweep over the quadratic -----------------------------------
 		# Gauss-Seidel IN PLACE, forward then backward, over-relaxed. The choice matters more than it
 		# looks: a Jacobi pass moves information one sample per iteration, so a 4 km run would need
@@ -159,15 +196,26 @@ static func solve(p_ground: PackedFloat32Array, p_ds: float, p_max_grade: float,
 			for i in n:
 				z[i] -= shift
 
-		# --- projections: pins, then the hard gradient limit ---------------------------------------
+		# --- projections: pins, then curvature, then the hard gradient limit -----------------------
 		_apply_pins(z, pins)
+		if k_crest > 1e-7 or k_sag > 1e-7:
+			_project_vertical_curvature(z, ds, k_crest, k_sag, pins, jump_mask, GRADE_SWEEPS)
 		_project_grade(z, ds, g_max, pins, step_limits)
 
+		var moved := 0.0
+		for i in n:
+			moved = maxf(moved, absf(z[i] - z_prev[i]))
+		if _it >= 20 and moved < 1e-4:
+			break
+
 	_smooth_profile(z, ds, g_max, pins, smooth_radius, step_limits)
+	if k_crest > 1e-7 or k_sag > 1e-7:
+		_project_vertical_curvature(z, ds, k_crest, k_sag, pins, jump_mask, 16)
+		_project_grade(z, ds, g_max, pins, step_limits)
 
 	out.z = z
 	out.pinned = _pin_indices(pins)
-	_fill_diagnostics(out, pins, ds, g_max)
+	_fill_diagnostics(out, pins, ds, g_max, v_design)
 	# No plan geometry was supplied, so there is no curvature and therefore no banking. A caller that
 	# wants banking hands the centreline to `solve_with_plan`.
 	out.curvature = _zeros(n)
@@ -196,6 +244,10 @@ static func solve_with_plan(p_plan: PackedVector2Array, p_ground: PackedFloat32A
 		out.curvature = res.get("curvature", _zeros(p_ground.size()))
 		out.bank = res.get("bank", _zeros(p_ground.size()))
 		out.peak_grade = float(res.get("peak_grade", 0.0))
+		out.peak_vertical_curvature_crest = float(res.get("peak_vertical_curvature_crest", 0.0))
+		out.peak_vertical_curvature_sag = float(res.get("peak_vertical_curvature_sag", 0.0))
+		out.peak_vertical_accel_crest = float(res.get("peak_vertical_accel_crest", 0.0))
+		out.peak_vertical_accel_sag = float(res.get("peak_vertical_accel_sag", 0.0))
 		out.feasible = bool(res.get("feasible", true))
 		out.cut_volume = float(res.get("cut_volume", 0.0))
 		out.fill_volume = float(res.get("fill_volume", 0.0))
@@ -206,6 +258,8 @@ static func solve_with_plan(p_plan: PackedVector2Array, p_ground: PackedFloat32A
 	var curv := plan_curvature(p_plan, p_force_gdscript)
 	var solve_opts := p_opts.duplicate()
 	solve_opts["curvature"] = curv
+	if not solve_opts.has("design_speed"):
+		solve_opts["design_speed"] = p_design_speed
 	var out := solve(p_ground, p_ds, p_max_grade, solve_opts, p_force_gdscript)
 	out.curvature = curv
 	var trans_len := float(p_opts.get("bank_transition_length", 25.0))
@@ -306,6 +360,48 @@ static func superelevation(p_curvature: PackedFloat32Array, p_design_speed: floa
 
 
 # ---- internals ----------------------------------------------------------------------------------
+
+## Second-difference clamping projection on consecutive triples (P9f):
+##   Δ²z_i = (z[i-1] - 2*z[i] + z[i+1]) / ds² ∈ [-κ_{crest}, κ_{sag}]
+## where κ = a_max / v_design². Prevents vehicle airborne launch over crests and bump-stop bottoming in sags.
+## Intentional jumps (allow_airborne_jump) bypass the crest clamp.
+static func _project_vertical_curvature(p_z: PackedFloat32Array, p_ds: float,
+		p_k_crest: float, p_k_sag: float, p_pins: Dictionary,
+		p_jump_mask: PackedByteArray = PackedByteArray(), p_sweeps: int = 4) -> void:
+	var n := p_z.size()
+	if n < 3:
+		return
+	var has_crest := p_k_crest > 1e-7
+	var has_sag := p_k_sag > 1e-7
+	if not has_crest and not has_sag:
+		return
+
+	var ds2 := p_ds * p_ds
+	var kc := p_k_crest * ds2
+	var ks := p_k_sag * ds2
+	var has_jump := p_jump_mask.size() == n
+
+	for _sw in p_sweeps:
+		# Forward pass: i from 1 to n-2
+		for i in range(1, n - 1):
+			if p_pins.has(i):
+				continue
+			var allow_jump := has_jump and p_jump_mask[i] != 0
+			var z_mid := 0.5 * (p_z[i - 1] + p_z[i + 1])
+			var z_min := (z_mid - 0.5 * ks) if has_sag else -INF
+			var z_max := (z_mid + 0.5 * kc) if (has_crest and not allow_jump) else INF
+			p_z[i] = clampf(p_z[i], z_min, z_max)
+
+		# Backward pass: i from n-2 down to 1
+		for i in range(n - 2, 0, -1):
+			if p_pins.has(i):
+				continue
+			var allow_jump := has_jump and p_jump_mask[i] != 0
+			var z_mid := 0.5 * (p_z[i - 1] + p_z[i + 1])
+			var z_min := (z_mid - 0.5 * ks) if has_sag else -INF
+			var z_max := (z_mid + 0.5 * kc) if (has_crest and not allow_jump) else INF
+			p_z[i] = clampf(p_z[i], z_min, z_max)
+
 
 ## Bring the profile inside the gradient limit, WITHOUT a direction bias.
 ##
@@ -416,7 +512,7 @@ static func _pin_indices(p_pins: Dictionary) -> PackedInt32Array:
 
 
 static func _fill_diagnostics(p_out: Pasture3DRoadAlignment, p_pins: Dictionary, p_ds: float,
-		p_max_grade: float) -> void:
+		p_max_grade: float, p_design_speed: float = 0.0) -> void:
 	var n := p_out.z.size()
 	var peak := 0.0
 	for i in range(1, n):
@@ -443,6 +539,22 @@ static func _fill_diagnostics(p_out: Pasture3DRoadAlignment, p_pins: Dictionary,
 	p_out.pin_error = err
 	if err > 1e-3:
 		p_out.feasible = false
+
+	var peak_curv_crest := 0.0
+	var peak_curv_sag := 0.0
+	if n >= 3:
+		var ds2 := p_ds * p_ds
+		for i in range(1, n - 1):
+			var d2 := (p_out.z[i - 1] - 2.0 * p_out.z[i] + p_out.z[i + 1]) / ds2
+			if d2 < 0.0:
+				peak_curv_crest = maxf(peak_curv_crest, -d2)
+			else:
+				peak_curv_sag = maxf(peak_curv_sag, d2)
+	p_out.peak_vertical_curvature_crest = peak_curv_crest
+	p_out.peak_vertical_curvature_sag = peak_curv_sag
+	var v2 := p_design_speed * p_design_speed
+	p_out.peak_vertical_accel_crest = peak_curv_crest * v2
+	p_out.peak_vertical_accel_sag = peak_curv_sag * v2
 
 
 ## Conditioning pass on the SOLVED profile: removes bumps shorter than `p_radius` metres. See §3 of
