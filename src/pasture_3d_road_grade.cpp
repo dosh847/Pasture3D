@@ -338,11 +338,23 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 	std::vector<float> fwd((size_t)n);
 	std::vector<float> bwd((size_t)n);
 
-	auto relax_toward_pin = [&](std::vector<float> &pz, int at, int dir) {
+	const double hairpin_comp = (double)p_opts.get("hairpin_grade_compensation", 0.0);
+	PackedFloat32Array curv_arr = p_opts.get("curvature", PackedFloat32Array());
+	std::vector<double> step_limits(n, p_max_grade * p_ds);
+	if (hairpin_comp > 0.0 && curv_arr.size() == n) {
+		const float *k_ptr = curv_arr.ptr();
+		for (int i = 0; i < n; i++) {
+			const double abs_k = (double)std::abs(k_ptr[i]);
+			const double reduction = std::clamp((abs_k - 0.02) / 0.06, 0.0, 1.0) * hairpin_comp;
+			step_limits[i] = p_max_grade * (1.0 - reduction) * p_ds;
+		}
+	}
+
+	auto relax_toward_pin = [&](std::vector<float> &pz, int at, int dir, double p_step) {
 		int j = at + dir;
 		while (j >= 0 && j < n && !has_pin[j]) {
-			const float anchor = pz[j - dir];
-			const float fixed = std::clamp(pz[j], (float)(anchor - step), (float)(anchor + step));
+			const double anchor = (double)pz[j - dir];
+			const float fixed = std::clamp(pz[j], (float)(anchor - p_step), (float)(anchor + p_step));
 			if (std::abs(fixed - pz[j]) < 1e-6f) {
 				return;
 			}
@@ -355,18 +367,20 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 		for (int sw = 0; sw < 4; sw++) {
 			std::copy(pz.begin(), pz.end(), fwd.begin());
 			for (int i = 1; i < n; i++) {
+				const double local_step = std::min(step_limits[i - 1], step_limits[i]);
 				if (has_pin[i]) {
-					relax_toward_pin(fwd, i, -1);
+					relax_toward_pin(fwd, i, -1, local_step);
 				} else {
-					fwd[i] = std::clamp(fwd[i], (float)(fwd[i - 1] - step), (float)(fwd[i - 1] + step));
+					fwd[i] = std::clamp(fwd[i], (float)(fwd[i - 1] - local_step), (float)(fwd[i - 1] + local_step));
 				}
 			}
 			std::copy(pz.begin(), pz.end(), bwd.begin());
 			for (int i = n - 2; i >= 0; i--) {
+				const double local_step = std::min(step_limits[i], step_limits[i + 1]);
 				if (has_pin[i]) {
-					relax_toward_pin(bwd, i, 1);
+					relax_toward_pin(bwd, i, 1, local_step);
 				} else {
-					bwd[i] = std::clamp(bwd[i], (float)(bwd[i + 1] - step), (float)(bwd[i + 1] + step));
+					bwd[i] = std::clamp(bwd[i], (float)(bwd[i + 1] - local_step), (float)(bwd[i + 1] + local_step));
 				}
 			}
 			for (int i = 0; i < n; i++) {
@@ -574,7 +588,7 @@ PackedFloat32Array godot::road_plan_curvature(const PackedVector2Array &p_plan) 
 }
 
 PackedFloat32Array godot::road_superelevation(const PackedFloat32Array &p_curvature, double p_design_speed,
-		double p_max_superelevation, double p_ds, double p_transition_length) {
+		double p_max_superelevation, double p_ds, double p_transition_length, double p_mountain_banking_cap) {
 	const int n = p_curvature.size();
 	PackedFloat32Array out;
 	out.resize(n);
@@ -584,18 +598,34 @@ PackedFloat32Array godot::road_superelevation(const PackedFloat32Array &p_curvat
 	float *o_ptr = out.ptrw();
 	const float *k_ptr = p_curvature.ptr();
 	const double v2 = p_design_speed * p_design_speed;
-	const double cap = std::max(p_max_superelevation, 0.0);
+	const double base_cap = std::max(p_max_superelevation, 0.0);
+	const double cap = (p_mountain_banking_cap > 0.0) ? std::min(p_mountain_banking_cap, base_cap) : base_cap;
+
 	for (int i = 0; i < n; i++) {
-		o_ptr[i] = (float)std::clamp(-v2 * (double)k_ptr[i] / 9.81, -cap, cap);
+		const double k_val = (double)k_ptr[i];
+		o_ptr[i] = (float)std::clamp(-v2 * k_val / 9.81, -cap, cap);
 	}
-	const int half = (int)std::round(std::max(p_transition_length, 0.0) / std::max(p_ds, 1e-4) * 0.5);
-	if (half <= 0) {
+
+	const double max_trans = std::max(p_transition_length, 0.0);
+	if (max_trans <= 1e-4) {
 		return out;
 	}
+
 	PackedFloat32Array smoothed;
 	smoothed.resize(n);
 	float *s_ptr = smoothed.ptrw();
 	for (int i = 0; i < n; i++) {
+		const double abs_k = std::abs((double)k_ptr[i]);
+		double local_trans = max_trans;
+		if (abs_k > 1e-4) {
+			const double radius = 1.0 / abs_k;
+			local_trans = std::min(max_trans, std::max(4.0, 0.35 * radius));
+		}
+		const int half = (int)std::round(local_trans / std::max(p_ds, 1e-4) * 0.5);
+		if (half <= 0) {
+			s_ptr[i] = o_ptr[i];
+			continue;
+		}
 		double acc = 0.0;
 		double cnt = 0.0;
 		for (int k = i - half; k <= i + half; k++) {
@@ -603,18 +633,22 @@ PackedFloat32Array godot::road_superelevation(const PackedFloat32Array &p_curvat
 			acc += (double)o_ptr[ki];
 			cnt += 1.0;
 		}
-		s_ptr[i] = (float)(acc / cnt);
+		s_ptr[i] = (float)std::clamp(acc / cnt, -cap, cap);
 	}
+
 	return smoothed;
 }
 
 Dictionary godot::road_align_solve_with_plan(const PackedVector2Array &p_plan, const PackedFloat32Array &p_ground,
 		double p_ds, double p_max_grade, double p_design_speed, double p_max_superelevation,
 		const Dictionary &p_opts) {
-	Dictionary out = road_align_solve(p_ground, p_ds, p_max_grade, p_opts);
 	PackedFloat32Array curv = road_plan_curvature(p_plan);
+	Dictionary solve_opts = p_opts.duplicate();
+	solve_opts["curvature"] = curv;
+	Dictionary out = road_align_solve(p_ground, p_ds, p_max_grade, solve_opts);
 	const double trans_len = (double)p_opts.get("bank_transition_length", 25.0);
-	PackedFloat32Array bank = road_superelevation(curv, p_design_speed, p_max_superelevation, p_ds, trans_len);
+	const double mtn_cap = (double)p_opts.get("mountain_banking_cap", -1.0);
+	PackedFloat32Array bank = road_superelevation(curv, p_design_speed, p_max_superelevation, p_ds, trans_len, mtn_cap);
 	out["curvature"] = curv;
 	out["bank"] = bank;
 	return out;
@@ -654,10 +688,38 @@ static inline Vector2 road_mesh_plan_point_at(const Vector2 *p_plan, const float
 	return p_plan[lo].lerp(p_plan[hi], (float)t);
 }
 
+static inline Vector2 road_mesh_plan_tangent_at(const Vector2 *p_plan, const float *p_cum, int n, double p_s, double p_h = 0.5) {
+	if (n < 2) {
+		return Vector2(1.0f, 0.0f);
+	}
+	const double total = (double)p_cum[n - 1];
+	const double h = std::max(p_h, 0.01);
+	if (p_s >= 2.0 * h && p_s <= total - 2.0 * h) {
+		const Vector2 p_m2 = road_mesh_plan_point_at(p_plan, p_cum, n, p_s - 2.0 * h);
+		const Vector2 p_m1 = road_mesh_plan_point_at(p_plan, p_cum, n, p_s - h);
+		const Vector2 p_p1 = road_mesh_plan_point_at(p_plan, p_cum, n, p_s + h);
+		const Vector2 p_p2 = road_mesh_plan_point_at(p_plan, p_cum, n, p_s + 2.0 * h);
+		const Vector2 d = (-p_p2 + 8.0f * p_p1 - 8.0f * p_m1 + p_m2) / (float)(12.0 * h);
+		const double len = d.length();
+		if (len > 1e-6) {
+			return d / (float)len;
+		}
+	}
+	const Vector2 a = road_mesh_plan_point_at(p_plan, p_cum, n, std::clamp(p_s - h, 0.0, total));
+	const Vector2 b = road_mesh_plan_point_at(p_plan, p_cum, n, std::clamp(p_s + h, 0.0, total));
+	const Vector2 d = b - a;
+	const double len = d.length();
+	return len > 1e-6 ? d / (float)len : Vector2(1.0f, 0.0f);
+}
+
 } // namespace
 
 Vector2 godot::road_plan_point_at(const Vector2 *p_plan, const float *p_cum, int n, double p_s) {
 	return road_mesh_plan_point_at(p_plan, p_cum, n, p_s);
+}
+
+Vector2 godot::road_plan_tangent_at(const Vector2 *p_plan, const float *p_cum, int n, double p_s, double p_h) {
+	return road_mesh_plan_tangent_at(p_plan, p_cum, n, p_s, p_h);
 }
 
 PackedVector2Array godot::road_resample_plan(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
@@ -675,18 +737,6 @@ PackedVector2Array godot::road_resample_plan(const PackedVector2Array &p_plan, c
 }
 
 namespace {
-
-static inline Vector2 road_mesh_plan_tangent_at(const Vector2 *p_plan, const float *p_cum, int n, double p_s, double p_h = 0.5) {
-	if (n < 2) {
-		return Vector2(1.0f, 0.0f);
-	}
-	const double total = (double)p_cum[n - 1];
-	const Vector2 a = road_mesh_plan_point_at(p_plan, p_cum, n, std::clamp(p_s - p_h, 0.0, total));
-	const Vector2 b = road_mesh_plan_point_at(p_plan, p_cum, n, std::clamp(p_s + p_h, 0.0, total));
-	const Vector2 d = b - a;
-	const double len = d.length();
-	return len > 1e-6 ? d / len : Vector2(1.0f, 0.0f);
-}
 
 // `p_s0` is the arc length of SAMPLE ZERO. It is not decoration: an alignment solved over a sub-range
 // carries s0 != 0, and sampling `s / ds` instead of `(s - s0) / ds` reads the profile shifted by s0/ds

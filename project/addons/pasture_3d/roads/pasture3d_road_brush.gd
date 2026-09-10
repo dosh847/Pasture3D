@@ -541,7 +541,8 @@ func corridor_half_width() -> float:
 				batter = minf(batter, road_mod.cut_batter_override)
 			if road_mod.fill_batter_override >= 0.0:
 				batter = minf(batter, road_mod.fill_batter_override)
-	return t.disturbed_width(resolved_lane_count()) * 0.5 + allowance / maxf(batter, 0.05)
+	var widen := t.curve_widening_max if t.curve_widening_enabled else 0.0
+	return t.disturbed_width(resolved_lane_count()) * 0.5 + widen + allowance / maxf(batter, 0.05)
 
 
 func _padding() -> float:
@@ -630,9 +631,16 @@ func _paint_flat_footprint(path: Path3D) -> void:
 			alignment.bank = Pasture3DRoadGrader._zeros(n_s)
 			alignment.curvature = Pasture3DRoadGrader._zeros(n_s)
 		else:
+			var mtn_cap: float = t.mountain_banking_cap if t != null else -1.0
+			var hairpin_comp: float = t.hairpin_grade_compensation if t != null else 0.0
 			alignment = Pasture3DRoadAlignmentSolver.solve_with_plan(_resample_plan(plan, cum, ds, n_s),
 					ground, ds, max_grade, design_speed, max_superelevation,
-					{"pins": pins, "smooth_radius": road_mod.smooth_radius})
+					{
+						"pins": pins,
+						"smooth_radius": road_mod.smooth_radius,
+						"mountain_banking_cap": mtn_cap,
+						"hairpin_grade_compensation": hairpin_comp,
+					})
 		alignment.input_digest = alignment_digest(road_mod)
 		road_mod.last_alignment = alignment
 
@@ -943,6 +951,21 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 			verge[i] = seg_verge[k]
 			suppress[i] = seg_bridge[k]
 
+	if t != null and t.curve_widening_enabled:
+		var plan := _plan_points()
+		if plan.size() >= 3:
+			var cum := _plan_cum()
+			var r_plan := _resample_plan(plan, cum, p_ds, p_n_s)
+			var curv: PackedFloat32Array
+			if ClassDB.class_has_method("Pasture3DUtil", "road_plan_curvature"):
+				curv = Pasture3DUtil.road_plan_curvature(r_plan)
+			else:
+				curv = Pasture3DRoadAlignmentSolver.plan_curvature(r_plan)
+			var c_size := mini(curv.size(), p_n_s)
+			for i in c_size:
+				var extra := clampf(t.curve_widening_factor * absf(curv[i]), 0.0, t.curve_widening_max)
+				half[i] += extra
+
 	# ---- WHAT THE JUNCTIONS ASK OF THIS ROAD (§6) ---------------------------------------------------
 	#
 	# Two things, and they go to two different places. The PIN goes into the alignment solve, because a
@@ -1054,9 +1077,16 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 		alignment.bank = Pasture3DRoadGrader._zeros(n_s)
 		alignment.curvature = Pasture3DRoadGrader._zeros(n_s)
 	else:
+		var mtn_cap: float = t.mountain_banking_cap if t != null else -1.0
+		var hairpin_comp: float = t.hairpin_grade_compensation if t != null else 0.0
 		alignment = Pasture3DRoadAlignmentSolver.solve_with_plan(_resample_plan(plan, cum, ds, n_s),
 				ground, ds, t.max_grade, t.design_speed, t.max_superelevation,
-				{"pins": pins, "smooth_radius": p_mod.smooth_radius})
+				{
+					"pins": pins,
+					"smooth_radius": p_mod.smooth_radius,
+					"mountain_banking_cap": mtn_cap,
+					"hairpin_grade_compensation": hairpin_comp,
+				})
 	alignment.input_digest = alignment_digest(p_mod)
 	p_mod.last_alignment = alignment
 
@@ -2045,6 +2075,11 @@ func alignment_digest(p_mod: Pasture3DNodeRoad = null) -> String:
 		resolved_follow_terrain(),
 		t.max_grade if t != null else -1.0,
 		t.design_speed if t != null else -1.0,
+		t.mountain_banking_cap if t != null else -1.0,
+		t.hairpin_grade_compensation if t != null else 0.0,
+		t.curve_widening_enabled if t != null else false,
+		t.curve_widening_factor if t != null else 0.0,
+		t.curve_widening_max if t != null else 0.0,
 		junction_digest(),
 	]))
 

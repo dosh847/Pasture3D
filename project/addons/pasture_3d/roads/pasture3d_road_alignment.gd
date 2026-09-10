@@ -146,6 +146,18 @@ func height_at(p_s: float) -> float:
 	return lerpf(z[i], z[i + 1], clampf(t - float(i), 0.0, 1.0))
 
 
+## Signed plan curvature at `p_s` metres, linearly interpolated.
+func curvature_at(p_s: float) -> float:
+	var n := curvature.size()
+	if n == 0:
+		return 0.0
+	if n == 1:
+		return curvature[0]
+	var t := (p_s - s0) / maxf(ds, 1e-6)
+	var i := clampi(int(floor(t)), 0, n - 2)
+	return lerpf(curvature[i], curvature[i + 1], clampf(t - float(i), 0.0, 1.0))
+
+
 ## Gradient at sample `p_i`, rise/run, by central difference (one-sided at the ends). The quantity the
 ## solve constrains, so it is derived here rather than stored — a stored copy could disagree with `z`.
 func grade_at(p_i: int) -> float:

@@ -831,6 +831,7 @@ bench/RoadTerminusApronGate.tscn
 # & pitch, watertight carriageway edge seams, trimesh collision parity, all kerb profiles, and C++ parity.
 bench/RoadKerbMesherGate.tscn
 
-
-
-
+# --- Simcade Road Upgrade Phase 5: Civil Mountain Road Engineering & Adaptive Splines ---
+# Watched green 2026-09-10 (0 failures). Tests adaptive spline tessellation, hairpin apex curvature preservation,
+# localized transition length isolation, mountain banking cap, hairpin grade compensation, curve widening, and C++ parity.
+bench/RoadMountainCivilGate.tscn

@@ -1818,12 +1818,16 @@ PackedFloat32Array Pasture3DUtil::road_plan_curvature(const PackedVector2Array &
 
 PackedFloat32Array Pasture3DUtil::road_superelevation(const PackedFloat32Array &p_curvature,
 		const double p_design_speed, const double p_max_superelevation, const double p_ds,
-		const double p_transition_length) {
-	return godot::road_superelevation(p_curvature, p_design_speed, p_max_superelevation, p_ds, p_transition_length);
+		const double p_transition_length, const double p_mountain_banking_cap) {
+	return godot::road_superelevation(p_curvature, p_design_speed, p_max_superelevation, p_ds, p_transition_length, p_mountain_banking_cap);
 }
 
 Vector2 Pasture3DUtil::road_plan_point_at(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum, const double p_s) {
 	return godot::road_plan_point_at(p_plan.ptr(), p_cum.ptr(), p_plan.size(), p_s);
+}
+
+Vector2 Pasture3DUtil::road_plan_tangent_at(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum, const double p_s, const double p_h) {
+	return godot::road_plan_tangent_at(p_plan.ptr(), p_cum.ptr(), p_plan.size(), p_s, p_h);
 }
 
 PackedVector2Array Pasture3DUtil::resample_plan(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum, const double p_ds, const int p_n_s) {
@@ -2748,11 +2752,14 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("road_plan_curvature", "plan"),
 			&Pasture3DUtil::road_plan_curvature);
 	ClassDB::bind_static_method("Pasture3DUtil",
-			D_METHOD("road_superelevation", "curvature", "design_speed", "max_superelevation", "ds", "transition_length"),
-			&Pasture3DUtil::road_superelevation, DEFVAL(25.0));
+			D_METHOD("road_superelevation", "curvature", "design_speed", "max_superelevation", "ds", "transition_length", "mountain_banking_cap"),
+			&Pasture3DUtil::road_superelevation, DEFVAL(25.0), DEFVAL(-1.0));
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("road_plan_point_at", "plan", "cum", "s"),
 			&Pasture3DUtil::road_plan_point_at);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("road_plan_tangent_at", "plan", "cum", "s", "h"),
+			&Pasture3DUtil::road_plan_tangent_at, DEFVAL(0.5));
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("resample_plan", "plan", "cum", "ds", "n_s"),
 			&Pasture3DUtil::resample_plan);

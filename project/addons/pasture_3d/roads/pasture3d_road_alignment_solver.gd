@@ -122,10 +122,20 @@ static func solve(p_ground: PackedFloat32Array, p_ds: float, p_max_grade: float,
 	var pins: Dictionary = p_opts.get("pins", {})
 	var smooth_radius := float(p_opts.get("smooth_radius", 0.0))
 
+	var hairpin_comp := float(p_opts.get("hairpin_grade_compensation", 0.0))
+	var curv: PackedFloat32Array = p_opts.get("curvature", PackedFloat32Array())
+	var step_limits := PackedFloat32Array()
+	if hairpin_comp > 0.0 and curv.size() == n:
+		step_limits.resize(n)
+		for i in n:
+			var abs_k := absf(curv[i])
+			var reduction := clampf((abs_k - 0.02) / 0.06, 0.0, 1.0) * hairpin_comp
+			step_limits[i] = g_max * (1.0 - reduction) * ds
+
 	# Start from the ground: the feasible-ish starting point closest to the earth term's optimum.
 	var z := p_ground.duplicate()
 	_apply_pins(z, pins)
-	_project_grade(z, ds, g_max, pins)
+	_project_grade(z, ds, g_max, pins, step_limits)
 
 	for _it in iterations:
 		# --- relaxation: a symmetric SOR sweep over the quadratic -----------------------------------
@@ -151,9 +161,9 @@ static func solve(p_ground: PackedFloat32Array, p_ds: float, p_max_grade: float,
 
 		# --- projections: pins, then the hard gradient limit ---------------------------------------
 		_apply_pins(z, pins)
-		_project_grade(z, ds, g_max, pins)
+		_project_grade(z, ds, g_max, pins, step_limits)
 
-	_smooth_profile(z, ds, g_max, pins, smooth_radius)
+	_smooth_profile(z, ds, g_max, pins, smooth_radius, step_limits)
 
 	out.z = z
 	out.pinned = _pin_indices(pins)
@@ -193,10 +203,15 @@ static func solve_with_plan(p_plan: PackedVector2Array, p_ground: PackedFloat32A
 		out.pinned = res.get("pinned", PackedInt32Array())
 		return out
 
-	var out := solve(p_ground, p_ds, p_max_grade, p_opts, p_force_gdscript)
-	out.curvature = plan_curvature(p_plan, p_force_gdscript)
+	var curv := plan_curvature(p_plan, p_force_gdscript)
+	var solve_opts := p_opts.duplicate()
+	solve_opts["curvature"] = curv
+	var out := solve(p_ground, p_ds, p_max_grade, solve_opts, p_force_gdscript)
+	out.curvature = curv
+	var trans_len := float(p_opts.get("bank_transition_length", 25.0))
+	var mtn_cap := float(p_opts.get("mountain_banking_cap", -1.0))
 	out.bank = superelevation(out.curvature, p_design_speed, p_max_superelevation, p_ds,
-			float(p_opts.get("bank_transition_length", 25.0)), p_force_gdscript)
+			trans_len, mtn_cap, p_force_gdscript)
 	return out
 
 
@@ -242,40 +257,51 @@ static func plan_curvature(p_plan: PackedVector2Array,
 	return out
 
 
-## Superelevation from curvature: bank = clamp(-v²·κ/g, ±max), then smoothed over `p_transition_length`
-## metres so the road rolls into a corner instead of snapping. Physics, not styling — and the same
-## number a racing track wants, which is why one formula serves the environment artist and the driver.
+## Superelevation from curvature: bank = clamp(-v²·κ/g, ±max), smoothed over local transition length
+## bounded by curve geometry (L_trans <= 0.35 * R), with mountain banking cap for tight curves.
 static func superelevation(p_curvature: PackedFloat32Array, p_design_speed: float,
 		p_max_superelevation: float, p_ds: float, p_transition_length: float = 25.0,
+		p_mountain_banking_cap: float = -1.0,
 		p_force_gdscript: bool = false) -> PackedFloat32Array:
 	if not p_force_gdscript and ClassDB.class_has_method("Pasture3DUtil", "road_superelevation"):
 		return Pasture3DUtil.road_superelevation(p_curvature, p_design_speed, p_max_superelevation,
-				p_ds, p_transition_length)
+				p_ds, p_transition_length, p_mountain_banking_cap)
 
 	var n := p_curvature.size()
 	var out := _zeros(n)
 	if n == 0:
 		return out
 	var v2 := p_design_speed * p_design_speed
-	var cap := maxf(p_max_superelevation, 0.0)
+	var base_cap := maxf(p_max_superelevation, 0.0)
+	var cap := minf(p_mountain_banking_cap, base_cap) if p_mountain_banking_cap > 0.0 else base_cap
+
 	for i in n:
-		# NEGATIVE of v²κ/g, and the sign is the whole physics. `bank` is a rise per metre toward +u, and
-		# κ > 0 is a turn TOWARD +u — so the centre of that turn is on the +u side and the OUTSIDE of the
-		# corner is on -u. Raising the outside therefore means banking negative. The magnitude is v²κ/g
-		# either way, which is why this read as correct for so long: the formula was right and the road
-		# was tilted into the corner instead of out of it.
-		out[i] = clampf(-v2 * p_curvature[i] / 9.81, -cap, cap)
-	var half := int(round(maxf(p_transition_length, 0.0) / maxf(p_ds, 1e-4) * 0.5))
-	if half <= 0:
+		var k_val: float = p_curvature[i]
+		out[i] = clampf(-v2 * k_val / 9.81, -cap, cap)
+
+	var max_trans := maxf(p_transition_length, 0.0)
+	if max_trans <= 1e-4:
 		return out
+
 	var smoothed := _zeros(n)
 	for i in n:
+		var abs_k := absf(p_curvature[i])
+		var local_trans := max_trans
+		if abs_k > 1e-4:
+			var radius := 1.0 / abs_k
+			local_trans = minf(max_trans, maxf(4.0, 0.35 * radius))
+		var half := int(round(local_trans / maxf(p_ds, 1e-4) * 0.5))
+		if half <= 0:
+			smoothed[i] = out[i]
+			continue
 		var acc := 0.0
 		var cnt := 0.0
 		for k in range(i - half, i + half + 1):
-			acc += out[clampi(k, 0, n - 1)]
-			cnt += 1.0
-		smoothed[i] = acc / cnt
+			if k >= 0 and k < n:
+				acc += out[k]
+				cnt += 1.0
+		smoothed[i] = clampf(acc / cnt if cnt > 0.0 else out[i], -cap, cap)
+
 	return smoothed
 
 
@@ -298,20 +324,23 @@ static func superelevation(p_curvature: PackedFloat32Array, p_design_speed: floa
 ## Pinned samples are skipped by both cascades, so they are never averaged away — which is what makes an
 ## impossible pin pair surface as a residual gradient breach rather than as a pin that quietly slid.
 static func _project_grade(p_z: PackedFloat32Array, p_ds: float, p_max_grade: float,
-		p_pins: Dictionary) -> void:
+		p_pins: Dictionary, p_step_limits: PackedFloat32Array = PackedFloat32Array()) -> void:
 	var n := p_z.size()
 	if n < 2:
 		return
-	var step := p_max_grade * p_ds
+	var default_step := p_max_grade * p_ds
+	var has_limits := p_step_limits.size() == n
 	for _sweep in GRADE_SWEEPS:
 		var fwd := p_z.duplicate()
 		for i in range(1, n):
+			var step := minf(p_step_limits[i - 1], p_step_limits[i]) if has_limits else default_step
 			if p_pins.has(i):
 				_relax_toward_pin(fwd, p_pins, i, -1, step)
 			else:
 				fwd[i] = clampf(fwd[i], fwd[i - 1] - step, fwd[i - 1] + step)
 		var bwd := p_z.duplicate()
 		for i in range(n - 2, -1, -1):
+			var step := minf(p_step_limits[i], p_step_limits[i + 1]) if has_limits else default_step
 			if p_pins.has(i):
 				_relax_toward_pin(bwd, p_pins, i, 1, step)
 			else:
@@ -447,7 +476,7 @@ static func _fill_diagnostics(p_out: Pasture3DRoadAlignment, p_pins: Dictionary,
 ## Mirrors the native stage in `road_align_solve` (src/pasture_3d_road_grade.cpp) sample for sample.
 ## RoadSmoothGate [G] compares the two; a change here that is not made there shows up there.
 static func _smooth_profile(p_z: PackedFloat32Array, p_ds: float, p_max_grade: float,
-		p_pins: Dictionary, p_radius: float) -> void:
+		p_pins: Dictionary, p_radius: float, p_step_limits: PackedFloat32Array = PackedFloat32Array()) -> void:
 	var n := p_z.size()
 	var half := int(round(p_radius / p_ds))
 	if half < 1 or n < 3:
@@ -471,7 +500,7 @@ static func _smooth_profile(p_z: PackedFloat32Array, p_ds: float, p_max_grade: f
 		if not p_pins.has(i):
 			p_z[i] = src[i]
 	_apply_pins(p_z, p_pins)
-	_project_grade(p_z, p_ds, p_max_grade, p_pins)
+	_project_grade(p_z, p_ds, p_max_grade, p_pins, p_step_limits)
 
 
 static func _zeros(p_n: int) -> PackedFloat32Array:

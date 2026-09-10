@@ -396,9 +396,10 @@ public:
 	static PackedFloat32Array road_plan_curvature(const PackedVector2Array &p_plan);
 	static PackedFloat32Array road_superelevation(const PackedFloat32Array &p_curvature,
 			const double p_design_speed, const double p_max_superelevation, const double p_ds,
-			const double p_transition_length = 25.0);
+			const double p_transition_length = 25.0, const double p_mountain_banking_cap = -1.0);
 
 	static Vector2 road_plan_point_at(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum, const double p_s);
+	static Vector2 road_plan_tangent_at(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum, const double p_s, const double p_h = 0.5);
 	static PackedVector2Array resample_plan(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum, const double p_ds, const int p_n_s);
 
 	static Array road_mesh_build_chunk(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,

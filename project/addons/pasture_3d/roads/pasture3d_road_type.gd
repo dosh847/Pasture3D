@@ -153,6 +153,37 @@ enum KerbType {
 		terminus_apron_roundness = maxf(v, 0.0)
 		emit_changed()
 
+@export_group("Civil Road & Mountain Geometry")
+## Dynamically widen the carriageway on tight turns to account for vehicle off-tracking.
+@export var curve_widening_enabled: bool = false:
+	set(v):
+		curve_widening_enabled = v
+		emit_changed()
+
+## Extra width in metres per unit curvature κ (1/R).
+@export var curve_widening_factor: float = 6.0:
+	set(v):
+		curve_widening_factor = maxf(v, 0.0)
+		emit_changed()
+
+## Maximum allowable extra width in metres from curve widening.
+@export var curve_widening_max: float = 2.0:
+	set(v):
+		curve_widening_max = maxf(v, 0.0)
+		emit_changed()
+
+## Maximum banking angle in radians on tight curves (R < 25m), preventing unrealistic velodrome banking on mountain roads.
+@export var mountain_banking_cap: float = 0.04:
+	set(v):
+		mountain_banking_cap = maxf(v, 0.0)
+		emit_changed()
+
+## Fractional reduction in max_grade across sharp switchback curves (hairpin grade compensation).
+@export var hairpin_grade_compensation: float = 0.5:
+	set(v):
+		hairpin_grade_compensation = clampf(v, 0.0, 0.8)
+		emit_changed()
+
 @export_group("Verge props")
 ## Mesh asset id in the terrain's asset list, placed repeatedly along both verges (§10, P5c). -1 means
 ## this road has no verge props — the same "-1 is not an index, it is a refusal" convention `surface_layer_id`

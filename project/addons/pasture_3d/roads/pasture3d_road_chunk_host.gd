@@ -171,7 +171,7 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 	# surface_material and depth_lift, which move no terrain vertex, and the height bake reads the batters
 	# and max_grade, which move no ribbon vertex. Collapsing them into one would make each rebuild on the
 	# other's edits — the churn the paragraph above exists to avoid.
-	var digest := "%s|%s|%.4f|%s|%s|%s|%.4f|%.4f|%.4f|%d|%.4f|%.4f|%s|%s|%s|%.4f|%.4f|%.4f|%d|%d|%.4f|%.4f|%.4f|%.4f|%s" % [
+	var digest := "%s|%s|%.4f|%s|%s|%s|%.4f|%.4f|%.4f|%d|%.4f|%.4f|%s|%s|%s|%.4f|%.4f|%.4f|%d|%d|%.4f|%.4f|%.4f|%.4f|%s|%s|%.4f|%.4f|%.4f|%.4f" % [
 		p_brush.alignment_digest(),
 		p_brush.junction_digest(),
 		depth_lift,
@@ -197,6 +197,11 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 		t.kerb_rumble_pitch,
 		t.kerb_rumble_depth,
 		_segments_kerb_signature(p_brush),
+		str(t.curve_widening_enabled),
+		t.curve_widening_factor,
+		t.curve_widening_max,
+		t.mountain_banking_cap,
+		t.hairpin_grade_compensation,
 	]
 	if not _chunks.is_empty() and _last_digest == digest:
 		last_rebuilt = false
@@ -249,9 +254,13 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 		var mid := (float(span[0]) + float(span[1])) * 0.5
 		var l_kerb: int = p_brush.left_kerb_at(mid)
 		var r_kerb: int = p_brush.right_kerb_at(mid)
+		var span_half := half
+		if t != null and t.curve_widening_enabled and alignment != null:
+			var k_mid: float = alignment.curvature_at(mid)
+			span_half += clampf(t.curve_widening_factor * absf(k_mid), 0.0, t.curve_widening_max)
 		for lod in Pasture3DRoadMesher.LOD_LEVELS:
 			var arrays := Pasture3DRoadMesher.build_chunk(plan, cum, alignment, float(span[0]),
-					float(span[1]), half, shoulder, crown, lod, depth_lift, false,
+					float(span[1]), span_half, shoulder, crown, lod, depth_lift, false,
 					t.crown_mode, t.max_superelevation,
 					l_kerb, r_kerb, t.kerb_width, t.kerb_height, t.kerb_rumble_pitch, t.kerb_rumble_depth)
 			if arrays.is_empty():
@@ -276,7 +285,7 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 		var is_bridge_span: bool = p_brush.is_bridge_at(mid)
 		var should_collide: bool = collision_enabled or is_bridge_span
 		if should_collide:
-			_add_collider(mi, plan, cum, alignment, float(span[0]), float(span[1]), half, shoulder, crown, surf_info,
+			_add_collider(mi, plan, cum, alignment, float(span[0]), float(span[1]), span_half, shoulder, crown, surf_info,
 					t.crown_mode, t.max_superelevation,
 					l_kerb, r_kerb, t.kerb_width, t.kerb_height, t.kerb_rumble_pitch, t.kerb_rumble_depth)
 		var markings: MeshInstance3D = null

@@ -121,17 +121,28 @@ static func plan_point_at(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 
 ## Plan direction at `p_s`, normalised, pointing along INCREASING arc length.
 ##
-## A central difference straddling the point, not the segment direction: an arc length landing exactly on
-## a plan vertex has two segment answers and would pick one by rounding — and junction arms land near
-## vertices constantly.
+## Continuous 5-point Savitzky-Golay 4th-order derivative filter with fallback to central difference
+## within 2h of the ends, eliminating lateral jerk spikes and slope discontinuities.
 static func plan_tangent_at(p_plan: PackedVector2Array, p_cum: PackedFloat32Array, p_s: float,
-		p_h: float = 0.5) -> Vector2:
+		p_h: float = 0.5, p_force_gdscript: bool = false) -> Vector2:
+	if not p_force_gdscript and ClassDB.class_has_method("Pasture3DUtil", "road_plan_tangent_at"):
+		return Pasture3DUtil.road_plan_tangent_at(p_plan, p_cum, p_s, p_h)
 	var n := p_plan.size()
 	if n < 2 or p_cum.size() < n:
 		return Vector2.RIGHT
 	var total: float = p_cum[n - 1]
-	var a := plan_point_at(p_plan, p_cum, clampf(p_s - p_h, 0.0, total))
-	var b := plan_point_at(p_plan, p_cum, clampf(p_s + p_h, 0.0, total))
+	var h: float = maxf(p_h, 0.01)
+	if p_s >= 2.0 * h and p_s <= total - 2.0 * h:
+		var p_m2 := plan_point_at(p_plan, p_cum, p_s - 2.0 * h)
+		var p_m1 := plan_point_at(p_plan, p_cum, p_s - h)
+		var p_p1 := plan_point_at(p_plan, p_cum, p_s + h)
+		var p_p2 := plan_point_at(p_plan, p_cum, p_s + 2.0 * h)
+		var d := (-p_p2 + 8.0 * p_p1 - 8.0 * p_m1 + p_m2) / (12.0 * h)
+		var len := d.length()
+		if len > 1e-6:
+			return d / len
+	var a := plan_point_at(p_plan, p_cum, clampf(p_s - h, 0.0, total))
+	var b := plan_point_at(p_plan, p_cum, clampf(p_s + h, 0.0, total))
 	var d := b - a
 	return d.normalized() if d.length() > 1e-6 else Vector2.RIGHT
 
