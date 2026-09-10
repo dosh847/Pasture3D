@@ -848,4 +848,10 @@ bench/RoadVerticalDynamicsGate.tscn
 # and full multi-arm geometry coverage (crossroads, T-junctions, Y-junctions, acute crossings).
 bench/RoadJunctionPatchGate.tscn
 
+# --- Simcade Road Upgrade Phase 8 (P9h): Dual-Topology Racing Route & C++ Spatial Index ---
+# Watched green 2026-09-10 (0 failures). Tests closed-circuit topology, monotonic distance wrap across start/finish seam
+# (zero negative step), split sector timing gates with sub-tick interpolation, C++ spatial hash query parity vs brute-force
+# oracle to <= 1e-5 m, query performance speedup, seam closure validation, and parametric gate derivation.
+bench/RoadCircuitRouteGate.tscn
+
 

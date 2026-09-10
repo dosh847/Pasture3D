@@ -17,11 +17,26 @@ class_name Pasture3DRoadRoute
 extends Resource
 
 ## The walk, start to finish: `[{run_id: int, reversed: bool}, ...]`.
+enum RouteTopology {
+	POINT_TO_POINT, ## Rally stage: starts at s=0, ends at s=total, no loop wrapping.
+	CLOSED_CIRCUIT, ## Track racing: loop wraps s=total back to s=0 with lap counters.
+}
+
+## The walk, start to finish: `[{run_id: int, reversed: bool}, ...]`.
 ##
 ## Runs are named by STABLE ID, not by index into the runtime's array (§9.2), so a route survives edits
 ## elsewhere in the network. An index would break every route the moment a road was deleted from the
 ## middle of the network — and break it silently, by pointing at whichever road moved into that slot.
 @export var entries: Array = []
+
+## Route topology: point-to-point stage or closed racing circuit (P9h).
+@export var topology: RouteTopology = RouteTopology.POINT_TO_POINT
+
+## Number of laps in closed circuit mode (P9h).
+@export var lap_count: int = 3
+
+## Split timing sector gates along track arc length in metres (P9h).
+@export var sector_gates: PackedFloat32Array = PackedFloat32Array()
 
 ## Gates, as arc length along the ROUTE in metres — not along any one run, and not placed objects. A
 ## gate is derived: a plane perpendicular to the centreline at `s`, as wide as the corridor.
@@ -34,6 +49,24 @@ extends Resource
 
 ## How tall a derived checkpoint gate is, metres.
 @export var gate_height: float = 6.0
+
+
+## Create a tracking session for a race or run along this route (P9h).
+## Maintains continuous distance across laps, lap completion, and sector timing splits.
+func create_session(p_start_time: float = 0.0) -> Dictionary:
+	return {
+		"lap_index": 0,
+		"accum_distance": 0.0,
+		"lap_distance": 0.0,
+		"last_s": -1.0,
+		"last_time": p_start_time,
+		"completed_laps": 0,
+		"finished": false,
+		"sector_index": 0,
+		"current_lap_start_time": p_start_time,
+		"sector_crossings": [],
+		"lap_times": [],
+	}
 
 
 ## Total route length, metres. Cached is not worth it: this is a sum over a handful of entries.
@@ -56,6 +89,10 @@ func length(p_runtime: Pasture3DRoadRuntime) -> float:
 func entry_at(p_runtime: Pasture3DRoadRuntime, p_s: float) -> Dictionary:
 	if p_runtime == null:
 		return {}
+	var s := p_s
+	var total_len := length(p_runtime)
+	if topology == RouteTopology.CLOSED_CIRCUIT and total_len > 0.0:
+		s = fposmod(p_s, total_len)
 	var walked := 0.0
 	for i in entries.size():
 		var e: Dictionary = entries[i]
@@ -63,9 +100,9 @@ func entry_at(p_runtime: Pasture3DRoadRuntime, p_s: float) -> Dictionary:
 		if r == null:
 			continue
 		var l := r.length()
-		if p_s < walked + l or i == entries.size() - 1:
+		if s < walked + l or i == entries.size() - 1:
 			return { "index": i, "run_id": r.id, "reversed": bool(e.get("reversed", false)),
-					"local_s": clampf(p_s - walked, 0.0, l), "entry_start": walked }
+					"local_s": clampf(s - walked, 0.0, l), "entry_start": walked }
 		walked += l
 	return {}
 
@@ -87,11 +124,9 @@ func sample(p_runtime: Pasture3DRoadRuntime, p_s: float) -> Dictionary:
 
 ## Route-relative progress for a world position (§9.2):
 ## `{distance_from_start, lateral, next_checkpoint, next_checkpoint_distance, on_corridor, run_id}`.
-##
-## Route-relative, NOT lap-relative — there are no laps. `distance_from_start` walks the entries, so the
-## same physical position on a road used twice by one route reports two different distances, which is
-## the answer a point-to-point stage wants.
-func progress(p_runtime: Pasture3DRoadRuntime, p_world: Vector3) -> Dictionary:
+## In CLOSED_CIRCUIT with session: tracks monotonic distance, lap counters, split sector timing.
+func progress(p_runtime: Pasture3DRoadRuntime, p_world: Vector3,
+		p_session: Dictionary = {}, p_time: float = 0.0) -> Dictionary:
 	if p_runtime == null or entries.is_empty():
 		return {}
 	var best := {}
@@ -110,13 +145,149 @@ func progress(p_runtime: Pasture3DRoadRuntime, p_world: Vector3) -> Dictionary:
 		walked += r.length()
 	if best.is_empty():
 		return {}
+
+	var total_len := walked
+	var raw_s := float(best["distance_from_start"])
+
+	if topology == RouteTopology.POINT_TO_POINT:
+		best["next_checkpoint"] = -1
+		best["next_checkpoint_distance"] = INF
+		for i in checkpoints.size():
+			if checkpoints[i] >= raw_s:
+				best["next_checkpoint"] = i
+				best["next_checkpoint_distance"] = checkpoints[i] - raw_s
+				break
+		return best
+
+	# CLOSED_CIRCUIT
+	var loop_s := fposmod(raw_s, total_len) if total_len > 0.0 else raw_s
+	var lap_idx := int(floor(raw_s / total_len)) if total_len > 0.0 else 0
+
+	best["lap_index"] = lap_idx
+	best["lap_distance"] = loop_s
+	best["accum_distance"] = raw_s
+	best["completed_laps"] = 0
+	best["finished"] = false
+	best["sector_index"] = 0
+	best["lap_completed"] = false
+	best["sector_completed"] = false
+
+	if p_session.is_empty():
+		best["next_checkpoint"] = -1
+		best["next_checkpoint_distance"] = INF
+		for i in checkpoints.size():
+			if checkpoints[i] >= loop_s:
+				best["next_checkpoint"] = i
+				best["next_checkpoint_distance"] = checkpoints[i] - loop_s
+				break
+		return best
+
+	# Stateful Session Tracking
+	var last_s: float = float(p_session.get("last_s", -1.0))
+	var last_time: float = float(p_session.get("last_time", p_time))
+	var cur_accum: float = float(p_session.get("accum_distance", 0.0))
+	var cur_lap: int = int(p_session.get("lap_index", 0))
+	var cur_sector: int = int(p_session.get("sector_index", 0))
+	var lap_start_time: float = float(p_session.get("current_lap_start_time", p_time))
+	var completed_laps: int = int(p_session.get("completed_laps", 0))
+	var finished: bool = bool(p_session.get("finished", false))
+
+	if last_s < 0.0:
+		cur_accum = loop_s
+		last_s = loop_s
+		cur_lap = 0
+		completed_laps = 0
+		cur_sector = 0
+		for i in sector_gates.size():
+			if loop_s >= sector_gates[i]:
+				cur_sector = i + 1
+	else:
+		var ds: float = loop_s - last_s
+		var seam_crossed := false
+		if total_len > 0.0:
+			if ds < -0.5 * total_len:
+				ds += total_len
+				seam_crossed = true
+			elif ds > 0.5 * total_len:
+				ds -= total_len
+
+		cur_accum += ds
+
+		# Check sector gate crossings during this step
+		for i in sector_gates.size():
+			var gate_s := sector_gates[i]
+			var crossed := false
+			if not seam_crossed:
+				crossed = (last_s < gate_s and loop_s >= gate_s)
+			else:
+				crossed = (last_s < gate_s) or (loop_s >= gate_s)
+			if crossed and cur_sector == i:
+				var interp_frac := 0.0
+				var step_len := (loop_s + total_len - last_s) if seam_crossed else (loop_s - last_s)
+				if step_len > 1e-6:
+					var dist_to_gate := (gate_s + total_len - last_s) if (seam_crossed and gate_s < last_s) else (gate_s - last_s)
+					interp_frac = clampf(dist_to_gate / step_len, 0.0, 1.0)
+				var cross_time := last_time + (p_time - last_time) * interp_frac
+				var split_time := cross_time - lap_start_time
+				var crossing := {
+					"sector": i,
+					"lap": cur_lap,
+					"time": cross_time,
+					"split": split_time,
+					"s": gate_s
+				}
+				if not p_session.has("sector_crossings"):
+					p_session["sector_crossings"] = []
+				p_session["sector_crossings"].append(crossing)
+				cur_sector = i + 1
+				best["sector_completed"] = true
+
+		# Check lap completion (crossing start/finish forward)
+		if seam_crossed and ds > 0.0:
+			var step_len := loop_s + total_len - last_s
+			var dist_to_finish := total_len - last_s
+			var interp_frac := clampf(dist_to_finish / step_len, 0.0, 1.0) if step_len > 1e-6 else 1.0
+			var finish_time := last_time + (p_time - last_time) * interp_frac
+			var lap_duration := finish_time - lap_start_time
+			if not p_session.has("lap_times"):
+				p_session["lap_times"] = []
+			p_session["lap_times"].append(lap_duration)
+			cur_lap += 1
+			completed_laps += 1
+			cur_sector = 0
+			lap_start_time = finish_time
+			best["lap_completed"] = true
+			if completed_laps >= lap_count:
+				finished = true
+
+		last_s = loop_s
+
+	p_session["accum_distance"] = cur_accum
+	p_session["lap_index"] = cur_lap
+	p_session["lap_distance"] = loop_s
+	p_session["last_s"] = last_s
+	p_session["last_time"] = p_time
+	p_session["completed_laps"] = completed_laps
+	p_session["finished"] = finished
+	p_session["sector_index"] = cur_sector
+	p_session["current_lap_start_time"] = lap_start_time
+
+	best["distance_from_start"] = cur_accum
+	best["accum_distance"] = cur_accum
+	best["lap_index"] = cur_lap
+	best["lap_distance"] = loop_s
+	best["completed_laps"] = completed_laps
+	best["finished"] = finished
+	best["sector_index"] = cur_sector
+
 	best["next_checkpoint"] = -1
 	best["next_checkpoint_distance"] = INF
 	for i in checkpoints.size():
-		if checkpoints[i] >= float(best["distance_from_start"]):
+		if checkpoints[i] >= loop_s:
 			best["next_checkpoint"] = i
-			best["next_checkpoint_distance"] = checkpoints[i] - float(best["distance_from_start"])
+			best["next_checkpoint_distance"] = checkpoints[i] - loop_s
 			break
+
 	return best
 
 
@@ -133,6 +304,36 @@ func gate(p_runtime: Pasture3DRoadRuntime, p_index: int) -> Dictionary:
 		return {}
 	return { "position": at["position"], "normal": (at["tangent"] as Vector3).normalized(),
 			"half_width": corridor_width, "height": gate_height, "up": at["up"] }
+
+
+## Start/finish gate derived at s = 0 as {position, normal, half_width, height, up} (P9h).
+func start_finish_gate(p_runtime: Pasture3DRoadRuntime) -> Dictionary:
+	var at := sample(p_runtime, 0.0)
+	if at.is_empty():
+		return {}
+	return {
+		"position": at["position"],
+		"normal": (at["tangent"] as Vector3).normalized(),
+		"half_width": corridor_width,
+		"height": gate_height,
+		"up": at["up"]
+	}
+
+
+## Derived sector split gate at sector_gates[p_index] as {position, normal, half_width, height, up} (P9h).
+func sector_gate(p_runtime: Pasture3DRoadRuntime, p_index: int) -> Dictionary:
+	if p_index < 0 or p_index >= sector_gates.size():
+		return {}
+	var at := sample(p_runtime, sector_gates[p_index])
+	if at.is_empty():
+		return {}
+	return {
+		"position": at["position"],
+		"normal": (at["tangent"] as Vector3).normalized(),
+		"half_width": corridor_width,
+		"height": gate_height,
+		"up": at["up"]
+	}
 
 
 ## The surface under route arc length `p_s`, blended across transitions (§9.1).
@@ -259,6 +460,37 @@ func validate(p_runtime: Pasture3DRoadRuntime) -> PackedStringArray:
 		if s < 0.0 or s > length(p_runtime):
 			out.append("Checkpoint at %.1f m is off the route, which is %.1f m long."
 					% [s, length(p_runtime)])
+	if topology == RouteTopology.CLOSED_CIRCUIT:
+		if lap_count < 1:
+			out.append("Closed circuit requires lap_count >= 1 (got %d)." % lap_count)
+		if entries.is_empty():
+			out.append("Closed circuit requires at least one entry.")
+		else:
+			var first_id := int(entries[0]["run_id"])
+			var last_id := int(entries[entries.size() - 1]["run_id"])
+			var closed_ok := false
+			if entries.size() == 1:
+				var r := p_runtime.run_by_id(first_id)
+				if r != null and r.plan.size() >= 2:
+					closed_ok = r.plan[0].distance_to(r.plan[r.plan.size() - 1]) < 0.5
+			else:
+				if p_runtime.connected(last_id, first_id):
+					closed_ok = true
+				else:
+					var r_first := p_runtime.run_by_id(first_id)
+					var r_last := p_runtime.run_by_id(last_id)
+					if r_first != null and r_last != null and r_first.plan.size() >= 2 and r_last.plan.size() >= 2:
+						var p_end := r_last.plan[0 if bool(entries[entries.size() - 1].get("reversed", false)) else (r_last.plan.size() - 1)]
+						var p_start := r_first.plan[(r_first.plan.size() - 1) if bool(entries[0].get("reversed", false)) else 0]
+						closed_ok = p_end.distance_to(p_start) < 0.5
+			if not closed_ok:
+				out.append("Closed circuit seam does not meet: last entry %d (run %s) does not connect back to entry 0 (run %s)%s"
+						% [entries.size() - 1, _name_of(p_runtime, last_id), _name_of(p_runtime, first_id), _suggest(p_runtime, last_id, first_id)])
+		var total_len := length(p_runtime)
+		for s in sector_gates:
+			if s <= 0.0 or s >= total_len:
+				out.append("Sector gate at %.1f m is outside the circuit bounds (0.0 to %.1f m)."
+						% [s, total_len])
 	return out
 
 

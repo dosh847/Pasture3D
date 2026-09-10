@@ -296,6 +296,14 @@ public:
 			const int p_gw, const int p_gh, const Rect2 &p_rect, const double p_unreachable,
 			const double p_max_distance, const PackedFloat32Array &p_heights = PackedFloat32Array());
 
+	// Single point spatial lookup on polyline path (P9h). Returns { distance, s, t, segment, side }
+	static Dictionary path_geom_locate(const PackedVector2Array &p_points, const Vector2 &p_at,
+			const PackedFloat32Array &p_widths = PackedFloat32Array());
+	static Dictionary path_geom_locate_brute(const PackedVector2Array &p_points, const Vector2 &p_at,
+			const PackedFloat32Array &p_widths = PackedFloat32Array());
+	static Array road_plan_nearest(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
+			const Vector2 &p_at);
+
 	// Carve one cross-section along a PATH (PASTURE3D_SPLINE_GRAPH_SPEC.md §7.1). Returns { ok, height,
 	// bed, flank, cut, fill }: the composited surface plus four coverage masks, which exist so erosion can
 	// be wired to weather AROUND a carve rather than through it.

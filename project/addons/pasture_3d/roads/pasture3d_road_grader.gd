@@ -160,6 +160,8 @@ static func plan_tangent_at(p_plan: PackedVector2Array, p_cum: PackedFloat32Arra
 ## algorithms rather than two backends.
 static func nearest_on_plan(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 		p_at: Vector2) -> Array:
+	if ClassDB.class_has_method("Pasture3DUtil", "road_plan_nearest"):
+		return Pasture3DUtil.road_plan_nearest(p_plan, p_cum, p_at)
 	var n := p_plan.size()
 	if n == 0:
 		return [INF, 0.0, 0.0]

@@ -1698,6 +1698,118 @@ Dictionary Pasture3DUtil::path_query_grid(const PackedVector2Array &p_points,
 			p_heights);
 }
 
+Dictionary Pasture3DUtil::path_geom_locate(const PackedVector2Array &p_points, const Vector2 &p_at,
+		const PackedFloat32Array &p_widths) {
+	Dictionary out;
+	if (p_points.size() < 2) {
+		return out;
+	}
+	Pasture3DPathGeom geom;
+	if (!geom.build(p_points, p_widths)) {
+		return out;
+	}
+	std::vector<int> scratch;
+	Pasture3DPathHit hit = geom.nearest(p_at.x, p_at.y, scratch);
+	if (hit.segment < 0) {
+		return out;
+	}
+	out["distance"] = hit.distance;
+	out["s"] = hit.s;
+	out["t"] = hit.t;
+	out["segment"] = hit.segment;
+	out["side"] = hit.t >= 0.0 ? 1.0 : -1.0;
+	return out;
+}
+
+Dictionary Pasture3DUtil::path_geom_locate_brute(const PackedVector2Array &p_points, const Vector2 &p_at,
+		const PackedFloat32Array &p_widths) {
+	Dictionary out;
+	if (p_points.size() < 2) {
+		return out;
+	}
+	Pasture3DPathGeom geom;
+	if (!geom.build(p_points, p_widths)) {
+		return out;
+	}
+	Pasture3DPathHit hit = geom.nearest_brute(p_at.x, p_at.y);
+	if (hit.segment < 0) {
+		return out;
+	}
+	out["distance"] = hit.distance;
+	out["s"] = hit.s;
+	out["t"] = hit.t;
+	out["segment"] = hit.segment;
+	out["side"] = hit.t >= 0.0 ? 1.0 : -1.0;
+	return out;
+}
+
+Array Pasture3DUtil::road_plan_nearest(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
+		const Vector2 &p_at) {
+	Array res;
+	res.resize(3);
+	const int n = p_plan.size();
+	if (n == 0) {
+		res[0] = INFINITY;
+		res[1] = 0.0;
+		res[2] = 0.0;
+		return res;
+	}
+	if (n == 1) {
+		res[0] = (double)p_at.distance_to(p_plan[0]);
+		res[1] = 0.0;
+		res[2] = 0.0;
+		return res;
+	}
+	if (n >= 5) {
+		Pasture3DPathGeom geom;
+		if (geom.build(p_plan, PackedFloat32Array())) {
+			std::vector<int> scratch;
+			Pasture3DPathHit hit = geom.nearest(p_at.x, p_at.y, scratch);
+			if (hit.segment >= 0) {
+				res[0] = hit.distance;
+				res[1] = hit.s;
+				res[2] = hit.t >= 0.0 ? 1.0 : -1.0;
+				return res;
+			}
+		}
+	}
+	// Direct C++ segment scan for n < 5
+	double best_d2 = INFINITY;
+	double best_s = 0.0;
+	double best_side = 0.0;
+	for (int i = 0; i < n - 1; i++) {
+		const Vector2 a = p_plan[i];
+		const Vector2 b = p_plan[i + 1];
+		const double min_x = std::min(a.x, b.x);
+		const double max_x = std::max(a.x, b.x);
+		const double min_y = std::min(a.y, b.y);
+		const double max_y = std::max(a.y, b.y);
+		const double dx = std::max(0.0, std::max(min_x - (double)p_at.x, (double)p_at.x - max_x));
+		const double dy = std::max(0.0, std::max(min_y - (double)p_at.y, (double)p_at.y - max_y));
+		if (dx * dx + dy * dy >= best_d2) {
+			continue;
+		}
+		const Vector2 ab = b - a;
+		const double len2 = (double)ab.length_squared();
+		if (len2 <= 0.0) {
+			continue;
+		}
+		const double t = std::clamp((double)(p_at - a).dot(ab) / len2, 0.0, 1.0);
+		const Vector2 proj = a + ab * (real_t)t;
+		const double d2 = (double)p_at.distance_squared_to(proj);
+		if (d2 < best_d2) {
+			best_d2 = d2;
+			best_s = (i < p_cum.size() ? (double)p_cum[i] : 0.0) + std::sqrt(len2) * t;
+			const double cross = (double)ab.x * ((double)p_at.y - (double)a.y) - (double)ab.y * ((double)p_at.x - (double)a.x);
+			best_side = cross >= 0.0 ? 1.0 : -1.0;
+		}
+	}
+	res[0] = std::sqrt(best_d2);
+	res[1] = best_s;
+	res[2] = best_side;
+	return res;
+}
+
 Dictionary Pasture3DUtil::path_carve_grid(const PackedVector2Array &p_points,
 		const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights, const bool p_closed,
 		const PackedFloat32Array &p_surface, const int p_gw, const int p_gh, const Rect2 &p_rect,
@@ -2689,6 +2801,15 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("path_query_grid", "points", "widths", "gw", "gh", "rect", "unreachable",
 					"max_distance", "heights"),
 			&Pasture3DUtil::path_query_grid, DEFVAL(PackedFloat32Array()));
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("path_geom_locate", "points", "at", "widths"),
+			&Pasture3DUtil::path_geom_locate, DEFVAL(PackedFloat32Array()));
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("path_geom_locate_brute", "points", "at", "widths"),
+			&Pasture3DUtil::path_geom_locate_brute, DEFVAL(PackedFloat32Array()));
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("road_plan_nearest", "plan", "cum", "at"),
+			&Pasture3DUtil::road_plan_nearest);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("path_carve_grid", "points", "widths", "heights", "closed", "surface", "gw", "gh",
 					"rect", "profile", "params"),
