@@ -36,6 +36,11 @@ const PROTECT_STEP: float = 0.5
 ## exactly one node.
 @export_tool_button("Bake Road") var _bake_road_btn = bake_road
 
+## Smooth sharp corners along this road: relaxes tight turns (R < R_crit) on splines to prevent
+## inner edge swallowtail overlap and Z-fighting.
+@export_tool_button("Smooth Sharp Corners") var _smooth_corners_btn = smooth_sharp_corners
+
+
 
 @export_group("Road")
 ## What this brush overrides for its whole length. Sits between its segments and its group in the
@@ -2738,4 +2743,230 @@ func _pixels_per_metre(p_camera: Camera3D, p_dist: float) -> float:
 		return height_px / maxf(p_camera.size, 1e-4)
 	var span := 2.0 * tan(deg_to_rad(p_camera.fov) * 0.5) * maxf(p_dist, 1e-4)
 	return height_px / maxf(span, 1e-4)
+
+
+# ---- TIER A & B: SHARP CORNER DETECTION & SMOOTHING (§4) --------------------------------------------
+
+
+## Detect sharp corners along this road where the radius of curvature is smaller than the critical radius.
+## Returns an array of dictionaries: [{ "s": float, "radius": float, "point": Vector3, "severity": float, "spline": Path3D, "point_idx": int }]
+func detect_sharp_corners(p_min_radius: float = -1.0) -> Array[Dictionary]:
+	var r_crit := p_min_radius
+	if r_crit <= 0.0:
+		var hw := formation_half_width()
+		if hw <= 0.0:
+			var t := resolved_road_type()
+			hw = t.half_width(resolved_lane_count()) if t != null else 3.5
+		r_crit = maxf(hw * 1.2, 4.0)
+
+	var plan := _plan_points()
+	var cum := _plan_cum()
+	if plan.size() < 3 or cum.is_empty():
+		return []
+
+	var total_len: float = cum[-1]
+	var ds := 0.5
+	var n_s := int(ceil(total_len / ds)) + 1
+	var r_plan := _resample_plan(plan, cum, ds, n_s)
+	var curv: PackedFloat32Array
+	if ClassDB.class_has_method("Pasture3DUtil", "road_plan_curvature"):
+		curv = Pasture3DUtil.road_plan_curvature(r_plan)
+	else:
+		curv = Pasture3DRoadAlignmentSolver.plan_curvature(r_plan)
+
+	var out: Array[Dictionary] = []
+	var in_sharp := false
+	var sharp_start := 0
+	var min_r := 1e9
+	var apex_idx := -1
+
+	for i in curv.size():
+		var kv := absf(curv[i])
+		var r_val := 1.0 / kv if kv > 1e-6 else 1e9
+		if r_val < r_crit:
+			if not in_sharp:
+				in_sharp = true
+				sharp_start = i
+				min_r = r_val
+				apex_idx = i
+			else:
+				if r_val < min_r:
+					min_r = r_val
+					apex_idx = i
+		else:
+			if in_sharp:
+				in_sharp = false
+				var s_apex := float(apex_idx) * ds
+				var severity := clampf((r_crit - min_r) / r_crit, 0.0, 1.0)
+				var pt3 := _corner_3d_point(r_plan[apex_idx], s_apex)
+				var spline_info := _find_spline_at_s(s_apex, pt3)
+				out.append({
+					"s": s_apex,
+					"radius": min_r,
+					"point": pt3,
+					"severity": severity,
+					"spline": spline_info.get("spline", null),
+					"point_idx": spline_info.get("point_idx", -1),
+				})
+	if in_sharp:
+		var s_apex := float(apex_idx) * ds
+		var severity := clampf((r_crit - min_r) / r_crit, 0.0, 1.0)
+		var pt3 := _corner_3d_point(r_plan[apex_idx], s_apex)
+		var spline_info := _find_spline_at_s(s_apex, pt3)
+		out.append({
+			"s": s_apex,
+			"radius": min_r,
+			"point": pt3,
+			"severity": severity,
+			"spline": spline_info.get("spline", null),
+			"point_idx": spline_info.get("point_idx", -1),
+		})
+	return out
+
+
+func _corner_3d_point(p_xz: Vector2, p_s: float) -> Vector3:
+	var y := 0.0
+	var mod := road_modifier()
+	if mod != null and mod.last_alignment != null and not mod.last_alignment.z.is_empty():
+		var z_arr: PackedFloat32Array = mod.last_alignment.z
+		var z_ds: float = mod.last_alignment.ds
+		var idx := clampi(int(round(p_s / maxf(z_ds, 1e-4))), 0, z_arr.size() - 1)
+		y = z_arr[idx]
+	return Vector3(p_xz.x, y, p_xz.y)
+
+
+func _find_spline_at_s(p_s: float, p_world_pt: Vector3) -> Dictionary:
+	var cur_s := 0.0
+	for path_node in _get_splines():
+		var path := path_node as Path3D
+		if path == null or path.curve == null:
+			continue
+		var l: float = path.curve.get_baked_length()
+		if p_s >= cur_s and p_s <= cur_s + l + 1e-3:
+			var best_k := -1
+			var best_d := 1e9
+			var xf: Transform3D = path.global_transform if path.is_inside_tree() else path.transform
+			var local_pt: Vector3 = xf.affine_inverse() * p_world_pt
+			for k in path.curve.point_count:
+				var d: float = path.curve.get_point_position(k).distance_to(local_pt)
+				if d < best_d:
+					best_d = d
+					best_k = k
+			return { "spline": path, "point_idx": best_k }
+		cur_s += l
+	var global_best_path: Path3D = null
+	var global_best_k := -1
+	var global_best_d := 1e9
+	for path_node in _get_splines():
+		var path := path_node as Path3D
+		if path == null or path.curve == null:
+			continue
+		var xf: Transform3D = path.global_transform if path.is_inside_tree() else path.transform
+		for k in path.curve.point_count:
+			var w_pt: Vector3 = xf * path.curve.get_point_position(k)
+			var d: float = w_pt.distance_to(p_world_pt)
+			if d < global_best_d:
+				global_best_d = d
+				global_best_path = path
+				global_best_k = k
+	return { "spline": global_best_path, "point_idx": global_best_k }
+
+
+## Smooth sharp corners along the road to ensure radius >= p_min_radius (or 1.2 * formation_half_width).
+## Relaxes control points and inserts / expands fillet arcs. Returns number of modified control points.
+func smooth_sharp_corners(p_min_radius: float = -1.0) -> int:
+	var r_crit := p_min_radius
+	if r_crit <= 0.0:
+		var hw := formation_half_width()
+		if hw <= 0.0:
+			var t := resolved_road_type()
+			hw = t.half_width(resolved_lane_count()) if t != null else 3.5
+		r_crit = maxf(hw * 1.2, 4.0)
+
+	var corners := detect_sharp_corners(r_crit)
+	if corners.is_empty():
+		return 0
+
+	var r_target := maxf(r_crit * 1.15, r_crit + 0.6)
+	var modified := 0
+
+	for corner in corners:
+		var path := corner.get("spline", null) as Path3D
+		var best_idx: int = corner.get("point_idx", -1)
+		if path == null or path.curve == null:
+			continue
+		var curve: Curve3D = path.curve
+		if best_idx < 0 or best_idx >= curve.point_count:
+			continue
+
+		# Check if this control point is part of a two-point arc
+		var arc_idx0 := -1
+		var arc_idx1 := -1
+		if best_idx > 0 and curve.get_point_in(best_idx).length_squared() > 1e-4 and curve.get_point_out(best_idx - 1).length_squared() > 1e-4:
+			arc_idx0 = best_idx - 1
+			arc_idx1 = best_idx
+		elif best_idx < curve.point_count - 1 and curve.get_point_out(best_idx).length_squared() > 1e-4 and curve.get_point_in(best_idx + 1).length_squared() > 1e-4:
+			arc_idx0 = best_idx
+			arc_idx1 = best_idx + 1
+
+		if arc_idx0 > 0 and arc_idx1 < curve.point_count - 1:
+			var pA: Vector3 = curve.get_point_position(arc_idx0)
+			var pB: Vector3 = curve.get_point_position(arc_idx1)
+			var pPrev: Vector3 = curve.get_point_position(arc_idx0 - 1)
+			var pNext2: Vector3 = curve.get_point_position(arc_idx1 + 1)
+			var d_in: Vector3 = (pA - pPrev).normalized()
+			var d_out: Vector3 = (pNext2 - pB).normalized()
+			var corner_pt: Vector3 = _line_line_intersection_3d(pPrev, d_in, pNext2, -d_out)
+			if corner_pt != Vector3.INF:
+				var cos_th := clampf(d_in.dot(d_out), -1.0, 1.0)
+				var theta := acos(cos_th)
+				var half_th := theta * 0.5
+				var T_dist := r_target * tan(half_th)
+				var k_arc: float = 4.0 / 3.0 * tan(theta * 0.25) * r_target
+				curve.set_point_position(arc_idx0, corner_pt - d_in * T_dist)
+				curve.set_point_out(arc_idx0, d_in * k_arc)
+				curve.set_point_position(arc_idx1, corner_pt + d_out * T_dist)
+				curve.set_point_in(arc_idx1, -d_out * k_arc)
+				modified += 2
+				continue
+
+		# Otherwise, it's a single control point (kink or vertex)
+		if best_idx > 0 and best_idx < curve.point_count - 1:
+			var pK: Vector3 = curve.get_point_position(best_idx)
+			var pPrev: Vector3 = curve.get_point_position(best_idx - 1)
+			var pNext: Vector3 = curve.get_point_position(best_idx + 1)
+			var d_in: Vector3 = (pK - pPrev).normalized()
+			var d_out: Vector3 = (pNext - pK).normalized()
+			var cos_th := clampf(d_in.dot(d_out), -1.0, 1.0)
+			var theta := acos(cos_th)
+			var half_th := theta * 0.5
+			var T_dist := r_target * tan(half_th)
+			var max_T := 0.45 * minf(pK.distance_to(pPrev), pK.distance_to(pNext))
+			T_dist = minf(T_dist, max_T)
+			var eff_R := T_dist / tan(half_th) if tan(half_th) > 1e-4 else r_target
+			var k_arc: float = 4.0 / 3.0 * tan(theta * 0.25) * eff_R
+
+			var pA_single: Vector3 = pK - d_in * T_dist
+			var pB_single: Vector3 = pK + d_out * T_dist
+			curve.remove_point(best_idx)
+			curve.add_point(pA_single, Vector3.ZERO, d_in * k_arc, best_idx)
+			curve.add_point(pB_single, -d_out * k_arc, Vector3.ZERO, best_idx + 1)
+			modified += 1
+
+	if modified > 0:
+		_invalidate_plan()
+		_ensure_plan()
+		refresh(true)
+
+	return modified
+
+
+func _line_line_intersection_3d(p1: Vector3, d1: Vector3, p2: Vector3, d2: Vector3) -> Vector3:
+	var det := d1.x * d2.z - d1.z * d2.x
+	if absf(det) < 1e-5:
+		return Vector3.INF
+	var dx := p2.x - p1.x
+	var dz := p2.z - p1.z
+	var t := (dx * d2.z - dz * d2.x) / det
+	return p1 + d1 * t
 

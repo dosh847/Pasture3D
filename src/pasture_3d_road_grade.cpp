@@ -1018,23 +1018,51 @@ Array godot::road_mesh_build_chunk(const PackedVector2Array &p_plan, const Packe
 		}
 	}
 
-	const int total_indices = (rows - 1) * (across_count - 1) * 6;
-	indices.resize(total_indices);
-	int *idx_ptr = indices.ptrw();
-	int ii = 0;
+	// Swallowtail mitring & degenerate quad suppression (Tier C):
+	// Detect inner edge velocity inversion and clamp backwards movement to apex
+	for (int r = 0; r < rows - 1; r++) {
+		const double s = (r == rows - 1) ? p_to : std::min(p_from + (double)r * step, p_to);
+		const Vector2 tang = road_mesh_plan_tangent_at(plan_ptr, cum_ptr, plan_n, s);
+		for (int c = 0; c < across_count; c++) {
+			const int i0 = r * across_count + c;
+			const int i2 = i0 + across_count;
+			const Vector3 v0 = v_ptr[i0];
+			const Vector3 v2 = v_ptr[i2];
+			const Vector2 delta_xz(v2.x - v0.x, v2.z - v0.z);
+			if (delta_xz.dot(tang) < 0.0f) {
+				v_ptr[i2].x = v0.x;
+				v_ptr[i2].z = v0.z;
+			}
+		}
+	}
+
+	std::vector<int> kept_indices;
+	kept_indices.reserve((rows - 1) * (across_count - 1) * 6);
 	for (int r = 0; r < rows - 1; r++) {
 		for (int c = 0; c < across_count - 1; c++) {
 			const int i0 = r * across_count + c;
 			const int i1 = i0 + 1;
 			const int i2 = i0 + across_count;
 			const int i3 = i2 + 1;
-			idx_ptr[ii++] = i0;
-			idx_ptr[ii++] = i2;
-			idx_ptr[ii++] = i1;
-			idx_ptr[ii++] = i1;
-			idx_ptr[ii++] = i2;
-			idx_ptr[ii++] = i3;
+			const double cross1 = (double)(v_ptr[i2].x - v_ptr[i0].x) * (double)(v_ptr[i1].z - v_ptr[i0].z) -
+			                      (double)(v_ptr[i2].z - v_ptr[i0].z) * (double)(v_ptr[i1].x - v_ptr[i0].x);
+			if (cross1 > 1e-6) {
+				kept_indices.push_back(i0); kept_indices.push_back(i2); kept_indices.push_back(i1);
+			}
+
+			const double cross2 = (double)(v_ptr[i2].x - v_ptr[i1].x) * (double)(v_ptr[i3].z - v_ptr[i1].z) -
+			                      (double)(v_ptr[i2].z - v_ptr[i1].z) * (double)(v_ptr[i3].x - v_ptr[i1].x);
+			if (cross2 > 1e-6) {
+				kept_indices.push_back(i1); kept_indices.push_back(i2); kept_indices.push_back(i3);
+			}
 		}
+	}
+
+	const int total_indices = (int)kept_indices.size();
+	indices.resize(total_indices);
+	int *idx_ptr = indices.ptrw();
+	for (int i = 0; i < total_indices; i++) {
+		idx_ptr[i] = kept_indices[i];
 	}
 
 	// Area-weighted normals

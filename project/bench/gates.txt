@@ -864,3 +864,10 @@ bench/RoadDirtyRectGate.tscn
 # acute crossing (15° and 20°) cut-face mitre clamping eliminating self-intersections and spikes, cut-face elevation
 # and cross-section parity to <= 1e-4 m against approach ribbons, and watertight 2-manifold regular grid Coons patch meshing.
 bench/RoadComplexJunctionGate.tscn
+
+# --- Sharp Corner Smoothing & Swallowtail Mitigation Gate ---
+# Watched green 2026-09-10 (0 failures). Tests curvature detection on sharp 90° elbows (R ≈ 2.0 m) and zero-handle kinks,
+# spline smoothing relaxing corners to R >= 1.2 * w_half = 4.8 m, and mesher swallowtail velocity inversion clamping
+# with degenerate quad filtering producing 0 overlapping triangles, delta_parallel >= 0.0, and positive normals in C++ & GDScript.
+bench/RoadSharpCornerSmoothingGate.tscn
+

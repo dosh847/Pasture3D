@@ -344,18 +344,43 @@ static func build_chunk(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 			uvs.append(Vector2(offsets[c] / half * 0.5 + 0.5, s))
 			normals.append(Vector3.UP)
 
+	# Swallowtail mitring & degenerate quad suppression (Tier C):
+	# Detect inner edge velocity inversion and clamp backwards movement to apex
+	for r in range(rows - 1):
+		var s: float = minf(p_from + float(r) * step, p_to)
+		var tang := Pasture3DRoadGrader.plan_tangent_at(p_plan, p_cum, s)
+		for c in across_count:
+			var i0 := r * across_count + c
+			var i2 := i0 + across_count
+			var v0 := verts[i0]
+			var v2 := verts[i2]
+			var delta_xz := Vector2(v2.x - v0.x, v2.z - v0.z)
+			if delta_xz.dot(tang) < 0.0:
+				verts[i2].x = v0.x
+				verts[i2].z = v0.z
+
 	for r in range(rows - 1):
 		for c in range(across_count - 1):
 			var i0 := r * across_count + c
 			var i1 := i0 + 1
 			var i2 := i0 + across_count
 			var i3 := i2 + 1
+
+			var v0 := verts[i0]
+			var v1 := verts[i1]
+			var v2 := verts[i2]
+			var v3 := verts[i3]
+
 			# GODOT'S FRONT FACE IS CLOCKWISE AS SEEN FROM THE FRONT, which is the opposite of the
 			# right-hand rule. For a surface that must be visible from ABOVE, the triangle has to look
-			# clockwise looking down — so its geometric (b-a) x (c-a) points DOWN, not up. Winding it the
-			# "mathematically up" way makes the road visible only from underneath: it draws, it is in the
-			# right place, and from every normal camera angle there is nothing there.
-			indices.append_array(PackedInt32Array([i0, i2, i1, i1, i2, i3]))
+			# clockwise looking down — so its geometric (b-a) x (c-a) points DOWN, not up.
+			var cross1 := (v2.x - v0.x) * (v1.z - v0.z) - (v2.z - v0.z) * (v1.x - v0.x)
+			if cross1 > 1e-6:
+				indices.append_array(PackedInt32Array([i0, i2, i1]))
+
+			var cross2 := (v2.x - v1.x) * (v3.z - v1.z) - (v2.z - v1.z) * (v3.x - v1.x)
+			if cross2 > 1e-6:
+				indices.append_array(PackedInt32Array([i1, i2, i3]))
 
 	_recompute_normals(verts, indices, normals)
 	var out := []
