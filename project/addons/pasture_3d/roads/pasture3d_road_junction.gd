@@ -87,6 +87,7 @@ enum JunctionKind { CROSSING = 0, END_TO_END = 1 }
 @export var arm_banks: PackedFloat32Array = PackedFloat32Array()
 @export var arm_crowns: PackedFloat32Array = PackedFloat32Array()
 @export var arm_grades: PackedFloat32Array = PackedFloat32Array()
+@export var arm_trims: PackedFloat32Array = PackedFloat32Array()
 
 ## Resolved kerb-return radius, metres — the highest-priority participant's, or the network default when
 ## they tie and disagree. Solver output; `corner_radius_override` is the user's.
@@ -157,10 +158,38 @@ func footprint_arms() -> Array:
 		var ri := arm_roads[i]
 		if ri < 0 or ri >= road_keys.size():
 			continue
+		var a_trim: float = arm_trims[i] if i < arm_trims.size() else trim_back_for(String(road_keys[ri]))
+		# If user authored a radius override, apply extra widening
+		var extra := maxf(effective_radius() - radius, 0.0)
 		out.append({
 			"dir": arm_dirs[i],
-			"trim": trim_back_for(String(road_keys[ri])),
+			"trim": a_trim + extra,
 			"half": arm_halfs[i],
+		})
+	return out
+
+
+## Each ARM's cut face, as `footprint_boundary_heights` and `build_coons_patch` want it.
+func arm_cut_faces() -> Array:
+	var n := arm_dirs.size()
+	if arm_z.size() != n or arm_banks.size() != n or arm_crowns.size() != n or arm_halfs.size() != n:
+		return []
+	var out: Array = []
+	for i in n:
+		var key: String = road_keys[arm_roads[i]] if arm_roads[i] >= 0 and arm_roads[i] < road_keys.size() else ""
+		var trim_dist: float = arm_trims[i] if i < arm_trims.size() else trim_back_for(key)
+		var extra := maxf(effective_radius() - radius, 0.0)
+		var effective_trim := trim_dist + extra
+		var arm_dir: Vector2 = arm_dirs[i]
+		out.append({
+			"dir": arm_dir,
+			"trim": effective_trim,
+			"half": arm_halfs[i],
+			"z": arm_z[i],
+			"bank": arm_banks[i],
+			"crown": arm_crowns[i],
+			"grade": arm_grades[i] if i < arm_grades.size() else 0.0,
+			"center": center + arm_dir * effective_trim,
 		})
 	return out
 

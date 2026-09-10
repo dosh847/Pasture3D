@@ -643,6 +643,20 @@ static func fillet_allowance(p_radius: float, p_phi: float) -> float:
 	return p_radius / tan(p_phi * 0.5)
 
 
+static func _segment_intersection(p1: Vector2, p2: Vector2, p3: Vector2, p4: Vector2) -> Array:
+	var d12 := p2 - p1
+	var d34 := p4 - p3
+	var den := d12.cross(d34)
+	if absf(den) < 1e-9:
+		return []
+	var d13 := p3 - p1
+	var t := d13.cross(d34) / den
+	var u := d13.cross(d12) / den
+	if t >= -1e-4 and t <= 1.0 + 1e-4 and u >= -1e-4 and u <= 1.0 + 1e-4:
+		return [p1 + d12 * clampf(t, 0.0, 1.0)]
+	return []
+
+
 ## The world-XZ boundary of a junction footprint, counter-clockwise.
 ##
 ## `p_arms` is one Dictionary per ARM — not per road. A road that crosses the junction contributes two,
@@ -669,52 +683,86 @@ static func plan_footprint(p_center: Vector2, p_arms: Array, p_corner_radius: fl
 			var h1: float = float(arms[1].get("half", 0.0))
 			if t0 <= 1e-3 and t1 <= 1e-3 and absf(h0 - h1) <= 0.01:
 				return PackedVector2Array()
-	for i in arms.size():
+
+	var n_arms := arms.size()
+	var faces: Array = []
+	for i in n_arms:
 		var a: Dictionary = arms[i]
-		var b: Dictionary = arms[(i + 1) % arms.size()]
 		var da: Vector2 = a["dir"]
-		var db: Vector2 = b["dir"]
-		# Rotating the outward direction by +90 degrees gives the side of INCREASING angle, so walking
-		# the arms in increasing angle and emitting the -n corner before the +n corner walks the whole
-		# boundary counter-clockwise without ever asking which way round we are going.
 		var na := Vector2(-da.y, da.x)
-		var nb := Vector2(-db.y, db.x)
-		var a_cw: Vector2 = p_center + da * float(a["trim"]) - na * float(a["half"])
-		var a_ccw: Vector2 = p_center + da * float(a["trim"]) + na * float(a["half"])
-		var b_cw: Vector2 = p_center + db * float(b["trim"]) - nb * float(b["half"])
-		_push(out, a_cw)
-		# THE CENTRELINE VERTEX, collinear with the two corners and not there for the outline's sake: the
-		# cut face is where a ribbon ends, and a ribbon is CROWNED, so a face represented by its corners
-		# alone is a chord across that crown. The polygon then sits `crown x half` below the ribbon at the
-		# middle of every approach — 0.20 m on a 0.05 crown and a 4 m half-width, a crease across each arm
-		# where the two surfaces are supposed to be one. In plan it changes nothing, which is why the
-		# outline criteria are unaffected; in section it is the whole difference.
-		_push(out, p_center + da * float(a["trim"]))
-		_push(out, a_ccw)
-		_append_fillet(out, a_ccw, da, b_cw, db, p_corner_radius, p_segments)
+		var c_pt: Vector2 = p_center + da * float(a["trim"])
+		var cw_pt: Vector2 = c_pt - na * float(a["half"])
+		var ccw_pt: Vector2 = c_pt + na * float(a["half"])
+		faces.append({
+			"cw": cw_pt, "center": c_pt, "ccw": ccw_pt, "dir": da,
+			"half": float(a["half"]), "trim": float(a["trim"])
+		})
+
+	# Detect and mitre overlapping adjacent cut faces to prevent inverted self-intersections
+	for i in n_arms:
+		var curr_f: Dictionary = faces[i]
+		var next_f: Dictionary = faces[(i + 1) % n_arms]
+		var hit := _segment_intersection(curr_f["cw"], curr_f["ccw"], next_f["cw"], next_f["ccw"])
+		if not hit.is_empty():
+			var x_pt: Vector2 = hit[0]
+			curr_f["ccw"] = x_pt
+			next_f["cw"] = x_pt
+			var chord: Vector2 = curr_f["ccw"] - curr_f["cw"]
+			var len2: float = chord.length_squared()
+			if len2 > 1e-6:
+				var t: float = clampf((Vector2(curr_f["center"]) - Vector2(curr_f["cw"])).dot(chord) / len2, 0.05, 0.95)
+				curr_f["center"] = Vector2(curr_f["cw"]) + chord * t
+			var next_chord: Vector2 = next_f["ccw"] - next_f["cw"]
+			var nlen2: float = next_chord.length_squared()
+			if nlen2 > 1e-6:
+				var t: float = clampf((Vector2(next_f["center"]) - Vector2(next_f["cw"])).dot(next_chord) / nlen2, 0.05, 0.95)
+				next_f["center"] = Vector2(next_f["cw"]) + next_chord * t
+
+	for i in n_arms:
+		var a: Dictionary = faces[i]
+		var b: Dictionary = faces[(i + 1) % n_arms]
+		_push(out, a["cw"])
+		# The centerline crown vertex, strictly preserved to meet crowned approach ribbons
+		_push(out, a["center"])
+		_push(out, a["ccw"])
+		var a_ccw: Vector2 = a["ccw"]
+		var b_cw: Vector2 = b["cw"]
+		if a_ccw.distance_to(b_cw) > 1e-4:
+			_append_fillet(out, a_ccw, a["dir"], b_cw, b["dir"], p_corner_radius, p_segments)
+
 	# The walk closes on itself, so the final fillet can land back on the first vertex.
 	while out.size() > 1 and out[0].distance_to(out[out.size() - 1]) <= 1e-4:
 		out.remove_at(out.size() - 1)
-	# ---- THE ACUTE-CROSSING FALLBACK ----
-	#
-	# The trim-back is `other_half / sin(theta)`, which DIVERGES as a crossing sharpens: two roads meeting
-	# at 20 degrees are each cut back nearly three times as far as at a square crossing. Past a point the
-	# two arms' cut faces reach past each other, the arm-by-arm walk threads between them, and the boundary
-	# folds over itself. A fan over a folded boundary is not a wrong shape, it is inside-out triangles.
-	#
-	# The hull is honest here rather than merely safe: at an angle sharp enough to fold, the arms are so
-	# nearly parallel that the true pavement outline IS very close to convex, and the two shapes differ by
-	# slivers. At every angle where they would differ meaningfully the walk does not fold, so the fallback
-	# never fires. Tested rather than assumed — see `RoadJunctionPolygonGate` [F].
+
 	if not _is_simple(out):
 		var hull := Geometry2D.convex_hull(out)
-		# `convex_hull` closes the ring by repeating the first point, which has to be dropped: a duplicated
-		# vertex is a zero-area triangle in the fan and a degenerate normal. Its winding already matches the
-		# walk's — MEASURED, not assumed, because reversing it is invisible until the surface turns out to
-		# be drawn only from underneath, and gate [F] asserts the signed area rather than trusting either.
 		if hull.size() > 1 and hull[0].distance_to(hull[hull.size() - 1]) <= 1e-4:
 			hull.remove_at(hull.size() - 1)
-		return hull
+		if not Geometry2D.is_polygon_clockwise(hull):
+			return hull
+		else:
+			hull.reverse()
+			return hull
+	return out
+
+
+## Subdivide any polygon edge longer than `p_max_segment_len` into collinear sub-segments.
+## This prevents unconstrained Delaunay triangulation from skipping long boundary edges or indenting
+## into interior grid vertices on multi-road or acute junctions with large trim-backs.
+static func densify_polygon(p_poly: PackedVector2Array, p_max_segment_len: float) -> PackedVector2Array:
+	if p_poly.size() < 2 or p_max_segment_len <= 1e-4:
+		return p_poly
+	var out := PackedVector2Array()
+	var n := p_poly.size()
+	for i in n:
+		var p0 := p_poly[i]
+		var p1 := p_poly[(i + 1) % n]
+		out.append(p0)
+		var d := p0.distance_to(p1)
+		if d > p_max_segment_len:
+			var subs := int(ceil(d / p_max_segment_len))
+			for s in range(1, subs):
+				out.append(p0.lerp(p1, float(s) / float(subs)))
 	return out
 
 
@@ -784,6 +832,8 @@ static func _append_fillet(p_out: PackedVector2Array, p_from: Vector2, p_from_di
 	# square corner and no arc fits, which is the correct answer rather than a failure.
 	var s_a := (p_from - c).dot(p_from_dir)
 	var s_b := (p_to - c).dot(p_to_dir)
+	if s_a <= 1e-4 or s_b <= 1e-4:
+		return
 	var room := maxf(minf(s_a, s_b), 0.0)
 	var half_phi := phi * 0.5
 	# CLAMPED TO WHAT FITS, never emitted as a reversed arc: an arc longer than the cut faces allow
@@ -1026,6 +1076,29 @@ static func _barycentric(p_at: Vector2, p_a: Vector2, p_b: Vector2, p_c: Vector2
 	return [1.0 - v - w, v, w]
 
 
+static func _is_point_on_boundary(p: Vector2, poly: PackedVector2Array, tol: float = 1e-3) -> bool:
+	var n := poly.size()
+	var tol_sq := tol * tol
+	for i in n:
+		var a := poly[i]
+		var b := poly[(i + 1) % n]
+		var ab := b - a
+		var l2 := ab.length_squared()
+		if l2 <= 1e-8:
+			if p.distance_squared_to(a) <= tol_sq:
+				return true
+			continue
+		var t := clampf((p - a).dot(ab) / l2, 0.0, 1.0)
+		var proj := a + ab * t
+		if p.distance_squared_to(proj) <= tol_sq:
+			return true
+	return false
+
+
+static func _is_point_in_or_on_poly(p: Vector2, poly: PackedVector2Array, tol: float = 1e-3) -> bool:
+	return Geometry2D.is_point_in_polygon(p, poly) or _is_point_on_boundary(p, poly, tol)
+
+
 ## The junction surface: `p_boundary` as a triangle fan about `p_center`, at the heights the ARMS give.
 ##
 ## The heights arrive as an argument rather than being sampled here, because the ground the junction
@@ -1089,7 +1162,7 @@ static func build_coons_patch(p_center: Vector2, p_boundary: PackedVector2Array,
 			var m01 := (p0 + p1) * 0.5
 			var m12 := (p1 + p2) * 0.5
 			var m20 := (p2 + p0) * 0.5
-			if Geometry2D.is_point_in_polygon(m01, p_boundary) and Geometry2D.is_point_in_polygon(m12, p_boundary) and Geometry2D.is_point_in_polygon(m20, p_boundary):
+			if _is_point_in_or_on_poly(m01, p_boundary) and _is_point_in_or_on_poly(m12, p_boundary) and _is_point_in_or_on_poly(m20, p_boundary):
 				# Front-face winding: clockwise seen from above (cross.y < 0 in Godot 3D)
 				var v0 := Vector3(p0.x, 0.0, p0.y)
 				var v1 := Vector3(p1.x, 0.0, p1.y)

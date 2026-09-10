@@ -621,7 +621,10 @@ func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_L
 			_apron_digests.erase(jid)
 
 		var arm_faces: Array = a.get("arm_faces", [])
-		var arrays := Pasture3DRoadMesher.build_footprint(a["center"], a["boundary"], a["heights"],
+		var boundary: PackedVector2Array = a["boundary"]
+		if not arm_faces.is_empty():
+			boundary = Pasture3DRoadMesher.densify_polygon(boundary, 1.0)
+		var arrays := Pasture3DRoadMesher.build_footprint(a["center"], boundary, a["heights"],
 				float(a["center_h"]), p_lift, arm_faces)
 		if arrays.is_empty():
 			continue
@@ -641,7 +644,7 @@ func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_L
 			# above — that one carries the render lift. Without this the road has a hole in its collision
 			# at every junction: a raycast asking "am I on tarmac" answers yes along the road and no in the
 			# middle of the crossroads, which is exactly where a vehicle most needs the answer.
-			var solid := Pasture3DRoadMesher.build_footprint(a["center"], a["boundary"], a["heights"],
+			var solid := Pasture3DRoadMesher.build_footprint(a["center"], boundary, a["heights"],
 					float(a["center_h"]), 0.0, arm_faces)
 			if not solid.is_empty():
 				_collider_from(mi, solid, a.get("surface_info"))

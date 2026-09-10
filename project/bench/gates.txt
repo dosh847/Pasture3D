@@ -859,5 +859,8 @@ bench/RoadCircuitRouteGate.tscn
 # stamp cache in-place preservation on clipped bakes, disjoint early-return, and scoped composite_area.
 bench/RoadDirtyRectGate.tscn
 
-
-
+# --- Multi-Road (>2 Roads) & Acute Crossing Junction Integrity Gate ---
+# Watched green 2026-09-10 (0 failures). Tests multi-road (3 roads / 5 arms) clustering with decoupled per-arm trims,
+# acute crossing (15° and 20°) cut-face mitre clamping eliminating self-intersections and spikes, cut-face elevation
+# and cross-section parity to <= 1e-4 m against approach ribbons, and watertight 2-manifold regular grid Coons patch meshing.
+bench/RoadComplexJunctionGate.tscn

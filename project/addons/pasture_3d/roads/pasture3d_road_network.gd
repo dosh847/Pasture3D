@@ -790,25 +790,9 @@ func _junction_batters(p_junction: Pasture3DRoadJunction) -> Dictionary:
 ## the junction elevation, which is flat and visibly wrong rather than subtly wrong, and one resolve
 ## fixes it.
 func _arm_faces(p_junction: Pasture3DRoadJunction, _p_by_key: Dictionary = {}) -> Array:
-	var n := p_junction.arm_dirs.size()
-	if p_junction.arm_z.size() != n or p_junction.arm_banks.size() != n 			or p_junction.arm_crowns.size() != n or p_junction.arm_halfs.size() != n:
+	if p_junction == null:
 		return []
-	var out: Array = []
-	for i in n:
-		var key: String = p_junction.road_keys[p_junction.arm_roads[i]] 				if p_junction.arm_roads[i] >= 0 and p_junction.arm_roads[i] < p_junction.road_keys.size() 				else ""
-		var trim_dist: float = p_junction.trim_back_for(key)
-		var arm_dir: Vector2 = p_junction.arm_dirs[i]
-		out.append({
-			"dir": arm_dir,
-			"trim": trim_dist,
-			"half": p_junction.arm_halfs[i],
-			"z": p_junction.arm_z[i],
-			"bank": p_junction.arm_banks[i],
-			"crown": p_junction.arm_crowns[i],
-			"grade": p_junction.arm_grades[i] if i < p_junction.arm_grades.size() else 0.0,
-			"center": p_junction.center + arm_dir * trim_dist,
-		})
-	return out
+	return p_junction.arm_cut_faces()
 
 
 ## Build the apron inside every detected junction footprint (§6, §10).

@@ -221,6 +221,7 @@ static func resolve(p_runs: Array, p_existing: Array = [], p_opts: Dictionary = 
 			prior.arm_dirs = j.arm_dirs
 			prior.arm_roads = j.arm_roads
 			prior.arm_halfs = j.arm_halfs
+			prior.arm_trims = j.arm_trims
 			prior.arm_z = j.arm_z
 			prior.arm_banks = j.arm_banks
 			prior.arm_crowns = j.arm_crowns
@@ -493,6 +494,12 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 		trims[gi] += allow[gi]
 	j.trim_backs = trims
 
+	var arm_trims := PackedFloat32Array()
+	arm_trims.resize(dirs.size())
+	for ai in dirs.size():
+		arm_trims[ai] = trims[arm_roads[ai]]
+	j.arm_trims = arm_trims
+
 	# ---- THE CUT-FACE CROSS-SECTIONS, ONCE THE TRIMS ARE FINAL --------------------------------------
 	#
 	# Read HERE and stored, rather than left for the mesher to read back off the alignments. An alignment
@@ -511,7 +518,7 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 		var gi: int = arm_roads[ai]
 		var run: Dictionary = p_runs[idx[gi]]
 		var alignment: Pasture3DRoadAlignment = run.get("alignment")
-		var s_face: float = arcs[gi] + arm_signs[ai] * trims[gi]
+		var s_face: float = arcs[gi] + arm_signs[ai] * arm_trims[ai]
 		if alignment == null or alignment.count() == 0:
 			arm_z.append(j.elevation)
 			arm_banks.append(0.0)
