@@ -88,6 +88,12 @@ enum JunctionKind { CROSSING = 0, END_TO_END = 1 }
 @export var arm_crowns: PackedFloat32Array = PackedFloat32Array()
 @export var arm_grades: PackedFloat32Array = PackedFloat32Array()
 @export var arm_trims: PackedFloat32Array = PackedFloat32Array()
+@export var arm_centers: PackedVector2Array = PackedVector2Array()
+@export var arm_signs: PackedFloat32Array = PackedFloat32Array()
+@export var arm_carriageway_halfs: PackedFloat32Array = PackedFloat32Array()
+@export var arm_shoulders: PackedFloat32Array = PackedFloat32Array()
+@export var arm_crown_modes: PackedInt32Array = PackedInt32Array()
+@export var arm_max_banks: PackedFloat32Array = PackedFloat32Array()
 
 ## Resolved kerb-return radius, metres — the highest-priority participant's, or the network default when
 ## they tie and disagree. Solver output; `corner_radius_override` is the user's.
@@ -161,10 +167,24 @@ func footprint_arms() -> Array:
 		var a_trim: float = arm_trims[i] if i < arm_trims.size() else trim_back_for(String(road_keys[ri]))
 		# If user authored a radius override, apply extra widening
 		var extra := maxf(effective_radius() - radius, 0.0)
+		var effective_trim := a_trim + extra
+		var arm_dir: Vector2 = arm_dirs[i]
+		var c_face: Vector2 = arm_centers[i] if (i < arm_centers.size() and extra <= 1e-4) else (center + arm_dir * effective_trim)
+		var c_half: float = arm_carriageway_halfs[i] if i < arm_carriageway_halfs.size() else arm_halfs[i]
+		var s_width: float = arm_shoulders[i] if i < arm_shoulders.size() else 0.0
+		var c_mode: int = arm_crown_modes[i] if i < arm_crown_modes.size() else 0
+		var m_bank: float = arm_max_banks[i] if i < arm_max_banks.size() else 0.0
+		var a_sign: float = arm_signs[i] if i < arm_signs.size() else 1.0
 		out.append({
-			"dir": arm_dirs[i],
-			"trim": a_trim + extra,
+			"dir": arm_dir,
+			"center": c_face,
+			"trim": effective_trim,
 			"half": arm_halfs[i],
+			"carriageway_half": c_half,
+			"shoulder_width": s_width,
+			"crown_mode": c_mode,
+			"max_bank": m_bank,
+			"sign": a_sign,
 		})
 	return out
 
@@ -181,15 +201,26 @@ func arm_cut_faces() -> Array:
 		var extra := maxf(effective_radius() - radius, 0.0)
 		var effective_trim := trim_dist + extra
 		var arm_dir: Vector2 = arm_dirs[i]
+		var c_face: Vector2 = arm_centers[i] if (i < arm_centers.size() and extra <= 1e-4) else (center + arm_dir * effective_trim)
+		var c_half: float = arm_carriageway_halfs[i] if i < arm_carriageway_halfs.size() else arm_halfs[i]
+		var s_width: float = arm_shoulders[i] if i < arm_shoulders.size() else 0.0
+		var c_mode: int = arm_crown_modes[i] if i < arm_crown_modes.size() else 0
+		var m_bank: float = arm_max_banks[i] if i < arm_max_banks.size() else 0.0
+		var a_sign: float = arm_signs[i] if i < arm_signs.size() else 1.0
 		out.append({
 			"dir": arm_dir,
 			"trim": effective_trim,
 			"half": arm_halfs[i],
+			"carriageway_half": c_half,
+			"shoulder_width": s_width,
+			"crown_mode": c_mode,
+			"max_bank": m_bank,
+			"sign": a_sign,
 			"z": arm_z[i],
 			"bank": arm_banks[i],
 			"crown": arm_crowns[i],
 			"grade": arm_grades[i] if i < arm_grades.size() else 0.0,
-			"center": center + arm_dir * effective_trim,
+			"center": c_face,
 		})
 	return out
 

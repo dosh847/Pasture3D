@@ -159,7 +159,7 @@ func _b_acute_crossing_mitre_and_parity() -> void:
 
 		# Verify cut-face center/crown vertices are preserved on the boundary
 		for arm: Dictionary in arms:
-			var center_pt: Vector2 = arm["dir"] * arm["trim"]
+			var center_pt: Vector2 = arm.get("center", arm["dir"] * arm["trim"])
 			var found_center := false
 			for p in poly:
 				if p.distance_to(center_pt) < 1e-4:
@@ -195,7 +195,12 @@ func _c_cut_face_ribbon_alignment_parity() -> void:
 		for u_ratio in [-1.0, -0.5, 0.0, 0.5, 1.0]:
 			var u: float = half * u_ratio
 			var pt: Vector2 = center + n * u
-			var expected_h: float = z + bank * u - crown * (u_ratio * u_ratio)
+			var c_half: float = float(face.get("carriageway_half", half))
+			var s_width: float = float(face.get("shoulder_width", maxf(half - c_half, 0.0)))
+			var c_mode: int = int(face.get("crown_mode", 0))
+			var m_bank: float = float(face.get("max_bank", 0.0))
+			var a_sign: float = float(face.get("sign", 1.0))
+			var expected_h: float = Pasture3DRoadMesher.ribbon_cross_section_height(z, bank, crown, u * a_sign, c_half, s_width, c_mode, m_bank)
 			var eval_h := Pasture3DRoadMesher.coons_patch_height_at(pt, j.center, arm_faces, j.elevation)
 			var err := absf(eval_h - expected_h)
 			worst_err = maxf(worst_err, err)

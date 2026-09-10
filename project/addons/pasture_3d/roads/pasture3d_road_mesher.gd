@@ -345,7 +345,7 @@ static func build_chunk(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 			normals.append(Vector3.UP)
 
 	# Swallowtail mitring & degenerate quad suppression (Tier C):
-	# Detect inner edge velocity inversion and clamp backwards movement to apex
+	# Detect inner edge velocity inversion and clamp backwards movement to apex.
 	for r in range(rows - 1):
 		var s: float = minf(p_from + float(r) * step, p_to)
 		var tang := Pasture3DRoadGrader.plan_tangent_at(p_plan, p_cum, s)
@@ -375,12 +375,24 @@ static func build_chunk(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 			# right-hand rule. For a surface that must be visible from ABOVE, the triangle has to look
 			# clockwise looking down — so its geometric (b-a) x (c-a) points DOWN, not up.
 			var cross1 := (v2.x - v0.x) * (v1.z - v0.z) - (v2.z - v0.z) * (v1.x - v0.x)
+			var has_tri1 := false
 			if cross1 > 1e-6:
 				indices.append_array(PackedInt32Array([i0, i2, i1]))
+				has_tri1 = true
 
 			var cross2 := (v2.x - v1.x) * (v3.z - v1.z) - (v2.z - v1.z) * (v3.x - v1.x)
+			var has_tri2 := false
 			if cross2 > 1e-6:
 				indices.append_array(PackedInt32Array([i1, i2, i3]))
+				has_tri2 = true
+
+			if not has_tri1 and not has_tri2:
+				var alt1 := (v3.x - v0.x) * (v1.z - v0.z) - (v3.z - v0.z) * (v1.x - v0.x)
+				var alt2 := (v2.x - v0.x) * (v3.z - v0.z) - (v2.z - v0.z) * (v3.x - v0.x)
+				if alt1 > 1e-6:
+					indices.append_array(PackedInt32Array([i0, i3, i1]))
+				if alt2 > 1e-6:
+					indices.append_array(PackedInt32Array([i0, i2, i3]))
 
 	_recompute_normals(verts, indices, normals)
 	var out := []
@@ -715,12 +727,14 @@ static func plan_footprint(p_center: Vector2, p_arms: Array, p_corner_radius: fl
 		var a: Dictionary = arms[i]
 		var da: Vector2 = a["dir"]
 		var na := Vector2(-da.y, da.x)
-		var c_pt: Vector2 = p_center + da * float(a["trim"])
+		var c_pt: Vector2 = a.get("center", p_center + da * float(a["trim"]))
 		var cw_pt: Vector2 = c_pt - na * float(a["half"])
 		var ccw_pt: Vector2 = c_pt + na * float(a["half"])
 		faces.append({
 			"cw": cw_pt, "center": c_pt, "ccw": ccw_pt, "dir": da,
-			"half": float(a["half"]), "trim": float(a["trim"])
+			"half": float(a["half"]), "trim": float(a["trim"]),
+			"carriageway_half": float(a.get("carriageway_half", a["half"])),
+			"shoulder_width": float(a.get("shoulder_width", 0.0))
 		})
 
 	# Detect and mitre overlapping adjacent cut faces to prevent inverted self-intersections
@@ -746,9 +760,40 @@ static func plan_footprint(p_center: Vector2, p_arms: Array, p_corner_radius: fl
 	for i in n_arms:
 		var a: Dictionary = faces[i]
 		var b: Dictionary = faces[(i + 1) % n_arms]
+		var c_half: float = float(a.get("carriageway_half", a["half"]))
+		var tot_half: float = float(a["half"])
+		var c_pt: Vector2 = a["center"]
+		var da: Vector2 = a["dir"]
+		var na := Vector2(-da.y, da.x)
+
 		_push(out, a["cw"])
+		# Intermediate carriageway edge on CW side if shoulders present
+		if c_half < tot_half - 1e-3 and a["cw"].distance_to(a["ccw"]) > 1e-3:
+			var left_cw := c_pt - na * c_half
+			var v_cw: Vector2 = a["cw"]
+			var v_cnt: Vector2 = a["center"]
+			var seg := v_cnt - v_cw
+			var seg_len2 := seg.length_squared()
+			if seg_len2 > 1e-4:
+				var t := (left_cw - v_cw).dot(seg) / seg_len2
+				if t > 0.05 and t < 0.95:
+					_push(out, v_cw + seg * t)
+
 		# The centerline crown vertex, strictly preserved to meet crowned approach ribbons
 		_push(out, a["center"])
+
+		# Intermediate carriageway edge on CCW side if shoulders present
+		if c_half < tot_half - 1e-3 and a["cw"].distance_to(a["ccw"]) > 1e-3:
+			var right_ccw := c_pt + na * c_half
+			var v_cnt: Vector2 = a["center"]
+			var v_ccw: Vector2 = a["ccw"]
+			var seg := v_ccw - v_cnt
+			var seg_len2 := seg.length_squared()
+			if seg_len2 > 1e-4:
+				var t := (right_ccw - v_cnt).dot(seg) / seg_len2
+				if t > 0.05 and t < 0.95:
+					_push(out, v_cnt + seg * t)
+
 		_push(out, a["ccw"])
 		var a_ccw: Vector2 = a["ccw"]
 		var b_cw: Vector2 = b["cw"]
@@ -830,12 +875,21 @@ static func _ordered_arms(p_arms: Array) -> Array:
 		if not d.is_finite() or d.length_squared() < 1e-12:
 			continue
 		d = d.normalized()
-		out.append({
+		var d_entry := {
 			"dir": d,
 			"trim": maxf(float(a.get("trim", 0.0)), 0.0),
 			"half": maxf(float(a.get("half", 0.01)), 0.01),
 			"ang": d.angle(),
-		})
+		}
+		if a.has("center"):
+			d_entry["center"] = a["center"]
+		if a.has("carriageway_half"):
+			d_entry["carriageway_half"] = a["carriageway_half"]
+		if a.has("shoulder_width"):
+			d_entry["shoulder_width"] = a["shoulder_width"]
+		if a.has("sign"):
+			d_entry["sign"] = a["sign"]
+		out.append(d_entry)
 	out.sort_custom(func(x, y): return float(x["ang"]) < float(y["ang"]))
 	return out
 
@@ -923,6 +977,36 @@ static func _push(p_out: PackedVector2Array, p_at: Vector2) -> void:
 ## A vertex on a FILLET lies on no cut face at all — it is the kerb return between two arms — so the
 ## blend is over every arm, weighted by inverse square distance to its cut face. On a cut face that
 ## distance is zero and the arm owns the vertex outright, which is what makes the join exact.
+## Evaluate the connecting road ribbon's actual cross-section elevation at lateral offset `p_u` (in road coordinates).
+## The road ribbon mesh connects canonical cross-section vertices:
+## [ -(carriageway_half + shoulder), -carriageway_half, 0.0, carriageway_half, carriageway_half + shoulder ]
+## with planar quads. Between those vertices, the physical road ribbon is linear.
+## Sampling this exact piecewise-linear chord profile guarantees zero vertical discrepancy along the seam.
+static func ribbon_cross_section_height(p_z: float, p_bank: float, p_crown: float, p_u: float,
+		p_carriageway_half: float, p_shoulder_width: float = 0.0,
+		p_crown_mode: int = 0, p_max_bank: float = 0.0) -> float:
+	var c_half := maxf(p_carriageway_half, 0.01)
+	var shoulder := maxf(p_shoulder_width, 0.0)
+
+	var y_center := Pasture3DRoadGrader.surface_height(p_z, p_bank, p_crown, 0.0, c_half, p_crown_mode, p_max_bank)
+	if p_u >= 0.0:
+		var y_cw := Pasture3DRoadGrader.surface_height(p_z, p_bank, p_crown, c_half, c_half, p_crown_mode, p_max_bank)
+		if p_u <= c_half:
+			return lerpf(y_center, y_cw, p_u / c_half)
+		var y_sh := Pasture3DRoadGrader.surface_height(p_z, p_bank, p_crown, c_half + shoulder, c_half, p_crown_mode, p_max_bank)
+		if shoulder > 1e-4 and p_u <= c_half + shoulder:
+			return lerpf(y_cw, y_sh, (p_u - c_half) / shoulder)
+		return y_sh + p_bank * (p_u - (c_half + shoulder))
+	else:
+		var y_cw := Pasture3DRoadGrader.surface_height(p_z, p_bank, p_crown, -c_half, c_half, p_crown_mode, p_max_bank)
+		if p_u >= -c_half:
+			return lerpf(y_center, y_cw, -p_u / c_half)
+		var y_sh := Pasture3DRoadGrader.surface_height(p_z, p_bank, p_crown, -(c_half + shoulder), c_half, p_crown_mode, p_max_bank)
+		if shoulder > 1e-4 and p_u >= -(c_half + shoulder):
+			return lerpf(y_cw, y_sh, (-p_u - c_half) / shoulder)
+		return y_sh + p_bank * (p_u + (c_half + shoulder))
+
+
 static func footprint_boundary_heights(p_center: Vector2, p_boundary: PackedVector2Array,
 		p_arm_faces: Array, p_fallback: float) -> PackedFloat32Array:
 	var out := PackedFloat32Array()
@@ -931,27 +1015,35 @@ static func footprint_boundary_heights(p_center: Vector2, p_boundary: PackedVect
 		out.fill(p_fallback)
 		return out
 	for i in p_boundary.size():
-		var v := p_boundary[i] - p_center
+		var pt := p_boundary[i]
 		var sum := 0.0
 		var wsum := 0.0
 		var exact := NAN
 		for face: Dictionary in p_arm_faces:
-			var dir: Vector2 = face["dir"]
+			var dir: Vector2 = face.get("dir", Vector2.ZERO)
 			var n := Vector2(-dir.y, dir.x)
-			var along: float = v.dot(dir)
-			var across: float = v.dot(n)
-			var z := Pasture3DRoadGrader.surface_height(float(face["z"]), float(face["bank"]),
-					float(face["crown"]), across)
-			# Distance to the cut face as a SEGMENT, not to its infinite line: an arm on the far side of
-			# the junction has a cut face whose line runs right past this vertex, and weighting by the line
-			# would let it pull a corner it is nowhere near.
-			var d_along: float = along - float(face["trim"])
-			var over: float = maxf(absf(across) - float(face["half"]), 0.0)
+			var trim: float = float(face.get("trim", 0.0))
+			var c: Vector2 = face.get("center", p_center + dir * trim)
+			var delta := pt - c
+			var along: float = delta.dot(dir)
+			var across: float = delta.dot(n)
+			var half: float = maxf(float(face.get("half", 4.0)), 0.01)
+			var carriageway_half: float = maxf(float(face.get("carriageway_half", half)), 0.01)
+			var shoulder_width: float = float(face.get("shoulder_width", maxf(half - carriageway_half, 0.0)))
+			var crown_mode: int = int(face.get("crown_mode", 0))
+			var max_bank: float = float(face.get("max_bank", 0.0))
+			var arm_sign: float = float(face.get("sign", 1.0))
+			var u_road := across * arm_sign
+			var d_along: float = along
+			var over: float = maxf(absf(across) - half, 0.0)
 			var d2: float = d_along * d_along + over * over
 			if d2 <= 1e-8:
-				exact = z
+				exact = ribbon_cross_section_height(float(face.get("z", p_fallback)), float(face.get("bank", 0.0)),
+						float(face.get("crown", 0.0)), u_road, carriageway_half, shoulder_width, crown_mode, max_bank)
 				break
-			var w := 1.0 / d2
+			var z := Pasture3DRoadGrader.surface_height(float(face.get("z", p_fallback)), float(face.get("bank", 0.0)),
+					float(face.get("crown", 0.0)), u_road, carriageway_half, crown_mode, max_bank)
+			var w := 1.0 / (d2 * d2)
 			sum += z * w
 			wsum += w
 		out[i] = exact if not is_nan(exact) else (sum / wsum if wsum > 0.0 else p_fallback)
@@ -980,24 +1072,31 @@ static func coons_patch_height_at(p_at: Vector2, p_center: Vector2, p_arm_faces:
 		var along: float = delta.dot(dir)
 		var across: float = delta.dot(n)
 		var half: float = maxf(float(face.get("half", 4.0)), 0.01)
+		var carriageway_half: float = maxf(float(face.get("carriageway_half", half)), 0.01)
+		var shoulder_width: float = float(face.get("shoulder_width", maxf(half - carriageway_half, 0.0)))
+		var crown_mode: int = int(face.get("crown_mode", 0))
+		var max_bank: float = float(face.get("max_bank", 0.0))
+		var arm_sign: float = float(face.get("sign", 1.0))
 		var z: float = float(face.get("z", p_fallback))
 		var bank: float = float(face.get("bank", 0.0))
 		var crown: float = float(face.get("crown", 0.0))
 		var grade: float = float(face.get("grade", 0.0))
-
-		# Hermite surface prediction from this arm
-		var u_clamped := clampf(across, -half, half)
-		var crown_term := -crown * (u_clamped / half) * (u_clamped / half)
-		var h_pred := z + bank * across + crown_term + grade * along
 
 		# Distance to cut face segment
 		var d_along := along
 		var over := maxf(absf(across) - half, 0.0)
 		var d2 := d_along * d_along + over * over
 
+		# On cut face segment: exact match with connecting road ribbon cross section
 		if d2 <= 1e-8:
-			exact_h = h_pred
+			exact_h = ribbon_cross_section_height(z, bank, crown, across * arm_sign, carriageway_half, shoulder_width, crown_mode, max_bank)
 			break
+
+		# Hermite surface prediction from this arm for interior blending:
+		# Uses canonical smooth profile to guarantee C¹ continuity without creases across diagonal crossing trajectories
+		var u_road := across * arm_sign
+		var h_profile := Pasture3DRoadGrader.surface_height(z, bank, crown, u_road, carriageway_half, crown_mode, max_bank)
+		var h_pred := h_profile + grade * along
 
 		var w := 1.0 / (d2 * d2)
 		sum += h_pred * w
@@ -1121,7 +1220,14 @@ static func _is_point_on_boundary(p: Vector2, poly: PackedVector2Array, tol: flo
 
 
 static func _is_point_in_or_on_poly(p: Vector2, poly: PackedVector2Array, tol: float = 1e-3) -> bool:
-	return Geometry2D.is_point_in_polygon(p, poly) or _is_point_on_boundary(p, poly, tol)
+	if Geometry2D.is_point_in_polygon(p, poly) or _is_point_on_boundary(p, poly, tol):
+		return true
+	# Robust fallbacks for ray-vertex collinearity edge cases in Godot point-in-polygon
+	const EPS: float = 1e-4
+	return Geometry2D.is_point_in_polygon(p + Vector2(0.0, EPS), poly) \
+		or Geometry2D.is_point_in_polygon(p - Vector2(0.0, EPS), poly) \
+		or Geometry2D.is_point_in_polygon(p + Vector2(EPS, 0.0), poly) \
+		or Geometry2D.is_point_in_polygon(p - Vector2(EPS, 0.0), poly)
 
 
 ## The junction surface: `p_boundary` as a triangle fan about `p_center`, at the heights the ARMS give.

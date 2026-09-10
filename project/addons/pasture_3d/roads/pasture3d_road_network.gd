@@ -837,12 +837,22 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 		var halfs_snap: Array = []
 		for hf: float in j.arm_halfs:
 			halfs_snap.append(snapped(hf, 0.001))
+		var crowns_snap: Array = []
+		for cr: float in j.arm_crowns:
+			crowns_snap.append(snapped(cr, 0.001))
+		var banks_snap: Array = []
+		for bk: float in j.arm_banks:
+			banks_snap.append(snapped(bk, 0.001))
+		var c_halfs_snap: Array = []
+		for ch: float in j.arm_carriageway_halfs:
+			c_halfs_snap.append(snapped(ch, 0.001))
 
 		var j_hash: int = hash([
 			jid,
 			snapped(j.center.x, 0.001), snapped(j.center.y, 0.001),
 			snapped(j.elevation, 0.001),
 			arm_dirs_snap, halfs_snap, trim_snap,
+			crowns_snap, banks_snap, c_halfs_snap, j.arm_crown_modes,
 			snapped(j.effective_corner_radius(), 0.001),
 			j.priorities,
 			default_control,

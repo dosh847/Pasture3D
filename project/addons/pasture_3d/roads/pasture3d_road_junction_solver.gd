@@ -222,6 +222,12 @@ static func resolve(p_runs: Array, p_existing: Array = [], p_opts: Dictionary = 
 			prior.arm_roads = j.arm_roads
 			prior.arm_halfs = j.arm_halfs
 			prior.arm_trims = j.arm_trims
+			prior.arm_centers = j.arm_centers
+			prior.arm_signs = j.arm_signs
+			prior.arm_carriageway_halfs = j.arm_carriageway_halfs
+			prior.arm_shoulders = j.arm_shoulders
+			prior.arm_crown_modes = j.arm_crown_modes
+			prior.arm_max_banks = j.arm_max_banks
 			prior.arm_z = j.arm_z
 			prior.arm_banks = j.arm_banks
 			prior.arm_crowns = j.arm_crowns
@@ -460,56 +466,131 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 	# allowance is added to them below, and a face height taken before that is a face height at the wrong
 	# place.
 	var arm_signs := PackedFloat32Array()
+	var carriageway_halfs := PackedFloat32Array()
+	var shoulders := PackedFloat32Array()
+	var crown_modes := PackedInt32Array()
+	var max_banks := PackedFloat32Array()
 	for gi in range(idx.size()):
 		var run: Dictionary = p_runs[idx[gi]]
 		var tang := _tangent_at(run, arcs[gi])
 		if tang.length_squared() < 0.5:
 			continue
-		var hw: float = float(run.get("half_width", 4.0))
+		var c_half: float = float(run.get("half_width", 4.0))
+		var s_width: float = float(run.get("shoulder_width", 0.0))
+		var c_mode: int = int(run.get("crown_mode", 0))
+		var m_bank: float = float(run.get("max_bank", 0.0))
+		var hw: float = c_half + s_width
 		var total := _run_length(run)
 		if total - arcs[gi] > ARM_MIN_LENGTH:
 			dirs.append(tang)
 			arm_roads.append(gi)
 			halfs.append(hw)
 			arm_signs.append(1.0)
+			carriageway_halfs.append(c_half)
+			shoulders.append(s_width)
+			crown_modes.append(c_mode)
+			max_banks.append(m_bank)
 		if arcs[gi] > ARM_MIN_LENGTH:
 			dirs.append(-tang)
 			arm_roads.append(gi)
 			halfs.append(hw)
 			arm_signs.append(-1.0)
+			carriageway_halfs.append(c_half)
+			shoulders.append(s_width)
+			crown_modes.append(c_mode)
+			max_banks.append(m_bank)
 	j.arm_dirs = dirs
 	j.arm_roads = arm_roads
 	j.arm_halfs = halfs
+	j.arm_signs = arm_signs
+	j.arm_carriageway_halfs = carriageway_halfs
+	j.arm_shoulders = shoulders
+	j.arm_crown_modes = crown_modes
+	j.arm_max_banks = max_banks
 
 	# ---- THE KERB RETURN COSTS TRIM-BACK -----------------------------------------------------------
 	#
-	# The corner between two arms is a corner of the GAP between them, not of the pavement, so rounding it
-	# ADDS pavement and its tangent points sit `radius / tan(phi/2)` back along each road. A return can
-	# therefore only be drawn if the arms were trimmed that much further back to leave room — which is why
-	# a corner radius makes an intersection BIGGER rather than rounder in place, and why this is added to
-	# the trim-back here rather than handled in the mesher.
+	# Calculate decoupled per-arm trims: each arm only clears its immediate angular neighbors in the junction.
+	# The clearance trim along arm a to clear neighbor b at angle phi is (w_b + w_a*cos(phi))/sin(phi) + R/tan(phi/2).
 	j.corner_radius = _corner_radius_for(p_runs, idx, best_priority, p_opts)
-	var allow := _fillet_allowances(dirs, arm_roads, idx.size(), j.effective_corner_radius())
-	for gi in range(idx.size()):
-		trims[gi] += allow[gi]
-	j.trim_backs = trims
-
+	var r_eff: float = j.effective_corner_radius()
+	var n_arms := dirs.size()
 	var arm_trims := PackedFloat32Array()
-	arm_trims.resize(dirs.size())
-	for ai in dirs.size():
-		arm_trims[ai] = trims[arm_roads[ai]]
+	arm_trims.resize(n_arms)
+	arm_trims.fill(0.0)
+
+	if is_e2e:
+		for ai in n_arms:
+			arm_trims[ai] = trims[arm_roads[ai]]
+	elif n_arms >= 2:
+		var order: Array = []
+		for i in n_arms:
+			order.append(i)
+		order.sort_custom(func(a, b): return dirs[a].angle() < dirs[b].angle())
+
+		for k in n_arms:
+			var ia: int = order[k]
+			var inext: int = order[(k + 1) % n_arms]
+			var iprev: int = order[(k - 1 + n_arms) % n_arms]
+
+			var phi_next := acos(clampf(dirs[ia].dot(dirs[inext]), -1.0, 1.0))
+			var phi_prev := acos(clampf(dirs[ia].dot(dirs[iprev]), -1.0, 1.0))
+
+			var wa: float = halfs[ia]
+			var w_next: float = halfs[inext]
+			var w_prev: float = halfs[iprev]
+
+			var t_next := 0.0
+			if phi_next > MIN_CROSSING_ANGLE and phi_next < PI - MIN_CROSSING_ANGLE:
+				var s_next := sin(phi_next)
+				t_next = w_next / s_next + Pasture3DRoadMesher.fillet_allowance(r_eff, phi_next)
+			elif phi_next <= MIN_CROSSING_ANGLE:
+				t_next = w_next / sin(MIN_CROSSING_ANGLE)
+
+			var t_prev := 0.0
+			if phi_prev > MIN_CROSSING_ANGLE and phi_prev < PI - MIN_CROSSING_ANGLE:
+				var s_prev := sin(phi_prev)
+				t_prev = w_prev / s_prev + Pasture3DRoadMesher.fillet_allowance(r_eff, phi_prev)
+			elif phi_prev <= MIN_CROSSING_ANGLE:
+				t_prev = w_prev / sin(MIN_CROSSING_ANGLE)
+
+			arm_trims[ia] = maxf(t_next, t_prev)
+	else:
+		for ai in n_arms:
+			arm_trims[ai] = trims[arm_roads[ai]]
+
+	for gi in range(idx.size()):
+		var max_t := 0.0
+		for ai in n_arms:
+			if arm_roads[ai] == gi:
+				max_t = maxf(max_t, arm_trims[ai])
+		trims[gi] = max_t
+	j.trim_backs = trims
 	j.arm_trims = arm_trims
 
-	# ---- THE CUT-FACE CROSS-SECTIONS, ONCE THE TRIMS ARE FINAL --------------------------------------
+	# ---- THE CUT-FACE CROSS-SECTIONS & CURVED PLAN GEOMETRY -----------------------------------------
 	#
-	# Read HERE and stored, rather than left for the mesher to read back off the alignments. An alignment
-	# is solved against the surface entering its own bake, so re-reading one gives a different answer
-	# depending on which road at this junction baked first — and the polygon built from it then changed
-	# shape with scene order. These are one snapshot, taken once, that every consumer shares.
-	#
-	# At `arcs[gi] + sign * trim`, not at `arcs[gi]`: that is where the ribbon actually ends, and on any
-	# road with a grade through the junction the two differ by grade x trim — exactly the step the polygon
-	# would otherwise have against every ribbon it is meant to join.
+	# Evaluate each arm's cut-face center and tangent directly along its approach road's curved spline
+	# at s_face = arcs[gi] + sign * trim. This ensures the apron cut-face matches the approach road
+	# ribbon's terminal cross-section with 0 spatial gap, even on tightly curving roads.
+	var arm_centers := PackedVector2Array()
+	arm_centers.resize(dirs.size())
+	for ai in dirs.size():
+		var gi: int = arm_roads[ai]
+		var run: Dictionary = p_runs[idx[gi]]
+		var s_face: float = arcs[gi] + arm_signs[ai] * arm_trims[ai]
+		var plan: PackedVector2Array = run.get("plan", PackedVector2Array())
+		var cum: PackedFloat32Array = run.get("cum", PackedFloat32Array())
+		if plan.size() >= 2 and cum.size() >= plan.size():
+			arm_centers[ai] = Pasture3DRoadGrader.plan_point_at(plan, cum, s_face)
+			var cur_tang := Pasture3DRoadGrader.plan_tangent_at(plan, cum, s_face)
+			if cur_tang.length_squared() > 0.5:
+				dirs[ai] = cur_tang * arm_signs[ai]
+		else:
+			arm_centers[ai] = j.center + dirs[ai] * arm_trims[ai]
+	j.arm_centers = arm_centers
+	j.arm_dirs = dirs
+
 	var arm_z := PackedFloat32Array()
 	var arm_banks := PackedFloat32Array()
 	var arm_crowns := PackedFloat32Array()

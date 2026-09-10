@@ -1019,7 +1019,7 @@ Array godot::road_mesh_build_chunk(const PackedVector2Array &p_plan, const Packe
 	}
 
 	// Swallowtail mitring & degenerate quad suppression (Tier C):
-	// Detect inner edge velocity inversion and clamp backwards movement to apex
+	// Detect inner edge velocity inversion and clamp backwards movement to apex.
 	for (int r = 0; r < rows - 1; r++) {
 		const double s = (r == rows - 1) ? p_to : std::min(p_from + (double)r * step, p_to);
 		const Vector2 tang = road_mesh_plan_tangent_at(plan_ptr, cum_ptr, plan_n, s);
@@ -1046,14 +1046,32 @@ Array godot::road_mesh_build_chunk(const PackedVector2Array &p_plan, const Packe
 			const int i3 = i2 + 1;
 			const double cross1 = (double)(v_ptr[i2].x - v_ptr[i0].x) * (double)(v_ptr[i1].z - v_ptr[i0].z) -
 			                      (double)(v_ptr[i2].z - v_ptr[i0].z) * (double)(v_ptr[i1].x - v_ptr[i0].x);
+			bool has_tri1 = false;
 			if (cross1 > 1e-6) {
 				kept_indices.push_back(i0); kept_indices.push_back(i2); kept_indices.push_back(i1);
+				has_tri1 = true;
 			}
 
 			const double cross2 = (double)(v_ptr[i2].x - v_ptr[i1].x) * (double)(v_ptr[i3].z - v_ptr[i1].z) -
 			                      (double)(v_ptr[i2].z - v_ptr[i1].z) * (double)(v_ptr[i3].x - v_ptr[i1].x);
+			bool has_tri2 = false;
 			if (cross2 > 1e-6) {
 				kept_indices.push_back(i1); kept_indices.push_back(i2); kept_indices.push_back(i3);
+				has_tri2 = true;
+			}
+
+			if (!has_tri1 && !has_tri2) {
+				// Fallback: try alternate diagonal to avoid leaving a hole
+				const double alt1 = (double)(v_ptr[i3].x - v_ptr[i0].x) * (double)(v_ptr[i1].z - v_ptr[i0].z) -
+				                    (double)(v_ptr[i3].z - v_ptr[i0].z) * (double)(v_ptr[i1].x - v_ptr[i0].x);
+				const double alt2 = (double)(v_ptr[i2].x - v_ptr[i0].x) * (double)(v_ptr[i3].z - v_ptr[i0].z) -
+				                    (double)(v_ptr[i2].z - v_ptr[i0].z) * (double)(v_ptr[i3].x - v_ptr[i0].x);
+				if (alt1 > 1e-6) {
+					kept_indices.push_back(i0); kept_indices.push_back(i3); kept_indices.push_back(i1);
+				}
+				if (alt2 > 1e-6) {
+					kept_indices.push_back(i0); kept_indices.push_back(i2); kept_indices.push_back(i3);
+				}
 			}
 		}
 	}

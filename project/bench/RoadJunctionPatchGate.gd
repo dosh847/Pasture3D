@@ -86,7 +86,12 @@ func _a_cut_face_elevation_and_cross_section_parity() -> void:
 		for u_ratio in [-1.0, -0.6, -0.2, 0.0, 0.2, 0.6, 1.0]:
 			var u: float = half * u_ratio
 			var pt: Vector2 = center + n * u
-			var expected_h: float = z + bank * u - crown * (u_ratio * u_ratio)
+			var c_half: float = float(face.get("carriageway_half", half))
+			var s_width: float = float(face.get("shoulder_width", maxf(half - c_half, 0.0)))
+			var c_mode: int = int(face.get("crown_mode", 0))
+			var m_bank: float = float(face.get("max_bank", 0.0))
+			var a_sign: float = float(face.get("sign", 1.0))
+			var expected_h := Pasture3DRoadMesher.ribbon_cross_section_height(z, bank, crown, u * a_sign, c_half, s_width, c_mode, m_bank)
 			var eval_h := Pasture3DRoadMesher.coons_patch_height_at(pt, Vector2.ZERO, arm_faces, float(fx["elevation"]))
 			var err := absf(eval_h - expected_h)
 			worst_err = maxf(worst_err, err)
@@ -354,6 +359,43 @@ func _e_multi_arm_geometry_coverage() -> void:
 		{"dir": acute_arms[3]["dir"], "trim": 10.0, "half": 4.0, "z": 12.0, "bank": 0.0, "crown": 0.05, "grade": -0.01, "center": acute_arms[3]["dir"] * 10.0},
 	]
 	_check("E", _test_arm_fixture("4-arm acute 35° r=2", acute_arms, 2.0, acute_faces, 12.0), "4-arm acute 35° r=2 passes")
+
+	# 5. Multi-profile crossing: 4 arms with distinct profiles (parabolic, circular, crossfall, v-roof)
+	var multi_arms := [
+		{"dir": Vector2(1, 0), "trim": 8.0, "half": 5.0, "carriageway_half": 4.5, "shoulder_width": 0.5},
+		{"dir": Vector2(0, 1), "trim": 8.0, "half": 4.0, "carriageway_half": 4.0, "shoulder_width": 0.0},
+		{"dir": Vector2(-1, 0), "trim": 8.0, "half": 4.5, "carriageway_half": 3.5, "shoulder_width": 1.0},
+		{"dir": Vector2(0, -1), "trim": 8.0, "half": 4.0, "carriageway_half": 4.0, "shoulder_width": 0.0},
+	]
+	var multi_faces := [
+		{"dir": multi_arms[0]["dir"], "trim": 8.0, "half": 5.0, "carriageway_half": 4.5, "shoulder_width": 0.5, "z": 10.0, "bank": 0.02, "crown": 0.04, "crown_mode": 0, "max_bank": 0.06, "grade": 0.01, "center": Vector2(8.0, 0), "sign": 1.0},
+		{"dir": multi_arms[1]["dir"], "trim": 8.0, "half": 4.0, "carriageway_half": 4.0, "shoulder_width": 0.0, "z": 10.0, "bank": 0.0, "crown": 0.05, "crown_mode": 2, "max_bank": 0.0, "grade": -0.02, "center": Vector2(0, 8.0), "sign": 1.0},
+		{"dir": multi_arms[2]["dir"], "trim": 8.0, "half": 4.5, "carriageway_half": 3.5, "shoulder_width": 1.0, "z": 10.0, "bank": -0.01, "crown": 0.03, "crown_mode": 1, "max_bank": 0.05, "grade": 0.03, "center": Vector2(-8.0, 0), "sign": -1.0},
+		{"dir": multi_arms[3]["dir"], "trim": 8.0, "half": 4.0, "carriageway_half": 4.0, "shoulder_width": 0.0, "z": 10.0, "bank": 0.0, "crown": 0.05, "crown_mode": 3, "max_bank": 0.0, "grade": -0.01, "center": Vector2(0, -8.0), "sign": -1.0},
+	]
+	_check("E", _test_arm_fixture("4-arm multi-profile crossing r=3", multi_arms, 3.0, multi_faces, 10.0), "4-arm multi-profile crossing r=3 passes")
+
+	var multi_worst_err := 0.0
+	for face: Dictionary in multi_faces:
+		var dir: Vector2 = face["dir"]
+		var n := Vector2(-dir.y, dir.x)
+		var center: Vector2 = face["center"]
+		var half: float = float(face["half"])
+		var c_half: float = float(face["carriageway_half"])
+		var c_mode: int = int(face["crown_mode"])
+		var m_bank: float = float(face["max_bank"])
+		var a_sign: float = float(face["sign"])
+		var z: float = float(face["z"])
+		var bank: float = float(face["bank"])
+		var crown: float = float(face["crown"])
+		for u_ratio in [-1.0, -0.5, 0.0, 0.5, 1.0]:
+			var u: float = half * u_ratio
+			var pt: Vector2 = center + n * u
+			var s_width: float = float(face.get("shoulder_width", maxf(half - c_half, 0.0)))
+			var expected_h := Pasture3DRoadMesher.ribbon_cross_section_height(z, bank, crown, u * a_sign, c_half, s_width, c_mode, m_bank)
+			var eval_h := Pasture3DRoadMesher.coons_patch_height_at(pt, Vector2.ZERO, multi_faces, 10.0)
+			multi_worst_err = maxf(multi_worst_err, absf(eval_h - expected_h))
+	_check("E", multi_worst_err < 1e-5, "multi-profile junction cut faces match respective road profiles to < 10^-5 m (worst: %.8f m)" % multi_worst_err)
 
 
 # ---- [F] Active Negative Controls -------------------------------------------------------------------

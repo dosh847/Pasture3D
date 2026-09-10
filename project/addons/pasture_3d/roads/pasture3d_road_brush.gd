@@ -2097,8 +2097,11 @@ func build_run() -> Dictionary:
 		# whole group, and a run that withheld it would silently fall back to the network default.
 		"corner_radius": t.corner_radius,
 		"half_width": t.half_width(resolved_lane_count()),
+		"shoulder_width": t.shoulder_width,
 		# For the junction's cut-face cross-sections: the solver reads the camber there once and stores it.
 		"crown": t.crown,
+		"crown_mode": t.crown_mode,
+		"max_bank": t.max_superelevation,
 	}
 
 
@@ -2358,18 +2361,41 @@ func junction_skips() -> Array:
 	var key := road_key()
 	var out: Array = []
 	for j in net.junctions_for(key):
-		# MIRRORS THE GRADER EXACTLY (see grade_surface): every arm stops at the footprint, the major road
-		# included, and the junction polygon covers what they leave.
-		#
-		# Getting this wrong is not a cosmetic difference. A ribbon that stops where the GROUND does not
-		# leaves a hole at every junction with graded road surface visible through it — the mesh and the
-		# terrain disagreeing about where the road is. The exemption these two sites used to share was
-		# exactly that kind of pairing, and it is retired in BOTH or in neither.
+		# Every arm stops at the footprint cut face, taking its exact arm trim so that the approach
+		# road ribbon and the apron cut face meet at the exact same arc length with zero gap.
 		var s: float = j.arc_length_for(key)
-		var trim: float = j.trim_back_for(key)
-		if not is_finite(s) or not is_finite(trim) or trim <= 0.0:
+		if not is_finite(s):
 			continue
-		out.append([s - trim, s + trim])
+		var ri := j.participant_index(key)
+		if ri < 0:
+			continue
+		var trim_back: float = -1.0
+		var trim_fwd: float = -1.0
+		for ai in j.arm_roads.size():
+			if j.arm_roads[ai] == ri:
+				var a_trim: float = j.arm_trims[ai] if ai < j.arm_trims.size() else j.trim_back_for(key)
+				var extra := maxf(j.effective_radius() - j.radius, 0.0)
+				var eff_trim := a_trim + extra
+				var sign_val: float = j.arm_signs[ai] if ai < j.arm_signs.size() else 0.0
+				if sign_val < 0.0:
+					trim_back = maxf(trim_back, eff_trim)
+				elif sign_val > 0.0:
+					trim_fwd = maxf(trim_fwd, eff_trim)
+				else:
+					var plan := _plan_points()
+					var cum := _plan_cum()
+					var tang := Pasture3DRoadGrader.plan_tangent_at(plan, cum, s)
+					if j.arm_dirs[ai].dot(tang) > 0.0:
+						trim_fwd = maxf(trim_fwd, eff_trim)
+					else:
+						trim_back = maxf(trim_back, eff_trim)
+		if trim_back < 0.0:
+			trim_back = j.trim_back_for(key)
+		if trim_fwd < 0.0:
+			trim_fwd = j.trim_back_for(key)
+		if trim_back <= 0.0 and trim_fwd <= 0.0:
+			continue
+		out.append([s - trim_back, s + trim_fwd])
 	return out
 
 
