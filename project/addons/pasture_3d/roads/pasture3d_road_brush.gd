@@ -587,7 +587,29 @@ func _paint_flat_footprint(path: Path3D) -> void:
 	# solve replaces `last_alignment`. `_rebake_if_corridor_outgrew` compares against it afterwards.
 	var used_pad := _padding()
 	var vs: float = terrain.vertex_spacing
-	var b := _snapped_bounds(_spline_footprint_aabb(path), vs)
+	var full_fp := _spline_footprint_aabb(path)
+	var active_box: AABB = full_fp
+	var has_clip := _clip_aabb.size != Vector3.ZERO
+	if has_clip:
+		var fp_min_x := full_fp.position.x
+		var fp_max_x := full_fp.position.x + full_fp.size.x
+		var fp_min_z := full_fp.position.z
+		var fp_max_z := full_fp.position.z + full_fp.size.z
+
+		var cl_min_x := _clip_aabb.position.x
+		var cl_max_x := _clip_aabb.position.x + _clip_aabb.size.x
+		var cl_min_z := _clip_aabb.position.z
+		var cl_max_z := _clip_aabb.position.z + _clip_aabb.size.z
+
+		var ix0 := maxf(fp_min_x, cl_min_x)
+		var ix1 := minf(fp_max_x, cl_max_x)
+		var iz0 := maxf(fp_min_z, cl_min_z)
+		var iz1 := minf(fp_max_z, cl_max_z)
+		if ix1 <= ix0 or iz1 <= iz0:
+			return
+		active_box = AABB(Vector3(ix0, full_fp.position.y, iz0), Vector3(ix1 - ix0, full_fp.size.y, iz1 - iz0))
+
+	var b := _snapped_bounds(active_box, vs)
 	var min_x: float = b[0]
 	var min_z: float = b[2]
 	var gw := int(round((b[1] - b[0]) / vs)) + 1
@@ -698,7 +720,31 @@ func _paint_flat_footprint(path: Path3D) -> void:
 			_store_stamp_cache(path, _compute_stamp_key(path), min_x, min_z, vs, gw, gh, vals_out,
 					_spline_footprint_aabb(path))
 		else:
-			_stamp_cache.erase(path.get_instance_id())
+			var pid := path.get_instance_id()
+			if _stamp_cache.has(pid) and vals_out.size() == gw * gh:
+				var c: Dictionary = _stamp_cache[pid]
+				var c_vals: PackedFloat32Array = c.get("vals", PackedFloat32Array())
+				var c_gw: int = int(c.get("gw", 0))
+				var c_gh: int = int(c.get("gh", 0))
+				var c_min_x: float = float(c.get("min_x", 0.0))
+				var c_min_z: float = float(c.get("min_z", 0.0))
+				if c_vals.size() == c_gw * c_gh and c_gw > 0 and c_gh > 0:
+					for r in gh:
+						var wz := min_z + float(r) * vs
+						var c_r := int(round((wz - c_min_z) / vs))
+						if c_r < 0 or c_r >= c_gh:
+							continue
+						var sub_row := r * gw
+						var c_row := c_r * c_gw
+						for col in gw:
+							var v := vals_out[sub_row + col]
+							if not is_nan(v):
+								var wx := min_x + float(col) * vs
+								var c_col := int(round((wx - c_min_x) / vs))
+								if c_col >= 0 and c_col < c_gw:
+									c_vals[c_row + c_col] = v
+			else:
+				_stamp_cache.erase(path.get_instance_id())
 
 		if road_mod.publish_masks:
 			road_mod.last_masks = {
@@ -739,7 +785,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 		basey.resize(n)
 		basey.fill(global_position.y)
 
-	var has_clip := _clip_aabb.size != Vector3.ZERO
+	has_clip = _clip_aabb.size != Vector3.ZERO
 	var cx0 := _clip_aabb.position.x
 	var cx1 := _clip_aabb.position.x + _clip_aabb.size.x
 	var cz0 := _clip_aabb.position.z

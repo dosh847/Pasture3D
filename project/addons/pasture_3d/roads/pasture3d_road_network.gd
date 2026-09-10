@@ -1367,13 +1367,25 @@ func paint_roads(p_brushes: Array = []) -> int:
 			terrains[b.terrain.get_instance_id()] = b.terrain
 	# One composite for the whole pass. Each road painted with `composite` off, so an overlap is
 	# composited once rather than once per road that touched it.
-	_composite(terrains)
+	_composite(terrains, repaint)
 	return written
 
 
 ## Push every terrain this pass touched. Separate because a pass that only CLEARED — every road on a
 ## layer deleted — wrote no cells and still has to composite, or the cleared paint stays on screen.
-func _composite(p_terrains: Dictionary) -> void:
+func _composite(p_terrains: Dictionary, p_repaint: Array = []) -> void:
+	var dirty_box := AABB()
+	for b in p_repaint:
+		if b is Pasture3DRoadBrush:
+			var box: AABB = b.paint_bounds()
+			if box.size != Vector3.ZERO:
+				dirty_box = box if dirty_box.size == Vector3.ZERO else dirty_box.merge(box)
 	for t in p_terrains.values():
-		if t.data != null and t.data.has_method("composite_regions"):
-			t.data.composite_regions()
+		if t.data != null:
+			if dirty_box.size != Vector3.ZERO and t.data.has_method("composite_area"):
+				t.data.composite_area(dirty_box, false)
+				if t.data.has_method("update_maps"):
+					t.data.update_maps(Pasture3DTerrainBrush.PASTURE_3D_MAPTYPE_CONTROL, false, false)
+			elif t.data.has_method("composite_regions"):
+				t.data.composite_regions()
+

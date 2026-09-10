@@ -854,4 +854,10 @@ bench/RoadJunctionPatchGate.tscn
 # oracle to <= 1e-5 m, query performance speedup, seam closure validation, and parametric gate derivation.
 bench/RoadCircuitRouteGate.tscn
 
+# --- Spline Edit Localization & Dirty-Rect Rasterization Gate ---
+# Watched green 2026-09-10 (0 failures). Tests localized sub-grid allocation (162x reduction),
+# stamp cache in-place preservation on clipped bakes, disjoint early-return, and scoped composite_area.
+bench/RoadDirtyRectGate.tscn
+
+
 
