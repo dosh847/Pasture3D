@@ -174,6 +174,7 @@ var _timer: SceneTreeTimer = null
 var _full_dirty: bool = false   # A queued refresh needs the whole layer (param/transform/structural change)
 var _dirty_splines: Dictionary = {} # Path3D instance_id -> true: splines whose curve changed (partial redraw)
 var _moved_node: bool = false   # A queued refresh is a node-transform move (dirty-rect, but re-snap all points)
+var _arm_gen: int = 0           # Bumped by every scheduler; lets a layer bake tell "armed before me" from "armed during me"
 var _last_baked_xform: Transform3D = Transform3D() # Global xform baked into the terrain; guards no-op transform refreshes (tab-switch churn)
 var _clip_aabb: AABB = AABB()   # When non-empty, _paint_* writes only cells inside this world box (dirty-rect)
 var _defer_composite: bool = false # When true, _paint_* write samples without compositing (caller composites the box once)
@@ -745,9 +746,22 @@ func _connect_spline(path: Path3D) -> void:
 func _on_path_curve_changed(path: Path3D) -> void:
 	if not is_instance_valid(path):
 		return
+	# Path3D re-emits `curve_changed` for every edit to the curve's CONTENT, not only for a resource swap,
+	# so a plain point move arrived here AND through the relay -- two arms per edit, seen in a bake trace.
+	# The relay owns content edits; this handler owns swaps.
+	if not _curve_swapped(path):
+		return
 	_connect_spline(path)
 	_refresh_group_warnings()
 	_schedule_spline_refresh(path)
+
+
+## True when `path` holds a different Curve3D than the one its relay listens to (or has no relay), i.e. the
+## resource itself was swapped rather than edited. Split out so a headless gate can assert the decision;
+## the scheduling it guards is editor-only.
+func _curve_swapped(path: Path3D) -> bool:
+	var relay: _SplineRelay = _spline_relays.get(path.get_instance_id())
+	return relay == null or relay.curve != path.curve
 
 
 func _clear_tree_settling() -> void:
@@ -981,6 +995,7 @@ func _schedule_refresh() -> void:
 	# Traced HERE and not in `_arm_refresh_timer`, even though all three schedulers funnel through it:
 	# the timer arms at most once per REFRESH_DELAY, so a brush woken five times in that window would
 	# record one cause and hide four. Which scheduler ran is also only known at this level.
+	_arm_gen += 1
 	Pasture3DBakeTrace.arm(self, "full")
 	_arm_refresh_timer()
 
@@ -1000,6 +1015,7 @@ func _schedule_transform_refresh() -> void:
 	for s in _get_splines():
 		_dirty_splines[s.get_instance_id()] = true
 	_moved_node = true
+	_arm_gen += 1
 	Pasture3DBakeTrace.arm(self, "transform")
 	_arm_refresh_timer()
 
@@ -1011,6 +1027,7 @@ func _schedule_spline_refresh(path: Path3D) -> void:
 		return
 	if is_instance_valid(path):
 		_dirty_splines[path.get_instance_id()] = true
+	_arm_gen += 1
 	Pasture3DBakeTrace.arm(self, "spline")
 	_arm_refresh_timer()
 
@@ -1146,6 +1163,7 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 	if not _paints():
 		return
 	var sibs := _tools_on_owner(owner)
+	var sib_gens := _arm_gens(sibs)
 	var _trace_tok := Pasture3DBakeTrace.bake_begin(self, "full")
 	var layer_id := _ensure_layer_for(owner, owner == _layer_owner)
 	var can_undo := record_undo and is_configured() and layer_id >= 0
@@ -1256,6 +1274,7 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 	# §18.5: the preview is built from the surface below this layer, which this bake may have moved.
 	for s in sibs:
 		s._queue_mask_preview()
+	_drop_covered_refreshes(sibs, sib_gens)
 	# `sibs.size()` and not 1: the count is what makes a shared layer legible in the trace — one edit
 	# repainting fourteen Contour brushes reads as fourteen here and as a single bake anywhere else.
 	Pasture3DBakeTrace.bake_end(_trace_tok, sibs.size())
@@ -1803,6 +1822,40 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 ## Emit `baked` on each tool in p_tools. Guarded per tool because this reaches across nodes:
 ## a layer-mate that has left the tree between the bake starting and finishing must not take
 ## the whole bake down with it.
+## Each layer-mate's arm generation at the start of a layer bake, for `_drop_covered_refreshes`.
+func _arm_gens(p_sibs: Array) -> Dictionary:
+	var out := {}
+	for s in p_sibs:
+		if s != self and is_instance_valid(s):
+			out[s] = s._arm_gen
+	return out
+
+
+## A full layer bake repaints every layer-mate, so a mate whose refresh was ALREADY pending when the bake
+## started has nothing left to do: its own timer would repaint the same layer again. A bake trace showed a
+## junction resolve arming seven roads and the layer then baking seven times in a row, six of them redundant.
+##
+## A mate re-armed DURING the bake keeps its refresh. That is not hypothetical: `_rebake_if_corridor_outgrew`
+## schedules from inside the paint, because the bake just learned the corridor it painted was too narrow,
+## and dropping that second pass would leave sheer walls. The generation counter tells the two apart.
+## Returns how many refreshes were dropped.
+func _drop_covered_refreshes(p_sibs: Array, p_gens: Dictionary) -> int:
+	var n := 0
+	for s in p_sibs:
+		if s == self or not is_instance_valid(s) or not p_gens.has(s):
+			continue
+		if s._arm_gen != int(p_gens[s]) or not is_instance_valid(s._timer):
+			continue
+		s._cancel_refresh_timer()
+		s._full_dirty = false
+		s._dirty_splines = {}
+		s._moved_node = false
+		s._last_baked_xform = s.global_transform
+		Pasture3DBakeTrace.mark("%s: pending refresh dropped, already repainted by %s's layer bake" % [s.name, name])
+		n += 1
+	return n
+
+
 func _emit_baked(p_tools) -> void:
 	for s in p_tools:
 		if s != null and is_instance_valid(s):
