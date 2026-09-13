@@ -978,6 +978,10 @@ func _schedule_refresh() -> void:
 	if not _can_auto_refresh():
 		return
 	_full_dirty = true
+	# Traced HERE and not in `_arm_refresh_timer`, even though all three schedulers funnel through it:
+	# the timer arms at most once per REFRESH_DELAY, so a brush woken five times in that window would
+	# record one cause and hide four. Which scheduler ran is also only known at this level.
+	Pasture3DBakeTrace.arm(self, "full")
 	_arm_refresh_timer()
 
 
@@ -996,6 +1000,7 @@ func _schedule_transform_refresh() -> void:
 	for s in _get_splines():
 		_dirty_splines[s.get_instance_id()] = true
 	_moved_node = true
+	Pasture3DBakeTrace.arm(self, "transform")
 	_arm_refresh_timer()
 
 
@@ -1006,6 +1011,7 @@ func _schedule_spline_refresh(path: Path3D) -> void:
 		return
 	if is_instance_valid(path):
 		_dirty_splines[path.get_instance_id()] = true
+	Pasture3DBakeTrace.arm(self, "spline")
 	_arm_refresh_timer()
 
 
@@ -1140,6 +1146,7 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 	if not _paints():
 		return
 	var sibs := _tools_on_owner(owner)
+	var _trace_tok := Pasture3DBakeTrace.bake_begin(self, "full")
 	var layer_id := _ensure_layer_for(owner, owner == _layer_owner)
 	var can_undo := record_undo and is_configured() and layer_id >= 0
 	var ur: EditorUndoRedoManager = _editor_undo() if can_undo else null
@@ -1249,6 +1256,9 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 	# §18.5: the preview is built from the surface below this layer, which this bake may have moved.
 	for s in sibs:
 		s._queue_mask_preview()
+	# `sibs.size()` and not 1: the count is what makes a shared layer legible in the trace — one edit
+	# repainting fourteen Contour brushes reads as fourteen here and as a single bake anywhere else.
+	Pasture3DBakeTrace.bake_end(_trace_tok, sibs.size())
 
 
 ## True when a bake from here might have to BUILD something expensive rather than serve it — solve an
@@ -1718,6 +1728,7 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 
 	var blend := _layer_blend_for(layer_id)
 	var t_start := Time.get_ticks_usec()
+	var _trace_tok := Pasture3DBakeTrace.bake_begin(self, "rect")
 	# Start from a clean edited-flag slate so the targeted update_maps below uploads EXACTLY the regions
 	# this bake touches. composite_region sets is_edited but update_maps never clears it, so without this
 	# every later partial would re-push every region edited this session (the far-spline slowdown).
@@ -1786,6 +1797,7 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 	_queue_mask_preview()
 	if log_bake_timing:
 		_log_bake_timing(clip_box, painted, t_start, t_clear, t_snap, t_paint, t_composite, Time.get_ticks_usec())
+	Pasture3DBakeTrace.bake_end(_trace_tok, painted)
 
 
 ## Emit `baked` on each tool in p_tools. Guarded per tool because this reaches across nodes:
@@ -5397,6 +5409,7 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 		_composite_graph(p_vals, z, zo, mask, amount, basey, add, n)
 		out_slot["stale"] = int(entry.get("key", 0)) != key
 		out_slot["served"] = true
+		Pasture3DBakeTrace.graph(self, frozen, extent, "STALE" if out_slot["stale"] else "HIT")
 		return p_vals
 
 	# Deferred driver pass 1: queue the solve for worker thread and return current surface
@@ -5429,10 +5442,13 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 			"extent": extent,
 			"done": 0,
 		})
+		Pasture3DBakeTrace.graph(self, frozen, extent, "DEFERRED")
 		return p_vals
 
 	# MISS: evaluate, handing the graph the absolute surface for its Input node.
+	var _trace_us := Time.get_ticks_usec()
 	zo = g.evaluate(gw, gh, rect, null, z)
+	Pasture3DBakeTrace.graph(self, frozen, extent, "MISS", Time.get_ticks_usec() - _trace_us)
 	_composite_graph(p_vals, z, zo, mask, amount, basey, add, n)
 	if p_step.has("out"):
 		out_slot["key"] = key

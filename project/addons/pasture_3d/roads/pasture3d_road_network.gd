@@ -364,6 +364,9 @@ func _get_configuration_warnings() -> PackedStringArray:
 
 var _resolve_queued: bool = false
 
+## `junction_surface` answers, one per junction, valid for the life of one resolve. See that function.
+var _junction_surface_cache: Dictionary = {}
+
 
 ## Ask for a junction resolve at the end of the frame. Coalesced, so ten brushes finishing their bakes in
 ## one refresh produce one resolve rather than ten.
@@ -387,6 +390,9 @@ func bake_all_roads() -> int:
 
 
 func request_resolve() -> void:
+	# Dropped here as well as in `resolve_junctions`, so a bake that lands between the request and the
+	# resolve cannot answer from arms or road types the request has just said have moved.
+	_junction_surface_cache.clear()
 	if _resolve_queued:
 		return
 	_resolve_queued = true
@@ -398,6 +404,7 @@ func request_resolve() -> void:
 ## front door.
 func resolve_junctions() -> void:
 	_resolve_queued = false
+	_junction_surface_cache.clear()
 	var brushes := road_brushes()
 	var runs: Array = []
 	for b in brushes:
@@ -714,9 +721,22 @@ func junction_surface(p_junction: Pasture3DRoadJunction) -> Dictionary:
 	# said is not an intersection -- the road would stop at a junction that is not drawn.
 	if p_junction == null or not p_junction.detected or p_junction.disabled:
 		return {}
+
+	# MEMOISED PER RESOLVE. One bake asks for the same junction's surface many times over — the apron
+	# builder, the exclusion mask, `grade_junction_footprints`, and once per partner road in
+	# `_merge_junction_earthwork` — and every one of those rebuilt the footprint polygon and the boundary
+	# heights from arms that had not moved since the last ask. The cache is cleared at the top of
+	# `resolve_junctions`, which is the only place the arms, the elevation, or the participating road
+	# types can change, so it cannot outlive the geometry it describes.
+	var cache_key: int = p_junction.get_instance_id()
+	var cached = _junction_surface_cache.get(cache_key)
+	if cached != null:
+		return cached
+
 	var boundary := Pasture3DRoadMesher.plan_footprint(p_junction.center,
 			p_junction.footprint_arms(), p_junction.effective_corner_radius())
 	if boundary.size() < 3:
+		_junction_surface_cache[cache_key] = {}
 		return {}
 	var faces := _arm_faces(p_junction)
 	var surf := {
@@ -728,6 +748,7 @@ func junction_surface(p_junction: Pasture3DRoadJunction) -> Dictionary:
 		"arm_faces": faces,
 	}
 	surf.merge(_junction_batters(p_junction))
+	_junction_surface_cache[cache_key] = surf
 	return surf
 
 
@@ -870,11 +891,13 @@ func build_junction_surfaces(p_brushes: Array = []) -> int:
 		# A junction whose arms the solver could not describe (a pre-P9a-0 record loaded from disk, or a
 		# degenerate group) produces no polygon, and is SKIPPED rather than falling back to a disc. A
 		# silent fallback would hide exactly the case this replaced the disc for.
-		var boundary := Pasture3DRoadMesher.plan_footprint(j.center, j.footprint_arms(),
-				j.effective_corner_radius())
-		if boundary.size() < 3:
-			continue
+		# The boundary comes back WITH the surface rather than being rebuilt beside it: `junction_surface`
+		# runs the same `plan_footprint` over the same arms, and it returns empty on exactly the
+		# fewer-than-three-vertices case this used to guard for itself.
 		var surf_data: Dictionary = junction_surface(j)
+		if surf_data.is_empty():
+			continue
+		var boundary: PackedVector2Array = surf_data["boundary"]
 		var heights: PackedFloat32Array = surf_data.get("heights", PackedFloat32Array())
 		var spec := {
 			"id": j.id,

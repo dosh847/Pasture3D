@@ -185,6 +185,13 @@ var _plan_cum_cache: PackedFloat32Array = PackedFloat32Array()
 var _plan_token_cache: Array = []
 var _plan_revision: int = 0
 
+## Resampled-plan curvature, keyed by the plan build it was taken from and the sampling it was taken at.
+## `grading_profile` is called several times per bake — its own grading step, `earthwork_over`, and once
+## per road from `_formation_mask` — and every one of those asked for the same resample and the same
+## curvature solve over the same unmoved plan.
+var _curv_cache: PackedFloat32Array = PackedFloat32Array()
+var _curv_key: Array = []
+
 ## How many times the plan has actually been tessellated. Read by RoadCostGate [CA]; a counter rather
 ## than a timer, so the criterion is deterministic and does not depend on what else the machine is doing.
 var plan_builds: int = 0
@@ -722,8 +729,9 @@ func _paint_flat_footprint(path: Path3D) -> void:
 		# worse of the two failures.
 		var vals_out: PackedFloat32Array = out.get("vals", PackedFloat32Array())
 		if not bool(out.get("clipped", true)) and vals_out.size() == gw * gh:
+			# `full_fp` is the same AABB, already walked once at the top of this function.
 			_store_stamp_cache(path, _compute_stamp_key(path), min_x, min_z, vs, gw, gh, vals_out,
-					_spline_footprint_aabb(path))
+					full_fp)
 		else:
 			var pid := path.get_instance_id()
 			if _stamp_cache.has(pid) and vals_out.size() == gw * gh:
@@ -835,7 +843,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 				vals[k] = basey[k]
 
 	_store_stamp_cache(path, _compute_stamp_key(path), min_x, min_z, vs, gw, gh, vals,
-			_spline_footprint_aabb(path))
+			full_fp)
 	if _layer_id >= 0 and terrain.data.has_method("apply_sim_block"):
 		terrain.data.apply_sim_block(_layer_id, min_x, min_z, vs, gw, gh, vals, _blend)
 	else:
@@ -1012,19 +1020,11 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 			jump_mask[i] = seg_jump[k]
 
 	if t != null and t.curve_widening_enabled:
-		var plan := _plan_points()
-		if plan.size() >= 3:
-			var cum := _plan_cum()
-			var r_plan := _resample_plan(plan, cum, p_ds, p_n_s)
-			var curv: PackedFloat32Array
-			if ClassDB.class_has_method("Pasture3DUtil", "road_plan_curvature"):
-				curv = Pasture3DUtil.road_plan_curvature(r_plan)
-			else:
-				curv = Pasture3DRoadAlignmentSolver.plan_curvature(r_plan)
-			var c_size := mini(curv.size(), p_n_s)
-			for i in c_size:
-				var extra := clampf(t.curve_widening_factor * absf(curv[i]), 0.0, t.curve_widening_max)
-				half[i] += extra
+		var curv := _plan_curvature_at(p_ds, p_n_s)
+		var c_size := mini(curv.size(), p_n_s)
+		for i in c_size:
+			var extra := clampf(t.curve_widening_factor * absf(curv[i]), 0.0, t.curve_widening_max)
+			half[i] += extra
 
 	# ---- WHAT THE JUNCTIONS ASK OF THIS ROAD (§6) ---------------------------------------------------
 	#
@@ -1345,44 +1345,50 @@ func _merge_junction_earthwork(p_out: PackedFloat32Array, p_ground: PackedFloat3
 	if net == null or p_ground.size() != p_out.size():
 		return p_out
 	var mine := road_key()
-	var partners := {}
+
+	# ONE WALK OVER THE JUNCTIONS, not one per partner road. Each junction is asked for its footprint
+	# exactly once and its box is then unioned into the entry of every partner sharing it, which is the
+	# same set of boxes the nested version produced — a junction's box does not depend on which partner
+	# is asking, only on whether that partner is a participant.
+	var partner_lo := {}
+	var partner_hi := {}
 	for j in net.junctions_for(mine):
 		# END_TO_END connections meet flush at a single seam rather than laterally crossing;
 		# re-grading the foreign road over the entire terrain grid is redundant and expensive.
 		if j.kind == Pasture3DRoadJunction.JunctionKind.END_TO_END:
 			continue
+		var j_lo := Vector2(INF, INF)
+		var j_hi := Vector2(-INF, -INF)
+		var bnd: PackedVector2Array = net.junction_surface(j).get("boundary", PackedVector2Array())
+		if not bnd.is_empty():
+			for pt in bnd:
+				j_lo.x = minf(j_lo.x, pt.x)
+				j_lo.y = minf(j_lo.y, pt.y)
+				j_hi.x = maxf(j_hi.x, pt.x)
+				j_hi.y = maxf(j_hi.y, pt.y)
+		else:
+			var r: float = maxf(j.radius, 15.0)
+			j_lo = Vector2(j.center.x - r, j.center.y - r)
+			j_hi = Vector2(j.center.x + r, j.center.y + r)
 		for k in j.road_keys:
-			if k != mine:
-				partners[k] = true
-	if partners.is_empty():
+			if k == mine:
+				continue
+			if partner_lo.has(k):
+				var e_lo: Vector2 = partner_lo[k]
+				var e_hi: Vector2 = partner_hi[k]
+				partner_lo[k] = Vector2(minf(e_lo.x, j_lo.x), minf(e_lo.y, j_lo.y))
+				partner_hi[k] = Vector2(maxf(e_hi.x, j_hi.x), maxf(e_hi.y, j_hi.y))
+			else:
+				partner_lo[k] = j_lo
+				partner_hi[k] = j_hi
+	if partner_lo.is_empty():
 		return p_out
 	for b in net.road_brushes():
-		if b == null or b == self or not partners.has(b.road_key()):
+		if b == null or b == self or not partner_lo.has(b.road_key()):
 			continue
 
-		# Compute conflict bounding box of all crossing junctions between mine and b
-		var conflict_lo := Vector2(INF, INF)
-		var conflict_hi := Vector2(-INF, -INF)
-		for j in net.junctions_for(mine):
-			if j.kind == Pasture3DRoadJunction.JunctionKind.END_TO_END:
-				continue
-			if not j.road_keys.has(b.road_key()):
-				continue
-			var surf := net.junction_surface(j)
-			var bnd: PackedVector2Array = surf.get("boundary", PackedVector2Array())
-			if not bnd.is_empty():
-				for pt in bnd:
-					conflict_lo.x = minf(conflict_lo.x, pt.x)
-					conflict_lo.y = minf(conflict_lo.y, pt.y)
-					conflict_hi.x = maxf(conflict_hi.x, pt.x)
-					conflict_hi.y = maxf(conflict_hi.y, pt.y)
-			else:
-				var r: float = maxf(j.radius, 15.0)
-				conflict_lo.x = minf(conflict_lo.x, j.center.x - r)
-				conflict_lo.y = minf(conflict_lo.y, j.center.y - r)
-				conflict_hi.x = maxf(conflict_hi.x, j.center.x + r)
-				conflict_hi.y = maxf(conflict_hi.y, j.center.y + r)
-
+		var conflict_lo: Vector2 = partner_lo[b.road_key()]
+		var conflict_hi: Vector2 = partner_hi[b.road_key()]
 		if not is_finite(conflict_lo.x):
 			continue
 
@@ -1914,6 +1920,26 @@ func _ensure_plan() -> void:
 	_plan_cum_cache = Pasture3DRoadGrader.cumulative_length(out)
 	_plan_token_cache = token
 	plan_builds += 1
+
+
+## Curvature of the plan resampled at `p_ds` over `p_n_s` samples. Empty when the plan cannot bend.
+##
+## Keyed on `plan_builds`, which `_ensure_plan` bumps exactly when the tessellation is rebuilt, so the
+## cache follows the same invalidation the plan itself already has and cannot outlive a moved spline.
+func _plan_curvature_at(p_ds: float, p_n_s: int) -> PackedFloat32Array:
+	var plan := _plan_points()
+	if plan.size() < 3:
+		return PackedFloat32Array()
+	var key: Array = [plan_builds, p_ds, p_n_s]
+	if key == _curv_key:
+		return _curv_cache
+	var r_plan := _resample_plan(plan, _plan_cum(), p_ds, p_n_s)
+	if ClassDB.class_has_method("Pasture3DUtil", "road_plan_curvature"):
+		_curv_cache = Pasture3DUtil.road_plan_curvature(r_plan)
+	else:
+		_curv_cache = Pasture3DRoadAlignmentSolver.plan_curvature(r_plan)
+	_curv_key = key
+	return _curv_cache
 
 
 func _plan_token() -> Array:
@@ -2794,11 +2820,7 @@ func detect_sharp_corners(p_min_radius: float = -1.0) -> Array[Dictionary]:
 	var ds := 0.5
 	var n_s := int(ceil(total_len / ds)) + 1
 	var r_plan := _resample_plan(plan, cum, ds, n_s)
-	var curv: PackedFloat32Array
-	if ClassDB.class_has_method("Pasture3DUtil", "road_plan_curvature"):
-		curv = Pasture3DUtil.road_plan_curvature(r_plan)
-	else:
-		curv = Pasture3DRoadAlignmentSolver.plan_curvature(r_plan)
+	var curv := _plan_curvature_at(ds, n_s)
 
 	var out: Array[Dictionary] = []
 	var in_sharp := false
