@@ -292,9 +292,31 @@ static func report() -> String:
 	return "\n".join(lines)
 
 
+## Default report location. user:// survives the Output panel being flooded and the editor restarting.
+const REPORT_PATH := "user://pasture3d_bake_trace.txt"
+
+
+## The whole in-editor session in one call, for the Pasture3D inspector toggle: `p_on` starts a trace
+## (stacks on); off stops it and writes the report. Returns the absolute report path on stop, "" otherwise.
+##
+## Lives here rather than in the inspector control because an EditorInspectorPlugin cannot be instantiated
+## outside the editor, so logic inside one can never be gated.
+static func set_session(p_on: bool) -> String:
+	if p_on:
+		start(true)
+		print("Pasture3DBakeTrace: STARTED. Reproduce the problem, then untick Bake Trace.")
+		return ""
+	if not enabled:
+		return ""
+	stop()
+	var path := write_report(REPORT_PATH)
+	print("Pasture3DBakeTrace: stopped, %d event(s) -> %s" % [_events.size(), path])
+	return path
+
+
 ## Write `report()` to `p_path` (default under user://, which survives the Output panel being flooded).
 ## Returns the absolute path written, or "" on failure.
-static func write_report(p_path: String = "user://pasture3d_bake_trace.txt") -> String:
+static func write_report(p_path: String = REPORT_PATH) -> String:
 	var f := FileAccess.open(p_path, FileAccess.WRITE)
 	if f == null:
 		push_error("Pasture3DBakeTrace: cannot write %s (%d)" % [p_path, FileAccess.get_open_error()])

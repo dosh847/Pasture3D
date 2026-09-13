@@ -41,6 +41,7 @@ func _run_all() -> void:
 	_c_stale_is_distinguished()
 	_d_bake_span_pairs()
 	_e_ring_buffer_evicts()
+	_g_session_toggle_writes_report()
 	_f_report_the_uncovered_half()
 
 
@@ -171,6 +172,33 @@ func _e_ring_buffer_evicts() -> void:
 		_fail += 1
 		print("    !! eviction is not oldest-first at the cap")
 	Pasture3DBakeTrace.max_events = saved
+	_ran += 1
+
+
+## [G] The inspector toggle's logic: on starts recording, off stops and writes a report that contains what
+## was recorded. The control is a stale file — deleted first, so a report left by an earlier run cannot
+## pass this.
+func _g_session_toggle_writes_report() -> void:
+	print("[G] set_session(true/false) records, then writes the report")
+	var path := Pasture3DBakeTrace.REPORT_PATH
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	Pasture3DBakeTrace.stop()
+	var off_path := Pasture3DBakeTrace.set_session(false)
+	print("    off while not running returns \"%s\" and writes nothing: exists=%s" % [off_path, FileAccess.file_exists(path)])
+	if off_path != "" or FileAccess.file_exists(path):
+		_fail += 1
+		print("    !! stopping an idle trace wrote a report")
+	Pasture3DBakeTrace.set_session(true)
+	var running := Pasture3DBakeTrace.is_running()
+	Pasture3DBakeTrace.mark("gate-G-marker")
+	var wrote := Pasture3DBakeTrace.set_session(false)
+	var text := FileAccess.get_file_as_string(path) if FileAccess.file_exists(path) else ""
+	print("    running after on=%s, stopped after off=%s, report has marker=%s" % [
+			running, not Pasture3DBakeTrace.is_running(), text.contains("gate-G-marker")])
+	if not running or Pasture3DBakeTrace.is_running() or wrote == "" or not text.contains("gate-G-marker"):
+		_fail += 1
+		print("    !! the toggle did not start, stop, or write what it recorded")
 	_ran += 1
 
 

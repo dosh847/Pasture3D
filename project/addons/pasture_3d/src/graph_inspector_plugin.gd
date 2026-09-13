@@ -33,6 +33,10 @@ func _can_handle(p_object: Object) -> bool:
 
 
 func _parse_begin(p_object: Object) -> void:
+	if p_object is Pasture3D:
+		add_custom_control(_bake_trace_row())
+		return
+
 	if p_object is Pasture3DTerrainBrush:
 		var brush := p_object as Pasture3DTerrainBrush
 		if not brush._supports_modifiers():
@@ -45,6 +49,31 @@ func _parse_begin(p_object: Object) -> void:
 	btn.tooltip_text = "Open the Terrain Graph visual editor in the bottom panel"
 	btn.pressed.connect(_open.bind(p_object))
 	add_custom_control(btn)
+
+
+## Bake Trace toggle on the terrain: tick, reproduce, untick, read the report. Deliberately on the terrain
+## rather than on a brush — the question it answers is "which brushes woke", which no single brush knows.
+## State is read from the tracer on every rebuild, so the checkbox cannot disagree with what is recording.
+func _bake_trace_row() -> Control:
+	var row := HBoxContainer.new()
+	var chk := CheckButton.new()
+	chk.text = "Bake Trace"
+	chk.tooltip_text = "Record what armed each brush bake (with call stack), bake costs, and graph cache " 			+ "hits/misses. Untick to write the report to %s." % Pasture3DBakeTrace.REPORT_PATH
+	chk.button_pressed = Pasture3DBakeTrace.is_running()
+	chk.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(chk)
+	var open := Button.new()
+	open.text = "Open Report"
+	open.tooltip_text = "Open the last written bake trace report"
+	open.disabled = not FileAccess.file_exists(Pasture3DBakeTrace.REPORT_PATH)
+	open.pressed.connect(func() -> void:
+		OS.shell_open(ProjectSettings.globalize_path(Pasture3DBakeTrace.REPORT_PATH)))
+	row.add_child(open)
+	chk.toggled.connect(func(p_on: bool) -> void:
+		var path := Pasture3DBakeTrace.set_session(p_on)
+		if path != "":
+			open.disabled = false)
+	return row
 
 
 func _open(p_object: Object) -> void:
