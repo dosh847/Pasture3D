@@ -29,7 +29,7 @@ var plugin: EditorPlugin
 
 func _can_handle(p_object: Object) -> bool:
 	return p_object is Pasture3DTerrainGraph or p_object is Pasture3DNodeGraph \
-			or p_object is Pasture3DTerrainBrush
+			or p_object is Pasture3DTerrainBrush or p_object is Pasture3D
 
 
 func _parse_begin(p_object: Object) -> void:

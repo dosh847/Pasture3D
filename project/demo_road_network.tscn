@@ -136,28 +136,28 @@ metadata/_custom_type_script = "uid://cavpljhh2m0bk"
 script = ExtResource("10_2u6n6")
 speed_limit = nan
 
-[sub_resource type="Resource" id="Resource_8seea"]
+[sub_resource type="Resource" id="Resource_wmy8v"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road5:1:0"
 priority_id = &"Road4:0:0>Road4:0:1"
 point = Vector3(-385.8569, 0, 7.9223557)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_en2k1"]
+[sub_resource type="Resource" id="Resource_6drfx"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road6:1:0"
 priority_id = &"Road4:0:0>Road4:0:1"
 point = Vector3(-385.8569, 0, 0.6764107)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_wmy8v"]
+[sub_resource type="Resource" id="Resource_c1863"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road4:1:0"
 priority_id = &"Road4:0:0>Road4:0:1"
 point = Vector3(-385.8569, 0, -7.6908207)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_6drfx"]
+[sub_resource type="Resource" id="Resource_232jn"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road4:0:1"
 priority_id = &"Road5:0:0>Road4:0:1"
@@ -165,21 +165,21 @@ point = Vector3(-385.8569, 0, 20.064816)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_c1863"]
+[sub_resource type="Resource" id="Resource_c24tk"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road4:0:1"
 priority_id = &"Road5:0:0>Road5:0:1"
 point = Vector3(-385.8569, 0, 1.8657722)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_232jn"]
+[sub_resource type="Resource" id="Resource_t0wjs"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road4:0:1"
 priority_id = &"Road5:0:0>Road6:0:1"
 point = Vector3(-385.8569, 0, 4.9629555)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_c24tk"]
+[sub_resource type="Resource" id="Resource_u7xi1"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road4:0:1"
 priority_id = &"Road4:0:0>Road4:0:1"
@@ -187,28 +187,28 @@ point = Vector3(-385.8569, 0, 20.064816)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_t0wjs"]
+[sub_resource type="Resource" id="Resource_1bslq"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road5:1:0"
 priority_id = &"Road4:0:0>Road4:0:1"
 point = Vector3(-385.8569, 0, -1.6342278)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_u7xi1"]
+[sub_resource type="Resource" id="Resource_4uqqw"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road6:1:0"
 priority_id = &"Road4:0:0>Road4:0:1"
 point = Vector3(-385.8569, 0, -6.239437)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_1bslq"]
+[sub_resource type="Resource" id="Resource_8ogjg"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road4:1:0"
 priority_id = &"Road4:0:0>Road4:0:1"
 point = Vector3(-385.8569, 0, -13.236523)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_4uqqw"]
+[sub_resource type="Resource" id="Resource_2ossa"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road4:0:1"
 priority_id = &"Road6:0:0>Road4:0:1"
@@ -216,21 +216,21 @@ point = Vector3(-385.8569, 0, 20.064816)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_8ogjg"]
+[sub_resource type="Resource" id="Resource_wv1kb"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road4:0:1"
 priority_id = &"Road6:0:0>Road5:0:1"
 point = Vector3(-385.8569, 0, -2.3287754)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_2ossa"]
+[sub_resource type="Resource" id="Resource_2vt0u"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road4:0:1"
 priority_id = &"Road6:0:0>Road6:0:1"
 point = Vector3(-385.8569, 0, 1.034647)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_wv1kb"]
+[sub_resource type="Resource" id="Resource_vxfb6"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road4:0:1"
 priority_id = &"Road4:0:0>Road4:0:1"
@@ -238,21 +238,21 @@ point = Vector3(-385.8569, 0, 20.064816)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_2vt0u"]
+[sub_resource type="Resource" id="Resource_e3cqu"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road5:1:0"
 priority_id = &"Road4:0:0>Road4:0:1"
 point = Vector3(-385.8569, 0, 1.2035408)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_vxfb6"]
+[sub_resource type="Resource" id="Resource_20l8f"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road6:1:0"
 priority_id = &"Road4:0:0>Road4:0:1"
 point = Vector3(-385.8569, 0, -3.7504463)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_e3cqu"]
+[sub_resource type="Resource" id="Resource_cgp2t"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road5:1:0"
 priority_id = &"Road4:0:0>Road5:1:0"
@@ -260,14 +260,14 @@ point = Vector3(-405.9406, 0, -1.6342254)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_20l8f"]
+[sub_resource type="Resource" id="Resource_h4mem"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road6:1:0"
 priority_id = &"Road4:0:0>Road5:1:0"
 point = Vector3(-390.79068, 0, -7.2766895)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_cgp2t"]
+[sub_resource type="Resource" id="Resource_ibch0"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road5:1:0"
 priority_id = &"Road4:0:0>Road5:1:0"
@@ -275,42 +275,42 @@ point = Vector3(-405.9406, 0, -1.6342254)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_h4mem"]
+[sub_resource type="Resource" id="Resource_nnuj8"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road6:1:0"
 priority_id = &"Road4:0:0>Road5:1:0"
 point = Vector3(-389.6796, 0, -8.508286)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_ibch0"]
+[sub_resource type="Resource" id="Resource_fs2j4"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road4:1:0"
 priority_id = &"Road4:0:0>Road5:1:0"
 point = Vector3(-387.35596, 0, -12.288452)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_nnuj8"]
+[sub_resource type="Resource" id="Resource_bc0od"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road5:1:0"
 priority_id = &"Road6:0:0>Road4:0:1"
 point = Vector3(-393.53494, 0, -5.051096)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_fs2j4"]
+[sub_resource type="Resource" id="Resource_ug6be"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road5:1:0"
 priority_id = &"Road6:0:0>Road5:0:1"
 point = Vector3(-392.27417, 0, -5.961752)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_bc0od"]
+[sub_resource type="Resource" id="Resource_325nn"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road5:1:0"
 priority_id = &"Road6:0:0>Road6:0:1"
 point = Vector3(-392.86566, 0, -5.499527)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_ug6be"]
+[sub_resource type="Resource" id="Resource_ya6qv"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road5:1:0"
 priority_id = &"Road4:0:0>Road5:1:0"
@@ -318,21 +318,21 @@ point = Vector3(-405.9406, 0, -1.6342254)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_325nn"]
+[sub_resource type="Resource" id="Resource_5vh83"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road6:1:0"
 priority_id = &"Road4:0:0>Road5:1:0"
 point = Vector3(-390.23907, 0, -7.835877)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_ya6qv"]
+[sub_resource type="Resource" id="Resource_trgl2"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road5:0:1"
 priority_id = &"Road4:1:1>Road4:1:0"
 point = Vector3(-382.3569, 0, -7.6908374)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_5vh83"]
+[sub_resource type="Resource" id="Resource_fd75y"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road5:0:1"
 priority_id = &"Road4:1:1>Road5:0:1"
@@ -340,14 +340,14 @@ point = Vector3(-362.2732, 0, 1.8657727)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_trgl2"]
+[sub_resource type="Resource" id="Resource_mv1ec"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road5:0:1"
 priority_id = &"Road5:0:0>Road4:1:0"
 point = Vector3(-384.1069, 0, -10.8777)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_fd75y"]
+[sub_resource type="Resource" id="Resource_huc74"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road5:0:1"
 priority_id = &"Road5:0:0>Road5:0:1"
@@ -355,35 +355,35 @@ point = Vector3(-362.2732, 0, 1.8657727)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_mv1ec"]
+[sub_resource type="Resource" id="Resource_oix55"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road4:0:1"
 priority_id = &"Road4:0:0>Road5:0:1"
 point = Vector3(-372.27066, 0, 0.11576766)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_huc74"]
+[sub_resource type="Resource" id="Resource_j4mjb"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road5:0:1"
 priority_id = &"Road5:1:1>Road5:1:0"
 point = Vector3(-375.93503, 0, -1.6342263)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_oix55"]
+[sub_resource type="Resource" id="Resource_a40vd"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road5:0:1"
 priority_id = &"Road5:1:1>Road6:1:0"
 point = Vector3(-378.34457, 0, -3.3228683)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_j4mjb"]
+[sub_resource type="Resource" id="Resource_twj3u"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road5:0:1"
 priority_id = &"Road6:0:0>Road4:1:0"
 point = Vector3(-385.0996, 0, -13.874997)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_a40vd"]
+[sub_resource type="Resource" id="Resource_4xjyu"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road5:0:1"
 priority_id = &"Road6:0:0>Road5:0:1"
@@ -391,14 +391,14 @@ point = Vector3(-362.2732, 0, 1.8657727)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_twj3u"]
+[sub_resource type="Resource" id="Resource_t1say"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road5:0:1"
 priority_id = &"Road6:1:1>Road4:1:0"
 point = Vector3(-380.5603, 0, -5.3666005)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_4xjyu"]
+[sub_resource type="Resource" id="Resource_5exi1"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road6:1:0"
 priority_id = &"Road4:0:0>Road6:1:0"
@@ -406,7 +406,7 @@ point = Vector3(-399.05286, 0, -16.05287)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_t1say"]
+[sub_resource type="Resource" id="Resource_5ifhg"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road6:1:0"
 priority_id = &"Road4:0:0>Road6:1:0"
@@ -414,7 +414,7 @@ point = Vector3(-399.05286, 0, -16.05287)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_5exi1"]
+[sub_resource type="Resource" id="Resource_6b7ih"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road6:1:0"
 priority_id = &"Road4:0:0>Road6:1:0"
@@ -422,21 +422,21 @@ point = Vector3(-399.05286, 0, -16.05287)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_5ifhg"]
+[sub_resource type="Resource" id="Resource_5biyt"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road6:0:1"
 priority_id = &"Road4:1:1>Road4:1:0"
 point = Vector3(-382.3569, 0, -0.077402115)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_6b7ih"]
+[sub_resource type="Resource" id="Resource_wb4v1"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road6:0:1"
 priority_id = &"Road4:1:1>Road5:0:1"
 point = Vector3(-377.5784, 0, 7.6583805)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_5biyt"]
+[sub_resource type="Resource" id="Resource_54m0y"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road6:0:1"
 priority_id = &"Road4:1:1>Road6:0:1"
@@ -444,21 +444,21 @@ point = Vector3(-369.49954, 0, 16.284418)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_wb4v1"]
+[sub_resource type="Resource" id="Resource_oaenh"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road6:0:1"
 priority_id = &"Road5:0:0>Road4:1:0"
 point = Vector3(-385.04138, 0, -8.9845295)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_54m0y"]
+[sub_resource type="Resource" id="Resource_jygnk"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road6:0:1"
 priority_id = &"Road5:0:0>Road5:0:1"
 point = Vector3(-381.33908, 0, 1.865774)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_oaenh"]
+[sub_resource type="Resource" id="Resource_1uogm"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road6:0:1"
 priority_id = &"Road5:0:0>Road6:0:1"
@@ -466,42 +466,42 @@ point = Vector3(-369.49954, 0, 16.284418)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_jygnk"]
+[sub_resource type="Resource" id="Resource_n6dk6"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road4:0:1"
 priority_id = &"Road4:0:0>Road6:0:1"
 point = Vector3(-379.68494, 0, 4.733332)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_1uogm"]
+[sub_resource type="Resource" id="Resource_cgoio"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road6:0:1"
 priority_id = &"Road5:1:1>Road5:1:0"
 point = Vector3(-382.95413, 0, -1.6342261)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_n6dk6"]
+[sub_resource type="Resource" id="Resource_wnfbu"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road6:0:1"
 priority_id = &"Road5:1:1>Road6:1:0"
 point = Vector3(-384.22842, 0, -5.4819326)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_cgoio"]
+[sub_resource type="Resource" id="Resource_y6l4y"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road6:0:1"
 priority_id = &"Road6:0:0>Road4:1:0"
 point = Vector3(-385.5873, 0, -13.426127)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_wnfbu"]
+[sub_resource type="Resource" id="Resource_l4wod"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road6:0:1"
 priority_id = &"Road6:0:0>Road5:0:1"
 point = Vector3(-382.7103, 0, -0.99859333)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_y6l4y"]
+[sub_resource type="Resource" id="Resource_t8jkn"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road6:0:1"
 priority_id = &"Road6:0:0>Road6:0:1"
@@ -509,28 +509,28 @@ point = Vector3(-369.49954, 0, 16.284418)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_l4wod"]
+[sub_resource type="Resource" id="Resource_ay3v3"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road4:0:1"
 priority_id = &"Road4:0:0>Road6:0:1"
 point = Vector3(-374.6975, 0, 11.023421)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_t8jkn"]
+[sub_resource type="Resource" id="Resource_nt37a"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road6:0:1"
 priority_id = &"Road6:1:1>Road5:1:0"
 point = Vector3(-380.3683, 0, 3.6362724)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_ay3v3"]
+[sub_resource type="Resource" id="Resource_a11lp"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:0:0>Road6:0:1"
 priority_id = &"Road6:1:1>Road6:1:0"
 point = Vector3(-382.60178, 0, -0.71574044)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_nt37a"]
+[sub_resource type="Resource" id="Resource_x6twm"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road4:1:0"
 priority_id = &"Road4:1:1>Road4:1:0"
@@ -538,21 +538,21 @@ point = Vector3(-382.3569, 0, -19.83326)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_a11lp"]
+[sub_resource type="Resource" id="Resource_mamxc"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road5:0:1"
 priority_id = &"Road4:1:1>Road4:1:0"
 point = Vector3(-382.3569, 0, 1.8657742)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_x6twm"]
+[sub_resource type="Resource" id="Resource_ago0q"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road6:0:1"
 priority_id = &"Road4:1:1>Road4:1:0"
 point = Vector3(-382.3569, 0, 6.6124487)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_mamxc"]
+[sub_resource type="Resource" id="Resource_0moih"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road4:1:0"
 priority_id = &"Road5:1:1>Road4:1:0"
@@ -560,28 +560,28 @@ point = Vector3(-382.3569, 0, -19.83326)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_ago0q"]
+[sub_resource type="Resource" id="Resource_gfryu"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road4:0:1"
 priority_id = &"Road4:1:1>Road4:1:0"
 point = Vector3(-382.3569, 0, 7.922373)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_0moih"]
+[sub_resource type="Resource" id="Resource_pxuj0"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road4:1:0"
 priority_id = &"Road5:1:1>Road5:1:0"
 point = Vector3(-382.3569, 0, -1.6342258)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_gfryu"]
+[sub_resource type="Resource" id="Resource_y4k8p"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road4:1:0"
 priority_id = &"Road5:1:1>Road6:1:0"
 point = Vector3(-382.3569, 0, -4.611376)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_pxuj0"]
+[sub_resource type="Resource" id="Resource_tbpnh"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road4:1:0"
 priority_id = &"Road4:1:1>Road4:1:0"
@@ -589,21 +589,21 @@ point = Vector3(-382.3569, 0, -19.83326)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_y4k8p"]
+[sub_resource type="Resource" id="Resource_cgnb8"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road5:0:1"
 priority_id = &"Road4:1:1>Road4:1:0"
 point = Vector3(-382.3569, 0, -0.88533974)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_tbpnh"]
+[sub_resource type="Resource" id="Resource_i1k4x"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road6:0:1"
 priority_id = &"Road4:1:1>Road4:1:0"
 point = Vector3(-382.3569, 0, 4.297657)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_cgnb8"]
+[sub_resource type="Resource" id="Resource_e0efa"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road4:1:0"
 priority_id = &"Road6:1:1>Road4:1:0"
@@ -611,56 +611,56 @@ point = Vector3(-382.3569, 0, -19.83326)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_i1k4x"]
+[sub_resource type="Resource" id="Resource_kssyq"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road4:0:1"
 priority_id = &"Road4:1:1>Road4:1:0"
 point = Vector3(-382.3569, 0, 13.501786)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_e0efa"]
+[sub_resource type="Resource" id="Resource_38rhj"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road4:1:0"
 priority_id = &"Road6:1:1>Road5:1:0"
 point = Vector3(-382.3569, 0, 2.6929455)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_kssyq"]
+[sub_resource type="Resource" id="Resource_653dm"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road4:1:0"
 priority_id = &"Road6:1:1>Road6:1:0"
 point = Vector3(-382.3569, 0, -0.4874401)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_38rhj"]
+[sub_resource type="Resource" id="Resource_gc02m"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road4:1:0"
 priority_id = &"Road4:1:1>Road5:1:0"
 point = Vector3(-395.9431, 0, 0.1157766)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_653dm"]
+[sub_resource type="Resource" id="Resource_kdoyl"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road5:1:0"
 priority_id = &"Road5:0:0>Road5:0:1"
 point = Vector3(-392.27875, 0, 1.8657737)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_gc02m"]
+[sub_resource type="Resource" id="Resource_infdw"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road5:1:0"
 priority_id = &"Road5:0:0>Road6:0:1"
 point = Vector3(-389.7186, 0, 3.6747355)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_kdoyl"]
+[sub_resource type="Resource" id="Resource_100ig"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road5:1:0"
 priority_id = &"Road5:1:1>Road4:0:1"
 point = Vector3(-384.1069, 0, 11.109296)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_infdw"]
+[sub_resource type="Resource" id="Resource_ack13"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road5:1:0"
 priority_id = &"Road5:1:1>Road5:1:0"
@@ -668,21 +668,21 @@ point = Vector3(-405.9406, 0, -1.6342254)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_100ig"]
+[sub_resource type="Resource" id="Resource_k54wh"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road5:1:0"
 priority_id = &"Road6:0:0>Road4:0:1"
 point = Vector3(-387.77322, 0, 5.479901)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_ack13"]
+[sub_resource type="Resource" id="Resource_6xvbd"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road5:1:0"
 priority_id = &"Road6:1:1>Road4:0:1"
 point = Vector3(-383.1088, 0, 14.12789)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_k54wh"]
+[sub_resource type="Resource" id="Resource_xvdw2"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road5:1:0"
 priority_id = &"Road6:1:1>Road5:1:0"
@@ -690,24 +690,9 @@ point = Vector3(-405.9406, 0, -1.6342254)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_6xvbd"]
-script = ExtResource("13_en2k1")
-yielding_id = &"Road5:0:0>Road5:0:1"
-priority_id = &"Road4:1:1>Road5:0:1"
-point = Vector3(-362.2732, 0, 1.8657727)
-merge = true
-reason = 2
-
-[sub_resource type="Resource" id="Resource_xvdw2"]
-script = ExtResource("13_en2k1")
-yielding_id = &"Road5:0:0>Road6:0:1"
-priority_id = &"Road4:1:1>Road5:0:1"
-point = Vector3(-378.6424, 0, 8.869877)
-reason = 2
-
 [sub_resource type="Resource" id="Resource_pgjnv"]
 script = ExtResource("13_en2k1")
-yielding_id = &"Road6:0:0>Road5:0:1"
+yielding_id = &"Road5:0:0>Road5:0:1"
 priority_id = &"Road4:1:1>Road5:0:1"
 point = Vector3(-362.2732, 0, 1.8657727)
 merge = true
@@ -715,75 +700,90 @@ reason = 2
 
 [sub_resource type="Resource" id="Resource_0m8im"]
 script = ExtResource("13_en2k1")
+yielding_id = &"Road5:0:0>Road6:0:1"
+priority_id = &"Road4:1:1>Road5:0:1"
+point = Vector3(-378.6424, 0, 8.869877)
+reason = 2
+
+[sub_resource type="Resource" id="Resource_ywe60"]
+script = ExtResource("13_en2k1")
+yielding_id = &"Road6:0:0>Road5:0:1"
+priority_id = &"Road4:1:1>Road5:0:1"
+point = Vector3(-362.2732, 0, 1.8657727)
+merge = true
+reason = 2
+
+[sub_resource type="Resource" id="Resource_4v8qv"]
+script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road6:0:1"
 priority_id = &"Road4:1:1>Road5:0:1"
 point = Vector3(-378.12265, 0, 8.245198)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_ywe60"]
+[sub_resource type="Resource" id="Resource_wi0th"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road5:0:1"
 priority_id = &"Road6:1:1>Road4:1:0"
 point = Vector3(-374.85675, 0, 5.3945966)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_4v8qv"]
+[sub_resource type="Resource" id="Resource_7l1vf"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road4:0:1"
 priority_id = &"Road4:1:1>Road5:0:1"
 point = Vector3(-380.87482, 0, 12.5646515)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_wi0th"]
+[sub_resource type="Resource" id="Resource_utu38"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road5:0:1"
 priority_id = &"Road6:1:1>Road5:1:0"
 point = Vector3(-376.08716, 0, 6.3085675)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_7l1vf"]
+[sub_resource type="Resource" id="Resource_wrev1"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road5:0:1"
 priority_id = &"Road6:1:1>Road6:1:0"
 point = Vector3(-375.53235, 0, 5.875013)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_utu38"]
+[sub_resource type="Resource" id="Resource_evjvv"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road4:1:0"
 priority_id = &"Road4:1:1>Road6:1:0"
 point = Vector3(-388.65704, 0, -4.3751526)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_wrev1"]
+[sub_resource type="Resource" id="Resource_mp34d"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road6:1:0"
 priority_id = &"Road5:0:0>Road5:0:1"
 point = Vector3(-385.38385, 0, 1.8657734)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_evjvv"]
+[sub_resource type="Resource" id="Resource_50p4w"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road6:1:0"
 priority_id = &"Road5:0:0>Road6:0:1"
 point = Vector3(-384.03534, 0, 5.8214245)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_mp34d"]
+[sub_resource type="Resource" id="Resource_ldkx7"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road6:1:0"
 priority_id = &"Road5:1:1>Road4:0:1"
 point = Vector3(-383.20654, 0, 9.28412)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_50p4w"]
+[sub_resource type="Resource" id="Resource_2uad4"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road6:1:0"
 priority_id = &"Road5:1:1>Road5:1:0"
 point = Vector3(-387.0502, 0, -1.6342269)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_ldkx7"]
+[sub_resource type="Resource" id="Resource_njnv1"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road6:1:0"
 priority_id = &"Road5:1:1>Road6:1:0"
@@ -791,42 +791,42 @@ point = Vector3(-399.05286, 0, -16.05287)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_2uad4"]
+[sub_resource type="Resource" id="Resource_o4aa5"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road4:1:0"
 priority_id = &"Road4:1:1>Road6:1:0"
 point = Vector3(-393.93784, 0, -10.716984)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_njnv1"]
+[sub_resource type="Resource" id="Resource_u8l6e"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road6:1:0"
 priority_id = &"Road6:0:0>Road5:0:1"
 point = Vector3(-388.00662, 0, -3.3291435)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_o4aa5"]
+[sub_resource type="Resource" id="Resource_kmnvw"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road6:1:0"
 priority_id = &"Road6:0:0>Road6:0:1"
 point = Vector3(-385.63043, 0, 1.2457805)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_u8l6e"]
+[sub_resource type="Resource" id="Resource_vsfph"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road6:1:0"
 priority_id = &"Road6:1:1>Road4:0:1"
 point = Vector3(-382.6353, 0, 13.700025)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_kmnvw"]
+[sub_resource type="Resource" id="Resource_vb0em"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road6:1:0"
 priority_id = &"Road6:1:1>Road5:1:0"
 point = Vector3(-385.61603, 0, 1.2819862)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_vsfph"]
+[sub_resource type="Resource" id="Resource_o8814"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road4:1:1>Road6:1:0"
 priority_id = &"Road6:1:1>Road6:1:0"
@@ -834,7 +834,7 @@ point = Vector3(-399.05286, 0, -16.05287)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_vb0em"]
+[sub_resource type="Resource" id="Resource_gfuj5"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road6:0:1"
 priority_id = &"Road4:1:1>Road6:0:1"
@@ -842,7 +842,7 @@ point = Vector3(-369.49954, 0, 16.284418)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_o8814"]
+[sub_resource type="Resource" id="Resource_kc5op"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road6:0:1"
 priority_id = &"Road4:1:1>Road6:0:1"
@@ -850,7 +850,7 @@ point = Vector3(-369.49954, 0, 16.284418)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_gfuj5"]
+[sub_resource type="Resource" id="Resource_dec13"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road4:1:0"
 priority_id = &"Road5:1:1>Road4:1:0"
@@ -858,21 +858,21 @@ point = Vector3(-382.3569, 0, -19.83326)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_kc5op"]
+[sub_resource type="Resource" id="Resource_umgy6"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road4:1:0"
 priority_id = &"Road5:1:1>Road5:1:0"
 point = Vector3(-392.27875, 0, -1.6342258)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_dec13"]
+[sub_resource type="Resource" id="Resource_recgq"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road4:1:0"
 priority_id = &"Road5:1:1>Road6:1:0"
 point = Vector3(-386.62198, 0, -6.620413)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_umgy6"]
+[sub_resource type="Resource" id="Resource_otds0"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road4:1:0"
 priority_id = &"Road5:0:0>Road4:1:0"
@@ -880,28 +880,28 @@ point = Vector3(-382.3569, 0, -19.83326)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_recgq"]
+[sub_resource type="Resource" id="Resource_qxyh0"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road4:1:0"
 priority_id = &"Road6:0:0>Road4:0:1"
 point = Vector3(-391.43536, 0, -2.1769514)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_otds0"]
+[sub_resource type="Resource" id="Resource_4p6pk"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road4:1:0"
 priority_id = &"Road6:0:0>Road5:0:1"
 point = Vector3(-389.0602, 0, -3.9768214)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_qxyh0"]
+[sub_resource type="Resource" id="Resource_wsgm6"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road4:1:0"
 priority_id = &"Road6:0:0>Road6:0:1"
 point = Vector3(-390.2256, 0, -3.0382104)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_4p6pk"]
+[sub_resource type="Resource" id="Resource_iwqm5"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road4:1:0"
 priority_id = &"Road6:1:1>Road4:1:0"
@@ -909,39 +909,23 @@ point = Vector3(-382.3569, 0, -19.83326)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_wsgm6"]
+[sub_resource type="Resource" id="Resource_54f51"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road4:1:0"
 priority_id = &"Road6:1:1>Road5:1:0"
 point = Vector3(-393.79617, 0, -0.8196627)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_iwqm5"]
+[sub_resource type="Resource" id="Resource_pf6ux"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road4:1:0"
 priority_id = &"Road6:1:1>Road6:1:0"
 point = Vector3(-387.6229, 0, -5.396856)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_54f51"]
-script = ExtResource("13_en2k1")
-yielding_id = &"Road5:1:1>Road4:0:1"
-priority_id = &"Road5:0:0>Road4:0:1"
-point = Vector3(-385.8569, 0, 20.064816)
-merge = true
-reason = 1
-
-[sub_resource type="Resource" id="Resource_pf6ux"]
-script = ExtResource("13_en2k1")
-yielding_id = &"Road6:0:0>Road4:0:1"
-priority_id = &"Road5:0:0>Road4:0:1"
-point = Vector3(-385.8569, 0, 20.064816)
-merge = true
-reason = 2
-
 [sub_resource type="Resource" id="Resource_k7tuv"]
 script = ExtResource("13_en2k1")
-yielding_id = &"Road6:1:1>Road4:0:1"
+yielding_id = &"Road5:1:1>Road4:0:1"
 priority_id = &"Road5:0:0>Road4:0:1"
 point = Vector3(-385.8569, 0, 20.064816)
 merge = true
@@ -949,19 +933,35 @@ reason = 1
 
 [sub_resource type="Resource" id="Resource_67xn4"]
 script = ExtResource("13_en2k1")
+yielding_id = &"Road6:0:0>Road4:0:1"
+priority_id = &"Road5:0:0>Road4:0:1"
+point = Vector3(-385.8569, 0, 20.064816)
+merge = true
+reason = 2
+
+[sub_resource type="Resource" id="Resource_x2j5u"]
+script = ExtResource("13_en2k1")
+yielding_id = &"Road6:1:1>Road4:0:1"
+priority_id = &"Road5:0:0>Road4:0:1"
+point = Vector3(-385.8569, 0, 20.064816)
+merge = true
+reason = 1
+
+[sub_resource type="Resource" id="Resource_lacsc"]
+script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road4:0:1"
 priority_id = &"Road5:0:0>Road5:0:1"
 point = Vector3(-375.93506, 0, 1.8657733)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_x2j5u"]
+[sub_resource type="Resource" id="Resource_0kbxl"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road4:0:1"
 priority_id = &"Road5:0:0>Road5:0:1"
 point = Vector3(-389.2121, 0, 1.8657739)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_lacsc"]
+[sub_resource type="Resource" id="Resource_1ohx4"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road5:0:1"
 priority_id = &"Road5:0:0>Road5:0:1"
@@ -969,49 +969,49 @@ point = Vector3(-362.2732, 0, 1.8657727)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_0kbxl"]
+[sub_resource type="Resource" id="Resource_xtmyc"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road6:0:1"
 priority_id = &"Road5:0:0>Road5:0:1"
 point = Vector3(-384.96542, 0, 1.8657737)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_1ohx4"]
+[sub_resource type="Resource" id="Resource_441au"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road5:0:1"
 priority_id = &"Road6:1:1>Road4:1:0"
 point = Vector3(-377.28848, 0, 1.8657734)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_xtmyc"]
+[sub_resource type="Resource" id="Resource_75y6k"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road5:0:1"
 priority_id = &"Road6:1:1>Road5:1:0"
 point = Vector3(-384.11276, 0, 1.8657737)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_441au"]
+[sub_resource type="Resource" id="Resource_hn8sp"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:0:0>Road5:0:1"
 priority_id = &"Road6:1:1>Road6:1:0"
 point = Vector3(-379.83276, 0, 1.8657734)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_75y6k"]
+[sub_resource type="Resource" id="Resource_3orwq"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road4:0:1"
 priority_id = &"Road5:0:0>Road6:0:1"
 point = Vector3(-381.68912, 0, 6.971394)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_hn8sp"]
+[sub_resource type="Resource" id="Resource_r4g2w"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road4:0:1"
 priority_id = &"Road5:0:0>Road6:0:1"
 point = Vector3(-388.3018, 0, 4.136403)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_3orwq"]
+[sub_resource type="Resource" id="Resource_bfjj8"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road6:0:1"
 priority_id = &"Road5:0:0>Road6:0:1"
@@ -1019,14 +1019,14 @@ point = Vector3(-369.49954, 0, 16.284418)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_r4g2w"]
+[sub_resource type="Resource" id="Resource_q6v2i"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road4:0:1"
 priority_id = &"Road5:0:0>Road6:0:1"
 point = Vector3(-375.6694, 0, 11.047674)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_bfjj8"]
+[sub_resource type="Resource" id="Resource_bmo2j"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road4:1:0"
 priority_id = &"Road5:1:1>Road4:1:0"
@@ -1034,7 +1034,7 @@ point = Vector3(-382.3569, 0, -19.83326)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_q6v2i"]
+[sub_resource type="Resource" id="Resource_vbtk8"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road4:1:0"
 priority_id = &"Road5:1:1>Road4:1:0"
@@ -1042,7 +1042,7 @@ point = Vector3(-382.3569, 0, -19.83326)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_bmo2j"]
+[sub_resource type="Resource" id="Resource_31hyx"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road4:0:1"
 priority_id = &"Road6:0:0>Road4:0:1"
@@ -1050,28 +1050,28 @@ point = Vector3(-385.8569, 0, 20.064816)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_vbtk8"]
+[sub_resource type="Resource" id="Resource_u6h1j"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road4:0:1"
 priority_id = &"Road6:0:0>Road5:0:1"
 point = Vector3(-374.46457, 0, 1.0752615)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_31hyx"]
+[sub_resource type="Resource" id="Resource_cu3ou"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road4:0:1"
 priority_id = &"Road6:0:0>Road6:0:1"
 point = Vector3(-380.7394, 0, 5.8056235)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_u6h1j"]
+[sub_resource type="Resource" id="Resource_enp21"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road4:0:1"
 priority_id = &"Road6:1:1>Road4:1:0"
 point = Vector3(-376.9344, 0, 2.5088518)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_cu3ou"]
+[sub_resource type="Resource" id="Resource_p43qm"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road4:0:1"
 priority_id = &"Road5:1:1>Road4:0:1"
@@ -1079,49 +1079,49 @@ point = Vector3(-385.8569, 0, 20.064816)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_enp21"]
+[sub_resource type="Resource" id="Resource_8hfky"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road4:0:1"
 priority_id = &"Road6:1:1>Road5:1:0"
 point = Vector3(-379.26816, 0, 4.321589)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_p43qm"]
+[sub_resource type="Resource" id="Resource_vf2hi"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road4:0:1"
 priority_id = &"Road6:1:1>Road6:1:0"
 point = Vector3(-378.17056, 0, 3.415422)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_8hfky"]
+[sub_resource type="Resource" id="Resource_qo601"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road5:1:0"
 priority_id = &"Road6:0:0>Road4:0:1"
 point = Vector3(-391.1272, 0, -1.634226)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_vf2hi"]
+[sub_resource type="Resource" id="Resource_r2138"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road5:1:0"
 priority_id = &"Road6:0:0>Road5:0:1"
 point = Vector3(-384.36438, 0, -1.6342263)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_qo601"]
+[sub_resource type="Resource" id="Resource_40cqs"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road5:1:1>Road5:1:0"
 priority_id = &"Road6:0:0>Road6:0:1"
 point = Vector3(-388.7196, 0, -1.6342261)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_r2138"]
+[sub_resource type="Resource" id="Resource_unfna"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road4:1:0"
 priority_id = &"Road5:1:1>Road5:1:0"
 point = Vector3(-379.14545, 0, -1.6342266)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_40cqs"]
+[sub_resource type="Resource" id="Resource_ed407"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road5:1:0"
 priority_id = &"Road5:1:1>Road5:1:0"
@@ -1129,28 +1129,28 @@ point = Vector3(-405.9406, 0, -1.6342254)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_unfna"]
+[sub_resource type="Resource" id="Resource_nn8fc"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road6:1:0"
 priority_id = &"Road5:1:1>Road5:1:0"
 point = Vector3(-383.58698, 0, -1.6342263)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_ed407"]
+[sub_resource type="Resource" id="Resource_ekri5"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road4:1:0"
 priority_id = &"Road5:1:1>Road6:1:0"
 point = Vector3(-392.76984, 0, -10.739693)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_nn8fc"]
+[sub_resource type="Resource" id="Resource_yhd7y"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road4:1:0"
 priority_id = &"Road5:1:1>Road6:1:0"
 point = Vector3(-380.0014, 0, -3.8535686)
 reason = 2
 
-[sub_resource type="Resource" id="Resource_ekri5"]
+[sub_resource type="Resource" id="Resource_mrc6d"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road6:1:0"
 priority_id = &"Road5:1:1>Road6:1:0"
@@ -1158,7 +1158,7 @@ point = Vector3(-399.05286, 0, -16.05287)
 merge = true
 reason = 2
 
-[sub_resource type="Resource" id="Resource_yhd7y"]
+[sub_resource type="Resource" id="Resource_tujcf"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road4:1:0"
 priority_id = &"Road6:1:1>Road4:1:0"
@@ -1166,14 +1166,14 @@ point = Vector3(-382.3569, 0, -19.83326)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_mrc6d"]
+[sub_resource type="Resource" id="Resource_qrtye"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road4:1:0"
 priority_id = &"Road6:1:1>Road6:1:0"
 point = Vector3(-393.34186, 0, -10.728571)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_tujcf"]
+[sub_resource type="Resource" id="Resource_jwsju"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road4:0:1"
 priority_id = &"Road6:0:0>Road4:0:1"
@@ -1181,70 +1181,70 @@ point = Vector3(-385.8569, 0, 20.064816)
 merge = true
 reason = 1
 
-[sub_resource type="Resource" id="Resource_qrtye"]
+[sub_resource type="Resource" id="Resource_8la5u"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road4:0:1"
 priority_id = &"Road6:1:1>Road5:1:0"
 point = Vector3(-390.26407, 0, -0.11422944)
 reason = 3
 
-[sub_resource type="Resource" id="Resource_jwsju"]
+[sub_resource type="Resource" id="Resource_s8set"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road5:1:0"
 priority_id = &"Road6:0:0>Road4:0:1"
 point = Vector3(-390.26407, 0, -0.11422944)
 reason = 3
 
-[sub_resource type="Resource" id="Resource_8la5u"]
+[sub_resource type="Resource" id="Resource_ljssy"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road5:0:1"
 priority_id = &"Road6:1:1>Road4:1:0"
 point = Vector3(-378.11746, 0, 0.3603447)
 reason = 3
 
-[sub_resource type="Resource" id="Resource_s8set"]
+[sub_resource type="Resource" id="Resource_go66u"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road4:1:0"
 priority_id = &"Road6:0:0>Road5:0:1"
 point = Vector3(-378.11746, 0, 0.3603447)
 reason = 3
 
-[sub_resource type="Resource" id="Resource_ljssy"]
+[sub_resource type="Resource" id="Resource_synhj"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road5:0:1"
 priority_id = &"Road6:1:1>Road6:1:0"
 point = Vector3(-383.00726, 0, -1.0937642)
 reason = 3
 
-[sub_resource type="Resource" id="Resource_go66u"]
+[sub_resource type="Resource" id="Resource_7to37"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road6:1:0"
 priority_id = &"Road6:0:0>Road5:0:1"
 point = Vector3(-383.00726, 0, -1.0937642)
 reason = 3
 
-[sub_resource type="Resource" id="Resource_synhj"]
+[sub_resource type="Resource" id="Resource_kxm5b"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road4:0:1"
 priority_id = &"Road6:0:0>Road6:0:1"
 point = Vector3(-375.13104, 0, 11.034238)
 reason = 1
 
-[sub_resource type="Resource" id="Resource_7to37"]
+[sub_resource type="Resource" id="Resource_7ykbl"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:0:0>Road6:0:1"
 priority_id = &"Road6:1:1>Road5:1:0"
 point = Vector3(-385.5785, 0, 1.2942181)
 reason = 3
 
-[sub_resource type="Resource" id="Resource_kxm5b"]
+[sub_resource type="Resource" id="Resource_sq1qf"]
 script = ExtResource("13_en2k1")
 yielding_id = &"Road6:1:1>Road5:1:0"
 priority_id = &"Road6:0:0>Road6:0:1"
 point = Vector3(-385.5785, 0, 1.2942181)
 reason = 3
 
-[sub_resource type="Curve3D" id="Curve3D_7ykbl"]
+[sub_resource type="Curve3D" id="Curve3D_0r84s"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 0, 0, 16.75719, -385.8569, 0, -19.83326, 0, 0, -16.75719, 0, 0, 0, -385.8569, 0, 20.064816),
 "tilts": PackedFloat32Array(0, 0)
@@ -1256,9 +1256,9 @@ script = ExtResource("14_wmy8v")
 id = &"Road4:0:0>Road4:0:1"
 from_key = "Road4"
 to_key = "Road4"
-curve = SubResource("Curve3D_7ykbl")
+curve = SubResource("Curve3D_0r84s")
 
-[sub_resource type="Curve3D" id="Curve3D_sq1qf"]
+[sub_resource type="Curve3D" id="Curve3D_akuvw"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 0, 0, 11.383164, -385.8569, 0, -19.83326, 11.383164, 0, -5.088671e-07, 0, 0, 0, -405.9406, 0, -1.6342254),
 "tilts": PackedFloat32Array(0, 0)
@@ -1272,11 +1272,11 @@ from_key = "Road4"
 to_key = "Road5"
 to_lane = 1
 to_end = 0
-curve = SubResource("Curve3D_sq1qf")
+curve = SubResource("Curve3D_akuvw")
 turn = 2
 turn_angle = 1.570796282091413
 
-[sub_resource type="Curve3D" id="Curve3D_0r84s"]
+[sub_resource type="Curve3D" id="Curve3D_3i4hr"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 0, 0, 13.459931, -385.8569, 0, -19.83326, -13.459931, 0, 6.0170584e-07, 0, 0, 0, -362.2732, 0, 1.8657727),
 "tilts": PackedFloat32Array(0, 0)
@@ -1288,12 +1288,12 @@ script = ExtResource("14_wmy8v")
 id = &"Road4:0:0>Road5:0:1"
 from_key = "Road4"
 to_key = "Road5"
-curve = SubResource("Curve3D_0r84s")
+curve = SubResource("Curve3D_3i4hr")
 turn = 1
 turn_angle = -1.5707963714983801
 crosses_oncoming = true
 
-[sub_resource type="Curve3D" id="Curve3D_akuvw"]
+[sub_resource type="Curve3D" id="Curve3D_rgfgn"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 0, 0, 5.7652483, -385.8569, 0, -19.83326, 4.2169366, 0, 3.9313526, 0, 0, 0, -399.05286, 0, -16.05287),
 "tilts": PackedFloat32Array(0, 0)
@@ -1307,11 +1307,11 @@ from_key = "Road4"
 to_key = "Road6"
 to_lane = 1
 to_end = 0
-curve = SubResource("Curve3D_akuvw")
+curve = SubResource("Curve3D_rgfgn")
 turn = 2
 turn_angle = 2.321160468830564
 
-[sub_resource type="Curve3D" id="Curve3D_3i4hr"]
+[sub_resource type="Curve3D" id="Curve3D_lipce"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 0, 0, 16.652615, -385.8569, 0, -19.83326, -12.180414, 0, -11.355487, 0, 0, 0, -369.49954, 0, 16.284418),
 "tilts": PackedFloat32Array(0, 0)
@@ -1323,12 +1323,12 @@ script = ExtResource("14_wmy8v")
 id = &"Road4:0:0>Road6:0:1"
 from_key = "Road4"
 to_key = "Road6"
-curve = SubResource("Curve3D_3i4hr")
+curve = SubResource("Curve3D_lipce")
 turn = 1
 turn_angle = -0.8204335762280357
 crosses_oncoming = true
 
-[sub_resource type="Curve3D" id="Curve3D_rgfgn"]
+[sub_resource type="Curve3D" id="Curve3D_7715s"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 0, 0, -16.75719, -382.3569, 0, 20.064816, 0, 0, 16.75719, 0, 0, 0, -382.3569, 0, -19.83326),
 "tilts": PackedFloat32Array(0, 0)
@@ -1344,9 +1344,9 @@ from_end = 1
 to_key = "Road4"
 to_lane = 1
 to_end = 0
-curve = SubResource("Curve3D_rgfgn")
+curve = SubResource("Curve3D_7715s")
 
-[sub_resource type="Curve3D" id="Curve3D_lipce"]
+[sub_resource type="Curve3D" id="Curve3D_7kia7"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 0, 0, -13.459934, -382.3569, 0, 20.064816, 13.459934, 0, -6.0170595e-07, 0, 0, 0, -405.9406, 0, -1.6342254),
 "tilts": PackedFloat32Array(0, 0)
@@ -1362,12 +1362,12 @@ from_end = 1
 to_key = "Road5"
 to_lane = 1
 to_end = 0
-curve = SubResource("Curve3D_lipce")
+curve = SubResource("Curve3D_7kia7")
 turn = 1
 turn_angle = -1.5707963714983801
 crosses_oncoming = true
 
-[sub_resource type="Curve3D" id="Curve3D_7715s"]
+[sub_resource type="Curve3D" id="Curve3D_f12gv"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 0, 0, -11.383166, -382.3569, 0, 20.064816, -11.383166, 0, 5.088672e-07, 0, 0, 0, -362.2732, 0, 1.8657727),
 "tilts": PackedFloat32Array(0, 0)
@@ -1381,11 +1381,11 @@ from_key = "Road4"
 from_lane = 1
 from_end = 1
 to_key = "Road5"
-curve = SubResource("Curve3D_7715s")
+curve = SubResource("Curve3D_f12gv")
 turn = 2
 turn_angle = 1.570796282091413
 
-[sub_resource type="Curve3D" id="Curve3D_7kia7"]
+[sub_resource type="Curve3D" id="Curve3D_ry8vf"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 0, 0, -16.71179, -382.3569, 0, 20.064816, 12.223681, 0, 11.395856, 0, 0, 0, -399.05286, 0, -16.05287),
 "tilts": PackedFloat32Array(0, 0)
@@ -1401,12 +1401,12 @@ from_end = 1
 to_key = "Road6"
 to_lane = 1
 to_end = 0
-curve = SubResource("Curve3D_7kia7")
+curve = SubResource("Curve3D_ry8vf")
 turn = 1
 turn_angle = -0.820432184759229
 crosses_oncoming = true
 
-[sub_resource type="Curve3D" id="Curve3D_f12gv"]
+[sub_resource type="Curve3D" id="Curve3D_74rdy"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 0, 0, -5.6286755, -382.3569, 0, 20.064816, -4.1170473, 0, -3.838217, 0, 0, 0, -369.49954, 0, 16.284418),
 "tilts": PackedFloat32Array(0, 0)
@@ -1420,11 +1420,11 @@ from_key = "Road4"
 from_lane = 1
 from_end = 1
 to_key = "Road6"
-curve = SubResource("Curve3D_f12gv")
+curve = SubResource("Curve3D_74rdy")
 turn = 2
 turn_angle = 2.3211590773617576
 
-[sub_resource type="Curve3D" id="Curve3D_ry8vf"]
+[sub_resource type="Curve3D" id="Curve3D_63rb8"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 13.459931, 0, -6.0170584e-07, -405.9406, 0, 1.8657746, 0, 0, 13.459931, 0, 0, 0, -382.3569, 0, -19.83326),
 "tilts": PackedFloat32Array(0, 0)
@@ -1438,12 +1438,12 @@ from_key = "Road5"
 to_key = "Road4"
 to_lane = 1
 to_end = 0
-curve = SubResource("Curve3D_ry8vf")
+curve = SubResource("Curve3D_63rb8")
 turn = 1
 turn_angle = -1.570796282091413
 crosses_oncoming = true
 
-[sub_resource type="Curve3D" id="Curve3D_74rdy"]
+[sub_resource type="Curve3D" id="Curve3D_al4ke"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 11.383166, 0, -5.088672e-07, -405.9406, 0, 1.8657746, 0, 0, -11.383166, 0, 0, 0, -385.8569, 0, 20.064816),
 "tilts": PackedFloat32Array(0, 0)
@@ -1455,11 +1455,11 @@ script = ExtResource("14_wmy8v")
 id = &"Road5:0:0>Road4:0:1"
 from_key = "Road5"
 to_key = "Road4"
-curve = SubResource("Curve3D_74rdy")
+curve = SubResource("Curve3D_al4ke")
 turn = 2
 turn_angle = 1.5707963714983801
 
-[sub_resource type="Curve3D" id="Curve3D_63rb8"]
+[sub_resource type="Curve3D" id="Curve3D_ftav1"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 18.340317, 0, -8.1987605e-07, -405.9406, 0, 1.8657746, -18.340317, 0, 8.1987605e-07, 0, 0, 0, -362.2732, 0, 1.8657727),
 "tilts": PackedFloat32Array(0, 0)
@@ -1471,9 +1471,9 @@ script = ExtResource("14_wmy8v")
 id = &"Road5:0:0>Road5:0:1"
 from_key = "Road5"
 to_key = "Road5"
-curve = SubResource("Curve3D_63rb8")
+curve = SubResource("Curve3D_ftav1")
 
-[sub_resource type="Curve3D" id="Curve3D_al4ke"]
+[sub_resource type="Curve3D" id="Curve3D_6l315"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 8.062676, 0, -3.6042974e-07, -405.9406, 0, 1.8657746, 5.897369, 0, 5.4979806, 0, 0, 0, -399.05286, 0, -16.05287),
 "tilts": PackedFloat32Array(0, 0)
@@ -1487,12 +1487,12 @@ from_key = "Road5"
 to_key = "Road6"
 to_lane = 1
 to_end = 0
-curve = SubResource("Curve3D_al4ke")
+curve = SubResource("Curve3D_6l315")
 turn = 3
 turn_angle = -2.3912284469928062
 default_allowed = false
 
-[sub_resource type="Curve3D" id="Curve3D_ftav1"]
+[sub_resource type="Curve3D" id="Curve3D_dbhy1"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 16.459763, 0, -7.358087e-07, -405.9406, 0, 1.8657746, -12.039354, 0, -11.22398, 0, 0, 0, -369.49954, 0, 16.284418),
 "tilts": PackedFloat32Array(0, 0)
@@ -1504,10 +1504,10 @@ script = ExtResource("14_wmy8v")
 id = &"Road5:0:0>Road6:0:1"
 from_key = "Road5"
 to_key = "Road6"
-curve = SubResource("Curve3D_ftav1")
+curve = SubResource("Curve3D_dbhy1")
 turn_angle = 0.7503628151281815
 
-[sub_resource type="Curve3D" id="Curve3D_6l315"]
+[sub_resource type="Curve3D" id="Curve3D_vldsc"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, -11.383163, 0, 5.0886706e-07, -362.2732, 0, -1.6342273, 0, 0, 11.383163, 0, 0, 0, -382.3569, 0, -19.83326),
 "tilts": PackedFloat32Array(0, 0)
@@ -1523,11 +1523,11 @@ from_end = 1
 to_key = "Road4"
 to_lane = 1
 to_end = 0
-curve = SubResource("Curve3D_6l315")
+curve = SubResource("Curve3D_vldsc")
 turn = 2
 turn_angle = 1.5707963714983801
 
-[sub_resource type="Curve3D" id="Curve3D_dbhy1"]
+[sub_resource type="Curve3D" id="Curve3D_ftdg1"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, -13.459934, 0, 6.0170595e-07, -362.2732, 0, -1.6342273, 0, 0, -13.459934, 0, 0, 0, -385.8569, 0, 20.064816),
 "tilts": PackedFloat32Array(0, 0)
@@ -1541,12 +1541,12 @@ from_key = "Road5"
 from_lane = 1
 from_end = 1
 to_key = "Road4"
-curve = SubResource("Curve3D_dbhy1")
+curve = SubResource("Curve3D_ftdg1")
 turn = 1
 turn_angle = -1.570796282091413
 crosses_oncoming = true
 
-[sub_resource type="Curve3D" id="Curve3D_vldsc"]
+[sub_resource type="Curve3D" id="Curve3D_0nww6"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, -18.340317, 0, 8.1987605e-07, -362.2732, 0, -1.6342273, 18.340317, 0, -8.1987605e-07, 0, 0, 0, -405.9406, 0, -1.6342254),
 "tilts": PackedFloat32Array(0, 0)
@@ -1562,9 +1562,9 @@ from_end = 1
 to_key = "Road5"
 to_lane = 1
 to_end = 0
-curve = SubResource("Curve3D_vldsc")
+curve = SubResource("Curve3D_0nww6")
 
-[sub_resource type="Curve3D" id="Curve3D_ftdg1"]
+[sub_resource type="Curve3D" id="Curve3D_l3q80"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, -16.592077, 0, 7.417236e-07, -362.2732, 0, -1.6342273, 12.136119, 0, 11.314223, 0, 0, 0, -399.05286, 0, -16.05287),
 "tilts": PackedFloat32Array(0, 0)
@@ -1580,10 +1580,10 @@ from_end = 1
 to_key = "Road6"
 to_lane = 1
 to_end = 0
-curve = SubResource("Curve3D_ftdg1")
+curve = SubResource("Curve3D_l3q80")
 turn_angle = 0.750364206596987
 
-[sub_resource type="Curve3D" id="Curve3D_0nww6"]
+[sub_resource type="Curve3D" id="Curve3D_q8lbw"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, -8.114787, 0, 3.6275924e-07, -362.2732, 0, -1.6342273, -5.9354925, 0, -5.533507, 0, 0, 0, -369.49954, 0, 16.284418),
 "tilts": PackedFloat32Array(0, 0)
@@ -1597,12 +1597,12 @@ from_key = "Road5"
 from_lane = 1
 from_end = 1
 to_key = "Road6"
-curve = SubResource("Curve3D_0nww6")
+curve = SubResource("Curve3D_q8lbw")
 turn = 3
 turn_angle = -2.3912298384616117
 default_allowed = false
 
-[sub_resource type="Curve3D" id="Curve3D_l3q80"]
+[sub_resource type="Curve3D" id="Curve3D_xae62"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 6.1773973, 0, 5.7590446, -401.4395, 0, -13.492827, 0, 0, 8.445521, 0, 0, 0, -382.3569, 0, -19.83326),
 "tilts": PackedFloat32Array(0, 0)
@@ -1616,12 +1616,12 @@ from_key = "Road6"
 to_key = "Road4"
 to_lane = 1
 to_end = 0
-curve = SubResource("Curve3D_l3q80")
+curve = SubResource("Curve3D_xae62")
 turn = 1
 turn_angle = -2.321160468830564
 crosses_oncoming = true
 
-[sub_resource type="Curve3D" id="Curve3D_q8lbw"]
+[sub_resource type="Curve3D" id="Curve3D_1n5hn"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 11.366309, 0, 10.596547, -401.4395, 0, -13.492827, 0, 0, -15.53962, 0, 0, 0, -385.8569, 0, 20.064816),
 "tilts": PackedFloat32Array(0, 0)
@@ -1633,11 +1633,11 @@ script = ExtResource("14_wmy8v")
 id = &"Road6:0:0>Road4:0:1"
 from_key = "Road6"
 to_key = "Road4"
-curve = SubResource("Curve3D_q8lbw")
+curve = SubResource("Curve3D_1n5hn")
 turn = 2
 turn_angle = 0.820432184759229
 
-[sub_resource type="Curve3D" id="Curve3D_xae62"]
+[sub_resource type="Curve3D" id="Curve3D_fua5y"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 3.8966188, 0, 3.6327276, -401.4395, 0, -13.492827, 5.327321, 0, -2.3814981e-07, 0, 0, 0, -405.9406, 0, -1.6342254),
 "tilts": PackedFloat32Array(0, 0)
@@ -1651,12 +1651,12 @@ from_key = "Road6"
 to_key = "Road5"
 to_lane = 1
 to_end = 0
-curve = SubResource("Curve3D_xae62")
+curve = SubResource("Curve3D_fua5y")
 turn = 3
 turn_angle = 2.3912284469928062
 default_allowed = false
 
-[sub_resource type="Curve3D" id="Curve3D_1n5hn"]
+[sub_resource type="Curve3D" id="Curve3D_0sbsl"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 12.924126, 0, 12.048863, -401.4395, 0, -13.492827, -17.669413, 0, 7.898843e-07, 0, 0, 0, -362.2732, 0, 1.8657727),
 "tilts": PackedFloat32Array(0, 0)
@@ -1668,10 +1668,10 @@ script = ExtResource("14_wmy8v")
 id = &"Road6:0:0>Road5:0:1"
 from_key = "Road6"
 to_key = "Road5"
-curve = SubResource("Curve3D_1n5hn")
+curve = SubResource("Curve3D_0sbsl")
 turn_angle = -0.750364206596987
 
-[sub_resource type="Curve3D" id="Curve3D_fua5y"]
+[sub_resource type="Curve3D" id="Curve3D_aruo0"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, 13.414861, 0, 12.506364, -401.4395, 0, -13.492827, -13.414878, 0, -12.506346, 0, 0, 0, -369.49954, 0, 16.284418),
 "tilts": PackedFloat32Array(0, 0)
@@ -1683,10 +1683,10 @@ script = ExtResource("14_wmy8v")
 id = &"Road6:0:0>Road6:0:1"
 from_key = "Road6"
 to_key = "Road6"
-curve = SubResource("Curve3D_fua5y")
+curve = SubResource("Curve3D_aruo0")
 turn_angle = -1.39146880329032e-06
 
-[sub_resource type="Curve3D" id="Curve3D_0sbsl"]
+[sub_resource type="Curve3D" id="Curve3D_lx668"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, -11.3229065, 0, -10.556054, -367.11288, 0, 13.724372, 0, 0, 15.480262, 0, 0, 0, -382.3569, 0, -19.83326),
 "tilts": PackedFloat32Array(0, 0)
@@ -1702,11 +1702,11 @@ from_end = 1
 to_key = "Road4"
 to_lane = 1
 to_end = 0
-curve = SubResource("Curve3D_0sbsl")
+curve = SubResource("Curve3D_lx668")
 turn = 2
 turn_angle = 0.8204335762280357
 
-[sub_resource type="Curve3D" id="Curve3D_aruo0"]
+[sub_resource type="Curve3D" id="Curve3D_v18n0"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, -6.0787835, 0, -5.6670933, -367.11288, 0, 13.724372, 0, 0, -8.310689, 0, 0, 0, -385.8569, 0, 20.064816),
 "tilts": PackedFloat32Array(0, 0)
@@ -1720,12 +1720,12 @@ from_key = "Road6"
 from_lane = 1
 from_end = 1
 to_key = "Road4"
-curve = SubResource("Curve3D_aruo0")
+curve = SubResource("Curve3D_v18n0")
 turn = 1
 turn_angle = -2.3211590773617576
 crosses_oncoming = true
 
-[sub_resource type="Curve3D" id="Curve3D_lx668"]
+[sub_resource type="Curve3D" id="Curve3D_gmsy8"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, -12.827361, 0, -11.958618, -367.11288, 0, 13.724372, 17.537096, 0, -7.839693e-07, 0, 0, 0, -405.9406, 0, -1.6342254),
 "tilts": PackedFloat32Array(0, 0)
@@ -1741,10 +1741,10 @@ from_end = 1
 to_key = "Road5"
 to_lane = 1
 to_end = 0
-curve = SubResource("Curve3D_lx668")
+curve = SubResource("Curve3D_gmsy8")
 turn_angle = -0.7503628151281815
 
-[sub_resource type="Curve3D" id="Curve3D_v18n0"]
+[sub_resource type="Curve3D" id="Curve3D_3ette"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, -3.9347365, 0, -3.6682534, -367.11288, 0, 13.724372, -5.379427, 0, 2.4047912e-07, 0, 0, 0, -362.2732, 0, 1.8657727),
 "tilts": PackedFloat32Array(0, 0)
@@ -1758,12 +1758,12 @@ from_key = "Road6"
 from_lane = 1
 from_end = 1
 to_key = "Road5"
-curve = SubResource("Curve3D_v18n0")
+curve = SubResource("Curve3D_3ette")
 turn = 3
 turn_angle = 2.3912298384616117
 default_allowed = false
 
-[sub_resource type="Curve3D" id="Curve3D_gmsy8"]
+[sub_resource type="Curve3D" id="Curve3D_211ii"]
 _data = {
 "points": PackedVector3Array(0, 0, 0, -13.414878, 0, -12.506346, -367.11288, 0, 13.724372, 13.414861, 0, 12.506364, 0, 0, 0, -399.05286, 0, -16.05287),
 "tilts": PackedFloat32Array(0, 0)
@@ -1779,7 +1779,7 @@ from_end = 1
 to_key = "Road6"
 to_lane = 1
 to_end = 0
-curve = SubResource("Curve3D_gmsy8")
+curve = SubResource("Curve3D_211ii")
 turn_angle = 1.39146880329032e-06
 
 [sub_resource type="Resource" id="Resource_7cvwp"]
@@ -1871,7 +1871,7 @@ corner_radius = 6.0
 connectors = Array[ExtResource("14_wmy8v")]([SubResource("Resource_rf8pt"), SubResource("Resource_ochs8"), SubResource("Resource_htx6y"), SubResource("Resource_7715s"), SubResource("Resource_ry8vf"), SubResource("Resource_212yh"), SubResource("Resource_gl84b"), SubResource("Resource_7m0w2"), SubResource("Resource_6l315"), SubResource("Resource_vldsc"), SubResource("Resource_5o3xq"), SubResource("Resource_eirwi"), SubResource("Resource_dhaih"), SubResource("Resource_xae62"), SubResource("Resource_fua5y"), SubResource("Resource_m3ry4"), SubResource("Resource_ojf0f"), SubResource("Resource_3oqbn"), SubResource("Resource_gmsy8"), SubResource("Resource_211ii"), SubResource("Resource_1d1kx"), SubResource("Resource_m2ork"), SubResource("Resource_3u241"), SubResource("Resource_2onsq"), SubResource("Resource_d71qt"), SubResource("Resource_7nncj"), SubResource("Resource_ia82o"), SubResource("Resource_x8ypl"), SubResource("Resource_ocgin"), SubResource("Resource_v3tmd")])
 stop_lines = Array[ExtResource("16_c1863")]([SubResource("Resource_3ecid"), SubResource("Resource_i0qqo"), SubResource("Resource_ibho5"), SubResource("Resource_v8547"), SubResource("Resource_b70p0"), SubResource("Resource_m8syo")])
 priorities = PackedInt32Array(0, 0, 0)
-conflicts = Array[ExtResource("13_en2k1")]([SubResource("Resource_8seea"), SubResource("Resource_en2k1"), SubResource("Resource_wmy8v"), SubResource("Resource_6drfx"), SubResource("Resource_c1863"), SubResource("Resource_232jn"), SubResource("Resource_c24tk"), SubResource("Resource_t0wjs"), SubResource("Resource_u7xi1"), SubResource("Resource_1bslq"), SubResource("Resource_4uqqw"), SubResource("Resource_8ogjg"), SubResource("Resource_2ossa"), SubResource("Resource_wv1kb"), SubResource("Resource_2vt0u"), SubResource("Resource_vxfb6"), SubResource("Resource_e3cqu"), SubResource("Resource_20l8f"), SubResource("Resource_cgp2t"), SubResource("Resource_h4mem"), SubResource("Resource_ibch0"), SubResource("Resource_nnuj8"), SubResource("Resource_fs2j4"), SubResource("Resource_bc0od"), SubResource("Resource_ug6be"), SubResource("Resource_325nn"), SubResource("Resource_ya6qv"), SubResource("Resource_5vh83"), SubResource("Resource_trgl2"), SubResource("Resource_fd75y"), SubResource("Resource_mv1ec"), SubResource("Resource_huc74"), SubResource("Resource_oix55"), SubResource("Resource_j4mjb"), SubResource("Resource_a40vd"), SubResource("Resource_twj3u"), SubResource("Resource_4xjyu"), SubResource("Resource_t1say"), SubResource("Resource_5exi1"), SubResource("Resource_5ifhg"), SubResource("Resource_6b7ih"), SubResource("Resource_5biyt"), SubResource("Resource_wb4v1"), SubResource("Resource_54m0y"), SubResource("Resource_oaenh"), SubResource("Resource_jygnk"), SubResource("Resource_1uogm"), SubResource("Resource_n6dk6"), SubResource("Resource_cgoio"), SubResource("Resource_wnfbu"), SubResource("Resource_y6l4y"), SubResource("Resource_l4wod"), SubResource("Resource_t8jkn"), SubResource("Resource_ay3v3"), SubResource("Resource_nt37a"), SubResource("Resource_a11lp"), SubResource("Resource_x6twm"), SubResource("Resource_mamxc"), SubResource("Resource_ago0q"), SubResource("Resource_0moih"), SubResource("Resource_gfryu"), SubResource("Resource_pxuj0"), SubResource("Resource_y4k8p"), SubResource("Resource_tbpnh"), SubResource("Resource_cgnb8"), SubResource("Resource_i1k4x"), SubResource("Resource_e0efa"), SubResource("Resource_kssyq"), SubResource("Resource_38rhj"), SubResource("Resource_653dm"), SubResource("Resource_gc02m"), SubResource("Resource_kdoyl"), SubResource("Resource_infdw"), SubResource("Resource_100ig"), SubResource("Resource_ack13"), SubResource("Resource_k54wh"), SubResource("Resource_6xvbd"), SubResource("Resource_xvdw2"), SubResource("Resource_pgjnv"), SubResource("Resource_0m8im"), SubResource("Resource_ywe60"), SubResource("Resource_4v8qv"), SubResource("Resource_wi0th"), SubResource("Resource_7l1vf"), SubResource("Resource_utu38"), SubResource("Resource_wrev1"), SubResource("Resource_evjvv"), SubResource("Resource_mp34d"), SubResource("Resource_50p4w"), SubResource("Resource_ldkx7"), SubResource("Resource_2uad4"), SubResource("Resource_njnv1"), SubResource("Resource_o4aa5"), SubResource("Resource_u8l6e"), SubResource("Resource_kmnvw"), SubResource("Resource_vsfph"), SubResource("Resource_vb0em"), SubResource("Resource_o8814"), SubResource("Resource_gfuj5"), SubResource("Resource_kc5op"), SubResource("Resource_dec13"), SubResource("Resource_umgy6"), SubResource("Resource_recgq"), SubResource("Resource_otds0"), SubResource("Resource_qxyh0"), SubResource("Resource_4p6pk"), SubResource("Resource_wsgm6"), SubResource("Resource_iwqm5"), SubResource("Resource_54f51"), SubResource("Resource_pf6ux"), SubResource("Resource_k7tuv"), SubResource("Resource_67xn4"), SubResource("Resource_x2j5u"), SubResource("Resource_lacsc"), SubResource("Resource_0kbxl"), SubResource("Resource_1ohx4"), SubResource("Resource_xtmyc"), SubResource("Resource_441au"), SubResource("Resource_75y6k"), SubResource("Resource_hn8sp"), SubResource("Resource_3orwq"), SubResource("Resource_r4g2w"), SubResource("Resource_bfjj8"), SubResource("Resource_q6v2i"), SubResource("Resource_bmo2j"), SubResource("Resource_vbtk8"), SubResource("Resource_31hyx"), SubResource("Resource_u6h1j"), SubResource("Resource_cu3ou"), SubResource("Resource_enp21"), SubResource("Resource_p43qm"), SubResource("Resource_8hfky"), SubResource("Resource_vf2hi"), SubResource("Resource_qo601"), SubResource("Resource_r2138"), SubResource("Resource_40cqs"), SubResource("Resource_unfna"), SubResource("Resource_ed407"), SubResource("Resource_nn8fc"), SubResource("Resource_ekri5"), SubResource("Resource_yhd7y"), SubResource("Resource_mrc6d"), SubResource("Resource_tujcf"), SubResource("Resource_qrtye"), SubResource("Resource_jwsju"), SubResource("Resource_8la5u"), SubResource("Resource_s8set"), SubResource("Resource_ljssy"), SubResource("Resource_go66u"), SubResource("Resource_synhj"), SubResource("Resource_7to37"), SubResource("Resource_kxm5b")])
+conflicts = Array[ExtResource("13_en2k1")]([SubResource("Resource_wmy8v"), SubResource("Resource_6drfx"), SubResource("Resource_c1863"), SubResource("Resource_232jn"), SubResource("Resource_c24tk"), SubResource("Resource_t0wjs"), SubResource("Resource_u7xi1"), SubResource("Resource_1bslq"), SubResource("Resource_4uqqw"), SubResource("Resource_8ogjg"), SubResource("Resource_2ossa"), SubResource("Resource_wv1kb"), SubResource("Resource_2vt0u"), SubResource("Resource_vxfb6"), SubResource("Resource_e3cqu"), SubResource("Resource_20l8f"), SubResource("Resource_cgp2t"), SubResource("Resource_h4mem"), SubResource("Resource_ibch0"), SubResource("Resource_nnuj8"), SubResource("Resource_fs2j4"), SubResource("Resource_bc0od"), SubResource("Resource_ug6be"), SubResource("Resource_325nn"), SubResource("Resource_ya6qv"), SubResource("Resource_5vh83"), SubResource("Resource_trgl2"), SubResource("Resource_fd75y"), SubResource("Resource_mv1ec"), SubResource("Resource_huc74"), SubResource("Resource_oix55"), SubResource("Resource_j4mjb"), SubResource("Resource_a40vd"), SubResource("Resource_twj3u"), SubResource("Resource_4xjyu"), SubResource("Resource_t1say"), SubResource("Resource_5exi1"), SubResource("Resource_5ifhg"), SubResource("Resource_6b7ih"), SubResource("Resource_5biyt"), SubResource("Resource_wb4v1"), SubResource("Resource_54m0y"), SubResource("Resource_oaenh"), SubResource("Resource_jygnk"), SubResource("Resource_1uogm"), SubResource("Resource_n6dk6"), SubResource("Resource_cgoio"), SubResource("Resource_wnfbu"), SubResource("Resource_y6l4y"), SubResource("Resource_l4wod"), SubResource("Resource_t8jkn"), SubResource("Resource_ay3v3"), SubResource("Resource_nt37a"), SubResource("Resource_a11lp"), SubResource("Resource_x6twm"), SubResource("Resource_mamxc"), SubResource("Resource_ago0q"), SubResource("Resource_0moih"), SubResource("Resource_gfryu"), SubResource("Resource_pxuj0"), SubResource("Resource_y4k8p"), SubResource("Resource_tbpnh"), SubResource("Resource_cgnb8"), SubResource("Resource_i1k4x"), SubResource("Resource_e0efa"), SubResource("Resource_kssyq"), SubResource("Resource_38rhj"), SubResource("Resource_653dm"), SubResource("Resource_gc02m"), SubResource("Resource_kdoyl"), SubResource("Resource_infdw"), SubResource("Resource_100ig"), SubResource("Resource_ack13"), SubResource("Resource_k54wh"), SubResource("Resource_6xvbd"), SubResource("Resource_xvdw2"), SubResource("Resource_pgjnv"), SubResource("Resource_0m8im"), SubResource("Resource_ywe60"), SubResource("Resource_4v8qv"), SubResource("Resource_wi0th"), SubResource("Resource_7l1vf"), SubResource("Resource_utu38"), SubResource("Resource_wrev1"), SubResource("Resource_evjvv"), SubResource("Resource_mp34d"), SubResource("Resource_50p4w"), SubResource("Resource_ldkx7"), SubResource("Resource_2uad4"), SubResource("Resource_njnv1"), SubResource("Resource_o4aa5"), SubResource("Resource_u8l6e"), SubResource("Resource_kmnvw"), SubResource("Resource_vsfph"), SubResource("Resource_vb0em"), SubResource("Resource_o8814"), SubResource("Resource_gfuj5"), SubResource("Resource_kc5op"), SubResource("Resource_dec13"), SubResource("Resource_umgy6"), SubResource("Resource_recgq"), SubResource("Resource_otds0"), SubResource("Resource_qxyh0"), SubResource("Resource_4p6pk"), SubResource("Resource_wsgm6"), SubResource("Resource_iwqm5"), SubResource("Resource_54f51"), SubResource("Resource_pf6ux"), SubResource("Resource_k7tuv"), SubResource("Resource_67xn4"), SubResource("Resource_x2j5u"), SubResource("Resource_lacsc"), SubResource("Resource_0kbxl"), SubResource("Resource_1ohx4"), SubResource("Resource_xtmyc"), SubResource("Resource_441au"), SubResource("Resource_75y6k"), SubResource("Resource_hn8sp"), SubResource("Resource_3orwq"), SubResource("Resource_r4g2w"), SubResource("Resource_bfjj8"), SubResource("Resource_q6v2i"), SubResource("Resource_bmo2j"), SubResource("Resource_vbtk8"), SubResource("Resource_31hyx"), SubResource("Resource_u6h1j"), SubResource("Resource_cu3ou"), SubResource("Resource_enp21"), SubResource("Resource_p43qm"), SubResource("Resource_8hfky"), SubResource("Resource_vf2hi"), SubResource("Resource_qo601"), SubResource("Resource_r2138"), SubResource("Resource_40cqs"), SubResource("Resource_unfna"), SubResource("Resource_ed407"), SubResource("Resource_nn8fc"), SubResource("Resource_ekri5"), SubResource("Resource_yhd7y"), SubResource("Resource_mrc6d"), SubResource("Resource_tujcf"), SubResource("Resource_qrtye"), SubResource("Resource_jwsju"), SubResource("Resource_8la5u"), SubResource("Resource_s8set"), SubResource("Resource_ljssy"), SubResource("Resource_go66u"), SubResource("Resource_synhj"), SubResource("Resource_7to37"), SubResource("Resource_kxm5b"), SubResource("Resource_7ykbl"), SubResource("Resource_sq1qf")])
 phases = Array[ExtResource("15_6drfx")]([SubResource("Resource_7cvwp"), SubResource("Resource_ha2m8"), SubResource("Resource_10iao")])
 
 [sub_resource type="Resource" id="Resource_vrro6"]
@@ -3556,7 +3556,7 @@ road_keys = PackedStringArray("Road2", "Road1")
 arc_lengths = PackedFloat32Array(144.84183, 223.06229)
 trim_backs = PackedFloat32Array(15.233674, 15.233674)
 radius = 15.233674
-elevation = 1.1155707386116945e-10
+elevation = 1.1155707386116944e-10
 arm_dirs = PackedVector2Array(0.36949888, 0.92923117, -0.5110357, -0.8595595, 0.9993153, -0.036999714, -0.99931586, 0.036984853)
 arm_roads = PackedInt32Array(0, 0, 1, 1)
 arm_halfs = PackedFloat32Array(4.5, 4.5, 4.5, 4.5)
@@ -5116,7 +5116,7 @@ road_keys = PackedStringArray("Road1", "Road")
 arc_lengths = PackedFloat32Array(509.12582, 490.16208)
 trim_backs = PackedFloat32Array(10.726785, 10.726785)
 radius = 10.726785
-elevation = 3.7798957498239028e-06
+elevation = 3.7798957498239023e-06
 arm_dirs = PackedVector2Array(-0.02544924, 0.9996761, 0.025437683, -0.9996764, 0.99993765, -0.011167321, -0.99993765, 0.0111671705)
 arm_roads = PackedInt32Array(0, 0, 1, 1)
 arm_halfs = PackedFloat32Array(4.5, 4.5, 4.5, 4.5)
@@ -5193,7 +5193,7 @@ center = Vector2(-154.13968, -281.49936)
 road_keys = PackedStringArray("Road1", "Road")
 arc_lengths = PackedFloat32Array(0, 0)
 trim_backs = PackedFloat32Array(0, 0)
-elevation = -1.4070142e-37
+elevation = -1.4070141999999998e-37
 arm_dirs = PackedVector2Array(-0.0033874318, 0.9999943, 0.9999914, 0.0041503552)
 arm_roads = PackedInt32Array(0, 1)
 arm_halfs = PackedFloat32Array(4.5, 4.5)
@@ -5572,7 +5572,7 @@ peak_vertical_curvature_sag = 4.2106842e-07
 peak_vertical_accel_crest = 0.001575308
 peak_vertical_accel_sag = 0.00026316775
 cut_volume = 7.080013698016869e-17
-fill_volume = 1.8899133747059522e-05
+fill_volume = 1.889913374705952e-05
 input_digest = "4061305576"
 
 [sub_resource type="Resource" id="Resource_j26y8"]
