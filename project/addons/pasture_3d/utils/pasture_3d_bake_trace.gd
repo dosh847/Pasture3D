@@ -67,6 +67,8 @@ static var _events: Array[Dictionary] = []
 static var _seq: int = 0
 static var _t0: int = 0
 static var _open_bakes: Dictionary = {}
+static var _started_at: String = ""
+static var _session_note: String = ""
 
 
 ## Begin a session, discarding anything already buffered. Timestamps are relative to this call, because an
@@ -220,6 +222,8 @@ static func events() -> Array[Dictionary]:
 static func report() -> String:
 	var lines := PackedStringArray()
 	lines.append("=== Pasture3D bake trace — %d event(s) ===" % _events.size())
+	if _session_note != "":
+		lines.append(_session_note)
 	if _events.is_empty():
 		lines.append("  (nothing recorded — was Pasture3DBakeTrace.start() called before the edit?)")
 		return "\n".join(lines)
@@ -297,20 +301,34 @@ const REPORT_PATH := "user://pasture3d_bake_trace.txt"
 
 
 ## The whole in-editor session in one call, for the Pasture3D inspector toggle: `p_on` starts a trace
-## (stacks on); off stops it and writes the report. Returns the absolute report path on stop, "" otherwise.
+## (stacks on); off stops it and ALWAYS writes a report, returning its absolute path ("" only on start or a
+## write failure).
+##
+## Off writes even when nothing was running, on purpose. The first real use of this toggle produced no
+## report and no message, and "never unticked" could not be told apart from "the recorder's static state was
+## reset mid-session" (a script reload clears static vars). A report stamped NOT RUNNING answers that; a
+## silent return answered nothing.
 ##
 ## Lives here rather than in the inspector control because an EditorInspectorPlugin cannot be instantiated
 ## outside the editor, so logic inside one can never be gated.
-static func set_session(p_on: bool) -> String:
+static func set_session(p_on: bool, p_path: String = REPORT_PATH) -> String:
 	if p_on:
 		start(true)
+		_started_at = Time.get_datetime_string_from_system()
 		print("Pasture3DBakeTrace: STARTED. Reproduce the problem, then untick Bake Trace.")
 		return ""
-	if not enabled:
-		return ""
+	var was_running := enabled
 	stop()
-	var path := write_report(REPORT_PATH)
-	print("Pasture3DBakeTrace: stopped, %d event(s) -> %s" % [_events.size(), path])
+	_session_note = "session: started %s, stopped %s%s" % [
+			_started_at if _started_at != "" else "<unknown>",
+			Time.get_datetime_string_from_system(),
+			"" if was_running else "  -- NOT RUNNING at stop: the trace was reset or never started, " 					+ "so the events below (if any) are incomplete"]
+	var path := write_report(p_path)
+	_session_note = ""
+	if was_running:
+		print("Pasture3DBakeTrace: stopped, %d event(s) -> %s" % [_events.size(), path])
+	else:
+		push_warning("Pasture3DBakeTrace: unticked but the trace was NOT running (state reset, e.g. a " 				+ "script reload). Wrote what was buffered (%d event(s)) -> %s" % [_events.size(), path])
 	return path
 
 

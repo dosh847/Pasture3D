@@ -175,30 +175,36 @@ func _e_ring_buffer_evicts() -> void:
 	_ran += 1
 
 
-## [G] The inspector toggle's logic: on starts recording, off stops and writes a report that contains what
-## was recorded. The control is a stale file — deleted first, so a report left by an earlier run cannot
-## pass this.
+## [G] The inspector toggle's logic: on starts recording, off stops and writes a report containing what was
+## recorded. Uses its OWN path — the gate once wrote the editor's default report file, and Open Report then
+## showed a user this gate's marker instead of their session. The control: unticking an idle trace must
+## still write, stamped NOT RUNNING, because a silent return there is what made that session undiagnosable.
 func _g_session_toggle_writes_report() -> void:
 	print("[G] set_session(true/false) records, then writes the report")
-	var path := Pasture3DBakeTrace.REPORT_PATH
+	var path := "user://_baketracegate_report.txt"
 	if FileAccess.file_exists(path):
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
 	Pasture3DBakeTrace.stop()
-	var off_path := Pasture3DBakeTrace.set_session(false)
-	print("    off while not running returns \"%s\" and writes nothing: exists=%s" % [off_path, FileAccess.file_exists(path)])
-	if off_path != "" or FileAccess.file_exists(path):
+	var idle := Pasture3DBakeTrace.set_session(false, path)
+	var idle_text := FileAccess.get_file_as_string(path) if FileAccess.file_exists(path) else ""
+	print("    idle untick wrote a report stamped NOT RUNNING: %s" % idle_text.contains("NOT RUNNING"))
+	if idle == "" or not idle_text.contains("NOT RUNNING"):
 		_fail += 1
-		print("    !! stopping an idle trace wrote a report")
+		print("    !! unticking an idle trace is silent again")
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
 	Pasture3DBakeTrace.set_session(true)
 	var running := Pasture3DBakeTrace.is_running()
 	Pasture3DBakeTrace.mark("gate-G-marker")
-	var wrote := Pasture3DBakeTrace.set_session(false)
+	var wrote := Pasture3DBakeTrace.set_session(false, path)
 	var text := FileAccess.get_file_as_string(path) if FileAccess.file_exists(path) else ""
-	print("    running after on=%s, stopped after off=%s, report has marker=%s" % [
-			running, not Pasture3DBakeTrace.is_running(), text.contains("gate-G-marker")])
-	if not running or Pasture3DBakeTrace.is_running() or wrote == "" or not text.contains("gate-G-marker"):
+	print("    running after on=%s, stopped after off=%s, has marker=%s, not flagged=%s" % [
+			running, not Pasture3DBakeTrace.is_running(), text.contains("gate-G-marker"),
+			not text.contains("NOT RUNNING")])
+	if not running or Pasture3DBakeTrace.is_running() or wrote == "" or not text.contains("gate-G-marker") 			or text.contains("NOT RUNNING"):
 		_fail += 1
 		print("    !! the toggle did not start, stop, or write what it recorded")
+	if FileAccess.file_exists(Pasture3DBakeTrace.REPORT_PATH) 			and FileAccess.get_file_as_string(Pasture3DBakeTrace.REPORT_PATH).contains("gate-G-marker"):
+		print("    (note: the editor report file still holds an OLD gate marker; it is stale, not written now)")
 	_ran += 1
 
 
