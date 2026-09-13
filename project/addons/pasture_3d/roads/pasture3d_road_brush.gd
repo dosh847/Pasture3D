@@ -2477,6 +2477,21 @@ func schedule_junction_rebake() -> void:
 	var d := junction_digest()
 	if d == last_junction_digest:
 		return
+	# WHICH junction fields moved, not just that the digest did. A trace showed the resolve→bake→resolve
+	# loop taking four full-layer rebakes to settle after one drag; the line diff is what tells a pin that
+	# genuinely moved apart from %.3f jitter that never converges.
+	if Pasture3DBakeTrace.enabled:
+		var was := Array(last_junction_digest.split("\n", false))
+		var now := Array(d.split("\n", false))
+		var diff := PackedStringArray()
+		for l in was:
+			if not now.has(l):
+				diff.append("- " + l)
+		for l in now:
+			if not was.has(l):
+				diff.append("+ " + l)
+		Pasture3DBakeTrace.mark("%s junction digest changed:\n    %s" % [name,
+				"\n    ".join(diff)])
 	last_junction_digest = d
 	_schedule_refresh()
 
