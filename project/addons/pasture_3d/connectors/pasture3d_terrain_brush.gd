@@ -1439,6 +1439,10 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 		var lb_host := _layer_brush_for_owner(owner) if owner.begins_with(LAYER_BRUSH_OWNER_PREFIX) else null
 		if lb_host != null:
 			lb_host.bake_base()
+			# A full bake repaints every member, so nothing the base moved is left to clip to — except inside a
+			# driver run, whose later passes (rect or full) still need it.
+			if not _erosion_running:
+				lb_host.clear_base_change()
 		var blend := _layer_blend_for(layer_id)
 		# Union of everything this bake will write, so the deferred composite below covers all of it.
 		var painted_box := AABB()
@@ -2040,14 +2044,20 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 		_refresh_owner(owner, false, [])
 		return
 	_layer_id = layer_id # set before the snap below reads it (paint sets it again per tool)
-	# Layer brush stage 1 (§6.3). A skipped base leaves the rect bake exactly as it was. A re-solved base can
-	# move ground under any member, so stage 2 goes full. Clipping to the changed box is deferred.
+	# Layer brush stage 1 (§6.3). A skipped base leaves the rect bake exactly as it was. A re-solved base
+	# reports the box where the ground actually moved, and that box joins the rect: every member overlapping
+	# it repaints there, and its snapped points inside it re-seat. Kept until a bake outside a run (or the
+	# end of the Layer's run) has repainted it, so the driver's later passes repaint it too.
+	var base_change := AABB()
 	if owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
 		var lb_host := _layer_brush_for_owner(owner)
-		if lb_host != null and lb_host.base_is_stale():
-			_last_rect_decision = "full"
-			_refresh_owner(owner, false, [])
-			return
+		if lb_host != null:
+			if lb_host.base_is_stale():
+				lb_host.bake_base()
+			if not rect_ignores_base_change:
+				base_change = lb_host.base_change()
+			if not _erosion_running:
+				lb_host.clear_base_change()
 
 	# Union the previous (cached) and current footprint of changed sections into one world box.
 	#
@@ -2094,6 +2104,8 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 	for bx: AABB in p_boxes:
 		if bx.size.x > 0.0 or bx.size.z > 0.0:
 			pieces.append(bx)
+	if base_change.size.x > 0.0 or base_change.size.z > 0.0:
+		pieces.append(base_change)
 	if pieces.is_empty():
 		if unchanged > 0 and unchanged == changed_ids.size():
 			_last_rect_decision = "skip"
@@ -2147,6 +2159,26 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 					# moved-point diff finds nothing — re-snap all points against the freshly-cleared base.
 					var idxs := _all_point_indices(sp) if snap_all else _moved_point_indices(sp)
 					_apply_surface_snap_points(sp, idxs)
+		# The base moved under points nobody dragged: re-seat the snapped points inside the changed box, against
+		# the ground this clip just cleared. Only inside it — a point outside reads ground that did not move.
+		if base_change.size != Vector3.ZERO and clip_box.position.x < base_change.end.x \
+				and base_change.position.x < clip_box.end.x and clip_box.position.z < base_change.end.z \
+				and base_change.position.z < clip_box.end.z:
+			for s in _tools_on_owner(owner):
+				if not s.snap_to_surface:
+					continue
+				for sp: Path3D in s._get_splines():
+					if sp == null or sp.curve == null:
+						continue
+					var idxs := PackedInt32Array()
+					for i in range(sp.curve.point_count):
+						var w: Vector3 = sp.global_transform * sp.curve.get_point_position(i)
+						if w.x >= base_change.position.x and w.x <= base_change.end.x \
+								and w.z >= base_change.position.z and w.z <= base_change.end.z:
+							idxs.append(i)
+					if not idxs.is_empty():
+						s._apply_surface_snap_points(sp, idxs)
+						s._update_curve_cache(sp) # a re-seat is not an edit to re-bake on
 		var t_snap := Time.get_ticks_usec()
 		var box_tools: Array = []
 		for s in _tools_on_owner(owner):
@@ -4813,8 +4845,19 @@ func _base_below_grid(min_x: float, min_z: float, vs: float, gw: int, gh: int) -
 	if not is_configured():
 		return PackedFloat32Array()
 	if _layer_id > 0 and terrain.data.has_method("composite_height_below"):
-		return terrain.data.composite_height_below(_layer_id, min_x, min_z, vs, gw, gh)
+		var lid := _layer_id
+		if read_past_base_row and _layer_owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
+			var base_row: int = terrain.data.get_layer_stack().find_layer_by_owner(_layer_owner + "#base")
+			if base_row >= 0:
+				lid = base_row
+		return terrain.data.composite_height_below(lid, min_x, min_z, vs, gw, gh)
 	return PackedFloat32Array()
+
+
+## Gate control (LB-P): a Layer member's stack reads the ground below its Layer's BASE row, skipping the base.
+var read_past_base_row: bool = false
+## Gate control (LB-I clipping): a rect bake ignores the box a re-solved base moved.
+var rect_ignores_base_change: bool = false
 
 
 ## Height of the layers below this brush's, at a world position (snap + the GDScript fallback rasteriser).

@@ -469,6 +469,15 @@ base being the row directly beneath (§3.1), so adjacency is an invariant, not a
    first-member flip fires from the member's `_ready` (an empty owner is a join), not `_sync_layer_host`
    alone; LB-P checks the snap half only, not a child erosion's flow. Stage 1 runs synchronously until the
    phase 4 driver.
+   **Follow-ups closed (2026-09-14).** LB-P now checks both halves: a child erosion's flow grid over the base
+   differs from the no-base child, and a member reading past the base row (`read_past_base_row`) gets the
+   no-base flow. Flow is read after a deferred run, because the synchronous native step only fills flow when
+   a later modifier reads fields. Changed-box clipping is built: `bake_base` diffs the ground under the main
+   row before and after, and keeps the box that moved (`base_change()`). A member's rect bake re-solves a
+   stale base in place, adds that box to its pieces, and re-seats snapped points inside it. The box is
+   dropped by a bake outside a run, or at the end of the Layer's run. Gated in LB-I: a far member stays out
+   of the rect; an unmoved eroding member is reached when the base moves under it; both equal a full bake.
+   Control: ignoring the box (`rect_ignores_base_change`) differs.
 3b. **Whole Region mode + Select Regions tool.** §7.1 region extent, §7.2 analytic profile, §7.5 tool,
    overlay, undo, region-lifecycle listener. Gates LB-M, LB-N, LB-O.
    **Built (2026-09-14)**, gated by `bench/LayerBrushRegionGate.tscn` (M, N, O; all with controls). The

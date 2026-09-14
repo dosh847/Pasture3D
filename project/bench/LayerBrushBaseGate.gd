@@ -8,10 +8,14 @@
 #   [H] Footprints profile: no base cell moves beyond outline ⊕ margin, none at a thin diagonal's AABB corner,
 #       and the feather falls over several cells; control: AABB profile moves the corner, steps in one cell
 #   [I] Whole Terrain: a member height edit re-solves 0 times. Footprints: an outline move re-solves once and the
-#       result equals a fresh full bake; control: marking the key fresh first leaves the stale base (differs)
+#       result equals a fresh full bake; control: marking the key fresh first leaves the stale base (differs).
+#       Changed-box clipping: the rect bake stays a rect, keeps a far member out, reaches an unmoved eroding
+#       member when the base moves under it, and equals a full bake; control: ignore the base's changed box
 #   [K] the key changes on stack, mode, outline and lower-layer edits, not on a member height edit;
 #       control: keyed without the below digest, the lower edit is missed
-#   [P] a snapped member's points sit on ground + base; control: the read past the base row differs
+#   [P] a snapped member's points sit on ground + base; control: the read past the base row differs.
+#       A child erosion's flow grid over the base differs from the no-base child; control: a member reading
+#       past the base row (`read_past_base_row`) gives the no-base flow
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/LayerBrushBaseGate.tscn
 extends Node
@@ -115,6 +119,15 @@ func _heights() -> PackedFloat32Array:
 		for x in range(RS):
 			out.append(_terrain.data.get_height(Vector3(x, 0, z)))
 	return out
+
+
+## True when any rect clip overlaps any of the member's footprints in XZ (clips span Y, footprints may not).
+func _clips_touch(p_clips: Array, p_m: Node) -> bool:
+	for fp: AABB in p_m._own_footprints():
+		for c: AABB in p_clips:
+			if c.position.x < fp.end.x and fp.position.x < c.end.x and c.position.z < fp.end.z and fp.position.z < c.end.z:
+				return true
+	return false
 
 
 func _drop(p_nodes: Array) -> void:
@@ -316,6 +329,56 @@ func _i() -> void:
 	lb._base_key = ""
 	lb.bake_layer()
 	_check("I control", stale != _heights(), "stage 2 over the pre-edit base differs from a fresh bake")
+
+	# Changed-box clipping (§6.3). Moving one outline re-solves the base; the rect bake stays a rect, keeps a far
+	# member out, and still equals a full bake.
+	var near_b := _mound(lb, "Near", _square(120, 120, 8))
+	var ero := Pasture3DNodeErosion.new()
+	ero.evaluation = Pasture3DNode.Evaluation.LIVE
+	ero.iterations = 8
+	var bmods: Array[Pasture3DNode] = [ero]
+	near_b.modifiers = bmods
+	var far_c := _mound(lb, "Far", _square(208, 208, 6))
+	await _settle()
+	lb._base_key = ""
+	lb.bake_layer()
+	sp.curve.set_point_position(1, sp.curve.get_point_position(1) + Vector3(6, 0, 0))
+	m._refresh_owner_rect(m._layer_owner, {sp.get_instance_id(): true}, false, [], false)
+	var dec := m._last_rect_decision
+	var far_in := _clips_touch(m._last_rect_clips, far_c)
+	var clipped := _heights()
+	lb._base_key = ""
+	lb.bake_layer()
+	var full := _heights()
+	_check("I clipped", dec == "rect" and not far_in and clipped == full,
+			"decision %s, far member inside the rect %s, equals a full bake %s" % [dec, far_in, clipped == full])
+
+	# The base moves under every member (new noise seed): the rect reaches the unmoved eroding member.
+	var nz := lb.modifiers[0] as Pasture3DNodeNoise
+	nz.noise.seed = 11
+	lb._base_key = ""
+	sp.curve.set_point_position(1, sp.curve.get_point_position(1) - Vector3(3, 0, 0))
+	m._refresh_owner_rect(m._layer_owner, {sp.get_instance_id(): true}, false, [], false)
+	var dec2 := m._last_rect_decision
+	var reached := _clips_touch(m._last_rect_clips, near_b)
+	var rect11 := _heights()
+	lb._base_key = ""
+	lb.bake_layer()
+	var full11 := _heights()
+	_check("I base moved everywhere", dec2 == "rect" and reached and rect11 == full11,
+			"decision %s, unmoved eroding member inside the rect %s, equals a full bake %s" % [dec2, reached, rect11 == full11])
+
+	# Control: the rect ignores the base's changed box, so the unmoved member keeps its old ground.
+	nz.noise.seed = 12
+	lb._base_key = ""
+	sp.curve.set_point_position(1, sp.curve.get_point_position(1) + Vector3(3, 0, 0))
+	m.rect_ignores_base_change = true
+	m._refresh_owner_rect(m._layer_owner, {sp.get_instance_id(): true}, false, [], false)
+	m.rect_ignores_base_change = false
+	var ignored := _heights()
+	lb._base_key = ""
+	lb.bake_layer()
+	_check("I clipped control", ignored != _heights(), "ignoring the base's changed box differs from a full bake: %s" % (ignored != _heights()))
 	_drop([lb])
 	await _settle()
 	_ran += 1
@@ -395,4 +458,46 @@ func _p() -> void:
 	_check("P control", ctl > 0.05, "the read past the base row is off by %.4f m" % ctl)
 	_drop([lb])
 	await _settle()
+
+	# A child erosion's flow grid over the base differs from the same child with no base.
+	var flb := _layer("Flow", true)
+	var fm := _mound(flb, "Eroded", _square(32, 32, 14))
+	var ero := Pasture3DNodeErosion.new()
+	ero.evaluation = Pasture3DNode.Evaluation.FROZEN
+	ero.iterations = 8
+	# Flow is a published diagnostic: the solver only returns it when fields are published.
+	ero.publish_fields = true
+	var fmods: Array[Pasture3DNode] = [ero]
+	fm.modifiers = fmods
+	await _settle()
+	flb.extent_mode = Pasture3DLayerBrush.ExtentMode.WHOLE_TERRAIN
+	var noise_mods: Array[Pasture3DNode] = flb.modifiers.duplicate()
+	var over_base := await _flow_after_bake(flb, ero)
+	var empty: Array[Pasture3DNode] = []
+	flb.modifiers = empty
+	var no_base := await _flow_after_bake(flb, ero)
+	flb.modifiers = noise_mods
+	fm.read_past_base_row = true
+	var past := await _flow_after_bake(flb, ero)
+	fm.read_past_base_row = false
+	_check("P flow reads base", over_base.size() > 0 and over_base.size() == no_base.size() and over_base != no_base,
+			"flow grid %d cells, differs from the no-base child %s" % [over_base.size(), over_base != no_base])
+	# Non-empty, or two empty grids would pass this as equal.
+	_check("P flow control", past.size() > 0 and past == no_base,
+			"reading past the base row gives the no-base flow: %s (%d cells)" % [past == no_base, past.size()])
+	_drop([flb])
+	await _settle()
 	_ran += 1
+
+
+## Clear the erosion's frozen solve and the base key, run the Layer's deferred bake, and return the fresh
+## flow grid. Deferred on purpose: the synchronous native step only fills flow when a later modifier reads
+## fields, while the driver stores the solver's own flow diagnostics — the path a Frozen erosion takes in
+## the editor.
+func _flow_after_bake(p_lb: Pasture3DLayerBrush, p_ero: Pasture3DNodeErosion) -> PackedFloat32Array:
+	p_ero.clear_cache()
+	p_lb._base_key = ""
+	await p_lb.bake_layer_run()
+	for e: Dictionary in p_ero._cache.values():
+		return e.get("flow", PackedFloat32Array())
+	return PackedFloat32Array()

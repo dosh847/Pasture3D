@@ -434,6 +434,7 @@ func bake_layer(p_record_undo: bool = false) -> void:
 		if not mem.is_empty():
 			_log_children()
 			mem[0]._refresh_owner(owner, false, [])
+	_base_change = AABB()
 	_commit_deferred_undo(owner, before, can_undo)
 
 
@@ -506,6 +507,8 @@ func bake_layer_run(p_record_undo: bool = false, p_lead: Node = null, p_member_b
 		if not _cancel and lead != null and is_instance_valid(lead):
 			await _run_members(lead, bake, owner)
 	_layer_run_active = false
+	# Every pass of the member stage has repainted what the base moved; the next edit starts from nothing.
+	_base_change = AABB()
 	_commit_deferred_undo(owner, before, can_undo)
 
 
@@ -570,6 +573,8 @@ func bake_base() -> bool:
 	var clear := _base_box
 	if box.size.x > 0.0 and box.size.z > 0.0:
 		clear = box if clear.size == Vector3.ZERO else clear.merge(box)
+	# The ground members stand on, before, so the solve can report where it actually moved (§6.3).
+	var pre := _read_main_below(clear)
 	if clear.size != Vector3.ZERO:
 		terrain.data.clear_layer_in_area(row, clear, false)
 	_base_box = box if box.size.x > 0.0 and box.size.z > 0.0 else AABB()
@@ -584,7 +589,67 @@ func bake_base() -> bool:
 		_solve_base(inp)
 	if clear.size != Vector3.ZERO:
 		terrain.data.composite_area(clear, false)
+		_note_base_change(clear, pre)
 	return true
+
+
+## ---- Changed-box clipping (§6.3) ----------------------------------------------------------------------------
+
+## Where the ground under the members moved in base solves that no member bake has repainted yet. A member's
+## rect bake clears and repaints it with the spline's own box; a full bake or a finished Layer run drops it.
+var _base_change: AABB = AABB()
+
+
+func base_change() -> AABB:
+	return _base_change
+
+
+func clear_base_change() -> void:
+	_base_change = AABB()
+
+
+## The ground below the main row (ground + base) over a box, or empty.
+func _read_main_below(p_box: AABB) -> PackedFloat32Array:
+	var stack := _stack()
+	if stack == null or p_box.size.x <= 0.0 or p_box.size.z <= 0.0:
+		return PackedFloat32Array()
+	var main_row: int = stack.find_layer_by_owner(layer_owner_id())
+	if main_row < 0:
+		return PackedFloat32Array()
+	var vs: float = terrain.vertex_spacing
+	return terrain.data.composite_height_below(main_row, p_box.position.x, p_box.position.z, vs,
+			roundi(p_box.size.x / vs), roundi(p_box.size.z / vs))
+
+
+## Merge the cells that differ between `p_pre` and now into `_base_change`. Unreadable → the whole box.
+func _note_base_change(p_box: AABB, p_pre: PackedFloat32Array) -> void:
+	var post := _read_main_below(p_box)
+	var vs: float = terrain.vertex_spacing
+	var gw := roundi(p_box.size.x / vs)
+	var chg := AABB()
+	if post.is_empty() or post.size() != p_pre.size() or gw <= 0:
+		chg = AABB(Vector3(p_box.position.x, 0.0, p_box.position.z), Vector3(p_box.size.x, 0.0, p_box.size.z))
+	else:
+		var gh := post.size() / gw
+		var x0 := gw
+		var x1 := -1
+		var z0 := gh
+		var z1 := -1
+		for iz in range(gh):
+			for ix in range(gw):
+				var a := p_pre[iz * gw + ix]
+				var b := post[iz * gw + ix]
+				if a == b or (is_nan(a) and is_nan(b)):
+					continue
+				x0 = mini(x0, ix)
+				x1 = maxi(x1, ix)
+				z0 = mini(z0, iz)
+				z1 = maxi(z1, iz)
+		if x1 < 0:
+			return
+		chg = AABB(Vector3(p_box.position.x + x0 * vs, 0.0, p_box.position.z + z0 * vs),
+				Vector3((x1 - x0 + 1) * vs, 0.0, (z1 - z0 + 1) * vs))
+	_base_change = chg if _base_change.size == Vector3.ZERO else _base_change.merge(chg)
 
 
 func _solve_base(p_inp: Dictionary) -> void:
