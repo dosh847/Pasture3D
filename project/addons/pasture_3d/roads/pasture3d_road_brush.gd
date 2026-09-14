@@ -199,6 +199,10 @@ var _trace_hash: Dictionary = {} # Vector2i -> Array of sample indices
 ## RectBakeAlignmentGate: the refresh it schedules is editor-only and records nothing headless.
 var _last_spill_box: AABB = AABB()
 
+## The box a clipped bake queued because its corridor outgrew the one it rasterised, or empty (no growth, or an
+## unclipped bake, which re-arms the layer). Read by RectBakeAlignmentGate [F], for the same reason.
+var _last_outgrew_box: AABB = AABB()
+
 ## Tolerances for `junction_values_differ` (spec §3.2). A real drag moves arc lengths by metres.
 const JUNCTION_TOL_LENGTH: float = 0.01 # m — arc length, trim-back
 const JUNCTION_TOL_HEIGHT: float = 0.01 # m — pin, elevation, cut-face z
@@ -2709,10 +2713,42 @@ func junction_rebake_box() -> AABB:
 ## `_schedule_refresh` early-returns unless `Engine.is_editor_hint()`, so a gate that watched `_full_dirty`
 ## would see nothing headless and pass whether this function was right or wrong — measuring nothing and
 ## measuring well would look identical. The caller ignores the value; the gate is the reader.
+##
+## On a CLIPPED bake the re-bake is a box, not the layer (trace 2026-09-13: every LakeRoad1 edit that deepened a
+## cut cost a 2.3 s full bake on top of its 200 ms rect bake). The batter only reaches further where the road
+## now sits further from the ground, and a sample can only have moved there inside the clip or in the spill;
+## everywhere else the last bake's corridor already held it. So the clip and the spill, grown by the NEW
+## padding, is everything the narrower corridor could have cut short.
 func _rebake_if_corridor_outgrew(p_used_pad: float) -> bool:
-	if snappedf(_padding(), PAD_QUANTUM) <= snappedf(p_used_pad, PAD_QUANTUM):
+	_last_outgrew_box = AABB()
+	var pad := _padding()
+	if snappedf(pad, PAD_QUANTUM) <= snappedf(p_used_pad, PAD_QUANTUM):
 		return false
-	_schedule_refresh()
+	if _clip_aabb.size == Vector3.ZERO:
+		_schedule_refresh()
+		return true
+	var box := AABB(Vector3(_clip_aabb.position.x, -1.0, _clip_aabb.position.z),
+			Vector3(_clip_aabb.size.x, 2.0, _clip_aabb.size.z))
+	if _last_spill_box.size != Vector3.ZERO:
+		box = box.merge(_last_spill_box)
+	box = box.grow(pad)
+	# Nothing this road paints lies outside its own (already widened) footprint, and a pad of a hundred metres
+	# on a short road would otherwise queue more than the road covers.
+	var fp := AABB()
+	for sp in _get_splines():
+		var f := _spline_footprint_aabb(sp)
+		fp = f if fp.size == Vector3.ZERO else fp.merge(f)
+	if fp.size != Vector3.ZERO:
+		fp = AABB(Vector3(fp.position.x, -1.0, fp.position.z), Vector3(fp.size.x, 2.0, fp.size.z))
+		box = box.intersection(fp)
+		if box.size.x <= 0.0 or box.size.z <= 0.0:
+			return false
+	_last_outgrew_box = box
+	if Pasture3DBakeTrace.enabled:
+		Pasture3DBakeTrace.mark("%s corridor outgrew its clipped bake (pad %.1f -> %.1f m): queued x[%.1f..%.1f] z[%.1f..%.1f]" % [
+				name, p_used_pad, pad, _last_outgrew_box.position.x, _last_outgrew_box.end.x,
+				_last_outgrew_box.position.z, _last_outgrew_box.end.z])
+	_schedule_box_refresh(_last_outgrew_box)
 	return true
 
 

@@ -17,6 +17,8 @@
 #                the road's footprint), not the layer; control: identical records give no box
 #   [E]          `_spill_box` covers a height change outside the clip and little else; control: an unchanged
 #                alignment gives no box
+#   [F]          a clipped bake whose corridor outgrew queues the clip grown by the new padding, smaller than the
+#                footprint; controls: an unchanged pad asks for nothing, an unclipped bake still re-arms the layer
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/RectBakeAlignmentGate.tscn
 extends Node
@@ -37,8 +39,8 @@ func _ready() -> void:
 	print("=== RectBakeAlignmentGate ===")
 	if await _setup():
 		_run()
-	if _ran != 5:
-		_check("completed", false, "%d of 5 criteria ran" % _ran)
+	if _ran != 6:
+		_check("completed", false, "%d of 6 criteria ran" % _ran)
 	print("=== RECT BAKE ALIGNMENT %s (%d failures) ===" % ["PASS" if _fail == 0 else "FAIL", _fail])
 	get_tree().quit(1 if _fail > 0 else 0)
 
@@ -160,6 +162,49 @@ func _run() -> void:
 	_settle()
 	_d_junction_box(sp, i, orig)
 	_e_spill_box(sp, i, orig)
+	_f_outgrew_box(sp, i, orig)
+
+
+## [F] A clipped bake whose corridor outgrew regrades a box, not the layer. The growth is forced by claiming the
+## bake used a zero pad; the decision and its box are read back because the scheduler is editor-only.
+func _f_outgrew_box(p_sp: Path3D, p_i: int, p_orig: Vector3) -> void:
+	p_sp.curve.set_point_position(p_i, p_orig + NUDGE)
+	_mover._refresh_owner_rect(_owner, {p_sp.get_instance_id(): true}, false)
+	var clip: AABB = _mover._last_rect_clip
+	p_sp.curve.set_point_position(p_i, p_orig)
+	_settle()
+	var pad: float = _mover._padding()
+	_mover._last_spill_box = AABB()
+	_mover._clip_aabb = clip
+	var quiet: bool = _mover._rebake_if_corridor_outgrew(pad)
+	var fired: bool = _mover._rebake_if_corridor_outgrew(0.0)
+	var box: AABB = _mover._last_outgrew_box
+	_mover._clip_aabb = AABB()
+	var full_fired: bool = _mover._rebake_if_corridor_outgrew(0.0)
+	var full_box: AABB = _mover._last_outgrew_box
+	# Covers the clip grown by the pad wherever the road's footprint reaches. The size check is against the whole
+	# LAYER's footprint (every road on it), which is what the layer rebake it replaces would regrade.
+	var fp: AABB = _mover._spline_footprint_aabb(p_sp)
+	var want := AABB(Vector3(clip.position.x, -1.0, clip.position.z), Vector3(clip.size.x, 2.0, clip.size.z)) \
+			.grow(pad).intersection(AABB(Vector3(fp.position.x, -1.0, fp.position.z), Vector3(fp.size.x, 2.0, fp.size.z)))
+	var covers := clip.size != Vector3.ZERO and box.position.x <= want.position.x + 0.01 \
+			and box.end.x >= want.end.x - 0.01 and box.position.z <= want.position.z + 0.01 \
+			and box.end.z >= want.end.z - 0.01
+	var layer := AABB()
+	for b in _net.road_brushes():
+		if b == null or b._layer_owner != _owner:
+			continue
+		for s in b._get_splines():
+			var f: AABB = b._spline_footprint_aabb(s)
+			layer = f if layer.size == Vector3.ZERO else layer.merge(f)
+	var box_area := box.size.x * box.size.z
+	var fp_area := layer.size.x * layer.size.z
+	_ran += 1
+	_check("[F] corridor outgrew on a clipped bake", not quiet and fired and covers and box_area < fp_area
+			and full_fired and full_box.size == Vector3.ZERO,
+			"same pad -> %s; grown -> box %.0f m2 covering clip+pad %s vs layer footprint %.0f m2; unclipped -> %s" % [
+			"no rebake" if not quiet else "REBAKE", box_area, covers, fp_area,
+			"layer (no box)" if full_fired and full_box.size == Vector3.ZERO else "WRONG"])
 
 
 ## [D] The rebake area is the junctions that moved, not the road. Computed against a baseline captured before
