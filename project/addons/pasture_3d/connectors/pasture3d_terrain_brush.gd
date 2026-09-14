@@ -174,6 +174,7 @@ var _timer: SceneTreeTimer = null
 var _full_dirty: bool = false   # A queued refresh needs the whole layer (param/transform/structural change)
 var _dirty_splines: Dictionary = {} # Path3D instance_id -> true: splines whose curve changed (partial redraw)
 var _moved_node: bool = false   # A queued refresh is a node-transform move (dirty-rect, but re-snap all points)
+var _dirty_boxes: Array = []    # World AABBs a queued refresh must regrade though no spline moved (dirty-rect)
 var _arm_gen: int = 0
 
 ## The tile-grown box the last `_refresh_owner_rect` cleared and repainted. Read by RectBakeJunctionGate to
@@ -1036,6 +1037,19 @@ func _schedule_spline_refresh(path: Path3D) -> void:
 	_arm_refresh_timer()
 
 
+## Area scheduler — something this brush paints depends on changed inside `p_box`, but no curve moved: a
+## road's junction pins, or the part of its alignment a clipped bake found had moved outside its own clip.
+## Takes the dirty-rect path over the box, where `_schedule_refresh` would repaint the whole layer — a trace
+## showed every junction rebake costing 1.4-2.8 s that way, for a change a few hundred metres across.
+func _schedule_box_refresh(p_box: AABB) -> void:
+	if not _can_auto_refresh() or (p_box.size.x <= 0.0 and p_box.size.z <= 0.0):
+		return
+	_dirty_boxes.append(p_box)
+	_arm_gen += 1
+	Pasture3DBakeTrace.arm(self, "box")
+	_arm_refresh_timer()
+
+
 func _arm_refresh_timer() -> void:
 	if is_instance_valid(_timer):
 		return
@@ -1088,9 +1102,11 @@ func _on_refresh_timer() -> void:
 	var full := _full_dirty
 	var splines := _dirty_splines
 	var moved_node := _moved_node
+	var boxes := _dirty_boxes
 	_full_dirty = false
 	_dirty_splines = {}
 	_moved_node = false
+	_dirty_boxes = []
 	# The non-painting branch sits AFTER the snapshot deliberately: a brush that returned before the
 	# clear above would carry a permanently-set dirty flag and re-arm the timer forever.
 	if not _paints():
@@ -1099,8 +1115,8 @@ func _on_refresh_timer() -> void:
 		if is_inside_tree():
 			update_gizmos()
 		return
-	var bake: Callable = (_refresh_owner.bind(_layer_owner, false, []) if full or splines.is_empty()
-			else _refresh_owner_rect.bind(_layer_owner, splines, moved_node))
+	var bake: Callable = (_refresh_owner.bind(_layer_owner, false, []) if full or (splines.is_empty() and boxes.is_empty())
+			else _refresh_owner_rect.bind(_layer_owner, splines, moved_node, boxes))
 	# §14. Both bake paths go through the same driver, because either can be the one that has no cache
 	# yet: dragging a spline on a freshly created Mound reaches the dirty-rect path first.
 	if _wants_deferred_bake():
@@ -1712,7 +1728,7 @@ func cancel_erosion() -> void:
 ## layer-mates inside the box (not just the moved spline) is what keeps shared cells correct — the same
 ## reason the full refresh repaints mates. Auto-refresh only (no undo action; the gizmo edit is the
 ## undoable cause). Falls back to a full refresh when there's no layers Tool API or nothing locatable.
-func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool = false) -> void:
+func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool = false, p_boxes: Array = []) -> void:
 	if not is_configured():
 		return
 	var layer_id := _ensure_layer_for(owner, owner == _layer_owner)
@@ -1741,6 +1757,11 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 				have = true
 		elif prev.size != Vector3.ZERO:
 			dirty = prev if not have else dirty.merge(prev)
+			have = true
+	# Areas queued by `_schedule_box_refresh`: no curve moved there, so there is no previous footprint to union.
+	for bx: AABB in p_boxes:
+		if bx.size.x > 0.0 or bx.size.z > 0.0:
+			dirty = bx if not have else dirty.merge(bx)
 			have = true
 	if not have:
 		# Splines vanished (e.g. removed) — let the full path reconcile the layer.
@@ -1874,6 +1895,7 @@ func _drop_covered_refreshes(p_sibs: Array, p_gens: Dictionary) -> int:
 		s._full_dirty = false
 		s._dirty_splines = {}
 		s._moved_node = false
+		s._dirty_boxes = []
 		s._last_baked_xform = s.global_transform
 		Pasture3DBakeTrace.mark("%s: pending refresh dropped, already repainted by %s's layer bake" % [s.name, name])
 		n += 1

@@ -184,6 +184,21 @@ var last_junction_digest: String = ""
 ## a rounding boundary still flips. Pinned to the last BAKE, never the last resolve, so drift accumulates.
 var _last_junction_values: Dictionary = {}
 
+## Where each sample of the last solved alignment sat in world XZ, with the ground and height it solved, hashed
+## by cell. A clipped bake reads ground outside its grid from here, and compares its new heights against it to
+## find where the alignment moved beyond the clip. See `_trace_at`. Not saved: the first bake after a load has
+## none, and falls back to the layers below.
+var _trace_xz: PackedVector2Array = PackedVector2Array()
+var _trace_ground: PackedFloat32Array = PackedFloat32Array()
+var _trace_z: PackedFloat32Array = PackedFloat32Array()
+var _trace_ds: float = 0.0
+var _trace_cell: float = 1.0
+var _trace_hash: Dictionary = {} # Vector2i -> Array of sample indices
+
+## The box the last clipped bake found its alignment had moved outside its clip, or empty. Read by
+## RectBakeAlignmentGate: the refresh it schedules is editor-only and records nothing headless.
+var _last_spill_box: AABB = AABB()
+
 ## Tolerances for `junction_values_differ` (spec §3.2). A real drag moves arc lengths by metres.
 const JUNCTION_TOL_LENGTH: float = 0.01 # m — arc length, trim-back
 const JUNCTION_TOL_HEIGHT: float = 0.01 # m — pin, elevation, cut-face z
@@ -691,6 +706,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 					})
 		alignment.input_digest = alignment_digest(road_mod)
 		road_mod.last_alignment = alignment
+		_after_alignment_solve(_resample_plan(plan, cum, ds, n_s), ds, alignment)
 
 		_rebake_if_corridor_outgrew(used_pad)
 
@@ -1116,11 +1132,44 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	# The ground the alignment is solved against is the SURFACE ENTERING THIS STEP, not the terrain — so
 	# an Erosion step above this one is ground the road cuts through, which is the ordering §8 exists to
 	# make editable.
+	#
+	# ---- A CLIPPED GRID DOES NOT COVER THE ROAD ----
+	#
+	# A rect bake hands this a grid over the clip box only, and the alignment is solved for the WHOLE plan.
+	# Sampled from that grid alone, every sample outside the box read NaN cells and `_sample_grid` answered 0.0:
+	# the road beyond the box was solved against flat zero ground (12.96 m off on the demo's Road2), and the
+	# resolve that followed moved or dropped junctions a kilometre from the edit, each undone by a full bake.
+	# Outside the grid, the ground the last solve used at the same world position (`_trace_at`): the clip
+	# covers the edit, so nothing out there changed. The layers below are only the fallback, when there is no
+	# trace or the curve moved — they miss any modifier that runs ahead of this one, which the grid includes
+	# (0.088 m on the demo's Road2, against 12.96 m for the old flat zero).
+	var gx1 := p_min_x + float(p_gw - 1) * p_vs
+	var gz1 := p_min_z + float(p_gh - 1) * p_vs
+	#
+	# ONLY ON A CLIPPED BAKE. An unclipped bake's grid is the whole footprint, and a caller handing this a smaller
+	# grid on purpose (RoadJunctionGate P and S do) gets the grid it asked for, as before.
+	var clipped := _clip_aabb.size != Vector3.ZERO
+	var pts := _resample_plan(plan, cum, ds, n_s)
+	var below := PackedFloat32Array()
 	var ground := PackedFloat32Array()
 	ground.resize(n_s)
 	for i in n_s:
 		var at := _plan_point_at(plan, cum, float(i) * ds)
-		ground[i] = _sample_grid(p_z, p_gw, p_gh, p_min_x, p_min_z, p_vs, at)
+		if not clipped or (at.x >= p_min_x and at.x <= gx1 and at.y >= p_min_z and at.y <= gz1):
+			ground[i] = _sample_grid(p_z, p_gw, p_gh, p_min_x, p_min_z, p_vs, at)
+			continue
+		var old := _trace_at(pts[i] if i < pts.size() else at, ds)
+		if not old.is_empty() and is_finite(float(old[0])):
+			ground[i] = float(old[0])
+			continue
+		if below.is_empty():
+			if terrain != null and terrain.data != null and terrain.data.has_method("get_height_below_along_plan"):
+				below = terrain.data.get_height_below_along_plan(_layer_id, plan, cum, ds, n_s)
+			if below.size() != n_s:
+				below.resize(n_s)
+				below.fill(NAN)
+		var h: float = below[i]
+		ground[i] = h if is_finite(h) else _base_height_below(Vector3(at.x, 0.0, at.y))
 
 	var t := resolved_road_type()
 	if t == null:
@@ -1164,6 +1213,7 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 				})
 	alignment.input_digest = alignment_digest(p_mod)
 	p_mod.last_alignment = alignment
+	_after_alignment_solve(pts, ds, alignment)
 
 	_rebake_if_corridor_outgrew(used_pad)
 
@@ -2524,8 +2574,12 @@ func junction_values() -> Dictionary:
 		return out
 	var key := road_key()
 	for j in net.junctions_for(key):
-		out[String(j.id)] = _junction_record(j.kind == Pasture3DRoadJunction.JunctionKind.END_TO_END,
+		var rec := _junction_record(j.kind == Pasture3DRoadJunction.JunctionKind.END_TO_END,
 				j.arc_length_for(key), j.pin_for(key), j.trim_back_for(key), j.elevation, j.arm_z, j.arm_banks)
+		# Where it is, for `_junction_change_box`. Not compared: `junction_values_differ` reads only v and tol.
+		rec["c"] = j.center
+		rec["r"] = j.widest_trim_back() + j.effective_corner_radius()
+		out[String(j.id)] = rec
 	return out
 
 
@@ -2580,6 +2634,10 @@ func schedule_junction_rebake() -> void:
 	if not junction_rebake_needed():
 		last_junction_digest = d
 		return
+	# Before the baseline is replaced below. A rect over the junctions that moved, not the whole layer: the
+	# trace this replaced spent 1.4-2.8 s per rebake repainting every road on the owner. Whatever the new pins
+	# change along the road beyond this box, the rect bake's `_spill_box` finds and queues.
+	var box := junction_rebake_box()
 	# WHICH junction fields moved, not just that the digest did — the line diff is what separated signed-zero
 	# noise from real drift (spec §2). The ground under each changed junction is sampled as well, so a value
 	# that reverts can be tied to a ground change (spec §4).
@@ -2605,7 +2663,16 @@ func schedule_junction_rebake() -> void:
 		Pasture3DBakeTrace.mark("%s junction digest changed:\n    %s" % [name, "\n    ".join(diff)])
 	last_junction_digest = d
 	_last_junction_values = junction_values()
-	_schedule_refresh()
+	if box.size == Vector3.ZERO:
+		_schedule_refresh()
+	else:
+		_schedule_box_refresh(box)
+
+
+## The area a junction rebake has to regrade: `_junction_change_box` of the current records against the ones
+## last baked. Its own function so a headless gate can assert the decision the editor-only scheduler acts on.
+func junction_rebake_box() -> AABB:
+	return _junction_change_box(junction_values(), _last_junction_values)
 
 
 ## ---- THE CORRIDOR WIDTH DEPENDS ON A RESULT THE BAKE HAS TO PRODUCE FIRST ----------------------
@@ -2647,6 +2714,164 @@ func _rebake_if_corridor_outgrew(p_used_pad: float) -> bool:
 		return false
 	_schedule_refresh()
 	return true
+
+
+## ---- A CLIPPED BAKE STILL SOLVES THE WHOLE ROAD ----
+##
+## The alignment is one solve over the whole plan, so a rect bake that clips the terrain write to the edited
+## stretch still re-solves every sample. Two consequences, and this section handles both:
+##
+##   * its grid covers only the clip, so ground outside it has to come from somewhere else. It came from the
+##     grid, clamped to NaN cells and read as 0.0, and a road a kilometre long was solved against flat zero
+##     ground outside a 300 m box — which moved and dropped junctions far from the edit (trace 2026-09-13).
+##     It now comes from the last bake's own ground at the same world position (`_trace_at`).
+##   * the new profile can legitimately differ outside the clip — a pin or a grade limit carries a change
+##     along the road — and nothing regraded the terrain there until some later full bake happened to.
+##     `_spill_box` finds that stretch, and the bake queues a rect refresh over it.
+
+## Record this solve as the reference the next clipped bake reads and compares against.
+func _record_alignment_trace(p_pts: PackedVector2Array, p_ds: float, p_alignment: Pasture3DRoadAlignment) -> void:
+	_trace_xz = p_pts
+	_trace_ground = p_alignment.ground
+	_trace_z = p_alignment.z
+	_trace_ds = p_ds
+	_trace_cell = maxf(p_ds * 2.0, 1.0)
+	_trace_hash = {}
+	for k in p_pts.size():
+		var key := Vector2i(floori(p_pts[k].x / _trace_cell), floori(p_pts[k].y / _trace_cell))
+		if _trace_hash.has(key):
+			(_trace_hash[key] as Array).append(k)
+		else:
+			_trace_hash[key] = [k]
+
+
+## [ground, z] of the last solve at world XZ `p_at`, interpolated along the old samples, or [] when no old
+## sample lies within 0.75 ds — the curve moved there, or there is no trace yet.
+func _trace_at(p_at: Vector2, p_ds: float) -> Array:
+	var n := _trace_xz.size()
+	if n == 0 or _trace_ground.size() < n or _trace_z.size() < n or not is_equal_approx(_trace_ds, p_ds):
+		return []
+	var cx := floori(p_at.x / _trace_cell)
+	var cz := floori(p_at.y / _trace_cell)
+	var best := -1
+	var best_d2 := INF
+	for dz in range(-1, 2):
+		for dx in range(-1, 2):
+			var idxs: Variant = _trace_hash.get(Vector2i(cx + dx, cz + dz))
+			if idxs == null:
+				continue
+			for k: int in idxs:
+				var d2 := p_at.distance_squared_to(_trace_xz[k])
+				if d2 < best_d2:
+					best_d2 = d2
+					best = k
+	if best < 0 or best_d2 > (p_ds * 0.75) * (p_ds * 0.75):
+		return []
+	var j := best + 1
+	if j >= n or (p_at - _trace_xz[best]).dot(_trace_xz[j] - _trace_xz[best]) < 0.0:
+		j = best - 1
+	if j < 0:
+		return [_trace_ground[best], _trace_z[best]]
+	var seg := _trace_xz[j] - _trace_xz[best]
+	var t := clampf((p_at - _trace_xz[best]).dot(seg) / maxf(seg.length_squared(), 1e-8), 0.0, 1.0)
+	return [lerpf(_trace_ground[best], _trace_ground[j], t), lerpf(_trace_z[best], _trace_z[j], t)]
+
+
+## The world box, grown by the corridor, around every sample OUTSIDE the current clip whose solved height moved
+## by more than JUNCTION_TOL_HEIGHT against the last solve. Empty on an unclipped bake, or when nothing moved.
+## Must run BEFORE `_record_alignment_trace` replaces the reference.
+func _spill_box(p_pts: PackedVector2Array, p_z: PackedFloat32Array, p_ds: float) -> AABB:
+	if _clip_aabb.size == Vector3.ZERO:
+		return AABB()
+	var c0 := _clip_aabb.position
+	var c1 := _clip_aabb.end
+	var have := false
+	var lo := Vector2(INF, INF)
+	var hi := Vector2(-INF, -INF)
+	for k in mini(p_pts.size(), p_z.size()):
+		var at := p_pts[k]
+		if at.x >= c0.x and at.x <= c1.x and at.y >= c0.z and at.y <= c1.z:
+			continue
+		var old := _trace_at(at, p_ds)
+		if old.is_empty() or absf(p_z[k] - float(old[1])) <= JUNCTION_TOL_HEIGHT:
+			continue
+		lo = Vector2(minf(lo.x, at.x), minf(lo.y, at.y))
+		hi = Vector2(maxf(hi.x, at.x), maxf(hi.y, at.y))
+		have = true
+	if not have:
+		return AABB()
+	var pad := _padding()
+	return AABB(Vector3(lo.x - pad, -1.0, lo.y - pad), Vector3(hi.x - lo.x + 2.0 * pad, 2.0, hi.y - lo.y + 2.0 * pad))
+
+
+## After a solve: find and queue the spill, then make this solve the reference.
+func _after_alignment_solve(p_pts: PackedVector2Array, p_ds: float, p_alignment: Pasture3DRoadAlignment) -> void:
+	_last_spill_box = _spill_box(p_pts, p_alignment.z, p_ds)
+	_record_alignment_trace(p_pts, p_ds, p_alignment)
+	if _last_spill_box.size == Vector3.ZERO:
+		return
+	if Pasture3DBakeTrace.enabled:
+		Pasture3DBakeTrace.mark("%s alignment moved outside its clip: queued x[%.1f..%.1f] z[%.1f..%.1f]" % [name,
+				_last_spill_box.position.x, _last_spill_box.end.x, _last_spill_box.position.z, _last_spill_box.end.z])
+	_schedule_box_refresh(_last_spill_box)
+
+
+## The world box covering every junction whose record differs between `p_now` and `p_baked` — present in one and
+## not the other, or moved beyond tolerance — each grown by its footprint and this road's corridor. Empty when a
+## changed record carries no position (a baseline adopted from text), which the caller treats as "bake it all".
+func _junction_change_box(p_now: Dictionary, p_baked: Dictionary) -> AABB:
+	var ids := {}
+	for id in p_now:
+		ids[id] = true
+	for id in p_baked:
+		ids[id] = true
+	# ---- ARC LENGTH ALONE MOVES NOTHING ON THE GROUND ----
+	#
+	# Lengthening the road near its start shifts the arc length of every junction downstream, so every record
+	# differs, and boxing them all regraded more than a full bake would (RectBakeAlignmentGate [D]). A junction
+	# whose only change is its arc length sits where it sat with the same pins; it still needs the re-solve,
+	# which ANY rect bake of this road does, and `_spill_box` catches whatever that solve moves. So only
+	# junctions that changed in some other way are boxed, and when none did, the smallest changed one is, just
+	# to get the solve.
+	var moved: Array = []
+	var arc_only: Array = []
+	for id in ids:
+		var a: Variant = p_now.get(id)
+		var b: Variant = p_baked.get(id)
+		if a != null and b != null:
+			if not junction_values_differ({id: a}, {id: b}):
+				continue
+			if not junction_values_differ({id: _without_arc(a)}, {id: _without_arc(b)}):
+				arc_only.append(a)
+				continue
+		for rec: Variant in [a, b]:
+			if rec != null:
+				moved.append(rec)
+	if moved.is_empty() and not arc_only.is_empty():
+		arc_only.sort_custom(func(x, y): return float(x.get("r", 0.0)) < float(y.get("r", 0.0)))
+		moved.append(arc_only[0])
+	if moved.is_empty():
+		return AABB()
+	var pad := _padding()
+	var lo := Vector2(INF, INF)
+	var hi := Vector2(-INF, -INF)
+	for rec: Dictionary in moved:
+		if not rec.has("c"):
+			return AABB()
+		var c: Vector2 = rec["c"]
+		var r: float = float(rec.get("r", 0.0)) + pad
+		lo = Vector2(minf(lo.x, c.x - r), minf(lo.y, c.y - r))
+		hi = Vector2(maxf(hi.x, c.x + r), maxf(hi.y, c.y + r))
+	return AABB(Vector3(lo.x, -1.0, lo.y), Vector3(hi.x - lo.x, 2.0, hi.y - lo.y))
+
+
+## A `_junction_record` whose arc length (field 0) no longer counts: `junction_values_differ` compares within
+## tolerance, and nothing is further than INF.
+static func _without_arc(p_rec: Dictionary) -> Dictionary:
+	var tol: PackedFloat64Array = (p_rec["tol"] as PackedFloat64Array).duplicate()
+	if tol.size() > 0:
+		tol[0] = INF
+	return {"v": p_rec["v"], "tol": tol}
 
 
 ## Everything a road's baked surface depends on that is NOT its spline geometry and NOT the road
