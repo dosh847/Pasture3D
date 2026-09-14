@@ -169,13 +169,8 @@ func _paint_spline(path: Path3D) -> void:
 	var inv_ex := 1.0 / maxf(frame[4], 0.001)
 	var inv_ez := 1.0 / maxf(frame[5], 0.001)
 
-	var fields: Array = _terrain_fields(min_x, min_z, vs, gw, gh) if use_fields else []
-	var measured: Array = _measured_fields(fields[0], fields[2], op_selectors, vs, gw, gh,
-			Pasture3DTerrainMask.FieldSource.BELOW_LAYER) if use_fields else []
-	var sim_fields: Array = []
 	var sim_dict := {}
 	if sim_res != null and sim_res.is_valid():
-		sim_fields = _sim_fields(sim_res, min_x, min_z, vs, gw, gh)
 		sim_dict = _sim_result_dict(sim_res)
 
 	# Native rasteriser: same SDF + per-cell modifier math in C++ (~15-40x faster than GDScript loop
@@ -208,6 +203,15 @@ func _paint_spline(path: Path3D) -> void:
 		_commit_modifier_caches(stack, extent,
 				[fcx, fcz, fcos, fsin, frame[4], frame[5], min_x, min_z, vs])
 		return
+
+	# The fields THIS route reads. Built after the native branch for the reason in Pasture3DMound: the
+	# rasteriser builds its own, so above it they were a GDScript pass over the grid that nothing read.
+	var fields: Array = _terrain_fields(min_x, min_z, vs, gw, gh) if use_fields else []
+	var measured: Array = _measured_fields(fields[0], fields[2], op_selectors, vs, gw, gh,
+			Pasture3DTerrainMask.FieldSource.BELOW_LAYER) if use_fields else []
+	var sim_fields: Array = []
+	if sim_res != null and sim_res.is_valid():
+		sim_fields = _sim_fields(sim_res, min_x, min_z, vs, gw, gh)
 
 	var sdf := _signed_distance_field(poly, min_x, min_z, vs, gw, gh)
 	if crease_smoothing > 0.0:

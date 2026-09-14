@@ -250,15 +250,8 @@ func _paint_spline(path: Path3D) -> void:
 	var inv_ex := 1.0 / maxf(frame[4], 0.001)
 	var inv_ez := 1.0 / maxf(frame[5], 0.001)
 
-	var fields: Array = _terrain_fields(min_x, min_z, vs, gw, gh) if use_fields else []
-	# §21.6: the wider grids any selector's `measure_radius` asks for, indexed by selector id. Empty when
-	# every selector left it at 0, which is the default.
-	var measured: Array = _measured_fields(fields[0], fields[2], op_selectors, vs, gw, gh,
-			Pasture3DTerrainMask.FieldSource.BELOW_LAYER) if use_fields else []
-	var sim_fields: Array = []
 	var sim_dict := {}
 	if sim_res != null and sim_res.is_valid():
-		sim_fields = _sim_fields(sim_res, min_x, min_z, vs, gw, gh)
 		sim_dict = _sim_result_dict(sim_res)
 
 	# Native rasteriser (Round 2): same SDF + per-cell math in C++ (~15-40x faster than this GDScript loop
@@ -294,6 +287,18 @@ func _paint_spline(path: Path3D) -> void:
 		_commit_modifier_caches(stack, extent,
 				[fcx, fcz, fcos, fsin, frame[4], frame[5], min_x, min_z, vs])
 		return
+
+	# The fields THIS route reads. Built after the native branch, not above it: stamp_mound_loop builds its
+	# own from `need_fields` / `sim_result`, so up there they were a per-cell GDScript pass over the whole
+	# grid whose result nothing read.
+	var fields: Array = _terrain_fields(min_x, min_z, vs, gw, gh) if use_fields else []
+	# §21.6: the wider grids any selector's `measure_radius` asks for, indexed by selector id. Empty when
+	# every selector left it at 0, which is the default.
+	var measured: Array = _measured_fields(fields[0], fields[2], op_selectors, vs, gw, gh,
+			Pasture3DTerrainMask.FieldSource.BELOW_LAYER) if use_fields else []
+	var sim_fields: Array = []
+	if sim_res != null and sim_res.is_valid():
+		sim_fields = _sim_fields(sim_res, min_x, min_z, vs, gw, gh)
 
 	# One O(cells) signed distance field replaces the old per-pixel O(edges) polygon distance (×2 for
 	# the dome's max-interior pass). Positive inside, in metres; max_inside normalises the dome.
