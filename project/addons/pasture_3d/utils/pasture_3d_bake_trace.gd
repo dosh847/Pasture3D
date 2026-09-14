@@ -119,6 +119,9 @@ static func bake_begin(p_brush: Node, p_path: String) -> int:
 		"brush": _brush_name(p_brush),
 		"owner": _layer_owner_of(p_brush),
 		"path": p_path,
+		# Spec §5: not every bake comes through a scheduler — refresh(), undo, force_bake_modifiers and the
+		# deferred driver's later passes do not — so the arm stack alone left bakes with no recorded cause.
+		"stack": _stack() if capture_stacks else [],
 	})
 	_open_bakes[token] = Time.get_ticks_usec()
 	return token
@@ -253,6 +256,9 @@ static func report() -> String:
 						lines.append("            %s %s" % ["woken by" if i == 0 else "        ", st[i]])
 			"bake_begin":
 				lines.append("  %8.1f  BAKE  %-16s owner=%-28s path=%s" % [t, ev["brush"], ev["owner"], ev["path"]])
+				var bst: Array = ev.get("stack", [])
+				for i in bst.size():
+					lines.append("            %s %s" % ["entered via" if i == 0 else "           ", bst[i]])
 			"bake_end":
 				var of_seq: int = int(ev["of"])
 				var owner_name := "?"

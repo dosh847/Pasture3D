@@ -406,6 +406,20 @@ func resolve_junctions() -> void:
 	_resolve_queued = false
 	_junction_surface_cache.clear()
 	var brushes := road_brushes()
+	# Spec §4: whether this resolve can be reading ground from a bake that has not happened yet. A junction
+	# value that changed and then changed back is only explicable against this line.
+	if Pasture3DBakeTrace.enabled:
+		var pending := PackedStringArray()
+		var deferred := PackedStringArray()
+		for b in brushes:
+			if b == null:
+				continue
+			if b._full_dirty or is_instance_valid(b._timer):
+				pending.append(String(b.name))
+			if b._erosion_running or b._task_id != -1:
+				deferred.append(String(b.name))
+		Pasture3DBakeTrace.mark("resolve_junctions: pending refresh [%s]; deferred run in flight [%s]" % [
+				", ".join(pending), ", ".join(deferred)])
 	var runs: Array = []
 	for b in brushes:
 		if b != null and b.has_method("build_run"):
@@ -423,7 +437,9 @@ func resolve_junctions() -> void:
 	# they just decided: an arm sits exactly where the approach's grading stops.
 	_resolve_lane_graphs(brushes)
 	for b in brushes:
-		if b != null and b.has_method("junction_digest") and b.junction_digest() != b.last_junction_digest:
+		# Unconditional: the brush decides against its tolerance (spec §3), and advances its digest text even
+		# when it does not re-arm. A text comparison here would re-arm on signed zero and millimetre drift.
+		if b != null and b.has_method("schedule_junction_rebake"):
 			b.schedule_junction_rebake()
 	paint_roads(brushes)
 	build_chunks(brushes)

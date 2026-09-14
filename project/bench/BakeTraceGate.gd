@@ -42,6 +42,7 @@ func _run_all() -> void:
 	_d_bake_span_pairs()
 	_e_ring_buffer_evicts()
 	_g_session_toggle_writes_report()
+	_h_bake_begin_records_its_caller()
 	_f_report_the_uncovered_half()
 
 
@@ -206,6 +207,52 @@ func _g_session_toggle_writes_report() -> void:
 	if FileAccess.file_exists(Pasture3DBakeTrace.REPORT_PATH) 			and FileAccess.get_file_as_string(Pasture3DBakeTrace.REPORT_PATH).contains("gate-G-marker"):
 		print("    (note: the editor report file still holds an OLD gate marker; it is stale, not written now)")
 	_ran += 1
+
+
+## [H] A bake records the path that entered it (spec §5). The frame looked for is THIS gate's call into
+## `_refresh_owner` — not a stack the gate built — and the control is the same bake with capture off.
+## `get_stack()` is empty without a debugger session, so headless this reports itself NOT COVERED rather
+## than passing on an empty array.
+func _h_bake_begin_records_its_caller() -> void:
+	print("[H] bake_begin records the stack that entered the bake")
+	var terrain := Pasture3D.new()
+	DirAccess.make_dir_recursive_absolute("user://_baketracegate_data")
+	terrain.data_directory = "user://_baketracegate_data"
+	add_child(terrain)
+	_brush.terrain = terrain
+	var probe := get_stack()
+	Pasture3DBakeTrace.start(true)
+	_brush._refresh_owner(_brush._layer_owner, false, [])
+	var on_stack := _bake_stack()
+	Pasture3DBakeTrace.start(false)
+	_brush._refresh_owner(_brush._layer_owner, false, [])
+	var off_stack := _bake_stack()
+	_brush.terrain = null
+	terrain.queue_free()
+	if probe.is_empty():
+		print("    NOT COVERED: get_stack() is empty here (no debugger session); verify in the editor.")
+		print("    capture on recorded %d frame(s), capture off recorded %d." % [on_stack.size(), off_stack.size()])
+		if not off_stack.is_empty():
+			_fail += 1
+			print("    !! capture OFF still recorded a stack")
+		_ran += 1
+		return
+	var found := false
+	for f in on_stack:
+		if String(f).contains("BakeTraceGate.gd"):
+			found = true
+	print("    capture on: caller frame found=%s; capture off: %d frame(s) (want true, 0)" % [found, off_stack.size()])
+	if not found or not off_stack.is_empty():
+		_fail += 1
+		print("    !! bake_begin did not record the caller, or recorded one with capture off")
+	_ran += 1
+
+
+func _bake_stack() -> Array:
+	for ev in Pasture3DBakeTrace.events():
+		if ev["type"] == "bake_begin":
+			return ev.get("stack", [])
+	return []
 
 
 ## [F] Not an assertion — a standing statement of what a PASS above does and does not mean.

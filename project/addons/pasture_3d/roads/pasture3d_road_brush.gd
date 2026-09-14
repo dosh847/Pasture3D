@@ -178,6 +178,17 @@ const PAD_QUANTUM: float = 0.5
 ## see `junction_digest`. Not saved — a reload re-bakes and re-resolves anyway.
 var last_junction_digest: String = ""
 
+## The junction VALUES the last bake used. `last_junction_digest` stays the text form (trace diffs, cache
+## keys, gates); these decide whether to re-arm, compared with a tolerance. PASTURE3D_BAKE_TRACE_FINDINGS_SPEC
+## §3: millimetre drift re-armed a 358 ms layer bake, and rounding cannot fix that because a value sitting on
+## a rounding boundary still flips. Pinned to the last BAKE, never the last resolve, so drift accumulates.
+var _last_junction_values: Dictionary = {}
+
+## Tolerances for `junction_values_differ` (spec §3.2). A real drag moves arc lengths by metres.
+const JUNCTION_TOL_LENGTH: float = 0.01 # m — arc length, trim-back
+const JUNCTION_TOL_HEIGHT: float = 0.01 # m — pin, elevation, cut-face z
+const JUNCTION_TOL_BANK: float = 0.001
+
 ## The plan polyline and its arc lengths, and the token they were built against. Not saved: derived
 ## output, rebuilt on demand, and a token holding instance ids would be meaningless after a reload.
 var _plan_cache: PackedVector2Array = PackedVector2Array()
@@ -785,7 +796,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 		# caller, rather than here consulting global input state inside a bake kernel.
 		var jnet := road_network()
 		if jnet != null:
-			last_junction_digest = junction_digest()
+			_record_junction_bake()
 			jnet.request_resolve()
 		return
 
@@ -1125,7 +1136,7 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	# crediting it with a rebake it did not do would stop the resolve loop asking for the one it needs.
 	var jnet := road_network()
 	if jnet != null:
-		last_junction_digest = junction_digest()
+		_record_junction_bake()
 
 	var alignment: Pasture3DRoadAlignment
 	if resolved_follow_terrain():
@@ -2452,47 +2463,148 @@ func junction_digest() -> String:
 		# crossing, and the apron MESH meanwhile rebuilt to the fresh numbers, so the ground and the
 		# pavement disagreed by exactly the amount the last bake had moved the road.
 		#
-		if j.kind == Pasture3DRoadJunction.JunctionKind.END_TO_END:
-			# End-to-end connections meet flush without an apron polygon or crossing cut-face mesh.
-			# Only depend on this road's pin, trim, and the junction elevation, decoupling from the partner's
-			# cut-face height to prevent multi-frame rebake ping-pong cascades across connected roads.
-			parts.append("%s|%.3f|%.3f|%.3f|%.3f" % [j.id, j.arc_length_for(key), j.pin_for(key),
-					j.trim_back_for(key), j.elevation])
-		else:
-			var z_strs: PackedStringArray = []
-			for z in j.arm_z:
-				z_strs.append("%.3f" % float(z))
-			var bank_strs: PackedStringArray = []
-			for b in j.arm_banks:
-				bank_strs.append("%.3f" % float(b))
-			parts.append("%s|%.3f|%.3f|%.3f|%.3f|%s|%s" % [j.id, j.arc_length_for(key), j.pin_for(key),
-					j.trim_back_for(key), j.elevation, ",".join(z_strs), ",".join(bank_strs)])
+		parts.append(_junction_line(String(j.id), j.kind == Pasture3DRoadJunction.JunctionKind.END_TO_END,
+				j.arc_length_for(key), j.pin_for(key), j.trim_back_for(key), j.elevation, j.arm_z, j.arm_banks))
 	parts.sort()
 	return "\n".join(parts)
 
 
-## Bake again because the junctions moved. Records the digest FIRST, so the bake it triggers is credited
-## with the pins it is about to use and the next resolve does not ask for another one.
+## One junction's digest line. END_TO_END connections carry only this road's pin, trim and the junction
+## elevation — decoupled from the partner's cut-face height to prevent ping-pong rebakes across connected
+## roads — while a crossing also carries every arm's cut-face z and bank.
+##
+## Static and argument-only so JunctionDigestGate can drive it without building a network. EVERY number goes
+## through `_digest_num`: a field left on raw `%.3f` is the signed-zero bug left in place.
+static func _junction_line(p_id: String, p_end_to_end: bool, p_arc: float, p_pin: float, p_trim: float,
+		p_elev: float, p_z: PackedFloat32Array, p_banks: PackedFloat32Array) -> String:
+	var head := "%s|%s|%s|%s|%s" % [p_id, _digest_num(p_arc), _digest_num(p_pin), _digest_num(p_trim),
+			_digest_num(p_elev)]
+	if p_end_to_end:
+		return head
+	var z_strs := PackedStringArray()
+	for z in p_z:
+		z_strs.append(_digest_num(z))
+	var bank_strs := PackedStringArray()
+	for b in p_banks:
+		bank_strs.append(_digest_num(b))
+	return "%s|%s|%s" % [head, ",".join(z_strs), ",".join(bank_strs)]
+
+
+## `%.3f` of a value in (-0.0005, 0) prints "-0.000". The digest was compared as text, so that sign alone
+## re-armed full layer bakes: 976 ms across two passes that moved nothing (spec §2.1). NaN stays "nan".
+static func _digest_num(p_v: float) -> String:
+	var s := "%.3f" % p_v
+	return "0.000" if s == "-0.000" else s
+
+
+## The same fields as `_junction_line`, as numbers with a per-field tolerance: {"v": values, "tol": tols}.
+## The z count leads the arm lists with tolerance 0, so trading one z for one bank cannot compare equal.
+static func _junction_record(p_end_to_end: bool, p_arc: float, p_pin: float, p_trim: float, p_elev: float,
+		p_z: PackedFloat32Array, p_banks: PackedFloat32Array) -> Dictionary:
+	var v := PackedFloat64Array([p_arc, p_pin, p_trim, p_elev])
+	var tol := PackedFloat64Array([JUNCTION_TOL_LENGTH, JUNCTION_TOL_HEIGHT, JUNCTION_TOL_LENGTH,
+			JUNCTION_TOL_HEIGHT])
+	if not p_end_to_end:
+		v.append(float(p_z.size()))
+		tol.append(0.0)
+		for z in p_z:
+			v.append(z)
+			tol.append(JUNCTION_TOL_HEIGHT)
+		for b in p_banks:
+			v.append(b)
+			tol.append(JUNCTION_TOL_BANK)
+	return {"v": v, "tol": tol}
+
+
+## Junction id -> `_junction_record`, for every junction this road takes part in.
+func junction_values() -> Dictionary:
+	var out := {}
+	var net := road_network()
+	if net == null:
+		return out
+	var key := road_key()
+	for j in net.junctions_for(key):
+		out[String(j.id)] = _junction_record(j.kind == Pasture3DRoadJunction.JunctionKind.END_TO_END,
+				j.arc_length_for(key), j.pin_for(key), j.trim_back_for(key), j.elevation, j.arm_z, j.arm_banks)
+	return out
+
+
+## True when `p_now` needs a rebake relative to `p_baked`. Structural changes (a junction appearing or
+## going, a list changing length, a value gaining or losing NaN) always count; otherwise only a field that
+## moved by more than its tolerance does.
+static func junction_values_differ(p_now: Dictionary, p_baked: Dictionary) -> bool:
+	if p_now.size() != p_baked.size():
+		return true
+	for id in p_now:
+		if not p_baked.has(id):
+			return true
+		var a: PackedFloat64Array = p_now[id]["v"]
+		var b: PackedFloat64Array = p_baked[id]["v"]
+		var tol: PackedFloat64Array = p_now[id]["tol"]
+		if a.size() != b.size():
+			return true
+		for i in a.size():
+			var an := is_nan(a[i])
+			if an != is_nan(b[i]):
+				return true
+			if not an and absf(a[i] - b[i]) > tol[i]:
+				return true
+	return false
+
+
+## "This bake used these junction demands." Both forms together, so they cannot disagree about which bake
+## they describe.
+func _record_junction_bake() -> void:
+	last_junction_digest = junction_digest()
+	_last_junction_values = junction_values()
+
+
+## Whether the junctions moved beyond tolerance since the last bake.
+##
+## A baseline set only as TEXT (gates assign `last_junction_digest` directly, and the values are not saved)
+## is adopted when the text still matches, rather than read as "every junction is new".
+func junction_rebake_needed() -> bool:
+	var vals := junction_values()
+	if _last_junction_values.is_empty() and not vals.is_empty() and junction_digest() == last_junction_digest:
+		_last_junction_values = vals
+	return junction_values_differ(vals, _last_junction_values)
+
+
+## Bake again because the junctions moved beyond tolerance. Records the demands FIRST, so the bake it
+## triggers is credited with the pins it is about to use and the next resolve does not ask for another.
+##
+## Within tolerance, the TEXT still advances — a caller comparing digests sees the road as settled — but the
+## values stay pinned to the last bake, so sub-tolerance drift accumulates against it (spec §3.2).
 func schedule_junction_rebake() -> void:
 	var d := junction_digest()
-	if d == last_junction_digest:
+	if not junction_rebake_needed():
+		last_junction_digest = d
 		return
-	# WHICH junction fields moved, not just that the digest did. A trace showed the resolve→bake→resolve
-	# loop taking four full-layer rebakes to settle after one drag; the line diff is what tells a pin that
-	# genuinely moved apart from %.3f jitter that never converges.
+	# WHICH junction fields moved, not just that the digest did — the line diff is what separated signed-zero
+	# noise from real drift (spec §2). The ground under each changed junction is sampled as well, so a value
+	# that reverts can be tied to a ground change (spec §4).
 	if Pasture3DBakeTrace.enabled:
 		var was := Array(last_junction_digest.split("\n", false))
 		var now := Array(d.split("\n", false))
 		var diff := PackedStringArray()
+		var changed_ids := {}
 		for l in was:
 			if not now.has(l):
 				diff.append("- " + l)
+				changed_ids[l.get_slice("|", 0)] = true
 		for l in now:
 			if not was.has(l):
 				diff.append("+ " + l)
-		Pasture3DBakeTrace.mark("%s junction digest changed:\n    %s" % [name,
-				"\n    ".join(diff)])
+				changed_ids[l.get_slice("|", 0)] = true
+		var net := road_network()
+		if net != null and is_configured():
+			for j in net.junctions_for(road_key()):
+				if changed_ids.has(String(j.id)):
+					diff.append("  ground@%s = %.3f" % [j.id,
+							terrain.data.get_height(Vector3(j.center.x, 0.0, j.center.y))])
+		Pasture3DBakeTrace.mark("%s junction digest changed:\n    %s" % [name, "\n    ".join(diff)])
 	last_junction_digest = d
+	_last_junction_values = junction_values()
 	_schedule_refresh()
 
 

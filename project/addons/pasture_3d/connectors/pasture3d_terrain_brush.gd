@@ -1360,6 +1360,8 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 		_erosion_defer = true
 		_growth_defer = true
 		_graph_defer = true
+		# Spec §5: driver passes are expected repeats; marked so they cannot be mistaken for redundant bakes.
+		Pasture3DBakeTrace.mark("%s: deferred driver pass 1 (round %d)" % [name, _round])
 		p_bake.call()
 		_erosion_defer = false
 		_growth_defer = false
@@ -1400,6 +1402,7 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 	# ---- Phase C: the erosion solve, against the surface phase A & B finished.
 	if pending_erosion.is_empty():
 		if not pending_graph.is_empty():
+			Pasture3DBakeTrace.mark("%s: deferred driver pass 2 (graphs solved)" % name)
 			p_bake.call()
 		_end_deferred_run(run)
 		_commit_deferred_undo(p_owner, before, can_undo)
@@ -1409,6 +1412,7 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 	if ok:
 		for st: Dictionary in pending_erosion:
 			_store_solved_erosion(st)
+	Pasture3DBakeTrace.mark("%s: deferred driver pass 2 (erosion solved)" % name)
 	p_bake.call()
 	_end_deferred_run(run)
 	_commit_deferred_undo(p_owner, before, can_undo)
