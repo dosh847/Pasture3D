@@ -2592,9 +2592,24 @@ int Pasture3DUtil::gd_graph_gpu_threshold() {
 	return graph_gpu_threshold();
 }
 
+void Pasture3DUtil::gd_set_max_threads(const int p_count) {
+	Pasture3DThreadPool::s_max_threads.store(MAX(p_count, 0), std::memory_order_relaxed);
+}
+
+int Pasture3DUtil::gd_get_max_threads() {
+	return Pasture3DThreadPool::s_max_threads.load(std::memory_order_relaxed);
+}
+
+int64_t Pasture3DUtil::gd_parallel_dispatch_count() {
+	return Pasture3DThreadPool::s_dispatches.load(std::memory_order_relaxed);
+}
+
 void Pasture3DUtil::_bind_methods() {
 	// Control map converters
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("graph_gpu_threshold"), &gd_graph_gpu_threshold);
+	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("set_max_threads", "count"), &gd_set_max_threads);
+	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("get_max_threads"), &gd_get_max_threads);
+	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("parallel_dispatch_count"), &gd_parallel_dispatch_count);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("as_float", "value"), &as_float);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("as_uint", "value"), &as_uint);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("get_base", "pixel"), &gd_get_base);

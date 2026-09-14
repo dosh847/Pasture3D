@@ -1,6 +1,7 @@
 // Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 
 #include "pasture_3d_hydraulic_saleve.h"
+#include "pasture_3d_thread_pool.h"
 
 #include <algorithm>
 #include <cmath>
@@ -163,31 +164,37 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 	// Normalized unit elevation [0..1]
 	std::vector<float> z(n);
 	std::vector<float> erodibility(n, 1.0f);
-	std::vector<bool> is_outlet(n, false);
+	// uint8_t, not bool: std::vector<bool> packs cells into shared words, so two rows each writing only
+	// their own cells would still race on the word between them.
+	std::vector<uint8_t> is_outlet(n, 0);
 
-	for (int iz = 0; iz < p_gh; iz++) {
-		for (int ix = 0; ix < p_gw; ix++) {
-			int idx = iz * p_gw + ix;
-			float h = src_height[idx];
-			if (!std::isfinite(h)) {
-				z[idx] = 0.0f;
-				is_outlet[idx] = true;
-				continue;
-			}
-			float zn = (h - zmin) / zptp;
-			z[idx] = zn;
+	// Per cell: the normalised height, the erodibility pow and the outlet flag read only the cell's own
+	// input, so the rows split exactly.
+	Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int z0, int z1) {
+		for (int iz = z0; iz < z1; iz++) {
+			for (int ix = 0; ix < p_gw; ix++) {
+				int idx = iz * p_gw + ix;
+				float h = src_height[idx];
+				if (!std::isfinite(h)) {
+					z[idx] = 0.0f;
+					is_outlet[idx] = 1;
+					continue;
+				}
+				float zn = (h - zmin) / zptp;
+				z[idx] = zn;
 
-			// Hesiod Shape Preservation: erodibility = (1.0 - z_norm)^shape_exp. Measured against the
-			// reference relief, so a pinned reference keeps a given height eroding at a given rate.
-			const float zr = (h - zmin) / std::max(relief_ref, 1.0e-5f);
-			erodibility[idx] = std::pow(std::clamp(1.0f - zr, 0.01f, 1.0f), p_params.shape_preservation);
+				// Hesiod Shape Preservation: erodibility = (1.0 - z_norm)^shape_exp. Measured against the
+				// reference relief, so a pinned reference keeps a given height eroding at a given rate.
+				const float zr = (h - zmin) / std::max(relief_ref, 1.0e-5f);
+				erodibility[idx] = std::pow(std::clamp(1.0f - zr, 0.01f, 1.0f), p_params.shape_preservation);
 
-			// Border cells are default outlets
-			if (ix == 0 || ix == p_gw - 1 || iz == 0 || iz == p_gh - 1) {
-				is_outlet[idx] = true;
+				// Border cells are default outlets
+				if (ix == 0 || ix == p_gw - 1 || iz == 0 || iz == p_gh - 1) {
+					is_outlet[idx] = 1;
+				}
 			}
 		}
-	}
+	});
 
 	const int iterations = std::max(1, p_params.iterations);
 	const float m_exp = p_params.drainage_exponent;
@@ -220,49 +227,54 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 	// ================================================================================================
 	for (int iter = 0; iter < iterations; iter++) {
 		// 1. Compute steepest descent receivers with domain noise / dx/dy perturbation
-		for (int iz = 0; iz < p_gh; iz++) {
-			for (int ix = 0; ix < p_gw; ix++) {
-				int idx = iz * p_gw + ix;
-				if (is_outlet[idx]) {
-					receivers[idx] = idx;
-					continue;
-				}
+		// A cell scores its neighbours off `z` and writes only its own receiver, and the drainage noise is a
+		// pure hash of (seed, iteration, cell pair) — so the rows split exactly. The sort and the three
+		// order-walking passes after it are sequential and stay that way.
+		Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int z0, int z1) {
+			for (int iz = z0; iz < z1; iz++) {
+				for (int ix = 0; ix < p_gw; ix++) {
+					int idx = iz * p_gw + ix;
+					if (is_outlet[idx]) {
+						receivers[idx] = idx;
+						continue;
+					}
 
-				float z_c = z[idx];
-				float best_score = -1.0e9f;
-				int best_k = idx;
+					float z_c = z[idx];
+					float best_score = -1.0e9f;
+					int best_k = idx;
 
-				for (int k = 0; k < 8; k++) {
-					int nx = ix + n_dx[k];
-					int nz = iz + n_dz[k];
-					if (nx >= 0 && nx < p_gw && nz >= 0 && nz < p_gh) {
-						int n_idx = nz * p_gw + nx;
-						float dz_val = z_c - z[n_idx];
-						if (dz_val > 0.0f) {
-							float slope = dz_val / (float)n_dist[k];
-							float noise = fast_hash_to_unit(seed + (uint32_t)iter * 17, (uint32_t)(idx ^ (n_idx << 16)));
-							float warp_factor = 1.0f;
-							// EITHER axis on its own is a real warp: a missing component is a ZERO component,
-							// not a reason to drop the perturbation. Requiring both made the two evaluators
-							// disagree, because they disagree about what an unwired port is — GDScript's
-							// _input_grids hands the solver a zeros GRID, so dx alone warped there, while the
-							// compiled program passes in = -1 (absent), so dx alone did nothing here.
-							if (dx_ptr || dy_ptr) {
-								const float wdx = dx_ptr ? dx_ptr[idx] : 0.0f;
-								const float wdy = dy_ptr ? dy_ptr[idx] : 0.0f;
-								warp_factor += 0.5f * (wdx * (float)n_dx[k] + wdy * (float)n_dz[k]);
-							}
-							float score = slope * (warp_factor + noise_strength * noise);
-							if (score > best_score) {
-								best_score = score;
-								best_k = n_idx;
+					for (int k = 0; k < 8; k++) {
+						int nx = ix + n_dx[k];
+						int nz = iz + n_dz[k];
+						if (nx >= 0 && nx < p_gw && nz >= 0 && nz < p_gh) {
+							int n_idx = nz * p_gw + nx;
+							float dz_val = z_c - z[n_idx];
+							if (dz_val > 0.0f) {
+								float slope = dz_val / (float)n_dist[k];
+								float noise = fast_hash_to_unit(seed + (uint32_t)iter * 17, (uint32_t)(idx ^ (n_idx << 16)));
+								float warp_factor = 1.0f;
+								// EITHER axis on its own is a real warp: a missing component is a ZERO component,
+								// not a reason to drop the perturbation. Requiring both made the two evaluators
+								// disagree, because they disagree about what an unwired port is — GDScript's
+								// _input_grids hands the solver a zeros GRID, so dx alone warped there, while the
+								// compiled program passes in = -1 (absent), so dx alone did nothing here.
+								if (dx_ptr || dy_ptr) {
+									const float wdx = dx_ptr ? dx_ptr[idx] : 0.0f;
+									const float wdy = dy_ptr ? dy_ptr[idx] : 0.0f;
+									warp_factor += 0.5f * (wdx * (float)n_dx[k] + wdy * (float)n_dz[k]);
+								}
+								float score = slope * (warp_factor + noise_strength * noise);
+								if (score > best_score) {
+									best_score = score;
+									best_k = n_idx;
+								}
 							}
 						}
 					}
+					receivers[idx] = best_k;
 				}
-				receivers[idx] = best_k;
 			}
-		}
+		});
 
 		// 2. Topological order from highest to lowest elevation
 		for (int i = 0; i < n; i++) {
@@ -409,46 +421,54 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 	if (p_params.enable_post_smoothing || p_params.bank_smoothing > 0.0f) {
 		std::vector<float> smoothed = z;
 		float blend = p_params.enable_post_smoothing ? 0.3f : (p_params.bank_smoothing * 0.4f);
-		for (int iz = 1; iz < p_gh - 1; iz++) {
-			for (int ix = 1; ix < p_gw - 1; ix++) {
-				int idx = iz * p_gw + ix;
-				float avg = 0.25f * (z[iz * p_gw + ix - 1] + z[iz * p_gw + ix + 1] +
-						z[(iz - 1) * p_gw + ix] + z[(iz + 1) * p_gw + ix]);
-				smoothed[idx] = (1.0f - blend) * z[idx] + blend * avg;
+		// Reads z, writes smoothed: the rows split exactly.
+		Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int z0, int z1) {
+			for (int iz = std::max(z0, 1); iz < std::min(z1, p_gh - 1); iz++) {
+				for (int ix = 1; ix < p_gw - 1; ix++) {
+					int idx = iz * p_gw + ix;
+					float avg = 0.25f * (z[iz * p_gw + ix - 1] + z[iz * p_gw + ix + 1] +
+							z[(iz - 1) * p_gw + ix] + z[(iz + 1) * p_gw + ix]);
+					smoothed[idx] = (1.0f - blend) * z[idx] + blend * avg;
+				}
 			}
-		}
+		});
 		z = smoothed;
 	}
 
 	if (p_params.gamma != 1.0f || p_params.gain != 1.0f) {
-		for (int i = 0; i < n; i++) {
-			z[i] = p_params.gain * std::pow(std::clamp(z[i], 0.0f, 1.0f), p_params.gamma);
-		}
+		Pasture3DThreadPool::parallel_for_elements(n, 4096, [&](int i0, int i1) {
+			for (int i = i0; i < i1; i++) {
+				z[i] = p_params.gain * std::pow(std::clamp(z[i], 0.0f, 1.0f), p_params.gamma);
+			}
+		});
 	}
 
 	// 5. Final Composite with original heightfield in world metres
 	std::vector<float> final_height(n);
 	std::vector<float> eroded_rock(n, 0.0f);
 
-	for (int i = 0; i < n; i++) {
-		float orig_h = src_height[i];
-		if (!std::isfinite(orig_h)) {
-			final_height[i] = orig_h;
-			eroded_rock[i] = 0.0f;
-			continue;
+	// Per cell: each output reads only its own input height, mask and eroded height.
+	Pasture3DThreadPool::parallel_for_elements(n, 4096, [&](int i0, int i1) {
+		for (int i = i0; i < i1; i++) {
+			float orig_h = src_height[i];
+			if (!std::isfinite(orig_h)) {
+				final_height[i] = orig_h;
+				eroded_rock[i] = 0.0f;
+				continue;
+			}
+
+			// Stage 1 renormalised the field to [0..1], so the amplitude out is the REFERENCE, anchored at the
+			// input's low point — not "whatever range happened to be in the grid". On auto these are the same
+			// number; pinned, it is what stops a margin band's surrounding terrain from stretching the landform.
+			float eroded_h = zmin + z[i] * relief_ref;
+			float m_val = has_mask ? mask_ptr[i] : 1.0f;
+			float eff_weight = p_params.erosion_strength * p_params.mix_factor * m_val;
+
+			float res_h = (1.0f - eff_weight) * orig_h + eff_weight * eroded_h;
+			final_height[i] = res_h;
+			eroded_rock[i] = std::max(0.0f, orig_h - res_h);
 		}
-
-		// Stage 1 renormalised the field to [0..1], so the amplitude out is the REFERENCE, anchored at the
-		// input's low point — not "whatever range happened to be in the grid". On auto these are the same
-		// number; pinned, it is what stops a margin band's surrounding terrain from stretching the landform.
-		float eroded_h = zmin + z[i] * relief_ref;
-		float m_val = has_mask ? mask_ptr[i] : 1.0f;
-		float eff_weight = p_params.erosion_strength * p_params.mix_factor * m_val;
-
-		float res_h = (1.0f - eff_weight) * orig_h + eff_weight * eroded_h;
-		final_height[i] = res_h;
-		eroded_rock[i] = std::max(0.0f, orig_h - res_h);
-	}
+	});
 
 	res.ok = true;
 	res.height.resize(n);

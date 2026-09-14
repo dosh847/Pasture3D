@@ -1,6 +1,7 @@
 // Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 
 #include "pasture_3d_warp_downslope.h"
+#include "pasture_3d_thread_pool.h"
 #include "pasture_3d_terrain_metrics.h"
 #include "pasture_3d_transform.h"
 
@@ -54,58 +55,61 @@ PackedFloat32Array godot::warp_downslope_solve(const PackedFloat32Array &p_surfa
 	const double sign = p_reverse ? -1.0 : 1.0;
 	float *dst = out.ptrw();
 
-	for (int iz = 0; iz < p_gh; iz++) {
-		for (int ix = 0; ix < p_gw; ix++) {
-			const int i = iz * p_gw + ix;
-			const double z = (double)src[i];
-			if (!std::isfinite(z)) {
-				dst[i] = (float)z; // NaN is the brush-loop mask; it stays put and stays NaN.
-				continue;
-			}
+	// A cell reads the source, the smoothed copy and the mask and never `dst`, so the rows split exactly.
+	Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int z0, int z1) {
+		for (int iz = z0; iz < z1; iz++) {
+			for (int ix = 0; ix < p_gw; ix++) {
+				const int i = iz * p_gw + ix;
+				const double z = (double)src[i];
+				if (!std::isfinite(z)) {
+					dst[i] = (float)z; // NaN is the brush-loop mask; it stays put and stays NaN.
+					continue;
+				}
 
-			const int xm = std::max(ix - 1, 0);
-			const int xp = std::min(ix + 1, p_gw - 1);
-			const int zm = std::max(iz - 1, 0);
-			const int zp = std::min(iz + 1, p_gh - 1);
-			const double sxm = (double)sm[iz * p_gw + xm];
-			const double sxp = (double)sm[iz * p_gw + xp];
-			const double szm = (double)sm[zm * p_gw + ix];
-			const double szp = (double)sm[zp * p_gw + ix];
-			if (!std::isfinite(sxm) || !std::isfinite(sxp) || !std::isfinite(szm) || !std::isfinite(szp)) {
-				dst[i] = (float)z;
-				continue;
-			}
+				const int xm = std::max(ix - 1, 0);
+				const int xp = std::min(ix + 1, p_gw - 1);
+				const int zm = std::max(iz - 1, 0);
+				const int zp = std::min(iz + 1, p_gh - 1);
+				const double sxm = (double)sm[iz * p_gw + xm];
+				const double sxp = (double)sm[iz * p_gw + xp];
+				const double szm = (double)sm[zm * p_gw + ix];
+				const double szp = (double)sm[zp * p_gw + ix];
+				if (!std::isfinite(sxm) || !std::isfinite(sxp) || !std::isfinite(szm) || !std::isfinite(szp)) {
+					dst[i] = (float)z;
+					continue;
+				}
 
-			// Metric gradients: rise in metres over run in metres. Dividing by cell counts instead would
-			// make the displacement direction correct but its magnitude resolution-dependent.
-			const double gx = (sxp - sxm) / ((double)(xp - xm) * dx);
-			const double gz = (szp - szm) / ((double)(zp - zm) * dz);
-			const double mag = std::sqrt(gx * gx + gz * gz);
-			if (mag <= GRADIENT_EPSILON) {
-				dst[i] = (float)z;
-				continue;
-			}
+				// Metric gradients: rise in metres over run in metres. Dividing by cell counts instead would
+				// make the displacement direction correct but its magnitude resolution-dependent.
+				const double gx = (sxp - sxm) / ((double)(xp - xm) * dx);
+				const double gz = (szp - szm) / ((double)(zp - zm) * dz);
+				const double mag = std::sqrt(gx * gx + gz * gz);
+				if (mag <= GRADIENT_EPSILON) {
+					dst[i] = (float)z;
+					continue;
+				}
 
-			double w = p_amount;
-			if (have_mask) {
-				const double m = (double)mk[i];
-				w *= std::isfinite(m) ? std::clamp(m, 0.0, 1.0) : 0.0;
-			}
-			if (w <= 0.0) {
-				dst[i] = (float)z;
-				continue;
-			}
+				double w = p_amount;
+				if (have_mask) {
+					const double m = (double)mk[i];
+					w *= std::isfinite(m) ? std::clamp(m, 0.0, 1.0) : 0.0;
+				}
+				if (w <= 0.0) {
+					dst[i] = (float)z;
+					continue;
+				}
 
-			// Displace in METRES, then convert to cells for the tap. Doing the whole thing in cells is the
-			// `talus / shape.x` trap in another costume: the warp would get stronger every time the bake
-			// resolution rose.
-			const double step = p_displacement_m * w * sign;
-			const double ox = (gx / mag) * step / dx;
-			const double oz = (gz / mag) * step / dz;
+				// Displace in METRES, then convert to cells for the tap. Doing the whole thing in cells is the
+				// `talus / shape.x` trap in another costume: the warp would get stronger every time the bake
+				// resolution rose.
+				const double step = p_displacement_m * w * sign;
+				const double ox = (gx / mag) * step / dx;
+				const double oz = (gz / mag) * step / dz;
 
-			dst[i] = (float)transform_sample_bilinear(src, (double)ix + ox, (double)iz + oz, p_gw, p_gh,
-					TRANSFORM_EDGE_CLAMP);
+				dst[i] = (float)transform_sample_bilinear(src, (double)ix + ox, (double)iz + oz, p_gw, p_gh,
+						TRANSFORM_EDGE_CLAMP);
+			}
 		}
-	}
+	});
 	return out;
 }

@@ -2,12 +2,34 @@
 
 #include "pasture_3d_erosion_hydraulic.h"
 
+#include "pasture_3d_scatter_rows.h"
+
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 
 using namespace godot;
+
+namespace {
+
+// One source cell of the routing sweep: what it did to itself, and what it sent each neighbour.
+struct RoutingRecord {
+	double moved_w[4];
+	double moved_s[4];
+	double height_amt; // subtracted under ERODE, added under DEPOSIT
+	double flow_out; // subtracted from the cell's own water
+	double sed_delta; // the sediment it kept, minus the sediment it started the pass with
+	uint8_t flags;
+	uint8_t sent; // bit k: moved_w[k] and moved_s[k] went to neighbour k
+};
+
+constexpr uint8_t ROUTED = 1; // the cell had water and somewhere downhill to send it
+constexpr uint8_t ERODE = 2;
+constexpr uint8_t DEPOSIT = 4;
+
+} // namespace
 
 ErosionHydraulicParams ErosionHydraulicParams::from_dict(const Dictionary &p_dict) {
 	ErosionHydraulicParams p;
@@ -60,13 +82,17 @@ ErosionHydraulicResult godot::erosion_hydraulic_solve(const PackedFloat32Array &
 	std::vector<float> sediment(n, 0.0f);
 	std::vector<float> water(n, 0.0f);
 	std::vector<float> flow_accum(n, 0.0f);
+	// The routing sweep writes every cell of these, so each pass swaps them with the state rather than
+	// copying the state into them first.
+	std::vector<float> next_height(n);
+	std::vector<float> next_sediment(n);
+	std::vector<float> next_water(n);
+	std::vector<float> next_flow(n);
 
 	const double dx = (double)p_rect.size.x / (double)std::max(p_gw, 1);
 	const double dz = (double)p_rect.size.y / (double)std::max(p_gh, 1);
 	const double cell_dist = std::sqrt(std::max(dx * dz, 1e-6));
 
-	const int n_dx[4] = { -1, 1, 0, 0 };
-	const int n_dz[4] = { 0, 0, -1, 1 };
 	const double n_dist[4] = { dx, dx, dz, dz };
 
 	const int iterations = p_params.iterations;
@@ -77,123 +103,165 @@ ErosionHydraulicResult godot::erosion_hydraulic_solve(const PackedFloat32Array &
 	const double p_dep_spd = (double)p_params.deposition_speed;
 	const double p_min_slope = (double)p_params.min_slope;
 
-	for (int pass = 0; pass < iterations; pass++) {
-		// 1. Rain
-		for (int i = 0; i < n; i++) {
-			if (std::isfinite(height[i])) {
-				water[i] = (float)((double)water[i] + p_rain);
-				flow_accum[i] = (float)((double)flow_accum[i] + p_rain);
+	// 2. Downhill flow routing & stream power incision, as a scatter: each cell pushes water, sediment and flow
+	// into its downhill neighbours, and each of those is a float sum whose bits depend on the order its terms
+	// arrive in. So a source records what it sends (compute_row) and each destination replays its terms in the
+	// serial sweep's raster order (gather_row) — see parallel_scatter_rows.
+	//
+	// Everything a record reads is the state at the START of the pass. For flow_accum that was once a bug fix:
+	// the sweep read the live array while scattering into it, so the carrying capacity at a cell depended on
+	// whether its upstream neighbour happened to be visited first — raster order deciding how much sediment a
+	// cell could hold. The GPU's two-phase split always read the snapshot.
+	const auto compute_row = [&](int iz, RoutingRecord *p_records) {
+		const int row = iz * p_gw;
+		for (int ix = 0; ix < p_gw; ix++) {
+			RoutingRecord &rec = p_records[ix];
+			rec.flags = 0;
+			rec.sent = 0;
+			const int i = row + ix;
+			const double h_c = (double)height[i];
+			const double w_c = (double)water[i];
+			if (!std::isfinite(h_c) || w_c <= 1e-7) {
+				continue;
 			}
-		}
 
-		// The routing sweep below SCATTERS into flow_accum (`flow_accum[ni] += moved_w`) and also READS it
-		// for the carrying-capacity term. Reading the live array made the capacity at a cell depend on
-		// whether its upstream neighbour happened to be visited first -- raster order deciding how much
-		// sediment a cell could hold. Read the snapshot instead: the sweep sees the flow accumulated up to
-		// the START of this iteration, which is the model the GPU's two-phase split already implements
-		// (it folds inbound flux in a separate gather pass) and is why sediment diverged even after the
-		// scatter fix. Same reasoning as next_water/next_sediment; this array was simply missed.
-		const std::vector<float> flow_accum_in = flow_accum;
-		std::vector<float> next_water = water;
-		std::vector<float> next_sediment = sediment;
-		std::vector<float> next_height = height;
+			const double total_alt = h_c + w_c;
+			double diffs[4] = { 0.0, 0.0, 0.0, 0.0 };
+			double total_diff = 0.0;
+			double max_slope = 0.0;
+			double min_downhill_diff = std::numeric_limits<double>::infinity();
 
-		// 2. Downhill flow routing & stream power incision
-		for (int iz = 0; iz < p_gh; iz++) {
-			const int row = iz * p_gw;
-			for (int ix = 0; ix < p_gw; ix++) {
-				const int i = row + ix;
-				const double h_c = (double)height[i];
-				const double w_c = (double)water[i];
-				if (!std::isfinite(h_c) || w_c <= 1e-7) {
-					continue;
-				}
-
-				const double total_alt = h_c + w_c;
-				double diffs[4] = { 0.0, 0.0, 0.0, 0.0 };
-				double total_diff = 0.0;
-				double max_slope = 0.0;
-				double min_downhill_diff = std::numeric_limits<double>::infinity();
-
-				for (int k = 0; k < 4; k++) {
-					const int nx = ix + n_dx[k];
-					const int nz = iz + n_dz[k];
-					if (nx >= 0 && nx < p_gw && nz >= 0 && nz < p_gh) {
-						const int ni = nz * p_gw + nx;
-						const double n_h = (double)height[ni];
-						const double n_w = (double)water[ni];
-						if (std::isfinite(n_h)) {
-							const double n_total = n_h + n_w;
-							const double diff = total_alt - n_total;
-							if (diff > 0.0) {
-								diffs[k] = diff;
-								total_diff += diff;
-								min_downhill_diff = std::min(min_downhill_diff, diff);
-								const double slope = diff / n_dist[k];
-								if (slope > max_slope) {
-									max_slope = slope;
-								}
+			for (int k = 0; k < 4; k++) {
+				const int nx = ix + SCATTER_DX[k];
+				const int nz = iz + SCATTER_DZ[k];
+				if (nx >= 0 && nx < p_gw && nz >= 0 && nz < p_gh) {
+					const int ni = nz * p_gw + nx;
+					const double n_h = (double)height[ni];
+					const double n_w = (double)water[ni];
+					if (std::isfinite(n_h)) {
+						const double n_total = n_h + n_w;
+						const double diff = total_alt - n_total;
+						if (diff > 0.0) {
+							diffs[k] = diff;
+							total_diff += diff;
+							min_downhill_diff = std::min(min_downhill_diff, diff);
+							const double slope = diff / n_dist[k];
+							if (slope > max_slope) {
+								max_slope = slope;
 							}
 						}
 					}
 				}
+			}
 
-				if (total_diff > 0.0) {
-					const double eff_slope = std::max(max_slope, p_min_slope);
-					const double vel = std::sqrt(std::clamp(eff_slope * cell_dist, 0.05, 50.0));
-					const double flow_factor = std::log(1.0 + (double)flow_accum_in[i] * 10.0) + 1.0;
-					const double cap = p_cap * eff_slope * vel * w_c * flow_factor * 0.5;
+			if (total_diff > 0.0) {
+				rec.flags = ROUTED;
+				const double eff_slope = std::max(max_slope, p_min_slope);
+				const double vel = std::sqrt(std::clamp(eff_slope * cell_dist, 0.05, 50.0));
+				const double flow_factor = std::log(1.0 + (double)flow_accum[i] * 10.0) + 1.0;
+				const double cap = p_cap * eff_slope * vel * w_c * flow_factor * 0.5;
 
-					double sed_c = (double)sediment[i];
-					const double max_erode = min_downhill_diff * 0.4;
-					const double max_dep = min_downhill_diff * 0.4;
+				double sed_c = (double)sediment[i];
+				const double max_erode = min_downhill_diff * 0.4;
+				const double max_dep = min_downhill_diff * 0.4;
 
-					if (sed_c < cap) {
-						const double erode_amt = std::clamp((cap - sed_c) * p_ero_spd * 0.4, 0.0, max_erode);
-						next_height[i] = (float)((double)next_height[i] - erode_amt);
-						sed_c += erode_amt;
-					} else if (sed_c > cap) {
-						const double dep_amt = std::clamp((sed_c - cap) * p_dep_spd * 0.4, 0.0, max_dep);
-						next_height[i] = (float)((double)next_height[i] + dep_amt);
-						sed_c -= dep_amt;
+				if (sed_c < cap) {
+					const double erode_amt = std::clamp((cap - sed_c) * p_ero_spd * 0.4, 0.0, max_erode);
+					rec.flags |= ERODE;
+					rec.height_amt = erode_amt;
+					sed_c += erode_amt;
+				} else if (sed_c > cap) {
+					const double dep_amt = std::clamp((sed_c - cap) * p_dep_spd * 0.4, 0.0, max_dep);
+					rec.flags |= DEPOSIT;
+					rec.height_amt = dep_amt;
+					sed_c -= dep_amt;
+				}
+
+				const double flow_out = std::min(w_c * 0.6, total_diff * 0.5);
+				rec.flow_out = flow_out;
+
+				for (int k = 0; k < 4; k++) {
+					if (diffs[k] > 0.0) {
+						const double frac = diffs[k] / total_diff;
+						const double moved_w = flow_out * frac;
+						const double moved_s = sed_c * (moved_w / std::max(w_c, 1e-6));
+						rec.moved_w[k] = moved_w;
+						rec.moved_s[k] = moved_s;
+						rec.sent |= (uint8_t)(1u << k);
+						sed_c = std::max(sed_c - moved_s, 0.0);
 					}
+				}
+				rec.sed_delta = sed_c - (double)sediment[i];
+			}
+		}
+	};
 
-					const double flow_out = std::min(w_c * 0.6, total_diff * 0.5);
-					next_water[i] = (float)((double)next_water[i] - flow_out);
-
-					for (int k = 0; k < 4; k++) {
-						if (diffs[k] > 0.0) {
-							const double frac = diffs[k] / total_diff;
-							const double moved_w = flow_out * frac;
-							const double moved_s = sed_c * (moved_w / std::max(w_c, 1e-6));
-							const int ni = (iz + n_dz[k]) * p_gw + (ix + n_dx[k]);
-							next_water[ni] = (float)((double)next_water[ni] + moved_w);
-							next_sediment[ni] = (float)((double)next_sediment[ni] + moved_s);
-							flow_accum[ni] = (float)((double)flow_accum[ni] + moved_w);
-							sed_c = std::max(sed_c - moved_s, 0.0);
+	const auto gather_row = [&](int iz, const RoutingRecord *p_above, const RoutingRecord *p_row,
+									const RoutingRecord *p_below) {
+		const RoutingRecord *rows[3] = { p_above, p_row, p_below };
+		const int row = iz * p_gw;
+		for (int ix = 0; ix < p_gw; ix++) {
+			const int i = row + ix;
+			float h = height[i];
+			float w = water[i];
+			float s = sediment[i];
+			float f = flow_accum[i];
+			for (const ScatterSource &src : SCATTER_SOURCES) {
+				const int sx = ix + src.dx;
+				const RoutingRecord *src_row = rows[src.dz + 1];
+				// Routing is 4-neighbour: no diagonal ever sent anything here.
+				if (src.k >= 4 || !src_row || sx < 0 || sx >= p_gw) {
+					continue;
+				}
+				const RoutingRecord &rec = src_row[sx];
+				if (src.k < 0) {
+					if (rec.flags & ROUTED) {
+						if (rec.flags & ERODE) {
+							h = (float)((double)h - rec.height_amt);
+						} else if (rec.flags & DEPOSIT) {
+							h = (float)((double)h + rec.height_amt);
 						}
+						w = (float)((double)w - rec.flow_out);
+						// += the DELTA, not = the retained amount. An assignment threw away every grain an
+						// already-visited upstream neighbour had delivered here — a scan-order-dependent loss no
+						// other channel showed, because water and flow both accumulate. The GPU keeps the
+						// retained amount and the inbound flux in separate buffers and was always right.
+						s = (float)((double)s + rec.sed_delta);
 					}
-					// += the DELTA, not = the retained amount. next_sediment[i] starts at sediment[i] and
-					// neighbours scatter into it with +=, so an assignment here threw away every grain an
-					// already-visited upstream neighbour had deposited on this cell -- a scan-order-dependent
-					// loss that no other channel showed, because water and flow_accum both accumulate. The
-					// GPU has always been right about this: it keeps the retained amount and the inbound
-					// flux in separate buffers and sums them in its gather phase.
-					next_sediment[i] = (float)((double)next_sediment[i] + (sed_c - (double)sediment[i]));
+				} else if (rec.sent & (1u << src.k)) {
+					w = (float)((double)w + rec.moved_w[src.k]);
+					s = (float)((double)s + rec.moved_s[src.k]);
+					f = (float)((double)f + rec.moved_w[src.k]);
 				}
 			}
-		}
-
-		// 3. Evaporation
-		for (int i = 0; i < n; i++) {
-			if (std::isfinite(next_height[i])) {
-				next_water[i] = (float)((double)next_water[i] * (1.0 - p_evap));
+			// 3. Evaporation — per cell and after every term, so it folds into the gather.
+			if (std::isfinite(h)) {
+				w = (float)((double)w * (1.0 - p_evap));
 			}
+			next_height[i] = h;
+			next_water[i] = w;
+			next_sediment[i] = s;
+			next_flow[i] = f;
 		}
+	};
 
-		water = std::move(next_water);
-		sediment = std::move(next_sediment);
-		height = std::move(next_height);
+	for (int pass = 0; pass < iterations; pass++) {
+		// 1. Rain
+		Pasture3DThreadPool::parallel_for_elements(n, 4096, [&](int p_begin, int p_end) {
+			for (int i = p_begin; i < p_end; i++) {
+				if (std::isfinite(height[i])) {
+					water[i] = (float)((double)water[i] + p_rain);
+					flow_accum[i] = (float)((double)flow_accum[i] + p_rain);
+				}
+			}
+		});
+
+		parallel_scatter_rows<RoutingRecord>(p_gw, p_gh, compute_row, gather_row);
+
+		height.swap(next_height);
+		water.swap(next_water);
+		sediment.swap(next_sediment);
+		flow_accum.swap(next_flow);
 	}
 
 	// 4. Normalization for mask channels

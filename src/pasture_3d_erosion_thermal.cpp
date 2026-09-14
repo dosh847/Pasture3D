@@ -2,8 +2,11 @@
 
 #include "pasture_3d_erosion_thermal.h"
 
+#include "pasture_3d_scatter_rows.h"
+
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <vector>
 
@@ -11,10 +14,18 @@ using namespace godot;
 
 namespace {
 
-struct OffsetEntry {
-	int dx;
-	int dy;
-	double dist;
+// One source cell of a thermal pass: how much slipped off it, and how much of that each lower neighbour got.
+struct SlipRecord {
+	double moved[8];
+	double slip;
+	uint8_t sent; // bit k: moved[k] went to neighbour k
+	bool slipped;
+};
+
+// One source cell of a talus-projection pass: what it handed each neighbour it stands too far above.
+struct TransferRecord {
+	double excess[8];
+	uint8_t sent; // bit k: excess[k] left this cell for neighbour k
 };
 
 inline double deg_to_rad(double p_deg) {
@@ -47,6 +58,7 @@ ErosionThermalResult godot::erosion_thermal_solve(const PackedFloat32Array &p_su
 	const float *src_hard = (p_hardness.size() == n) ? p_hardness.ptr() : nullptr;
 
 	std::vector<float> height(src_h, src_h + n);
+	std::vector<float> next_height(n);
 	std::vector<float> talus_accum(n, 0.0f);
 
 	const double dx = (double)p_rect.size.x / (double)std::max(p_gw, 1);
@@ -55,68 +67,99 @@ ErosionThermalResult godot::erosion_thermal_solve(const PackedFloat32Array &p_su
 
 	const double tan_talus = std::tan(deg_to_rad(p_talus_angle_deg));
 
-	const int n_dx[8] = { -1, 1, 0, 0, -1, 1, -1, 1 };
-	const int n_dz[8] = { 0, 0, -1, 1, -1, -1, 1, 1 };
 	const double n_dist[8] = { dx, dx, dz, dz, diag_dist, diag_dist, diag_dist, diag_dist };
 
-	for (int pass = 0; pass < p_iterations; pass++) {
-		std::vector<float> next_height = height;
+	// Every cell sheds into its lower neighbours: a scatter, so a source records what it sheds and each
+	// destination replays its terms in raster order — see parallel_scatter_rows.
+	const auto compute_row = [&](int iz, SlipRecord *p_records) {
+		const int row = iz * p_gw;
+		for (int ix = 0; ix < p_gw; ix++) {
+			SlipRecord &rec = p_records[ix];
+			rec.sent = 0;
+			rec.slipped = false;
+			const int i = row + ix;
+			const double h_c = (double)height[i];
+			if (!std::isfinite(h_c)) {
+				continue;
+			}
 
-		for (int iz = 0; iz < p_gh; iz++) {
-			const int row = iz * p_gw;
-			for (int ix = 0; ix < p_gw; ix++) {
-				const int i = row + ix;
-				const double h_c = (double)height[i];
-				if (!std::isfinite(h_c)) {
-					continue;
-				}
+			const double hard_c = src_hard ? std::clamp((double)src_hard[i], 0.0, 1.0) : 0.0;
+			const double eff_tan = tan_talus * (1.0 + hard_c * 0.75);
 
-				const double hard_c = src_hard ? std::clamp((double)src_hard[i], 0.0, 1.0) : 0.0;
-				const double eff_tan = tan_talus * (1.0 + hard_c * 0.75);
+			double excess[8] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+			double total_excess = 0.0;
+			double max_ex = 0.0;
 
-				double excess[8] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-				double total_excess = 0.0;
-				double max_ex = 0.0;
-
-				for (int k = 0; k < 8; k++) {
-					const int nx = ix + n_dx[k];
-					const int nz = iz + n_dz[k];
-					if (nx >= 0 && nx < p_gw && nz >= 0 && nz < p_gh) {
-						const int ni = nz * p_gw + nx;
-						const double n_h = (double)height[ni];
-						if (std::isfinite(n_h)) {
-							const double diff = h_c - n_h;
-							const double max_diff = n_dist[k] * eff_tan;
-							if (diff > max_diff) {
-								const double ex = diff - max_diff;
-								excess[k] = ex;
-								total_excess += ex;
-								if (ex > max_ex) {
-									max_ex = ex;
-								}
+			for (int k = 0; k < 8; k++) {
+				const int nx = ix + SCATTER_DX[k];
+				const int nz = iz + SCATTER_DZ[k];
+				if (nx >= 0 && nx < p_gw && nz >= 0 && nz < p_gh) {
+					const int ni = nz * p_gw + nx;
+					const double n_h = (double)height[ni];
+					if (std::isfinite(n_h)) {
+						const double diff = h_c - n_h;
+						const double max_diff = n_dist[k] * eff_tan;
+						if (diff > max_diff) {
+							const double ex = diff - max_diff;
+							excess[k] = ex;
+							total_excess += ex;
+							if (ex > max_ex) {
+								max_ex = ex;
 							}
 						}
 					}
 				}
+			}
 
-				if (total_excess > 0.0) {
-					const double slip_amt = std::clamp(max_ex * 0.5 * p_settling_rate, 0.0, total_excess * 0.5);
-					next_height[i] = (float)((double)next_height[i] - slip_amt);
+			if (total_excess > 0.0) {
+				const double slip_amt = std::clamp(max_ex * 0.5 * p_settling_rate, 0.0, total_excess * 0.5);
+				rec.slip = slip_amt;
+				rec.slipped = true;
 
-					for (int k = 0; k < 8; k++) {
-						if (excess[k] > 0.0) {
-							const double frac = excess[k] / total_excess;
-							const double moved = slip_amt * frac;
-							const int ni = (iz + n_dz[k]) * p_gw + (ix + n_dx[k]);
-							next_height[ni] = (float)((double)next_height[ni] + moved);
-							talus_accum[ni] = (float)((double)talus_accum[ni] + moved);
-						}
+				for (int k = 0; k < 8; k++) {
+					if (excess[k] > 0.0) {
+						const double frac = excess[k] / total_excess;
+						rec.moved[k] = slip_amt * frac;
+						rec.sent |= (uint8_t)(1u << k);
 					}
 				}
 			}
 		}
+	};
 
-		height = std::move(next_height);
+	const auto gather_row = [&](int iz, const SlipRecord *p_above, const SlipRecord *p_row,
+									const SlipRecord *p_below) {
+		const SlipRecord *rows[3] = { p_above, p_row, p_below };
+		const int row = iz * p_gw;
+		for (int ix = 0; ix < p_gw; ix++) {
+			const int i = row + ix;
+			float h = height[i];
+			float talus = talus_accum[i];
+			for (const ScatterSource &src : SCATTER_SOURCES) {
+				const int sx = ix + src.dx;
+				const SlipRecord *src_row = rows[src.dz + 1];
+				if (!src_row || sx < 0 || sx >= p_gw) {
+					continue;
+				}
+				const SlipRecord &rec = src_row[sx];
+				if (src.k < 0) {
+					if (rec.slipped) {
+						h = (float)((double)h - rec.slip);
+					}
+				} else if (rec.sent & (1u << src.k)) {
+					h = (float)((double)h + rec.moved[src.k]);
+					talus = (float)((double)talus + rec.moved[src.k]);
+				}
+			}
+			next_height[i] = h;
+			// In place: only this row's gather writes it, and no record reads it.
+			talus_accum[i] = talus;
+		}
+	};
+
+	for (int pass = 0; pass < p_iterations; pass++) {
+		parallel_scatter_rows<SlipRecord>(p_gw, p_gh, compute_row, gather_row);
+		height.swap(next_height);
 	}
 
 	double max_talus = 1e-6;
@@ -164,6 +207,7 @@ PackedFloat32Array godot::talus_projection_solve(const PackedFloat32Array &p_sur
 	const float *src_m = (p_mask.size() == n) ? p_mask.ptr() : nullptr;
 
 	std::vector<float> h(src_h, src_h + n);
+	std::vector<float> next_h(n);
 
 	const double dx = (p_rect.size.x > 0.0 && p_gw > 1) ? ((double)p_rect.size.x / std::max((double)(p_gw - 1), 1.0)) : 2.0;
 	const double dz = (p_rect.size.y > 0.0 && p_gh > 1) ? ((double)p_rect.size.y / std::max((double)(p_gh - 1), 1.0)) : 2.0;
@@ -172,57 +216,77 @@ PackedFloat32Array godot::talus_projection_solve(const PackedFloat32Array &p_sur
 	const double tan_talus = std::tan(deg_to_rad(p_talus_angle_deg));
 	const double rate = p_transfer_rate * 0.25;
 
-	const OffsetEntry offsets[8] = {
-		{ -1, 0, dx }, { 1, 0, dx },
-		{ 0, -1, dz }, { 0, 1, dz },
-		{ -1, -1, diag_d }, { 1, -1, diag_d },
-		{ -1, 1, diag_d }, { 1, 1, diag_d }
-	};
+	const double dist[8] = { dx, dx, dz, dz, diag_d, diag_d, diag_d, diag_d };
 
-	std::vector<double> delta(n, 0.0);
+	// The serial pass summed every transfer into a delta grid in raster order, then applied it. The delta is
+	// now summed per destination instead, from records, in that same order — see parallel_scatter_rows.
+	const auto compute_row = [&](int iz, TransferRecord *p_records) {
+		const int row = iz * p_gw;
+		for (int ix = 0; ix < p_gw; ix++) {
+			TransferRecord &rec = p_records[ix];
+			rec.sent = 0;
+			const int i = row + ix;
+			const double hi = (double)h[i];
+			if (!std::isfinite(hi)) {
+				continue;
+			}
 
-	for (int iter = 0; iter < p_iterations; iter++) {
-		std::fill(delta.begin(), delta.end(), 0.0);
-
-		for (int iz = 0; iz < p_gh; iz++) {
-			const int row = iz * p_gw;
-			for (int ix = 0; ix < p_gw; ix++) {
-				const int i = row + ix;
-				const double hi = (double)h[i];
-				if (!std::isfinite(hi)) {
+			for (int k = 0; k < 8; k++) {
+				const int nx = ix + SCATTER_DX[k];
+				const int nz = iz + SCATTER_DZ[k];
+				if (nx < 0 || nx >= p_gw || nz < 0 || nz >= p_gh) {
 					continue;
 				}
 
-				for (int k = 0; k < 8; k++) {
-					const int nx = ix + offsets[k].dx;
-					const int nz = iz + offsets[k].dy;
-					if (nx < 0 || nx >= p_gw || nz < 0 || nz >= p_gh) {
-						continue;
-					}
+				const int ni = nz * p_gw + nx;
+				const double hni = (double)h[ni];
+				if (!std::isfinite(hni)) {
+					continue;
+				}
 
-					const int ni = nz * p_gw + nx;
-					const double hni = (double)h[ni];
-					if (!std::isfinite(hni)) {
-						continue;
-					}
+				const double diff = hi - hni;
+				const double max_diff = dist[k] * tan_talus;
 
-					const double diff = hi - hni;
-					const double max_diff = offsets[k].dist * tan_talus;
-
-					if (diff > max_diff) {
-						const double excess = (diff - max_diff) * rate;
-						delta[i] -= excess;
-						delta[ni] += excess;
-					}
+				if (diff > max_diff) {
+					rec.excess[k] = (diff - max_diff) * rate;
+					rec.sent |= (uint8_t)(1u << k);
 				}
 			}
 		}
+	};
 
-		for (int i = 0; i < n; i++) {
-			if (std::isfinite(h[i])) {
-				h[i] = (float)((double)h[i] + delta[i]);
+	const auto gather_row = [&](int iz, const TransferRecord *p_above, const TransferRecord *p_row,
+									const TransferRecord *p_below) {
+		const TransferRecord *rows[3] = { p_above, p_row, p_below };
+		const int row = iz * p_gw;
+		for (int ix = 0; ix < p_gw; ix++) {
+			double delta = 0.0;
+			for (const ScatterSource &src : SCATTER_SOURCES) {
+				const int sx = ix + src.dx;
+				const TransferRecord *src_row = rows[src.dz + 1];
+				if (!src_row || sx < 0 || sx >= p_gw) {
+					continue;
+				}
+				const TransferRecord &rec = src_row[sx];
+				if (src.k < 0) {
+					// The cell's own outflows, in the order its neighbour loop sent them.
+					for (int k = 0; k < 8; k++) {
+						if (rec.sent & (1u << k)) {
+							delta -= rec.excess[k];
+						}
+					}
+				} else if (rec.sent & (1u << src.k)) {
+					delta += rec.excess[src.k];
+				}
 			}
+			const int i = row + ix;
+			next_h[i] = std::isfinite(h[i]) ? (float)((double)h[i] + delta) : h[i];
 		}
+	};
+
+	for (int iter = 0; iter < p_iterations; iter++) {
+		parallel_scatter_rows<TransferRecord>(p_gw, p_gh, compute_row, gather_row);
+		h.swap(next_h);
 	}
 
 	PackedFloat32Array out;

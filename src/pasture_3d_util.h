@@ -143,6 +143,13 @@ public:
 	// back the `pasture_3d/performance/graph_gpu_threshold` setting GraphGpuBenchGate tells them to set.
 	static int gd_graph_gpu_threshold();
 
+	// The cap every native parallel region honours (0 = every hardware thread), and a count of the regions
+	// that actually split. Bound so a gate can run a kernel at 1 thread and at N and prove both halves of a
+	// threading claim: the answers match bit for bit, AND the threaded arm really ran threaded.
+	static void gd_set_max_threads(const int p_count);
+	static int gd_get_max_threads();
+	static int64_t gd_parallel_dispatch_count();
+
 	// Stream-power fluvial erosion for the graph-native Erosion SOLVER node. A thin binding over the native
 	// erosion_solve (the same solver the brush erosion modifier and Pasture3DSim run — one implementation),
 	// so the GDScript Erosion node can solve without reimplementing it. `p_z` is the absolute surface

@@ -6,6 +6,7 @@
 // them numerically. If you change one, change the other in the same commit.
 
 #include "pasture_3d_relief_ops.h"
+#include "pasture_3d_thread_pool.h"
 #include "pasture_3d_util.h"
 
 #include <godot_cpp/core/math.hpp>
@@ -456,13 +457,34 @@ void godot::relief_fields_build(const PackedFloat32Array &p_below, double p_min_
 	r_out.vs = p_vs;
 	r_out.altitude.assign((size_t)n, 0.f);
 	const bool has_below = p_below.size() == n;
+	const float *below = has_below ? p_below.ptr() : nullptr;
+	// The fallback runs on the CALLING thread, never a worker: it is whatever the caller handed in, and the
+	// rasterisers' fallback reads the live terrain through the region Dictionary. So the parallel pass fills
+	// every cell the below grid covers and only flags the rows that need more; the serial pass visits those.
+	std::vector<uint8_t> row_needs_fallback((size_t)p_gh, 0);
+	Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int z0, int z1) {
+		for (int iz = z0; iz < z1; iz++) {
+			const int row = iz * p_gw;
+			for (int ix = 0; ix < p_gw; ix++) {
+				const float h = below ? below[row + ix] : (float)NAN;
+				if (std::isfinite(h)) {
+					r_out.altitude[row + ix] = h;
+				} else {
+					row_needs_fallback[(size_t)iz] = 1;
+				}
+			}
+		}
+	});
 	for (int iz = 0; iz < p_gh; iz++) {
+		if (!row_needs_fallback[(size_t)iz]) {
+			continue;
+		}
 		const int row = iz * p_gw;
 		for (int ix = 0; ix < p_gw; ix++) {
-			float h = has_below ? p_below[row + ix] : (float)NAN;
-			if (!std::isfinite(h)) {
-				h = p_fallback(p_min_x + ix * p_vs, p_min_z + iz * p_vs);
+			if (below && std::isfinite(below[row + ix])) {
+				continue;
 			}
+			const float h = p_fallback(p_min_x + ix * p_vs, p_min_z + iz * p_vs);
 			r_out.altitude[row + ix] = std::isfinite(h) ? h : 0.f;
 		}
 	}
@@ -472,29 +494,31 @@ void godot::relief_fields_build(const PackedFloat32Array &p_below, double p_min_
 	r_out.grad_x.assign((size_t)n, 0.f);
 	r_out.grad_z.assign((size_t)n, 0.f);
 	const double inv2 = 1.0 / (2.0 * p_vs);
-	for (int iz = 0; iz < p_gh; iz++) {
-		const int row = iz * p_gw;
-		const int zm = MAX(iz - 1, 0) * p_gw;
-		const int zp = MIN(iz + 1, p_gh - 1) * p_gw;
-		for (int ix = 0; ix < p_gw; ix++) {
-			const int xm = MAX(ix - 1, 0);
-			const int xp = MIN(ix + 1, p_gw - 1);
-			const double c = (double)r_out.altitude[row + ix];
-			const double gx = ((double)r_out.altitude[row + xp] - (double)r_out.altitude[row + xm]) * inv2;
-			const double gz = ((double)r_out.altitude[zp + ix] - (double)r_out.altitude[zm + ix]) * inv2;
-			r_out.grad_x[row + ix] = (float)gx;
-			r_out.grad_z[row + ix] = (float)gz;
-			r_out.slope_deg[row + ix] = (float)Math::rad_to_deg(std::atan(std::sqrt(gx * gx + gz * gz)));
-			// §21.6: METRES of deviation — the mean of the ring at one cell, minus the centre. The old
-			// form divided by vs² instead of 4, which made the same hollow read 16x smaller on a 4x
-			// coarser grid. Positive is still a hollow.
-			r_out.curvature[row + ix] = (float)(((double)r_out.altitude[row + xp] +
-														(double)r_out.altitude[row + xm] +
-														(double)r_out.altitude[zp + ix] +
-														(double)r_out.altitude[zm + ix] - 4.0 * c) *
-					0.25);
+	Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int z0, int z1) {
+		for (int iz = z0; iz < z1; iz++) {
+			const int row = iz * p_gw;
+			const int zm = MAX(iz - 1, 0) * p_gw;
+			const int zp = MIN(iz + 1, p_gh - 1) * p_gw;
+			for (int ix = 0; ix < p_gw; ix++) {
+				const int xm = MAX(ix - 1, 0);
+				const int xp = MIN(ix + 1, p_gw - 1);
+				const double c = (double)r_out.altitude[row + ix];
+				const double gx = ((double)r_out.altitude[row + xp] - (double)r_out.altitude[row + xm]) * inv2;
+				const double gz = ((double)r_out.altitude[zp + ix] - (double)r_out.altitude[zm + ix]) * inv2;
+				r_out.grad_x[row + ix] = (float)gx;
+				r_out.grad_z[row + ix] = (float)gz;
+				r_out.slope_deg[row + ix] = (float)Math::rad_to_deg(std::atan(std::sqrt(gx * gx + gz * gz)));
+				// §21.6: METRES of deviation — the mean of the ring at one cell, minus the centre. The old
+				// form divided by vs² instead of 4, which made the same hollow read 16x smaller on a 4x
+				// coarser grid. Positive is still a hollow.
+				r_out.curvature[row + ix] = (float)(((double)r_out.altitude[row + xp] +
+															(double)r_out.altitude[row + xm] +
+															(double)r_out.altitude[zp + ix] +
+															(double)r_out.altitude[zm + ix] - 4.0 * c) *
+						0.25);
+			}
 		}
-	}
+	});
 	r_out.ready = true;
 }
 
@@ -571,33 +595,37 @@ void godot::relief_fields_add_measured(const PackedFloat32Array &p_selectors, Re
 		}
 		const double inv_ring = ring_dx.empty() ? 0.0 : 1.0 / (double)ring_dx.size();
 
-		for (int iz = 0; iz < gh; iz++) {
-			const int row = iz * gw;
-			const int zm = MAX(iz - rc, 0) * gw;
-			const int zp = MIN(iz + rc, gh - 1) * gw;
-			for (int ix = 0; ix < gw; ix++) {
-				const int xm = MAX(ix - rc, 0);
-				const int xp = MIN(ix + rc, gw - 1);
-				const double gx = ((double)r_fields.altitude[row + xp] -
-										  (double)r_fields.altitude[row + xm]) *
-						inv2;
-				const double gz = ((double)r_fields.altitude[zp + ix] -
-										  (double)r_fields.altitude[zm + ix]) *
-						inv2;
-				slope[row + ix] = (float)Math::rad_to_deg(std::atan(std::sqrt(gx * gx + gz * gz)));
-				if (ring_dx.empty()) {
-					curv[row + ix] = r_fields.curvature[row + ix];
-					continue;
+		// Every cell reads only `altitude` and writes only itself, and the ring sum runs in the same order
+		// inside each cell, so rows split across threads bit-exactly.
+		Pasture3DThreadPool::parallel_for_rows(gh, 16, [&](int z0, int z1) {
+			for (int iz = z0; iz < z1; iz++) {
+				const int row = iz * gw;
+				const int zm = MAX(iz - rc, 0) * gw;
+				const int zp = MIN(iz + rc, gh - 1) * gw;
+				for (int ix = 0; ix < gw; ix++) {
+					const int xm = MAX(ix - rc, 0);
+					const int xp = MIN(ix + rc, gw - 1);
+					const double gx = ((double)r_fields.altitude[row + xp] -
+											  (double)r_fields.altitude[row + xm]) *
+							inv2;
+					const double gz = ((double)r_fields.altitude[zp + ix] -
+											  (double)r_fields.altitude[zm + ix]) *
+							inv2;
+					slope[row + ix] = (float)Math::rad_to_deg(std::atan(std::sqrt(gx * gx + gz * gz)));
+					if (ring_dx.empty()) {
+						curv[row + ix] = r_fields.curvature[row + ix];
+						continue;
+					}
+					double acc = 0.0;
+					for (size_t i = 0; i < ring_dx.size(); i++) {
+						const int sx = CLAMP(ix + ring_dx[i], 0, gw - 1);
+						const int sz = CLAMP(iz + ring_dz[i], 0, gh - 1);
+						acc += (double)r_fields.altitude[sz * gw + sx];
+					}
+					curv[row + ix] = (float)(acc * inv_ring - (double)r_fields.altitude[row + ix]);
 				}
-				double acc = 0.0;
-				for (size_t i = 0; i < ring_dx.size(); i++) {
-					const int sx = CLAMP(ix + ring_dx[i], 0, gw - 1);
-					const int sz = CLAMP(iz + ring_dz[i], 0, gh - 1);
-					acc += (double)r_fields.altitude[sz * gw + sx];
-				}
-				curv[row + ix] = (float)(acc * inv_ring - (double)r_fields.altitude[row + ix]);
 			}
-		}
+		});
 	}
 }
 
@@ -631,30 +659,32 @@ void godot::relief_fields_add_sim(const Dictionary &p_sim, double p_min_x, doubl
 	const float *ep = ero.ptr();
 	const float *dp = dep.ptr();
 	const float *wp = wet.ptr();
-	for (int iz = 0; iz < p_gh; iz++) {
-		const double fv = ((p_min_z + (double)iz * p_vs) - smin_z) / cell;
-		if (fv < 0.0 || fv > (double)(sh - 1)) {
-			continue;
-		}
-		const int row = iz * p_gw;
-		for (int ix = 0; ix < p_gw; ix++) {
-			const double fu = ((p_min_x + (double)ix * p_vs) - smin_x) / cell;
-			if (fu < 0.0 || fu > (double)(sw - 1)) {
+	Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int z0, int z1) {
+		for (int iz = z0; iz < z1; iz++) {
+			const double fv = ((p_min_z + (double)iz * p_vs) - smin_z) / cell;
+			if (fv < 0.0 || fv > (double)(sh - 1)) {
 				continue;
 			}
-			const double f = relief_bilinear(fp, sw, sh, fu, fv);
-			const double e = relief_bilinear(ep, sw, sh, fu, fv);
-			const double d = relief_bilinear(dp, sw, sh, fu, fv);
-			const double w = relief_bilinear(wp, sw, sh, fu, fv);
-			// The two unit conversions the ReliefSample docs promise. exp() once per cell here rather
-			// than once per gated op in the evaluator, and the sign flip so an erosion band reads in the
-			// direction an artist thinks in.
-			r_fields.sim_flow[(size_t)(row + ix)] = (float)std::exp(f);
-			r_fields.sim_erosion[(size_t)(row + ix)] = (float)(e < 0.0 ? -e : 0.0);
-			r_fields.sim_deposition[(size_t)(row + ix)] = (float)(d > 0.0 ? d : 0.0);
-			r_fields.sim_wetness[(size_t)(row + ix)] = (float)(w > 0.0 ? w : 0.0);
+			const int row = iz * p_gw;
+			for (int ix = 0; ix < p_gw; ix++) {
+				const double fu = ((p_min_x + (double)ix * p_vs) - smin_x) / cell;
+				if (fu < 0.0 || fu > (double)(sw - 1)) {
+					continue;
+				}
+				const double f = relief_bilinear(fp, sw, sh, fu, fv);
+				const double e = relief_bilinear(ep, sw, sh, fu, fv);
+				const double d = relief_bilinear(dp, sw, sh, fu, fv);
+				const double w = relief_bilinear(wp, sw, sh, fu, fv);
+				// The two unit conversions the ReliefSample docs promise. exp() once per cell here rather
+				// than once per gated op in the evaluator, and the sign flip so an erosion band reads in the
+				// direction an artist thinks in.
+				r_fields.sim_flow[(size_t)(row + ix)] = (float)std::exp(f);
+				r_fields.sim_erosion[(size_t)(row + ix)] = (float)(e < 0.0 ? -e : 0.0);
+				r_fields.sim_deposition[(size_t)(row + ix)] = (float)(d > 0.0 ? d : 0.0);
+				r_fields.sim_wetness[(size_t)(row + ix)] = (float)(w > 0.0 ? w : 0.0);
+			}
 		}
-	}
+	});
 }
 
 bool godot::relief_scatter_build(const Dictionary &p_params, double p_min_x, double p_min_z, double p_vs,

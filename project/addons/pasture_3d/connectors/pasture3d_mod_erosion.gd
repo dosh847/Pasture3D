@@ -272,6 +272,8 @@ func make_pending(p_out: Dictionary, p_extent: String) -> Dictionary:
 		"mod": self, "extent": p_extent,
 		"z0": p_out["pending"], "z": p_out["pending"], "key": int(p_out["pending_key"]),
 		"gw": int(p_out["pending_gw"]), "gh": int(p_out["pending_gh"]),
+		# A Live Preview Resolution grid is coarser than the terrain; -1 = the terrain's own spacing.
+		"cell": float(p_out.get("pending_cell", -1.0)),
 		"iterations": maxi(iterations, 1), "done": 0, "failed": false,
 		"want_diagnostics": publish_fields, "res": {},
 		"params": to_params(), "erod": PackedFloat32Array(),

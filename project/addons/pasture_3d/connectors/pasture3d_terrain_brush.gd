@@ -179,6 +179,8 @@ var _arm_gen: int = 0
 
 ## The tile-grown box the last `_refresh_owner_rect` cleared and repainted. Read by RectBakeJunctionGate to
 ## know which junctions a partial bake could have touched; nothing in the bake path reads it.
+var _last_rect_clips: Array = []    # Every clip the last rect bake cleared, cluster 0 first (RectBakeSplitGate)
+var _last_rect_decision: String = "" # "rect", "skip" (armed, nothing changed) or "full" (fell back), for gates
 var _last_rect_clip: AABB = AABB()           # Bumped by every scheduler; lets a layer bake tell "armed before me" from "armed during me"
 var _last_baked_xform: Transform3D = Transform3D() # Global xform baked into the terrain; guards no-op transform refreshes (tab-switch churn)
 var _clip_aabb: AABB = AABB()   # When non-empty, _paint_* writes only cells inside this world box (dirty-rect)
@@ -338,8 +340,16 @@ var _task_id: int = -1
 # THIS ALSO SAYS SOMETHING ABOUT THE SIM, which does chunk: a chunked Sim solve is not bitwise the same
 # as an unchunked one, and §4.5 claims it is. Nothing here depends on that and it has not been chased.
 #
-# FROZEN ONLY, deliberately. A Live modifier has no cache to deliver a deferred answer INTO, and Live is
-# documented as the setting for a brush small enough to watch solve. One rule per Evaluation mode.
+# LIVE SOLVES DEFER TOO. They used to run synchronously on the main thread inside pass 1, on the grounds
+# that a Live modifier has no cache to deliver a deferred answer into. It has one now, owned by the run
+# rather than the modifier: `_live_solved`, filled by the solve phases and dropped when the run ends. Two
+# rules differ from FROZEN, and both follow from that cache being an answer for ONE surface:
+#   - a Live step defers on EVERY bake of the run, not only pass 1, and never serves a stale entry
+#     (`serve_stale` false). A Live graph above a Live erosion hands the erosion a new surface once the
+#     graph lands, so the driver loops — solve, bake, solve what that bake asked for — up to LIVE_ROUNDS.
+#   - newest edit wins: an edit arriving while only Live solves are in flight cancels the run
+#     (`_superseded`) and the re-armed refresh starts over. A run holding a FROZEN solve is never
+#     superseded, because that solve would be thrown away and repeated for nothing.
 
 ## Take the deferred path where `Engine.is_editor_hint()` is false. A gate's only way in: the driver
 ## exists so the EDITOR stays live, and a headless run has no editor to be live — but the answer it
@@ -403,6 +413,8 @@ func _end_deferred_run(p_run: int = 0) -> void:
 	if _deferred_run == 0 or (p_run != 0 and p_run != _deferred_run):
 		return
 	_deferred_run = 0
+	_live_solved = {}
+	_run_supersedable = false
 	# The three phase flags belong to the run, not to the frame. Left set by an abort they make every
 	# later synchronous bake behave as though a driver were about to redo it, and nothing ever does.
 	_erosion_defer = false
@@ -411,6 +423,43 @@ func _end_deferred_run(p_run: int = 0) -> void:
 
 
 var _deferred_run_seq: int = 0
+
+## Live solves the run has finished, keyed by `_live_key`. Same entry shape as a modifier's frozen cache,
+## and never written into the modifier: a Live modifier must not come out of a bake holding a cache.
+var _live_solved: Dictionary = {}
+## True while every solve in flight is Live, so an edit may cancel the run and start over.
+var _run_supersedable: bool = false
+## Set when an edit cancelled the run; the driver then ends without a final bake or a "cancelled" print.
+var _superseded: bool = false
+
+## How many solve-then-bake rounds a run gives Live steps that feed each other (a Live graph over a Live
+## erosion needs two). Capped so a stack that never settles yields a slow bake, not a run that never ends.
+const LIVE_ROUNDS := 4
+
+
+func _live_key(p_mod: Object, p_extent: String) -> String:
+	return "%d|%s" % [p_mod.get_instance_id(), p_extent]
+
+
+## File one finished solve: into the run's transient cache for a Live step, the modifier's own for FROZEN.
+func _file_solved(p_mod: Object, p_extent: String, p_entry: Dictionary, p_live: bool) -> void:
+	if p_live:
+		_live_solved[_live_key(p_mod, p_extent)] = p_entry
+	else:
+		p_mod.store_cache(p_extent, p_entry)
+
+
+## Whether an edit arriving now should cancel the run and start over (newest edit wins). Its own function
+## so a headless gate can ask the decision; the timer that acts on it is editor-only.
+func _should_supersede() -> bool:
+	return _erosion_running and _run_supersedable and not _cancel
+
+
+func _all_live(p_pending: Array) -> bool:
+	for st: Dictionary in p_pending:
+		if not bool(st.get("live", false)):
+			return false
+	return true
 
 
 ## Run `p_states` to completion on a worker, yielding frames here until it finishes. Returns false when
@@ -865,6 +914,21 @@ func _get_property_list() -> Array[Dictionary]:
 			"usage": PROPERTY_USAGE_DEFAULT,
 		})
 		props.append({
+			"name": "live_preview_resolution",
+			"type": TYPE_INT,
+			"hint": PROPERTY_HINT_ENUM,
+			"hint_string": "Full,Half,Quarter",
+			"usage": PROPERTY_USAGE_DEFAULT,
+		})
+		props.append({"name": "_preview_coarse_baked", "type": TYPE_BOOL, "usage": PROPERTY_USAGE_STORAGE})
+		props.append({
+			"name": "bake_scale",
+			"type": TYPE_INT,
+			"hint": PROPERTY_HINT_ENUM,
+			"hint_string": "1x,2x,4x",
+			"usage": PROPERTY_USAGE_DEFAULT,
+		})
+		props.append({
 			"name": "modifiers",
 			"type": TYPE_ARRAY,
 			"hint": PROPERTY_HINT_TYPE_STRING,
@@ -1051,6 +1115,9 @@ func _schedule_box_refresh(p_box: AABB) -> void:
 
 
 func _arm_refresh_timer() -> void:
+	# Every edit scheduler funnels through here, so this is "the next edit" that ends a Bake's full-res
+	# hold and puts a Live Preview Resolution back into effect.
+	_preview_full_res = false
 	if is_instance_valid(_timer):
 		return
 	# Never arm a timer while detached (scene load / tree churn): the timer would fire and bake a node
@@ -1088,6 +1155,11 @@ func _on_refresh_timer() -> void:
 	# the driver exists to remove, on top of a bake the driver is about to redo anyway. Keep the dirty
 	# state and come back after it lands.
 	if _erosion_running:
+		# Newest edit wins, when nothing but Live solves would be lost: cancel, and the re-armed tick
+		# bakes this edit once the run has wound down.
+		if _should_supersede():
+			_superseded = true
+			_cancel = true
 		_arm_refresh_timer()
 		return
 	# EVERY guard first, and only then the snapshot. `is_inside_tree()` is the one the bake actually
@@ -1103,10 +1175,12 @@ func _on_refresh_timer() -> void:
 	var splines := _dirty_splines
 	var moved_node := _moved_node
 	var boxes := _dirty_boxes
+	var stack_changed := _stack_dirty
 	_full_dirty = false
 	_dirty_splines = {}
 	_moved_node = false
 	_dirty_boxes = []
+	_stack_dirty = false
 	# The non-painting branch sits AFTER the snapshot deliberately: a brush that returned before the
 	# clear above would carry a permanently-set dirty flag and re-arm the timer forever.
 	if not _paints():
@@ -1116,7 +1190,7 @@ func _on_refresh_timer() -> void:
 			update_gizmos()
 		return
 	var bake: Callable = (_refresh_owner.bind(_layer_owner, false, []) if full or (splines.is_empty() and boxes.is_empty())
-			else _refresh_owner_rect.bind(_layer_owner, splines, moved_node, boxes))
+			else _refresh_owner_rect.bind(_layer_owner, splines, moved_node, boxes, stack_changed))
 	# §14. Both bake paths go through the same driver, because either can be the one that has no cache
 	# yet: dragging a spline on a freshly created Mound reaches the dirty-rect path first.
 	if _wants_deferred_bake():
@@ -1167,6 +1241,8 @@ func force_bake_modifiers() -> void:
 		if is_instance_valid(s):
 			_dirty_splines[s.get_instance_id()] = true
 	_stamp_cache.clear()
+	# An explicit Bake is always full resolution, and stays so until the next edit.
+	_preview_full_res = true
 	refresh(false)
 
 
@@ -1256,6 +1332,14 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 		for s in sibs:
 			s._paint_into(-1, _get_blend_mode())
 
+	# Every curve this bake painted is now the one the terrain reflects. Only a rect bake used to record that, so
+	# after a full bake the cache still held the curve from the last rect bake — which the moved-point diff then
+	# compared against, and which `_refresh_owner_rect` reads as "nothing changed" when an edit (an undo, say)
+	# puts the curve back to exactly that shape. RectBakeSplitGate [F].
+	for s in sibs:
+		for sp in s._get_splines():
+			s._update_curve_cache(sp)
+
 	# GPU push — targeted (edited-regions-only) for placement/edit, full all-regions for detach/rebind and
 	# the destructive fallback (see targeted_push above).
 	var stack = terrain.data.get_layer_stack() if (terrain and terrain.data and terrain.data.has_method("get_layer_stack")) else null
@@ -1318,8 +1402,9 @@ func _wants_deferred_bake() -> bool:
 	for s in _tools_on_owner(_layer_owner):
 		if not is_instance_valid(s):
 			continue
+		# Live as well as Frozen: a Live erosion solves on the worker too.
 		for m in s.erosion_modifiers():
-			if m.evaluation == Pasture3DNode.Evaluation.FROZEN:
+			if m.is_active():
 				return true
 		if s._has_growing_relief():
 			return true
@@ -1367,6 +1452,8 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 	# and the multi-minute solve the user was abandoning ran to completion. A phase must never clear a
 	# cancel it did not set.
 	_cancel = false
+	_superseded = false
+	_run_supersedable = false # growth is never superseded; set per round below
 	var can_undo := p_record_undo and is_configured()
 	var before: Dictionary = _snapshot_owner(p_owner) if can_undo else {}
 
@@ -1382,7 +1469,9 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 		_graph_defer = true
 		# Spec §5: driver passes are expected repeats; marked so they cannot be mistaken for redundant bakes.
 		Pasture3DBakeTrace.mark("%s: deferred driver pass 1 (round %d)" % [name, _round])
+		_deferred_repass = _round > 0
 		p_bake.call()
+		_deferred_repass = false
 		_erosion_defer = false
 		_growth_defer = false
 		_graph_defer = false
@@ -1400,40 +1489,63 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 			print("%s: growth cancelled — the brush is showing the mountain it already had." % name)
 			return
 
-	# ---- Phase B: solve pending graphs on worker thread
-	if not pending_graph.is_empty():
-		var ok_graph := await _solve_graph_pending(pending_graph)
-		if not ok_graph:
-			# §3.5. This used to fall through with no else and no return: nothing was stored, the erosion
-			# phase reset the cancel and solved to completion, and the final bake then re-evaluated the
-			# WHOLE graph on the main thread — the exact freeze Cancel was pressed to abandon, with
-			# nothing said. Same shape as the growth phase above, and said out loud for the same reason.
-			_end_deferred_run(run)
-			_commit_deferred_undo(p_owner, before, can_undo)
-			print("%s: graph evaluation cancelled — the brush is showing its un-graphed shape." % name)
-			return
-		for st: Dictionary in pending_graph:
-			if st.has("zo"):
-				(st["mod"] as Pasture3DNodeGraph).store_cache(st["extent"], {
-					"key": st["key"],
-					"grid": st["zo"],
-				})
+	# ---- Phases B and C, then a bake; repeated while that bake asks Live steps for more (LIVE_ROUNDS).
+	# Frozen steps only defer on pass 1, so every round after the first solves Live work alone.
+	var ok := true
+	for live_round in range(LIVE_ROUNDS):
+		if pending_graph.is_empty() and pending_erosion.is_empty():
+			break
+		_run_supersedable = _all_live(pending_graph) and _all_live(pending_erosion)
 
-	# ---- Phase C: the erosion solve, against the surface phase A & B finished.
-	if pending_erosion.is_empty():
+		# ---- Phase B: solve pending graphs on worker thread
 		if not pending_graph.is_empty():
-			Pasture3DBakeTrace.mark("%s: deferred driver pass 2 (graphs solved)" % name)
-			p_bake.call()
-		_end_deferred_run(run)
-		_commit_deferred_undo(p_owner, before, can_undo)
-		return
+			var ok_graph := await _solve_graph_pending(pending_graph)
+			if not ok_graph:
+				if _superseded:
+					_end_superseded(run, p_owner, before, can_undo)
+					return
+				# §3.5. This used to fall through with no else and no return: nothing was stored, the erosion
+				# phase reset the cancel and solved to completion, and the final bake then re-evaluated the
+				# WHOLE graph on the main thread — the exact freeze Cancel was pressed to abandon, with
+				# nothing said. Same shape as the growth phase above, and said out loud for the same reason.
+				_end_deferred_run(run)
+				_commit_deferred_undo(p_owner, before, can_undo)
+				print("%s: graph evaluation cancelled — the brush is showing its un-graphed shape." % name)
+				return
+			for st: Dictionary in pending_graph:
+				if st.has("zo"):
+					_file_solved(st["mod"], st["extent"], {"key": st["key"], "grid": st["zo"]},
+							bool(st.get("live", false)))
 
-	var ok := await _solve_erosion_pending(pending_erosion)
-	if ok:
-		for st: Dictionary in pending_erosion:
-			_store_solved_erosion(st)
-	Pasture3DBakeTrace.mark("%s: deferred driver pass 2 (erosion solved)" % name)
-	p_bake.call()
+		# ---- Phase C: the erosion solve, against the surface phase A & B finished.
+		if not pending_erosion.is_empty():
+			ok = await _solve_erosion_pending(pending_erosion)
+			if not ok and _superseded:
+				_end_superseded(run, p_owner, before, can_undo)
+				return
+			if ok:
+				for st: Dictionary in pending_erosion:
+					_store_solved_erosion(st)
+
+		Pasture3DBakeTrace.mark("%s: deferred driver pass 2 (round %d)" % [name, live_round])
+		_pending_erosion = []
+		_pending_graph = []
+		# Pass 1 already recorded the moved curve, so a rect bake repeated here would read "nothing changed"
+		# and skip — leaving the section cleared and unsolved. A repass is never a double commit.
+		_deferred_repass = true
+		p_bake.call()
+		_deferred_repass = false
+		pending_erosion = _pending_erosion
+		pending_graph = _pending_graph
+		_pending_erosion = []
+		_pending_graph = []
+		if not ok:
+			break
+		if live_round == LIVE_ROUNDS - 1 and not (pending_graph.is_empty() and pending_erosion.is_empty()):
+			push_warning(("%s: Live modifiers were still asking for solves after %d rounds, so the brush "
+					+ "is showing part of the stack un-solved. Bake again, or freeze one of them.")
+					% [name, LIVE_ROUNDS])
+	_run_supersedable = false
 	_end_deferred_run(run)
 	_commit_deferred_undo(p_owner, before, can_undo)
 	if not ok:
@@ -1442,6 +1554,14 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 		# the worst outcome of the whole feature.
 		print("%s: erosion cancelled — the brush is showing its un-eroded shape. Bake again to solve."
 				% name)
+
+
+## An edit cancelled the run (newest edit wins). No final bake and no "cancelled" print: the re-armed
+## refresh is about to bake the edit, and anything said here would describe a state that lasts a frame.
+func _end_superseded(p_run: int, p_owner: String, p_before: Dictionary, p_can_undo: bool) -> void:
+	Pasture3DBakeTrace.mark("%s: deferred driver superseded by a newer edit" % name)
+	_end_deferred_run(p_run)
+	_commit_deferred_undo(p_owner, p_before, p_can_undo)
 
 
 ## One action over the whole three-pass bake, or none when there was nothing undoable to record.
@@ -1639,7 +1759,8 @@ func _erosion_solve_one(p_state: Dictionary) -> bool:
 	var params: Dictionary = (p_state["params"] as Dictionary).duplicate()
 	params["gw"] = p_state["gw"]
 	params["gh"] = p_state["gh"]
-	params["cell_size"] = terrain.vertex_spacing
+	var cell := float(p_state.get("cell", -1.0))
+	params["cell_size"] = cell if cell > 0.0 else terrain.vertex_spacing
 	params["time_step"] = 1.0
 	params["iterations"] = p_state["iterations"]
 	params["want_diagnostics"] = p_state["want_diagnostics"]
@@ -1690,7 +1811,7 @@ func _store_solved_erosion(p_state: Dictionary) -> void:
 		entry["ero"] = ero
 		entry["dep"] = dep
 		entry["wet"] = wet
-	m.store_cache(String(p_state["extent"]), entry)
+	_file_solved(m, String(p_state["extent"]), entry, bool(p_state.get("live", false)))
 
 
 ## Bake this brush's layer with every erosion modifier suppressed, so the layer holds the shape the
@@ -1728,7 +1849,8 @@ func cancel_erosion() -> void:
 ## layer-mates inside the box (not just the moved spline) is what keeps shared cells correct — the same
 ## reason the full refresh repaints mates. Auto-refresh only (no undo action; the gizmo edit is the
 ## undoable cause). Falls back to a full refresh when there's no layers Tool API or nothing locatable.
-func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool = false, p_boxes: Array = []) -> void:
+func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool = false, p_boxes: Array = [],
+		p_stack_changed: bool = false) -> void:
 	if not is_configured():
 		return
 	var layer_id := _ensure_layer_for(owner, owner == _layer_owner)
@@ -1744,13 +1866,30 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 	# whether it needed it: the partial-section path re-derives its own previous component from
 	# `_curve_cache` and must stay narrow, while the whole-spline fallback has no way to know where the
 	# brush was and would otherwise leave the old cut uncleared. See the note on that function.
+	_last_rect_clips = []
+	_last_rect_decision = ""
 	var dirty := AABB()
 	var have := false
+	var unchanged := 0
 	for sid in changed_ids:
 		var path := _find_spline_by_id(sid)
 		var prev: AABB = _last_paint_aabb.get(sid, AABB())
 		if path != null:
 			var moved := _moved_point_indices(path) if not snap_all else PackedInt32Array()
+			# ---- AN EDIT THAT CHANGED NOTHING BAKES NOTHING ----
+			# The gizmo commits a drag twice when the undo action re-applies the final curve after the drag's own
+			# bake has already cached it (trace 2026-09-13, 66992 ms). The diff then finds no moved point, and
+			# `_spline_dirty_aabb` reads "no moved points" as "the whole spline": a 1 km x 2 km rect bake,
+			# 1035 ms, that repainted exactly what was already there.
+			#
+			# Except when the STACK changed. A graph or modifier edit arms every spline with no point moved, and
+			# skipping it here dropped the edit: a Live graph updated only on an explicit Bake.
+			#
+			# And never on the deferred driver's later passes: pass 1 cached the curve they are re-baking.
+			if (not snap_all and not p_stack_changed and not _deferred_repass and moved.is_empty()
+					and _curve_cache.has(sid)):
+				unchanged += 1
+				continue
 			var curr := _spline_dirty_aabb(path, moved, prev)
 			if curr.size != Vector3.ZERO:
 				dirty = curr if not have else dirty.merge(curr)
@@ -1759,12 +1898,21 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 			dirty = prev if not have else dirty.merge(prev)
 			have = true
 	# Areas queued by `_schedule_box_refresh`: no curve moved there, so there is no previous footprint to union.
+	# Kept apart from the spline's box, and from each other; see `_cluster_rect_boxes`.
+	var pieces: Array = []
+	if have:
+		pieces.append(dirty)
 	for bx: AABB in p_boxes:
 		if bx.size.x > 0.0 or bx.size.z > 0.0:
-			dirty = bx if not have else dirty.merge(bx)
-			have = true
-	if not have:
+			pieces.append(bx)
+	if pieces.is_empty():
+		if unchanged > 0 and unchanged == changed_ids.size():
+			_last_rect_decision = "skip"
+			if Pasture3DBakeTrace.enabled:
+				Pasture3DBakeTrace.mark("%s rect bake skipped: %d spline(s) armed, none changed since the last bake" % [name, unchanged])
+			return
 		# Splines vanished (e.g. removed) — let the full path reconcile the layer.
+		_last_rect_decision = "full"
 		_refresh_owner(owner, false, [])
 		return
 
@@ -1772,72 +1920,83 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 	# actually cleared is the box grown out to tile boundaries — larger than `dirty`. Clip the repaint to
 	# that SAME grown box, or a neighbour's samples in a dropped tile outside `dirty` are erased and never
 	# repainted (the far-away "cut"). Tile boundaries sit at world multiples of tile_size * vertex_spacing.
-	var clip_box := _snap_aabb_to_tiles(dirty, _layer_tile_world(layer_id))
+	var clips := _cluster_rect_boxes(pieces, _layer_tile_world(layer_id))
+	_last_rect_decision = "rect"
 
 	var blend := _layer_blend_for(layer_id)
-	var t_start := Time.get_ticks_usec()
 	var _trace_tok := Pasture3DBakeTrace.bake_begin(self, "rect")
 	# Start from a clean edited-flag slate so the targeted update_maps below uploads EXACTLY the regions
 	# this bake touches. composite_region sets is_edited but update_maps never clears it, so without this
 	# every later partial would re-push every region edited this session (the far-spline slowdown).
 	_clear_region_edited_flags()
-	# Clear the dropped tiles across all affiliated layers and composite the (tile-bounded) box back to base.
-	# This composite is required before painting: the rasterisers read get_height per cell for
-	# relative_to_terrain / follow_spline_height, so they must see the cleared base (not this tool's
-	# own previous dome) or the feature climbs each edit.
-	for lyr_idx in _all_layers_for_owner(owner):
-		terrain.data.clear_layer_in_area(lyr_idx, clip_box, false)
-	terrain.data.composite_area(clip_box, false)
-	var t_clear := Time.get_ticks_usec()
-	# Re-seat ONLY the points the user actually moved, against the freshly-cleared base inside the box.
-	# Snapping every point here is the snap-to-self regression: an unmoved point elsewhere reads terrain
-	# the box clear didn't touch (its own ridge) and climbs. A whole-spline / node move instead takes the
-	# full-refresh path, which clears everything first and re-snaps all points. Snap is world-Y only, so
-	# the XZ box just cleared stays valid.
-	if snap_to_surface:
-		for sid in changed_ids:
-			var sp := _find_spline_by_id(sid)
-			if sp != null:
-				# A node move shifts every point's world XZ but leaves the local curve unchanged, so the
-				# moved-point diff finds nothing — re-snap all points against the freshly-cleared base.
-				var idxs := _all_point_indices(sp) if snap_all else _moved_point_indices(sp)
-				_apply_surface_snap_points(sp, idxs)
-	var t_snap := Time.get_ticks_usec()
 	var painted := 0
 	# The tools that actually painted, accumulated as we go. `_emit_baked` below used to re-run the group
 	# scan AND `_overlaps_box` — a walk over every baked point of every spline on the layer — twenty lines
 	# after this loop had already established exactly the same answer.
 	var painted_tools: Array = []
-	for s in _tools_on_owner(owner):
-		if not s._overlaps_box(clip_box):
-			continue
-		painted_tools.append(s)
-		s._clip_aabb = clip_box
-		s._defer_composite = true # write samples only; we composite the whole box once below
-		s._paint_into(layer_id, blend)
-		s._defer_composite = false
-		s._clip_aabb = AABB()
-		painted += 1
-	_last_rect_clip = clip_box
-	# Which layer-mates this partial bake repainted and which it skipped, and the box it CLEARED. The clear
-	# drops whole tiles on every affiliated layer, while the repaint is gated on each mate's spline footprint,
-	# so a mate whose paint reaches into the box without its footprint doing so is erased until a full bake.
-	# A junction reverting between resolves (Road+Road1@96,-1, trace 2026-09-13) is only explicable with both.
-	if Pasture3DBakeTrace.enabled:
-		var repainted := PackedStringArray()
-		for s in painted_tools:
-			repainted.append(String(s.name))
-		var skipped := PackedStringArray()
+	for ci in clips.size():
+		var clip_box: AABB = clips[ci]
+		var t_start := Time.get_ticks_usec()
+		# Clear the dropped tiles across all affiliated layers and composite the (tile-bounded) box back to base.
+		# This composite is required before painting: the rasterisers read get_height per cell for
+		# relative_to_terrain / follow_spline_height, so they must see the cleared base (not this tool's
+		# own previous dome) or the feature climbs each edit.
+		for lyr_idx in _all_layers_for_owner(owner):
+			terrain.data.clear_layer_in_area(lyr_idx, clip_box, false)
+		terrain.data.composite_area(clip_box, false)
+		var t_clear := Time.get_ticks_usec()
+		# Re-seat ONLY the points the user actually moved, against the freshly-cleared base inside the box.
+		# Snapping every point here is the snap-to-self regression: an unmoved point elsewhere reads terrain
+		# the box clear didn't touch (its own ridge) and climbs. A whole-spline / node move instead takes the
+		# full-refresh path, which clears everything first and re-snaps all points. Snap is world-Y only, so
+		# the XZ box just cleared stays valid. The spline's own box is always cluster 0.
+		if snap_to_surface and have and ci == 0:
+			for sid in changed_ids:
+				var sp := _find_spline_by_id(sid)
+				if sp != null:
+					# A node move shifts every point's world XZ but leaves the local curve unchanged, so the
+					# moved-point diff finds nothing — re-snap all points against the freshly-cleared base.
+					var idxs := _all_point_indices(sp) if snap_all else _moved_point_indices(sp)
+					_apply_surface_snap_points(sp, idxs)
+		var t_snap := Time.get_ticks_usec()
+		var box_tools: Array = []
 		for s in _tools_on_owner(owner):
+			if not s._overlaps_box(clip_box):
+				continue
+			box_tools.append(s)
 			if not painted_tools.has(s):
-				skipped.append(String(s.name))
-		Pasture3DBakeTrace.mark("%s rect bake: cleared x[%.1f..%.1f] z[%.1f..%.1f] (tiles of %.1f m); repainted [%s]; skipped, footprint outside box [%s]" % [
-				name, clip_box.position.x, clip_box.end.x, clip_box.position.z, clip_box.end.z,
-				_layer_tile_world(layer_id), ", ".join(repainted), ", ".join(skipped)])
-	var t_paint := Time.get_ticks_usec()
-	# Composite the whole footprint ONCE instead of per painted pixel — the big win for large edits.
-	terrain.data.composite_area(clip_box, false)
-	var t_composite := Time.get_ticks_usec()
+				painted_tools.append(s)
+			s._clip_aabb = clip_box
+			s._defer_composite = true # write samples only; we composite the whole box once below
+			s._paint_into(layer_id, blend)
+			s._defer_composite = false
+			s._clip_aabb = AABB()
+			painted += 1
+		if ci == 0:
+			_last_rect_clip = clip_box
+		_last_rect_clips.append(clip_box)
+		# Which layer-mates this partial bake repainted and which it skipped, and the box it CLEARED. The clear
+		# drops whole tiles on every affiliated layer, while the repaint is gated on each mate's spline footprint,
+		# so a mate whose paint reaches into the box without its footprint doing so is erased until a full bake.
+		# A junction reverting between resolves (Road+Road1@96,-1, trace 2026-09-13) is only explicable with both.
+		if Pasture3DBakeTrace.enabled:
+			var repainted := PackedStringArray()
+			for s in box_tools:
+				repainted.append(String(s.name))
+			var skipped := PackedStringArray()
+			for s in _tools_on_owner(owner):
+				if not box_tools.has(s):
+					skipped.append(String(s.name))
+			Pasture3DBakeTrace.mark("%s rect bake%s: cleared x[%.1f..%.1f] z[%.1f..%.1f] (tiles of %.1f m); repainted [%s]; skipped, footprint outside box [%s]" % [
+					name, "" if clips.size() == 1 else " box %d of %d" % [ci + 1, clips.size()],
+					clip_box.position.x, clip_box.end.x, clip_box.position.z, clip_box.end.z,
+					_layer_tile_world(layer_id), ", ".join(repainted), ", ".join(skipped)])
+		var t_paint := Time.get_ticks_usec()
+		# Composite the whole footprint ONCE instead of per painted pixel — the big win for large edits.
+		terrain.data.composite_area(clip_box, false)
+		var t_composite := Time.get_ticks_usec()
+		if log_bake_timing:
+			_log_bake_timing(clip_box, box_tools.size(), t_start, t_clear, t_snap, t_paint, t_composite, Time.get_ticks_usec())
 	# Remember the (possibly snapped) point layout so the next edit only re-snaps what changes again.
 	for sid in changed_ids:
 		var cp := _find_spline_by_id(sid)
@@ -1859,9 +2018,40 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 	# §18: a spline drag takes THIS path, not the full refresh, and moving the loop moves the preview's
 	# area mask — so the overlay has to follow the handle rather than waiting for the next full bake.
 	_queue_mask_preview()
-	if log_bake_timing:
-		_log_bake_timing(clip_box, painted, t_start, t_clear, t_snap, t_paint, t_composite, Time.get_ticks_usec())
-	Pasture3DBakeTrace.bake_end(_trace_tok, painted)
+	Pasture3DBakeTrace.bake_end(_trace_tok, painted_tools.size())
+
+
+## ---- ONE BOUNDING BOX PAINTS THE GROUND BETWEEN ----
+##
+## A rect bake used to merge everything it was asked to regrade into a single AABB. A spill half a kilometre up
+## the road and a junction at its far end made x[-64..704] z[1536..2752]: 385-411 ms, where the junction box on its
+## own took 91 ms (trace 2026-09-13). Each box is snapped to tiles; two are merged only when they overlap, or when
+## the merged box wastes little (area no more than RECT_MERGE_SLACK times the pair). The spline's own box stays
+## cluster 0, because the snap step belongs to it. Clusters come back disjoint, so each can clear, paint and
+## composite on its own.
+const RECT_MERGE_SLACK: float = 1.25
+
+func _cluster_rect_boxes(p_pieces: Array, p_tile: float) -> Array:
+	var out: Array = []
+	for bx: AABB in p_pieces:
+		var t := _snap_aabb_to_tiles(bx, p_tile)
+		out.append(AABB(Vector3(t.position.x, -10000.0, t.position.z), Vector3(t.size.x, 20000.0, t.size.z)))
+	var merged := true
+	while merged:
+		merged = false
+		for i in out.size():
+			for j in range(i + 1, out.size()):
+				var a: AABB = out[i]
+				var b: AABB = out[j]
+				var m := a.merge(b)
+				if a.intersects(b) or m.size.x * m.size.z <= RECT_MERGE_SLACK * (a.size.x * a.size.z + b.size.x * b.size.z):
+					out[i] = m
+					out.remove_at(j)
+					merged = true
+					break
+			if merged:
+				break
+	return out
 
 
 ## Emit `baked` on each tool in p_tools. Guarded per tool because this reaches across nodes:
@@ -2065,8 +2255,18 @@ func _modifier_signature() -> Array:
 	return sig
 
 
+## True when the last `_commit_modifier_caches` queued a deferred solve, i.e. that bake's grid is an
+## intermediate the driver will bake over. Read by `_store_stamp_cache`, which every host calls right after.
+var _commit_left_pending: bool = false
+
+
 func _store_stamp_cache(path: Path3D, p_key: int, p_min_x: float, p_min_z: float, p_vs: float, p_gw: int, p_gh: int, p_vals: PackedFloat32Array, p_bounds: AABB) -> void:
 	if not is_instance_valid(path) or p_vals.is_empty():
+		return
+	# A grid with solves still pending is not this key's answer. Cached, the driver's next pass hits the
+	# stamp cache — the key is the spline and the stack's settings, neither of which a solve changes — and
+	# replays the un-solved grid without running the stack, so nothing re-defers and nothing is ever applied.
+	if _commit_left_pending:
 		return
 	_stamp_cache[path.get_instance_id()] = {
 		"key": p_key,
@@ -4590,6 +4790,97 @@ var modifier_margin: float = 0.0:
 		_stamp_cache.clear()
 		_schedule_refresh()
 
+## LIVE PREVIEW RESOLUTION: how coarse this brush's LIVE erosion and graph modifiers solve while you edit
+## (0 Full, 1 Half, 2 Quarter). Only the stack's solvers run coarse, and only their change is upsampled,
+## so the outline, the profile and every Noise/Relief modifier stay full resolution. Frozen modifiers, Bake
+## and Bake All Brushes always solve at full resolution. GDScript-rasteriser brushes ignore it.
+var live_preview_resolution: int = 0:
+	set(v):
+		v = clampi(v, 0, 2)
+		if v == live_preview_resolution:
+			return
+		live_preview_resolution = v
+		_stamp_cache.clear()
+		_schedule_refresh()
+
+## BAKE SCALE: evaluate Noise and Relief modifiers every 1 / 2 / 4 cells and interpolate between (0, 1, 2).
+## This one DOES reach the final bake, so it is refused outright for a stack holding any solver or field
+## modifier (erosion routes water on the grid it is given; a coarse solve is a different landscape), and
+## capped so the finest periodic relief op or noise period keeps PERIOD_SAMPLES_MIN samples. The brush's
+## own shape and falloff are always full resolution. GDScript-rasteriser brushes ignore it.
+var bake_scale: int = 0:
+	set(v):
+		v = clampi(v, 0, 2)
+		if v == bake_scale:
+			return
+		bake_scale = v
+		_stamp_cache.clear()
+		_schedule_refresh()
+
+
+## The lattice spacing, in cells, this stack's point modifiers are evaluated at on this bake. 1 when Bake
+## Scale is off, when the stack holds anything but Noise/Relief, or when the cap leaves nothing coarser.
+func _effective_bake_scale() -> int:
+	return int(_bake_scale_report()["scale"])
+
+
+## `{scale, requested, blocker, finest}` — the reasoning `_effective_bake_scale` and the warning share.
+func _bake_scale_report() -> Dictionary:
+	var requested := 1 if bake_scale == 0 else (2 if bake_scale == 1 else 4)
+	var rep := {"scale": 1, "requested": requested, "blocker": "", "finest": 0.0}
+	if requested == 1 or not _supports_modifiers():
+		return rep
+	var finest := 0.0
+	for m in modifiers:
+		if m == null or not m.is_active():
+			continue
+		var period := 0.0
+		if m is Pasture3DNodeRelief:
+			period = _relief_finest_period(m.material)
+		elif m is Pasture3DNodeNoise:
+			var fnl: FastNoiseLite = m.noise
+			if fnl != null and fnl.frequency > 0.0:
+				period = 1.0 / fnl.frequency
+		else:
+			rep["blocker"] = m.display_name() if m.has_method("display_name") else str(m.op())
+			return rep
+		if period > 0.0 and (finest <= 0.0 or period < finest):
+			finest = period
+	rep["finest"] = finest
+	var vs := terrain.vertex_spacing if is_instance_valid(terrain) else 1.0
+	var s := requested
+	while s > 1 and finest > 0.0 and float(s) * vs * PERIOD_SAMPLES_MIN > finest:
+		s /= 2
+	rep["scale"] = s
+	return rep
+
+
+## True while the deferred driver re-runs its bake after a solve (pass 2+). See `_refresh_owner_rect`.
+var _deferred_repass := false
+
+## Set by Bake / Bake All: every step solves full-res until the next edit arms a refresh.
+var _preview_full_res := false
+
+## Whether the last bake of this brush ran any step coarse. Stored, so a scene saved mid-preview still
+## warns when it is reopened.
+var _preview_coarse_baked := false
+
+
+## The cell-size multiplier one modifier solves at on this bake: 1 unless it is Live and previewing.
+func _preview_scale_for(p_mod: Pasture3DNode) -> int:
+	if (live_preview_resolution == 0 or _preview_full_res or _erosion_suppress
+			or p_mod.evaluation == Pasture3DNode.Evaluation.FROZEN):
+		return 1
+	return 2 if live_preview_resolution == 1 else 4
+
+
+func _note_preview_coarse(p_coarse: bool) -> void:
+	if p_coarse == _preview_coarse_baked:
+		return
+	_preview_coarse_baked = p_coarse
+	update_configuration_warnings()
+
+
 ## Last Mask Preview Source list, and last set of modifier names. Not exported — they are comparison
 ## caches, and a stale one after a scene load costs at most one extra rebuild.
 var _stack_ui_signature: PackedStringArray = PackedStringArray()
@@ -4659,9 +4950,17 @@ func _on_modifier_changed() -> void:
 	for s in _get_splines():
 		if is_instance_valid(s):
 			_dirty_splines[s.get_instance_id()] = true
+	# The splines are armed so the bake takes the rect path over this brush's footprint — but no curve
+	# moved, and the rect path's "nothing changed" skip reads exactly that. Say what did change.
+	_stack_dirty = true
 	_queue_mask_preview()
 	_arm_refresh_timer()
 	update_configuration_warnings()
+
+
+## Set by a modifier edit, consumed by the refresh tick. Tells `_refresh_owner_rect` that an armed spline
+## whose curve did not move still needs baking: the stack under it changed.
+var _stack_dirty: bool = false
 
 
 ## Each modifier's row name, in order. Compared against `_stack_names_cache` to recognise a `changed`
@@ -4746,6 +5045,18 @@ func _modifier_warnings() -> PackedStringArray:
 		w.append(("Two Relief modifiers read different Sim Results. One bake can resample only one, "
 			+ "so the first is used and the rest are ignored. Point them at the same result, or split "
 			+ "them across two brushes."))
+	if _preview_coarse_baked:
+		w.append(("The terrain holds a reduced-resolution Live preview of this brush (Live Preview "
+			+ "Resolution). Bake, Bake All Brushes, or set it to Full before shipping the scene."))
+	var bsr := _bake_scale_report()
+	if String(bsr["blocker"]) != "":
+		w.append(("Bake Scale is ignored: %s is not a Noise or Relief modifier, and a coarse bake of a "
+			+ "solver is a different result, not a blurrier one. The stack bakes at full resolution.")
+			% bsr["blocker"])
+	elif int(bsr["scale"]) < int(bsr["requested"]):
+		w.append(("Bake Scale was capped to %dx: the finest period in the stack is %.1f m, and a coarser "
+			+ "lattice would sample it fewer than %d times.")
+			% [int(bsr["scale"]), float(bsr["finest"]), int(PERIOD_SAMPLES_MIN)])
 	return w
 
 
@@ -4775,6 +5086,8 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 		return out
 	var stride := Pasture3DReliefMaterial.SELECTOR_STRIDE
 	var sel := PackedFloat32Array()
+	var coarse := false
+	var bscale := _effective_bake_scale()
 	for m in modifiers:
 		if m == null or not m.is_active():
 			continue
@@ -4788,13 +5101,26 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 		blk["op"] = m.op()
 		blk["mod"] = m
 		blk["grid"] = m.needs_grid()
+		if bscale > 1 and (m is Pasture3DNodeNoise or m is Pasture3DNodeRelief):
+			blk["bake_scale"] = bscale
 		if m._supports_freezing():
 			# `out` is a plain Dictionary handed BOTH ways: the rasteriser writes the solve into it and
 			# `_commit_modifier_caches` reads it back after the bake. Dictionaries are reference types,
 			# which is the whole reason a void rasteriser call can return a grid.
 			var slot := {}
-			var entry: Dictionary = m.cache_for(p_extent) if p_extent != "" else {}
-			blk["frozen"] = m.evaluation == Pasture3DNode.Evaluation.FROZEN
+			# A Live step inside a deferred run is compiled AS a frozen one whose cache is the run's own
+			# answer for it — see the header above `force_deferred_erosion`. Not under suppression, which
+			# wants the step gone, not solved.
+			var live_async: bool = (m.evaluation != Pasture3DNode.Evaluation.FROZEN and _erosion_running
+					and not _erosion_suppress)
+			var entry: Dictionary = {}
+			if live_async:
+				entry = _live_solved.get(_live_key(m, p_extent), {})
+			elif p_extent != "":
+				entry = m.cache_for(p_extent)
+			blk["live_async"] = live_async
+			blk["serve_stale"] = not live_async
+			blk["frozen"] = live_async or m.evaluation == Pasture3DNode.Evaluation.FROZEN
 			blk["cache_key"] = int(entry.get("key", 0))
 			blk["cache"] = entry.get("grid", PackedFloat32Array())
 			blk["cache_flow"] = entry.get("flow", PackedFloat32Array())
@@ -4813,8 +5139,10 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 			# All Brushes" cleared every cache and then re-eroded on the spot.
 			#
 			# There is now one dictionary, so there is nowhere for the two to drift apart.
-			blk["defer"] = _erosion_suppress or (_erosion_defer and bool(blk["frozen"]))
+			blk["defer"] = _erosion_suppress or live_async or (_erosion_defer and bool(blk["frozen"]))
 			blk["out"] = slot
+			blk["preview_scale"] = _preview_scale_for(m)
+			coarse = coarse or int(blk["preview_scale"]) > 1
 		if m is Pasture3DNodeGraph and m.graph != null:
 			# HOST-SIDE SOURCE RESOLUTION, before the program is compiled and before either rasteriser
 			# runs. `_apply_graph_step` also calls this, which is where it used to live alone -- and that
@@ -4886,6 +5214,7 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 		out["gd"].append(blk)
 	out["op_selectors"] = sel
 	out["count"] = out["list"].size()
+	_note_preview_coarse(coarse)
 	return out
 
 
@@ -4932,6 +5261,7 @@ func _extent_key(p_min_x: float, p_min_z: float, p_vs: float, p_gw: int, p_gh: i
 ## Store what the bake solved, and record which modifiers served stale data. Called after BOTH paths,
 ## because both fill the same `out` dictionaries.
 func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Array = []) -> void:
+	_commit_left_pending = false
 	var reseeded := false
 	for step in p_stack["gd"]:
 		if not step.has("out"):
@@ -4956,10 +5286,13 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 			# was never solved.
 			var entry: Dictionary = m.make_pending(out, p_extent)
 			if not entry.is_empty():
+				# Tells the solve phases which cache the answer goes back into.
+				entry["live"] = bool(step.get("live_async", false))
 				var queues := _pending_queues()
 				var queue: StringName = m.pending_queue()
 				if queues.has(queue):
 					queues[queue].append(entry)
+					_commit_left_pending = true
 				else:
 					push_error("Pasture3D: %s deferred a solve to the unknown queue '%s', so it will "
 							% [m.display_name(), queue] + "never be solved.")
@@ -4971,7 +5304,9 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 			m.last_gw = int(out.get("sink_gw", 0))
 			m.last_gh = int(out.get("sink_gh", 0))
 			m.last_rect = out.get("sink_rect", m.last_rect)
-		if out.has("grid"):
+		# A Live step in a run never files into the modifier's cache, and has no staleness to report.
+		var live_async: bool = step.get("live_async", false)
+		if out.has("grid") and not live_async:
 			m.store_cache(p_extent, {
 				"key": out["key"], "grid": out["grid"],
 				"flow": out.get("flow", PackedFloat32Array()),
@@ -4982,7 +5317,7 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 		# Only an EROSION modifier has a staleness flag. Relief steps reach this loop too now that one of
 		# them can ask for a surface, and asking them about staleness would be a crash rather than a
 		# question with an answer.
-		if m.has_method("set_stale"):
+		if m.has_method("set_stale") and not live_async:
 			m.set_stale(bool(out.get("stale", false)))
 	# A material that had never seen a surface stamped NOTHING on this bake, and one whose surface moved
 	# stamped the previous shape. Either way the answer is one more bake, which converges because the
@@ -5499,12 +5834,18 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	# The output is composited per bake below, so Strength and the profile — which move with the footprint —
 	# reuse a cached evaluation for free.
 	var out_slot: Dictionary = p_step.get("out", {})
-	var frozen: bool = m.evaluation == Pasture3DNode.Evaluation.FROZEN
+	# A Live step in a deferred run carries the run's answer on the step and never serves it stale.
+	var live_async: bool = p_step.get("live_async", false)
+	var frozen: bool = live_async or m.evaluation == Pasture3DNode.Evaluation.FROZEN
 	var extent: String = p_ctx.get("extent", "")
 	var key: int = hash([g.content_key(), z]) if reads else g.content_key()
-	var entry: Dictionary = m.cache_for(extent) if frozen and extent != "" else {}
+	var entry: Dictionary = {}
+	if live_async:
+		entry = {"key": p_step.get("cache_key", 0), "grid": p_step.get("cache", PackedFloat32Array())}
+	elif frozen and extent != "":
+		entry = m.cache_for(extent)
 	var zo: PackedFloat32Array = entry.get("grid", PackedFloat32Array())
-	if zo.size() == n:
+	if zo.size() == n and (not live_async or int(entry.get("key", 0)) == key):
 		_composite_graph(p_vals, z, zo, mask, amount, basey, add, n)
 		out_slot["stale"] = int(entry.get("key", 0)) != key
 		out_slot["served"] = true
@@ -5530,17 +5871,8 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 		out_slot["pending_rect"] = rect
 		out_slot["stale"] = false
 		out_slot["served"] = true
-		_pending_graph.append({
-			"mod": m,
-			"prog": prog,
-			"gw": gw,
-			"gh": gh,
-			"rect": rect,
-			"z": z.duplicate(),
-			"key": key,
-			"extent": extent,
-			"done": 0,
-		})
+		# Queued by `_commit_modifier_caches` from `out_slot`, as the native route's is. This used to ALSO
+		# append to `_pending_graph` here, so on this route every deferred graph was solved twice.
 		Pasture3DBakeTrace.graph(self, frozen, extent, "DEFERRED")
 		return p_vals
 
@@ -5661,11 +5993,22 @@ func _apply_erosion_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	# It deliberately does NOT match the native path's key — each path only compares keys it wrote
 	# itself, and switching rasterisers costs one extra solve.
 	var out: Dictionary = p_step.get("out", {})
-	var frozen: bool = m.evaluation == Pasture3DNode.Evaluation.FROZEN
+	var live_async: bool = p_step.get("live_async", false)
+	var frozen: bool = live_async or m.evaluation == Pasture3DNode.Evaluation.FROZEN
 	var extent: String = p_ctx.get("extent", "")
 	var key := hash([z, m.iterations, m.erosion_rate, m.area_exponent, m.hillslope_diffusion,
 			m.deposition, m.erodability_range, m.publish_fields])
-	var entry: Dictionary = m.cache_for(extent) if frozen and extent != "" else {}
+	var entry: Dictionary = {}
+	if live_async:
+		# The run's own answer, and only for this exact surface: a mismatch is a miss, which defers again.
+		if int(p_step.get("cache_key", 0)) == key:
+			entry = {"key": key, "grid": p_step.get("cache", PackedFloat32Array()),
+					"flow": p_step.get("cache_flow", PackedFloat32Array()),
+					"ero": p_step.get("cache_ero", PackedFloat32Array()),
+					"dep": p_step.get("cache_dep", PackedFloat32Array()),
+					"wet": p_step.get("cache_wet", PackedFloat32Array())}
+	elif frozen and extent != "":
+		entry = m.cache_for(extent)
 	var cached: PackedFloat32Array = entry.get("grid", PackedFloat32Array())
 	# A cached surface is not enough on its own: if a modifier BELOW this one now reads the published
 	# channels and the entry does not carry them, the cache is unusable however well its key matches.

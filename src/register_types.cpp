@@ -17,6 +17,7 @@
 #include "pasture_3d_wave_profile.h"
 #include "pasture_3d_pool_manager.h"
 #include "pasture_3d_water_clipmap.h"
+#include "pasture_3d_thread_pool.h"
 
 void initialize_pasture_3d_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
@@ -56,6 +57,8 @@ void uninitialize_pasture_3d_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
+	// Before the library can be unloaded, not in a static destructor: see Pasture3DThreadPool::shutdown.
+	godot::Pasture3DThreadPool::shutdown();
 }
 
 #ifdef GDEXTENSION

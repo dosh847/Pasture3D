@@ -1,6 +1,7 @@
 // Stream-power fluvial erosion solver. See pasture_3d_erosion.h and PASTURE3D_SIM_NODE_SPEC.md §4.
 
 #include "pasture_3d_erosion.h"
+#include "pasture_3d_thread_pool.h"
 
 #include <godot_cpp/variant/utility_functions.hpp>
 
@@ -428,35 +429,39 @@ ErosionResult godot::erosion_solve(const std::vector<float> &p_z, const ErosionP
 		}
 
 		// ---- 4.1b D8 receivers -------------------------------------------------------------------
-		for (int iz = 0; iz < gh; iz++) {
-			for (int ix = 0; ix < gw; ix++) {
-				const int i = iz * gw + ix;
-				if (boundary[(size_t)i]) {
-					receiver[(size_t)i] = i; // a root of the forest: fixed base level
-					continue;
-				}
-				double best = 0.0;
-				int best_i = i;
-				// No bounds test: every cell on the grid edge is `boundary` and took the branch above,
-				// so anything reaching here is interior and has all eight neighbours. The test that used
-				// to be here could never fail — it was dead, and the flood pays for the same insight
-				// with an explicit interior branch because its cells are not pre-filtered that way.
-				for (int k = 0; k < 8; k++) {
-					const int ni = i + NB_DZ[k] * gw + NB_DX[k];
-					const double drop = zf_route[(size_t)i] - zf_route[(size_t)ni];
-					if (drop <= 0.0) {
+		// A cell reads zf_route and writes only its own receiver, so the rows split across threads with every
+		// neighbour compared in the serial order and every tie broken the same way: bit-identical.
+		Pasture3DThreadPool::parallel_for_rows(gh, 16, [&](int z0, int z1) {
+			for (int iz = z0; iz < z1; iz++) {
+				for (int ix = 0; ix < gw; ix++) {
+					const int i = iz * gw + ix;
+					if (boundary[(size_t)i]) {
+						receiver[(size_t)i] = i; // a root of the forest: fixed base level
 						continue;
 					}
-					const bool is_diag = (NB_DX[k] != 0 && NB_DZ[k] != 0);
-					const double slope = drop / (is_diag ? diag : cell);
-					if (slope > best) {
-						best = slope;
-						best_i = ni;
+					double best = 0.0;
+					int best_i = i;
+					// No bounds test: every cell on the grid edge is `boundary` and took the branch above,
+					// so anything reaching here is interior and has all eight neighbours. The test that used
+					// to be here could never fail — it was dead, and the flood pays for the same insight
+					// with an explicit interior branch because its cells are not pre-filtered that way.
+					for (int k = 0; k < 8; k++) {
+						const int ni = i + NB_DZ[k] * gw + NB_DX[k];
+						const double drop = zf_route[(size_t)i] - zf_route[(size_t)ni];
+						if (drop <= 0.0) {
+							continue;
+						}
+						const bool is_diag = (NB_DX[k] != 0 && NB_DZ[k] != 0);
+						const double slope = drop / (is_diag ? diag : cell);
+						if (slope > best) {
+							best = slope;
+							best_i = ni;
+						}
 					}
+					receiver[(size_t)i] = best_i;
 				}
-				receiver[(size_t)i] = best_i;
 			}
-		}
+		});
 
 		// ---- 4.2 Topological order + drainage area (Braun & Willett's stack) ---------------------
 		std::fill(ndon.begin(), ndon.end(), 0);
@@ -636,28 +641,35 @@ ErosionResult godot::erosion_solve(const std::vector<float> &p_z, const ErosionP
 		// ---- 4.4 Hillslope diffusion -------------------------------------------------------------
 		if (ddt > 0.0) {
 			for (int s = 0; s < diffusion_substeps; s++) {
-				for (int iz = 0; iz < gh; iz++) {
-					const int zm = std::max(iz - 1, 0) * gw;
-					const int zp = std::min(iz + 1, gh - 1) * gw;
-					const int row = iz * gw;
-					for (int ix = 0; ix < gw; ix++) {
-						const int i = row + ix;
-						if (boundary[(size_t)i]) {
-							lap[(size_t)i] = 0.0;
-							continue;
+				// Two passes that never read what they write — the Laplacian reads zz into lap, the update reads lap
+				// into zz — so both split by row exactly. They run every sub-step of every iteration, which is why
+				// they are threaded and the network rebuild's flood and stack walks, which are ordered, are not.
+				Pasture3DThreadPool::parallel_for_rows(gh, 16, [&](int z0, int z1) {
+					for (int iz = z0; iz < z1; iz++) {
+						const int zm = std::max(iz - 1, 0) * gw;
+						const int zp = std::min(iz + 1, gh - 1) * gw;
+						const int row = iz * gw;
+						for (int ix = 0; ix < gw; ix++) {
+							const int i = row + ix;
+							if (boundary[(size_t)i]) {
+								lap[(size_t)i] = 0.0;
+								continue;
+							}
+							const int xm = std::max(ix - 1, 0);
+							const int xp = std::min(ix + 1, gw - 1);
+							lap[(size_t)i] = (zz[(size_t)(row + xm)] + zz[(size_t)(row + xp)] +
+													 zz[(size_t)(zm + ix)] + zz[(size_t)(zp + ix)] - 4.0 * zz[(size_t)i]) /
+									cell_area;
 						}
-						const int xm = std::max(ix - 1, 0);
-						const int xp = std::min(ix + 1, gw - 1);
-						lap[(size_t)i] = (zz[(size_t)(row + xm)] + zz[(size_t)(row + xp)] +
-												 zz[(size_t)(zm + ix)] + zz[(size_t)(zp + ix)] - 4.0 * zz[(size_t)i]) /
-								cell_area;
 					}
-				}
-				for (int64_t i = 0; i < n; i++) {
-					if (!boundary[(size_t)i]) {
-						zz[(size_t)i] += diff_step * lap[(size_t)i];
+				});
+				Pasture3DThreadPool::parallel_for_elements((int)n, 4096, [&](int i0, int i1) {
+					for (int64_t i = i0; i < i1; i++) {
+						if (!boundary[(size_t)i]) {
+							zz[(size_t)i] += diff_step * lap[(size_t)i];
+						}
 					}
-				}
+				});
 			}
 		}
 	}

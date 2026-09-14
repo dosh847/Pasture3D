@@ -36,6 +36,13 @@ func _ready() -> void:
 	_c_cancel_lands_between_states()
 	_d_defer_reaches_the_gdscript_step()
 	_e_a_rejected_tick_does_not_eat_the_edit()
+	_f_live_steps_defer_inside_a_run()
+	_g_newest_edit_supersedes_live_only()
+	await _h_live_solve_on_worker_matches_synchronous()
+	_i_a_stack_edit_is_not_an_unchanged_curve()
+	await _j_live_preview_resolution()
+	await _k_spline_edit_rebakes_through_the_driver()
+	await _l_bake_scale()
 
 	print("\n=== %s (%d failures) ===\n" % ["DEFERRED DRIVER PASS" if _fail == 0 else "DEFERRED DRIVER FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
@@ -207,6 +214,468 @@ func _e_a_rejected_tick_does_not_eat_the_edit() -> void:
 	m.queue_free()
 
 
+# --- F. A Live step defers inside a run, and only inside one (Live solves on the worker) --------------
+#
+# Before, `defer` was compiled for FROZEN steps alone, so a Live erosion solved synchronously on the main
+# thread inside pass 1. Inside a run it is now compiled as a frozen step with the RUN's cache, deferring
+# on every bake of the run and never serving a stale entry.
+func _f_live_steps_defer_inside_a_run() -> void:
+	print("[F] a Live erosion step defers inside a deferred run, and not outside one")
+	var ero := Pasture3DNodeErosion.new()
+	ero.evaluation = Pasture3DNode.Evaluation.LIVE
+	var mods: Array[Pasture3DNode] = [ero]
+	_mound.modifiers = mods
+	_mound.force_gdscript_raster = false
+
+	# CONTROL: outside a run a Live step is exactly what it was — not frozen, not deferred.
+	var outside := _first_erosion_step(_mound._compile_modifiers("x").get("gd", []))
+	_check("control", not outside.is_empty() and not bool(outside.get("defer", true))
+			and not bool(outside.get("frozen", true)),
+			"outside a run: defer %s, frozen %s (want false, false)"
+					% [outside.get("defer", "<missing>"), outside.get("frozen", "<missing>")])
+
+	var run: int = _mound._begin_deferred_run()
+	var inside := _first_erosion_step(_mound._compile_modifiers("x").get("gd", []))
+	_check("inside a run", bool(inside.get("defer", false)) and bool(inside.get("frozen", false))
+			and bool(inside.get("live_async", false)) and not bool(inside.get("serve_stale", true)),
+			"defer %s, frozen %s, live_async %s, serve_stale %s (want true, true, true, false)"
+					% [inside.get("defer"), inside.get("frozen"), inside.get("live_async"),
+					inside.get("serve_stale")])
+	# A FROZEN step in the same run still defers on pass 1 only — so the rule above is not "every step".
+	var frz := Pasture3DNodeErosion.new()
+	frz.evaluation = Pasture3DNode.Evaluation.FROZEN
+	var mods2: Array[Pasture3DNode] = [frz]
+	_mound.modifiers = mods2
+	var frozen_step := _first_erosion_step(_mound._compile_modifiers("x").get("gd", []))
+	_check("frozen unchanged", not bool(frozen_step.get("defer", true))
+			and bool(frozen_step.get("serve_stale", false)),
+			"a FROZEN step past pass 1: defer %s, serve_stale %s (want false, true)"
+					% [frozen_step.get("defer"), frozen_step.get("serve_stale")])
+
+	# The run's cache is what the Live step is handed, and it dies with the run.
+	_mound.modifiers = mods
+	var grid := PackedFloat32Array([1.0, 2.0, 3.0])
+	_mound._file_solved(ero, "x", {"key": 77, "grid": grid}, true)
+	var served := _first_erosion_step(_mound._compile_modifiers("x").get("gd", []))
+	_check("run cache served", int(served.get("cache_key", 0)) == 77
+			and (served.get("cache", PackedFloat32Array()) as PackedFloat32Array) == grid,
+			"the step carries key %s and a %d-cell cache (want 77, 3)"
+					% [served.get("cache_key"), (served.get("cache", PackedFloat32Array()) as PackedFloat32Array).size()])
+	_check("modifier cache untouched", ero.cache_for("x").is_empty(),
+			"filing a Live answer wrote nothing into the modifier's own cache")
+	_mound._end_deferred_run(run)
+	_check("dies with the run", _mound._live_solved.is_empty(), "the run's cache is empty once it ends")
+	_mound.modifiers = _no_mods()
+
+
+# --- G. Newest edit wins, but never at the cost of a Frozen solve --------------------------------------
+func _g_newest_edit_supersedes_live_only() -> void:
+	print("[G] an edit during a Live-only run cancels it; during a run with a Frozen solve it waits")
+	var m := _make_mound()
+	var run: int = m._begin_deferred_run()
+	m._cancel = false
+	m._run_supersedable = m._all_live([{"live": true}, {"live": true}])
+	m._on_refresh_timer()
+	_check("live only", m._superseded and m._cancel and is_instance_valid(m._timer),
+			"superseded %s, cancel %s, re-armed %s (want true, true, true)"
+					% [m._superseded, m._cancel, is_instance_valid(m._timer)])
+	m._cancel_refresh_timer()
+	m._end_deferred_run(run)
+
+	# CONTROL: one Frozen entry in the batch and the same tick only re-arms.
+	run = m._begin_deferred_run()
+	m._cancel = false
+	m._superseded = false
+	m._run_supersedable = m._all_live([{"live": true}, {"live": false}])
+	m._on_refresh_timer()
+	_check("control", not m._superseded and not m._cancel and is_instance_valid(m._timer),
+			"superseded %s, cancel %s, re-armed %s (want false, false, true)"
+					% [m._superseded, m._cancel, is_instance_valid(m._timer)])
+	m._cancel_refresh_timer()
+	m._end_deferred_run(run)
+	m.queue_free()
+
+
+# --- H. A Live stack solved on the worker is the stack solved synchronously ----------------------------
+#
+# End to end through `_bake_deferred`, on real layers. Two stacks: a Live erosion alone, and a Live graph
+# over a Live erosion — the chain that needs a second round, because the erosion's surface only exists
+# once the graph has landed. Each is baked synchronously and through the driver, and the heights must be
+# BITWISE equal. Controls: the erosion must move the ground (else equality is vacuous), and the driver
+# must actually have gone to the worker (else it is the synchronous bake twice).
+func _h_live_solve_on_worker_matches_synchronous() -> void:
+	print("[H] Live stacks solved on the worker equal the synchronous bake, bitwise")
+	var t := Pasture3D.new()
+	t.name = "LiveTerrain"
+	t.vertex_spacing = 1.0
+	t.region_size = 64
+	add_child(t)
+	t.data.add_region_blankp(Vector3.ZERO)
+	t.data.update_maps(Pasture3DRegion.TYPE_HEIGHT, false, false)
+
+	var bare := await _h_bake(t, [], false)
+	var ero_sync := await _h_bake(t, [_h_erosion()], false)
+	var moved := _h_max_diff(bare, ero_sync)
+	_check("control: erosion moves the ground", moved > 0.01, "max |eroded - bare| %.4f m (want > 0.01)" % moved)
+	var ero_def := await _h_bake(t, [_h_erosion()], true)
+	_check("erosion alone", ero_def.get("worker", false) and _h_max_diff(ero_sync, ero_def) == 0.0,
+			"worker used %s, max |deferred - sync| %.6f m (want true, 0)"
+					% [ero_def.get("worker", false), _h_max_diff(ero_sync, ero_def)])
+
+	var chain_sync := await _h_bake(t, [_h_graph(), _h_erosion()], false)
+	var chain_def := await _h_bake(t, [_h_graph(), _h_erosion()], true)
+	_check("control: the graph moves the ground", _h_max_diff(ero_sync, chain_sync) > 0.01,
+			"max |graph+erosion - erosion| %.4f m (want > 0.01)" % _h_max_diff(ero_sync, chain_sync))
+	_check("graph over erosion", chain_def.get("worker", false) and _h_max_diff(chain_sync, chain_def) == 0.0,
+			"worker used %s, max |deferred - sync| %.6f m (want true, 0)"
+					% [chain_def.get("worker", false), _h_max_diff(chain_sync, chain_def)])
+
+	# The same chain on the GDScript rasteriser, which carries its own copy of the never-serve-stale rule.
+	_h_force_gd = true
+	var gd_sync := await _h_bake(t, [_h_graph(), _h_erosion()], false)
+	var gd_def := await _h_bake(t, [_h_graph(), _h_erosion()], true)
+	_h_force_gd = false
+	_check("control: GDScript chain moved", _h_max_diff(bare, gd_sync) > 0.01,
+			"max |graph+erosion - bare| %.4f m on the GDScript raster (want > 0.01)" % _h_max_diff(bare, gd_sync))
+	_check("graph over erosion, GDScript raster", gd_def.get("worker", false) and _h_max_diff(gd_sync, gd_def) == 0.0,
+			"worker used %s, max |deferred - sync| %.6f m (want true, 0)"
+					% [gd_def.get("worker", false), _h_max_diff(gd_sync, gd_def)])
+	t.queue_free()
+
+
+var _h_force_gd := false
+
+
+# --- I. A stack edit on an unmoved spline still bakes ---------------------------------------------------
+#
+# A graph/modifier edit arms every spline without moving a point, and the rect path's double-commit skip
+# ("none changed since the last bake") threw it away: a Live graph only updated on an explicit Bake.
+# `_last_rect_decision` is the decision itself, so this asks it rather than the editor-only timer.
+func _i_a_stack_edit_is_not_an_unchanged_curve() -> void:
+	print("[I] a modifier edit on an unmoved spline takes the rect bake, not the skip")
+	var t := Pasture3D.new()
+	t.name = "RectTerrain"
+	t.vertex_spacing = 1.0
+	t.region_size = 64
+	add_child(t)
+	t.data.add_region_blankp(Vector3.ZERO)
+	t.data.update_maps(Pasture3DRegion.TYPE_HEIGHT, false, false)
+	var m := Pasture3DMound.new()
+	m.name = "RectGate"
+	m.auto_refresh = false
+	var path := Path3D.new()
+	var c := Curve3D.new()
+	for p in [Vector3(12, 0, 12), Vector3(52, 0, 12), Vector3(52, 0, 52), Vector3(12, 0, 52)]:
+		c.add_point(p)
+	c.closed = true
+	path.curve = c
+	m.add_child(path)
+	add_child(m)
+	m.terrain = t
+	m._refresh_owner(m._layer_owner, false, [])
+	var ids := {path.get_instance_id(): true}
+
+	# CONTROL: the double-commit case the skip exists for still skips.
+	m._refresh_owner_rect(m._layer_owner, ids, false, [], false)
+	_check("control", m._last_rect_decision == "skip",
+			"an armed, unmoved spline with no stack change decides '%s' (want skip)" % m._last_rect_decision)
+	m._refresh_owner_rect(m._layer_owner, ids, false, [], true)
+	_check("stack edit", m._last_rect_decision == "rect",
+			"the same spline after a stack edit decides '%s' (want rect)" % m._last_rect_decision)
+
+	# And the handler is what raises it: a modifier's `changed` sets the flag the tick passes through.
+	m._stack_dirty = false
+	m._on_modifier_changed()
+	_check("handler", m._stack_dirty, "_on_modifier_changed sets _stack_dirty = %s (want true)" % m._stack_dirty)
+	m._cancel_refresh_timer()
+	remove_child(m)
+	m.free()
+	t.queue_free()
+
+
+# --- J. Live Preview Resolution ------------------------------------------------------------------------
+#
+# Half/Quarter run a Live solver on a coarse grid and upsample its change. Controls: a coarse bake must
+# DIFFER from the full one (else the coarse path never ran) and a smooth graph must stay CLOSE to it (else
+# the upsample is wrong). Frozen steps and a Bake's full-res hold must be bitwise full resolution, and a
+# worker solve of a coarse grid must equal the synchronous coarse bake — which is only true if the solver
+# was handed the coarse cell size.
+func _j_live_preview_resolution() -> void:
+	print("[J] Live Preview Resolution: coarse while Live, full for Frozen and Bake")
+	var t := Pasture3D.new()
+	t.name = "PreviewTerrain"
+	t.vertex_spacing = 1.0
+	t.region_size = 64
+	add_child(t)
+	t.data.add_region_blankp(Vector3.ZERO)
+	t.data.update_maps(Pasture3DRegion.TYPE_HEIGHT, false, false)
+
+	var bare := await _h_bake(t, [], false)
+	var g_full := await _h_bake(t, [_h_graph()], false, 0)
+	var g_half := await _h_bake(t, [_h_graph()], false, 1)
+	var g_quarter := await _h_bake(t, [_h_graph()], false, 2)
+	var moved := _h_max_diff(bare, g_full)
+	_check("control: coarse differs", _h_max_diff(g_full, g_half) > 0.0 and _h_max_diff(g_full, g_quarter) > 0.0,
+			"max |half - full| %.4f, |quarter - full| %.4f m (want > 0)"
+					% [_h_max_diff(g_full, g_half), _h_max_diff(g_full, g_quarter)])
+	_check("graph half close to full", _h_max_diff(g_full, g_half) < 0.25 * moved,
+			"max |half - full| %.4f m vs graph effect %.4f m (want < 25%%)" % [_h_max_diff(g_full, g_half), moved])
+	_check("warning flag", g_half["coarse"] and g_quarter["coarse"] and not g_full["coarse"],
+			"coarse_baked full/half/quarter = %s/%s/%s (want false/true/true)"
+					% [g_full["coarse"], g_half["coarse"], g_quarter["coarse"]])
+
+	var held := await _h_bake(t, [_h_graph()], false, 2, true)
+	_check("bake holds full res", _h_max_diff(g_full, held) == 0.0 and not held["coarse"],
+			"max |bake at quarter - full| %.6f m, coarse %s (want 0, false)" % [_h_max_diff(g_full, held), held["coarse"]])
+
+	var fz_full := _h_graph()
+	fz_full.evaluation = Pasture3DNode.Evaluation.FROZEN
+	var fz_half := _h_graph()
+	fz_half.evaluation = Pasture3DNode.Evaluation.FROZEN
+	var f_full := await _h_bake(t, [fz_full], false, 0)
+	var f_half := await _h_bake(t, [fz_half], false, 1)
+	_check("frozen ignores it", _h_max_diff(f_full, f_half) == 0.0 and _h_max_diff(bare, f_full) > 0.01,
+			"max |frozen half - frozen full| %.6f m, moved %.4f (want 0, > 0.01)"
+					% [_h_max_diff(f_full, f_half), _h_max_diff(bare, f_full)])
+
+	var e_full := await _h_bake(t, [_h_erosion()], false, 0)
+	var e_sync := await _h_bake(t, [_h_erosion()], false, 1)
+	var e_def := await _h_bake(t, [_h_erosion()], true, 1)
+	_check("control: coarse erosion differs", _h_max_diff(e_full, e_sync) > 0.0,
+			"max |half - full| %.4f m (want > 0)" % _h_max_diff(e_full, e_sync))
+	_check("coarse erosion on the worker", e_def["worker"] and _h_max_diff(e_sync, e_def) == 0.0,
+			"worker %s, max |deferred half - sync half| %.6f m (want true, 0)" % [e_def["worker"], _h_max_diff(e_sync, e_def)])
+	t.queue_free()
+
+
+# --- K. A spline edit re-bakes through the driver ------------------------------------------------------
+#
+# Pass 1 of a rect bake records the moved curve; pass 2 used to read that as "nothing changed" and skip,
+# so a Live stack left the section cleared and unsolved after every point drag. The deferred rect bake must
+# equal the synchronous one bitwise. Controls: the move must change the ground, and the worker must run.
+func _k_spline_edit_rebakes_through_the_driver() -> void:
+	print("[K] a point move re-bakes a Live stack through the deferred driver")
+	var sync := await _k_rect_bake(false)
+	var def := await _k_rect_bake(true)
+	_check("control: the move changes the ground", _h_max_diff(sync["before"], sync) > 0.01,
+			"max |after - before| %.4f m (want > 0.01)" % _h_max_diff(sync["before"], sync))
+	_check("deferred rect equals sync rect", def["worker"] and _h_max_diff(sync, def) == 0.0,
+			"worker %s, decision '%s', max |deferred - sync| %.6f m (want true, rect, 0)"
+					% [def["worker"], def["decision"], _h_max_diff(sync, def)])
+
+
+# --- L. Bake Scale -------------------------------------------------------------------------------------
+#
+# A Noise-only stack at 2x/4x evaluates the noise on a lattice and interpolates. Controls: it must DIFFER
+# from 1x (else the lattice never ran) yet stay close for a smooth noise; a solver in the stack must make it
+# bitwise 1x; and a noise too fine for the lattice must be capped back to bitwise 1x.
+func _l_bake_scale() -> void:
+	print("[L] Bake Scale: lattice point modifiers, refused for solvers, capped by period")
+	var t := Pasture3D.new()
+	t.name = "BakeScaleTerrain"
+	t.vertex_spacing = 1.0
+	t.region_size = 64
+	add_child(t)
+	t.data.add_region_blankp(Vector3.ZERO)
+	t.data.update_maps(Pasture3DRegion.TYPE_HEIGHT, false, false)
+
+	var bare := await _h_bake(t, [], false)
+	var n1 := await _l_bake(t, [_l_noise(0.02)], 0)
+	var n2 := await _l_bake(t, [_l_noise(0.02)], 1)
+	var n4 := await _l_bake(t, [_l_noise(0.02)], 2)
+	var moved := _h_max_diff(bare, n1)
+	_check("control: lattice differs", _h_max_diff(n1, n2) > 0.0 and _h_max_diff(n1, n4) > 0.0,
+			"max |2x - 1x| %.5f, |4x - 1x| %.5f m (want > 0)" % [_h_max_diff(n1, n2), _h_max_diff(n1, n4)])
+	_check("smooth noise stays close", _h_max_diff(n1, n4) < 0.05 * moved,
+			"max |4x - 1x| %.5f m vs noise effect %.4f m (want < 5%%)" % [_h_max_diff(n1, n4), moved])
+	_check("scale reported", n2["scale"] == 2 and n4["scale"] == 4 and n1["scale"] == 1,
+			"effective 1x/2x/4x = %d/%d/%d" % [n1["scale"], n2["scale"], n4["scale"]])
+
+	var fine1 := await _l_bake(t, [_l_noise(0.2)], 0)
+	var fine4 := await _l_bake(t, [_l_noise(0.2)], 2)
+	_check("capped by period", fine4["scale"] == 1 and _h_max_diff(fine1, fine4) == 0.0,
+			"5 m period at 4x: effective %d, max |4x - 1x| %.6f m (want 1, 0)" % [fine4["scale"], _h_max_diff(fine1, fine4)])
+
+	var s1 := await _l_bake(t, [_l_noise(0.02), _h_erosion()], 0)
+	var s4 := await _l_bake(t, [_l_noise(0.02), _h_erosion()], 2)
+	_check("refused with a solver", s4["scale"] == 1 and _h_max_diff(s1, s4) == 0.0 and s4["blocked"],
+			"effective %d, blocked %s, max |4x - 1x| %.6f m (want 1, true, 0)" % [s4["scale"], s4["blocked"], _h_max_diff(s1, s4)])
+	t.queue_free()
+
+
+func _l_noise(p_freq: float) -> Pasture3DNodeNoise:
+	var n := Pasture3DNodeNoise.new()
+	var fn := FastNoiseLite.new()
+	fn.seed = 11
+	fn.frequency = p_freq
+	fn.fractal_type = FastNoiseLite.FRACTAL_NONE
+	n.noise = fn
+	n.strength = 6.0
+	return n
+
+
+func _l_bake(p_terrain: Pasture3D, p_mods: Array, p_scale: int) -> Dictionary:
+	var m := Pasture3DMound.new()
+	m.name = "BakeScaleGate"
+	m.auto_refresh = false
+	var path := Path3D.new()
+	var c := Curve3D.new()
+	for p in [Vector3(12, 0, 12), Vector3(52, 0, 12), Vector3(52, 0, 52), Vector3(12, 0, 52)]:
+		c.add_point(p)
+	c.closed = true
+	path.curve = c
+	m.add_child(path)
+	add_child(m)
+	m.terrain = p_terrain
+	var mods: Array[Pasture3DNode] = []
+	for x in p_mods:
+		mods.append(x)
+	m.modifiers = mods
+	m.bake_scale = p_scale
+	var rep: Dictionary = m._bake_scale_report()
+	m._refresh_owner(m._layer_owner, false, [])
+	var h := _k_heights(p_terrain)
+	m.modifiers = _no_mods()
+	remove_child(m)
+	m.free()
+	return {"h": h, "scale": int(rep["scale"]), "blocked": String(rep["blocker"]) != ""}
+
+
+func _k_rect_bake(p_deferred: bool) -> Dictionary:
+	var t := Pasture3D.new()
+	t.name = "KTerrain%s" % p_deferred
+	t.vertex_spacing = 1.0
+	t.region_size = 64
+	add_child(t)
+	t.data.add_region_blankp(Vector3.ZERO)
+	t.data.update_maps(Pasture3DRegion.TYPE_HEIGHT, false, false)
+	var m := Pasture3DMound.new()
+	m.name = "KGate"
+	m.auto_refresh = false
+	var path := Path3D.new()
+	var c := Curve3D.new()
+	for p in [Vector3(12, 0, 12), Vector3(40, 0, 12), Vector3(40, 0, 40), Vector3(12, 0, 40)]:
+		c.add_point(p)
+	c.closed = true
+	path.curve = c
+	m.add_child(path)
+	add_child(m)
+	m.terrain = t
+	var mods: Array[Pasture3DNode] = [_h_graph(), _h_erosion()]
+	m.modifiers = mods
+	m.force_deferred_erosion = p_deferred
+	m._refresh_owner(m._layer_owner, false, [])
+	var before := _k_heights(t)
+	if p_deferred:
+		# Land the first bake's Live solves too, so both runs start from the same finished terrain.
+		await m._bake_deferred(m._refresh_owner.bind(m._layer_owner, false, []), m._layer_owner, false)
+		before = _k_heights(t)
+	c.set_point_position(2, Vector3(52, 0, 52))
+	var bake := m._refresh_owner_rect.bind(m._layer_owner, {path.get_instance_id(): true}, false, [], false)
+	var worker := false
+	if p_deferred:
+		var box := [false]
+		var drive := func() -> void:
+			await m._bake_deferred(bake, m._layer_owner, false)
+			box[0] = true
+		drive.call()
+		while not box[0]:
+			worker = worker or m._running
+			await get_tree().process_frame
+	else:
+		bake.call()
+	var out := {"h": _k_heights(t), "before": {"h": before}, "worker": worker, "decision": m._last_rect_decision}
+	remove_child(m)
+	m.free()
+	t.queue_free()
+	return out
+
+
+func _k_heights(p_terrain: Pasture3D) -> PackedFloat32Array:
+	var h := PackedFloat32Array()
+	for z in range(64):
+		for x in range(64):
+			h.append(p_terrain.data.get_height(Vector3(float(x), 0.0, float(z))))
+	return h
+
+
+func _h_erosion() -> Pasture3DNodeErosion:
+	var e := Pasture3DNodeErosion.new()
+	e.evaluation = Pasture3DNode.Evaluation.LIVE
+	e.iterations = 8
+	return e
+
+
+func _h_graph() -> Pasture3DNodeGraph:
+	var gm := Pasture3DNodeGraph.new()
+	gm.evaluation = Pasture3DNode.Evaluation.LIVE
+	gm.graph = _graph()
+	return gm
+
+
+## One bake of a fresh 40 m Mound over the region, returning its heights and whether a worker solve ran.
+func _h_bake(p_terrain: Pasture3D, p_mods: Array, p_deferred: bool, p_res: int = 0,
+		p_full := false) -> Dictionary:
+	var m := Pasture3DMound.new()
+	m.name = "LiveGate"
+	m.auto_refresh = false
+	var path := Path3D.new()
+	var c := Curve3D.new()
+	for p in [Vector3(12, 0, 12), Vector3(52, 0, 12), Vector3(52, 0, 52), Vector3(12, 0, 52)]:
+		c.add_point(p)
+	c.closed = true
+	path.curve = c
+	m.add_child(path)
+	add_child(m)
+	m.terrain = p_terrain
+	m.force_gdscript_raster = _h_force_gd
+	var mods: Array[Pasture3DNode] = []
+	for x in p_mods:
+		mods.append(x)
+	m.modifiers = mods
+	m.live_preview_resolution = p_res
+	m._preview_full_res = p_full
+	var worker := false
+	if p_deferred:
+		m.force_deferred_erosion = true
+		var bake := m._refresh_owner.bind(m._layer_owner, false, [])
+		var box := [false]
+		var drive := func() -> void:
+			await m._bake_deferred(bake, m._layer_owner, false)
+			box[0] = true
+		drive.call()
+		while not box[0]:
+			worker = worker or m._running
+			await get_tree().process_frame
+	else:
+		m._refresh_owner(m._layer_owner, false, [])
+	var h := PackedFloat32Array()
+	for z in range(64):
+		for x in range(64):
+			h.append(p_terrain.data.get_height(Vector3(float(x), 0.0, float(z))))
+	var coarse := m._preview_coarse_baked
+	# The next bake must start from bare ground, not from this one's layer.
+	m.modifiers = _no_mods()
+	remove_child(m)
+	m.free()
+	return {"h": h, "worker": worker, "coarse": coarse}
+
+
+func _h_max_diff(p_a: Dictionary, p_b: Dictionary) -> float:
+	var a: PackedFloat32Array = p_a.get("h", PackedFloat32Array())
+	var b: PackedFloat32Array = p_b.get("h", PackedFloat32Array())
+	if a.size() != b.size() or a.is_empty():
+		return INF
+	var worst := 0.0
+	for i in range(a.size()):
+		var fa := is_finite(a[i])
+		if fa != is_finite(b[i]):
+			return INF
+		if fa:
+			worst = maxf(worst, absf(a[i] - b[i]))
+	return worst
+
+
 # ---- helpers -----------------------------------------------------------------------------------------
 
 func _make_mound() -> Pasture3DMound:
@@ -256,3 +725,8 @@ func _spread(p: PackedFloat32Array) -> float:
 		lo = minf(lo, v)
 		hi = maxf(hi, v)
 	return 0.0 if lo > hi else hi - lo
+
+
+func _no_mods() -> Array[Pasture3DNode]:
+	var none: Array[Pasture3DNode] = []
+	return none

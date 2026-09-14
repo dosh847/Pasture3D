@@ -1616,6 +1616,9 @@ func _bake_all_step(p_ctx: Dictionary, p_index: int) -> void:
 		# clear for the same reason: without it Bake All serves the field it already had and does visibly
 		# nothing on a brush whose loop was reshaped under a frozen mountain.
 		p_ctx["grown"] = int(p_ctx.get("grown", 0)) + b.clear_relief_growth()
+		# Bake All is never a preview: full resolution until the brush is next edited.
+		b._preview_full_res = true
+		b._stamp_cache.clear()
 	# `_refresh_owner` is the brush's own layer bake — clear the layer, repaint every tool bound to it,
 	# one GPU push. Called with record_undo FALSE: this run is one action, not one per layer.
 	var lead: Pasture3DTerrainBrush = brushes[0]
