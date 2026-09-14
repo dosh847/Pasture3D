@@ -162,7 +162,8 @@ func _on_evaluation_pressed() -> void:
 
 
 ## Find the brush's first graph modifier, or build one carrying the default graph
-## (`mountain_cone` -> `output` for Plow, `input` -> `output` for other brushes) and append it.
+## (`input` + `mountain_cone` -> `blend` (ADD) -> `output` for Plow, `input` -> `output` for other
+## brushes) and append it.
 ## The single definition of "a new graph modifier" — the row's Add Graph and the
 ## inspector plugin's Edit in Graph Editor both come through here.
 static func ensure_graph_modifier(p_brush: Pasture3DTerrainBrush) -> Pasture3DNodeGraph:
@@ -178,19 +179,28 @@ static func ensure_graph_modifier(p_brush: Pasture3DTerrainBrush) -> Pasture3DNo
 	var mod := Pasture3DNodeGraph.new()
 	mod.resource_name = "Terrain Graph"
 	if p_brush is Pasture3DPlow:
+		# Input -> Blend(ADD).a, Mountain Cone -> Blend.b, Blend -> Output. The cone ADDS to the ground below
+		# instead of replacing it, so a Plow on a shared layer (a Layer brush member) builds on what is there.
 		mod.graph = Pasture3DTerrainGraph.new()
+		var inp = Pasture3DGraphNodeRegistry.create(&"input")
 		var mc = Pasture3DGraphNodeRegistry.create(&"mountain_cone")
-		if mc != null:
-			mc.set("elevation", 35.0)
-			mc.graph_position = Vector2(40.0, 80.0)
+		var blend = Pasture3DGraphNodeRegistry.create(&"blend")
 		var out_n = Pasture3DGraphNodeRegistry.create(&"output")
-		if out_n != null:
-			out_n.graph_position = Vector2(420.0, 80.0)
-		if mc != null and out_n != null:
+		if inp != null and mc != null and blend != null and out_n != null:
+			inp.graph_position = Vector2(40.0, 0.0)
+			mc.set("elevation", 35.0)
+			mc.graph_position = Vector2(40.0, 160.0)
+			blend.set("mode", 0) # ADD
+			blend.graph_position = Vector2(320.0, 40.0)
+			out_n.graph_position = Vector2(560.0, 40.0)
+			mod.graph.add_node(inp)
 			mod.graph.add_node(mc)
+			mod.graph.add_node(blend)
 			mod.graph.add_node(out_n)
-			mod.graph.connect_ports(0, 0, 1, 0)
-			mod.graph.output_node = 1
+			mod.graph.connect_ports(0, 0, 2, 0)
+			mod.graph.connect_ports(1, 0, 2, 1)
+			mod.graph.connect_ports(2, 0, 3, 0)
+			mod.graph.output_node = 3
 		else:
 			mod.graph = Pasture3DTerrainGraph.create_default()
 	else:
