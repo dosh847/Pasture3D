@@ -43,6 +43,9 @@ const BLEND_MIN: int = 3     # Pasture3DLayer.BlendMode.MIN
 signal baked
 
 const BRUSH_OWNER_PREFIX: String = "pasture3d_brush:"
+## owner_id namespace of the rows a Pasture3DLayerBrush owns (PASTURE3D_LAYER_BRUSH_SPEC.md §3.1). Deliberately
+## NOT under BRUSH_OWNER_PREFIX, so `_brush_layers()` never offers a Layer brush's rows to a free brush.
+const LAYER_BRUSH_OWNER_PREFIX: String = "pasture3d_layerbrush:"
 ## Group every brush node joins so siblings can find each other for layer-granular refresh.
 const BRUSH_GROUP: StringName = &"pasture3d_brush"
 
@@ -189,6 +192,8 @@ var _curve_cache: Dictionary = {}   # spline instance_id -> flat [pos, in, out] 
 var _stamp_cache: Dictionary = {}   # spline instance_id -> { key, min_x, min_z, vs, gw, gh, vals, bounds }
 var _suspend_auto: bool = false # Blocks auto-refresh while we mutate curves programmatically (undo)
 var _ready_done: bool = false   # True once _ready ran — gates re-parent auto-assign off scene-load
+var _membership_transition: bool = false # A tree-driven Layer brush join/leave is under way; §5's refusal lets it through
+var _last_layer_refusal: String = ""      # The last layer assignment this brush refused, for its configuration warnings
 var _tree_settling: bool = false # True during the node's own tree enter/exit churn (tab switch) — suppresses no-op child-refresh
 
 ## Editor-only floating nameplate (internal child → never saved, hidden from the Scene dock).
@@ -211,7 +216,8 @@ func _init() -> void:
 
 func _ready() -> void:
 	if _layer_owner == "" and _paints():
-		_layer_owner = BRUSH_OWNER_PREFIX + _default_layer_name()
+		var host := _hosted_by()
+		_layer_owner = host.layer_owner_id() if host != null else BRUSH_OWNER_PREFIX + _default_layer_name()
 	add_to_group(BRUSH_GROUP)
 	set_notify_transform(true)
 	if not child_entered_tree.is_connected(_on_child_changed):
@@ -233,6 +239,8 @@ func _ready() -> void:
 	# re-notifies the SAME transform is recognised as a no-op (see _schedule_transform_refresh).
 	_last_baked_xform = global_transform
 	_ready_done = true
+	# A stored owner that disagrees with the tree (a hand-edited scene) is put right, with a warning.
+	_sync_layer_host(true)
 	# A freshly added/duplicated brush may have made an existing brush's curve newly shared — refresh all.
 	_refresh_group_warnings()
 	# A scene saved with a preview toggle on should show its overlay on load, not on the next edit.
@@ -564,6 +572,10 @@ func _notification(what: int) -> void:
 		if _ready_done:
 			_tree_settling = true
 			_clear_tree_settling.call_deferred()
+			# ENTER_TREE and not PARENTED: dragging a folder of brushes under a Layer brush re-enters every
+			# descendant, but only the folder itself is re-parented. Deferred so the move has settled; a tab
+			# switch re-enters too and finds its binding already correct.
+			_sync_layer_host.call_deferred()
 	elif what == NOTIFICATION_EXIT_TREE:
 		remove_from_group(BRUSH_GROUP)
 		# Before anything else: the task is holding this node's arrays.
@@ -692,6 +704,7 @@ func _get_configuration_warnings() -> PackedStringArray:
 		warnings.append("Add at least one spline (press Add Spline, or add a Path3D child).")
 	warnings.append_array(_mask_preview_warnings())
 	warnings.append_array(_modifier_warnings())
+	warnings.append_array(_layer_brush_membership_warnings())
 	var shared := _shared_curve_spline_names()
 	if not shared.is_empty():
 		warnings.append(("These splines share a Curve3D with another spline, so editing one edits "
@@ -885,8 +898,10 @@ func _get_property_list() -> Array[Dictionary]:
 		props.append({"name": "_layer_owner", "type": TYPE_STRING, "usage": PROPERTY_USAGE_STORAGE})
 		props.append({"name": "Layer", "type": TYPE_NIL, "usage": PROPERTY_USAGE_GROUP,
 				"hint_string": ""})
-		var names := _brush_layer_names()
 		var cur := _layer_display_name()
+		# A Layer brush member offers only its own layer: moving it elsewhere is refused (§5), so any other
+		# entry would offer nothing but an error.
+		var names := PackedStringArray([cur]) if _hosted_by() != null else _brush_layer_names()
 		if not names.has(cur):
 			names.append(cur)
 		props.append({
@@ -1026,10 +1041,136 @@ func add_new_layer() -> void:
 	_set_layer_owner(BRUSH_OWNER_PREFIX + _unique_brush_layer_name(name))
 
 
+## ---- Layer brush membership (PASTURE3D_LAYER_BRUSH_SPEC.md §4, §5) ----
+##
+## Pasture3DLayerBrush EXTENDS this script, so it is found by duck typing on `layer_owner_id` rather than by
+## `is Pasture3DLayerBrush`: a base class naming its own subclass is a cyclic reference.
+
+## Nearest Layer brush ancestor, whether or not this brush may join it.
+func _layer_brush_host() -> Node:
+	var n := get_parent()
+	while n != null:
+		if n.has_method(&"layer_owner_id"):
+			return n
+		n = n.get_parent()
+	return null
+
+
+## The Layer brush this node belongs to, or null. A pure function of the tree (§4.1).
+func _hosted_by() -> Node:
+	if _layer_brush_refusal_reason() != "":
+		return null
+	return _layer_brush_host()
+
+
+## Why this brush cannot join a Layer brush, or "" when it can. Overridden by Pasture3DRoadBrush (D13).
+func _layer_brush_refusal_reason() -> String:
+	if not _paints():
+		return "It paints nothing."
+	if _map_type() != PASTURE_3D_MAPTYPE_HEIGHT:
+		return "Layer brushes host height brushes only."
+	return ""
+
+
+func _layer_brush_membership_warnings() -> PackedStringArray:
+	var out := PackedStringArray()
+	if not _paints():
+		return out
+	var host := _layer_brush_host()
+	var reason := _layer_brush_refusal_reason()
+	if host != null and reason != "":
+		out.append("Not a member of Layer brush '%s': %s This brush keeps its own layer." % [host.name, reason])
+	if _last_layer_refusal != "":
+		out.append("Refused: %s" % _last_layer_refusal)
+	return out
+
+
+## Bring `_layer_owner` in line with the tree. A member takes its host's layer; a brush that has left every
+## Layer brush gets a fresh free layer of its own. Neither is a violation — moving a node is how membership is
+## meant to change — so both run as a membership transition, which §5's refusal lets through.
+func _sync_layer_host(p_on_load: bool = false) -> void:
+	if not _paints() or not is_inside_tree():
+		return
+	var host := _hosted_by()
+	var want := ""
+	if host != null:
+		if is_instance_valid(host.terrain) and terrain != host.terrain:
+			terrain = host.terrain
+		want = host.layer_owner_id()
+	elif _layer_owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
+		want = BRUSH_OWNER_PREFIX + _unique_brush_layer_name(name)
+	if want == "" or want == _layer_owner:
+		return
+	if p_on_load:
+		push_warning("Pasture3D brush '%s': its stored layer disagreed with its place in the tree; rebound it to '%s'."
+				% [name, _owner_display_name(want)])
+	_membership_transition = true
+	_set_layer_owner(want)
+	_membership_transition = false
+
+
+## §5. False, with a push_error naming both nodes, when `p_owner` would break Layer brush membership: a member
+## leaving its host's layer, or a non-member entering a Layer brush's layer.
+func _layer_owner_allowed(p_owner: String) -> bool:
+	var host := _hosted_by()
+	var layer_node: Node = null
+	var msg := ""
+	if host != null and p_owner != host.layer_owner_id():
+		layer_node = host
+		msg = ("'%s' is a member of Layer brush '%s' and cannot be moved to layer '%s'. Move the node out of the Layer brush first."
+				% [_node_label(self), _node_label(host), _owner_display_name(p_owner)])
+	elif host == null and p_owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
+		layer_node = _layer_brush_for_owner(p_owner)
+		msg = ("'%s' cannot be assigned to layer '%s': it belongs to Layer brush '%s'. Make this brush a child of that node instead."
+				% [_node_label(self), _owner_display_name(p_owner), _node_label(layer_node)])
+	else:
+		return true
+	push_error("Pasture3D: " + msg)
+	_last_layer_refusal = msg
+	if layer_node != null and layer_node.has_method(&"_note_violation"):
+		layer_node._note_violation(self, p_owner, msg)
+	# The inspector's enum already shows the rejected value, and a dynamic hint does not repaint without this
+	# (`property-hints-need-notifying`).
+	notify_property_list_changed()
+	update_configuration_warnings()
+	return false
+
+
+func _node_label(p_node: Node) -> String:
+	if p_node == null:
+		return "(missing)"
+	return str(p_node.get_path()) if p_node.is_inside_tree() else str(p_node.name)
+
+
+## The Layer brush whose pair `p_owner` names (main or `#…` row), or null.
+func _layer_brush_for_owner(p_owner: String) -> Node:
+	if not is_inside_tree():
+		return null
+	var main := p_owner.get_slice("#", 0)
+	for n in get_tree().get_nodes_in_group(BRUSH_GROUP):
+		if is_instance_valid(n) and n.has_method(&"layer_owner_id") and n.layer_owner_id() == main:
+			return n
+	return null
+
+
+## A human name for any owner: the live row name when the row exists, else what the owner points at.
+func _owner_display_name(p_owner: String) -> String:
+	var l := _resolve_layer_for(p_owner)
+	if l != null:
+		return l.get_layer_name()
+	if p_owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
+		var lb := _layer_brush_for_owner(p_owner)
+		return str(lb.name) if lb != null else "(missing Layer brush)"
+	return p_owner.trim_prefix(BRUSH_OWNER_PREFIX)
+
+
 ## Re-bind to a different tool layer: lift our contribution off the old layer, then bake into the new.
 func _set_layer_owner(owner: String) -> void:
 	if owner == _layer_owner:
 		return
+	if not _membership_transition and not _layer_owner_allowed(owner):
+		return
+	_last_layer_refusal = ""
 	var old := _layer_owner
 	_layer_owner = owner
 	notify_property_list_changed()
@@ -2741,6 +2882,13 @@ func _ensure_layer_for(owner: String, sync_blend: bool) -> int:
 		return -1
 	var mt := _map_type()
 	var nm := owner.trim_prefix(BRUSH_OWNER_PREFIX)
+	if owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
+		# The Layer brush names and pairs its rows (§3.1). Children are ready before their parent, so a member
+		# can bake first — and must not create the main row alone, with its owner string for a name.
+		var lb := _layer_brush_for_owner(owner)
+		if lb != null:
+			lb.ensure_rows()
+			nm = str(lb.name)
 	var id: int = -1
 	if terrain.data.has_method("create_owned_layer_typed"):
 		id = terrain.data.create_owned_layer_typed(owner, nm, _get_blend_mode(), mt)
@@ -2833,6 +2981,8 @@ func _owner_for_layer_name(display_name: String) -> String:
 
 ## Live display name of the layer we're bound to, or our owner slug if it doesn't exist yet.
 func _layer_display_name() -> String:
+	if _layer_owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
+		return _owner_display_name(_layer_owner)
 	for l in _brush_layers():
 		if l.get_owner_id() == _layer_owner:
 			return l.get_layer_name()

@@ -45,6 +45,7 @@ var _warning: Label
 var _warning_timer: Timer
 var _rows: Array = []
 var _assigned_owners: Dictionary = {} # owner_id -> true, the tool layers some brush node targets
+var _layer_brush_members: Dictionary = {} # Layer brush main owner_id -> member count, for its live nodes
 ## The Pasture3DData we're currently subscribed to for layers_changed, so set_terrain can unsubscribe
 ## from the previous one. Held as a plain ref (Resource) — always checked with is_instance_valid.
 var _watched_data: Pasture3DData = null
@@ -210,17 +211,67 @@ func refresh() -> void:
 	# orphaned-tool-layer badges stay current as tools are added/removed/reassigned.
 	_assigned_owners = _assigned_brush_owners()
 
-	var count: int = stack.get_layer_count()
-	# List top layer first so the visual order matches compositing (top = drawn last/over).
-	for i in range(count - 1, -1, -1):
+	_layer_brush_members = _layer_brush_member_counts()
+	# List top unit first so the visual order matches compositing (top = drawn last/over). A Layer brush's
+	# base and main rows are ONE unit shown as one row (PASTURE3D_LAYER_BRUSH_SPEC.md §8.4).
+	var units := Pasture3DLayerBrush.stack_units(stack)
+	for u in range(units.size() - 1, -1, -1):
+		var i := Pasture3DLayerBrush.shown_row(stack, units[u], _layer_brush_members)
 		var layer: Pasture3DLayer = stack.get_layer(i)
 		if layer == null:
 			continue
 		var row := _build_row(i, layer)
+		row.set_meta("unit_first", int(units[u][0]))
+		row.set_meta("unit_last", int(units[u][1]))
 		_rows.append(row)
 		_list.add_child(row)
 
 	_sync_active_state()
+
+
+## main owner id -> member count, for every Layer brush on this terrain in the edited scene. An owner
+## missing from it has no node: its rows are orphaned.
+func _layer_brush_member_counts() -> Dictionary:
+	var out := {}
+	var root := EditorInterface.get_edited_scene_root()
+	if root == null or not root.is_inside_tree():
+		return out
+	for n in root.get_tree().get_nodes_in_group(Pasture3DLayerBrush.LAYER_GROUP):
+		if n is Pasture3DLayerBrush and n.terrain == terrain:
+			out[n.layer_owner_id()] = n.member_count()
+	return out
+
+
+## Every stack row a dock action on row `p_idx` must reach: the whole pair for a Layer brush row.
+func _unit_rows(p_idx: int) -> PackedInt32Array:
+	var stack := _stack()
+	if stack == null:
+		return PackedInt32Array([p_idx])
+	var rows := Pasture3DLayerBrush.unit_rows(stack, p_idx)
+	return rows if not rows.is_empty() else PackedInt32Array([p_idx])
+
+
+## The main row of `p_idx`'s Layer brush pair, or `p_idx` itself. Blend lives on main only: the base row's
+## REPLACE is what makes it "the Layer's result" rather than an offset.
+func _blend_row(p_idx: int) -> int:
+	var stack := _stack()
+	var po := Pasture3DLayerBrush.pair_owner_of(stack.get_layer(p_idx)) if stack else ""
+	if po == "":
+		return p_idx
+	var m: int = stack.find_layer_by_owner(po)
+	return m if m >= 0 else p_idx
+
+
+func _is_layer_brush_row(p_idx: int) -> bool:
+	var stack := _stack()
+	return stack != null and Pasture3DLayerBrush.pair_owner_of(stack.get_layer(p_idx)) != ""
+
+
+func _refuse_layer_brush_action(p_what: String) -> void:
+	_warning.text = "%s is owned by its Layer brush node — %s" % [
+		"This layer", p_what]
+	_warning.visible = true
+	_warning_timer.start()
 
 
 ## Repaint the active-row highlight and the toolbar's enabled state from the stack's active layer. Split
@@ -231,24 +282,28 @@ func _sync_active_state() -> void:
 	if stack == null:
 		return
 	var active: int = stack.get_active_layer()
-	var count: int = stack.get_layer_count()
+	var units := Pasture3DLayerBrush.stack_units(stack)
+	var au := Pasture3DLayerBrush.unit_index_of(units, active)
 	for row in _rows:
 		if not is_instance_valid(row):
 			continue
-		if int(row.get_meta("layer_idx", -1)) == active:
+		# An active row hidden inside a pair highlights the row that stands for it.
+		if active >= int(row.get_meta("unit_first", -1)) and active <= int(row.get_meta("unit_last", -1)):
 			var sb := StyleBoxFlat.new()
 			sb.bg_color = Color(0.26, 0.45, 0.78, 0.5)
 			sb.set_content_margin_all(3)
 			row.add_theme_stylebox_override("panel", sb)
 		else:
 			row.remove_theme_stylebox_override("panel")
-	_del_btn.disabled = active == 0
+	var pair := _is_layer_brush_row(active)
+	_del_btn.disabled = active == 0 or pair
 	# Base is excluded for the same reason Remove is, plus a sharper one: a single-layer Base ALIASES the
 	# region height images (Pasture3DData::refresh_base_alias), so dropping its tiles would detach the
 	# terrain's own maps rather than clear a layer.
-	_clear_btn.disabled = active == 0
-	_up_btn.disabled = active == 0 or active >= count - 1
-	_down_btn.disabled = active <= 1
+	_clear_btn.disabled = active == 0 or pair
+	_dup_btn.disabled = pair
+	_up_btn.disabled = au <= 0 or au >= units.size() - 1
+	_down_btn.disabled = au <= 1
 
 
 func _build_row(p_idx: int, p_layer: Pasture3DLayer) -> Control:
@@ -291,6 +346,8 @@ func _build_row(p_idx: int, p_layer: Pasture3DLayer) -> Control:
 	name_edit.text = p_layer.get_layer_name()
 	name_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	name_edit.tooltip_text = "Layer name — double-click or F2 to rename (Base is index 0)"
+	if Pasture3DLayerBrush.pair_owner_of(p_layer) != "":
+		name_edit.tooltip_text = "Owned by a Pasture3DLayerBrush — rename the node to rename this layer"
 	name_edit.editable = false
 	name_edit.selecting_enabled = false
 	name_edit.flat = true # reads as a label until it is actually being edited
@@ -309,7 +366,8 @@ func _build_row(p_idx: int, p_layer: Pasture3DLayer) -> Control:
 	var blend := OptionButton.new()
 	for n in BLEND_NAMES:
 		blend.add_item(n)
-	blend.select(BLEND_MODES.find(p_layer.get_blend_mode()))
+	var blend_layer: Pasture3DLayer = _stack().get_layer(_blend_row(p_idx))
+	blend.select(BLEND_MODES.find((blend_layer if blend_layer else p_layer).get_blend_mode()))
 	blend.tooltip_text = "Blend mode"
 	blend.item_selected.connect(func(sel): _on_blend(p_idx, sel))
 	hb.add_child(blend)
@@ -379,6 +437,10 @@ func _collect_brush_owners(node: Node, owners: Dictionary) -> void:
 ## Orphan is the primary signal (requirement 4); empty is the fallback (requirement 5).
 func _layer_status(p_layer: Pasture3DLayer) -> String:
 	var owner := p_layer.get_owner_id()
+	var po := Pasture3DLayerBrush.pair_owner_of(p_layer)
+	if po != "":
+		# An empty pair is normal (no members yet, no stack yet), so only a missing node is flagged.
+		return "orphan" if not _layer_brush_members.has(po) else ""
 	if p_layer.is_reserved() and owner.begins_with(BRUSH_OWNER_PREFIX) and not _assigned_owners.has(owner):
 		return "orphan"
 	if not p_layer.is_base() and p_layer.get_region_locations().is_empty():
@@ -468,59 +530,32 @@ func _end_rename(p_edit: LineEdit) -> void:
 
 
 func _on_visible(p_idx: int, p_visible: bool) -> void:
-	var stack := _stack()
-	if not stack:
-		return
-	var layer: Pasture3DLayer = stack.get_layer(p_idx)
-	if layer:
-		var old := layer.is_visible()
-		layer.set_visible(p_visible)
-		_data().recomposite_layer(p_idx)
-		_mark_unsaved()
-		_commit_property_action("Toggle Pasture3D Layer Visibility", p_idx, "set_visible", old, p_visible, true)
+	_set_unit_property("Toggle Pasture3D Layer Visibility", _unit_rows(p_idx), "is_visible", "set_visible",
+		p_visible, true)
 
 
 func _on_lock(p_idx: int, p_locked: bool) -> void:
-	var stack := _stack()
-	if not stack:
-		return
-	var layer: Pasture3DLayer = stack.get_layer(p_idx)
-	if layer:
-		var old := layer.is_locked()
-		layer.set_locked(p_locked)
-		_mark_unsaved()
-		_commit_property_action("Toggle Pasture3D Layer Lock", p_idx, "set_locked", old, p_locked, false)
+	_set_unit_property("Toggle Pasture3D Layer Lock", _unit_rows(p_idx), "is_locked", "set_locked", p_locked, false)
 
 
 func _on_opacity(p_idx: int, p_value: float) -> void:
 	var stack := _stack()
-	if not stack:
+	var layer: Pasture3DLayer = stack.get_layer(p_idx) if stack else null
+	if layer == null:
 		return
-	var layer: Pasture3DLayer = stack.get_layer(p_idx)
-	if layer:
-		var old := layer.get_opacity()
-		layer.set_opacity(p_value)
-		_data().recomposite_layer(p_idx)
-		_mark_unsaved()
-		# MERGE_ENDS collapses a drag's stream of value_changed into ONE entry: it keeps the first action's
-		# undo (the pre-drag opacity) and the last one's do. The action name carries the layer name so a
-		# drag on a different layer starts a new entry instead of merging into the previous layer's.
-		_commit_property_action("Set Pasture3D Layer Opacity — %s" % layer.get_layer_name(),
-			p_idx, "set_opacity", old, p_value, true, UndoRedo.MERGE_ENDS)
+	# MERGE_ENDS collapses a drag's stream of value_changed into ONE entry: it keeps the first action's
+	# undo (the pre-drag opacity) and the last one's do. The action name carries the layer name so a
+	# drag on a different layer starts a new entry instead of merging into the previous layer's.
+	_set_unit_property("Set Pasture3D Layer Opacity — %s" % layer.get_layer_name(), _unit_rows(p_idx),
+		"get_opacity", "set_opacity", p_value, true, UndoRedo.MERGE_ENDS)
 
 
+## Blend goes to the MAIN row only, whichever row of a pair is shown.
 func _on_blend(p_idx: int, p_selected: int) -> void:
-	var stack := _stack()
-	if not stack or p_selected < 0 or p_selected >= BLEND_MODES.size():
+	if p_selected < 0 or p_selected >= BLEND_MODES.size():
 		return
-	var layer: Pasture3DLayer = stack.get_layer(p_idx)
-	if layer:
-		var old := layer.get_blend_mode()
-		layer.set_blend_mode(BLEND_MODES[p_selected])
-		_data().recomposite_layer(p_idx)
-		_mark_unsaved()
-		_commit_property_action("Set Pasture3D Layer Blend Mode", p_idx, "set_blend_mode",
-			old, BLEND_MODES[p_selected], true)
+	_set_unit_property("Set Pasture3D Layer Blend Mode", PackedInt32Array([_blend_row(p_idx)]),
+		"get_blend_mode", "set_blend_mode", BLEND_MODES[p_selected], true)
 
 
 func _on_rename(p_idx: int, p_text: String) -> void:
@@ -528,25 +563,44 @@ func _on_rename(p_idx: int, p_text: String) -> void:
 	if not stack:
 		return
 	var layer: Pasture3DLayer = stack.get_layer(p_idx)
-	if layer:
-		var old := layer.get_layer_name()
-		layer.set_layer_name(p_text)
-		_mark_unsaved()
-		_commit_property_action("Rename Pasture3D Layer", p_idx, "set_layer_name", old, p_text, false)
+	if layer == null:
+		return
+	if _is_layer_brush_row(p_idx):
+		_refuse_layer_brush_action("rename the node instead.")
+		refresh() # put the old name back in the field
+		return
+	_set_unit_property("Rename Pasture3D Layer", PackedInt32Array([p_idx]), "get_layer_name", "set_layer_name",
+		p_text, false)
 
 
-## Record an already-applied row edit. commit_action(false) because the handler applied it live — letting
-## UndoRedo re-run the do here would repeat the recomposite, and for the opacity slider would rebuild the
-## very row being dragged. Undo and redo both route through _apply_layer_property so the two directions
-## can't drift apart. A no-op edit records nothing.
-func _commit_property_action(p_name: String, p_idx: int, p_setter: String, p_old: Variant, p_new: Variant,
-		p_recomposite: bool, p_merge: int = UndoRedo.MERGE_DISABLE) -> void:
+## Apply one property to every row in `p_idxs` live, then record it as ONE undoable action. commit_action(false)
+## because it is applied here — letting UndoRedo re-run the do would repeat the recomposite, and for the opacity
+## slider would rebuild the very row being dragged. Undo and redo both route through _apply_layer_property so the
+## two directions can't drift apart. Rows already at the value record nothing.
+func _set_unit_property(p_name: String, p_idxs: PackedInt32Array, p_getter: String, p_setter: String,
+		p_value: Variant, p_recomposite: bool, p_merge: int = UndoRedo.MERGE_DISABLE) -> void:
+	var stack := _stack()
+	if not stack:
+		return
+	var olds := {}
+	for i in p_idxs:
+		var layer: Pasture3DLayer = stack.get_layer(i)
+		if layer == null or layer.call(p_getter) == p_value:
+			continue
+		olds[i] = layer.call(p_getter)
+		layer.call(p_setter, p_value)
+		if p_recomposite:
+			_data().recomposite_layer(i)
+	if olds.is_empty():
+		return
+	_mark_unsaved()
 	var ur := EditorInterface.get_editor_undo_redo()
-	if ur == null or p_old == p_new:
+	if ur == null:
 		return
 	ur.create_action(p_name, p_merge, terrain)
-	ur.add_do_method(self, "_apply_layer_property", p_idx, p_setter, p_new, p_recomposite)
-	ur.add_undo_method(self, "_apply_layer_property", p_idx, p_setter, p_old, p_recomposite)
+	for i in olds:
+		ur.add_do_method(self, "_apply_layer_property", i, p_setter, p_value, p_recomposite)
+		ur.add_undo_method(self, "_apply_layer_property", i, p_setter, olds[i], p_recomposite)
 	ur.commit_action(false)
 
 
@@ -630,6 +684,9 @@ func _on_duplicate() -> void:
 	var d := _data()
 	var stack := _stack()
 	if not d or not stack:
+		return
+	if _is_layer_brush_row(stack.get_active_layer()):
+		_refuse_layer_brush_action("duplicate the node instead.")
 		return
 	var before := _stack_snapshot()
 	var idx: int = d.layer_duplicate(stack.get_active_layer())
@@ -719,6 +776,9 @@ func _on_clear() -> void:
 	var idx: int = stack.get_active_layer()
 	var layer: Pasture3DLayer = stack.get_layer(idx)
 	if layer == null or layer.is_base():
+		return
+	if _is_layer_brush_row(idx):
+		_refuse_layer_brush_action("its node rebuilds it on every bake.")
 		return
 	var ur := EditorInterface.get_editor_undo_redo()
 	if ur == null:
@@ -835,6 +895,9 @@ func _on_remove() -> void:
 	var stack := _stack()
 	if not d or not stack:
 		return
+	if _is_layer_brush_row(stack.get_active_layer()):
+		_refuse_layer_brush_action("delete the node instead.")
+		return
 	var before := _stack_snapshot()
 	d.layer_remove(stack.get_active_layer())
 	refresh()
@@ -854,11 +917,8 @@ func _move_active(p_dir: int) -> void:
 	var stack := _stack()
 	if not stack:
 		return
-	var from: int = stack.get_active_layer()
-	var to: int = from + p_dir
-	if from <= 0 or to <= 0 or to >= stack.get_layer_count():
-		return
-	_move_layer_undoable(from, to)
+	# By display unit, so a Layer brush pair steps past its neighbour whole and a row steps past a pair whole.
+	_move_steps_undoable(Pasture3DLayerBrush.unit_move_steps(stack, stack.get_active_layer(), p_dir))
 
 
 ## Drag-and-drop reordering (forwarded from each row)
@@ -887,31 +947,36 @@ func _drop_row(_pos: Vector2, p_data: Variant, p_idx: int) -> void:
 	var to: int = p_idx
 	if from == to or from == 0 or to == 0:
 		return
-	_move_layer_undoable(from, to)
+	_move_steps_undoable(Pasture3DLayerBrush.unit_drop_steps(stack, from, to))
 
 
-## Reorder a layer as one undoable action so Ctrl+Z restores the previous order. move_layer is its own
-## inverse: undoing move(from→to) is move(to→from), so a single _apply_move serves both directions.
+## Reorder as one undoable action so Ctrl+Z restores the previous order. A unit move is several
+## `layer_move` steps; undo replays their inverses in REVERSE order (see Pasture3DLayerBrush.apply_steps).
 ## Routed to the terrain's scene-local history via the custom context.
-func _move_layer_undoable(p_from: int, p_to: int) -> void:
+func _move_steps_undoable(p_steps: Array) -> void:
+	if p_steps.is_empty():
+		return
 	var ur := EditorInterface.get_editor_undo_redo()
 	if ur == null:
-		_apply_move(p_from, p_to)
+		_apply_move(p_steps, false)
 		return
 	ur.create_action("Reorder Pasture3D Layer", UndoRedo.MERGE_DISABLE, terrain)
-	ur.add_do_method(self, "_apply_move", p_from, p_to)
-	ur.add_undo_method(self, "_apply_move", p_to, p_from)
+	ur.add_do_method(self, "_apply_move", p_steps, false)
+	ur.add_undo_method(self, "_apply_move", p_steps, true)
 	ur.commit_action()
 
 
-## Apply a reorder and rebuild the list. One entry point for both do and undo, so call order is trivial.
-func _apply_move(p_from: int, p_to: int) -> void:
+## Apply a reorder and rebuild the list, keeping the same layer active. One entry point for do and undo.
+func _apply_move(p_steps: Array, p_inverse: bool) -> void:
 	var d := _data()
 	var stack := _stack()
 	if not d or not stack:
 		return
-	d.layer_move(p_from, p_to)
-	stack.set_active_layer(p_to)
+	var active_layer: Pasture3DLayer = stack.get_layer(stack.get_active_layer())
+	Pasture3DLayerBrush.apply_steps(d, p_steps, p_inverse)
+	var idx: int = stack.get_layers().find(active_layer)
+	if idx >= 0:
+		stack.set_active_layer(idx)
 	refresh()
 	_mark_unsaved()
 

@@ -41,6 +41,12 @@ const PROTECT_STEP: float = 0.5
 @export_tool_button("Smooth Sharp Corners") var _smooth_corners_btn = smooth_sharp_corners
 
 
+## Roads are grouped by a Pasture3DRoadNetwork, which is to roads what a Pasture3DLayerBrush is to every other
+## brush (PASTURE3D_LAYER_BRUSH_SPEC.md D13) — so a road under a Layer brush keeps its own binding.
+func _layer_brush_refusal_reason() -> String:
+	return "Road brushes are grouped by a Pasture3DRoadNetwork, not a Layer brush."
+
+
 
 @export_group("Road")
 ## What this brush overrides for its whole length. Sits between its segments and its group in the
