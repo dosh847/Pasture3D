@@ -496,11 +496,28 @@ func _l_bake_scale() -> void:
 	_check("capped by period", fine4["scale"] == 1 and _h_max_diff(fine1, fine4) == 0.0,
 			"5 m period at 4x: effective %d, max |4x - 1x| %.6f m (want 1, 0)" % [fine4["scale"], _h_max_diff(fine1, fine4)])
 
+	# Graphs are allowed, and it reaches a Frozen graph under a Bake's full-res hold — it is a bake setting.
+	var g1 := await _l_bake(t, [_l_frozen_graph()], 0)
+	var g2 := await _l_bake(t, [_l_frozen_graph()], 1)
+	_check("control: graph moves the ground", _h_max_diff(bare, g1) > 0.01,
+			"max |graph - bare| %.4f m (want > 0.01)" % _h_max_diff(bare, g1))
+	_check("frozen graph under Bake takes it", g2["scale"] == 2 and not g2["blocked"] and _h_max_diff(g1, g2) > 0.0,
+			"effective %d, blocked %s, max |2x - 1x| %.4f m (want 2, false, > 0)"
+					% [g2["scale"], g2["blocked"], _h_max_diff(g1, g2)])
+	_check("graph 2x close to 1x", _h_max_diff(g1, g2) < 0.25 * _h_max_diff(bare, g1),
+			"max |2x - 1x| %.4f m vs graph effect %.4f m (want < 25%%)" % [_h_max_diff(g1, g2), _h_max_diff(bare, g1)])
+
 	var s1 := await _l_bake(t, [_l_noise(0.02), _h_erosion()], 0)
 	var s4 := await _l_bake(t, [_l_noise(0.02), _h_erosion()], 2)
 	_check("refused with a solver", s4["scale"] == 1 and _h_max_diff(s1, s4) == 0.0 and s4["blocked"],
 			"effective %d, blocked %s, max |4x - 1x| %.6f m (want 1, true, 0)" % [s4["scale"], s4["blocked"], _h_max_diff(s1, s4)])
 	t.queue_free()
+
+
+func _l_frozen_graph() -> Pasture3DNodeGraph:
+	var gm := _h_graph()
+	gm.evaluation = Pasture3DNode.Evaluation.FROZEN
+	return gm
 
 
 func _l_noise(p_freq: float) -> Pasture3DNodeNoise:
@@ -532,6 +549,7 @@ func _l_bake(p_terrain: Pasture3D, p_mods: Array, p_scale: int) -> Dictionary:
 		mods.append(x)
 	m.modifiers = mods
 	m.bake_scale = p_scale
+	m._preview_full_res = true # as a Bake would: nothing here may be coarse because of the Live preview
 	var rep: Dictionary = m._bake_scale_report()
 	m._refresh_owner(m._layer_owner, false, [])
 	var h := _k_heights(p_terrain)

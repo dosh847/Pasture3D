@@ -4803,11 +4803,13 @@ var live_preview_resolution: int = 0:
 		_stamp_cache.clear()
 		_schedule_refresh()
 
-## BAKE SCALE: evaluate Noise and Relief modifiers every 1 / 2 / 4 cells and interpolate between (0, 1, 2).
-## This one DOES reach the final bake, so it is refused outright for a stack holding any solver or field
-## modifier (erosion routes water on the grid it is given; a coarse solve is a different landscape), and
-## capped so the finest periodic relief op or noise period keeps PERIOD_SAMPLES_MIN samples. The brush's
-## own shape and falloff are always full resolution. GDScript-rasteriser brushes ignore it.
+## Bake Scale: evaluate Noise, Relief and Terrain Graph modifiers on a grid 1x / 2x / 4x coarser and
+## interpolate back. Faster bakes, and it applies to the FINAL bake too (Frozen, Bake, Bake All).
+## [b]Warning:[/b] this changes the output, not just its sharpness. Fine detail below the coarse cell
+## size is lost, and a graph containing a solver (Erosion, Salève, Stream Log…) routes water on the coarse
+## grid, so its channels form in different places than at 1x. The brush outline and falloff stay full
+## resolution. Refused when the stack holds an Erosion or Smooth modifier; Noise/Relief are capped so
+## the finest period keeps PERIOD_SAMPLES_MIN samples. GDScript-rasteriser brushes ignore it.
 var bake_scale: int = 0:
 	set(v):
 		v = clampi(v, 0, 2)
@@ -4841,6 +4843,8 @@ func _bake_scale_report() -> Dictionary:
 			var fnl: FastNoiseLite = m.noise
 			if fnl != null and fnl.frequency > 0.0:
 				period = 1.0 / fnl.frequency
+		elif m is Pasture3DNodeGraph:
+			pass # allowed by choice, output change and all — see `bake_scale`
 		else:
 			rep["blocker"] = m.display_name() if m.has_method("display_name") else str(m.op())
 			return rep
@@ -5050,8 +5054,8 @@ func _modifier_warnings() -> PackedStringArray:
 			+ "Resolution). Bake, Bake All Brushes, or set it to Full before shipping the scene."))
 	var bsr := _bake_scale_report()
 	if String(bsr["blocker"]) != "":
-		w.append(("Bake Scale is ignored: %s is not a Noise or Relief modifier, and a coarse bake of a "
-			+ "solver is a different result, not a blurrier one. The stack bakes at full resolution.")
+		w.append(("Bake Scale is ignored: %s is not a Noise, Relief or Terrain Graph modifier. The stack "
+			+ "bakes at full resolution.")
 			% bsr["blocker"])
 	elif int(bsr["scale"]) < int(bsr["requested"]):
 		w.append(("Bake Scale was capped to %dx: the finest period in the stack is %.1f m, and a coarser "
@@ -5141,8 +5145,11 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 			# There is now one dictionary, so there is nowhere for the two to drift apart.
 			blk["defer"] = _erosion_suppress or live_async or (_erosion_defer and bool(blk["frozen"]))
 			blk["out"] = slot
-			blk["preview_scale"] = _preview_scale_for(m)
-			coarse = coarse or int(blk["preview_scale"]) > 1
+			var pscale := _preview_scale_for(m)
+			coarse = coarse or pscale > 1 # the preview warning tracks the Live preview only
+			if m is Pasture3DNodeGraph:
+				pscale = maxi(pscale, bscale)
+			blk["preview_scale"] = pscale
 		if m is Pasture3DNodeGraph and m.graph != null:
 			# HOST-SIDE SOURCE RESOLUTION, before the program is compiled and before either rasteriser
 			# runs. `_apply_graph_step` also calls this, which is where it used to live alone -- and that
