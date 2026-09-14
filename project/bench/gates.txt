@@ -296,6 +296,27 @@ bench/PathCarveGate.tscn
 # quits 0 as SKIPPED, so a headless sweep neither greens it nor reds it.
 bench/PathCarveGpuGate.tscn
 
+# --- Leveler (PASTURE3D_GRAPH_LEVELER_SPEC.md) ---
+# Watched green 2026-09-14. The [Dev/GD] oracle's own criteria A-H, each with a control. MEDIAN is the
+# LOWER median: a histogram cannot reach the midpoint of the two middle values on sparse data.
+bench/LevelerOracleGate.tscn
+
+# Watched green 2026-09-14. P: binding vs oracle, 84 cases; T: 1 vs N threads bit-identical at 512^2 with
+# parallel_dispatch_count proving the split; R: lowered GRAPH_OP_LEVELER vs oracle on all 5 channels with
+# target and mask by wire. No GPU criterion yet -- a graph with a Leveler bails to CPU (spec step 4).
+bench/LevelerNativeParityGate.tscn
+
+# Watched green 2026-09-14, WINDOWED. The GPU Leveler (height only) vs the lowered CPU one, via direct
+# graph_eval_grid_gpu calls: 14 cases across every statistic, both distance routes, cut/fill, path width,
+# a wired target and a NaN footprint, worst 9e-6 m; mask channels refused; empty core passes through.
+# Headless reports NO-SIGNAL and quits 0 as SKIPPED.
+bench/LevelerGpuGate.tscn
+
+# Step 5, 2026-09-14. The §7 criteria A-H on the ORACLE, NATIVE (binding) and lowered GRAPH routes, 24 runs,
+# with the spec's named controls: a centred feather fails D, a constant feather fails E, and an unscaled
+# ring mask fails G's clamp(|delta|/wall_depth) scaling. Headless.
+bench/LevelerGate.tscn
+
 # S4 - the PATH pre-pass, and Path Width as its first customer (spec §8.2-8.3, §7.3). Green headless.
 #
 # Every way this phase can fail is SILENT, which is what shaped the criteria. A filter that never runs

@@ -1150,6 +1150,28 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				}
 			} break;
 
+			case GRAPH_OP_LEVELER: {
+				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
+				// The loop is `geo` (null, empty and open all mean "no loop", decided in the kernel); the mask
+				// is the declared aux port, and an unwired one reads as empty, which the kernel takes as 1.
+				// P[] is resolved, so a wire into `target_height` reaches slot 2.
+				const PackedFloat32Array lut = (size_t)s < p_prog.luts.size() ? p_prog.luts[(size_t)s]
+																			   : PackedFloat32Array();
+				Dictionary res = leveler_grid_geom(geo ? &geo->geom : nullptr, in_arr, aux_grid_of(s), p_gw,
+						p_gh, p_rect, lut, leveler_params_from(P, 16));
+				const PackedFloat32Array h_arr = res.has("height") ? (PackedFloat32Array)res["height"]
+																   : PackedFloat32Array();
+				if (h_arr.size() == n) std::copy_n(h_arr.ptr(), n, g_ptr);
+				else std::copy_n(in_arr.ptr(), n, g_ptr);
+				static const char *ch_names[4] = { "level_mask", "level_value", "delta", "walls" };
+				for (int c = 0; c < 4; c++) {
+					float *dst = want_aux(c + 1);
+					if (!dst || !res.has(ch_names[c])) continue;
+					const PackedFloat32Array a = res[ch_names[c]];
+					if (a.size() == n) std::copy_n(a.ptr(), n, dst);
+				}
+			} break;
+
 			case GRAPH_OP_PATH_MASK: {
 				const Pasture3DPathGeom empty;
 				PackedFloat32Array res = path_mask_grid_geom(geo ? geo->geom : empty, p_gw, p_gh, p_rect,

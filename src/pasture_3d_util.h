@@ -327,6 +327,10 @@ public:
 			const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights, const bool p_closed,
 			const PackedFloat32Array &p_surface, const int p_gw, const int p_gh, const Rect2 &p_rect,
 			const PackedFloat32Array &p_profile, const PackedFloat32Array &p_params);
+	static Dictionary leveler_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
+			const bool p_closed, const PackedFloat32Array &p_height, const PackedFloat32Array &p_mask,
+			const int p_gw, const int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_lut,
+			const PackedFloat32Array &p_params);
 
 	// Rasterise a PATH as a [0,1] mask (PASTURE3D_GRAPH_GEOMETRY_PORTS_SPEC.md §5.2). TWO RULES chosen by
 	// `p_closed`, not one rule with a parameter: an OPEN path masks a corridor — 1 on the carriageway,

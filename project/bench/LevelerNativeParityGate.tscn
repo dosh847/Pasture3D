@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://bench/LevelerNativeParityGate.gd" id="1_LevNat"]
+
+[node name="LevelerNativeParityGate" type="Node"]
+script = ExtResource("1_LevNat")

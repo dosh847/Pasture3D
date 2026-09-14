@@ -10,6 +10,7 @@
 
 #include "logger.h"
 #include "pasture_3d_curvature.h"
+#include "pasture_3d_leveler.h"
 #include "pasture_3d_path_carve.h"
 #include "pasture_3d_path_ops.h"
 #include "pasture_3d_path_query.h"
@@ -1275,6 +1276,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "path_mask", GRAPH_OP_PATH_MASK },
 		{ "road_grade", GRAPH_OP_ROAD_GRADE },
 		{ "path_carve", GRAPH_OP_PATH_CARVE },
+		{ "leveler", GRAPH_OP_LEVELER },
 	};
 	Dictionary d;
 	for (const auto &e : k_ops) {
@@ -1816,6 +1818,14 @@ Dictionary Pasture3DUtil::path_carve_grid(const PackedVector2Array &p_points,
 		const PackedFloat32Array &p_profile, const PackedFloat32Array &p_params) {
 	return godot::path_carve_grid(p_points, p_widths, p_heights, p_closed, p_surface, p_gw, p_gh, p_rect,
 			p_profile, path_carve_params_from(p_params.ptr(), p_params.size()));
+}
+
+Dictionary Pasture3DUtil::leveler_grid(const PackedVector2Array &p_points,
+		const PackedFloat32Array &p_widths, const bool p_closed, const PackedFloat32Array &p_height,
+		const PackedFloat32Array &p_mask, const int p_gw, const int p_gh, const Rect2 &p_rect,
+		const PackedFloat32Array &p_lut, const PackedFloat32Array &p_params) {
+	return godot::leveler_grid(p_points, p_widths, p_closed, p_height, p_mask, p_gw, p_gh, p_rect, p_lut,
+			leveler_params_from(p_params.ptr(), p_params.size()));
 }
 
 PackedFloat32Array Pasture3DUtil::path_mask_grid(const PackedVector2Array &p_points,
@@ -2829,6 +2839,10 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("path_carve_grid", "points", "widths", "heights", "closed", "surface", "gw", "gh",
 					"rect", "profile", "params"),
 			&Pasture3DUtil::path_carve_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("leveler_grid", "points", "widths", "closed", "height", "mask", "gw", "gh", "rect",
+					"lut", "params"),
+			&Pasture3DUtil::leveler_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("path_mask_grid", "points", "widths", "closed", "gw", "gh", "rect", "width_scale",
 					"feather", "invert"),

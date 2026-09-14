@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "pasture_3d_leveler.h"
 #include "pasture_3d_path_query.h"
 
 #include <godot_cpp/classes/fast_noise_lite.hpp>
@@ -90,6 +91,7 @@ enum GraphCellOpType {
 	GRAPH_OP_PATH_MASK = 58, // FILTER grid: a [0,1] corridor or region mask from in_g (1 output)
 	GRAPH_OP_ROAD_GRADE = 59, // SOLVER grid: cut a road into in0 along in_g (6 outputs)
 	GRAPH_OP_PATH_CARVE = 60, // SOLVER grid: cut one cross-section into in0 along in_g (5 outputs)
+	GRAPH_OP_LEVELER = 61, // FILTER grid: flatten/level in0 inside in_g and/or the in2 mask (5 outputs)
 };
 
 // Blend modes — sync with Pasture3DGraphNodeBlend.Mode { ADD, SUB, MUL, MAX, MIN } (0..4). Prefixed

@@ -1,5 +1,6 @@
 #include "pasture_3d_graph_gpu.h"
 #include "pasture_3d_data.h"
+#include "pasture_3d_leveler.h"
 #include "pasture_3d_path_carve.h"
 
 #include <godot_cpp/classes/fast_noise_lite.hpp>
@@ -60,6 +61,12 @@ enum GraphKernelMode {
 	// can be solved, and one dispatch cannot both write that array and read it.
 	GKM_PATH_VERTEX_GROUND = 29,
 	GKM_PATH_CARVE = 30,
+	// The Leveler (PASTURE3D_GRAPH_LEVELER_SPEC.md §5.2): the area weight, the per-cell inputs to its
+	// reductions, an 8x8 block sum the host folds in double, and the apply pass.
+	GKM_LEVELER_AREA = 31,
+	GKM_LEVELER_PREP = 32,
+	GKM_BLOCK_SUM = 33,
+	GKM_LEVELER_APPLY = 34,
 };
 
 struct GraphKernelModeName {
@@ -99,6 +106,10 @@ static const GraphKernelModeName GRAPH_KERNEL_MODES[] = {
 	{ "GKM_MUDSLIDE_POOL", GKM_MUDSLIDE_POOL },
 	{ "GKM_PATH_VERTEX_GROUND", GKM_PATH_VERTEX_GROUND },
 	{ "GKM_PATH_CARVE", GKM_PATH_CARVE },
+	{ "GKM_LEVELER_AREA", GKM_LEVELER_AREA },
+	{ "GKM_LEVELER_PREP", GKM_LEVELER_PREP },
+	{ "GKM_BLOCK_SUM", GKM_BLOCK_SUM },
+	{ "GKM_LEVELER_APPLY", GKM_LEVELER_APPLY },
 };
 
 // `#version` has to be the first line of the source, so it is prepended here rather than living in the
@@ -1119,6 +1130,148 @@ static const char *GRAPH_GRID_GLSL_3 = R"(	if (p.mode == GKM_FLOOD_LEVEL) { // F
 			}
 		}
 	}
+)";
+
+// A fourth chunk because the third is near MSVC's 16380-byte literal cap. It closes main().
+static const char *GRAPH_GRID_GLSL_4 = R"(
+	// ---- LEVELER (PASTURE3D_GRAPH_LEVELER_SPEC.md §5.2) ----------------------------------------------
+	//
+	// Height only: the four masks are channels 1-4, which this evaluator refuses graph-wide. The rules are
+	// src/pasture_3d_leveler.cpp's, in float32; the reductions are summed per 8x8 block here and folded in
+	// double on the host, so a count is exact and a mean differs from the CPU's only in the block sums.
+
+	// BLOCK SUM: the block's ORIGIN cell sums its 8x8 block of finite a[] into o[block index]. A gather
+	// rather than shared memory, so it needs no barrier and can sit after the bounds guard.
+	if (p.mode == GKM_BLOCK_SUM) {
+		if ((ix & 7) != 0 || (iz & 7) != 0) { return; }
+		float sum = 0.0;
+		for (int oz = 0; oz < 8; oz++) {
+			int z = iz + oz;
+			if (z >= p.gh) { break; }
+			for (int ox = 0; ox < 8; ox++) {
+				int x = ix + ox;
+				if (x >= p.gw) { break; }
+				float v = a[z * p.gw + x];
+				if (!isnan(v) && !isinf(v)) { sum += v; }
+			}
+		}
+		o[(iz / 8) * ((p.gw + 7) / 8) + (ix / 8)] = sum;
+		return;
+	}
+
+	// AREA: A = the clamped mask (f0 > 0.5 = wired, else 1), zeroed outside the loop and on non-finite
+	// height. ip = loop vertex count, 0 = no loop. The even-odd rule is Pasture3DPathGeom::inside's,
+	// half-open y comparison included.
+	if (p.mode == GKM_LEVELER_AREA) {
+		float hv = a[i];
+		if (isnan(hv) || isinf(hv)) { o[i] = 0.0; return; }
+		float m = 1.0;
+		if (p.f0 > 0.5) {
+			float mv = b[i];
+			m = (isnan(mv) || isinf(mv)) ? 0.0 : clamp(mv, 0.0, 1.0);
+		}
+		int gn = p.ip;
+		if (gn >= 4 && m > 0.0) {
+			float qx = p.ox + (float(ix) + 0.5) * p.dx;
+			float qz = p.oz + (float(iz) + 0.5) * p.dz;
+			bool odd = false;
+			for (int k = 0; k < gn - 1; k++) {
+				float ay = g[3 + 2 * k];
+				float by = g[5 + 2 * k];
+				if ((ay > qz) != (by > qz)) {
+					float dy = by - ay;
+					if (dy != 0.0) {
+						float xc = g[2 + 2 * k] + (qz - ay) / dy * (g[4 + 2 * k] - g[2 + 2 * k]);
+						if (qx < xc) { odd = !odd; }
+					}
+				}
+			}
+			if (!odd) { m = 0.0; }
+		}
+		o[i] = m;
+		return;
+	}
+
+	// PREP: a = height, b = area (or the mask for kind 3). ip = kind, f1 = the core threshold (the
+	// smallest float32 at or above 1 - 1e-6, chosen on the host so the test is the CPU's exactly).
+	//   1 core height, NaN elsewhere      2 core indicator 1/0
+	//   3 mask over finite cells, NaN elsewhere (the trivial-mask test)
+	//   4 core AND height < f0 (a median rank count; f0 is an exact float32 bin cut from the host)
+	if (p.mode == GKM_LEVELER_PREP) {
+		float hv = a[i];
+		bool fin = !isnan(hv) && !isinf(hv);
+		if (p.ip == 3) {
+			if (!fin) { o[i] = 0.0 / 0.0; return; }
+			float mv = b[i];
+			o[i] = (isnan(mv) || isinf(mv)) ? 0.0 : clamp(mv, 0.0, 1.0);
+			return;
+		}
+		bool core = fin && b[i] >= p.f1;
+		if (p.ip == 1) { o[i] = core ? hv : 0.0 / 0.0; }
+		else if (p.ip == 2) { o[i] = core ? 1.0 : 0.0; }
+		else { o[i] = (core && hv < p.f0) ? 1.0 : 0.0; }
+		return;
+	}
+
+	// APPLY: a = height, b = area, c = raster distance from the core (read only off the exact route),
+	// g = the loop's stripes followed by the falloff LUT at 2 + 5*ip. ip = vertex count; ip2 bit0 exact
+	// route, bit1 width from path, bits 2-3 cut/fill. f0 level, f1 feather, f2 path width scale, f3 core
+	// threshold, f4 LUT size.
+	if (p.mode == GKM_LEVELER_APPLY) {
+		float hv = a[i];
+		if (isnan(hv) || isinf(hv)) { o[i] = hv; return; }
+		float av = b[i];
+		float w = 1.0;
+		if (!(av >= p.f3)) {
+			int gn = p.ip;
+			bool exact = (p.ip2 & 1) != 0;
+			bool useW = (p.ip2 & 2) != 0;
+			float d = c[i];
+			float fw = p.f1;
+			if ((exact || useW) && gn >= 2) {
+				float qx = p.ox + (float(ix) + 0.5) * p.dx;
+				float qz = p.oz + (float(iz) + 0.5) * p.dz;
+				float best = 1.0e30;
+				int bseg = 0;
+				float bf = 0.0;
+				for (int si = 0; si < gn - 1; si++) {
+					float ax = g[2 + 2 * si];
+					float az = g[3 + 2 * si];
+					float abx = g[4 + 2 * si] - ax;
+					float abz = g[5 + 2 * si] - az;
+					float len2 = abx * abx + abz * abz;
+					float f = (len2 <= 0.0) ? 0.0 : clamp(((qx - ax) * abx + (qz - az) * abz) / len2, 0.0, 1.0);
+					float ddx = qx - (ax + abx * f);
+					float ddz = qz - (az + abz * f);
+					float dd = sqrt(ddx * ddx + ddz * ddz);
+					if (dd < best) { best = dd; bseg = si; bf = f; } // strictly less: the first segment wins a tie
+				}
+				if (exact) { d = best; }
+				if (useW) {
+					int GC0 = 2 + 3 * gn;
+					float sarc = g[GC0 + bseg] + (g[GC0 + bseg + 1] - g[GC0 + bseg]) * bf;
+					fw = p.f2 * pathHalfWidth(gn, 2 + 2 * gn, GC0, sarc);
+				}
+			}
+			if (fw > 0.0 && d < fw) {
+				int nl = int(p.f4);
+				int L0 = 2 + 5 * gn;
+				float fl = clamp(d / fw, 0.0, 1.0) * float(nl - 1);
+				int i0 = int(fl);
+				float lv = (i0 >= nl - 1) ? g[L0 + nl - 1] : mix(g[L0 + i0], g[L0 + i0 + 1], fl - float(i0));
+				w = max(av, lv);
+			} else {
+				w = av;
+			}
+			if (w <= 0.0) { o[i] = hv; return; }
+		}
+		float target = hv + (p.f0 - hv) * w;
+		int cf = (p.ip2 >> 2) & 3;
+		if (cf == 1) { target = min(hv, target); }
+		else if (cf == 2) { target = max(hv, target); }
+		o[i] = target;
+		return;
+	}
 }
 )";
 
@@ -1189,7 +1342,7 @@ bool Pasture3DGraphGPU::_ensure_init() {
 	}
 	Ref<RDShaderSource> src;
 	src.instantiate();
-	src->set_stage_source(RenderingDevice::SHADER_STAGE_COMPUTE, defines + String(GRAPH_GRID_GLSL) + String(GRAPH_GRID_GLSL_1B) + String(GRAPH_GRID_GLSL_2) + String(GRAPH_GRID_GLSL_3));
+	src->set_stage_source(RenderingDevice::SHADER_STAGE_COMPUTE, defines + String(GRAPH_GRID_GLSL) + String(GRAPH_GRID_GLSL_1B) + String(GRAPH_GRID_GLSL_2) + String(GRAPH_GRID_GLSL_3) + String(GRAPH_GRID_GLSL_4));
 	Ref<RDShaderSPIRV> spirv = _rd->shader_compile_spirv_from_source(src);
 	if (spirv.is_null() || !spirv->get_stage_compile_error(RenderingDevice::SHADER_STAGE_COMPUTE).is_empty()) {
 		// The compile log goes into the warning. Without it a shader typo is indistinguishable from "no
@@ -1410,18 +1563,9 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 	// (an empty width array meaning 1.0, a single width meaning constant) are expanded here into a full
 	// per-vertex array so the shader has one case rather than three.
 	std::vector<RID> geo_buf(p_prog.geom.size());
-	auto geo_of = [&](int p_slot) -> RID {
-		if (p_prog.in_g.size() != p_prog.count) {
-			return RID();
-		}
-		const int gi = p_prog.in_g[p_slot];
-		if (gi < 0 || gi >= (int)p_prog.geom.size()) {
-			return RID();
-		}
-		if (geo_buf[(size_t)gi].is_valid()) {
-			return geo_buf[(size_t)gi];
-		}
-		const Pasture3DPathGeom &pg = p_prog.geom[(size_t)gi].geom;
+	// The flat layout, separate from the upload so the Leveler can append its LUT to a copy of it -- every
+	// binding is taken, and a second copy of this layout written out by hand would drift from this one.
+	auto geo_flat = [&](const Pasture3DPathGeom &pg) -> std::vector<float> {
 		const int gn = (int)pg.px.size();
 		// FIVE stripes since S3b: x/z pairs, half-width, cumulative arc length, drawn height.
 		std::vector<float> flat((size_t)(2 + 5 * std::max(gn, 1)), 0.f);
@@ -1448,6 +1592,31 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 					? pg.height[(size_t)std::min(v, (int)pg.height.size() - 1)]
 					: nan_v;
 		}
+		return flat;
+	};
+	auto upload_floats = [&](const std::vector<float> &p_flat) -> RID {
+		const int fb = (int)(p_flat.size() * sizeof(float));
+		PackedByteArray pb;
+		pb.resize(fb);
+		std::memcpy(pb.ptrw(), p_flat.data(), (size_t)fb);
+		RID b = _rd->storage_buffer_create(fb, pb);
+		if (b.is_valid()) {
+			to_free.push_back(b);
+		}
+		return b;
+	};
+	auto geo_of = [&](int p_slot) -> RID {
+		if (p_prog.in_g.size() != p_prog.count) {
+			return RID();
+		}
+		const int gi = p_prog.in_g[p_slot];
+		if (gi < 0 || gi >= (int)p_prog.geom.size()) {
+			return RID();
+		}
+		if (geo_buf[(size_t)gi].is_valid()) {
+			return geo_buf[(size_t)gi];
+		}
+		const std::vector<float> flat = geo_flat(p_prog.geom[(size_t)gi].geom);
 		const int gb = (int)(flat.size() * sizeof(float));
 		PackedByteArray pb;
 		pb.resize(gb);
@@ -2214,6 +2383,259 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				d.f4 = (float)cp.width;
 				d.f5 = (float)std::max(cp.falloff, 0.0);
 				d.f6 = (float)lut.size();
+				plan.push_back(d);
+				slot_buf[s] = out;
+			} break;
+			case GRAPH_OP_LEVELER: {
+				// PASTURE3D_GRAPH_LEVELER_SPEC.md §5.2, HEIGHT ONLY -- channels 1-4 are refused at the top.
+				// The plan runs in stages with small readbacks between them, the way a driven parameter
+				// does: the core count decides pass-through, the mask decides the distance route, and the
+				// statistic is a scalar the apply pass takes as a push constant.
+				const RID src = in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf;
+				const Pasture3DLevelerParams lp = leveler_params_from(P, 16);
+				// Counts are summed as floats, exact only to 2^24, and JFA sites are cell indices in floats.
+				if (n > (1 << 24)) {
+					return fail();
+				}
+				const int mask_slot = aux_src(s);
+				const bool have_mask = mask_slot >= 0;
+				const RID mask_buf = have_mask ? slot_buf[mask_slot] : zero_buf;
+
+				// The loop counts only when closed and non-empty -- the kernel's rule, and the geometry
+				// table's closing rule upstream of both.
+				const int gi = p_prog.in_g.size() == p_prog.count ? p_prog.in_g[s] : -1;
+				const Pasture3DPathGeom *lg = nullptr;
+				if (gi >= 0 && gi < (int)p_prog.geom.size() && p_prog.geom[(size_t)gi].geom.closed &&
+						!p_prog.geom[(size_t)gi].geom.is_empty()) {
+					lg = &p_prog.geom[(size_t)gi].geom;
+				}
+				const int gn = lg ? (int)lg->px.size() : 0;
+
+				// Geometry + LUT in one buffer. An absent or short LUT bakes 1 - smoothstep, as the kernel does.
+				std::vector<float> flat = lg ? geo_flat(*lg) : std::vector<float>(2, 0.f);
+				flat.resize((size_t)(2 + 5 * gn));
+				const PackedFloat32Array &lut_in = p_prog.luts[(size_t)s];
+				int lut_n = (int)lut_in.size();
+				if (lut_n >= 2) {
+					flat.insert(flat.end(), lut_in.ptr(), lut_in.ptr() + lut_n);
+				} else {
+					lut_n = 256;
+					for (int k = 0; k < lut_n; k++) {
+						const double x = (double)k / (double)(lut_n - 1);
+						flat.push_back((float)(1.0 - x * x * (3.0 - 2.0 * x)));
+					}
+				}
+				const RID lvl_geo = upload_floats(flat);
+				if (!lvl_geo.is_valid()) {
+					return fail();
+				}
+
+				// The core threshold as the smallest float32 whose double is >= 1 - eps, so `A >= f` on the
+				// GPU is exactly the kernel's `(double)A >= 1 - eps`.
+				const double core_d = 1.0 - LEVELER_CORE_EPS;
+				float core_thr = (float)core_d;
+				while ((double)core_thr < core_d) {
+					core_thr = std::nextafter(core_thr, 2.0f);
+				}
+				while ((double)std::nextafter(core_thr, 0.0f) >= core_d) {
+					core_thr = std::nextafter(core_thr, 0.0f);
+				}
+
+				const int nwg = gx * gy;
+				auto prep = [&](int p_kind, RID p_b, float p_f0) -> RID {
+					const RID o = empty_buf();
+					GraphDispatch d{ o, src, p_b, zero_buf, GKM_LEVELER_PREP, p_kind };
+					d.f0 = p_f0;
+					d.f1 = core_thr;
+					plan.push_back(d);
+					return o;
+				};
+				// Block sums on the GPU, folded in double here in block order.
+				auto sum_of = [&](RID p_in, double &r_sum) -> bool {
+					const RID sums = empty_buf();
+					plan.push_back({ sums, p_in, zero_buf, zero_buf, GKM_BLOCK_SUM, 0 });
+					if (!run_pending()) {
+						return false;
+					}
+					const PackedByteArray pb = _rd->buffer_get_data(sums, 0, (uint32_t)(nwg * sizeof(float)));
+					if (pb.size() < nwg * (int)sizeof(float)) {
+						return false;
+					}
+					const float *f = (const float *)pb.ptr();
+					double t = 0.0;
+					for (int k = 0; k < nwg; k++) {
+						t += (double)f[k];
+					}
+					r_sum = t;
+					return true;
+				};
+				// Contrast's reduction pair, read back. Non-finite cells are skipped by mode 22.
+				auto minmax_of = [&](RID p_in, double &r_lo, double &r_hi) -> bool {
+					const RID partials = empty_buf();
+					const RID window = empty_buf();
+					GraphDispatch r1{ partials, p_in, zero_buf, zero_buf, GKM_MINMAX_PARTIAL, 0 };
+					r1.f0 = (float)nwg;
+					plan.push_back(r1);
+					GraphDispatch r2{ window, partials, zero_buf, zero_buf, GKM_MINMAX_FINAL, 0 };
+					r2.f0 = (float)nwg;
+					plan.push_back(r2);
+					if (!run_pending()) {
+						return false;
+					}
+					const PackedByteArray pb = _rd->buffer_get_data(window, 0, 2 * sizeof(float));
+					if (pb.size() < 2 * (int)sizeof(float)) {
+						return false;
+					}
+					r_lo = (double)pb.decode_float(0);
+					r_hi = (double)pb.decode_float(4);
+					return true;
+				};
+
+				// ---- 1. AREA, CORE COUNT, TRIVIAL MASK ----
+				const RID area = empty_buf();
+				GraphDispatch da{ area, src, mask_buf, zero_buf, GKM_LEVELER_AREA, gn };
+				da.f0 = have_mask ? 1.f : 0.f;
+				da.geo = lvl_geo;
+				plan.push_back(da);
+				const RID core_ind = prep(2, area, 0.f);
+				double count_d = 0.0;
+				if (!sum_of(core_ind, count_d)) {
+					return fail();
+				}
+				const int64_t core_count = (int64_t)std::llround(count_d);
+				if (core_count == 0) {
+					const RID out = empty_buf();
+					plan.push_back({ out, src, zero_buf, zero_buf, GKM_COPY, 0 });
+					slot_buf[s] = out;
+					break;
+				}
+				bool mask_trivial = true;
+				if (have_mask) {
+					double mlo = 0.0, mhi = 0.0;
+					if (!minmax_of(prep(3, mask_buf, 0.f), mlo, mhi)) {
+						return fail();
+					}
+					mask_trivial = mlo >= core_d;
+				}
+
+				// ---- 2. LEVEL ----
+				double level = lp.target_height;
+				if (lp.mode != LEVELER_LEVEL_AT_HEIGHT) {
+					const RID core_h = prep(1, area, 0.f);
+					if (lp.statistic == LEVELER_MEAN) {
+						double sum = 0.0;
+						if (!sum_of(core_h, sum)) {
+							return fail();
+						}
+						level = sum / (double)core_count;
+					} else {
+						double lo = 0.0, hi = 0.0;
+						if (!minmax_of(core_h, lo, hi)) {
+							return fail();
+						}
+						if (lp.statistic == LEVELER_MIN) {
+							level = lo;
+						} else if (lp.statistic == LEVELER_MAX) {
+							level = hi;
+						} else if (hi <= lo) {
+							level = lo;
+						} else {
+							// MEDIAN by binary search over the kernel's bins. count_le(b) counts core cells whose
+							// bin is <= b, by a float32 cut chosen HERE so `h < cut` is exactly `bin(h) <= b`
+							// under the kernel's double-precision bin rule.
+							const int bins = lp.median_bins;
+							const double span = hi - lo;
+							auto bin_of = [&](float h) -> int {
+								return std::min((int)(((double)h - lo) / span * (double)bins), bins - 1);
+							};
+							std::vector<int64_t> memo((size_t)bins, -1);
+							bool count_failed = false;
+							auto count_le = [&](int b) -> int64_t {
+								if (b < 0) {
+									return 0;
+								}
+								if (b >= bins - 1) {
+									return core_count;
+								}
+								if (memo[(size_t)b] >= 0) {
+									return memo[(size_t)b];
+								}
+								float cut = (float)(lo + (double)(b + 1) * span / (double)bins);
+								for (int guard = 0; guard < 64 && bin_of(cut) <= b; guard++) {
+									cut = std::nextafter(cut, std::numeric_limits<float>::infinity());
+								}
+								for (int guard = 0; guard < 64 && bin_of(std::nextafter(cut, -std::numeric_limits<float>::infinity())) > b; guard++) {
+									cut = std::nextafter(cut, -std::numeric_limits<float>::infinity());
+								}
+								double c = 0.0;
+								if (!sum_of(prep(4, area, cut), c)) {
+									count_failed = true;
+									return 0;
+								}
+								memo[(size_t)b] = (int64_t)std::llround(c);
+								return memo[(size_t)b];
+							};
+							const double k = 0.5 * (double)core_count;
+							int b_lo = 0;
+							int b_hi = bins - 1;
+							while (b_lo < b_hi && !count_failed) {
+								const int mid = (b_lo + b_hi) / 2;
+								if ((double)count_le(mid) >= k) {
+									b_hi = mid;
+								} else {
+									b_lo = mid + 1;
+								}
+							}
+							const int64_t cum = count_le(b_lo - 1);
+							const int64_t c = count_le(b_lo) - cum;
+							if (count_failed) {
+								return fail();
+							}
+							level = c > 0 ? lo + ((double)b_lo + (k - (double)cum) / (double)c) * span / (double)bins : hi;
+						}
+					}
+				}
+
+				// ---- 3. DISTANCE ----
+				const bool exact = lg != nullptr && mask_trivial;
+				RID dist = zero_buf;
+				if (!exact) {
+					// The Distance Transform's own JFA+1 plan over the core indicator: OUTSIDE, EUCLIDEAN, metres.
+					int max_step = 1;
+					while (max_step < std::max(p_gw, p_gh)) {
+						max_step <<= 1;
+					}
+					const RID seed = empty_buf();
+					GraphDispatch sd{ seed, core_ind, zero_buf, zero_buf, GKM_DT_SEED, 0 };
+					sd.f0 = 0.5f;
+					sd.f1 = 1.0f;
+					plan.push_back(sd);
+					RID cur = seed;
+					RID other = empty_buf();
+					for (int kstep = max_step / 2; kstep >= 1; kstep >>= 1) {
+						GraphDispatch jd{ other, cur, zero_buf, zero_buf, GKM_DT_JFA, 0 };
+						jd.f0 = (float)kstep;
+						plan.push_back(jd);
+						std::swap(cur, other);
+					}
+					GraphDispatch jd{ other, cur, zero_buf, zero_buf, GKM_DT_JFA, 0 };
+					jd.f0 = 1.0f;
+					plan.push_back(jd);
+					std::swap(cur, other);
+					dist = empty_buf();
+					plan.push_back({ dist, cur, zero_buf, zero_buf, GKM_DT_RESOLVE, 0 });
+				}
+
+				// ---- 4. APPLY ----
+				const RID out = empty_buf();
+				GraphDispatch d{ out, src, area, dist, GKM_LEVELER_APPLY, gn };
+				d.geo = lvl_geo;
+				d.ip2 = (exact ? 1 : 0) | ((lp.feather_from_path_width && lg != nullptr) ? 2 : 0) | ((lp.cut_fill & 3) << 2);
+				d.f0 = (float)level;
+				d.f1 = (float)lp.feather;
+				d.f2 = (float)lp.path_width_scale;
+				d.f3 = core_thr;
+				d.f4 = (float)lut_n;
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;
