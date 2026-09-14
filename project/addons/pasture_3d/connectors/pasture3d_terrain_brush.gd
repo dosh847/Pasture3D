@@ -945,7 +945,7 @@ func _get_property_list() -> Array[Dictionary]:
 			"name": "bake_scale",
 			"type": TYPE_INT,
 			"hint": PROPERTY_HINT_ENUM,
-			"hint_string": "1x,2x,4x",
+			"hint_string": _bake_scale_hint(),
 			"usage": PROPERTY_USAGE_DEFAULT,
 		})
 		props.append({
@@ -5065,9 +5065,10 @@ var live_preview_resolution: int = 0:
 ## grid, so its channels form in different places than at 1x. The brush outline and falloff stay full
 ## resolution. Refused when the stack holds an Erosion or Smooth modifier; Noise/Relief are capped so
 ## the finest period keeps PERIOD_SAMPLES_MIN samples. GDScript-rasteriser brushes ignore it.
+## The index is log2 of the factor. Brushes offer up to 4x; the Layer brush also offers 8x and 16x.
 var bake_scale: int = 0:
 	set(v):
-		v = clampi(v, 0, 2)
+		v = clampi(v, 0, _max_bake_scale_index())
 		if v == bake_scale:
 			return
 		bake_scale = v
@@ -5081,9 +5082,23 @@ func _effective_bake_scale() -> int:
 	return int(_bake_scale_report()["scale"])
 
 
+## The coarsest Bake Scale index this host offers (log2 of the factor). A brush's stack spans one feature,
+## so 4x is the limit; the Layer brush overrides it for landscape-wide noise.
+func _max_bake_scale_index() -> int:
+	return 2
+
+
+## The inspector's Bake Scale choices, up to `_max_bake_scale_index()`.
+func _bake_scale_hint() -> String:
+	var names := PackedStringArray()
+	for i in range(_max_bake_scale_index() + 1):
+		names.append("%dx" % (1 << i))
+	return ",".join(names)
+
+
 ## `{scale, requested, blocker, finest}` — the reasoning `_effective_bake_scale` and the warning share.
 func _bake_scale_report() -> Dictionary:
-	var requested := 1 if bake_scale == 0 else (2 if bake_scale == 1 else 4)
+	var requested := 1 << clampi(bake_scale, 0, _max_bake_scale_index())
 	var rep := {"scale": 1, "requested": requested, "blocker": "", "finest": 0.0}
 	if requested == 1 or not _supports_modifiers():
 		return rep

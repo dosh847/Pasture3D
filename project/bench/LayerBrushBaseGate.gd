@@ -16,11 +16,14 @@
 #   [P] a snapped member's points sit on ground + base; control: the read past the base row differs.
 #       A child erosion's flow grid over the base differs from the no-base child; control: a member reading
 #       past the base row (`read_past_base_row`) gives the no-base flow
+#   [BS] Bake Scale 8x/16x on a Layer: the base re-solves on the scale change alone (keyed), runs at 16x and 8x
+#       over a 250 m noise, stays within 0.5 m of 1x and is not bitwise 1x; a 20 m noise caps 16x to 4x.
+#       Control: a Mound's Bake Scale stops at 4x and its inspector offers no 8x
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/LayerBrushBaseGate.tscn
 extends Node
 
-const CRITERIA := 6
+const CRITERIA := 7
 var RS := 64
 
 var _fail := 0
@@ -39,7 +42,7 @@ func _ready() -> void:
 	_terrain.data.ensure_layer_stack()
 	# The terrain may enforce a larger region than asked for; measure over the one it made.
 	RS = _terrain.region_size
-	for f in [_a, _g, _h, _i, _k, _p]:
+	for f in [_a, _g, _h, _i, _k, _p, _bs]:
 		await f.call()
 	if _ran != CRITERIA:
 		_check("completed", false, "%d of %d criteria ran" % [_ran, CRITERIA])
@@ -486,6 +489,51 @@ func _p() -> void:
 	_check("P flow control", past.size() > 0 and past == no_base,
 			"reading past the base row gives the no-base flow: %s (%d cells)" % [past == no_base, past.size()])
 	_drop([flb])
+	await _settle()
+	_ran += 1
+
+
+func _bs() -> void:
+	var lb := _layer("Scaled", true)
+	var nz := lb.modifiers[0] as Pasture3DNodeNoise
+	nz.noise.frequency = 0.004 # 250 m period: 16x keeps 15.6 samples per period, above the cap's 4
+	# One octave, so the tolerance measures interpolation. FastNoiseLite defaults to 5-octave FBM, whose finest
+	# octave (~16 m) a 16 m lattice drops outright (0.78 m here) — detail loss Bake Scale documents, and which
+	# the period cap does not see because it reads the base frequency only.
+	nz.noise.fractal_type = FastNoiseLite.FRACTAL_NONE
+	nz.strength = 8.0
+	await _settle()
+	lb.extent_mode = Pasture3DLayerBrush.ExtentMode.WHOLE_TERRAIN
+	lb.bake_layer()
+	var full := _heights()
+	var c0 := lb.base_solve_count
+	# No key reset: the scale change alone must make the base stale.
+	lb.bake_scale = 4
+	lb.bake_layer()
+	var eff16 := lb._effective_bake_scale()
+	var solved := lb.base_solve_count - c0
+	var s16 := _heights()
+	var worst := 0.0
+	for i in range(full.size()):
+		if is_finite(full[i]) and is_finite(s16[i]):
+			worst = maxf(worst, absf(full[i] - s16[i]))
+	_check("BS 16x", lb.bake_scale == 4 and eff16 == 16 and solved == 1 and s16 != full and worst < 0.5,
+			"index %d, effective %dx, re-solves on the scale change %d, differs from 1x %s, worst %.4f m" % [lb.bake_scale, eff16, solved, s16 != full, worst])
+	lb.bake_scale = 3
+	lb.bake_layer()
+	var s8 := _heights()
+	_check("BS 8x", lb._effective_bake_scale() == 8 and s8 != s16 and s8 != full,
+			"effective %dx, differs from 16x %s and 1x %s" % [lb._effective_bake_scale(), s8 != s16, s8 != full])
+	nz.noise.frequency = 0.05 # 20 m period: 16x would sample it 1.25 times
+	lb.bake_scale = 4
+	var capped := lb._effective_bake_scale()
+	_check("BS cap", capped == 4 and lb._bake_scale_hint().ends_with("16x"),
+			"20 m noise caps 16x to %dx; hint '%s'" % [capped, lb._bake_scale_hint()])
+	var m := _mound(_terrain, "Plain", _square(40, 40, 8))
+	m.bake_scale = 4
+	_check("BS control", m.bake_scale == 2 and not m._bake_scale_hint().contains("8x"),
+			"a Mound clamps index 4 to %d, hint '%s'" % [m.bake_scale, m._bake_scale_hint()])
+	_drop([lb, m])
 	await _settle()
 	_ran += 1
 

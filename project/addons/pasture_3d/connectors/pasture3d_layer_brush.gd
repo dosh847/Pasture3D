@@ -121,6 +121,12 @@ func _supports_modifiers() -> bool:
 	return true
 
 
+## Bake Scale reaches 8x and 16x here. A Layer's stack spans the landscape, and its large-feature noise still
+## gets enough samples per period at those spacings; the PERIOD_SAMPLES_MIN cap still steps a finer one down.
+func _max_bake_scale_index() -> int:
+	return 4
+
+
 ## ---- Stage 1: the base (§6.1, phase 3) ------------------------------------------------------------------
 
 ## Append only: the int is stored.
@@ -693,7 +699,8 @@ func _base_inputs() -> Dictionary:
 	var inp := {"row": row, "vs": vs, "box": box}
 	var h := HashingContext.new()
 	h.start(HashingContext.HASH_MD5)
-	h.update(("%d|%s" % [extent_mode, str(_modifier_signature())]).to_utf8_buffer())
+	# The effective Bake Scale changes the result, so it is part of what the base is a function of.
+	h.update(("%d|%s|%d" % [extent_mode, str(_modifier_signature()), _effective_bake_scale()]).to_utf8_buffer())
 	if extent_mode == ExtentMode.WHOLE_REGION:
 		# The SORTED valid selection (§7.1): a reordered list is the same base.
 		h.update(str(_selection_raw if key_unsorted_selection else _valid_selection()).to_utf8_buffer())

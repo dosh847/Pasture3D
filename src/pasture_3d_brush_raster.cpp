@@ -483,7 +483,7 @@ bool brush_mod_build(const Dictionary &p_params, std::vector<BrushModStep> &r_st
 			Object *obj = d.get("noise", Variant());
 			st.noise = Object::cast_to<FastNoiseLite>(obj);
 			st.strength = d.get("strength", 0.0);
-			st.bake_scale = CLAMP((int)d.get("bake_scale", 1), 1, 4);
+			st.bake_scale = CLAMP((int)d.get("bake_scale", 1), 1, 16);
 			if (st.noise.is_null() || st.strength == 0.0) {
 				continue;
 			}
@@ -491,7 +491,7 @@ bool brush_mod_build(const Dictionary &p_params, std::vector<BrushModStep> &r_st
 			st.kind = BrushModStep::RELIEF;
 			st.strength = d.get("strength", 0.0);
 			st.mat_strength = d.get("mat_strength", 1.0);
-			st.bake_scale = CLAMP((int)d.get("bake_scale", 1), 1, 4);
+			st.bake_scale = CLAMP((int)d.get("bake_scale", 1), 1, 16);
 			if (st.strength == 0.0) {
 				continue;
 			}
@@ -536,7 +536,8 @@ bool brush_mod_build(const Dictionary &p_params, std::vector<BrushModStep> &r_st
 			st.frozen = d.get("frozen", false);
 			st.defer = d.get("defer", false);
 			st.serve_stale = d.get("serve_stale", true);
-			st.preview_scale = CLAMP((int)d.get("preview_scale", 1), 1, 4);
+			// 16, not 4: a Layer brush's Bake Scale reaches 16x, and a graph step solves at max(preview, bake).
+			st.preview_scale = CLAMP((int)d.get("preview_scale", 1), 1, 16);
 			st.cache_key = d.get("cache_key", (int64_t)0);
 			st.cache = d.get("cache", PackedFloat32Array());
 			st.cache_flow = d.get("cache_flow", PackedFloat32Array());
@@ -567,7 +568,8 @@ bool brush_mod_build(const Dictionary &p_params, std::vector<BrushModStep> &r_st
 			st.frozen = d.get("frozen", false);
 			st.defer = d.get("defer", false);
 			st.serve_stale = d.get("serve_stale", true);
-			st.preview_scale = CLAMP((int)d.get("preview_scale", 1), 1, 4);
+			// 16, not 4: a Layer brush's Bake Scale reaches 16x, and a graph step solves at max(preview, bake).
+			st.preview_scale = CLAMP((int)d.get("preview_scale", 1), 1, 16);
 			st.cache_key = d.get("cache_key", (int64_t)0);
 			st.cache = d.get("cache", PackedFloat32Array());
 			st.has_out = d.has("out");

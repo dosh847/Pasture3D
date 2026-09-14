@@ -496,6 +496,13 @@ base being the row directly beneath (§3.1), so adjacency is an invariant, not a
    repass, because pass 1 records the key with the un-solved base. `work_log` is the order LB-L reads.
    Deviation: any deferrable work on the Layer or a member now makes the whole Layer the run, so a member
    edit under a Live Layer stack re-checks stage 1 (a key hit skips it) before its own bake.
+   **Bake Scale 8x and 16x (2026-09-14).** The Layer brush offers Bake Scale 1x–16x through
+   `_max_bake_scale_index()`; other brushes still stop at 4x. This makes landscape-wide, large-feature noise
+   cheaper to edit. The native step clamps for `bake_scale` and `preview_scale` are raised from 4 to 16.
+   The effective scale is part of the base key, so changing Bake Scale alone re-solves the base. Gated in
+   `LayerBrushBaseGate` [BS], with a Mound as the control: it clamps to 4x and offers no 8x. Known limit:
+   `PERIOD_SAMPLES_MIN` reads a noise's base frequency, not its fractal octaves. A 5-octave FBM at 16x
+   therefore loses its finest octaves without being capped (0.78 m of 8 m strength at a 250 m period).
 
 ---
 
