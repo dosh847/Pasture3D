@@ -185,6 +185,9 @@ var profile_from_aabbs: bool = false
 
 ## Click a region in the viewport to toggle it; drag to paint. Esc or deselecting the node exits.
 @export_tool_button("Select Regions") var _select_regions_btn = toggle_select_regions
+## Shown in place of Select Regions while the tool is on: press it to stop selecting. The two buttons swap in
+## `_validate_property`, so the inspector always says which state the tool is in.
+@export_tool_button("Done Selecting Regions") var _stop_select_regions_btn = toggle_select_regions
 
 ## True while the viewport Select Regions interaction is active. Not stored.
 var select_regions_active: bool = false
@@ -298,6 +301,12 @@ func set_select_regions_active(p_on: bool) -> void:
 		return
 	select_regions_active = p_on
 	_update_region_overlay()
+	# Swap Select Regions / Done Selecting Regions in the inspector.
+	notify_property_list_changed()
+	if Engine.is_editor_hint() and is_inside_tree():
+		EditorInterface.get_editor_toaster().push_toast(
+				"Select Regions on: click or drag regions, then press Done Selecting Regions (or Esc)." if p_on
+				else "Select Regions off.", EditorToaster.SEVERITY_INFO)
 	select_regions_toggled.emit(p_on)
 
 
@@ -629,7 +638,11 @@ func _validate_property(property: Dictionary) -> void:
 	# Whole Terrain has nothing beyond it to skirt into (§7.1).
 	if property.name == "modifier_margin" and extent_mode == ExtentMode.WHOLE_TERRAIN:
 		property.usage &= ~PROPERTY_USAGE_EDITOR
-	if property.name in ["selected_regions", "_select_regions_btn"] and extent_mode != ExtentMode.WHOLE_REGION:
+	if property.name in ["selected_regions", "_select_regions_btn", "_stop_select_regions_btn"] and extent_mode != ExtentMode.WHOLE_REGION:
+		property.usage &= ~PROPERTY_USAGE_EDITOR
+	if property.name == "_select_regions_btn" and select_regions_active:
+		property.usage &= ~PROPERTY_USAGE_EDITOR
+	if property.name == "_stop_select_regions_btn" and not select_regions_active:
 		property.usage &= ~PROPERTY_USAGE_EDITOR
 
 
