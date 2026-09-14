@@ -174,7 +174,11 @@ var _timer: SceneTreeTimer = null
 var _full_dirty: bool = false   # A queued refresh needs the whole layer (param/transform/structural change)
 var _dirty_splines: Dictionary = {} # Path3D instance_id -> true: splines whose curve changed (partial redraw)
 var _moved_node: bool = false   # A queued refresh is a node-transform move (dirty-rect, but re-snap all points)
-var _arm_gen: int = 0           # Bumped by every scheduler; lets a layer bake tell "armed before me" from "armed during me"
+var _arm_gen: int = 0
+
+## The tile-grown box the last `_refresh_owner_rect` cleared and repainted. Read by RectBakeJunctionGate to
+## know which junctions a partial bake could have touched; nothing in the bake path reads it.
+var _last_rect_clip: AABB = AABB()           # Bumped by every scheduler; lets a layer bake tell "armed before me" from "armed during me"
 var _last_baked_xform: Transform3D = Transform3D() # Global xform baked into the terrain; guards no-op transform refreshes (tab-switch churn)
 var _clip_aabb: AABB = AABB()   # When non-empty, _paint_* writes only cells inside this world box (dirty-rect)
 var _defer_composite: bool = false # When true, _paint_* write samples without compositing (caller composites the box once)
@@ -1793,6 +1797,22 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 		s._defer_composite = false
 		s._clip_aabb = AABB()
 		painted += 1
+	_last_rect_clip = clip_box
+	# Which layer-mates this partial bake repainted and which it skipped, and the box it CLEARED. The clear
+	# drops whole tiles on every affiliated layer, while the repaint is gated on each mate's spline footprint,
+	# so a mate whose paint reaches into the box without its footprint doing so is erased until a full bake.
+	# A junction reverting between resolves (Road+Road1@96,-1, trace 2026-09-13) is only explicable with both.
+	if Pasture3DBakeTrace.enabled:
+		var repainted := PackedStringArray()
+		for s in painted_tools:
+			repainted.append(String(s.name))
+		var skipped := PackedStringArray()
+		for s in _tools_on_owner(owner):
+			if not painted_tools.has(s):
+				skipped.append(String(s.name))
+		Pasture3DBakeTrace.mark("%s rect bake: cleared x[%.1f..%.1f] z[%.1f..%.1f] (tiles of %.1f m); repainted [%s]; skipped, footprint outside box [%s]" % [
+				name, clip_box.position.x, clip_box.end.x, clip_box.position.z, clip_box.end.z,
+				_layer_tile_world(layer_id), ", ".join(repainted), ", ".join(skipped)])
 	var t_paint := Time.get_ticks_usec()
 	# Composite the whole footprint ONCE instead of per painted pixel — the big win for large edits.
 	terrain.data.composite_area(clip_box, false)
