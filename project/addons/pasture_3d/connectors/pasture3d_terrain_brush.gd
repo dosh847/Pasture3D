@@ -1343,7 +1343,10 @@ func _on_refresh_timer() -> void:
 			else _refresh_owner_rect.bind(_layer_owner, splines, moved_node, boxes, stack_changed))
 	# §14. Both bake paths go through the same driver, because either can be the one that has no cache
 	# yet: dragging a spline on a freshly created Mound reaches the dirty-rect path first.
-	if _wants_deferred_bake():
+	var run_host := _layer_run_host()
+	if run_host != null:
+		await run_host.bake_layer_run(false, self, bake)
+	elif _wants_deferred_bake():
 		await _bake_deferred(bake, _layer_owner, false)
 	else:
 		bake.call()
@@ -1377,6 +1380,10 @@ func refresh(record_undo: bool = false) -> void:
 		_fitting = true
 		auto_fit_loop_now(true)
 		_fitting = false
+	var run_host := _layer_run_host()
+	if run_host != null:
+		await run_host.bake_layer_run(record_undo, self)
+		return
 	if _wants_deferred_bake():
 		await _bake_deferred(_refresh_owner.bind(_layer_owner, false, []), _layer_owner, record_undo)
 		return
@@ -1555,17 +1562,36 @@ func _wants_deferred_bake() -> bool:
 	if not is_inside_tree():
 		return false # `_solve_on_worker` yields on the scene tree, and a detached node has none
 	for s in _tools_on_owner(_layer_owner):
-		if not is_instance_valid(s):
-			continue
-		# Live as well as Frozen: a Live erosion solves on the worker too.
-		for m in s.erosion_modifiers():
-			if m.is_active():
-				return true
-		if s._has_growing_relief():
-			return true
-		if s._has_graph_modifier():
+		if is_instance_valid(s) and s._stack_defers():
 			return true
 	return false
+
+
+## True when this brush's own stack holds work the driver solves off the main thread.
+func _stack_defers() -> bool:
+	# Live as well as Frozen: a Live erosion solves on the worker too.
+	for m in erosion_modifiers():
+		if m.is_active():
+			return true
+	return _has_growing_relief() or _has_graph_modifier()
+
+
+## `_wants_deferred_bake` without the editor gate: whether any tool on this owner has deferrable work.
+func _stack_defers_on_owner() -> bool:
+	if _erosion_running or not is_inside_tree():
+		return false
+	for s in _tools_on_owner(_layer_owner):
+		if is_instance_valid(s) and s._stack_defers():
+			return true
+	return false
+
+
+## The Layer brush that owns a deferred run of this member's bake (§9), or null to run it here.
+func _layer_run_host() -> Node:
+	if not _layer_owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
+		return null
+	var host := _layer_brush_for_owner(_layer_owner)
+	return host if host != null and host._wants_deferred_bake() else null
 
 
 ## True when any relief modifier here carries a material with an expensive build in it (a DLA, at any

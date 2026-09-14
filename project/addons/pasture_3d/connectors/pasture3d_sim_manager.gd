@@ -1513,7 +1513,8 @@ func _eroding_owner_plan(p_brushes: Array) -> Array:
 	var order: Array = []
 	var seen := {}
 	for b in p_brushes:
-		var owner: String = b._layer_owner
+		# A Layer brush is planned under the owner its members share: the Layer is the unit of work (§9).
+		var owner: String = b.layer_owner_id() if b is Pasture3DLayerBrush else b._layer_owner
 		if not seen.has(owner):
 			seen[owner] = {"owner": owner, "brushes": []}
 			order.append(seen[owner])
@@ -1619,6 +1620,22 @@ func _bake_all_step(p_ctx: Dictionary, p_index: int) -> void:
 		# Bake All is never a preview: full resolution until the brush is next edited.
 		b._preview_full_res = true
 		b._stamp_cache.clear()
+	# A Layer brush's owner is baked as a Layer (§9): its base re-solves once, then its members over it.
+	var host: Pasture3DLayerBrush = null
+	if owner.begins_with(Pasture3DTerrainBrush.LAYER_BRUSH_OWNER_PREFIX):
+		host = (brushes[0] as Pasture3DTerrainBrush)._layer_brush_for_owner(owner) as Pasture3DLayerBrush
+	if host != null:
+		host._base_key = ""
+		host.work_log.append("clear")
+		if bool(p_ctx.get("deferred", false)) and host._wants_deferred_bake():
+			_bake_all_brush = host
+			await host.bake_layer_run(false)
+			_bake_all_brush = null
+		else:
+			host.bake_layer(false)
+		p_ctx["after"][owner] = _snapshot_owner(owner)
+		p_ctx["baked"] = int(p_ctx["baked"]) + brushes.size()
+		return
 	# `_refresh_owner` is the brush's own layer bake — clear the layer, repaint every tool bound to it,
 	# one GPU push. Called with record_undo FALSE: this run is one action, not one per layer.
 	var lead: Pasture3DTerrainBrush = brushes[0]

@@ -479,6 +479,14 @@ base being the row directly beneath (§3.1), so adjacency is an invariant, not a
    editor.
 4. **Driver and Bake All.** Base-before-children phase ordering in the deferred run, registry. Gates LB-L,
    LB-S.
+   **Built (2026-09-14)**, gated by `bench/LayerBrushDriverGate.tscn` (L, S; both with controls).
+   `Pasture3DLayerBrush.bake_layer_run` runs stage 1 through its own `_bake_deferred` (so LIVE_ROUNDS
+   applies per stage), commits, then runs the members' driver; a member's refresh routes there through
+   `_layer_run_host`, keeping its rect bake for stage 2. Bake All plans a Layer under its members' owner,
+   invalidates `_base_key`, and bakes the owner as a Layer. `bake_base` ignores a matching key on a driver
+   repass, because pass 1 records the key with the un-solved base. `work_log` is the order LB-L reads.
+   Deviation: any deferrable work on the Layer or a member now makes the whole Layer the run, so a member
+   edit under a Live Layer stack re-checks stage 1 (a key hit skips it) before its own bake.
 
 ---
 

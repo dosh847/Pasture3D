@@ -419,24 +419,131 @@ func _ready_flip_check() -> void:
 func bake_layer(p_record_undo: bool = false) -> void:
 	if not is_configured():
 		return
+	var owner := layer_owner_id()
+	var can_undo := p_record_undo and _editor_undo() != null
+	var before: Dictionary = _snapshot_owner(owner) if can_undo else {}
 	var mem := members()
-	if not mem.is_empty():
-		mem[0]._refresh_owner(layer_owner_id(), p_record_undo, [])
-		return
-	_clear_region_edited_flags()
-	if bake_base():
-		terrain.data.update_maps(PASTURE_3D_MAPTYPE_HEIGHT, false, false)
+	if children_before_base and not mem.is_empty():
+		_hold_base = true
+		_log_children()
+		mem[0]._refresh_owner(owner, false, [])
+		_hold_base = false
+		_base_pass()
+	else:
+		_base_pass()
+		if not mem.is_empty():
+			_log_children()
+			mem[0]._refresh_owner(owner, false, [])
+	_commit_deferred_undo(owner, before, can_undo)
 
 
 func refresh(record_undo: bool = false) -> void:
 	if not Engine.is_editor_hint() or not is_configured():
+		return
+	if _wants_deferred_bake():
+		await bake_layer_run(record_undo)
 		return
 	bake_layer(record_undo)
 
 
 ## The refresh tick's non-painting branch lands here; a Layer brush has no graph consumers of its own.
 func _refresh_consumers() -> void:
-	bake_layer(false)
+	if _wants_deferred_bake():
+		bake_layer_run(false)
+	else:
+		bake_layer(false)
+
+
+## ---- The run (§9, phase 4) ------------------------------------------------------------------------------
+
+## Stage order, appended by every bake: "clear" (Bake All), "base_solve" per stage-1 solve pass,
+## "base_commit" when stage 1 is done, "child:<name>" per member bake pass. Gates read it; not persisted.
+var work_log: Array[String] = []
+## Gate control (LB-L, LB-S): the members bake, and collect their pending solves, before the base commits.
+var children_before_base: bool = false
+## Set while members bake ahead of the base under the control, so their inline `bake_base` writes nothing.
+var _hold_base: bool = false
+var _layer_run_active: bool = false
+
+
+## The Layer is the run owner: its own stack defers, or any member's does.
+func _wants_deferred_bake() -> bool:
+	if not (Engine.is_editor_hint() or force_deferred_erosion):
+		return false
+	if _erosion_running or _layer_run_active or _task_id != -1 or not is_inside_tree():
+		return false
+	if _stack_defers():
+		return true
+	for mbr in members():
+		if is_instance_valid(mbr) and mbr._stack_defers():
+			return true
+	return false
+
+
+## One deferred run over the Layer (§9). Stage 1 runs its whole driver (LIVE_ROUNDS included) and commits
+## before any member's pass 1, so every member solve reads THIS run's base. `p_lead` and `p_member_bake` are
+## the member that asked and its bake (full or rect); by default the first member bakes the whole owner.
+func bake_layer_run(p_record_undo: bool = false, p_lead: Node = null, p_member_bake: Callable = Callable()) -> void:
+	if not is_configured() or _layer_run_active or _erosion_running:
+		return
+	_layer_run_active = true
+	var owner := layer_owner_id()
+	var can_undo := p_record_undo and _editor_undo() != null
+	var before: Dictionary = _snapshot_owner(owner) if can_undo else {}
+	var mem := members()
+	var lead: Node = p_lead if p_lead != null else (mem[0] if not mem.is_empty() else null)
+	var bake := p_member_bake
+	if not bake.is_valid() and lead != null:
+		bake = lead._refresh_owner.bind(owner, false, [])
+	_cancel = false
+	if children_before_base and lead != null:
+		_hold_base = true
+		await _run_members(lead, bake, owner)
+		_hold_base = false
+		await _run_base()
+	else:
+		await _run_base()
+		if not _cancel and lead != null and is_instance_valid(lead):
+			await _run_members(lead, bake, owner)
+	_layer_run_active = false
+	_commit_deferred_undo(owner, before, can_undo)
+
+
+func cancel_erosion() -> void:
+	_cancel = true
+	super()
+	for mbr in members():
+		if is_instance_valid(mbr):
+			mbr.cancel_erosion()
+
+
+func _run_base() -> void:
+	if _stack_defers():
+		await _bake_deferred(_base_pass, base_owner_id(), false)
+	else:
+		_base_pass()
+	work_log.append("base_commit")
+
+
+func _base_pass() -> void:
+	_clear_region_edited_flags()
+	if bake_base():
+		terrain.data.update_maps(PASTURE_3D_MAPTYPE_HEIGHT, false, false)
+
+
+func _run_members(p_lead: Node, p_bake: Callable, p_owner: String) -> void:
+	var logged := func() -> void:
+		_log_children()
+		p_bake.call()
+	if p_lead._stack_defers_on_owner():
+		await p_lead._bake_deferred(logged, p_owner, false)
+	else:
+		logged.call()
+
+
+func _log_children() -> void:
+	for mbr in members():
+		work_log.append("child:%s" % mbr.name)
 
 
 func base_is_stale() -> bool:
@@ -446,12 +553,16 @@ func base_is_stale() -> bool:
 
 ## Run stage 1 when its key changed. True when the base row was rewritten.
 func bake_base() -> bool:
+	if _hold_base:
+		last_base_decision = "held"
+		return false
 	ensure_rows()
 	_connect_region_signal()
 	var inp := _base_inputs()
 	if inp.is_empty():
 		return false
-	if inp["key"] == _base_key:
+	# A driver repass must run even on a matching key: pass 1 recorded the key with the un-solved base.
+	if inp["key"] == _base_key and not _deferred_repass:
 		last_base_decision = "skip"
 		return false
 	var row: int = inp["row"]
@@ -469,6 +580,7 @@ func bake_base() -> bool:
 	else:
 		last_base_decision = "solve"
 		base_solve_count += 1
+		work_log.append("base_solve")
 		_solve_base(inp)
 	if clear.size != Vector3.ZERO:
 		terrain.data.composite_area(clear, false)
