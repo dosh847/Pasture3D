@@ -1228,6 +1228,240 @@ void Pasture3DData::_apply_control_block(Pasture3DLayer *p_layer, const int p_mi
 }
 
 // ---- Closed-loop dome/plateau (Pasture3DMound) ----
+// ---- The modifier step loop, shared by every host that runs a stack over a grid ----
+//
+// Extracted from stamp_mound_loop so the Layer brush (PASTURE3D_LAYER_BRUSH_SPEC.md §7.3) runs THE SAME loop
+// over grids it supplies, rather than a second implementation of it. What differs between hosts is only where
+// the 0..1 profile comes from, so that is what they pass in:
+//
+//   `p_point_pr(i)`  the mask a generator run (Noise / Relief, and the bake-scale lattice) multiplies by at
+//                    cell i. Called only where amp[i] is finite, in the same place the fused loop computed it,
+//                    so a Mound bake is bitwise what it was (gate LB-B).
+//   `p_graph_profile(fmode, custom_fw, custom_lut, gprofile)`  fills a GRAPH step's feather mask.
+//
+// On return `r_vals` holds the finished grid (a delta under ADD, an absolute target otherwise), NaN where
+// nothing is written. Margin restoration and the final write stay with the host.
+struct BrushStepFrame {
+	double fit_cx = 0.0;
+	double fit_cz = 0.0;
+	double fit_cos = 1.0;
+	double fit_sin = 0.0;
+	double inv_ex = 1.0;
+	double inv_ez = 1.0;
+};
+
+template <typename PointPr, typename GraphProfile>
+static void brush_run_step_loop(std::vector<BrushModStep> &steps, std::vector<double> &amp,
+		const std::vector<float> &basey, std::vector<float> &vals, const bool add, const int gw, const int gh,
+		const double vs, const double min_x, const double min_z, ReliefFields &fields, ReliefFields &host_fields,
+		const BrushStepFrame &p_frame, const PointPr &p_point_pr, const GraphProfile &p_graph_profile) {
+	const double fit_cx = p_frame.fit_cx;
+	const double fit_cz = p_frame.fit_cz;
+	const double fit_cos = p_frame.fit_cos;
+	const double fit_sin = p_frame.fit_sin;
+	const double inv_ex = p_frame.inv_ex;
+	const double inv_ez = p_frame.inv_ez;
+	const size_t n = (size_t)gw * gh;
+	bool in_vals = false;
+	size_t si = 0;
+	while (si < steps.size()) {
+		if (steps[si].capture) {
+			// The brush's own contribution in metres, which is what a seeded material wants: it is the
+			// SHAPE, independent of whatever ground the brush was dropped on, so the ridges it finds are
+			// the ones this brush built. Taken from `amp` rather than `vals` for exactly that reason.
+			if (in_vals) {
+				for (size_t k = 0; k < n; k++) {
+					amp[k] = !std::isfinite(vals[k]) ? NAN
+													: (add ? (double)vals[k] : (double)vals[k] - (double)basey[k]);
+				}
+				in_vals = false;
+			}
+			PackedFloat32Array surf;
+			surf.resize((int)n);
+			float *sw = surf.ptrw();
+			for (size_t k = 0; k < n; k++) {
+				sw[k] = (float)amp[k];
+			}
+			steps[si].out["surface"] = surf;
+			steps[si].out["gw"] = gw;
+			steps[si].out["gh"] = gh;
+			steps[si].capture = false; // consumed; fall through and run the step normally
+			continue;
+		}
+		if (!steps[si].field) {
+			// Fold the maximal RUN of point modifiers into one pass over the grid.
+			// The run stops in front of a CAPTURE as well as in front of a field step: a capture on a
+			// step in the MIDDLE of a run would otherwise never be examined, because the fold jumps the
+			// whole run in one go and only the first step is ever tested.
+			size_t sj = si + 1;
+			while (sj < steps.size() && !steps[sj].field && !steps[sj].capture) {
+				sj++;
+			}
+			if (in_vals) {
+				for (size_t k = 0; k < n; k++) {
+					amp[k] = !std::isfinite(vals[k]) ? NAN : (add ? (double)vals[k] : (double)vals[k] - (double)basey[k]);
+				}
+				in_vals = false;
+			}
+			// ---- BAKE SCALE ----
+			//
+			// Every term of the run is `strength × value × pr`, and only `value` is worth sampling coarsely:
+			// `pr` is the brush's own falloff and the rim is exactly where coarse sampling would show. So the
+			// run's summed value (without `pr`) is evaluated on a lattice of REAL cells — which keeps every
+			// selector reading its exact field index — interpolated bilinearly, and multiplied by the per-cell
+			// `pr`. The lattice always includes the last row and column, so nothing is extrapolated. Scale 1
+			// never enters this branch: it sums the terms in a different order, and the default must stay
+			// bitwise what it was.
+			const int bs = steps[si].bake_scale;
+			if (bs > 1 && gw > bs && gh > bs) {
+				const int lw = (gw - 1 + bs - 1) / bs + 1;
+				const int lh = (gh - 1 + bs - 1) / bs + 1;
+				std::vector<double> lat((size_t)lw * lh, 0.0);
+				Pasture3DThreadPool::parallel_for_rows(lh, 4, [&](int l0, int l1) {
+					ReliefSample ground;
+					for (int cz = l0; cz < l1; cz++) {
+						const int iz = MIN(cz * bs, gh - 1);
+						const double z = min_z + iz * vs;
+						for (int cx = 0; cx < lw; cx++) {
+							const int ix = MIN(cx * bs, gw - 1);
+							const double x = min_x + ix * vs;
+							const int i = iz * gw + ix;
+							double r = 0.0;
+							for (size_t k = si; k < sj; k++) {
+								const BrushModStep &st = steps[k];
+								if (st.kind == BrushModStep::NOISE) {
+									r += st.strength * st.noise->get_noise_2d(x, z);
+								} else {
+									const double dx = x - fit_cx;
+									const double dz = z - fit_cz;
+									const double lx = dx * fit_cos + dz * fit_sin;
+									const double lz = -dx * fit_sin + dz * fit_cos;
+									fields.sample(i, ground);
+									host_fields.sample_host(i, ground);
+									r += st.strength * relief_eval(st.prog, x, z, lx * inv_ex, lz * inv_ez,
+											inv_ex, inv_ez, ground) * st.mat_strength;
+								}
+							}
+							lat[(size_t)cz * lw + cx] = r;
+						}
+					}
+				});
+				Pasture3DThreadPool::parallel_for_rows(gh, 16, [&](int z0, int z1) {
+					for (int iz = z0; iz < z1; iz++) {
+						const int cz0 = MIN(iz / bs, lh - 2);
+						const int zlo = cz0 * bs;
+						const int zhi = MIN((cz0 + 1) * bs, gh - 1);
+						const double tz = zhi > zlo ? (double)(iz - zlo) / (double)(zhi - zlo) : 0.0;
+						const int row = iz * gw;
+						for (int ix = 0; ix < gw; ix++) {
+							const int i = row + ix;
+							if (std::isnan(amp[i])) {
+								continue;
+							}
+							const double pr = p_point_pr(i);
+							const int cx0 = MIN(ix / bs, lw - 2);
+							const int xlo = cx0 * bs;
+							const int xhi = MIN((cx0 + 1) * bs, gw - 1);
+							const double tx = xhi > xlo ? (double)(ix - xlo) / (double)(xhi - xlo) : 0.0;
+							const double top = lat[(size_t)cz0 * lw + cx0] * (1.0 - tx) + lat[(size_t)cz0 * lw + cx0 + 1] * tx;
+							const double bot = lat[(size_t)(cz0 + 1) * lw + cx0] * (1.0 - tx) + lat[(size_t)(cz0 + 1) * lw + cx0 + 1] * tx;
+							amp[i] = amp[i] + (top * (1.0 - tz) + bot * tz) * pr;
+						}
+					}
+				});
+				si = sj;
+				continue;
+			}
+			// Each cell's `a` depends on that cell alone, so the rows split across threads. The only state
+			// the fused loop shared was `ground`, and it carries nothing from cell to cell: `sample` and
+			// `sample_host` rewrite every member either of them ever sets, before every read. One sample
+			// per chunk is therefore the serial loop's sample, cell for cell.
+			Pasture3DThreadPool::parallel_for_rows(gh, 16, [&](int z0, int z1) {
+				ReliefSample ground;
+				for (int iz = z0; iz < z1; iz++) {
+					const double z = min_z + iz * vs;
+					const int row = iz * gw;
+					for (int ix = 0; ix < gw; ix++) {
+						const int i = row + ix;
+						if (std::isnan(amp[i])) {
+							continue;
+						}
+						const double x = min_x + ix * vs;
+						const double pr = p_point_pr(i);
+						double a = amp[i];
+						for (size_t k = si; k < sj; k++) {
+							const BrushModStep &st = steps[k];
+							if (st.kind == BrushModStep::NOISE) {
+								a += st.strength * st.noise->get_noise_2d(x, z) * pr;
+							} else {
+								// Loop-local metres, then the same point normalised to the frame's
+								// half-extents — TILE evaluates the ops in world XZ, so only nu,nv come
+								// from the frame.
+								const double dx = x - fit_cx;
+								const double dz = z - fit_cz;
+								const double lx = dx * fit_cos + dz * fit_sin;
+								const double lz = -dx * fit_sin + dz * fit_cos;
+								// Below-layer first, host second: `sample` blank-slates the whole struct,
+								// so filling the host half before it would silently discard it.
+								fields.sample(i, ground);
+								host_fields.sample_host(i, ground);
+								const double rv = relief_eval(st.prog, x, z, lx * inv_ex, lz * inv_ez,
+										inv_ex, inv_ez, ground);
+								a += st.strength * rv * pr * st.mat_strength;
+							}
+						}
+						amp[i] = a;
+					}
+				}
+			});
+			si = sj;
+			continue;
+		}
+		if (!in_vals) {
+			for (size_t k = 0; k < n; k++) {
+				vals[k] = !std::isfinite(amp[k]) ? (float)NAN : (float)(add ? amp[k] : (double)basey[k] + amp[k]);
+			}
+			in_vals = true;
+		}
+		if (steps[si].kind == BrushModStep::SMOOTH) {
+			graph_nan_blur(vals, gw, gh, steps[si].passes);
+		} else if (steps[si].kind == BrushModStep::EROSION) {
+			const int ps = steps[si].preview_scale;
+			if (ps > 1 && gw >= 2 * ps && gh >= 2 * ps) {
+				BrushModStep &st = steps[si];
+				brush_preview_field_step(ps, vals, basey, nullptr, gw, gh, vs, min_x, min_z, fields,
+						[&](std::vector<float> &cv, const std::vector<float> &cb, const std::vector<float> &,
+								int cw, int ch, double cvs, double, double, ReliefFields &cf) {
+							brush_mod_erode(st, cv, cb, add, cw, ch, cvs, cf);
+						});
+			} else {
+				brush_mod_erode(steps[si], vals, basey, add, gw, gh, vs, fields);
+			}
+		} else if (steps[si].kind == BrushModStep::GRAPH) {
+			const int fmode = steps[si].graph_feather_mode; // 0=USE_BRUSH_MASK, 1=CUSTOM, 2=OFF
+			std::vector<float> gprofile((size_t)gw * gh, 0.f);
+			p_graph_profile(fmode, MAX(steps[si].graph_custom_falloff_width, 0.001), steps[si].graph_custom_lut, gprofile);
+			const int ps = steps[si].preview_scale;
+			if (ps > 1 && gw >= 2 * ps && gh >= 2 * ps) {
+				BrushModStep &st = steps[si];
+				brush_preview_field_step(ps, vals, basey, &gprofile, gw, gh, vs, min_x, min_z, fields,
+						[&](std::vector<float> &cv, const std::vector<float> &cb, const std::vector<float> &cp,
+								int cw, int ch, double cvs, double cmx, double cmz, ReliefFields &) {
+							brush_mod_graph(st, cv, cb, cp, add, cw, ch, cvs, cmx, cmz);
+						});
+			} else {
+				brush_mod_graph(steps[si], vals, basey, gprofile, add, gw, gh, vs, min_x, min_z);
+			}
+		}
+		si++;
+	}
+	if (!in_vals) {
+		for (size_t k = 0; k < n; k++) {
+			vals[k] = !std::isfinite(amp[k]) ? (float)NAN : (float)(add ? amp[k] : (double)basey[k] + amp[k]);
+		}
+	}
+}
+
 void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Array &p_poly, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut) {
 	if (p_poly.size() < 3) {
 		return;
@@ -1589,253 +1823,57 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	// once, at the same point the hard-coded pipeline did — which is what makes gate BW's bitwise
 	// comparison a fair question rather than a tolerance dressed up as one.
 	const size_t n = (size_t)gw * gh;
-	bool in_vals = false;
-	size_t si = 0;
-	while (si < steps.size()) {
-		if (steps[si].capture) {
-			// The brush's own contribution in metres, which is what a seeded material wants: it is the
-			// SHAPE, independent of whatever ground the brush was dropped on, so the ridges it finds are
-			// the ones this brush built. Taken from `amp` rather than `vals` for exactly that reason.
-			if (in_vals) {
-				for (size_t k = 0; k < n; k++) {
-					amp[k] = !std::isfinite(vals[k]) ? NAN
-													: (add ? (double)vals[k] : (double)vals[k] - (double)basey[k]);
+	const BrushStepFrame frame{ fit_cx, fit_cz, fit_cos, fit_sin, inv_ex, inv_ez };
+	brush_run_step_loop(steps, amp, basey, vals, add, gw, gh, vs, min_x, min_z, fields, host_fields, frame,
+			[&](const int i) -> double {
+				// The ramp TRANSLATED OUTWARD by the margin (§6.8.1); `modifier_margin` is 0 without one, which makes
+				// this the historical expression.
+				double pr = 0.0;
+				double unused = 0.0;
+				if (!host_profile_at((double)field[i] + edge_offset + modifier_margin, unused, pr)) {
+					pr = 0.0; // host_profile_at leaves `pr` untouched when it declines the cell
 				}
-				in_vals = false;
-			}
-			PackedFloat32Array surf;
-			surf.resize((int)n);
-			float *sw = surf.ptrw();
-			for (size_t k = 0; k < n; k++) {
-				sw[k] = (float)amp[k];
-			}
-			steps[si].out["surface"] = surf;
-			steps[si].out["gw"] = gw;
-			steps[si].out["gh"] = gh;
-			steps[si].capture = false; // consumed; fall through and run the step normally
-			continue;
-		}
-		if (!steps[si].field) {
-			// Fold the maximal RUN of point modifiers into one pass over the grid.
-			// The run stops in front of a CAPTURE as well as in front of a field step: a capture on a
-			// step in the MIDDLE of a run would otherwise never be examined, because the fold jumps the
-			// whole run in one go and only the first step is ever tested.
-			size_t sj = si + 1;
-			while (sj < steps.size() && !steps[sj].field && !steps[sj].capture) {
-				sj++;
-			}
-			if (in_vals) {
-				for (size_t k = 0; k < n; k++) {
-					amp[k] = !std::isfinite(vals[k]) ? NAN : (add ? (double)vals[k] : (double)vals[k] - (double)basey[k]);
-				}
-				in_vals = false;
-			}
-			// ---- BAKE SCALE ----
-			//
-			// Every term of the run is `strength × value × pr`, and only `value` is worth sampling coarsely:
-			// `pr` is the brush's own falloff and the rim is exactly where coarse sampling would show. So the
-			// run's summed value (without `pr`) is evaluated on a lattice of REAL cells — which keeps every
-			// selector reading its exact field index — interpolated bilinearly, and multiplied by the per-cell
-			// `pr`. The lattice always includes the last row and column, so nothing is extrapolated. Scale 1
-			// never enters this branch: it sums the terms in a different order, and the default must stay
-			// bitwise what it was.
-			const int bs = steps[si].bake_scale;
-			if (bs > 1 && gw > bs && gh > bs) {
-				const int lw = (gw - 1 + bs - 1) / bs + 1;
-				const int lh = (gh - 1 + bs - 1) / bs + 1;
-				std::vector<double> lat((size_t)lw * lh, 0.0);
-				Pasture3DThreadPool::parallel_for_rows(lh, 4, [&](int l0, int l1) {
-					ReliefSample ground;
-					for (int cz = l0; cz < l1; cz++) {
-						const int iz = MIN(cz * bs, gh - 1);
-						const double z = min_z + iz * vs;
-						for (int cx = 0; cx < lw; cx++) {
-							const int ix = MIN(cx * bs, gw - 1);
-							const double x = min_x + ix * vs;
-							const int i = iz * gw + ix;
-							double r = 0.0;
-							for (size_t k = si; k < sj; k++) {
-								const BrushModStep &st = steps[k];
-								if (st.kind == BrushModStep::NOISE) {
-									r += st.strength * st.noise->get_noise_2d(x, z);
-								} else {
-									const double dx = x - fit_cx;
-									const double dz = z - fit_cz;
-									const double lx = dx * fit_cos + dz * fit_sin;
-									const double lz = -dx * fit_sin + dz * fit_cos;
-									fields.sample(i, ground);
-									host_fields.sample_host(i, ground);
-									r += st.strength * relief_eval(st.prog, x, z, lx * inv_ex, lz * inv_ez,
-											inv_ex, inv_ez, ground) * st.mat_strength;
-								}
-							}
-							lat[(size_t)cz * lw + cx] = r;
-						}
-					}
-				});
+				return pr;
+			},
+			[&](const int fmode, const double custom_fw, const PackedFloat32Array &custom_lut, std::vector<float> &gprofile) {
+				const double brush_fw = MAX(falloff_width, 0.001);
+
+				// A pure function of each cell's own signed distance, so the rows split across threads exactly.
 				Pasture3DThreadPool::parallel_for_rows(gh, 16, [&](int z0, int z1) {
 					for (int iz = z0; iz < z1; iz++) {
-						const int cz0 = MIN(iz / bs, lh - 2);
-						const int zlo = cz0 * bs;
-						const int zhi = MIN((cz0 + 1) * bs, gh - 1);
-						const double tz = zhi > zlo ? (double)(iz - zlo) / (double)(zhi - zlo) : 0.0;
 						const int row = iz * gw;
 						for (int ix = 0; ix < gw; ix++) {
 							const int i = row + ix;
-							if (std::isnan(amp[i])) {
+							if (fmode == 2) {
+								// OFF means full strength ACROSS THE LOOP, so the interior is 1 and only the band has
+								// anywhere to fade — already continuous, and translating it would take strength away
+								// from the interior this mode exists to cover.
+								if (margin_active && margin_mask[(size_t)i]) {
+									gprofile[i] = (float)margin_profile_at(i); // the skirt's taper
+									continue;
+								}
+								gprofile[i] = ((double)field[i] + edge_offset) > 0.0 ? 1.f : 0.f;
 								continue;
 							}
-							double pr = 0.0;
-							double unused = 0.0;
-							if (!host_profile_at((double)field[i] + edge_offset + modifier_margin, unused, pr)) {
-								pr = 0.0;
+							// THE FALLOFF STARTS AT THE OUTER EDGE OF THE MODIFIER MARGIN, not at the loop rim: the
+							// margin is added to the signed distance before the ramp reads it (§6.8.1), the same
+							// translation a POINT generator's mask already gets. Reading the band's taper outside the
+							// loop and the un-translated ramp inside it stepped this mask across its FULL RANGE at the
+							// rim, so a graph wrote nothing at the rim and its whole amplitude one cell out — a ring cut
+							// into the band the margin exists to smooth. Twin of Pasture3DTerrainBrush's
+							// `_graph_feather_mask`; at margin 0 it is the historical expression.
+							const double signed_d = (double)field[i] + edge_offset + modifier_margin;
+							if (signed_d <= 0.0) {
+								gprofile[i] = 0.f;
+								continue;
 							}
-							const int cx0 = MIN(ix / bs, lw - 2);
-							const int xlo = cx0 * bs;
-							const int xhi = MIN((cx0 + 1) * bs, gw - 1);
-							const double tx = xhi > xlo ? (double)(ix - xlo) / (double)(xhi - xlo) : 0.0;
-							const double top = lat[(size_t)cz0 * lw + cx0] * (1.0 - tx) + lat[(size_t)cz0 * lw + cx0 + 1] * tx;
-							const double bot = lat[(size_t)(cz0 + 1) * lw + cx0] * (1.0 - tx) + lat[(size_t)(cz0 + 1) * lw + cx0 + 1] * tx;
-							amp[i] = amp[i] + (top * (1.0 - tz) + bot * tz) * pr;
+							// CUSTOM takes custom_falloff_width / custom_lut; USE_BRUSH_MASK the brush's own pair.
+							const float u = (float)CLAMP(signed_d / (fmode == 1 ? custom_fw : brush_fw), 0.0, 1.0);
+							gprofile[i] = (float)raster_ramp(fmode == 1 ? custom_lut : p_lut, u);
 						}
 					}
 				});
-				si = sj;
-				continue;
-			}
-			// Each cell's `a` depends on that cell alone, so the rows split across threads. The only state
-			// the fused loop shared was `ground`, and it carries nothing from cell to cell: `sample` and
-			// `sample_host` rewrite every member either of them ever sets, before every read. One sample
-			// per chunk is therefore the serial loop's sample, cell for cell.
-			Pasture3DThreadPool::parallel_for_rows(gh, 16, [&](int z0, int z1) {
-				ReliefSample ground;
-				for (int iz = z0; iz < z1; iz++) {
-					const double z = min_z + iz * vs;
-					const int row = iz * gw;
-					for (int ix = 0; ix < gw; ix++) {
-						const int i = row + ix;
-						if (std::isnan(amp[i])) {
-							continue;
-						}
-						const double x = min_x + ix * vs;
-						double pr = 0.0;
-						double unused = 0.0;
-						// NOISE and RELIEF are generators, and take the ramp TRANSLATED OUTWARD by the margin
-						// (§6.8.1) so they reach into the band and fade at its outer edge instead of at the rim.
-						// `modifier_margin` is 0 without one, which makes this the historical expression.
-						if (!host_profile_at((double)field[i] + edge_offset + modifier_margin, unused, pr)) {
-							pr = 0.0; // host_profile_at leaves `pr` untouched when it declines the cell
-						}
-						double a = amp[i];
-						for (size_t k = si; k < sj; k++) {
-							const BrushModStep &st = steps[k];
-							if (st.kind == BrushModStep::NOISE) {
-								a += st.strength * st.noise->get_noise_2d(x, z) * pr;
-							} else {
-								// Loop-local metres, then the same point normalised to the frame's
-								// half-extents — TILE evaluates the ops in world XZ, so only nu,nv come
-								// from the frame.
-								const double dx = x - fit_cx;
-								const double dz = z - fit_cz;
-								const double lx = dx * fit_cos + dz * fit_sin;
-								const double lz = -dx * fit_sin + dz * fit_cos;
-								// Below-layer first, host second: `sample` blank-slates the whole struct,
-								// so filling the host half before it would silently discard it.
-								fields.sample(i, ground);
-								host_fields.sample_host(i, ground);
-								const double rv = relief_eval(st.prog, x, z, lx * inv_ex, lz * inv_ez,
-										inv_ex, inv_ez, ground);
-								a += st.strength * rv * pr * st.mat_strength;
-							}
-						}
-						amp[i] = a;
-					}
-				}
 			});
-			si = sj;
-			continue;
-		}
-		if (!in_vals) {
-			for (size_t k = 0; k < n; k++) {
-				vals[k] = !std::isfinite(amp[k]) ? (float)NAN : (float)(add ? amp[k] : (double)basey[k] + amp[k]);
-			}
-			in_vals = true;
-		}
-		if (steps[si].kind == BrushModStep::SMOOTH) {
-			graph_nan_blur(vals, gw, gh, steps[si].passes);
-		} else if (steps[si].kind == BrushModStep::EROSION) {
-			const int ps = steps[si].preview_scale;
-			if (ps > 1 && gw >= 2 * ps && gh >= 2 * ps) {
-				BrushModStep &st = steps[si];
-				brush_preview_field_step(ps, vals, basey, nullptr, gw, gh, vs, min_x, min_z, fields,
-						[&](std::vector<float> &cv, const std::vector<float> &cb, const std::vector<float> &,
-								int cw, int ch, double cvs, double, double, ReliefFields &cf) {
-							brush_mod_erode(st, cv, cb, add, cw, ch, cvs, cf);
-						});
-			} else {
-				brush_mod_erode(steps[si], vals, basey, add, gw, gh, vs, fields);
-			}
-		} else if (steps[si].kind == BrushModStep::GRAPH) {
-			const int fmode = steps[si].graph_feather_mode; // 0=USE_BRUSH_MASK, 1=CUSTOM, 2=OFF
-			const double custom_fw = MAX(steps[si].graph_custom_falloff_width, 0.001);
-			const PackedFloat32Array &custom_lut = steps[si].graph_custom_lut;
-			const double brush_fw = MAX(falloff_width, 0.001);
-
-			std::vector<float> gprofile((size_t)gw * gh, 0.f);
-			// A pure function of each cell's own signed distance, so the rows split across threads exactly.
-			Pasture3DThreadPool::parallel_for_rows(gh, 16, [&](int z0, int z1) {
-				for (int iz = z0; iz < z1; iz++) {
-					const int row = iz * gw;
-					for (int ix = 0; ix < gw; ix++) {
-						const int i = row + ix;
-						if (fmode == 2) {
-							// OFF means full strength ACROSS THE LOOP, so the interior is 1 and only the band has
-							// anywhere to fade — already continuous, and translating it would take strength away
-							// from the interior this mode exists to cover.
-							if (margin_active && margin_mask[(size_t)i]) {
-								gprofile[i] = (float)margin_profile_at(i); // the skirt's taper
-								continue;
-							}
-							gprofile[i] = ((double)field[i] + edge_offset) > 0.0 ? 1.f : 0.f;
-							continue;
-						}
-						// THE FALLOFF STARTS AT THE OUTER EDGE OF THE MODIFIER MARGIN, not at the loop rim: the
-						// margin is added to the signed distance before the ramp reads it (§6.8.1), the same
-						// translation a POINT generator's mask already gets. Reading the band's taper outside the
-						// loop and the un-translated ramp inside it stepped this mask across its FULL RANGE at the
-						// rim, so a graph wrote nothing at the rim and its whole amplitude one cell out — a ring cut
-						// into the band the margin exists to smooth. Twin of Pasture3DTerrainBrush's
-						// `_graph_feather_mask`; at margin 0 it is the historical expression.
-						const double signed_d = (double)field[i] + edge_offset + modifier_margin;
-						if (signed_d <= 0.0) {
-							gprofile[i] = 0.f;
-							continue;
-						}
-						// CUSTOM takes custom_falloff_width / custom_lut; USE_BRUSH_MASK the brush's own pair.
-						const float u = (float)CLAMP(signed_d / (fmode == 1 ? custom_fw : brush_fw), 0.0, 1.0);
-						gprofile[i] = (float)raster_ramp(fmode == 1 ? custom_lut : p_lut, u);
-					}
-				}
-			});
-			const int ps = steps[si].preview_scale;
-			if (ps > 1 && gw >= 2 * ps && gh >= 2 * ps) {
-				BrushModStep &st = steps[si];
-				brush_preview_field_step(ps, vals, basey, &gprofile, gw, gh, vs, min_x, min_z, fields,
-						[&](std::vector<float> &cv, const std::vector<float> &cb, const std::vector<float> &cp,
-								int cw, int ch, double cvs, double cmx, double cmz, ReliefFields &) {
-							brush_mod_graph(st, cv, cb, cp, add, cw, ch, cvs, cmx, cmz);
-						});
-			} else {
-				brush_mod_graph(steps[si], vals, basey, gprofile, add, gw, gh, vs, min_x, min_z);
-			}
-		}
-		si++;
-	}
-	if (!in_vals) {
-		for (size_t k = 0; k < n; k++) {
-			vals[k] = !std::isfinite(amp[k]) ? (float)NAN : (float)(add ? amp[k] : (double)basey[k] + amp[k]);
-		}
-	}
 
 	// The other half of the Modifier Margin (§6.8.1), the twin of the block at the end of
 	// Pasture3DTerrainBrush._run_modifier_stack. A margin cell the stack MOVED keeps its value and
@@ -1876,6 +1914,81 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 			}
 		}
 	}
+}
+
+// ---- Layer brush stack entry (PASTURE3D_LAYER_BRUSH_SPEC.md §7.3) ----
+//
+// Runs the modifier stack over grids the caller built — `basey` the ground, `amp` the starting contribution in
+// metres (NaN = not in play), `profile` the 0..1 mask — through the SAME step loop a Mound uses. Returns the
+// finished grid (NaN where nothing is written); writing it is the caller's business. A Layer has no host shape,
+// so Host Profile selectors read an empty field, and a graph's feather is the supplied profile (1 inside for OFF).
+PackedFloat32Array Pasture3DData::brush_run_stack_on_field(const Dictionary &p_params, const PackedFloat32Array &p_basey,
+		const PackedFloat64Array &p_amp, const PackedFloat64Array &p_profile) {
+	PackedFloat32Array out;
+	const double min_x = p_params.get("min_x", 0.0);
+	const double min_z = p_params.get("min_z", 0.0);
+	const double vs = p_params.get("vs", 1.0);
+	const int gw = (int)p_params.get("gw", 0);
+	const int gh = (int)p_params.get("gh", 0);
+	const size_t n = (size_t)MAX(gw, 0) * (size_t)MAX(gh, 0);
+	if (gw < 1 || gh < 1 || (size_t)p_basey.size() != n || (size_t)p_amp.size() != n || (size_t)p_profile.size() != n) {
+		ERR_PRINT("Pasture3DData::brush_run_stack_on_field: basey, amp and profile must each hold gw * gh cells.");
+		return out;
+	}
+	const bool add = (int)p_params.get("blend", 0) == 1; // BLEND_ADD
+
+	std::vector<BrushModStep> steps;
+	brush_mod_build(p_params, steps);
+	const PackedFloat32Array all_selectors = p_params.get("op_selectors", PackedFloat32Array());
+
+	BrushStepFrame frame;
+	frame.fit_cx = p_params.get("fit_cx", 0.0);
+	frame.fit_cz = p_params.get("fit_cz", 0.0);
+	frame.fit_cos = p_params.get("fit_cos", 1.0);
+	frame.fit_sin = p_params.get("fit_sin", 0.0);
+	frame.inv_ex = 1.0 / MAX((double)p_params.get("fit_ex", 1.0), 0.001);
+	frame.inv_ez = 1.0 / MAX((double)p_params.get("fit_ez", 1.0), 0.001);
+
+	ReliefFields fields;
+	if ((bool)p_params.get("need_fields", false)) {
+		const PackedFloat32Array below = p_params.get("base_below", p_basey);
+		relief_fields_build(below, min_x, min_z, vs, gw, gh,
+				[this](double x, double z) { return (float)get_height(Vector3(x, 0.0, z)); }, fields);
+		const Dictionary sim = p_params.get("sim_result", Dictionary());
+		if (!sim.is_empty()) {
+			relief_fields_add_sim(sim, min_x, min_z, vs, gw, gh, fields);
+		}
+		relief_fields_add_measured(all_selectors, fields, RELIEF_FIELD_BELOW);
+	}
+	ReliefFields host_fields;
+
+	std::vector<double> amp(n);
+	std::vector<float> basey(n);
+	std::vector<double> profile(n);
+	const double *ap = p_amp.ptr();
+	const float *bp = p_basey.ptr();
+	const double *pp = p_profile.ptr();
+	for (size_t k = 0; k < n; k++) {
+		amp[k] = ap[k];
+		basey[k] = bp[k];
+		profile[k] = pp[k];
+	}
+	std::vector<float> vals(n, (float)NAN);
+
+	brush_run_step_loop(steps, amp, basey, vals, add, gw, gh, vs, min_x, min_z, fields, host_fields, frame,
+			[&](const int i) -> double { return profile[(size_t)i]; },
+			[&](const int fmode, const double, const PackedFloat32Array &, std::vector<float> &gprofile) {
+				for (size_t k = 0; k < n; k++) {
+					gprofile[k] = fmode == 2 ? (profile[k] > 0.0 ? 1.f : 0.f) : (float)profile[k];
+				}
+			});
+
+	out.resize((int)n);
+	float *op = out.ptrw();
+	for (size_t k = 0; k < n; k++) {
+		op[k] = vals[k];
+	}
+	return out;
 }
 
 // ---- Open-polyline road grader (Pasture3DRoadBrush) ----

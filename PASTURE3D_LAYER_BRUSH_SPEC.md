@@ -305,8 +305,17 @@ Mound/Plow run the stack inside their rasterise, where `amp`, `basey`, `sdf` and
 the outline. The Layer needs **the same step loop** with those supplied as arrays:
 
 ```
-Pasture3DUtil.brush_run_stack_on_field(ctx, steps, basey, amp, profile, min_x, min_z, vs, gw, gh) -> PackedFloat32Array
+Pasture3DData.brush_run_stack_on_field(params, basey: PackedFloat32Array, amp: PackedFloat64Array, profile: PackedFloat64Array) -> PackedFloat32Array
 ```
+
+**Built (phase 2).** On `Pasture3DData`, not `Pasture3DUtil`: relief fields fall back to `get_height` for NaN
+ground, which needs the data. `params` is the Mound's dictionary shape (grid, `blend`, `modifiers`,
+`op_selectors`, fit frame, `need_fields`, `sim_result`, optional `base_below`). The shared loop is
+`brush_run_step_loop` in `pasture_3d_brush_raster.cpp`, templated on two callbacks: the point-run mask and the
+graph feather. Host Profile selectors read an empty field on a Layer. LB-B lives in
+`bench/LayerBrushStepLoopGate.tscn` and compares against heights recorded by the pre-extraction build. Its
+control is a 1e-4 strength nudge that must move a probe, not a per-modifier fold, which would need a debug
+switch in the kernel.
 
 It reuses the step loop, point-run folding (double precision), selector rebase, deferral, preview_scale and
 bake_scale handling. The one rule is **no second implementation of the step loop**: extract it from
