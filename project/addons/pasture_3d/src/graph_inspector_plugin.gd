@@ -69,6 +69,18 @@ func _bake_trace_row() -> Control:
 	open.pressed.connect(func() -> void:
 		OS.shell_open(ProjectSettings.globalize_path(Pasture3DBakeTrace.REPORT_PATH)))
 	row.add_child(open)
+	# The journal is written as events happen, so after a crash it is the only record. Opened by path rather
+	# than disabled-when-missing, because the file appears on tick, after this row was built.
+	var journal := Button.new()
+	journal.text = "Open Journal"
+	journal.tooltip_text = "Open the live journal (written as events happen, survives an editor crash). " 			+ "After a crash, relaunching and ticking Bake Trace moves it to %s." % Pasture3DBakeTrace.JOURNAL_PREV_PATH
+	journal.pressed.connect(func() -> void:
+		var p := Pasture3DBakeTrace.JOURNAL_PATH
+		if not FileAccess.file_exists(p):
+			push_warning("Pasture3DBakeTrace: no journal yet at %s — tick Bake Trace to start one" % p)
+			return
+		OS.shell_open(ProjectSettings.globalize_path(p)))
+	row.add_child(journal)
 	chk.toggled.connect(func(p_on: bool) -> void:
 		var path := Pasture3DBakeTrace.set_session(p_on)
 		if path != "":

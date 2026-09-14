@@ -24,9 +24,19 @@ var _fail := 0
 var _ran := 0
 var _brush: Pasture3DMound
 
+const GATE_JOURNAL := "user://_baketracegate_journal.txt"
+const GATE_JOURNAL_PREV := "user://_baketracegate_journal_prev.txt"
+## The closing LINE, not the bare phrase: the journal header itself explains "no 'STOPPED CLEANLY' line", and
+## matching the phrase read every live journal as cleanly stopped.
+const CLEAN_STOP := "=== STOPPED CLEANLY at"
+
 
 func _ready() -> void:
 	print("=== BakeTraceGate: bake causality recorder ===\n")
+	# set_session rotates the journal. Pointed away first, or running this gate would move the user's crash
+	# journal to _prev and then overwrite that on the next session call — deleting the one record of a crash.
+	Pasture3DBakeTrace.journal_path = GATE_JOURNAL
+	Pasture3DBakeTrace.journal_prev_path = GATE_JOURNAL_PREV
 	_brush = Pasture3DMound.new()
 	add_child(_brush)
 	_run_all()
@@ -43,6 +53,7 @@ func _run_all() -> void:
 	_e_ring_buffer_evicts()
 	_g_session_toggle_writes_report()
 	_h_bake_begin_records_its_caller()
+	_i_journal_survives_a_crash()
 	_f_report_the_uncovered_half()
 
 
@@ -245,6 +256,50 @@ func _h_bake_begin_records_its_caller() -> void:
 	if not found or not off_stack.is_empty():
 		_fail += 1
 		print("    !! bake_begin did not record the caller, or recorded one with capture off")
+	_ran += 1
+
+
+## [I] A session's events are on disk BEFORE it stops — the editor crashed mid-trace once and the in-memory
+## ring died with it. "Crash" here is reading the journal while the session is still running, with no stop
+## call; a report-on-stop implementation has nothing in the file at that point.
+##   control 1: plain start() (not a session) must not journal, or gates would write user files.
+##   control 2: starting a session again without stopping — the relaunch-after-crash case — must move the
+##              interrupted journal to _prev, not overwrite it.
+func _i_journal_survives_a_crash() -> void:
+	print("[I] the session journal is on disk before stop, and a restart keeps the interrupted one")
+	for p in [GATE_JOURNAL, GATE_JOURNAL_PREV]:
+		if FileAccess.file_exists(p):
+			DirAccess.remove_absolute(ProjectSettings.globalize_path(p))
+	Pasture3DBakeTrace.stop()
+	Pasture3DBakeTrace.start(true)
+	var plain_journals := Pasture3DBakeTrace.is_journaling() or FileAccess.file_exists(GATE_JOURNAL)
+	print("    plain start() journals: %s (want false)" % plain_journals)
+
+	Pasture3DBakeTrace.set_session(true)
+	Pasture3DBakeTrace.mark("gate-I-before-crash")
+	var tok := Pasture3DBakeTrace.bake_begin(_brush, "gate-I-path")
+	Pasture3DBakeTrace.bake_end(tok, 2)
+	var live := FileAccess.get_file_as_string(GATE_JOURNAL)
+	var live_ok := live.contains("gate-I-before-crash") and live.contains("path=gate-I-path") 			and live.contains("(2 tool(s) repainted)") and not live.contains(CLEAN_STOP)
+	print("    mid-session journal has mark, bake, done and no clean-stop line: %s" % live_ok)
+	if not live_ok:
+		print("    read %d byte(s) (exists=%s, open error=%d): mark=%s path=%s done=%s stopped=%s" % [live.length(),
+				FileAccess.file_exists(GATE_JOURNAL), FileAccess.get_open_error(), live.contains("gate-I-before-crash"),
+				live.contains("path=gate-I-path"), live.contains("(2 tool(s) repainted)"), live.contains(CLEAN_STOP)])
+
+	Pasture3DBakeTrace.set_session(true) # relaunch after the crash: no stop in between
+	Pasture3DBakeTrace.mark("gate-I-second-session")
+	var prev := FileAccess.get_file_as_string(GATE_JOURNAL_PREV) if FileAccess.file_exists(GATE_JOURNAL_PREV) else ""
+	var cur := FileAccess.get_file_as_string(GATE_JOURNAL)
+	var rotated := prev.contains("gate-I-before-crash") and not cur.contains("gate-I-before-crash") 			and cur.contains("gate-I-second-session")
+	print("    restart moved the interrupted journal to _prev: %s" % rotated)
+
+	Pasture3DBakeTrace.set_session(false, "user://_baketracegate_report.txt")
+	var closed := FileAccess.get_file_as_string(GATE_JOURNAL).contains(CLEAN_STOP)
+	print("    clean stop ends the journal with STOPPED CLEANLY: %s" % closed)
+	if plain_journals or not live_ok or not rotated or not closed or Pasture3DBakeTrace.is_journaling():
+		_fail += 1
+		print("    !! the journal would not survive a crash, or a relaunch would destroy it")
 	_ran += 1
 
 

@@ -123,7 +123,7 @@ static func bake_begin(p_brush: Node, p_path: String) -> int:
 		# deferred driver's later passes do not — so the arm stack alone left bakes with no recorded cause.
 		"stack": _stack() if capture_stacks else [],
 	})
-	_open_bakes[token] = Time.get_ticks_usec()
+	_open_bakes[token] = [Time.get_ticks_usec(), _brush_name(p_brush)]
 	return token
 
 
@@ -132,11 +132,15 @@ static func bake_begin(p_brush: Node, p_path: String) -> int:
 static func bake_end(p_token: int, p_tools: int = -1) -> void:
 	if not enabled or p_token < 0 or not _open_bakes.has(p_token):
 		return
-	var us: int = Time.get_ticks_usec() - int(_open_bakes[p_token])
+	var open: Array = _open_bakes[p_token]
+	var us: int = Time.get_ticks_usec() - int(open[0])
 	_open_bakes.erase(p_token)
 	_push({
 		"type": "bake_end",
 		"of": p_token,
+		# Carried on the event, not looked up from its begin: the journal writes one line per event as it
+		# happens and cannot search back, and the begin may already have left the ring.
+		"brush": open[1],
 		"us": us,
 		"tools": p_tools,
 	})
@@ -172,6 +176,8 @@ static func _push(p_ev: Dictionary) -> int:
 	p_ev["t_us"] = Time.get_ticks_usec() - _t0
 	_events.append(p_ev)
 	_seq += 1
+	if _journal != null:
+		_journal_write(p_ev)
 	if _events.size() > max_events:
 		_events = _events.slice(_events.size() - max_events)
 	return p_ev["seq"]
@@ -239,46 +245,18 @@ static func report() -> String:
 	lines.append("")
 	lines.append("-- TIMELINE (ms from start) --")
 	for ev in _events:
-		var t: float = float(ev["t_us"]) / 1000.0
+		lines.append_array(_event_lines(ev))
 		match String(ev["type"]):
-			"mark":
-				lines.append("")
-				lines.append("  %8.1f  ### %s" % [t, ev["text"]])
 			"arm":
 				var b := String(ev["brush"])
 				arms[b] = int(arms.get(b, 0)) + 1
-				lines.append("  %8.1f  ARM   %-16s owner=%-28s via %s" % [t, b, ev["owner"], ev["kind"]])
-				var st: Array = ev.get("stack", [])
-				if st.is_empty():
-					lines.append("            %-22s (no stack: capture_stacks off, or not an editor/tool context)" % "")
-				else:
-					for i in st.size():
-						lines.append("            %s %s" % ["woken by" if i == 0 else "        ", st[i]])
-			"bake_begin":
-				lines.append("  %8.1f  BAKE  %-16s owner=%-28s path=%s" % [t, ev["brush"], ev["owner"], ev["path"]])
-				var bst: Array = ev.get("stack", [])
-				for i in bst.size():
-					lines.append("            %s %s" % ["entered via" if i == 0 else "           ", bst[i]])
 			"bake_end":
-				var of_seq: int = int(ev["of"])
-				var owner_name := "?"
-				for e2 in _events:
-					if int(e2.get("seq", -1)) == of_seq:
-						owner_name = String(e2.get("brush", "?"))
-						break
-				var ms: float = float(ev["us"]) / 1000.0
-				totals[owner_name] = float(totals.get(owner_name, 0.0)) + ms
+				var owner_name := String(ev.get("brush", "?"))
+				totals[owner_name] = float(totals.get(owner_name, 0.0)) + float(ev["us"]) / 1000.0
 				counts[owner_name] = int(counts.get(owner_name, 0)) + 1
-				var tools: int = int(ev.get("tools", -1))
-				lines.append("  %8.1f  DONE  %-16s %8.1f ms%s" % [
-						t, owner_name, ms, ("  (%d tool(s) repainted)" % tools) if tools >= 0 else ""])
 			"graph":
 				var key := "%s/%s" % [ev["brush"], ev["result"]]
 				graph_stats[key] = int(graph_stats.get(key, 0)) + 1
-				var gms := ("  %.1f ms" % (float(ev["us"]) / 1000.0)) if int(ev["us"]) >= 0 else ""
-				lines.append("  %8.1f  GRAPH %-16s %-8s %-5s extent=%s%s" % [
-						t, ev["brush"], ev["result"], "frozen" if ev["frozen"] else "live",
-						ev["extent"], gms])
 
 	lines.append("")
 	lines.append("-- PER-BRUSH SUMMARY --")
@@ -302,8 +280,100 @@ static func report() -> String:
 	return "\n".join(lines)
 
 
+## One event as timeline text. Shared by `report()` and the journal so the two cannot drift apart.
+static func _event_lines(p_ev: Dictionary) -> PackedStringArray:
+	var lines := PackedStringArray()
+	var t: float = float(p_ev["t_us"]) / 1000.0
+	match String(p_ev["type"]):
+		"mark":
+			lines.append("")
+			lines.append("  %8.1f  ### %s" % [t, p_ev["text"]])
+		"arm":
+			lines.append("  %8.1f  ARM   %-16s owner=%-28s via %s" % [t, p_ev["brush"], p_ev["owner"], p_ev["kind"]])
+			var st: Array = p_ev.get("stack", [])
+			if st.is_empty():
+				lines.append("            %-22s (no stack: capture_stacks off, or not an editor/tool context)" % "")
+			else:
+				for i in st.size():
+					lines.append("            %s %s" % ["woken by" if i == 0 else "        ", st[i]])
+		"bake_begin":
+			lines.append("  %8.1f  BAKE  %-16s owner=%-28s path=%s" % [t, p_ev["brush"], p_ev["owner"], p_ev["path"]])
+			var bst: Array = p_ev.get("stack", [])
+			for i in bst.size():
+				lines.append("            %s %s" % ["entered via" if i == 0 else "           ", bst[i]])
+		"bake_end":
+			var tools: int = int(p_ev.get("tools", -1))
+			lines.append("  %8.1f  DONE  %-16s %8.1f ms%s" % [t, p_ev.get("brush", "?"), float(p_ev["us"]) / 1000.0,
+					("  (%d tool(s) repainted)" % tools) if tools >= 0 else ""])
+		"graph":
+			var gms := ("  %.1f ms" % (float(p_ev["us"]) / 1000.0)) if int(p_ev["us"]) >= 0 else ""
+			lines.append("  %8.1f  GRAPH %-16s %-8s %-5s extent=%s%s" % [
+					t, p_ev["brush"], p_ev["result"], "frozen" if p_ev["frozen"] else "live", p_ev["extent"], gms])
+	return lines
+
+
 ## Default report location. user:// survives the Output panel being flooded and the editor restarting.
 const REPORT_PATH := "user://pasture3d_bake_trace.txt"
+
+## ---- THE JOURNAL: WHAT SURVIVES A CRASH ----
+##
+## The ring buffer lives in memory and the report is written on untick, so an editor crash — the moment a
+## trace matters most — left nothing (2026-09-13: a road moved on a mound took the editor down mid-trace).
+## So a toggled session also appends every event to this file as it is recorded, flushed per event: a
+## process crash loses nothing already recorded, and the LAST line is the last thing that happened. A
+## machine-level crash (driver watchdog, power) can still lose what the OS had not written out.
+##
+## A clean stop ends the file with "STOPPED CLEANLY"; a journal without that line is from a session that died.
+## Starting a session moves the previous journal to JOURNAL_PREV_PATH first, so relaunching after a crash and
+## ticking the box again does not overwrite the only record of it.
+##
+## Only `set_session` journals. `start()` alone (gates) does not, and `journal_path` is a var so a gate that
+## exercises the session can point it away from the user's crash record.
+const JOURNAL_PATH := "user://pasture3d_bake_trace_journal.txt"
+const JOURNAL_PREV_PATH := "user://pasture3d_bake_trace_journal_prev.txt"
+static var journal_path: String = JOURNAL_PATH
+static var journal_prev_path: String = JOURNAL_PREV_PATH
+static var _journal: FileAccess = null
+
+
+static func is_journaling() -> bool:
+	return _journal != null
+
+
+static func _journal_open() -> void:
+	_journal_close("")
+	if FileAccess.file_exists(journal_path):
+		if FileAccess.file_exists(journal_prev_path):
+			DirAccess.remove_absolute(ProjectSettings.globalize_path(journal_prev_path))
+		DirAccess.rename_absolute(ProjectSettings.globalize_path(journal_path),
+				ProjectSettings.globalize_path(journal_prev_path))
+	_journal = FileAccess.open(journal_path, FileAccess.WRITE)
+	if _journal == null:
+		push_error("Pasture3DBakeTrace: cannot open journal %s (%d); a crash will lose this trace" % [
+				journal_path, FileAccess.get_open_error()])
+		return
+	_journal.store_line("=== Pasture3D bake trace JOURNAL — started %s ===" % Time.get_datetime_string_from_system())
+	_journal.store_line("One entry per event, flushed as recorded. No 'STOPPED CLEANLY' line at the end means the")
+	_journal.store_line("session died (crash or kill): the last entry is the last thing recorded before it did.")
+	_journal.store_line("")
+	_journal.flush()
+
+
+static func _journal_write(p_ev: Dictionary) -> void:
+	for l in _event_lines(p_ev):
+		_journal.store_line(l)
+	_journal.flush()
+
+
+## `p_end` is the closing line; "" closes without one (an interrupted journal is replaced, not ended).
+static func _journal_close(p_end: String) -> void:
+	if _journal == null:
+		return
+	if p_end != "":
+		_journal.store_line("")
+		_journal.store_line(p_end)
+	_journal.close()
+	_journal = null
 
 
 ## The whole in-editor session in one call, for the Pasture3D inspector toggle: `p_on` starts a trace
@@ -321,10 +391,13 @@ static func set_session(p_on: bool, p_path: String = REPORT_PATH) -> String:
 	if p_on:
 		start(true)
 		_started_at = Time.get_datetime_string_from_system()
-		print("Pasture3DBakeTrace: STARTED. Reproduce the problem, then untick Bake Trace.")
+		_journal_open()
+		print("Pasture3DBakeTrace: STARTED. Reproduce the problem, then untick Bake Trace. Live journal: %s" %
+				ProjectSettings.globalize_path(journal_path))
 		return ""
 	var was_running := enabled
 	stop()
+	_journal_close("=== STOPPED CLEANLY at %s, %d event(s) ===" % [Time.get_datetime_string_from_system(), _seq])
 	_session_note = "session: started %s, stopped %s%s" % [
 			_started_at if _started_at != "" else "<unknown>",
 			Time.get_datetime_string_from_system(),
