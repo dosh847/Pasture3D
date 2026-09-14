@@ -904,6 +904,12 @@ static func _append_fillet(p_out: PackedVector2Array, p_from: Vector2, p_from_di
 	var c: Vector2 = hit[0]
 	var phi := acos(clampf(p_from_dir.dot(p_to_dir), -1.0, 1.0))
 	if phi < FILLET_MIN_ANGLE or phi > PI - FILLET_MIN_ANGLE:
+		# NEARLY antiparallel arms are the parallel case above with a rounding error: their edge lines still
+		# cross, but anywhere — a 0.2 degree skew put this vertex 1.36 km from a 21 m junction, and meshing
+		# that ring (densified to 2773 vertices, a 1 m grid over its box) blocked the main thread for minutes.
+		# A crossing further out than the chord it replaces is not a corner of this junction: close straight.
+		if c.distance_to((p_from + p_to) * 0.5) > p_from.distance_to(p_to):
+			return
 		_push(p_out, c)
 		return
 	# How far each cut face already sits beyond the vertex, along its own road. This is what the

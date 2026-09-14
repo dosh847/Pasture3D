@@ -5,17 +5,19 @@
 #
 # Trace 2026-09-13: the ground at Road+Road1@96,-1 read 0.719, then -0.029 right after a Road2 rect bake
 # that repainted 4 of 7 roads, then 0.718 after a full bake repainted all 7. Each flip re-armed two roads.
-# That bake was the DEFERRED DRIVER's pass 2 (a frozen graph solved on a worker), with a graph extent far
-# wider than any plain rect box.
+# That bake was the DEFERRED DRIVER's pass 2 (a frozen graph solved on a worker), during a drag that moved
+# Road2's junction arc lengths by ~11 m and made BOTH Road2's and Road1's corridors outgrow.
 #
 #   [A] Direct rect path: for each control point of the moved road, every junction not involving that road
 #       inside the cleared box has the same ground after the rect bake as after a full bake of the same
 #       curve, within 5 cm. (Measured 2026-09-13: holds, but never reached @96,-1.)
-#   [B] Deferred driver: the same edit run through `_bake_deferred`, with frames flowing so the network's
-#       queued resolve runs where it does in the editor. The ground at every foreign junction is sampled
-#       EVERY FRAME of the run, and compared to a full bake of the same curve — the flip in the trace was
-#       transient, so an end-of-run comparison alone could miss it. Also records the ground the queued
-#       resolve_junctions actually saw.
+#   [B] Deferred driver, 0.7 m nudge: the same edit run through `_bake_deferred`, with frames flowing so the
+#       network's queued resolve runs where it does in the editor. Ground at every foreign junction is
+#       sampled EVERY FRAME of the run and compared to a full bake of the same curve — the flip in the
+#       trace was transient, so an end-of-run comparison alone could miss it. Also records the ground each
+#       queued resolve_junctions saw. (Measured 2026-09-13: 84 pairs hold; @96,-1 reads 0.719 throughout.)
+#   [C] Deferred driver, 12 m drag: as [B], but large enough to make the corridor outgrow, which a nudge
+#       never does and the editor drag did twice.
 #
 # The reference is a full bake at the same curve, not the pre-edit ground: moving a point may legitimately
 # move nearby batters, but the partial and the full bake of one input must agree.
@@ -24,8 +26,10 @@
 #   - the ground reads NaN (no terrain data loaded). The first version redirected data_directory to an
 #     empty folder, every height came back NaN, NaN "matched" NaN, and it passed;
 #   - [A] no foreign junction ever lies inside a cleared box;
-#   - [B] no edit ever reached the driver's pass 2 (the graph was served from cache, or is not frozen), so
-#     the path from the trace never ran.
+#   - [B][C] no edit reached the driver's pass 2. A FROZEN graph that already holds a cache skips the driver
+#     (`_has_graph_modifier`), and the settle bakes fill it — so each edit clears it first;
+#   - [C] no drag made the corridor outgrow. Read from the padding itself: the outgrow rebake goes through
+#     `_schedule_refresh`, which is editor-only and records nothing headless.
 #
 # Uses the demo road network like RoadInteractivePerfGate and keeps the scene's own terrain data, which a
 # headless run never saves — check `git status` after running anyway.
@@ -36,6 +40,8 @@ extends Node
 const MOVER := "Road2"
 const TOL := 0.05
 const NUDGE := Vector3(0.5, 0.0, 0.5)
+## [C]: ~12 m on the diagonal each way — the trace's drag moved arc lengths by 4-11 m per release.
+const DRAGS: Array[Vector3] = [Vector3(8.5, 0.0, 8.5), Vector3(-8.5, 0.0, -8.5)]
 
 var _fail := 0
 var _ran := 0
@@ -47,7 +53,7 @@ var _mover: Pasture3DRoadBrush
 var _owner: String
 var _foreign: Array = []
 
-# [B] per-frame sampler state
+# per-frame sampler state
 var _polling := false
 var _poll_gen := 0
 var _samples: Array = [] # [{ "frame": int, "phase": String, "h": PackedFloat64Array }]
@@ -56,13 +62,15 @@ var _resolve_seen: Array = [] # [{ "phase": String, "h": PackedFloat64Array }]
 
 func _ready() -> void:
 	print("=== RectBakeJunctionGate: partial vs full bake at foreign junctions ===\n")
+	var t0 := Time.get_ticks_msec()
 	if await _setup():
 		_a_rect_matches_full()
-		await _b_deferred_matches_full()
+		await _b_deferred_nudge()
+		await _c_deferred_drag()
 	if is_instance_valid(_scene):
 		_scene.queue_free()
-	print("\n  criteria completed: %d (want 2)" % _ran)
-	if _ran != 2:
+	print("\n  criteria completed: %d (want 3), %.1f s" % [_ran, (Time.get_ticks_msec() - t0) / 1000.0])
+	if _ran != 3:
 		_fail += 1
 	print("\n=== %s (%d failures) ===\n" % ["RECT BAKE JUNCTION PASS" if _fail == 0 else "RECT BAKE JUNCTION FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
@@ -183,103 +191,134 @@ func _a_rect_matches_full() -> void:
 	_ran += 1
 
 
-func _b_deferred_matches_full() -> void:
-	print("\n[B] the deferred driver's rect bake, sampled every frame, against a full bake of the same edit")
+func _b_deferred_nudge() -> void:
+	print("\n[B] the deferred driver's rect bake after a %.1f m nudge, sampled every frame, against a full bake" % NUDGE.length())
+	var r := await _deferred_edits([NUDGE])
+	if r["reached"] == 0:
+		_not_covered("no edit reached the driver's pass 2, so the path from the trace never ran")
+	elif r["bad"] > 0:
+		_fail += 1
+		print("    !! %d of %d junction/edit pair(s) left the full-bake ground by > %.2f m at some frame of the run" % [
+				r["bad"], r["measured"], TOL])
+	else:
+		print("    all %d junction/edit pair(s) stayed within %.2f m of the full bake on every frame (%d edit(s) reached pass 2)" % [
+				r["measured"], TOL, r["reached"]])
+	_ran += 1
+
+
+func _c_deferred_drag() -> void:
+	print("\n[C] the same, after a %.0f m drag that makes the corridor outgrow" % DRAGS[0].length())
+	var r := await _deferred_edits(DRAGS)
+	print("    %d of %d edit(s) outgrew %s's corridor" % [r["outgrew"], r["edits"], MOVER])
+	if r["reached"] == 0:
+		_not_covered("no drag reached the driver's pass 2, so the path from the trace never ran")
+	elif r["outgrew_reached"] == 0:
+		_not_covered("no drag that reached pass 2 made the corridor outgrow — the editor case did not run")
+	elif r["bad"] > 0:
+		_fail += 1
+		print("    !! %d of %d junction/edit pair(s) left the full-bake ground by > %.2f m at some frame of the run" % [
+				r["bad"], r["measured"], TOL])
+	else:
+		print("    all %d junction/edit pair(s) stayed within %.2f m on every frame (%d outgrowing edit(s) reached pass 2)" % [
+				r["measured"], TOL, r["outgrew_reached"]])
+	_ran += 1
+
+
+## Every control point of the mover, moved by each of `p_offsets` in turn, through the deferred driver.
+## Returns counts: edits, reached (pass 2), outgrew, outgrew_reached, measured (junction/edit pairs), bad.
+func _deferred_edits(p_offsets: Array) -> Dictionary:
+	var out := {"edits": 0, "reached": 0, "outgrew": 0, "outgrew_reached": 0, "measured": 0, "bad": 0}
 	_mover.force_deferred_erosion = true
-	# `_has_graph_modifier` skips a FROZEN graph that already holds a cache, and the settle bakes above fill
-	# it — so without this the driver is never taken and [B] measured nothing (first run 2026-09-13). The
-	# editor reached the driver with the cache empty, so each edit starts from that state.
 	var graphs: Array = []
 	for m in _mover.modifiers:
 		if m is Pasture3DNodeGraph and m.is_active():
 			graphs.append(m)
-	print("    %s has %d active graph modifier(s)" % [MOVER, graphs.size()])
 	var sp: Path3D = _mover._get_splines()[0]
-	var reached_pass2 := 0
-	var measured := 0
-	var bad := 0
-	for i in sp.curve.point_count:
-		var orig := sp.curve.get_point_position(i)
-		sp.curve.set_point_position(i, orig + NUDGE)
-		for g in graphs:
-			g.clear_cache()
-		if not _mover._wants_deferred_bake():
-			sp.curve.set_point_position(i, orig)
-			print("    point %d: driver not taken even with the graph cache cleared" % i)
-			continue
-
-		Pasture3DBakeTrace.start(false)
-		_samples = []
-		_resolve_seen = []
-		_polling = true
-		_poll()
-		var bake := _mover._refresh_owner_rect.bind(_owner, {sp.get_instance_id(): true}, false)
-		await _mover._bake_deferred(bake, _owner, false)
-		# Let the resolve the final pass queued run too, as it would in the editor.
-		await get_tree().process_frame
-		await get_tree().process_frame
-		_polling = false
-		var marks := PackedStringArray()
-		var graph_results := PackedStringArray()
-		for ev in Pasture3DBakeTrace.events():
-			if ev["type"] == "mark":
-				marks.append(String(ev["text"]).get_slice("\n", 0))
-			elif ev["type"] == "graph":
-				graph_results.append(String(ev["result"]))
-		Pasture3DBakeTrace.stop()
-		var hit_pass2 := false
-		for m in marks:
-			if m.contains("deferred driver pass 2"):
-				hit_pass2 = true
-
-		_mover._refresh_owner(_owner, false, [])
-		var full := _heights()
-		sp.curve.set_point_position(i, orig)
-		_settle()
-
-		print("    point %d: pass 2 %s; graph %s; %d frame sample(s); %d resolve(s) during the run" % [
-				i, "REACHED" if hit_pass2 else "not reached", ",".join(graph_results), _samples.size(),
-				_resolve_seen.size()])
-		if not hit_pass2:
-			continue
-		reached_pass2 += 1
-		for k in _foreign.size():
-			var f: float = full[k]
-			if is_nan(f):
+	for off: Vector3 in p_offsets:
+		for i in sp.curve.point_count:
+			out["edits"] += 1
+			var pad_before := snappedf(_mover._padding(), _mover.PAD_QUANTUM)
+			var orig := sp.curve.get_point_position(i)
+			sp.curve.set_point_position(i, orig + off)
+			for g in graphs:
+				g.clear_cache()
+			if not _mover._wants_deferred_bake():
+				sp.curve.set_point_position(i, orig)
+				_settle()
+				print("    point %d %s: driver not taken even with the graph cache cleared" % [i, off])
 				continue
-			var worst := 0.0
-			var worst_phase := ""
-			var worst_h := f
-			for s in _samples:
-				var h: float = s["h"][k]
-				if is_nan(h):
-					continue
-				if absf(h - f) > worst:
-					worst = absf(h - f)
-					worst_phase = s["phase"]
-					worst_h = h
-			var at_resolve := PackedStringArray()
-			for r in _resolve_seen:
-				at_resolve.append("%.3f (%s)" % [r["h"][k], r["phase"]])
-			measured += 1
-			var off := worst > TOL
-			if off:
-				bad += 1
-			if off or not at_resolve.is_empty():
-				print("       %s %-24s full %8.3f  worst in-run %8.3f (|d| %.3f, %s)  resolve saw [%s]" % [
-						"!!" if off else "  ", _foreign[k].id, f, worst_h, worst, worst_phase, ", ".join(at_resolve)])
-	_mover.force_deferred_erosion = false
 
-	if reached_pass2 == 0:
-		_not_covered("no edit reached the driver's pass 2, so the path from the trace never ran")
-	elif bad > 0:
-		_fail += 1
-		print("    !! %d of %d junction/edit pair(s) left the full-bake ground by > %.2f m at some frame of the run" % [
-				bad, measured, TOL])
-	else:
-		print("    all %d junction/edit pair(s) stayed within %.2f m of the full bake on every frame (%d edit(s) reached pass 2)" % [
-				measured, TOL, reached_pass2])
-	_ran += 1
+			Pasture3DBakeTrace.start(false)
+			_samples = []
+			_resolve_seen = []
+			_polling = true
+			_poll()
+			var bake := _mover._refresh_owner_rect.bind(_owner, {sp.get_instance_id(): true}, false)
+			await _mover._bake_deferred(bake, _owner, false)
+			# Let the resolve the final pass queued run too, as it would in the editor.
+			await get_tree().process_frame
+			await get_tree().process_frame
+			_polling = false
+			var pad_after := snappedf(_mover._padding(), _mover.PAD_QUANTUM)
+			var outgrew := pad_after > pad_before
+			var hit_pass2 := false
+			var graph_results := PackedStringArray()
+			var rect_mark := ""
+			for ev in Pasture3DBakeTrace.events():
+				if ev["type"] == "mark":
+					var t := String(ev["text"])
+					if t.contains("deferred driver pass 2"):
+						hit_pass2 = true
+					elif t.contains("rect bake"):
+						rect_mark = t.get_slice(": ", 1)
+				elif ev["type"] == "graph":
+					graph_results.append(String(ev["result"]))
+			Pasture3DBakeTrace.stop()
+
+			_mover._refresh_owner(_owner, false, [])
+			var full := _heights()
+			sp.curve.set_point_position(i, orig)
+			_settle()
+
+			if outgrew:
+				out["outgrew"] += 1
+			print("    point %d %s: pass 2 %s; graph %s; corridor %.2f -> %.2f%s; %d sample(s), %d resolve(s)" % [
+					i, off, "REACHED" if hit_pass2 else "not reached", ",".join(graph_results), pad_before, pad_after,
+					" OUTGREW" if outgrew else "", _samples.size(), _resolve_seen.size()])
+			if not hit_pass2:
+				continue
+			out["reached"] += 1
+			if outgrew:
+				out["outgrew_reached"] += 1
+			var printed_box := false
+			for k in _foreign.size():
+				var f: float = full[k]
+				if is_nan(f):
+					continue
+				var worst := 0.0
+				var worst_phase := ""
+				var worst_h := f
+				for s in _samples:
+					var h: float = s["h"][k]
+					if is_nan(h):
+						continue
+					if absf(h - f) > worst:
+						worst = absf(h - f)
+						worst_phase = s["phase"]
+						worst_h = h
+				out["measured"] += 1
+				if worst > TOL:
+					out["bad"] += 1
+					if not printed_box:
+						print("       last rect bake: %s" % rect_mark)
+						printed_box = true
+					var at_resolve := PackedStringArray()
+					for rs in _resolve_seen:
+						at_resolve.append("%.3f (%s)" % [rs["h"][k], rs["phase"]])
+					print("       !! %-24s full %8.3f  worst in-run %8.3f (|d| %.3f, %s)  resolve saw [%s]" % [
+							_foreign[k].id, f, worst_h, worst, worst_phase, ", ".join(at_resolve)])
+	_mover.force_deferred_erosion = false
+	return out
 
 
 ## Samples foreign-junction ground once per frame while `_polling`, tagged with the driver phase the latest
