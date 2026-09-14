@@ -70,6 +70,7 @@ func _ready() -> void:
 	adopt_members()
 	_sync_row_names()
 	_ready_flip_check()
+	_connect_region_signal()
 
 
 func _notification(what: int) -> void:
@@ -156,10 +157,246 @@ var flip_on_load: bool = false
 var profile_from_aabbs: bool = false
 
 
+## ---- Whole Region (§7.1, §7.5, phase 3b) ---------------------------------------------------------------
+
+## Region grid coordinates the stack runs over in Whole Region mode. Sorted and de-duplicated on assign.
+## Entries naming no existing region stay listed, are ignored, and are named in the configuration warnings.
+@export var selected_regions: Array[Vector2i] = []:
+	set(v):
+		_selection_raw = v.duplicate()
+		var seen := {}
+		var out: Array[Vector2i] = []
+		for r: Vector2i in v:
+			if not seen.has(r):
+				seen[r] = true
+				out.append(r)
+		out.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return a.y < b.y or (a.y == b.y and a.x < b.x))
+		if out == selected_regions:
+			return
+		selected_regions = out
+		update_configuration_warnings()
+		_update_region_overlay()
+		if extent_mode == ExtentMode.WHOLE_REGION:
+			_schedule_refresh()
+
+## Selected regions the REGION tool removed, so undoing that removal re-selects them (D12). Stored, because the
+## undo can come after a save.
+@export_storage var _dropped_regions: Array[Vector2i] = []
+
+## Click a region in the viewport to toggle it; drag to paint. Esc or deselecting the node exits.
+@export_tool_button("Select Regions") var _select_regions_btn = toggle_select_regions
+
+## True while the viewport Select Regions interaction is active. Not stored.
+var select_regions_active: bool = false
+signal select_regions_toggled(active: bool)
+
+## The list as assigned, before sorting. Only LB-M's control keys on it.
+var _selection_raw: Array = []
+var _overlay_selected: bool = false
+var _overlay: MeshInstance3D = null
+## Test hooks: LB-M key on the unsorted list, LB-M flip from any mode, LB-N profile 1 over the whole extent,
+## LB-O never restore a dropped region.
+var key_unsorted_selection: bool = false
+var flip_any_mode: bool = false
+var profile_full_extent: bool = false
+var no_dropped_restore: bool = false
+
+
+func _region_world() -> float:
+	return float(terrain.region_size) * terrain.vertex_spacing
+
+
+## The selected regions that exist, sorted.
+func _valid_selection() -> Array[Vector2i]:
+	var out: Array[Vector2i] = []
+	if not is_instance_valid(terrain) or terrain.data == null:
+		return out
+	var locs := {}
+	for l: Vector2i in terrain.data.region_locations:
+		locs[l] = true
+	for r in selected_regions:
+		if locs.has(r):
+			out.append(r)
+	return out
+
+
+## §7.2 Whole Region: 1 inside the selection, smoothstep 1 -> 0 over the margin outside it. The selection is a
+## union of axis-aligned squares, so the distance is exact: no JFA, no approximation.
+func _region_profile(p_inp: Dictionary) -> PackedFloat64Array:
+	var gw: int = p_inp["gw"]
+	var gh: int = p_inp["gh"]
+	var vs: float = p_inp["vs"]
+	var min_x: float = p_inp["min_x"]
+	var min_z: float = p_inp["min_z"]
+	var rsw := _region_world()
+	var margin := _effective_modifier_margin()
+	var sel := _valid_selection()
+	var prof := PackedFloat64Array()
+	prof.resize(gw * gh)
+	for iz in range(gh):
+		var z := min_z + iz * vs
+		for ix in range(gw):
+			var x := min_x + ix * vs
+			var d := INF
+			for loc in sel:
+				# A region owns vertices [origin, origin + size - vs]; the next vertex is its neighbour's.
+				var ax := loc.x * rsw
+				var az := loc.y * rsw
+				var dx := maxf(maxf(ax - x, x - (ax + rsw - vs)), 0.0)
+				var dz := maxf(maxf(az - z, z - (az + rsw - vs)), 0.0)
+				d = minf(d, sqrt(dx * dx + dz * dz))
+				if d <= 0.0:
+					break
+			var t := 1.0 if d <= 0.0 else (0.0 if margin <= 0.0 else clampf(1.0 - d / margin, 0.0, 1.0))
+			prof[iz * gw + ix] = t * t * (3.0 - 2.0 * t)
+	return prof
+
+
+func _connect_region_signal() -> void:
+	if is_instance_valid(terrain) and terrain.data != null and not terrain.data.region_map_changed.is_connected(_on_region_map_changed):
+		terrain.data.region_map_changed.connect(_on_region_map_changed)
+
+
+## D12. A selected region that no longer exists is dropped with a warning and remembered; one that comes back
+## (the REGION tool's undo) is re-selected. A plain property write, not an undo action of its own.
+func _on_region_map_changed() -> void:
+	if not is_instance_valid(terrain) or terrain.data == null:
+		return
+	var locs := {}
+	for l: Vector2i in terrain.data.region_locations:
+		locs[l] = true
+	var keep: Array[Vector2i] = []
+	var changed := false
+	for r in selected_regions:
+		if locs.has(r):
+			keep.append(r)
+		else:
+			if not _dropped_regions.has(r):
+				_dropped_regions.append(r)
+			push_warning("Pasture3D Layer brush '%s': selected region %s was removed; dropped it from the selection." % [name, r])
+			changed = true
+	if not no_dropped_restore:
+		var still: Array[Vector2i] = []
+		for r in _dropped_regions:
+			if locs.has(r):
+				if not keep.has(r):
+					keep.append(r)
+					changed = true
+			else:
+				still.append(r)
+		_dropped_regions = still
+	if changed:
+		selected_regions = keep
+
+
+func toggle_select_regions() -> void:
+	set_select_regions_active(not select_regions_active)
+
+
+func set_select_regions_active(p_on: bool) -> void:
+	if p_on == select_regions_active:
+		return
+	select_regions_active = p_on
+	_update_region_overlay()
+	select_regions_toggled.emit(p_on)
+
+
+## The region tile under a world position, or null where there is no region. Never adds or removes one.
+func region_at(p_world: Vector3) -> Variant:
+	if not is_instance_valid(terrain) or terrain.data == null or not terrain.data.has_regionp(p_world):
+		return null
+	var rsw := _region_world()
+	return Vector2i(floori(p_world.x / rsw), floori(p_world.z / rsw))
+
+
+## The selection after painting `p_tiles` to `p_state` (on or off). Pure: assigning it is the caller's undo action.
+func painted_selection(p_tiles: Array, p_state: bool) -> Array[Vector2i]:
+	var out: Array[Vector2i] = selected_regions.duplicate()
+	for t: Vector2i in p_tiles:
+		if p_state and not out.has(t):
+			out.append(t)
+		elif not p_state:
+			out.erase(t)
+	return out
+
+
+## ---- Overlay: an INTERNAL child, never saved, shown while the tool is active or the node is selected ----
+
+func set_overlay_selected(p_on: bool) -> void:
+	_overlay_selected = p_on
+	_update_region_overlay()
+
+
+func _update_region_overlay() -> void:
+	show_region_overlay(selected_regions, null)
+
+
+## Draw `p_selection` filled and `p_hover` outlined, draped over the surface.
+func show_region_overlay(p_selection: Array, p_hover: Variant) -> void:
+	var want := Engine.is_editor_hint() and is_inside_tree() and (select_regions_active or _overlay_selected) \
+			and extent_mode == ExtentMode.WHOLE_REGION and is_instance_valid(terrain) and terrain.data != null
+	if not want:
+		if _overlay != null:
+			_overlay.visible = false
+		return
+	if _overlay == null:
+		_overlay = MeshInstance3D.new()
+		_overlay.top_level = true
+		_overlay.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.no_depth_test = true
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		mat.vertex_color_use_as_albedo = true
+		_overlay.material_override = mat
+		add_child(_overlay, false, Node.INTERNAL_MODE_BACK)
+	_overlay.global_transform = Transform3D.IDENTITY
+	_overlay.visible = true
+	var im := ImmediateMesh.new()
+	var rsw := _region_world()
+	const STEPS := 16
+	var fill := Color(0.3, 0.7, 1.0, 0.25)
+	if not p_selection.is_empty():
+		im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+		for loc: Vector2i in p_selection:
+			var o := Vector2(loc.x * rsw, loc.y * rsw)
+			var st := rsw / STEPS
+			for j in range(STEPS):
+				for i in range(STEPS):
+					var a := _drape(o + Vector2(i, j) * st)
+					var b := _drape(o + Vector2(i + 1, j) * st)
+					var c := _drape(o + Vector2(i + 1, j + 1) * st)
+					var d := _drape(o + Vector2(i, j + 1) * st)
+					for p in [a, b, c, a, c, d]:
+						im.surface_set_color(fill)
+						im.surface_add_vertex(p)
+		im.surface_end()
+	if p_hover != null:
+		var hv: Vector2i = p_hover
+		var o := Vector2(hv.x * rsw, hv.y * rsw)
+		var corners := [o, o + Vector2(rsw, 0), o + Vector2(rsw, rsw), o + Vector2(0, rsw), o]
+		im.surface_begin(Mesh.PRIMITIVE_LINE_STRIP)
+		for k in range(4):
+			for s in range(STEPS):
+				im.surface_set_color(Color(1.0, 0.9, 0.2, 1.0))
+				im.surface_add_vertex(_drape(corners[k].lerp(corners[k + 1], float(s) / STEPS)))
+		im.surface_set_color(Color(1.0, 0.9, 0.2, 1.0))
+		im.surface_add_vertex(_drape(o))
+		im.surface_end()
+	_overlay.mesh = im
+
+
+func _drape(p_xz: Vector2) -> Vector3:
+	var h: float = terrain.data.get_height(Vector3(p_xz.x, 0.0, p_xz.y))
+	return Vector3(p_xz.x, (h if is_finite(h) else 0.0) + 0.5, p_xz.y)
+
+
 ## First member into an empty Whole Terrain Layer switches it to Children Footprints (D2). Only from Whole
 ## Terrain, only for the first, and only on a join: `_sync_layer_host` does not call this on load.
 func _on_member_joined(_p_member: Node) -> void:
-	if extent_mode == ExtentMode.WHOLE_TERRAIN and member_count() == 1:
+	var from_ok := extent_mode == ExtentMode.WHOLE_TERRAIN or (flip_any_mode and extent_mode != ExtentMode.CHILDREN_FOOTPRINTS)
+	if from_ok and member_count() == 1:
 		extent_mode = ExtentMode.CHILDREN_FOOTPRINTS
 
 
@@ -201,6 +438,7 @@ func base_is_stale() -> bool:
 ## Run stage 1 when its key changed. True when the base row was rewritten.
 func bake_base() -> bool:
 	ensure_rows()
+	_connect_region_signal()
 	var inp := _base_inputs()
 	if inp.is_empty():
 		return false
@@ -270,6 +508,9 @@ func _base_inputs() -> Dictionary:
 	var h := HashingContext.new()
 	h.start(HashingContext.HASH_MD5)
 	h.update(("%d|%s" % [extent_mode, str(_modifier_signature())]).to_utf8_buffer())
+	if extent_mode == ExtentMode.WHOLE_REGION:
+		# The SORTED valid selection (§7.1): a reordered list is the same base.
+		h.update(str(_selection_raw if key_unsorted_selection else _valid_selection()).to_utf8_buffer())
 	if box.size.x > 0.0 and box.size.z > 0.0:
 		var gw := roundi(box.size.x / vs)
 		var gh := roundi(box.size.z / vs)
@@ -296,10 +537,18 @@ func _base_inputs() -> Dictionary:
 	return inp
 
 
-## §7.1. Phase 3 builds Whole Terrain and Children Footprints; Whole Region (phase 3b) is an empty extent.
+## §7.1. The union of every region, of the members' footprints ⊕ margin, or of the selected regions ⊕ margin.
 func _base_extent(p_row: int) -> AABB:
 	var out := AABB()
 	match extent_mode:
+		ExtentMode.WHOLE_REGION:
+			var rsw: float = float(terrain.region_size) * terrain.vertex_spacing
+			for loc: Vector2i in _valid_selection():
+				var r := AABB(Vector3(loc.x * rsw, 0.0, loc.y * rsw), Vector3(rsw, 0.0, rsw))
+				out = r if out.size == Vector3.ZERO else out.merge(r)
+			# The margin may cross into unselected or missing neighbours; missing ones read NaN below.
+			if out.size != Vector3.ZERO:
+				out = _snap_aabb_to_tiles(out.grow(_effective_modifier_margin()), _layer_tile_world(p_row))
 		ExtentMode.WHOLE_TERRAIN:
 			var rs: float = float(terrain.region_size) * terrain.vertex_spacing
 			for loc: Vector2i in terrain.data.region_locations:
@@ -333,13 +582,15 @@ func _base_profile(p_inp: Dictionary) -> PackedFloat64Array:
 	var n := gw * gh
 	var prof := PackedFloat64Array()
 	prof.resize(n)
-	if extent_mode != ExtentMode.CHILDREN_FOOTPRINTS:
-		prof.fill(1.0)
-		return prof
-	prof.fill(0.0)
 	var vs: float = p_inp["vs"]
 	var min_x: float = p_inp["min_x"]
 	var min_z: float = p_inp["min_z"]
+	if extent_mode == ExtentMode.WHOLE_TERRAIN or profile_full_extent:
+		prof.fill(1.0)
+		return prof
+	if extent_mode == ExtentMode.WHOLE_REGION:
+		return _region_profile(p_inp)
+	prof.fill(0.0)
 	# Cell centres of this rect land on the grid's vertices.
 	var rect := Rect2(min_x - vs * 0.5, min_z - vs * 0.5, gw * vs, gh * vs)
 	var margin := _effective_modifier_margin()
@@ -378,6 +629,8 @@ func _validate_property(property: Dictionary) -> void:
 	# Whole Terrain has nothing beyond it to skirt into (§7.1).
 	if property.name == "modifier_margin" and extent_mode == ExtentMode.WHOLE_TERRAIN:
 		property.usage &= ~PROPERTY_USAGE_EDITOR
+	if property.name in ["selected_regions", "_select_regions_btn"] and extent_mode != ExtentMode.WHOLE_REGION:
+		property.usage &= ~PROPERTY_USAGE_EDITOR
 
 
 func _get_configuration_warnings() -> PackedStringArray:
@@ -388,6 +641,13 @@ func _get_configuration_warnings() -> PackedStringArray:
 		w.append("The Pasture3D terrain has no regions yet — add regions in Pasture3D first.")
 	for v in _violations:
 		w.append("Refused: %s" % v["message"])
+	if extent_mode == ExtentMode.WHOLE_REGION and is_instance_valid(terrain) and terrain.data != null:
+		var valid := _valid_selection()
+		if valid.is_empty():
+			w.append("Whole Region mode with no regions selected: the stack does not run. Use Select Regions.")
+		for r in selected_regions:
+			if not valid.has(r):
+				w.append("Selected region %s does not exist and is ignored." % r)
 	return w
 
 

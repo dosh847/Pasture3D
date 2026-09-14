@@ -471,6 +471,12 @@ base being the row directly beneath (§3.1), so adjacency is an invariant, not a
    phase 4 driver.
 3b. **Whole Region mode + Select Regions tool.** §7.1 region extent, §7.2 analytic profile, §7.5 tool,
    overlay, undo, region-lifecycle listener. Gates LB-M, LB-N, LB-O.
+   **Built (2026-09-14)**, gated by `bench/LayerBrushRegionGate.tscn` (M, N, O; all with controls). The
+   region-change signal is `Pasture3DData.region_map_changed`, emitted by `update_maps` whenever the region
+   map is rebuilt, add and remove alike. Deviations: the Select Regions entry point is the inspector button
+   only (no toolbar button yet), and the empty-region hint is an editor toast. The viewport tool, overlay and
+   one-action-per-drag undo are editor code no headless gate reaches; they are untested until tried in the
+   editor.
 4. **Driver and Bake All.** Base-before-children phase ordering in the deferred run, registry. Gates LB-L,
    LB-S.
 

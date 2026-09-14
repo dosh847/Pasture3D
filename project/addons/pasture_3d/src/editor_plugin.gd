@@ -347,6 +347,11 @@ func _forward_3d_gui_input(p_viewport_camera: Camera3D, p_event: InputEvent) -> 
 	if selection_mode and is_terrain_valid():
 		return _forward_selection_input(p_viewport_camera, p_event)
 
+	# A Layer brush's Select Regions mode consumes viewport clicks, so no brush is selected by accident (§7.5).
+	var region_lb := _current_brush()
+	if region_lb is Pasture3DLayerBrush and region_lb.select_regions_active:
+		return _forward_region_select_input(p_viewport_camera, p_event, region_lb)
+
 	# Brush selected → loop-point editing (Ctrl-click add / right-click-a-point remove). Mutually
 	# exclusive with sculpting (which only runs when the terrain is selected), so they never collide.
 	var brush := _current_brush()
@@ -481,15 +486,83 @@ func _current_brush() -> Pasture3DTerrainBrush:
 	return _selected_brush
 
 
+## ---- Layer brush Select Regions (§7.5) ----
+var _region_painting: bool = false
+var _region_paint_state: bool = false
+var _region_paint_tiles: Array = []
+
+
+## Click toggles a region; a drag applies the first tile's new state to every tile it crosses. The selection
+## changes once, on release, as one undo action — so a drag bakes once. Never adds or removes a region.
+func _forward_region_select_input(p_camera: Camera3D, p_event: InputEvent, p_lb: Pasture3DLayerBrush) -> AfterGUIInput:
+	if p_event is InputEventKey and p_event.pressed and not p_event.echo and p_event.keycode == KEY_ESCAPE:
+		_region_painting = false
+		p_lb.set_select_regions_active(false)
+		return AFTER_GUI_INPUT_STOP
+	if not (p_event is InputEventMouse) or not is_instance_valid(p_lb.terrain) or p_lb.terrain.data == null:
+		return AFTER_GUI_INPUT_PASS
+	var vp: Node = p_camera.get_parent()
+	var full_res: bool = not (vp.get_parent() is SubViewportContainer and vp.get_parent().stretch_shrink == 2)
+	var mp: Vector2 = vp.get_mouse_position() if full_res else vp.get_mouse_position() / 2
+	var from := p_camera.project_ray_origin(mp)
+	var dir := p_camera.project_ray_normal(mp)
+	if absf(dir.y) < 1e-6:
+		return AFTER_GUI_INPUT_PASS
+	# The REGION tool's own picking: the y = 0 plane, heights ignored.
+	var hit := from + dir * (-from.y / dir.y)
+	var tile: Variant = p_lb.region_at(hit)
+	if p_event is InputEventMouseMotion:
+		if _region_painting:
+			if tile != null and not _region_paint_tiles.has(tile):
+				_region_paint_tiles.append(tile)
+			p_lb.show_region_overlay(p_lb.painted_selection(_region_paint_tiles, _region_paint_state), tile)
+			return AFTER_GUI_INPUT_STOP
+		p_lb.show_region_overlay(p_lb.selected_regions, tile)
+		return AFTER_GUI_INPUT_PASS
+	if p_event is InputEventMouseButton and p_event.button_index == MOUSE_BUTTON_LEFT:
+		if p_event.pressed:
+			if tile == null:
+				EditorInterface.get_editor_toaster().push_toast("No region here — use the Region tool to add one.",
+						EditorToaster.SEVERITY_INFO)
+				return AFTER_GUI_INPUT_STOP
+			_region_painting = true
+			_region_paint_state = not p_lb.selected_regions.has(tile)
+			_region_paint_tiles = [tile]
+			p_lb.show_region_overlay(p_lb.painted_selection(_region_paint_tiles, _region_paint_state), tile)
+			return AFTER_GUI_INPUT_STOP
+		if _region_painting:
+			_region_painting = false
+			var before: Array[Vector2i] = p_lb.selected_regions.duplicate()
+			var after := p_lb.painted_selection(_region_paint_tiles, _region_paint_state)
+			_region_paint_tiles = []
+			if after != before:
+				var ur := get_undo_redo()
+				ur.create_action("Select Regions", UndoRedo.MERGE_DISABLE, p_lb)
+				ur.add_do_property(p_lb, &"selected_regions", after)
+				ur.add_undo_property(p_lb, &"selected_regions", before)
+				ur.commit_action()
+			p_lb.show_region_overlay(p_lb.selected_regions, tile)
+			return AFTER_GUI_INPUT_STOP
+	return AFTER_GUI_INPUT_PASS
+
+
 ## The selection changed — re-derive the brush once, here, instead of per input event. Also publishes
 ## the id to the brush gizmo, whose `_brush_selected` ran the same allocation once per redraw and once
 ## per subgizmo ray.
 func _on_editor_selection_changed() -> void:
+	var prev := _selected_brush if is_instance_valid(_selected_brush) else null
 	_selected_brush = null
 	for n in EditorInterface.get_selection().get_selected_nodes():
 		if n is Pasture3DTerrainBrush:
 			_selected_brush = n
 			break
+	# Deselecting a Layer brush ends its Select Regions mode and hides its overlay (§7.5).
+	if prev is Pasture3DLayerBrush and prev != _selected_brush:
+		_region_painting = false
+		prev.set_select_regions_active(false)
+		prev.set_overlay_selected(false)
+	if _selected_brush is Pasture3DLayerBrush:
+		_selected_brush.set_overlay_selected(true)
 	if brush_gizmo:
 		brush_gizmo.set_selected_brush(_selected_brush)
 
