@@ -1916,6 +1916,21 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	}
 }
 
+void Pasture3DData::stamp_grid(const int p_layer_id, const PackedFloat32Array &p_vals, const double p_min_x,
+		const double p_min_z, const double p_vs, const int p_gw, const int p_gh, const int p_blend) {
+	if (p_gw < 1 || p_gh < 1 || p_vs <= 0.0 || p_vals.size() != p_gw * p_gh) {
+		ERR_PRINT("Pasture3DData::stamp_grid: vals must hold gw * gh cells.");
+		return;
+	}
+	Pasture3DLayer *layer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
+	if (!layer || layer->is_base()) {
+		ERR_PRINT("Pasture3DData::stamp_grid: needs a non-Base layer.");
+		return;
+	}
+	_apply_stamp_block(layer, (int)std::lround(p_min_x / p_vs), (int)std::lround(p_min_z / p_vs), p_gw, p_gh,
+			p_vals.ptr(), p_blend);
+}
+
 // ---- Layer brush stack entry (PASTURE3D_LAYER_BRUSH_SPEC.md §7.3) ----
 //
 // Runs the modifier stack over grids the caller built — `basey` the ground, `amp` the starting contribution in

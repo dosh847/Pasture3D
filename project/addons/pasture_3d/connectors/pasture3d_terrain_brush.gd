@@ -215,10 +215,15 @@ func _init() -> void:
 
 
 func _ready() -> void:
+	# An empty owner is a brush that has never been bound: a join, not a load. The flip waits for the group.
+	var joined: Node = null
 	if _layer_owner == "" and _paints():
 		var host := _hosted_by()
 		_layer_owner = host.layer_owner_id() if host != null else BRUSH_OWNER_PREFIX + _default_layer_name()
+		joined = host
 	add_to_group(BRUSH_GROUP)
+	if joined != null:
+		joined._on_member_joined(self)
 	set_notify_transform(true)
 	if not child_entered_tree.is_connected(_on_child_changed):
 		child_entered_tree.connect(_on_child_changed)
@@ -1107,6 +1112,10 @@ func _sync_layer_host(p_on_load: bool = false) -> void:
 	_membership_transition = true
 	_set_layer_owner(want)
 	_membership_transition = false
+	# Joining, never loading: a loaded member's stored owner already matches and returned above (LB-G). Not
+	# gated on `p_on_load`, which a brush newly added under a Layer also arrives with, from its own `_ready`.
+	if host != null and _layer_owner == want:
+		host._on_member_joined(self)
 
 
 ## §5. False, with a push_error naming both nodes, when `p_owner` would break Layer brush membership: a member
@@ -1418,10 +1427,15 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 			# Clean edited-flag slate so the targeted push uploads EXACTLY the regions this bake touches
 			# (the clear/paint/composite below re-flag them via composite_region). Mirrors the dirty-rect path.
 			_clear_region_edited_flags()
+		# Layer brush stage 1 (§6.1): the base row beneath this layer, before any member clears or snaps, so every
+		# "below" read in stage 2 sees it. After the edited-flag reset, so the targeted push carries its regions.
+		var lb_host := _layer_brush_for_owner(owner) if owner.begins_with(LAYER_BRUSH_OWNER_PREFIX) else null
+		if lb_host != null:
+			lb_host.bake_base()
 		var blend := _layer_blend_for(layer_id)
 		# Union of everything this bake will write, so the deferred composite below covers all of it.
 		var painted_box := AABB()
-		var aff_layers := _all_layers_for_owner(owner)
+		var aff_layers := _clearable_layers_for_owner(owner)
 		for box: AABB in extra_clears:
 			if box.size != Vector3.ZERO:
 				for lyr_idx in aff_layers:
@@ -2000,6 +2014,14 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 		_refresh_owner(owner, false, [])
 		return
 	_layer_id = layer_id # set before the snap below reads it (paint sets it again per tool)
+	# Layer brush stage 1 (§6.3). A skipped base leaves the rect bake exactly as it was. A re-solved base can
+	# move ground under any member, so stage 2 goes full. Clipping to the changed box is deferred.
+	if owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
+		var lb_host := _layer_brush_for_owner(owner)
+		if lb_host != null and lb_host.base_is_stale():
+			_last_rect_decision = "full"
+			_refresh_owner(owner, false, [])
+			return
 
 	# Union the previous (cached) and current footprint of changed sections into one world box.
 	#
@@ -2082,7 +2104,7 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 		# This composite is required before painting: the rasterisers read get_height per cell for
 		# relative_to_terrain / follow_spline_height, so they must see the cleared base (not this tool's
 		# own previous dome) or the feature climbs each edit.
-		for lyr_idx in _all_layers_for_owner(owner):
+		for lyr_idx in _clearable_layers_for_owner(owner):
 			terrain.data.clear_layer_in_area(lyr_idx, clip_box, false)
 		terrain.data.composite_area(clip_box, false)
 		var t_clear := Time.get_ticks_usec()
@@ -2947,6 +2969,20 @@ func _all_layers_for_owner(owner: String) -> PackedInt32Array:
 	return out
 
 
+## The owner's rows a member bake may clear. A Layer brush's base row is not the members' output: it is
+## stage 1's, and clearing it under a member's footprint would erase the ground that member stands on.
+func _clearable_layers_for_owner(owner: String) -> PackedInt32Array:
+	var all := _all_layers_for_owner(owner)
+	if not owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
+		return all
+	var stack = terrain.data.get_layer_stack()
+	var out := PackedInt32Array()
+	for i in all:
+		if stack.get_layer(i).get_owner_id() != owner + "#base":
+			out.append(i)
+	return out
+
+
 
 ## Every reserved brush tool layer in the stack (owner in the brush namespace).
 func _brush_layers() -> Array:
@@ -3263,7 +3299,7 @@ func detach_placement() -> bool:
 	_clear_region_edited_flags()
 	# Drop the whole box (self + any mate samples in it), then repaint ONLY the mates back into it. Self is
 	# excluded, so its contribution is gone; mates are repainted from their unchanged curves (no snap).
-	for lyr_idx in _all_layers_for_owner(owner):
+	for lyr_idx in _clearable_layers_for_owner(owner):
 		terrain.data.clear_layer_in_area(lyr_idx, clip_box, false)
 	var blend := _layer_blend_for(layer_id)
 	for s in _tools_on_owner(owner):

@@ -3,9 +3,14 @@
 # Pasture3DLayerBrush — a container node that owns one layer and gives it to every height brush beneath it,
 # the way a Pasture3DRoadNetwork groups roads. See PASTURE3D_LAYER_BRUSH_SPEC.md.
 #
-# ---- PHASE 1: IDENTITY AND MEMBERSHIP ----
+# ---- STAGE 1: THE BASE (phase 3) ----
 #
-# No modifier stack yet (phase 3). Members bake exactly as brushes sharing a free layer always have — the
+# The Layer's own stack runs over the ground below its base row and writes only the cells it moved into that
+# row (`bake_base`), keyed so an unchanged input skips it. Members then bake over it. See "Stage 1" below.
+#
+# ---- IDENTITY AND MEMBERSHIP ----
+#
+# Members bake exactly as brushes sharing a free layer always have — the
 # sibling repaint in `_refresh_owner` already makes a layer's bake layer-granular. What this node adds is
 # WHICH layer that is, and the refusal (in `Pasture3DTerrainBrush._layer_owner_allowed`) to let a member be
 # anywhere else.
@@ -64,6 +69,7 @@ func _ready() -> void:
 		renamed.connect(_queue_rename_sync)
 	adopt_members()
 	_sync_row_names()
+	_ready_flip_check()
 
 
 func _notification(what: int) -> void:
@@ -110,6 +116,254 @@ func _layer_brush_refusal_reason() -> String:
 	return "A Layer brush is not a member of another; a nested Layer brush owns its own layer."
 
 
+func _supports_modifiers() -> bool:
+	return true
+
+
+## ---- Stage 1: the base (§6.1, phase 3) ------------------------------------------------------------------
+
+## Append only: the int is stored.
+enum ExtentMode { WHOLE_TERRAIN, CHILDREN_FOOTPRINTS, WHOLE_REGION }
+
+## Where the Layer's stack runs. Whole Terrain: every region. Children Footprints: the members' outlines,
+## feathered over Modifier Margin. In Whole Terrain mode no member edit ever re-solves the base.
+@export var extent_mode: ExtentMode = ExtentMode.WHOLE_TERRAIN:
+	set(v):
+		if extent_mode == v:
+			return
+		extent_mode = v
+		notify_property_list_changed()
+		_schedule_refresh()
+
+## The key the base row was last solved under (§6.2). Stored, so a reload skips stage 1 until something changes.
+@export_storage var _base_key: String = ""
+## The extent the base row was last written over, so the next solve clears it even when the extent shrinks.
+@export_storage var _base_box: AABB = AABB()
+
+## Stage 1 solves since this node was created. Gates count re-solves with it; not persisted.
+var base_solve_count: int = 0
+## "solve", "skip" or "clear" for the last `bake_base`.
+var last_base_decision: String = ""
+## Cells the last solve held in the base row (moved by at least MODIFIER_MARGIN_EPS).
+var base_cell_count: int = 0
+## Test hook for LB-A's control: hold every cell the stack produced, not only the moved ones.
+var hold_every_cell: bool = false
+## Test hook for LB-K's control: key without the below digest.
+var key_without_below: bool = false
+## Test hook for LB-G's control: run the first-member flip on load as well.
+var flip_on_load: bool = false
+## Test hook for LB-H's control: build the Footprints profile from member AABBs, not outlines.
+var profile_from_aabbs: bool = false
+
+
+## First member into an empty Whole Terrain Layer switches it to Children Footprints (D2). Only from Whole
+## Terrain, only for the first, and only on a join: `_sync_layer_host` does not call this on load.
+func _on_member_joined(_p_member: Node) -> void:
+	if extent_mode == ExtentMode.WHOLE_TERRAIN and member_count() == 1:
+		extent_mode = ExtentMode.CHILDREN_FOOTPRINTS
+
+
+func _ready_flip_check() -> void:
+	if flip_on_load and member_count() == 1:
+		_on_member_joined(null)
+
+
+## A Layer bake: stage 1, then every member through the shared-layer bake (which runs stage 1 again and
+## finds the key matching). With no members the base still runs (D15).
+func bake_layer(p_record_undo: bool = false) -> void:
+	if not is_configured():
+		return
+	var mem := members()
+	if not mem.is_empty():
+		mem[0]._refresh_owner(layer_owner_id(), p_record_undo, [])
+		return
+	_clear_region_edited_flags()
+	if bake_base():
+		terrain.data.update_maps(PASTURE_3D_MAPTYPE_HEIGHT, false, false)
+
+
+func refresh(record_undo: bool = false) -> void:
+	if not Engine.is_editor_hint() or not is_configured():
+		return
+	bake_layer(record_undo)
+
+
+## The refresh tick's non-painting branch lands here; a Layer brush has no graph consumers of its own.
+func _refresh_consumers() -> void:
+	bake_layer(false)
+
+
+func base_is_stale() -> bool:
+	var inp := _base_inputs()
+	return not inp.is_empty() and inp["key"] != _base_key
+
+
+## Run stage 1 when its key changed. True when the base row was rewritten.
+func bake_base() -> bool:
+	ensure_rows()
+	var inp := _base_inputs()
+	if inp.is_empty():
+		return false
+	if inp["key"] == _base_key:
+		last_base_decision = "skip"
+		return false
+	var row: int = inp["row"]
+	var box: AABB = inp["box"]
+	var clear := _base_box
+	if box.size.x > 0.0 and box.size.z > 0.0:
+		clear = box if clear.size == Vector3.ZERO else clear.merge(box)
+	if clear.size != Vector3.ZERO:
+		terrain.data.clear_layer_in_area(row, clear, false)
+	_base_box = box if box.size.x > 0.0 and box.size.z > 0.0 else AABB()
+	_base_key = inp["key"]
+	base_cell_count = 0
+	if not inp.has("below"):
+		last_base_decision = "clear"
+	else:
+		last_base_decision = "solve"
+		base_solve_count += 1
+		_solve_base(inp)
+	if clear.size != Vector3.ZERO:
+		terrain.data.composite_area(clear, false)
+	return true
+
+
+func _solve_base(p_inp: Dictionary) -> void:
+	var gw: int = p_inp["gw"]
+	var gh: int = p_inp["gh"]
+	var n := gw * gh
+	var below: PackedFloat32Array = p_inp["below"]
+	var stack: Dictionary = p_inp["stack"]
+	var amp := PackedFloat64Array()
+	amp.resize(n)
+	amp.fill(0.0)
+	var params := {"min_x": p_inp["min_x"], "min_z": p_inp["min_z"], "vs": p_inp["vs"], "gw": gw, "gh": gh,
+			"blend": BLEND_REPLACE, "modifiers": stack["list"], "op_selectors": stack["op_selectors"],
+			"need_fields": stack["need_fields"], "need_host_fields": false, "base_below": below}
+	var result: PackedFloat32Array = terrain.data.brush_run_stack_on_field(params, below, amp, _base_profile(p_inp))
+	# NaN below epsilon (§6.1): the base is absolute REPLACE, so a held cell freezes the ground beneath it.
+	var vals := PackedFloat32Array()
+	vals.resize(n)
+	for i in range(n):
+		var r := result[i] if i < result.size() else NAN
+		if is_nan(r) or is_nan(below[i]) or (not hold_every_cell and absf(r - below[i]) < MODIFIER_MARGIN_EPS):
+			vals[i] = NAN
+		else:
+			vals[i] = r
+			base_cell_count += 1
+	if base_cell_count > 0:
+		terrain.data.stamp_grid(int(p_inp["row"]), vals, p_inp["min_x"], p_inp["min_z"], p_inp["vs"], gw, gh, BLEND_REPLACE)
+	_commit_modifier_caches(stack, p_inp["extent"])
+
+
+## Everything stage 1 is a function of, and its key (§6.2). Empty when the rows are not there.
+func _base_inputs() -> Dictionary:
+	var stack := _stack()
+	if stack == null:
+		return {}
+	var row: int = stack.find_layer_by_owner(base_owner_id())
+	if row < 0:
+		return {}
+	var vs: float = terrain.vertex_spacing
+	var box := _base_extent(row)
+	var inp := {"row": row, "vs": vs, "box": box}
+	var h := HashingContext.new()
+	h.start(HashingContext.HASH_MD5)
+	h.update(("%d|%s" % [extent_mode, str(_modifier_signature())]).to_utf8_buffer())
+	if box.size.x > 0.0 and box.size.z > 0.0:
+		var gw := roundi(box.size.x / vs)
+		var gh := roundi(box.size.z / vs)
+		inp["min_x"] = box.position.x
+		inp["min_z"] = box.position.z
+		inp["gw"] = gw
+		inp["gh"] = gh
+		inp["extent"] = _extent_key(box.position.x, box.position.z, vs, gw, gh)
+		h.update(str(inp["extent"]).to_utf8_buffer())
+		var comp := _compile_modifiers(inp["extent"])
+		if int(comp["count"]) > 0:
+			inp["stack"] = comp
+			var below: PackedFloat32Array = terrain.data.composite_height_below(row, box.position.x, box.position.z, vs, gw, gh)
+			inp["below"] = below
+			if not key_without_below:
+				h.update(below.to_byte_array())
+			if extent_mode == ExtentMode.CHILDREN_FOOTPRINTS:
+				var paths := _member_paths()
+				inp["paths"] = paths
+				for p: Pasture3DGraphPath in paths:
+					h.update(("%s|%s" % [p.source_label, p.closed]).to_utf8_buffer())
+					h.update(p.points.to_byte_array())
+	inp["key"] = h.finish().hex_encode()
+	return inp
+
+
+## §7.1. Phase 3 builds Whole Terrain and Children Footprints; Whole Region (phase 3b) is an empty extent.
+func _base_extent(p_row: int) -> AABB:
+	var out := AABB()
+	match extent_mode:
+		ExtentMode.WHOLE_TERRAIN:
+			var rs: float = float(terrain.region_size) * terrain.vertex_spacing
+			for loc: Vector2i in terrain.data.region_locations:
+				var r := AABB(Vector3(loc.x * rs, 0.0, loc.y * rs), Vector3(rs, 0.0, rs))
+				out = r if out.size == Vector3.ZERO else out.merge(r)
+		ExtentMode.CHILDREN_FOOTPRINTS:
+			for mbr in members():
+				for fp: AABB in mbr._own_footprints():
+					if fp.size != Vector3.ZERO:
+						out = fp if out.size == Vector3.ZERO else out.merge(fp)
+			if out.size != Vector3.ZERO:
+				out = _snap_aabb_to_tiles(out.grow(_effective_modifier_margin()), _layer_tile_world(p_row))
+	return out
+
+
+func _member_paths() -> Array:
+	var out: Array = []
+	for mbr in members():
+		for i in range(mbr.graph_shape_count()):
+			var p: Pasture3DGraphPath = mbr.graph_shape_path(i)
+			if p.points.size() >= 2:
+				out.append(p)
+	return out
+
+
+## §7.2. Whole Terrain: 1. Children Footprints: 1 inside the outline union, smoothstep 1 -> 0 over the margin,
+## through the same path mask kernel the graph's shape nodes use.
+func _base_profile(p_inp: Dictionary) -> PackedFloat64Array:
+	var gw: int = p_inp["gw"]
+	var gh: int = p_inp["gh"]
+	var n := gw * gh
+	var prof := PackedFloat64Array()
+	prof.resize(n)
+	if extent_mode != ExtentMode.CHILDREN_FOOTPRINTS:
+		prof.fill(1.0)
+		return prof
+	prof.fill(0.0)
+	var vs: float = p_inp["vs"]
+	var min_x: float = p_inp["min_x"]
+	var min_z: float = p_inp["min_z"]
+	# Cell centres of this rect land on the grid's vertices.
+	var rect := Rect2(min_x - vs * 0.5, min_z - vs * 0.5, gw * vs, gh * vs)
+	var margin := _effective_modifier_margin()
+	if profile_from_aabbs:
+		for mbr in members():
+			for fp: AABB in mbr._own_footprints():
+				for iz in range(gh):
+					for ix in range(gw):
+						var x := min_x + ix * vs
+						var z := min_z + iz * vs
+						if x >= fp.position.x and x <= fp.end.x and z >= fp.position.z and z <= fp.end.z:
+							prof[iz * gw + ix] = 1.0
+		return prof
+	for p: Pasture3DGraphPath in p_inp.get("paths", []):
+		var m: PackedFloat32Array = Pasture3DUtil.path_mask_grid(p.points, p.half_widths, p.closed, gw, gh, rect, 1.0, margin, false)
+		for i in range(mini(n, m.size())):
+			if m[i] > prof[i]:
+				prof[i] = m[i]
+	for i in range(n):
+		var t := prof[i]
+		prof[i] = t * t * (3.0 - 2.0 * t)
+	return prof
+
+
 const _HIDDEN_BRUSH_PROPERTIES: Array[StringName] = [
 	&"corner_radius", &"crease_smoothing", &"snap_to_surface", &"surface_offset", &"_snap_btn",
 	&"_add_spline_btn", &"_add_water_btn", &"_add_layer_btn", &"_toggle_tangents_btn", &"_make_unique_btn",
@@ -120,6 +374,9 @@ const _HIDDEN_BRUSH_PROPERTIES: Array[StringName] = [
 func _validate_property(property: Dictionary) -> void:
 	super._validate_property(property)
 	if StringName(property.name) in _HIDDEN_BRUSH_PROPERTIES:
+		property.usage &= ~PROPERTY_USAGE_EDITOR
+	# Whole Terrain has nothing beyond it to skirt into (§7.1).
+	if property.name == "modifier_margin" and extent_mode == ExtentMode.WHOLE_TERRAIN:
 		property.usage &= ~PROPERTY_USAGE_EDITOR
 
 

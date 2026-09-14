@@ -463,6 +463,12 @@ base being the row directly beneath (§3.1), so adjacency is an invariant, not a
 2. **Native entry.** §7.3 loop extraction. Gate LB-B.
 3. **Base stage, Whole Terrain + Children Footprints.** §6.1 stage 1, §6.2 key, §6.3 rect table, §7.1–7.2
    for the first two modes, first-member flip. Gates LB-G, LB-H, LB-I, LB-K, LB-P.
+   **Built (2026-09-14)**, gated by `bench/LayerBrushBaseGate.tscn` (A's base-row check, G, H, I, K, P; all
+   with controls). The base is written through a new `Pasture3DData.stamp_grid`. Three deviations: a rect
+   bake whose base went stale re-bakes the members FULL rather than clipping to the changed box; the
+   first-member flip fires from the member's `_ready` (an empty owner is a join), not `_sync_layer_host`
+   alone; LB-P checks the snap half only, not a child erosion's flow. Stage 1 runs synchronously until the
+   phase 4 driver.
 3b. **Whole Region mode + Select Regions tool.** §7.1 region extent, §7.2 analytic profile, §7.5 tool,
    overlay, undo, region-lifecycle listener. Gates LB-M, LB-N, LB-O.
 4. **Driver and Bake All.** Base-before-children phase ordering in the deferred run, registry. Gates LB-L,

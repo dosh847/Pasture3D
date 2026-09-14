@@ -3018,6 +3018,7 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("clear_layer_in_area", "layer_id", "area", "composite"), &Pasture3DData::clear_layer_in_area, DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("stamp_mound_loop", "layer_id", "poly", "clip", "params", "lut"), &Pasture3DData::stamp_mound_loop);
 	ClassDB::bind_method(D_METHOD("brush_run_stack_on_field", "params", "basey", "amp", "profile"), &Pasture3DData::brush_run_stack_on_field);
+	ClassDB::bind_method(D_METHOD("stamp_grid", "layer_id", "vals", "min_x", "min_z", "vs", "gw", "gh", "blend"), &Pasture3DData::stamp_grid);
 	ClassDB::bind_method(D_METHOD("stamp_road_line", "layer_id", "plan", "clip", "params"), &Pasture3DData::stamp_road_line);
 	ClassDB::bind_method(D_METHOD("get_height_below_along_plan", "layer_id", "plan", "cum", "ds", "n_s"), &Pasture3DData::get_height_below_along_plan);
 	ClassDB::bind_method(D_METHOD("stamp_road_surface_control", "layer_id", "surface", "gw", "gh", "min_x", "min_z", "vs", "texture_id", "preserve_base", "min_coverage"), &Pasture3DData::stamp_road_surface_control, DEFVAL(true), DEFVAL(0.004));

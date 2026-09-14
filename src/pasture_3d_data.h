@@ -303,6 +303,10 @@ public:
 	// `params` is a Dictionary of grid (min_x/min_z/vs/gw/gh) + shape knobs; `lut` is a 0..1 ramp LUT
 	// (empty => analytic default). The GDScript keeps the equivalent loop as a fallback / A/B reference.
 	void stamp_mound_loop(const int p_layer_id, const PackedVector2Array &p_poly, const AABB &p_clip, const Dictionary &p_params, const PackedFloat32Array &p_lut);
+	// Write a grid into a layer through the batched raw-tile apply (NaN = no write), without compositing.
+	// Grid cell (ix, iz) is world (min_x + ix*vs, min_z + iz*vs). The Layer brush's base stage (§6.1).
+	void stamp_grid(const int p_layer_id, const PackedFloat32Array &p_vals, const double p_min_x, const double p_min_z,
+			const double p_vs, const int p_gw, const int p_gh, const int p_blend);
 	// The modifier stack over caller-supplied grids, through stamp_mound_loop's own step loop (Layer brush §7.3).
 	PackedFloat32Array brush_run_stack_on_field(const Dictionary &p_params, const PackedFloat32Array &p_basey,
 			const PackedFloat64Array &p_amp, const PackedFloat64Array &p_profile);
