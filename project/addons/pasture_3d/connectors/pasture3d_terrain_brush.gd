@@ -1726,6 +1726,10 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 				print("%s: graph evaluation cancelled — the brush is showing its un-graphed shape." % name)
 				return
 			for st: Dictionary in pending_graph:
+				# The worker could only report what a FROZEN solver inside the graph served or solved; filing
+				# it into the node is main-thread work, and this is the first main-thread moment after it.
+				if st.has("node_freeze") and st["mod"].graph != null:
+					st["mod"].graph.adopt_native_freeze(st["node_freeze"])
 				if st.has("zo"):
 					_file_solved(st["mod"], st["extent"], {"key": st["key"], "grid": st["zo"], "z": st["z"]},
 							bool(st.get("live", false)))
@@ -1894,8 +1898,16 @@ func _solve_graph_pending(p_pending: Array) -> bool:
 func _graph_solve_one(p_state: Dictionary) -> bool:
 	if int(p_state.get("done", 0)) > 0:
 		return true
-	p_state["zo"] = Pasture3DUtil.graph_eval_grid(p_state["prog"], p_state["gw"], p_state["gh"],
-			p_state["rect"], p_state["z"])
+	var prog: Dictionary = p_state["prog"]
+	if Pasture3DTerrainGraph.program_has_freeze(prog):
+		# A FROZEN solver inside: served or solved here, adopted by the driver on the main thread.
+		var res: Dictionary = Pasture3DUtil.graph_eval_grid_frozen(prog, p_state["gw"], p_state["gh"],
+				p_state["rect"], p_state["z"])
+		p_state["zo"] = res.get("field", PackedFloat32Array())
+		p_state["node_freeze"] = res.get("frozen", [])
+	else:
+		p_state["zo"] = Pasture3DUtil.graph_eval_grid(prog, p_state["gw"], p_state["gh"],
+				p_state["rect"], p_state["z"])
 	p_state["done"] = 1
 	return true
 
@@ -5661,6 +5673,10 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 			m.last_gw = int(out.get("sink_gw", 0))
 			m.last_gh = int(out.get("sink_gh", 0))
 			m.last_rect = out.get("sink_rect", m.last_rect)
+		# The C++ rasteriser's inline graph solve reports what a FROZEN solver INSIDE the graph served or
+		# solved (the graph's own nodes, not this modifier's cache). Filed here because this is main thread.
+		if out.has("node_freeze") and m is Pasture3DNodeGraph and m.graph != null:
+			m.graph.adopt_native_freeze(out["node_freeze"])
 		# A Live step in a run never files into the modifier's cache, and has no staleness to report.
 		var live_async: bool = step.get("live_async", false)
 		if out.has("grid") and not live_async:

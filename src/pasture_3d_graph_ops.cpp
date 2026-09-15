@@ -400,6 +400,33 @@ bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 			r_out.luts[i] = luts_in[i];
 		}
 	}
+	// The freeze table. Parallel to slots; null for a slot that is not a FROZEN solver. A ragged table is
+	// ignored whole rather than half-believed: a cache served to the wrong slot is a wrong terrain.
+	if (p_prog.has("frozen")) {
+		const Array fz = p_prog["frozen"];
+		if ((int)fz.size() == n) {
+			r_out.frozen.resize((size_t)n);
+			for (int i = 0; i < n; i++) {
+				const Variant v = fz[i];
+				if (v.get_type() != Variant::DICTIONARY) {
+					continue;
+				}
+				const Dictionary d = v;
+				GraphFrozenSlot &f = r_out.frozen[(size_t)i];
+				f.frozen = true;
+				f.node_id = (int64_t)d.get("node_id", 0);
+				f.key = (int64_t)d.get("key", 0);
+				f.dirty = (bool)d.get("dirty", false);
+				f.key_ports = d.get("key_ports", PackedInt32Array());
+				f.key_params = d.get("key_params", PackedInt32Array());
+				const Array ch = d.get("channels", Array());
+				for (int c = 0; c < (int)ch.size(); c++) {
+					f.channels.push_back((PackedFloat32Array)ch[c]);
+				}
+				r_out.has_frozen = true;
+			}
+		}
+	}
 	r_out.count = n;
 	if (r_out.is_empty()) {
 		r_out = GraphProgram();
@@ -426,7 +453,8 @@ bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect,
 		const PackedFloat32Array &p_input, const std::vector<std::pair<int, int>> &p_extra_protect,
 		std::vector<std::vector<float>> &r_pool, std::vector<int> &r_slot_buffer,
-		std::vector<std::vector<int>> &r_slot_aux, std::vector<int> *r_aux_demanded = nullptr) {
+		std::vector<std::vector<int>> &r_slot_aux, std::vector<int> *r_aux_demanded = nullptr,
+		Array *r_frozen = nullptr) {
 	const int n = (p_gw > 0 ? p_gw : 0) * (p_gh > 0 ? p_gh : 0);
 	r_pool.clear();
 	r_slot_buffer.clear();
@@ -550,6 +578,37 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 		// redirect is unreachable there; a TAP can ask for anything, and answering channel 4 of a
 		// one-output node with its height would be the impostor this whole area keeps producing. It is
 		// left unprotected and reported `unserved` at the copy-out.
+	}
+
+	// The native freeze. A COLD frozen slot must produce every channel — its report is the cache, and a
+	// channel nobody downstream happened to read today is still one a later wire will read from the cache —
+	// so it demands them all exactly as a tap does. The demand is released right after the report copies
+	// them out, so the buffers recycle as they would for any consumer.
+	auto frozen_at = [&](int p_slot) -> const GraphFrozenSlot * {
+		if (p_slot < 0 || p_slot >= (int)p_prog.frozen.size() || !p_prog.frozen[(size_t)p_slot].frozen) {
+			return nullptr;
+		}
+		return &p_prog.frozen[(size_t)p_slot];
+	};
+	auto frozen_warm = [&](const GraphFrozenSlot *p_f, int p_slot) -> bool {
+		if (p_f == nullptr || (int)p_f->channels.size() < n_out(p_slot)) {
+			return false;
+		}
+		for (int c = 0; c < n_out(p_slot); c++) {
+			if (p_f->channels[(size_t)c].size() != n) {
+				return false; // another grid's solve (a preview size): re-solve rather than serve a wrong shape
+			}
+		}
+		return true;
+	};
+	for (int s = 0; s < p_prog.count; s++) {
+		const GraphFrozenSlot *f = frozen_at(s);
+		if (f == nullptr || frozen_warm(f, s)) {
+			continue;
+		}
+		for (int &rc : aux_ref[(size_t)s]) {
+			rc++;
+		}
 	}
 
 	// 2. Scratch Buffer Pool (owned by the caller so tapped buffers survive the return)
@@ -749,7 +808,50 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 			return true;
 		});
 
-		switch (ops[s]) {
+		// ---- THE NATIVE FREEZE: key, then serve or fall through to the solve ----
+		//
+		// The key is computed on EVERY evaluation of a frozen slot, served or not: a served cache is stale
+		// exactly when this key moved, and a solved one is filed under it. It reads the same operands, in the
+		// same order, as Pasture3DGraphSolverNode.freeze_key — grids first, then one array of the resolved
+		// scalars — so a wired Const moving stales the solve on this route as on the other.
+		const GraphFrozenSlot *fz = frozen_at(s);
+		int64_t fz_key = 0;
+		bool fz_served = false;
+		if (fz != nullptr) {
+			std::vector<PackedFloat32Array> key_grids;
+			for (int ki = 0; ki < (int)fz->key_ports.size(); ki++) {
+				const int port = fz->key_ports[ki];
+				const bool in_range = port >= 0 && port < 4;
+				const int src = (in_range && in_slot_arr[port] != nullptr) ? in_slot_arr[port][s] : -1;
+				key_grids.push_back(get_grid_packed(src, in_range ? chan_of(port, s) : 0));
+			}
+			if (fz->key_params.size() > 0) {
+				PackedFloat32Array scalars;
+				for (int ki = 0; ki < (int)fz->key_params.size(); ki++) {
+					const int pi = fz->key_params[ki];
+					scalars.push_back((pi >= 0 && pi < 16) ? P[pi] : 0.f);
+				}
+				key_grids.push_back(scalars);
+			}
+			fz_key = graph_solver_cache_key(p_gw, p_gh, key_grids);
+			if (frozen_warm(fz, s)) {
+				std::copy_n(fz->channels[0].ptr(), n, g_ptr);
+				for (int c = 1; c < n_out(s); c++) {
+					copy_aux(c, fz->channels[(size_t)c]);
+				}
+				fz_served = true;
+				if (r_frozen != nullptr) {
+					Dictionary rep;
+					rep["node_id"] = fz->node_id;
+					rep["key"] = fz_key;
+					rep["served"] = true;
+					rep["stale"] = fz->dirty || fz->key != fz_key;
+					r_frozen->push_back(rep);
+				}
+			}
+		}
+
+		if (!fz_served) switch (ops[s]) {
 			case GRAPH_OP_INPUT: {
 				if (have_input) {
 					const float *src = p_input.ptr();
@@ -1360,7 +1462,13 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				ErosionParams p;
 				p.gw = p_gw;
 				p.gh = p_gh;
-				p.cell_size = (double)p_rect.size.x / (double)std::max(p_gw, 1);
+				// sqrt(dx*dz): the side of a square with the TRUE cell area, which is what the drainage-area
+				// term (cell_size²) needs, and what the Erosion node passes on the GDScript route. This used
+				// to be size.x / gw, so on non-square cells FROZEN (GDScript) and LIVE (native) cut different
+				// valleys from the same graph; they now share one cell, as they must once FROZEN runs here.
+				const double cdx = (double)p_rect.size.x / (double)std::max(p_gw, 1);
+				const double cdz = (double)p_rect.size.y / (double)std::max(p_gh, 1);
+				p.cell_size = std::sqrt(std::max(cdx * cdz, 1e-12));
 				p.iterations = (int)P[0];
 				p.erosion_rate = P[1];
 				p.area_exponent = P[2];
@@ -1640,6 +1748,39 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				break;
 		}
 
+		// The cold half of the native freeze: report every channel the solve just produced, then release the
+		// demand the reference pass added for them so they recycle like any other consumer's.
+		if (fz != nullptr && !fz_served) {
+			if (r_frozen != nullptr) {
+				Array channels;
+				PackedFloat32Array c0;
+				c0.resize(n);
+				std::copy_n(g_ptr, n, c0.ptrw());
+				channels.push_back(c0);
+				for (int c = 1; c < n_out(s); c++) {
+					PackedFloat32Array cc;
+					cc.resize(n);
+					const float *b = buf_of(s, c);
+					if (b != nullptr) {
+						std::copy_n(b, n, cc.ptrw());
+					} else {
+						std::fill_n(cc.ptrw(), n, 0.f);
+					}
+					channels.push_back(cc);
+				}
+				Dictionary rep;
+				rep["node_id"] = fz->node_id;
+				rep["key"] = fz_key;
+				rep["served"] = false;
+				rep["stale"] = false;
+				rep["channels"] = channels;
+				r_frozen->push_back(rep);
+			}
+			for (int c = 1; c < n_out(s); c++) {
+				release_consumer(s, c);
+			}
+		}
+
 		// 4. Release consumer references and recycle dead buffers.
 		//
 		// in3 is released too. It was not before, which never gave a wrong answer — an unreleased buffer
@@ -1681,6 +1822,42 @@ PackedFloat32Array graph_eval_grid(const GraphProgram &p_prog, int p_gw, int p_g
 		}
 	}
 	return out;
+}
+
+int64_t graph_solver_cache_key(int p_gw, int p_gh, const std::vector<PackedFloat32Array> &p_grids) {
+	// GDScript ints are int64 and `hash()` is Variant::hash, a uint32. Shifting the widened value matches
+	// GDScript's `hash(x) << k` for every shift the recipe uses.
+	int64_t h = (int64_t)Variant(p_gw).hash() ^ ((int64_t)Variant(p_gh).hash() << 1);
+	int shift = 2;
+	for (const PackedFloat32Array &g : p_grids) {
+		shift += 2;
+		h = h ^ ((int64_t)Variant(g).hash() << shift);
+	}
+	return h;
+}
+
+Dictionary graph_eval_grid_frozen(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect,
+		const PackedFloat32Array &p_input) {
+	Dictionary result;
+	const int n = (p_gw > 0 ? p_gw : 0) * (p_gh > 0 ? p_gh : 0);
+	PackedFloat32Array field;
+	field.resize(n);
+	field.fill(0.f);
+	Array frozen;
+	if (n > 0 && !p_prog.is_empty()) {
+		std::vector<std::vector<float>> pool;
+		std::vector<int> slot_buffer;
+		std::vector<std::vector<int>> slot_aux;
+		graph_eval_grid_core(p_prog, p_gw, p_gh, p_rect, p_input, std::vector<std::pair<int, int>>(), pool,
+				slot_buffer, slot_aux, nullptr, &frozen);
+		const int out_slot = p_prog.output;
+		if (out_slot >= 0 && out_slot < (int)slot_buffer.size() && slot_buffer[out_slot] >= 0) {
+			std::copy_n(pool[slot_buffer[out_slot]].data(), n, field.ptrw());
+		}
+	}
+	result["field"] = field;
+	result["frozen"] = frozen;
+	return result;
 }
 
 // Multi-tap: evaluate once and copy out every slot in p_tap_slots.

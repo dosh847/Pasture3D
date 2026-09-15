@@ -61,6 +61,14 @@ func native_param_ports() -> PackedInt32Array:
 	return PackedInt32Array([-1, -1, 0, 1, 2])
 
 
+func freeze_key_grid_ports() -> PackedInt32Array:
+	return PackedInt32Array([0, 1])
+
+
+func freeze_key_scalar_ports() -> PackedInt32Array:
+	return PackedInt32Array([2, 3, 4])
+
+
 func role() -> Role:
 	return Role.FILTER
 
@@ -139,7 +147,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	if hardness.size() != n:
 		hardness = Pasture3DGraphOps.zeros(n)
 
-	return solve_cached(_surface_hash(surface, hardness, p_gw, p_gh), func(): return _solve_dynamic(surface, hardness, p_gw, p_gh, p_rect, tang, iters, sr))
+	return solve_cached(freeze_key(p_inputs, p_gw, p_gh), func(): return _solve_dynamic(surface, hardness, p_gw, p_gh, p_rect, tang, iters, sr))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -153,10 +161,6 @@ func _param_changed() -> void:
 	emit_changed()
 
 
-func _surface_hash(p_surface: PackedFloat32Array, p_hardness: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
-	return solver_cache_key(p_gw, p_gh, [p_surface, p_hardness])
-
-
 func _solve_dynamic(p_surface: PackedFloat32Array, p_hardness: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_tang: float, p_iters: int, p_sr: float) -> Array:
 	var n := p_gw * p_gh
 	if not ClassDB.class_has_method("Pasture3DUtil", "erosion_thermal_solve_grid"):
@@ -166,5 +170,8 @@ func _solve_dynamic(p_surface: PackedFloat32Array, p_hardness: PackedFloat32Arra
 	var res: Dictionary = Pasture3DUtil.erosion_thermal_solve_grid(p_surface, p_hardness, p_gw, p_gh,
 			p_rect, p_tang, p_iters, p_sr)
 	if not bool(res.get("ok", false)):
+		# Pass the surface through, as Erosion and Hydraulic do. Reading `height` off a failed result served
+		# whatever the binding left there, or threw if it left nothing.
 		push_error("[Pasture3D] Thermal erosion native solve failed.")
+		return [p_surface.duplicate(), Pasture3DGraphOps.zeros(n)]
 	return [res["height"], res["talus"]]

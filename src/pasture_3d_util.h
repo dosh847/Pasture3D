@@ -120,6 +120,12 @@ public:
 	static PackedFloat32Array graph_eval_grid(const Dictionary &p_program, const int p_gw, const int p_gh,
 			const Rect2 &p_rect, const PackedFloat32Array &p_input);
 
+	// graph_eval_grid for a program carrying a freeze table: {"field", "frozen": Array of reports}, one report
+	// per FROZEN solver slot ({node_id, key, served, stale[, channels]}). Stateless, so a worker may call it;
+	// the host adopts the reports on the main thread (Pasture3DTerrainGraph.adopt_native_freeze).
+	static Dictionary graph_eval_grid_frozen(const Dictionary &p_program, const int p_gw, const int p_gh,
+			const Rect2 &p_rect, const PackedFloat32Array &p_input);
+
 	// Single-pass multi-tap graph evaluator: evaluate one program ONCE and return several nodes' buffers at
 	// once, keyed by SSA slot ({int -> PackedFloat32Array}). Backs the graph editor's inline node previews —
 	// N open previews cost one evaluation, not N. Empty Dictionary when the program cannot be built.

@@ -1301,6 +1301,21 @@ PackedFloat32Array Pasture3DUtil::graph_eval_grid(const Dictionary &p_program, c
 	return godot::graph_eval_grid_best(prog, p_gw, p_gh, p_rect, p_input);
 }
 
+Dictionary Pasture3DUtil::graph_eval_grid_frozen(const Dictionary &p_program, const int p_gw, const int p_gh,
+		const Rect2 &p_rect, const PackedFloat32Array &p_input) {
+	godot::GraphProgram prog;
+	if (!godot::graph_build(p_program, prog)) {
+		Dictionary out;
+		PackedFloat32Array field;
+		field.resize(MAX(p_gw, 0) * MAX(p_gh, 0));
+		field.fill(0.f);
+		out["field"] = field;
+		out["frozen"] = Array();
+		return out;
+	}
+	return godot::graph_eval_grid_frozen(prog, p_gw, p_gh, p_rect, p_input);
+}
+
 // Native single-pass multi-tap — one graph evaluation that yields several nodes' intermediate buffers at
 // once, keyed by SSA slot. The editor's inline node previews compile every preview-on node into one program
 // and read them all from a single call, so opening more previews never adds evaluation passes. Returns an
@@ -2755,6 +2770,10 @@ void Pasture3DUtil::_bind_methods() {
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("graph_eval_grid", "program", "gw", "gh", "rect", "input"),
 			&Pasture3DUtil::graph_eval_grid);
+	// Terrain graph — the whole-graph evaluator with the native freeze reports ({field, frozen}).
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("graph_eval_grid_frozen", "program", "gw", "gh", "rect", "input"),
+			&Pasture3DUtil::graph_eval_grid_frozen);
 	// Terrain graph — single-pass multi-tap; one eval, several node buffers keyed by slot (inline previews).
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("graph_eval_grid_taps", "program", "gw", "gh", "rect", "input", "tap_slots",

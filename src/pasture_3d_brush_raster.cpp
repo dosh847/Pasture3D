@@ -873,7 +873,18 @@ void brush_mod_graph(BrushModStep &p_step, std::vector<float> &r_vals, const std
 	std::memcpy(zin.ptrw(), z.data(), n * sizeof(float));
 	// GPU when the footprint is large enough (graph_gpu_threshold), else CPU — the three-tier fallback,
 	// evaluated only on a FROZEN miss (a fresh evaluation), exactly as brush_mod_erode gates its work.
-	const PackedFloat32Array zo = graph_eval_grid_best(p_step.graph_prog, p_gw, p_gh, rect, zin);
+	PackedFloat32Array zo;
+	if (p_step.graph_prog.has_frozen) {
+		// A FROZEN solver inside the graph: served or solved by the program, and the reports handed back so
+		// `_commit_modifier_caches` can adopt them. Dropping them would re-solve the node on every bake.
+		const Dictionary res = graph_eval_grid_frozen(p_step.graph_prog, p_gw, p_gh, rect, zin);
+		zo = res["field"];
+		if (p_step.has_out) {
+			p_step.out["node_freeze"] = res["frozen"];
+		}
+	} else {
+		zo = graph_eval_grid_best(p_step.graph_prog, p_gw, p_gh, rect, zin);
+	}
 	brush_mod_graph_composite(r_vals, z, zo.ptr(), p_profile, amount, p_basey, p_add, n);
 	if (want_key) {
 		p_step.out["key"] = key;

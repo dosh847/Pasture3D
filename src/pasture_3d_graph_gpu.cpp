@@ -3391,6 +3391,10 @@ static T dispatch_or_cpu(int p_gw, int p_gh, TGpu p_gpu, TCpu p_cpu) {
 
 PackedFloat32Array graph_eval_grid_best(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect,
 		const PackedFloat32Array &p_input) {
+	if (p_prog.has_frozen) {
+		// The GPU evaluator has no freeze table: it would re-solve a FROZEN slot rather than serve it.
+		return graph_eval_grid(p_prog, p_gw, p_gh, p_rect, p_input);
+	}
 	return dispatch_or_cpu<PackedFloat32Array>(
 			p_gw, p_gh,
 			[&](PackedFloat32Array &r_out) { return graph_gpu().eval_grid(p_prog, p_gw, p_gh, p_rect, p_input, r_out); },

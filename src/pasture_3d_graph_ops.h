@@ -207,6 +207,24 @@ void graph_cell_to_world(int p_ix, int p_iz, int p_gw, int p_gh, const Rect2 &p_
 // on every path. In place; p_passes <= 0 is the identity and allocates nothing.
 void graph_nan_blur(std::vector<float> &r_vals, int p_gw, int p_gh, int p_passes);
 
+// ---- The native freeze ----
+//
+// A FROZEN solver used to take the WHOLE graph off the native path, because the program was a pure function
+// of the graph and had nowhere to keep a solve. Now its cache travels in the program: one entry per frozen
+// slot, carrying the channels the host holds (empty when cold), the key they were solved for, and which
+// operands form that key. The evaluator recomputes the key exactly as Pasture3DGraphNode.solver_cache_key
+// does (Variant::hash of the same values), serves the channels when warm, solves when cold, and REPORTS
+// either way. Nothing here writes to a node: the host adopts the reports on the main thread.
+struct GraphFrozenSlot {
+	bool frozen = false;
+	int64_t node_id = 0; // the solver node's instance id, so a report cannot land on a renumbered slot
+	int64_t key = 0; // the key the cached channels were solved for
+	bool dirty = false; // a parameter moved since the bake; served is then stale regardless of the key
+	PackedInt32Array key_ports; // input ports (0..3) whose GRIDS form the key, in order
+	PackedInt32Array key_params; // resolved P[] slots whose values form the key's trailing scalar array
+	std::vector<PackedFloat32Array> channels; // the cached solve, one per output channel; empty when cold
+};
+
 // ---- Whole-graph evaluator (the native grid-pass interleave & scratch buffer arena) -----------------
 struct GraphProgram {
 	PackedInt32Array ops; // one GraphCellOpType per slot, topological order
@@ -292,6 +310,10 @@ struct GraphProgram {
 	PackedInt32Array pdrv_src;
 	std::vector<Ref<FastNoiseLite>> noise; // parallel to slots; null unless NOISE or JITTER
 	std::vector<PackedFloat32Array> luts; // parallel to slots; for CURVE
+	// The native freeze (see GraphFrozenSlot). Parallel to slots when present; empty on every program with
+	// no FROZEN solver. `has_frozen` keeps such a program off the GPU, which has no freeze table.
+	std::vector<GraphFrozenSlot> frozen;
+	bool has_frozen = false;
 	int output = -1; // the slot whose grid is the graph output
 	int count = 0;
 	bool is_empty() const { return count == 0 || output < 0 || output >= count; }
@@ -322,6 +344,17 @@ void graph_resolve_op_params(const GraphProgram &p_prog, int p_slot, float r_P[1
 // Evaluate the whole graph to a p_gw*p_gh row-major field over p_rect using scratch arena memory reuse.
 PackedFloat32Array graph_eval_grid(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect,
 		const PackedFloat32Array &p_input);
+
+// graph_eval_grid, plus one report per FROZEN solver slot: {"field": PackedFloat32Array, "frozen": Array of
+// {node_id, key, served, stale[, channels]}}. A served slot reports stale when its key moved or its node was
+// dirty; a solved slot reports every channel so the host can file it. CPU only.
+Dictionary graph_eval_grid_frozen(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect,
+		const PackedFloat32Array &p_input);
+
+// Pasture3DGraphNode.solver_cache_key, byte for byte: hash(gw) ^ (hash(gh) << 1), then each grid's Variant
+// hash XORed in at shift 4, 6, 8, ... Both routes must produce the same int or a frozen solve made on one is
+// a perpetual miss on the other.
+int64_t graph_solver_cache_key(int p_gw, int p_gh, const std::vector<PackedFloat32Array> &p_grids);
 
 // Evaluate the whole graph ONCE and tap several intermediate node buffers from the single pass. Each slot
 // in p_tap_slots is protected from the scratch-arena recycle (the same +1 ref count the output gets), so

@@ -68,11 +68,13 @@ func bake_label() -> String:
 	return "Bake"
 
 
-## FROZEN means this node serves its own cache, which only the GDScript evaluator can do — the native
-## program is a pure function of the graph and has no way to serve or invalidate a cached solve, so a
-## frozen node takes the WHOLE graph off the native path. See Pasture3DGraphNode.blocks_native().
+## FROZEN used to take the WHOLE graph off the native path: the program was a pure function of the graph
+## with nowhere to keep a solve. A solver that declares its freeze key (`freeze_key_grid_ports`) now rides
+## the program instead — its cache travels in the compiled `frozen` table, the native evaluator recomputes
+## the same key and serves or solves, and the host adopts the answer on the main thread. Only a solver that
+## has not declared its key still blocks. See Pasture3DGraphNode.blocks_native().
 func blocks_native() -> bool:
-	return evaluation == Evaluation.FROZEN
+	return evaluation == Evaluation.FROZEN and not native_freeze_supported()
 
 
 ## Drop the cached solve, so the next evaluation re-solves. This is what the Bake button does.
@@ -147,3 +149,87 @@ func solve_cached(p_key: int, p_solve: Callable) -> Variant:
 ## the cached height by its amplitude, which is exact and far cheaper than re-growing the massif.
 func _on_cache_hit(p_cached: Variant) -> Variant:
 	return p_cached
+
+
+# ---- The native freeze ----------------------------------------------------------------------------
+#
+# A solver opts in by naming its freeze key's operands. The key is then built by ONE recipe on both routes:
+# `freeze_key` here, and the native evaluator from the `frozen` table `native_freeze_entry` compiles. Both
+# hash the same values with the same Variant hash, so a solve made on one route is a hit on the other.
+#
+# A node that overrides `_on_cache_hit` must NOT opt in: the native route serves the cache as stored.
+
+## Input ports whose GRIDS form the freeze key, in order. Non-empty opts this node into the native freeze.
+## Ports 0..3 only — the program carries four grid operands.
+func freeze_key_grid_ports() -> PackedInt32Array:
+	return PackedInt32Array()
+
+
+## Input ports whose SCALAR values join the key as one trailing array. A wired Const that moves has to stale
+## a frozen solve; before this only the Inspector setters could, and a driven parameter changed nothing.
+## Each must appear in `native_param_ports()`, which is how the compiler finds its resolved value.
+func freeze_key_scalar_ports() -> PackedInt32Array:
+	return PackedInt32Array()
+
+
+## True when a FROZEN graph with this node in it can still lower to native.
+func native_freeze_supported() -> bool:
+	return not freeze_key_grid_ports().is_empty() and ClassDB.class_has_method("Pasture3DUtil", "graph_eval_grid_frozen")
+
+
+## The freeze key for one evaluation's inputs — the GDScript route's half of the one recipe.
+func freeze_key(p_inputs: Array, p_gw: int, p_gh: int) -> int:
+	var n := p_gw * p_gh
+	var grids: Array = []
+	for port in freeze_key_grid_ports():
+		var g = p_inputs[port] if port < p_inputs.size() else null
+		grids.append(g if (g is PackedFloat32Array and g.size() == n) else Pasture3DGraphOps.zeros(n))
+	var sp := freeze_key_scalar_ports()
+	if not sp.is_empty():
+		var sc := PackedFloat32Array()
+		for port in sp:
+			var g = p_inputs[port] if port < p_inputs.size() else null
+			sc.append(float(g[0]) if (g is PackedFloat32Array and g.size() > 0) else input_unwired_default(port))
+		grids.append(sc)
+	return solver_cache_key(p_gw, p_gh, grids)
+
+
+## This node's row in the compiled `frozen` table, or null when it has none. LIVE drops whatever a previous
+## freeze left, exactly as `solve_cached` does on the GDScript route, since the native route never calls it.
+func native_freeze_entry() -> Variant:
+	if not native_freeze_supported():
+		return null
+	if evaluation != Evaluation.FROZEN:
+		if not _cache.is_empty():
+			_cache.clear()
+		_set_stale(false)
+		return null
+	var pmap := native_param_ports()
+	var key_params := PackedInt32Array()
+	for port in freeze_key_scalar_ports():
+		key_params.append(pmap[port] if port < pmap.size() else -1)
+	var channels: Array = []
+	if not _cache.is_empty():
+		var v: Variant = _cache[_cache_key]
+		channels = v if v is Array else [v]
+	return {"node_id": get_instance_id(), "key": _cache_key, "dirty": _dirty_since_bake,
+			"key_ports": freeze_key_grid_ports(), "key_params": key_params, "channels": channels}
+
+
+## File one native report: the same two outcomes `solve_cached` has. Main thread only (the graph checks).
+func adopt_native_freeze(p_report: Dictionary) -> void:
+	if evaluation != Evaluation.FROZEN:
+		return
+	var key := int(p_report.get("key", 0))
+	if bool(p_report.get("served", false)):
+		# Served from a cache Bake may have cleared since the compile; nothing left to call stale.
+		if not _cache.is_empty() and (_dirty_since_bake or key != _cache_key):
+			_set_stale(true)
+		return
+	var channels: Array = p_report.get("channels", [])
+	if channels.is_empty():
+		return
+	_cache = {key: channels}
+	_cache_key = key
+	_dirty_since_bake = false
+	_set_stale(false)

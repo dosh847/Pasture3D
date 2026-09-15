@@ -247,15 +247,25 @@ func _d_frozen_blocks_native(p_solvers: Array) -> void:
 	# `blocks_native()` at all, and answering wrong in EITHER direction is a bug — false when frozen
 	# discards the user's bake, true when live costs native evaluation across the whole graph.
 	var wrong: Array[String] = []
+	var riders := 0
 	for pair in p_solvers:
 		var n: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(pair[0])
 		n.set(&"evaluation", 0)
 		if n.blocks_native():
 			wrong.append("%s blocks native while LIVE" % pair[0])
 		n.set(&"evaluation", 1)
-		if not n.blocks_native():
-			wrong.append("%s does not block native while FROZEN" % pair[0])
+		# Since the native freeze, a solver that declares its key rides the program while FROZEN and only
+		# the rest still block. Both halves are asserted, so a solver that declares a key and blocks anyway
+		# fails as surely as one that blocks nothing and declares nothing.
+		var rides: bool = n.native_freeze_supported()
+		if rides:
+			riders += 1
+		if n.blocks_native() == rides:
+			wrong.append("%s %s native while FROZEN" % [pair[0], "blocks" if rides else "does not block"])
 	_check(wrong.is_empty(), "%d solvers answer both ways%s" % [p_solvers.size(), "" if wrong.is_empty() else " — " + "; ".join(wrong)])
+	# CONTROL: both populations exist, or one half of the rule above is asserted over an empty set.
+	_check(riders >= 3 and riders < p_solvers.size(),
+			"control: %d of %d solvers ride the native freeze, and the rest still block" % [riders, p_solvers.size()])
 
 	# CONTROL: a node with no freeze must not block native, or [D] is passing on a constant.
 	var blend: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"blend")

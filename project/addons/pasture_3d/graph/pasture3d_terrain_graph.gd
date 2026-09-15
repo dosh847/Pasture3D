@@ -593,7 +593,7 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 			var sprog: Dictionary = compile_graph_program(out)
 			if not sprog.is_empty():
 				var s_in := _surface_grid(p_input, n)
-				var sfield: PackedFloat32Array = Pasture3DUtil.graph_eval_grid(sprog, p_gw, p_gh, p_rect, s_in)
+				var sfield: PackedFloat32Array = _native_eval(sprog, p_gw, p_gh, p_rect, s_in)
 				if not sfield.is_empty() and sfield.size() == n:
 					staged_compile_count += 1
 					# No `store_cache` here, unlike the single-program path below. A derive node's answer
@@ -609,7 +609,7 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 		var prog: Dictionary = compile_graph_program(out)
 		if not prog.is_empty():
 			var in_surf := _surface_grid(p_input, n)
-			var field: PackedFloat32Array = Pasture3DUtil.graph_eval_grid(prog, p_gw, p_gh, p_rect, in_surf)
+			var field: PackedFloat32Array = _native_eval(prog, p_gw, p_gh, p_rect, in_surf)
 			if not field.is_empty() and field.size() == n:
 				# The bake does not touch 2D node previews. The graph editor owns previews end to end,
 				# rendering them off the main thread from its own single low-res tap pass (see graph_editor.gd).
@@ -1265,7 +1265,49 @@ func compile_graph_program(p_root_node: int = -1) -> Dictionary:
 		"pmap0": pmap0, "pmap1": pmap1, "pmap2": pmap2, "pmap3": pmap3,
 		"pdrv_node": pdrv_node, "pdrv_param": pdrv_param, "pdrv_src": pdrv_src,
 		"noise": noise_tab, "luts": luts_tab, "output": int(slot_of[out]),
+		"frozen": _freeze_table(order),
 	}
+
+
+## The native freeze table, parallel to the compiled slots: each FROZEN solver's cache and key recipe, null
+## elsewhere. Built on the main thread at compile, which is the only time the evaluator may read a node.
+func _freeze_table(p_order: Array) -> Array:
+	var t: Array = []
+	for ni in p_order:
+		var nd: Pasture3DGraphNode = nodes[ni]
+		t.append(nd.native_freeze_entry() if (not nd.muted and nd is Pasture3DGraphSolverNode) else null)
+	return t
+
+
+## True when a compiled program carries a FROZEN solver. Static and resource-free, so a worker may ask.
+static func program_has_freeze(p_prog: Dictionary) -> bool:
+	for e in p_prog.get("frozen", []):
+		if e != null:
+			return true
+	return false
+
+
+## File what the native evaluator served or solved back into the solver nodes. MAIN THREAD ONLY — this is
+## the half of the freeze a worker may not do. Reports name the node by instance id rather than slot, so a
+## node deleted or renumbered while a worker solved is skipped instead of handed another node's solve.
+func adopt_native_freeze(p_reports: Array) -> void:
+	if OS.get_thread_caller_id() != OS.get_main_thread_id():
+		push_error("Pasture3DTerrainGraph.adopt_native_freeze() called off the main thread.")
+		return
+	for r in p_reports:
+		var obj := instance_from_id(int((r as Dictionary).get("node_id", 0)))
+		if obj is Pasture3DGraphSolverNode and nodes.has(obj):
+			obj.adopt_native_freeze(r)
+
+
+## One native evaluation of a compiled program, freeze-aware: a program with a FROZEN solver goes through
+## the reporting entry point and its reports are adopted before the field is returned.
+func _native_eval(p_prog: Dictionary, p_gw: int, p_gh: int, p_rect: Rect2, p_input: PackedFloat32Array) -> PackedFloat32Array:
+	if program_has_freeze(p_prog):
+		var res: Dictionary = Pasture3DUtil.graph_eval_grid_frozen(p_prog, p_gw, p_gh, p_rect, p_input)
+		adopt_native_freeze(res.get("frozen", []))
+		return res.get("field", PackedFloat32Array())
+	return Pasture3DUtil.graph_eval_grid(p_prog, p_gw, p_gh, p_rect, p_input)
 
 
 ## Which compiled parameter slot each of a node's first four INPUT PORTS drives, per op.

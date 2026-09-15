@@ -248,6 +248,10 @@ bench/GraphLiveNotifyProbe.tscn
 # The native whole-graph path skips the node entirely, so freezing was silently a no-op for every solver
 # in the allow-list. Swept from the registry so a new solver is covered the day it appears.
 bench/GraphFrozenSolverGate.tscn
+# --- The native freeze: a FROZEN solver that declares its key rides the program instead of dropping it ---
+# One key recipe on both routes (served across them), wired scalars in the key, Erosion's shared cell size,
+# and a brush bake filing the graph's frozen solver on both rasterisers.
+bench/GraphNativeFreezeGate.tscn
 
 # --- S1: an authored curve as graph geometry (PASTURE3D_SPLINE_GRAPH_SPEC.md) ---
 # Pasture3DSpline is a brush that PAINTS NOTHING, so every criterion is a join rather than a sum: the

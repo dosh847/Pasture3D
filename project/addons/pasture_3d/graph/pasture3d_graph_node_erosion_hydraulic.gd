@@ -90,6 +90,14 @@ func native_param_ports() -> PackedInt32Array:
 	return PackedInt32Array([-1, 0, 1, 4, 5])
 
 
+func freeze_key_grid_ports() -> PackedInt32Array:
+	return PackedInt32Array([0])
+
+
+func freeze_key_scalar_ports() -> PackedInt32Array:
+	return PackedInt32Array([1, 2, 3, 4])
+
+
 func role() -> Role:
 	return Role.FILTER
 
@@ -166,7 +174,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	if surface.size() != n:
 		surface = Pasture3DGraphOps.zeros(n)
 
-	return solve_cached(_surface_hash(surface, p_gw, p_gh), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, iters, rr, es, ds))
+	return solve_cached(freeze_key(p_inputs, p_gw, p_gh), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, iters, rr, es, ds))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -178,10 +186,6 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> 
 func _param_changed() -> void:
 	mark_dirty_since_bake()
 	emit_changed()
-
-
-func _surface_hash(p_surface: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
-	return solver_cache_key(p_gw, p_gh, [p_surface])
 
 
 func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_iters: int, p_rr: float, p_es: float, p_ds: float) -> Array:

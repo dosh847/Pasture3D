@@ -107,6 +107,14 @@ func native_param_ports() -> PackedInt32Array:
 	return PackedInt32Array([-1, 0, 1, 3])
 
 
+func freeze_key_grid_ports() -> PackedInt32Array:
+	return PackedInt32Array([0])
+
+
+func freeze_key_scalar_ports() -> PackedInt32Array:
+	return PackedInt32Array([1, 2, 3])
+
+
 func native_out_count() -> int:
 	return 5 # height, flow, erosion, deposition, wetness
 
@@ -159,9 +167,6 @@ func output_port_types() -> PackedInt32Array:
 
 func node_warnings() -> PackedStringArray:
 	var w := super()
-	if evaluation == Evaluation.FROZEN and not _cache.is_empty():
-		w.append("%s holds %.1f MB of frozen solve. Press Bake Erosion to re-solve it."
-			% [display_name(), _cache_bytes() / 1048576.0])
 	if is_zero_approx(erosion_rate) and is_zero_approx(hillslope_diffusion):
 		w.append("%s: both Erosion Rate and Hillslope Diffusion are 0, so the solver routes water and "
 			% display_name() + "changes nothing. Raise Erosion Rate to cut channels.")
@@ -180,7 +185,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	if surface.size() != n:
 		surface = Pasture3DGraphOps.zeros(n)
 
-	return solve_cached(_surface_hash(surface, p_gw, p_gh), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, iters, er, diff))
+	return solve_cached(freeze_key(p_inputs, p_gw, p_gh), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, iters, er, diff))
 
 
 func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_iters: int, p_er: float, p_diff: float) -> Array:
@@ -224,44 +229,3 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> 
 func _param_changed() -> void:
 	mark_dirty_since_bake()
 	emit_changed()
-
-
-## Run the native stream-power solve over `p_surface` and split it into the five channels. The grid maps onto
-## `p_rect`, so the cell size handed to the solver is sqrt(dx*dz) — the side of a square with the true cell
-## area, which is what the drainage-area term (cell_size²) needs. NaN in the surface (off a brush loop) is a
-## no-data outlet and passes through as NaN in the height / 0 in every channel, handled by the binding.
-func _solve(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2) -> Array:
-	var n := p_gw * p_gh
-	var dx := p_rect.size.x / float(maxi(p_gw, 1))
-	var dz := p_rect.size.y / float(maxi(p_gh, 1))
-	var cell_size := sqrt(maxf(dx * dz, 1e-12))
-	var params := {
-		"iterations": iterations,
-		"erosion_rate": erosion_rate,
-		"area_exponent": area_exponent,
-		"diffusion": hillslope_diffusion,
-		"deposition": deposition,
-	}
-	var res: Dictionary = Pasture3DUtil.erosion_solve_grid(p_surface, p_gw, p_gh, cell_size, params,
-			PackedFloat32Array())
-	if res.is_empty() or not bool(res.get("ok", false)):
-		# The solve failed or was refused (shape mismatch): pass the surface through untouched, zero
-		# channels, rather than stamping a wrong shape. A warning is not raised here — a failed native call
-		# is a build/plumbing fault the gate catches, not an artist-facing condition.
-		return [p_surface, Pasture3DGraphOps.zeros(n), Pasture3DGraphOps.zeros(n),
-				Pasture3DGraphOps.zeros(n), Pasture3DGraphOps.zeros(n)]
-	return [res["z"], res["flow"], res["ero"], res["dep"], res["wet"]]
-
-
-func _cache_bytes() -> int:
-	var b := 0
-	for k in _cache:
-		for g in (_cache[k] as Array):
-			b += (g as PackedFloat32Array).size() * 4
-	return b
-
-
-## A cheap order-sensitive hash of the surface, the freeze staleness key: a different upstream surface
-## produces a different key, so a frozen solve knows it is looking at new ground.
-func _surface_hash(p_surface: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
-	return solver_cache_key(p_gw, p_gh, [p_surface])

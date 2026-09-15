@@ -58,12 +58,15 @@ func _a_frozen_declines_native(p_ops: Array) -> void:
 		var live_native: bool = _graph(op, false).native_supported()
 		if live_native:
 			_live_native += 1
-		var ok: bool = frozen_blocks and not live_blocks and not frozen_native
-		print("    %-22s blocks_native FROZEN=%s LIVE=%s | native_supported FROZEN=%s LIVE=%s"
-			% [op, frozen_blocks, live_blocks, frozen_native, live_native])
+		# A solver that declares its freeze key rides the native program while FROZEN (its cache travels in
+		# the compiled freeze table); every other solver still declines native.
+		var rides: bool = _make(op, true).native_freeze_supported()
+		var ok: bool = frozen_blocks != rides and not live_blocks and frozen_native == (rides and live_native)
+		print("    %-22s blocks_native FROZEN=%s LIVE=%s | native_supported FROZEN=%s LIVE=%s | rides freeze=%s"
+			% [op, frozen_blocks, live_blocks, frozen_native, live_native, rides])
 		if not ok:
 			_fail += 1
-			print("      !! %s does not decline the native path when FROZEN" % op)
+			print("      !! %s: FROZEN %s the native path" % [op, "declined" if not frozen_native else "kept"])
 
 	# CONTROL. "FROZEN declines native" is worthless if nothing here reaches the native path to begin with
 	# — that is exactly the state DLA was in, passing its own gate for the wrong reason. Most of the family
