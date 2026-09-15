@@ -214,6 +214,9 @@ PackedFloat32Array godot::falloff_grid(const PackedFloat32Array &p_surface, cons
 	const double ox = (double)p_rect.position.x;
 	const double oz = (double)p_rect.position.y;
 	const double strength = std::clamp(p_strength, 0.0, 1.0);
+	// Falloff's Shape is metrics 0-3. Anything else was RADIAL under the old switch's default, and must stay
+	// RADIAL now that 4-7 mean something else to the shared metric.
+	const int metric = (p_shape >= GRAPH_METRIC_RADIAL && p_shape <= GRAPH_METRIC_AXIS_Z) ? p_shape : GRAPH_METRIC_RADIAL;
 
 	Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int z0, int z1) {
 		for (int iz = z0; iz < z1; iz++) {
@@ -228,17 +231,9 @@ PackedFloat32Array godot::falloff_grid(const PackedFloat32Array &p_surface, cons
 				}
 
 				const double wx = ox + ((double)ix + 0.5) * dx;
-				const double ddx = wx - p_centre_x;
-				const double ddz = wz - p_centre_z;
-
-				double d = 0.0;
-				switch (p_shape) {
-					case GRAPH_FALLOFF_SQUARE: d = std::max(std::abs(ddx), std::abs(ddz)); break;
-					case GRAPH_FALLOFF_AXIS_X: d = std::abs(ddx); break;
-					case GRAPH_FALLOFF_AXIS_Z: d = std::abs(ddz); break;
-					case GRAPH_FALLOFF_RADIAL:
-					default: d = std::sqrt(ddx * ddx + ddz * ddz); break;
-				}
+				// The shared metric (pasture_3d_distance_metric.h). Falloff is axis-aligned, so its frame is the
+				// literal +X, for which the metric's rotation is exact.
+				double d = p3d_distance_metric(metric, wx, wz, p_centre_x, p_centre_z, 1.0, 0.0);
 				if (nz != nullptr && std::isfinite(nz[i])) {
 					d += p_distance_noise * (double)nz[i];
 				}

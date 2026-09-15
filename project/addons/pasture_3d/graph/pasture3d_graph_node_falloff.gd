@@ -130,14 +130,8 @@ func input_unwired_default(p_port: int) -> float:
 ## The 0..1 attenuation at a world point. Shared by eval_cell and by the gate, so a criterion that checks
 ## the attenuation curve tests the same arithmetic the bake runs.
 func attenuation(p_wx: float, p_wz: float, p_radius: float, p_noise: float) -> float:
-	var dx: float = p_wx - centre.x
-	var dz: float = p_wz - centre.y
-	var d: float = 0.0
-	match shape:
-		Shape.RADIAL: d = sqrt(dx * dx + dz * dz)
-		Shape.SQUARE: d = maxf(absf(dx), absf(dz))
-		Shape.AXIS_X: d = absf(dx)
-		Shape.AXIS_Z: d = absf(dz)
+	# Shape's values ARE Pasture3DGraphDistance.Metric 0-3, measured in the axis-aligned (+X) frame.
+	var d: float = Pasture3DGraphDistance.metric(shape, p_wx, p_wz, centre, Vector2(1.0, 0.0))
 	d += distance_noise * p_noise
 
 	# smoothstep returns 0 below `radius` and 1 past `radius + feather`; the attenuation is its complement.

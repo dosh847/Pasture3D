@@ -30,6 +30,7 @@
 #include "pasture_3d_hydraulic_saleve.h"
 #include "pasture_3d_hydraulic_stream_log.h"
 #include "pasture_3d_lake_flooding.h"
+#include "pasture_3d_distance_metric.h"
 #include "pasture_3d_math_ops.h"
 #include "pasture_3d_noise_jordan.h"
 #include "pasture_3d_noise_swiss.h"
@@ -1309,6 +1310,43 @@ Dictionary Pasture3DUtil::graph_eval_grid_taps(const Dictionary &p_program, cons
 		return Dictionary();
 	}
 	return godot::graph_eval_grid_taps(prog, p_gw, p_gh, p_rect, p_input, p_tap_slots, p_tap_channels);
+}
+
+// The shared distance metric over a grid of cell centres, for GraphDistanceMetricGate. Same cell mapping as
+// every graph kernel (+0.5, dx = size / gw). The direction is derived from `p_b` HERE, through the one
+// fallback definition, so the gate's a == b criterion exercises the real fallback and not a copy of it.
+PackedFloat32Array Pasture3DUtil::graph_distance_metric_grid(const int p_metric, const int p_gw, const int p_gh,
+		const Rect2 &p_rect, const Vector2 &p_a, const Vector2 &p_b) {
+	PackedFloat32Array out;
+	if (p_gw <= 0 || p_gh <= 0) {
+		return out;
+	}
+	out.resize(p_gw * p_gh);
+	double ux = 1.0;
+	double uz = 0.0;
+	p3d_metric_direction(p_a.x, p_a.y, p_b.x, p_b.y, ux, uz);
+	const double dx = (double)p_rect.size.x / (double)p_gw;
+	const double dz = (double)p_rect.size.y / (double)p_gh;
+	float *w = out.ptrw();
+	for (int iz = 0; iz < p_gh; iz++) {
+		const double wz = (double)p_rect.position.y + ((double)iz + 0.5) * dz;
+		for (int ix = 0; ix < p_gw; ix++) {
+			const double wx = (double)p_rect.position.x + ((double)ix + 0.5) * dx;
+			w[iz * p_gw + ix] = (float)p3d_distance_metric(p_metric, wx, wz, p_a.x, p_a.y, ux, uz);
+		}
+	}
+	return out;
+}
+
+PackedFloat32Array Pasture3DUtil::graph_repeat_values(const int p_mode, const PackedFloat32Array &p_values) {
+	PackedFloat32Array out;
+	out.resize(p_values.size());
+	const float *src = p_values.ptr();
+	float *w = out.ptrw();
+	for (int64_t i = 0; i < p_values.size(); i++) {
+		w[i] = (float)p3d_repeat(p_mode, (double)src[i]);
+	}
+	return out;
 }
 
 // GPU whole-graph evaluator binding. A persistent instance so the local RD + shader compile ONCE across
@@ -2685,6 +2723,13 @@ void Pasture3DUtil::_bind_methods() {
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("graph_eval_grid_gpu", "program", "gw", "gh", "rect", "input"),
 			&Pasture3DUtil::graph_eval_grid_gpu);
+	// Terrain graph — the shared distance metric and repeat modes, for GraphDistanceMetricGate only.
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("graph_distance_metric_grid", "metric", "gw", "gh", "rect", "a", "b"),
+			&Pasture3DUtil::graph_distance_metric_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("graph_repeat_values", "mode", "values"),
+			&Pasture3DUtil::graph_repeat_values);
 	// Terrain graph — the Erosion SOLVER node's stream-power solve (native erosion_solve); returns
 	// { ok, z, flow, ero, dep, wet } or { ok:false }.
 	ClassDB::bind_static_method("Pasture3DUtil",

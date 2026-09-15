@@ -137,6 +137,14 @@ public:
 	static PackedFloat32Array graph_eval_grid_gpu(const Dictionary &p_program, const int p_gw, const int p_gh,
 			const Rect2 &p_rect, const PackedFloat32Array &p_input);
 
+	// The shared distance metric and repeat modes (pasture_3d_distance_metric.h), exposed ONLY so
+	// GraphDistanceMetricGate can hold the C++ copy against the GDScript oracle. Metrics 4-7 have no kernel
+	// caller until the Gradient node exists, so without these they would be untested code. Not used by any
+	// node. `p_b` is an end point; the direction is derived here, which is what exercises the +X fallback.
+	static PackedFloat32Array graph_distance_metric_grid(const int p_metric, const int p_gw, const int p_gh,
+			const Rect2 &p_rect, const Vector2 &p_a, const Vector2 &p_b);
+	static PackedFloat32Array graph_repeat_values(const int p_mode, const PackedFloat32Array &p_values);
+
 	// The cell-count crossover at or above which the graph takes the GPU route, AS THE CALLING THREAD
 	// SEES IT — 0 off the main thread, because RenderingDevice is main-thread only. Bound so
 	// GraphWorkerThreadGate can assert that refusal instead of assuming it, and so an operator can read

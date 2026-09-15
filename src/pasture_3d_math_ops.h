@@ -5,15 +5,10 @@
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/rect2.hpp>
 
-namespace godot {
+// Falloff's shapes are GraphDistanceMetric 0-3; there is no separate falloff enum to keep in step.
+#include "pasture_3d_distance_metric.h"
 
-// Sync with Pasture3DGraphNodeFalloff.Shape.
-enum GraphFalloffShape {
-	GRAPH_FALLOFF_RADIAL = 0,
-	GRAPH_FALLOFF_SQUARE = 1,
-	GRAPH_FALLOFF_AXIS_X = 2,
-	GRAPH_FALLOFF_AXIS_Z = 3,
-};
+namespace godot {
 
 // Sync with Pasture3DGraphNodeContrast.Mode.
 enum GraphContrastMode {
