@@ -1,8 +1,11 @@
 # Pasture3D Terrain Graph — Gradient, Value Ramp and Color Ramp Nodes Spec
 
-**Status:** Phase 1 built and gated (2026-09-14, uncommitted). `GraphDistanceMetricGate` passes windowed with
-every control live: the C++ Falloff is bit-identical in 64 of 64 cases, and the GPU matches within 1e-5 m
-(the DM-B amendment). Phases 2a–5 are unbuilt. Check the symbols named in §10 before planning from this
+**Status:** Phase 1 built and gated (2026-09-14, commit 3baf1794; its GLSL rode in e23e8c3a).
+`GraphDistanceMetricGate` passes windowed with every control live: the C++ Falloff is bit-identical in 64 of
+64 cases, and the GPU matches within 1e-5 m (the DM-B amendment). Phase 2a built and gated (2026-09-14,
+uncommitted): `lut_buf_of()` + GLSL `p3d_lut` on binding `c`, `GKM_CURVE = 35`, Path Carve moved onto the
+helper; `GraphCurveGpuGate` passes with a slope-scaled tolerance (EPS + gain × float32 ulp of the input).
+Phases 2b–5 are unbuilt. Check the symbols named in §10 before planning from this
 header, which will go stale.
 
 **Decisions taken before writing:**

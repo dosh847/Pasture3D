@@ -67,6 +67,8 @@ enum GraphKernelMode {
 	GKM_LEVELER_PREP = 32,
 	GKM_BLOCK_SUM = 33,
 	GKM_LEVELER_APPLY = 34,
+	// PASTURE3D_GRADIENT_AND_COLOR_RAMP_SPEC.md Phase 2a: a transfer curve read from the per-node LUT at `c`.
+	GKM_CURVE = 35,
 };
 
 struct GraphKernelModeName {
@@ -110,6 +112,7 @@ static const GraphKernelModeName GRAPH_KERNEL_MODES[] = {
 	{ "GKM_LEVELER_PREP", GKM_LEVELER_PREP },
 	{ "GKM_BLOCK_SUM", GKM_BLOCK_SUM },
 	{ "GKM_LEVELER_APPLY", GKM_LEVELER_APPLY },
+	{ "GKM_CURVE", GKM_CURVE },
 };
 
 // `#version` has to be the first line of the source, so it is prepended here rather than living in the
@@ -167,6 +170,19 @@ float p3d_repeat(int mode, float t) {
 	if (mode == 1) { return t - floor(t); }
 	if (mode == 2) { float h = t * 0.5; return 1.0 - abs((h - floor(h)) * 2.0 - 1.0); }
 	return clamp(t, 0.0, 1.0);
+}
+)"
+
+// THE LUT BINDING (spec Phase 2a). A node that lowers a `lut` gets it uploaded per node and bound at `c`
+// (binding 3) -- see lut_buf_of() in eval_grid. This is the ONE sampler over it, with the CPU kernels'
+// indexing: x clamped to [0, 1], the lower index capped at n - 2, linear between neighbours. The caller
+// guarantees n >= 2; a shorter table is a host-side pass-through, never a shader case. A macro spliced
+// after the `c` declaration, for the same literal-cap reason as the distance metric above.
+#define GRAPH_LUT_GLSL R"(
+float p3d_lut(int n, float x) {
+	float f = clamp(x, 0.0, 1.0) * float(n - 1);
+	int i0 = min(int(f), n - 2);
+	return mix(c[i0], c[i0 + 1], f - float(i0));
 }
 )"
 
@@ -237,7 +253,7 @@ uint gavHashCell(int cx, int cz, int sd, uint salt) {
 }
 
 // 24 bits into [0,1) — exact in a 32-bit float.
-)" GRAPH_DISTANCE_METRIC_GLSL R"(
+)" GRAPH_DISTANCE_METRIC_GLSL GRAPH_LUT_GLSL R"(
 float gavRnd01(uint h) {
 	return float(h & 0x00ffffffu) / 16777216.0;
 }
@@ -1313,6 +1329,20 @@ static const char *GRAPH_GRID_GLSL_4 = R"(
 		o[i] = target;
 		return;
 	}
+
+	// ---- CURVE (spec Phase 2a) -------------------------------------------------------------------------
+	// a = the input, c = the LUT (ip entries, >= 2). f0 input_min, f1 input_max, f2 output_min, f3 output_max,
+	// f4 amount. src/pasture_3d_math_ops.cpp curve_grid, in float32. An absent LUT and a zero amount never
+	// reach here: the host plans a COPY for both, as the CPU kernel returns its input.
+	if (p.mode == GKM_CURVE) {
+		float x = a[i];
+		if (isnan(x)) { o[i] = x; return; }
+		float span = p.f1 - p.f0;
+		float u = (abs(span) > 1.0e-9) ? clamp((x - p.f0) / span, 0.0, 1.0) : 0.0;
+		float r = p.f2 + p3d_lut(p.ip, u) * (p.f3 - p.f2);
+		o[i] = x + (r - x) * p.f4;
+		return;
+	}
 }
 )";
 
@@ -1646,6 +1676,16 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 		}
 		return b;
 	};
+	// THE LUT BINDING (spec Phase 2a): a slot's lowered `lut`, uploaded for that node alone and bound at `c`.
+	// Per node rather than shared, because two nodes in one graph legitimately carry different tables.
+	// Returns the zero buffer for an empty table and an invalid RID when the upload fails.
+	auto lut_buf_of = [&](int p_slot) -> RID {
+		const PackedFloat32Array &l = p_prog.luts[(size_t)p_slot];
+		if (l.size() == 0) {
+			return zero_buf;
+		}
+		return upload_floats(std::vector<float>(l.ptr(), l.ptr() + l.size()));
+	};
 	auto geo_of = [&](int p_slot) -> RID {
 		if (p_prog.in_g.size() != p_prog.count) {
 			return RID();
@@ -1938,6 +1978,30 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				d.f5 = P[6]; // invert
 				d.f6 = P[7]; // distance_noise
 				plan.push_back(d);
+				slot_buf[s] = out;
+			} break;
+			case GRAPH_OP_CURVE: {
+				// Spec Phase 2a. P is already resolved, so a wired in_min .. amount reaches the push constants.
+				// curve_grid returns its input for a table shorter than 2 or a near-zero amount; so does this,
+				// as a COPY, so the shader never sees a table it cannot index.
+				const RID src = in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf;
+				const int lut_n = (int)p_prog.luts[(size_t)s].size();
+				const RID out = empty_buf();
+				if (lut_n < 2 || std::abs(P[4]) <= 1e-7f) {
+					plan.push_back({ out, src, zero_buf, zero_buf, GKM_COPY, 0 });
+				} else {
+					const RID lut_buf = lut_buf_of(s);
+					if (!lut_buf.is_valid()) {
+						return fail();
+					}
+					GraphDispatch d{ out, src, zero_buf, lut_buf, GKM_CURVE, lut_n };
+					d.f0 = P[0]; // input_min
+					d.f1 = P[1]; // input_max
+					d.f2 = P[2]; // output_min
+					d.f3 = P[3]; // output_max
+					d.f4 = P[4]; // amount
+					plan.push_back(d);
+				}
 				slot_buf[s] = out;
 			} break;
 			case GRAPH_OP_CONTRAST: {
@@ -2379,20 +2443,12 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				if (gn > n) {
 					return fail();
 				}
-				// THE PROFILE LUT, bound at `c`. Uploaded per node rather than shared: two carves in one
-				// graph legitimately have different curves, and a shared buffer would give the second the
-				// first's cross-section.
+				// THE PROFILE LUT, on the shared LUT binding at `c`. carveRamp keeps its own sampler: an
+				// empty table means smoothstep there, not a pass-through.
 				const PackedFloat32Array &lut = p_prog.luts[(size_t)s];
-				RID lut_buf = zero_buf;
-				if (lut.size() > 0) {
-					PackedByteArray lb;
-					lb.resize(lut.size() * (int)sizeof(float));
-					std::memcpy(lb.ptrw(), lut.ptr(), (size_t)lb.size());
-					lut_buf = _rd->storage_buffer_create((uint32_t)lb.size(), lb);
-					if (!lut_buf.is_valid()) {
-						return fail();
-					}
-					to_free.push_back(lut_buf);
+				const RID lut_buf = lut_buf_of(s);
+				if (!lut_buf.is_valid()) {
+					return fail();
 				}
 
 				// PASS 1: the terrain under each path vertex. Reads the SAME surface the carve reads, so
