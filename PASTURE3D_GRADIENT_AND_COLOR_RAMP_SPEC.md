@@ -16,7 +16,10 @@ windowed, VR-A to VR-J, every control live. §5.3 and VR-B carry Phase 3 amendme
 (2026-09-14, uncommitted): Color Ramp (no op id), `Pasture3DUtil.color_ramp_cells`, base
 `color_field_port()`, `Pasture3DGraphNodeValueRamp.stops_of` shared by both ramps, the editor's per-cell
 colour preview generalised from Color Blend to any `graph_color_cells` node; `GraphColorRampGate` passes,
-CR-A to CR-I, every control live. CR-G carries a Phase 4 amendment. Phase 5 is unbuilt. Check
+CR-A to CR-I, every control live. CR-G carries a Phase 4 amendment. Phase 4 committed as 1ece4467.
+Phase 5 built and gated (2026-09-14, uncommitted): presets `earth_tones`, `snowline`, `slope_bands` under
+`addons/pasture_3d/graph/presets/`; `GraphRampPresetGate` passes headless (palette visibility with the
+dev flag off, presets exact in both ramps). §7 carries a Phase 5 amendment (the `color_ramp` op alias). Check
 the symbols named in §10 before planning from this header, which will go stale.
 
 **Decisions taken before writing:**
@@ -382,6 +385,12 @@ Output 0: MASK or HEIGHT per `output_mode`.
 `Pasture3DGraphNodeColorRamp`, `graph/pasture3d_graph_node_color_ramp.gd`, op `&"color_ramp"`.
 **No native op id and no `graph_op_ids()` entry.** The node has no scalar output, so, like Color Blend and
 Color Mix, it never lowers and cannot cost a graph its native route.
+
+*Phase 5 amendment.* `graph_op_ids()` does carry `color_ramp`, aliased to `GRAPH_OP_CONST`, the same
+way `const_color`, `color_mix` and `color_blend` already are. `GraphAllNodeSocketsGate` [G] requires every
+palette op to be in the table, while `GraphOperatorGate` [E] forbids the alias for `color_mix`. The two
+gates contradict each other for all four colour nodes. Color Ramp follows Color Blend until that is
+settled, and whatever settles it should treat all four colour nodes the same way.
 
 ### 7.1 Role and shape
 

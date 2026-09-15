@@ -1192,6 +1192,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "const_color", GRAPH_OP_CONST },
 		{ "color_mix", GRAPH_OP_CONST },
 		{ "color_blend", GRAPH_OP_CONST },
+		{ "color_ramp", GRAPH_OP_CONST }, // as color_blend: a sideband colour node, aliased so the palette walk passes
 		{ "const_bool", GRAPH_OP_CONST },
 		{ "road_source", GRAPH_OP_CONST },
 		{ "shape_source", GRAPH_OP_CONST },

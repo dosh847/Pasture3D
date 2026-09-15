@@ -1,0 +1,7 @@
+[gd_resource type="Gradient" format=3]
+
+[resource]
+resource_name = "Slope Bands"
+interpolation_mode = 1
+offsets = PackedFloat32Array(0, 0.35, 0.7)
+colors = PackedColorArray(0.3, 0.45, 0.2, 1, 0.5, 0.47, 0.42, 1, 0.32, 0.3, 0.29, 1)
