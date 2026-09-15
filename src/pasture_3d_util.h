@@ -250,6 +250,13 @@ public:
 			const Rect2 &p_rect, const double p_min_catchment_cells, const double p_carve_depth,
 			const double p_channel_width, const double p_bank_falloff);
 
+	// DLA massif growth, the C++ port of Pasture3DReliefDLA.grow_into. `params` carries the relief's
+	// properties plus host_ex/host_ez and, when seeding, seed_surface/seed_gw/seed_gh/frame.
+	// Returns { field, n, dims } exactly as grow_into's state does.
+	static Dictionary dla_grow_field(const Dictionary &p_params);
+	// For GraphDLANativeParityGate: the port's random stream, `count` rounds of [randi, randf, randfn(0, dev)].
+	static PackedFloat64Array dla_rng_probe(int64_t p_seed, int p_count, double p_dev);
+
 	// Native Thermal Erosion solver. Returns { ok:bool, height, talus }.
 	static Dictionary erosion_thermal_solve_grid(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_hardness,
 			const int p_gw, const int p_gh, const Rect2 &p_rect, const double p_talus_angle_deg,

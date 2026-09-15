@@ -252,6 +252,8 @@ bench/GraphFrozenSolverGate.tscn
 # One key recipe on both routes (served across them), wired scalars in the key, Erosion's shared cell size,
 # and a brush bake filing the graph's frozen solver on both rasterisers.
 bench/GraphNativeFreezeGate.tscn
+# --- DLA C++ port: the random stream and the grown field equal Pasture3DReliefDLA.grow_into bit for bit ---
+bench/GraphDLANativeParityGate.tscn
 
 # --- S1: an authored curve as graph geometry (PASTURE3D_SPLINE_GRAPH_SPEC.md) ---
 # Pasture3DSpline is a brush that PAINTS NOTHING, so every criterion is a join rather than a sum: the

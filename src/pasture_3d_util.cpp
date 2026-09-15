@@ -17,6 +17,7 @@
 #include "pasture_3d_road_grade.h"
 #include "pasture_3d_depression_filling.h"
 #include "pasture_3d_crater.h"
+#include "pasture_3d_dla.h"
 #include "pasture_3d_dunes.h"
 #include "pasture_3d_erosion.h"
 #include "pasture_3d_erosion_hydraulic.h"
@@ -1659,6 +1660,41 @@ Dictionary Pasture3DUtil::stream_extraction_grid(const PackedFloat32Array &p_sur
 	return res.to_dict();
 }
 
+Dictionary Pasture3DUtil::dla_grow_field(const Dictionary &p_params) {
+	godot::DLAParams p;
+	p.seed = (int64_t)p_params.get("seed", 0);
+	p.resolution = (int)p_params.get("resolution", 256);
+	p.hierarchy_levels = (int)p_params.get("hierarchy_levels", 4);
+	p.detail_size = (double)p_params.get("detail_size", 0.12);
+	p.wander = (double)p_params.get("wander", 0.32);
+	p.blur_levels = (int)p_params.get("blur_levels", 5);
+	p.blur_growth = (double)p_params.get("blur_growth", 1.6);
+	p.profile_power = (double)p_params.get("profile_power", 1.0);
+	p.coverage = (double)p_params.get("coverage", 0.95);
+	p.ridge_seeding = (bool)p_params.get("ridge_seeding", false);
+	p.ridge_amount = (double)p_params.get("ridge_amount", 0.05);
+	p.host_ex = (double)p_params.get("host_ex", 1.0);
+	p.host_ez = (double)p_params.get("host_ez", 1.0);
+	p.seed_surface = p_params.get("seed_surface", PackedFloat32Array());
+	p.seed_gw = (int)p_params.get("seed_gw", 0);
+	p.seed_gh = (int)p_params.get("seed_gh", 0);
+	const Array frame = p_params.get("frame", Array());
+	p.frame_size = (int)frame.size();
+	for (int i = 0; i < std::min(p.frame_size, 9); i++) {
+		p.frame[i] = (double)frame[i];
+	}
+	const godot::DLAResult r = godot::dla_grow(p);
+	Dictionary out;
+	out["field"] = r.field;
+	out["n"] = r.n;
+	out["dims"] = r.dims;
+	return out;
+}
+
+PackedFloat64Array Pasture3DUtil::dla_rng_probe(int64_t p_seed, int p_count, double p_dev) {
+	return godot::dla_rng_probe(p_seed, p_count, p_dev);
+}
+
 Dictionary Pasture3DUtil::erosion_thermal_solve_grid(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_hardness,
 		const int p_gw, const int p_gh, const Rect2 &p_rect, const double p_talus_angle_deg,
 		const int p_iterations, const double p_settling_rate) {
@@ -2894,6 +2930,12 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("stream_extraction_grid", "surface", "gw", "gh", "rect", "min_catchment_cells", "carve_depth", "channel_width", "bank_falloff"),
 			&Pasture3DUtil::stream_extraction_grid);
 	// Terrain graph — Geomorphology & Structural Shaping (Thermal Erosion, Talus Projection, Spectral Equalizer, Curvature, Warp).
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("dla_grow_field", "params"),
+			&Pasture3DUtil::dla_grow_field);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("dla_rng_probe", "seed", "count", "dev"),
+			&Pasture3DUtil::dla_rng_probe);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("erosion_thermal_solve_grid", "surface", "hardness", "gw", "gh", "rect", "talus_angle_deg", "iterations", "settling_rate"),
 			&Pasture3DUtil::erosion_thermal_solve_grid);
