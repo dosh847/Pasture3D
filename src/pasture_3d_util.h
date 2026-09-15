@@ -526,7 +526,8 @@ public:
 	static PackedFloat32Array strata_grid(const PackedFloat32Array &p_surface, const int p_gw, const int p_gh,
 			const Rect2 &p_rect, const double p_band_height, const double p_hardness,
 			const double p_amount, const double p_dip, const double p_dip_direction_deg,
-			const double p_break_amount, const double p_break_size, const int p_seed);
+			const double p_break_amount, const double p_break_size, const int p_seed,
+			const PackedFloat32Array &p_profile_lut);
 
 	// Native Curve transfer filter.
 	static PackedFloat32Array curve_grid(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_lut,

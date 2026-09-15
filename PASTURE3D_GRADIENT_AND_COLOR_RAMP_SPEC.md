@@ -3,9 +3,10 @@
 **Status:** Phase 1 built and gated (2026-09-14, commit 3baf1794; its GLSL rode in e23e8c3a).
 `GraphDistanceMetricGate` passes windowed with every control live: the C++ Falloff is bit-identical in 64 of
 64 cases, and the GPU matches within 1e-5 m (the DM-B amendment). Phase 2a built and gated (2026-09-14,
-uncommitted): `lut_buf_of()` + GLSL `p3d_lut` on binding `c`, `GKM_CURVE = 35`, Path Carve moved onto the
-helper; `GraphCurveGpuGate` passes with a slope-scaled tolerance (EPS + gain × float32 ulp of the input).
-Phases 2b–5 are unbuilt. Check the symbols named in §10 before planning from this
+commit 337bb27c): `lut_buf_of()` + GLSL `p3d_lut` on binding `c`, `GKM_CURVE = 35`, Path Carve moved onto
+the helper; `GraphCurveGpuGate` passes with a slope-scaled tolerance. Phase 2b audit done (2026-09-14,
+uncommitted): outcomes in §9.1; Strata moved to GPU (`GKM_STRATA = 36`) and its dropped terrace profile
+fixed. Phases 2c–5 are unbuilt. Check the symbols named in §10 before planning from this
 header, which will go stale.
 
 **Decisions taken before writing:**
@@ -437,6 +438,18 @@ adding ports that behave differently from every other node's.
 | 2a | **GPU LUT binding and Curve GPU mode.** A generic per-step float side buffer in `pasture_3d_graph_gpu.cpp` carrying the lowered `lut`. `GKM_CURVE` for the Curve node on it | A Curve GPU gate: native vs direct GPU within 1e-4, route checked, with a control that forces the CPU route and must report it |
 | 2b | **LUT audit.** Check every node that lowers or samples a `Curve` for a GPU mode, and move each that would benefit onto the 2a binding **before** any new C++ work in Phase 3. Starting list, from `sample_baked` / `"lut"` in `graph/`: **Const Curve, Path Carve, Leveler (falloff), Path Width, Path Width Field, Strata (terrace profile)**. For each, record in this spec: already GPU / moved to GPU / not worth it (with the reason, e.g. a PATH-domain node whose cost is not the kernel). An entry with no recorded reason is not done | Every listed node has a recorded outcome, and every node moved has a parity criterion added to its existing gate |
 | 2c | Gradient node: oracle, native op 62, GPU mode, host placement | GR gate |
+
+### 9.1 Phase 2b audit outcome (2026-09-14)
+
+| Node | Outcome | Reason / evidence |
+|---|---|---|
+| Curve | **Moved to GPU** (2a) | `GKM_CURVE`; `GraphCurveGpuGate` |
+| Const Curve | **Already GPU** (via 2a) | Registered as `GRAPH_OP_CURVE` with no inputs, so `GKM_CURVE` serves it. It has no parity criterion of its own: its lowering is Curve's with a fixed identity window. |
+| Path Carve | **Already GPU**, moved onto the 2a helper | `lut_buf_of()` replaces its private upload; `carveRamp` keeps its sampler, because an empty table means smoothstep there. `PathCarveGpuGate` passes. |
+| Leveler (falloff) | **Already GPU, not moved** | The apply pass binds `c` to the distance field, so the falloff LUT has to travel in the geometry buffer beside the loop. Moving it would need a sixth binding for no gain. `LevelerGpuGate` passes. |
+| Path Width | **Not worth it** | A PATH-domain node registered as `GRAPH_OP_CONST`: `along` is sampled per vertex in `path_width_solve` on the host. There is no grid kernel to move, and the cost is per vertex, not per cell. |
+| Path Width Field | **Not worth it** | As Path Width: `response` is sampled per vertex in `path_width_field_solve`. It reads a grid but writes a path. |
+| Strata (terrace profile) | **Moved to GPU, and a bug fixed** | `native_lower()` never lowered `terrace_profile`. A custom profile shaped `eval_cell` and was silently ignored by the native kernel, which is the route the editor bakes through. The profile is now lowered as a 256-entry LUT and read by `strata_grid`, and there is a new `GKM_STRATA = 36` with the break noise filled on the host. New criterion: `GraphReliefNodeGate` H2. Native matches `eval_cell` within 5e-3 m (worst 1.4e-3); GPU matches native within 1e-3 m (worst 1.4e-4). The controls: the profile moves the result by 6.3 m, which the old native route would have failed. |
 | 3 | Ramp core (§5) + Value Ramp: oracle, native op 63, GPU mode | VR gate |
 | 4 | Color Ramp: `color_field_port` contract, `color_ramp_cells` native helper, node | CR gate |
 | 5 | Palette entries, `[Dev/GD]` dev-flag split, preset gradients (earth tones, snowline, slope bands) as `.tres` under `addons/pasture_3d/graph/presets/` | Nodes visible with the dev flag off; presets load in both ramps |

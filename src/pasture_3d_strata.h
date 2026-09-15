@@ -10,6 +10,7 @@ namespace godot {
 PackedFloat32Array strata_grid(const PackedFloat32Array &p_surface, int p_gw, int p_gh,
 		const Rect2 &p_rect, double p_band_height, double p_hardness,
 		double p_amount, double p_dip, double p_dip_direction_deg,
-		double p_break_amount, double p_break_size, int p_seed);
+		double p_break_amount, double p_break_size, int p_seed,
+		const PackedFloat32Array &p_profile_lut = PackedFloat32Array());
 
 } // namespace godot

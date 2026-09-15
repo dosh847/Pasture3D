@@ -13,7 +13,7 @@ using namespace godot;
 PackedFloat32Array godot::strata_grid(const PackedFloat32Array &p_surface, int p_gw, int p_gh,
 		const Rect2 &p_rect, double p_band_height, double p_hardness,
 		double p_amount, double p_dip, double p_dip_direction_deg,
-		double p_break_amount, double p_break_size, int p_seed) {
+		double p_break_amount, double p_break_size, int p_seed, const PackedFloat32Array &p_profile_lut) {
 	const int n = p_gw * p_gh;
 	PackedFloat32Array out;
 	out.resize(n);
@@ -37,6 +37,8 @@ PackedFloat32Array godot::strata_grid(const PackedFloat32Array &p_surface, int p
 
 	const float *s_ptr = p_surface.ptr();
 	float *w = out.ptrw();
+	const int lut_n = p_profile_lut.size();
+	const float *lut_ptr = p_profile_lut.ptr();
 
 	const double dipdir = p_dip_direction_deg * (Math_PI / 180.0);
 	const double cos_dip = std::cos(dipdir);
@@ -68,7 +70,17 @@ PackedFloat32Array godot::strata_grid(const PackedFloat32Array &p_surface, int p
 				const double q = std::floor(t);
 				const double f = t - q;
 
-				const double profile_val = std::pow(std::clamp(f, 0.0, 1.0), exponent);
+				// A custom profile is the lowered LUT, sampled as every graph LUT is (clamp, lower index capped at
+				// n - 2, linear); the GPU's p3d_lut is its twin. Shorter than 2 = the power law.
+				double profile_val;
+				if (lut_n >= 2) {
+					const double f_idx = std::clamp(f, 0.0, 1.0) * (double)(lut_n - 1);
+					const int i0 = std::min((int)f_idx, lut_n - 2);
+					const double frac = f_idx - (double)i0;
+					profile_val = (double)lut_ptr[i0] * (1.0 - frac) + (double)lut_ptr[i0 + 1] * frac;
+				} else {
+					profile_val = std::pow(std::clamp(f, 0.0, 1.0), exponent);
+				}
 				const double stepped = (q + profile_val) * bh;
 
 				w[i] = (float)((double)x + ((stepped - (double)x) * p_amount));

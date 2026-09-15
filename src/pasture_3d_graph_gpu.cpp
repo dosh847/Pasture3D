@@ -69,6 +69,8 @@ enum GraphKernelMode {
 	GKM_LEVELER_APPLY = 34,
 	// PASTURE3D_GRADIENT_AND_COLOR_RAMP_SPEC.md Phase 2a: a transfer curve read from the per-node LUT at `c`.
 	GKM_CURVE = 35,
+	// Phase 2b: Strata, with its terrace profile on the same LUT binding and the break noise host-filled.
+	GKM_STRATA = 36,
 };
 
 struct GraphKernelModeName {
@@ -113,6 +115,7 @@ static const GraphKernelModeName GRAPH_KERNEL_MODES[] = {
 	{ "GKM_BLOCK_SUM", GKM_BLOCK_SUM },
 	{ "GKM_LEVELER_APPLY", GKM_LEVELER_APPLY },
 	{ "GKM_CURVE", GKM_CURVE },
+	{ "GKM_STRATA", GKM_STRATA },
 };
 
 // `#version` has to be the first line of the source, so it is prepended here rather than living in the
@@ -1343,6 +1346,24 @@ static const char *GRAPH_GRID_GLSL_4 = R"(
 		o[i] = x + (r - x) * p.f4;
 		return;
 	}
+
+	// ---- STRATA (spec Phase 2b) ------------------------------------------------------------------------
+	// a = the input, b = the break noise already scaled by break_amount (the zero buffer when there is none),
+	// c = the terrace profile LUT (ip entries; fewer than 2 = the power law). f0 band height (floored at
+	// 1 mm on the host), f1 the power-law exponent, f2 amount, f3 dip, f4 / f5 cos / sin of the dip
+	// direction. src/pasture_3d_strata.cpp, in float32. A zero amount is a host-side COPY.
+	if (p.mode == GKM_STRATA) {
+		float x = a[i];
+		if (isnan(x)) { o[i] = x; return; }
+		float wx = p.ox + (float(ix) + 0.5) * p.dx;
+		float wz = p.oz + (float(iz) + 0.5) * p.dz;
+		float t = (x + p.f3 * (wx * p.f4 + wz * p.f5) * 0.01 + b[i]) / p.f0;
+		float q = floor(t);
+		float fr = t - q;
+		float pv = (p.ip >= 2) ? p3d_lut(p.ip, fr) : pow(clamp(fr, 0.0, 1.0), p.f1);
+		o[i] = x + ((q + pv) * p.f0 - x) * p.f2;
+		return;
+	}
 }
 )";
 
@@ -2002,6 +2023,56 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 					d.f4 = P[4]; // amount
 					plan.push_back(d);
 				}
+				slot_buf[s] = out;
+			} break;
+			case GRAPH_OP_STRATA: {
+				// Spec Phase 2b. P: 0 band_height, 1 hardness, 2 amount, 3 dip, 4 dip direction deg,
+				// 5 break_amount, 6 break_size, 7 seed. The break noise is FastNoiseLite, which no shader
+				// runs, so it is filled here with strata_grid's exact configuration and scaled, in double,
+				// the way the kernel adds it to the tilt.
+				const RID src = in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf;
+				const RID out = empty_buf();
+				if (std::abs(P[2]) <= 1e-7f) {
+					plan.push_back({ out, src, zero_buf, zero_buf, GKM_COPY, 0 });
+					slot_buf[s] = out;
+					break;
+				}
+				RID brk = zero_buf;
+				if (P[5] > 0.0f) {
+					Ref<FastNoiseLite> nz;
+					nz.instantiate();
+					nz->set_noise_type(FastNoiseLite::TYPE_SIMPLEX_SMOOTH);
+					nz->set_fractal_type(FastNoiseLite::FRACTAL_FBM);
+					nz->set_fractal_octaves(3);
+					nz->set_frequency((real_t)(1.0 / std::max((double)P[6], 0.01)));
+					nz->set_seed((int)P[7]);
+					for (int iz = 0; iz < p_gh; iz++) {
+						const int row = iz * p_gw;
+						for (int ix = 0; ix < p_gw; ix++) {
+							double wx, wz;
+							graph_cell_to_world(ix, iz, p_gw, p_gh, p_rect, wx, wz);
+							host[row + ix] = (float)((double)nz->get_noise_2d((real_t)wx, (real_t)wz) * (double)P[5]);
+						}
+					}
+					brk = buf_from(host.data());
+				}
+				const int lut_n = (int)p_prog.luts[(size_t)s].size();
+				RID lut_buf = zero_buf;
+				if (lut_n >= 2) {
+					lut_buf = lut_buf_of(s);
+					if (!lut_buf.is_valid()) {
+						return fail();
+					}
+				}
+				const double dipdir = (double)P[4] * (Math_PI / 180.0);
+				GraphDispatch d{ out, src, brk, lut_buf, GKM_STRATA, lut_n >= 2 ? lut_n : 0 };
+				d.f0 = (float)std::max((double)P[0], 0.001);
+				d.f1 = (float)(1.0 + std::clamp((double)P[1], 0.0, 1.0) * 15.0);
+				d.f2 = P[2];
+				d.f3 = P[3];
+				d.f4 = (float)std::cos(dipdir);
+				d.f5 = (float)std::sin(dipdir);
+				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;
 			case GRAPH_OP_CONTRAST: {

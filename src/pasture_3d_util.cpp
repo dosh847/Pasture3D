@@ -2145,9 +2145,10 @@ Array Pasture3DUtil::scree_solve_grid(const PackedFloat32Array &p_surface, const
 PackedFloat32Array Pasture3DUtil::strata_grid(const PackedFloat32Array &p_surface, const int p_gw, const int p_gh,
 		const Rect2 &p_rect, const double p_band_height, const double p_hardness,
 		const double p_amount, const double p_dip, const double p_dip_direction_deg,
-		const double p_break_amount, const double p_break_size, const int p_seed) {
+		const double p_break_amount, const double p_break_size, const int p_seed,
+		const PackedFloat32Array &p_profile_lut) {
 	return godot::strata_grid(p_surface, p_gw, p_gh, p_rect, p_band_height, p_hardness,
-			p_amount, p_dip, p_dip_direction_deg, p_break_amount, p_break_size, p_seed);
+			p_amount, p_dip, p_dip_direction_deg, p_break_amount, p_break_size, p_seed, p_profile_lut);
 }
 
 PackedFloat32Array Pasture3DUtil::curve_grid(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_lut,
@@ -3009,8 +3010,8 @@ void Pasture3DUtil::_bind_methods() {
 			&Pasture3DUtil::scree_solve_grid);
 	// Terrain graph — Modifiers & Math Operations.
 	ClassDB::bind_static_method("Pasture3DUtil",
-			D_METHOD("strata_grid", "surface", "gw", "gh", "rect", "band_height", "hardness", "amount", "dip", "dip_direction_deg", "break_amount", "break_size", "seed"),
-			&Pasture3DUtil::strata_grid);
+			D_METHOD("strata_grid", "surface", "gw", "gh", "rect", "band_height", "hardness", "amount", "dip", "dip_direction_deg", "break_amount", "break_size", "seed", "profile_lut"),
+			&Pasture3DUtil::strata_grid, DEFVAL(PackedFloat32Array()));
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("curve_grid", "surface", "lut", "in_min", "in_max", "out_min", "out_max", "amount"),
 			&Pasture3DUtil::curve_grid);

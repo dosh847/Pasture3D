@@ -122,7 +122,18 @@ func native_lower() -> Dictionary:
 	p[5] = break_amount
 	p[6] = break_size
 	p[7] = float(seed)
-	return {"params": p}
+	return {"params": p, "lut": profile_lut()}
+
+
+## The terrace profile as 256 samples over [0, 1], or empty for the power-law profile. It was never lowered
+## before spec Phase 2b, so the native and GPU routes ignored a custom profile that eval_cell honoured.
+func profile_lut() -> PackedFloat32Array:
+	var lut := PackedFloat32Array()
+	if terrace_profile != null:
+		lut.resize(256)
+		for i in 256:
+			lut[i] = terrace_profile.sample_baked(float(i) / 255.0)
+	return lut
 
 
 func native_param_ports() -> PackedInt32Array:
@@ -171,16 +182,10 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) ->
 	var dir: float = float(p_inputs[4][0]) if (p_inputs.size() > 4 and p_inputs[4] is PackedFloat32Array and p_inputs[4].size() > 0) else dip_direction_degrees
 	var amt: float = float(p_inputs[5][0]) if (p_inputs.size() > 5 and p_inputs[5] is PackedFloat32Array and p_inputs[5].size() > 0) else amount
 
-	if terrace_profile != null:
-		var out := PackedFloat32Array()
-		out.resize(p_gw * p_gh)
-		for iz in range(p_gh):
-			var row := iz * p_gw
-			for ix in range(p_gw):
-				var w := Pasture3DTerrainGraph.cell_to_world(ix, iz, p_gw, p_gh, p_rect)
-				out[row + ix] = eval_cell(w.x, w.y, PackedFloat32Array([s[row + ix], bh, h, d, dir, amt]))
-		return out
-	return Pasture3DUtil.strata_grid(s, p_gw, p_gh, p_rect, bh, h, amt, d, dir, break_amount, break_size, seed)
+	# The profile goes to native as its LUT, the same table the compiled program carries. eval_cell stays the
+	# exact-curve oracle.
+	return Pasture3DUtil.strata_grid(s, p_gw, p_gh, p_rect, bh, h, amt, d, dir, break_amount, break_size, seed,
+			profile_lut())
 
 
 func eval_cell(p_wx: float, p_wz: float, p_inputs: PackedFloat32Array) -> float:

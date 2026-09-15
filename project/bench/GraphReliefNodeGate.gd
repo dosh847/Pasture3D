@@ -35,6 +35,7 @@ func _ready() -> void:
 	_f_dunes_matches_formula()
 	_g_crater_fills_the_frame()
 	_h_strata_bands_its_input_tilted()
+	_h2_strata_profile_reaches_native_and_gpu()
 	_i_curve_remaps_its_input()
 	_j_mask_weights_from_terrain()
 	print("\n=== %s (%d failures) ===\n" % ["GRAPH RELIEF NODE PASS" if _fail == 0 else "GRAPH RELIEF NODE FAIL", _fail])
@@ -244,6 +245,76 @@ func _h_strata_bands_its_input_tilted() -> void:
 	print("    control: dip changes the bedding (diff %.3f, want > 0.05)" % moved)
 	if moved <= 0.05:
 		_fail += 1; print("    !! dip did nothing — the beds are not tilted")
+
+
+# --- H2. Strata's terrace profile reaches native and the GPU (spec Phase 2b) ---------------------------
+# The profile was never lowered: a custom profile shaped eval_cell and was ignored by the native kernel, so
+# H (no profile) could not see it. The oracle is eval_cell itself, sampling the exact curve; native reads a
+# 256-entry LUT, hence the looser EPS_LUT. The GPU half needs a RenderingDevice and SKIPS headless.
+const EPS_LUT := 5.0e-3
+const EPS_STRATA_GPU := 1.0e-3 # float32 world coordinates and tilt at +-100 m, and the host-filled break noise
+
+func _h2_strata_profile_reaches_native_and_gpu() -> void:
+	print("[H2] Strata terrace profile: native == eval_cell, GPU == native")
+	var surf := _ramp(70.0)
+	var st := _strata(7.0, 1.0, 1.0, 5.0, 30.0, 0.0, 45.0, 4)
+	st.terrace_profile = _s_profile()
+	var got := _filter_graph(st).evaluate(GW, GH, RECT, null, surf)
+	var want := PackedFloat32Array()
+	want.resize(GW * GH)
+	for iz in range(GH):
+		for ix in range(GW):
+			var w := Pasture3DTerrainGraph.cell_to_world(ix, iz, GW, GH, RECT)
+			want[iz * GW + ix] = st.eval_cell(w.x, w.y, PackedFloat32Array([surf[iz * GW + ix]]))
+	var d := _max_abs_diff(got, want)
+	print("    max |native - eval_cell| = %.7f (want < %.7f)" % [d, EPS_LUT])
+	if d > EPS_LUT:
+		_fail += 1; print("    !! the native Strata ignored or mis-sampled the terrace profile")
+	# CONTROL: the profile must matter, or the agreement above says nothing about it reaching native.
+	var plain := _strata(7.0, 1.0, 1.0, 5.0, 30.0, 0.0, 45.0, 4)
+	var moved := _max_abs_diff(got, _filter_graph(plain).evaluate(GW, GH, RECT, null, surf))
+	print("    control: the profile changes the result by %.3f m (want > 0.5)" % moved)
+	if moved <= 0.5:
+		_fail += 1; print("    !! the profile is inert — this criterion cannot see it")
+
+	# GPU, called DIRECTLY: through evaluate() a refusal would fall back to native and match perfectly.
+	if not ClassDB.class_has_method("Pasture3DUtil", "graph_eval_grid_gpu"):
+		print("    GPU: SKIPPED (graph_eval_grid_gpu not bound)")
+		return
+	var broken := _strata(7.0, 1.0, 0.8, 5.0, 30.0, 2.0, 45.0, 4) # break noise on, amount < 1
+	broken.terrace_profile = _s_profile()
+	var cases := [["profile + break", broken], ["power law + break", _strata(7.0, 0.6, 1.0, -8.0, 22.0, 1.5, 120.0, 9)]]
+	for c in cases:
+		var prog: Dictionary = _filter_graph(c[1]).compile_graph_program()
+		var gpu: PackedFloat32Array = Pasture3DUtil.graph_eval_grid_gpu(prog, GW, GH, RECT, surf)
+		if gpu.is_empty():
+			print("    GPU: SKIPPED for %s (no RenderingDevice, or the GPU refused)" % c[0])
+			if DisplayServer.get_name() != "headless":
+				_fail += 1; print("    !! windowed, yet the GPU refused a Strata graph")
+			continue
+		var native: PackedFloat32Array = Pasture3DUtil.graph_eval_grid(prog, GW, GH, RECT, surf)
+		var g := _max_abs_diff(gpu, native)
+		print("    GPU %s: max |GPU - native| = %.7f (want < %.7f)" % [c[0], g, EPS_STRATA_GPU])
+		if g > EPS_STRATA_GPU:
+			_fail += 1; print("    !! the GPU Strata diverged from native")
+	# CONTROL: the GPU without the profile must disagree with native WITH it.
+	var gpu_plain: PackedFloat32Array = Pasture3DUtil.graph_eval_grid_gpu(_filter_graph(plain).compile_graph_program(), GW, GH, RECT, surf)
+	if not gpu_plain.is_empty():
+		var gc := _max_abs_diff(gpu_plain, got)
+		print("    control: GPU power law vs native profile %.3f m (want > 0.5)" % gc)
+		if gc <= 0.5:
+			_fail += 1; print("    !! the GPU comparison cannot see the profile")
+
+
+## Continuous at both ends, (0,0) to (1,1), so a floor() that rounds differently across evaluators lands on
+## the same height either side of a band edge and cannot pass as a profile difference.
+func _s_profile() -> Curve:
+	var c := Curve.new()
+	c.add_point(Vector2(0.0, 0.0), 0.0, 0.0)
+	c.add_point(Vector2(0.3, 0.05), 0.0, 0.0)
+	c.add_point(Vector2(0.7, 0.9), 0.0, 0.0)
+	c.add_point(Vector2(1.0, 1.0), 0.0, 0.0)
+	return c
 
 
 # --- I. Curve filter remaps its input through the transfer curve --------------------------------------
