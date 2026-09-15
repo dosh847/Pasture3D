@@ -5,9 +5,12 @@
 64 cases, and the GPU matches within 1e-5 m (the DM-B amendment). Phase 2a built and gated (2026-09-14,
 commit 337bb27c): `lut_buf_of()` + GLSL `p3d_lut` on binding `c`, `GKM_CURVE = 35`, Path Carve moved onto
 the helper; `GraphCurveGpuGate` passes with a slope-scaled tolerance. Phase 2b audit done (2026-09-14,
-uncommitted): outcomes in §9.1; Strata moved to GPU (`GKM_STRATA = 36`) and its dropped terrace profile
-fixed. Phases 2c–5 are unbuilt. Check the symbols named in §10 before planning from this
-header, which will go stale.
+commit d1758a14): outcomes in §9.1; Strata moved to GPU (`GKM_STRATA = 36`) and its dropped terrace profile
+fixed. Phase 2c built and gated (2026-09-14, uncommitted): Gradient, op 62, `gradient_grid` +
+`gradient_frame`, `GKM_GRADIENT = 37` (push-constant pads became `f8` / `f9`), `[Dev/GD] Gradient`, host
+placement stamped by `Pasture3DGraphSources.resolve_host_placements`; `GraphGradientGate` passes windowed,
+GR-A to GR-K, every control live. §4.3 and §4.4 carry Phase 2c amendments. Phases 3–5 are unbuilt. Check
+the symbols named in §10 before planning from this header, which will go stale.
 
 **Decisions taken before writing:**
 
@@ -167,8 +170,11 @@ A graph is a Resource and cannot reach the scene, so the host places it from out
 * **What the placement holds.** The host's world XZ origin and its **yaw** (rotation about Y), taken from
   its `global_transform`. Pitch, roll and scale are dropped: a gradient is measured in metres on the ground
   plane, so a scaled brush does not stretch a 500 m slope.
-* **Where it is applied.** `native_lower()` and the oracle transform `start` / `end` into world space
-  before the metric. Kernels only ever see world coordinates, so §3 stays placement-blind.
+* **Where it is applied.** *Amended in Phase 2c.* `native_lower()` lowers `start` / `end` in the node's
+  space plus the placement (slots 13–15: origin x, z, yaw), and `gradient_frame()` in C++ places them. It
+  cannot happen in `native_lower()`, because a driven `start_x` is resolved into the param block after
+  lowering and must be transformed exactly like the property. The GPU planner calls the same
+  `gradient_frame()` in double, so the metric (§3) still only ever sees world coordinates.
 * **Invalidation.** `set_host_placement` emits `changed` **only when the placement differs** (compared
   within 1e-4 m / 1e-5 rad). Without the change signal, a moved brush reuses a stale compiled program.
   With a signal on every resolve, the cache never holds.
@@ -185,7 +191,7 @@ A graph is a Resource and cannot reach the scene, so the host places it from out
 | LINEAR | LINEAR | `d / L` |
 | REFLECTED | REFLECTED | `d / L`: a valley, 0 on the line. Invert for a ridge |
 | RADIAL | RADIAL | `1 − d / L` |
-| SPHERICAL | RADIAL | `sqrt(max(0, 1 − (d/L)²))`, **applied after repeat** |
+| SPHERICAL | RADIAL | `u = d / L` is repeated, then `sqrt(max(0, 1 − u²))`. Folding `1 − d/L` instead agrees only at L/2 (a Phase 2c bug GR-D caught at d = L) |
 | SQUARE | SQUARE (frame of end − start) | `1 − d / L` |
 | DIAMOND | DIAMOND | `1 − d / L` |
 | ANGULAR | ANGULAR | `d / 2π` |

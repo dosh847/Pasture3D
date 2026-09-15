@@ -43,6 +43,19 @@ PackedFloat32Array contrast_grid(const PackedFloat32Array &p_surface, const Pack
 		int p_mode, double p_amount, double p_range_min, double p_range_max, double p_mask_amount,
 		bool p_explicit_window);
 
+// Gradient (PASTURE3D_GRADIENT_AND_COLOR_RAMP_SPEC.md §4). `p_params` is the node's resolved 16-slot block:
+// 0 shape, 1-4 start/end in NODE space, 5-6 height min/max, 7 profile, 8 hardness, 9 repeat, 10 invert,
+// 11 output mode, 12 distance_noise, 13-15 host origin x/z and yaw. `p_warp` may be empty (no warp).
+PackedFloat32Array gradient_grid(const PackedFloat32Array &p_warp, int p_gw, int p_gh, const Rect2 &p_rect,
+		const float *p_params, const PackedFloat32Array &p_lut);
+
+// The world-space frame both the CPU kernel and the GPU planner derive from the params, once, in double.
+struct GradientFrame {
+	double ax = 0.0, az = 0.0, ux = 1.0, uz = 0.0, len = 1.0e-3;
+	int metric = 0;
+};
+GradientFrame gradient_frame(const float *p_params);
+
 PackedFloat32Array mask_grid(const PackedFloat32Array &p_surface, int p_gw, int p_gh,
 		const Rect2 &p_rect, int p_property, double p_band_min, double p_band_max,
 		double p_falloff_lo, double p_falloff_hi, bool p_invert, double p_strength);

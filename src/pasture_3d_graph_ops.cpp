@@ -1175,6 +1175,15 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				}
 			} break;
 
+			case GRAPH_OP_GRADIENT: {
+				// Port 0 is the warp field, on in0: a generator's port 0 is never an aux port. Unwired = no warp.
+				const PackedFloat32Array warp = in0[s] >= 0 ? get_grid_packed(in0[s], c_in0) : PackedFloat32Array();
+				const PackedFloat32Array lut = (size_t)s < p_prog.luts.size() ? p_prog.luts[(size_t)s]
+																			   : PackedFloat32Array();
+				PackedFloat32Array res = gradient_grid(warp, p_gw, p_gh, p_rect, &P[0], lut);
+				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
+			} break;
+
 			case GRAPH_OP_PATH_MASK: {
 				const Pasture3DPathGeom empty;
 				PackedFloat32Array res = path_mask_grid_geom(geo ? geo->geom : empty, p_gw, p_gh, p_rect,

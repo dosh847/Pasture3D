@@ -36,7 +36,37 @@ static func resolve(p_graph: Pasture3DTerrainGraph, p_host: Node = null) -> int:
 	filled += resolve_shapes(p_graph, p_host)
 	filled += resolve_splines(p_graph, p_host)
 	filled += resolve_publish_targets(p_graph, p_host)
+	filled += resolve_host_placements(p_graph, p_host)
 	return filled
+
+
+## Stamp the host's ground-plane placement on every node that measures in HOST space (the Gradient,
+## PASTURE3D_GRADIENT_AND_COLOR_RAMP_SPEC.md §4.3). Origin XZ and yaw only: pitch, roll and scale are
+## dropped, so a scaled brush does not stretch a 500 m slope. The node emits `changed` only when the
+## placement actually moved, which is what keeps this callable on every resolve without defeating caches.
+##
+## No host, or a host that is not a Node3D, stamps nothing: the node keeps identity and warns.
+static func resolve_host_placements(p_graph: Pasture3DTerrainGraph, p_host: Node = null) -> int:
+	if p_graph == null or not (p_host is Node3D):
+		return 0
+	var xf := host_placement(p_host as Node3D)
+	var filled := 0
+	for node in p_graph.nodes:
+		if node != null and node.has_method("set_host_placement"):
+			node.set_host_placement(xf)
+			filled += 1
+	return filled
+
+
+## A Node3D's placement on the ground plane as a Transform2D over (x, z): `x` is where local +X points,
+## `y` is local +Z, both unit length, and `origin` is the world XZ. Yaw is read from the projected +X axis.
+static func host_placement(p_host: Node3D) -> Transform2D:
+	var gt: Transform3D = p_host.global_transform if p_host.is_inside_tree() else p_host.transform
+	var ax := Vector2(gt.basis.x.x, gt.basis.x.z)
+	if ax.length() < 1.0e-6:
+		ax = Vector2(1.0, 0.0)
+	ax = ax.normalized()
+	return Transform2D(ax, Vector2(-ax.y, ax.x), Vector2(gt.origin.x, gt.origin.z))
 
 
 ## The B3 publish sinks (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.3). Same mechanism as the source nodes

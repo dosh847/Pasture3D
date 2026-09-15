@@ -264,6 +264,116 @@ PackedFloat32Array godot::falloff_grid(const PackedFloat32Array &p_surface, cons
 //
 // Mirrors Pasture3DGraphNodeContrast.eval_cell. Heights OUTSIDE the window pass through untouched rather
 // than being clamped into it — clamping would flatten every peak above the window into a plateau.
+// --- Gradient (PASTURE3D_GRADIENT_AND_COLOR_RAMP_SPEC.md §4) ------------------------------------------
+//
+// Mirrors Pasture3DGraphNodeGradient.eval_cell, the oracle. start / end arrive in the node's space with
+// the host placement beside them, and are placed HERE rather than in native_lower, because a driven
+// start_x is resolved into P after lowering and has to be transformed exactly like the property.
+
+// Shape -> shared metric. Sync with Pasture3DGraphNodeGradient.Shape.
+static const int k_gradient_metric[7] = {
+	GRAPH_METRIC_LINEAR, GRAPH_METRIC_REFLECTED, GRAPH_METRIC_RADIAL, GRAPH_METRIC_RADIAL,
+	GRAPH_METRIC_SQUARE, GRAPH_METRIC_DIAMOND, GRAPH_METRIC_ANGULAR,
+};
+
+GradientFrame godot::gradient_frame(const float *p_params) {
+	GradientFrame f;
+	const int shape = std::clamp((int)p_params[0], 0, 6);
+	f.metric = k_gradient_metric[shape];
+	const double c = std::cos((double)p_params[15]);
+	const double s = std::sin((double)p_params[15]);
+	const double ox = (double)p_params[13];
+	const double oz = (double)p_params[14];
+	const double sx = (double)p_params[1], sz = (double)p_params[2];
+	const double ex = (double)p_params[3], ez = (double)p_params[4];
+	f.ax = ox + c * sx - s * sz;
+	f.az = oz + s * sx + c * sz;
+	const double bx = ox + c * ex - s * ez;
+	const double bz = oz + s * ex + c * ez;
+	f.len = std::max(std::sqrt((bx - f.ax) * (bx - f.ax) + (bz - f.az) * (bz - f.az)), 1.0e-3);
+	p3d_metric_direction(f.ax, f.az, bx, bz, f.ux, f.uz);
+	return f;
+}
+
+PackedFloat32Array godot::gradient_grid(const PackedFloat32Array &p_warp, int p_gw, int p_gh, const Rect2 &p_rect,
+		const float *p_params, const PackedFloat32Array &p_lut) {
+	const int n = p_gw * p_gh;
+	PackedFloat32Array result;
+	result.resize(n);
+	if (n <= 0) {
+		return result;
+	}
+	const GradientFrame fr = gradient_frame(p_params);
+	const int shape = std::clamp((int)p_params[0], 0, 6);
+	const double hmin = (double)p_params[5];
+	const double hmax = (double)p_params[6];
+	const int profile = (int)p_params[7];
+	const double hardness = std::clamp((double)p_params[8], 0.05, 16.0);
+	const int repeat = (int)p_params[9];
+	const bool invert = p_params[10] > 0.5f;
+	const bool height = p_params[11] > 0.5f;
+	const double dnoise = (double)p_params[12];
+	const double warp_scale = shape == 6 ? dnoise / fr.len : dnoise;
+
+	const float *wp = (p_warp.size() == n) ? p_warp.ptr() : nullptr;
+	const int lut_n = p_lut.size();
+	const float *lut = p_lut.ptr();
+	float *dst = result.ptrw();
+
+	const double dx = (double)p_rect.size.x / (double)std::max(p_gw, 1);
+	const double dz = (double)p_rect.size.y / (double)std::max(p_gh, 1);
+	const double ox = (double)p_rect.position.x;
+	const double oz = (double)p_rect.position.y;
+
+	Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int z0, int z1) {
+		for (int iz = z0; iz < z1; iz++) {
+			const int row = iz * p_gw;
+			const double wz = oz + ((double)iz + 0.5) * dz;
+			for (int ix = 0; ix < p_gw; ix++) {
+				const int i = row + ix;
+				const double wx = ox + ((double)ix + 0.5) * dx;
+				double d = p3d_distance_metric(fr.metric, wx, wz, fr.ax, fr.az, fr.ux, fr.uz);
+				if (wp != nullptr && std::isfinite(wp[i])) {
+					d += warp_scale * (double)wp[i];
+				}
+				double t;
+				// SPHERICAL folds u = d / L and domes it after repeat; 1 - d/L would dome the wrong side.
+				if (shape <= 1 || shape == 3) {
+					t = d / fr.len;
+				} else if (shape == 6) {
+					t = d / (2.0 * 3.14159265358979323846);
+				} else {
+					t = 1.0 - d / fr.len;
+				}
+				t = p3d_repeat(repeat, t);
+				if (shape == 3) {
+					t = std::sqrt(std::max(0.0, 1.0 - t * t));
+				}
+				switch (profile) {
+					case 1: t = t * t * (3.0 - 2.0 * t); break;
+					case 2: t = t * t; break;
+					case 3: t = 1.0 - (1.0 - t) * (1.0 - t); break;
+					case 4: t = std::pow(std::max(t, 0.0), hardness); break;
+					case 5:
+						if (lut_n >= 2) {
+							const double f_idx = std::clamp(t, 0.0, 1.0) * (double)(lut_n - 1);
+							const int i0 = std::min((int)f_idx, lut_n - 2);
+							const double frac = f_idx - (double)i0;
+							t = (double)lut[i0] * (1.0 - frac) + (double)lut[i0 + 1] * frac;
+						}
+						break;
+					default: break;
+				}
+				if (invert) {
+					t = 1.0 - t;
+				}
+				dst[i] = (float)(height ? hmin + (hmax - hmin) * t : t);
+			}
+		}
+	});
+	return result;
+}
+
 PackedFloat32Array godot::contrast_grid(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_mask,
 		int p_mode, double p_amount, double p_range_min, double p_range_max, double p_mask_amount,
 		bool p_explicit_window) {

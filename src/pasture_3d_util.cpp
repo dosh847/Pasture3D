@@ -1278,6 +1278,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "road_grade", GRAPH_OP_ROAD_GRADE },
 		{ "path_carve", GRAPH_OP_PATH_CARVE },
 		{ "leveler", GRAPH_OP_LEVELER },
+		{ "gradient", GRAPH_OP_GRADIENT },
 	};
 	Dictionary d;
 	for (const auto &e : k_ops) {

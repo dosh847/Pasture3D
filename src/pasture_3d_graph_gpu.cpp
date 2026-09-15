@@ -1,6 +1,7 @@
 #include "pasture_3d_graph_gpu.h"
 #include "pasture_3d_data.h"
 #include "pasture_3d_leveler.h"
+#include "pasture_3d_math_ops.h"
 #include "pasture_3d_path_carve.h"
 
 #include <godot_cpp/classes/fast_noise_lite.hpp>
@@ -71,6 +72,8 @@ enum GraphKernelMode {
 	GKM_CURVE = 35,
 	// Phase 2b: Strata, with its terrace profile on the same LUT binding and the break noise host-filled.
 	GKM_STRATA = 36,
+	// Phase 2c: Gradient. CURVE profile on the LUT binding; f8 carries the warp scale.
+	GKM_GRADIENT = 37,
 };
 
 struct GraphKernelModeName {
@@ -116,6 +119,7 @@ static const GraphKernelModeName GRAPH_KERNEL_MODES[] = {
 	{ "GKM_LEVELER_APPLY", GKM_LEVELER_APPLY },
 	{ "GKM_CURVE", GKM_CURVE },
 	{ "GKM_STRATA", GKM_STRATA },
+	{ "GKM_GRADIENT", GKM_GRADIENT },
 };
 
 // `#version` has to be the first line of the source, so it is prepended here rather than living in the
@@ -234,7 +238,9 @@ layout(push_constant, std430) uniform Params {
 	// PATH_CARVE packs its five enums and flags into ip2 rather than spending five float slots on values
 	// that are 0 or 1: bit0 cross_section, bit1 flank_mode, bit2 width_source, bit3 follow_path_height,
 	// bits 4-5 blend. `ip` carries the vertex count, as it does for the other two path modes.
-	int ip2; int pad0; int pad1; int pad2;
+	// f8 / f9 were two pad ints; GRADIENT ran the eight float slots out. Same 4-byte offsets, and an
+	// unset float encodes as the zero bits the pads always sent.
+	int ip2; float f8; float f9; int pad2;
 } p;
 
 // The Gavoronoise hash. INTEGER arithmetic, matching hash_u32/hash_cell in pasture_3d_gavoronoise.cpp
@@ -1364,6 +1370,38 @@ static const char *GRAPH_GRID_GLSL_4 = R"(
 		o[i] = x + ((q + pv) * p.f0 - x) * p.f2;
 		return;
 	}
+
+	// ---- GRADIENT (spec §4) ----------------------------------------------------------------------------
+	// a = warp (zero buffer when unwired), c = the CURVE LUT (ip entries; < 2 = LINEAR). The world frame is
+	// placed on the host in double: f0 / f1 origin, f2 / f3 unit direction, f4 L. f5 / f6 height min / max,
+	// f7 hardness (clamped), f8 warp scale (distance_noise, / L for ANGULAR). ip2: bits 0-3 shape, 4-7
+	// profile, 8-9 repeat, bit 12 invert, bit 13 HEIGHT. src/pasture_3d_math_ops.cpp gradient_grid.
+	if (p.mode == GKM_GRADIENT) {
+		float wx = p.ox + (float(ix) + 0.5) * p.dx;
+		float wz = p.oz + (float(iz) + 0.5) * p.dz;
+		int sh = p.ip2 & 15;
+		int prof = (p.ip2 >> 4) & 15;
+		int metric = 0;
+		if (sh == 0) { metric = 4; } else if (sh == 1) { metric = 5; } else if (sh == 4) { metric = 1; }
+		else if (sh == 5) { metric = 6; } else if (sh == 6) { metric = 7; }
+		float d = p3d_distance_metric(metric, wx, wz, p.f0, p.f1, p.f2, p.f3);
+		float wv = a[i];
+		if (!isnan(wv) && !isinf(wv)) { d += p.f8 * wv; }
+		float t;
+		if (sh <= 1 || sh == 3) { t = d / p.f4; }
+		else if (sh == 6) { t = d / 6.283185307179586; }
+		else { t = 1.0 - d / p.f4; }
+		t = p3d_repeat((p.ip2 >> 8) & 3, t);
+		if (sh == 3) { t = sqrt(max(0.0, 1.0 - t * t)); }
+		if (prof == 1) { t = t * t * (3.0 - 2.0 * t); }
+		else if (prof == 2) { t = t * t; }
+		else if (prof == 3) { t = 1.0 - (1.0 - t) * (1.0 - t); }
+		else if (prof == 4) { t = pow(max(t, 0.0), p.f7); }
+		else if (prof == 5 && p.ip >= 2) { t = p3d_lut(p.ip, t); }
+		if ((p.ip2 & 4096) != 0) { t = 1.0 - t; }
+		o[i] = ((p.ip2 & 8192) != 0) ? p.f5 + (p.f6 - p.f5) * t : t;
+		return;
+	}
 }
 )";
 
@@ -1557,6 +1595,7 @@ struct GraphDispatch {
 	// Op-specific scalars, mirroring the shader's push-constant block. All zero for COPY/BLEND/SMOOTH.
 	float f0 = 0, f1 = 0, f2 = 0, f3 = 0, f4 = 0, f5 = 0, f6 = 0, f7 = 0;
 	int ip2 = 0; // GAVORONOISE: the seed. See the push-constant block.
+	float f8 = 0, f9 = 0;
 	// The geometry SSBO this dispatch reads, or invalid for the dispatches that read none (all of them
 	// but the two path modes). Bound at binding 4 either way.
 	RID geo;
@@ -1871,8 +1910,8 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 			push.encode_float(56, (float)((double)p_rect.size.x / (double)std::max(p_gw, 1)));
 			push.encode_float(60, (float)((double)p_rect.size.y / (double)std::max(p_gh, 1)));
 			push.encode_s32(64, plan[k].ip2);
-			push.encode_s32(68, 0);
-			push.encode_s32(72, 0);
+			push.encode_float(68, plan[k].f8);
+			push.encode_float(72, plan[k].f9);
 			push.encode_s32(76, 0);
 			_rd->compute_list_bind_uniform_set(cl, sets[k - executed], 0);
 			_rd->compute_list_set_push_constant(cl, push, push.size());
@@ -1998,6 +2037,37 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				d.f4 = std::clamp(P[5], 0.0f, 1.0f); // strength
 				d.f5 = P[6]; // invert
 				d.f6 = P[7]; // distance_noise
+				plan.push_back(d);
+				slot_buf[s] = out;
+			} break;
+			case GRAPH_OP_GRADIENT: {
+				// Spec §4. The frame is placed once, in double, by the CPU kernel's own helper, so the two
+				// cannot disagree about where a HOST-space start lands. Only the per-cell arithmetic is float32.
+				const GradientFrame fr = gradient_frame(&P[0]);
+				const int shape = std::clamp((int)P[0], 0, 6);
+				const int profile = std::clamp((int)P[7], 0, 15);
+				int lut_n = 0;
+				RID lut_buf = zero_buf;
+				if (profile == 5 && (int)p_prog.luts[(size_t)s].size() >= 2) {
+					lut_n = (int)p_prog.luts[(size_t)s].size();
+					lut_buf = lut_buf_of(s);
+					if (!lut_buf.is_valid()) {
+						return fail();
+					}
+				}
+				const RID out = empty_buf();
+				GraphDispatch d{ out, in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf, zero_buf, lut_buf, GKM_GRADIENT, lut_n };
+				d.f0 = (float)fr.ax;
+				d.f1 = (float)fr.az;
+				d.f2 = (float)fr.ux;
+				d.f3 = (float)fr.uz;
+				d.f4 = (float)fr.len;
+				d.f5 = P[5];
+				d.f6 = P[6];
+				d.f7 = (float)std::clamp((double)P[8], 0.05, 16.0);
+				d.f8 = (float)(shape == 6 ? (double)P[12] / fr.len : (double)P[12]);
+				d.ip2 = shape | (profile << 4) | ((std::clamp((int)P[9], 0, 3)) << 8) | (P[10] > 0.5f ? 4096 : 0) |
+						(P[11] > 0.5f ? 8192 : 0);
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;
