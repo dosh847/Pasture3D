@@ -44,7 +44,8 @@ const ReliefDLA = preload("res://addons/pasture_3d/connectors/pasture3d_relief_d
 @export_range(0.0, 4000.0, 1.0, "or_greater") var amplitude: float = 400.0:
 	set(v):
 		amplitude = maxf(v, 0.0)
-		_param_changed()
+		# Not `_param_changed`: a served cache is rebuilt as amplitude * mask, so the frozen massif is not stale.
+		emit_changed()
 
 @export_group("Shape")
 ## Outer radius as a fraction of the rect's half-extent: 1.0 reaches the edge, 0.5 sits in the middle with
@@ -147,14 +148,24 @@ var _wired_detail_size: float = 0.12
 ## A cached massif rescales exactly, so a change of amplitude alone does not need a re-growth: the DLA
 ## shape is amplitude-independent and the height is linear in it. Every other solver serves its cache
 ## unchanged, which is why this is a hook and not a branch in the shared freeze.
+##
+## The height is rebuilt from the cached normalised mask, not rescaled from the cached height. A ratio of
+## wired to exported amplitude assumed the cache was grown at the CURRENT export, so editing Amplitude after
+## a bake scaled the massif by the wrong factor; the mask carries no amplitude at all. A NaN cell in the
+## cached height (a brush-loop boundary) stays NaN.
+func serve_time_properties() -> PackedStringArray:
+	return PackedStringArray(["amplitude"])
+
+
 func _on_cache_hit(p_cached: Variant) -> Variant:
 	var cached: Array = p_cached
-	var scaled_h := (cached[0] as PackedFloat32Array).duplicate()
-	if not is_equal_approx(_wired_amplitude, amplitude) and amplitude > 0.0:
-		var scale := _wired_amplitude / amplitude
-		for i in range(scaled_h.size()):
-			scaled_h[i] *= scale
-	return [scaled_h, cached[1]]
+	var cached_h: PackedFloat32Array = cached[0]
+	var mask: PackedFloat32Array = cached[1]
+	var h := PackedFloat32Array()
+	h.resize(mask.size())
+	for i in range(mask.size()):
+		h[i] = NAN if is_nan(cached_h[i]) else _wired_amplitude * mask[i]
+	return [h, mask]
 
 
 func op() -> StringName:
@@ -284,7 +295,9 @@ func _solve(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2) 
 			var fx := u * float(w - 1)
 			var s := _bilinear01(cropped, w, h, fx, fy)
 			mask[i] = s
-			height[i] = amplitude * s
+			# The wired amplitude, which a cache miss used to ignore: the first solve read the export. Scaled from
+			# the STORED float32 mask cell, not `s`, so a miss and a later hit (`_on_cache_hit`) are bit-identical.
+			height[i] = _wired_amplitude * mask[i]
 	return [height, mask]
 
 
@@ -347,8 +360,3 @@ func _bilinear01(g: PackedFloat32Array, w: int, h: int, fx: float, fy: float) ->
 	var c := g[y1 * w + x0]
 	var d := g[y1 * w + x1]
 	return (a * (1.0 - tx) + b * tx) * (1.0 - ty) + (c * (1.0 - tx) + d * tx) * ty
-
-
-## A cheap order-sensitive hash of the surface, the freeze staleness key.
-func _surface_hash(p_surface: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
-	return solver_cache_key(p_gw, p_gh, [p_surface])

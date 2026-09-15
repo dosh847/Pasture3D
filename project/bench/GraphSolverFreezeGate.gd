@@ -118,6 +118,10 @@ func _probe(p_op: StringName, p_a: PackedFloat32Array, p_b: PackedFloat32Array) 
 		var nm: String = String(prop.get("name", ""))
 		if nm == "" or nm.begins_with("_") or nm == "evaluation" or nm == "seed":
 			continue
+		# A serve-time property moves a FROZEN output on purpose (DLA's amplitude rescales the cached massif);
+		# it cannot tell a held freeze from a re-solve.
+		if n is Pasture3DGraphSolverNode and n.serve_time_properties().has(nm):
+			continue
 		if int(prop.get("type", TYPE_NIL)) != TYPE_FLOAT or (int(prop.get("usage", 0)) & PROPERTY_USAGE_EDITOR) == 0:
 			continue
 		var was := float(n.get(nm))

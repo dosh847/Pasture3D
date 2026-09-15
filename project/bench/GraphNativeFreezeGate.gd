@@ -17,6 +17,8 @@ const GH := 32
 const RECT := Rect2(-64.0, -64.0, 128.0, 128.0)
 const RECT_WIDE := Rect2(-64.0, -32.0, 128.0, 64.0) # dx = 4, dz = 2
 const EPS := 1.0e-5
+# Criteria that must reach their assertion on a full run: five sections, [K] and [C] once per opted-in op.
+const WANT := 1 + 3 * 2 + 1 + 1
 
 var _fail := 0
 var _done := 0
@@ -28,15 +30,23 @@ func _ready() -> void:
 		print("!! graph_eval_grid_frozen is not bound; rebuild the extension")
 		get_tree().quit(1)
 		return
-	_p_native_supported()
+	# `-- --only=PKCWS` runs a subset, for isolating a section; the completion count only binds a full run.
+	var only := "PKCWS"
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--only="):
+			only = a.trim_prefix("--only=")
+	if only.contains("P"):
+		_p_native_supported()
 	for op in [&"erosion", &"erosion_hydraulic", &"erosion_thermal"]:
-		_k_key_parity(op)
-		_c_cold_native_adopted(op)
-	_w_wired_scalar()
-	_s_cell_size()
-	# Five sections; [K] and [C] run per opted-in op.
-	const WANT := 1 + 3 * 2 + 1 + 1
-	if _done != WANT:
+		if only.contains("K"):
+			_k_key_parity(op)
+		if only.contains("C"):
+			_c_cold_native_adopted(op)
+	if only.contains("W"):
+		_w_wired_scalar()
+	if only.contains("S"):
+		_s_cell_size()
+	if only == "PKCWS" and _done != WANT:
 		_fail += 1
 		print("\n!! only %d of %d criteria reached their assertion" % [_done, WANT])
 	print("\n=== %s (%d failures) ===\n" % ["GRAPH NATIVE FREEZE PASS" if _fail == 0 else "GRAPH NATIVE FREEZE FAIL", _fail])

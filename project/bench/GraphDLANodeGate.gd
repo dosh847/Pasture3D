@@ -39,6 +39,7 @@ func _ready() -> void:
 	_c_ridge_seeding_uses_input()
 	_d_per_solver_freeze()
 	_e_multi_output_mask_routing()
+	_f_wired_amplitude_frozen()
 	print("\n=== %s (%d failures) ===\n" % ["GRAPH DLA NODE PASS" if _fail == 0 else "GRAPH DLA NODE FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -272,6 +273,44 @@ func _e_multi_output_mask_routing() -> void:
 	print("    control: mask unwired -> blend max dev from 1.0 = %.6f" % cmax)
 	if cmax > EPS:
 		_fail += 1; print("    !! unwired mask was not treated as full strength (1.0)")
+
+
+# ---- [F] --------------------------------------------------------------------------------------------
+
+## FROZEN amplitude is exact on both sides of the cache. A miss used to multiply by the EXPORT and ignore a
+## wired amplitude; a hit rescaled the cached height by wired/export, which assumed the cache had been grown
+## at the current export, so an Amplitude edit after a bake served the old height.
+func _f_wired_amplitude_frozen() -> void:
+	print("[F] FROZEN amplitude: a wired value is used on a miss; a hit is amplitude*mask whatever the history")
+	var d := _new_dla(DLAScript.Evaluation.FROZEN) # export amplitude 100
+	var flat := PackedFloat32Array(); flat.resize(GW * GH)
+	var miss: Array = d.eval_grid_channels([flat, PackedFloat32Array([50.0])], GW, GH, null, RECT)
+	var mask: PackedFloat32Array = miss[1]
+	var miss_err := _amp_err(miss[0], mask, 50.0)
+	var miss_ctrl := _amp_err(miss[0], mask, 100.0) # the export, which the miss used to apply
+	d.amplitude = 300.0
+	var hit: Array = d.eval_grid_channels([flat], GW, GH, null, RECT)
+	var hit_err := _amp_err(hit[0], mask, 300.0)
+	var hit_ctrl := _amp_err(hit[0], mask, 50.0) # the cached height, which the old ratio (300/300) served
+	var wired_hit: Array = d.eval_grid_channels([flat, PackedFloat32Array([25.0])], GW, GH, null, RECT)
+	var wired_err := _amp_err(wired_hit[0], mask, 25.0)
+	var served := _max_abs_diff(mask, hit[1]) < 1.0e-6 and _max_abs_diff(mask, wired_hit[1]) < 1.0e-6
+	print("    miss: |h-50m|=%.6f (control |h-100m|=%.3f) | export 300 hit: |h-300m|=%.6f (control |h-50m|=%.3f) | wired 25 hit: |h-25m|=%.6f | mask served=%s"
+		% [miss_err, miss_ctrl, hit_err, hit_ctrl, wired_err, served])
+	if miss_err > EPS or miss_ctrl <= 1.0:
+		_fail += 1; print("    !! a cache miss did not apply the wired amplitude")
+	if hit_err > 1.0e-3 or hit_ctrl <= 1.0 or wired_err > 1.0e-3:
+		_fail += 1; print("    !! a cache hit did not rebuild height as amplitude*mask")
+	if not served:
+		_fail += 1; print("    !! the frozen mask was regrown instead of served")
+
+
+func _amp_err(p_h: PackedFloat32Array, p_mask: PackedFloat32Array, p_amp: float) -> float:
+	var e := 0.0
+	for i in range(p_h.size()):
+		if not is_nan(p_h[i]):
+			e = maxf(e, absf(p_h[i] - p_amp * p_mask[i]))
+	return e
 
 
 # ---- helpers ----------------------------------------------------------------------------------------

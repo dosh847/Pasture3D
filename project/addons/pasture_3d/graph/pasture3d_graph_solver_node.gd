@@ -145,6 +145,12 @@ func solve_cached(p_key: int, p_solve: Callable) -> Variant:
 	return p_solve.call()
 
 
+## Properties `_on_cache_hit` applies exactly to a served cache, so changing one moves a FROZEN output
+## without a re-solve and without going stale. DLA's amplitude is the one: the massif is linear in it.
+func serve_time_properties() -> PackedStringArray:
+	return PackedStringArray()
+
+
 ## Last chance to adjust a served cache. The default serves it unchanged; DLA overrides this to rescale
 ## the cached height by its amplitude, which is exact and far cheaper than re-growing the massif.
 func _on_cache_hit(p_cached: Variant) -> Variant:
