@@ -444,6 +444,35 @@ func bake_layer(p_record_undo: bool = false) -> void:
 	_commit_deferred_undo(owner, before, can_undo)
 
 
+## Drop every row this Layer owns and bake it again from the node tree: the base re-solved, the members that
+## still exist repainted. The Layers dock's Clear, and a member deleted from under the Layer, both land here;
+## a plain bake cannot, because it clears only the footprints of members that are still there.
+func rebuild_layer() -> void:
+	if not is_configured() or _layer_run_active or _erosion_running:
+		return
+	ensure_rows()
+	var stack := _stack()
+	if stack == null:
+		return
+	var regions := {}
+	for i in _owned_row_indices():
+		var l := stack.get_layer(i)
+		for loc in l.get_region_locations():
+			regions[loc] = true
+		l.set_tiles({})
+	_base_key = ""
+	_base_box = AABB()
+	_base_change = AABB()
+	for loc in regions:
+		terrain.data.composite_region(loc, Rect2i(), false)
+	terrain.data.update_maps()
+	# Not awaited, as `_refresh_consumers` does: an await would make every caller a coroutine.
+	if _wants_deferred_bake():
+		bake_layer_run(false)
+	else:
+		bake_layer(false)
+
+
 func refresh(record_undo: bool = false) -> void:
 	if not Engine.is_editor_hint() or not is_configured():
 		return

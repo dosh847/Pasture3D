@@ -192,6 +192,10 @@ var _curve_cache: Dictionary = {}   # spline instance_id -> flat [pos, in, out] 
 var _stamp_cache: Dictionary = {}   # spline instance_id -> { key, min_x, min_z, vs, gw, gh, vals, bounds }
 var _suspend_auto: bool = false # Blocks auto-refresh while we mutate curves programmatically (undo)
 var _ready_done: bool = false   # True once _ready ran — gates re-parent auto-assign off scene-load
+## Test hook for LayerBrushFixesGate [R]'s control: the base-change re-seat leaves each mate's `_layer_id` as it was.
+var reseat_keeps_layer_id: bool = false
+var _exit_host: Node = null # The Layer brush this member left, between EXIT_TREE and its deferred delete check
+var _left_host: Node = null # The Layer brush a delete took this member out of, so its undo can rebuild it
 var _membership_transition: bool = false # A tree-driven Layer brush join/leave is under way; §5's refusal lets it through
 var _last_layer_refusal: String = ""      # The last layer assignment this brush refused, for its configuration warnings
 var _tree_settling: bool = false # True during the node's own tree enter/exit churn (tab switch) — suppresses no-op child-refresh
@@ -581,7 +585,19 @@ func _notification(what: int) -> void:
 			# descendant, but only the folder itself is re-parented. Deferred so the move has settled; a tab
 			# switch re-enters too and finds its binding already correct.
 			_sync_layer_host.call_deferred()
+		# Undoing a member delete: the host rebuilt without this brush, so it has to rebuild with it again.
+		if is_instance_valid(_left_host):
+			_left_host.rebuild_layer.call_deferred()
+		_left_host = null
 	elif what == NOTIFICATION_EXIT_TREE:
+		# A member deleted in the editor is kept for undo and never freed, so PREDELETE's detach cannot lift its
+		# stamp. Remember the host now, while the tree still says who it is; a frame later tells delete from move.
+		if _ready_done and _exit_host == null:
+			var host := _hosted_by()
+			# Editor-only, like the Layer's own delete check, and switched on headless by the same hook.
+			if host != null and (Engine.is_editor_hint() or host.detect_delete_headless):
+				_exit_host = host
+				_check_member_deleted.call_deferred()
 		remove_from_group(BRUSH_GROUP)
 		# Before anything else: the task is holding this node's arrays.
 		_join_worker()
@@ -603,6 +619,18 @@ func _notification(what: int) -> void:
 		# never fires during initial scene load (PARENTED precedes _ready then).
 		if Engine.is_editor_hint() and _ready_done:
 			_auto_assign_terrain.call_deferred()
+
+
+## Deferred from EXIT_TREE. Back in the tree means a move (`_sync_layer_host` handles leaving a Layer). A host
+## that is out of the tree too means a tab switch or the Layer itself going, which the Layer handles. What is
+## left is this member deleted from under a live Layer: rebuild it without this brush.
+func _check_member_deleted() -> void:
+	var host := _exit_host
+	_exit_host = null
+	if is_inside_tree() or not is_instance_valid(host) or not host.is_inside_tree():
+		return
+	_left_host = host
+	host.rebuild_layer()
 
 
 ## Follow a reparent: bind to the nearest Pasture3D ancestor (the setter detaches from the old one).
@@ -2177,6 +2205,10 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 								and w.z >= base_change.position.z and w.z <= base_change.end.z:
 							idxs.append(i)
 					if not idxs.is_empty():
+						# The snap reads the ground below `_layer_id`. A mate that has not baked this session (or holds an
+						# index a row insert has since shifted) reads the full composite, its own stamp included, and climbs.
+						if not reseat_keeps_layer_id:
+							s._layer_id = layer_id
 						s._apply_surface_snap_points(sp, idxs)
 						s._update_curve_cache(sp) # a re-seat is not an edit to re-bake on
 		var t_snap := Time.get_ticks_usec()

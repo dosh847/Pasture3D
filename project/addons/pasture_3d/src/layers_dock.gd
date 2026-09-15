@@ -267,6 +267,28 @@ func _is_layer_brush_row(p_idx: int) -> bool:
 	return stack != null and Pasture3DLayerBrush.pair_owner_of(stack.get_layer(p_idx)) != ""
 
 
+## The live Layer brush node that owns row `p_idx`'s pair, or null (not a pair, or an orphaned one).
+func _layer_brush_node(p_idx: int) -> Pasture3DLayerBrush:
+	var stack := _stack()
+	var po := Pasture3DLayerBrush.pair_owner_of(stack.get_layer(p_idx)) if stack else ""
+	var root := EditorInterface.get_edited_scene_root()
+	if po == "" or root == null or not root.is_inside_tree():
+		return null
+	for n in root.get_tree().get_nodes_in_group(Pasture3DLayerBrush.LAYER_GROUP):
+		if n is Pasture3DLayerBrush and n.terrain == terrain and n.layer_owner_id() == po:
+			return n
+	return null
+
+
+## Give `p_node` and its non-instanced descendants `p_root` as owner, so a node added from here is saved.
+func _own_subtree(p_node: Node, p_root: Node) -> void:
+	p_node.owner = p_root
+	if p_node != p_root and p_node.scene_file_path != "":
+		return
+	for c in p_node.get_children():
+		_own_subtree(c, p_root)
+
+
 func _refuse_layer_brush_action(p_what: String) -> void:
 	_warning.text = "%s is owned by its Layer brush node — %s" % [
 		"This layer", p_what]
@@ -295,13 +317,13 @@ func _sync_active_state() -> void:
 			row.add_theme_stylebox_override("panel", sb)
 		else:
 			row.remove_theme_stylebox_override("panel")
-	var pair := _is_layer_brush_row(active)
-	_del_btn.disabled = active == 0 or pair
+	# A Layer brush row acts through its node: Remove deletes it, Duplicate copies it, Clear rebuilds it.
+	_del_btn.disabled = active == 0
 	# Base is excluded for the same reason Remove is, plus a sharper one: a single-layer Base ALIASES the
 	# region height images (Pasture3DData::refresh_base_alias), so dropping its tiles would detach the
 	# terrain's own maps rather than clear a layer.
-	_clear_btn.disabled = active == 0 or pair
-	_dup_btn.disabled = pair
+	_clear_btn.disabled = active == 0
+	_dup_btn.disabled = _is_layer_brush_row(active) and _layer_brush_node(active) == null
 	_up_btn.disabled = au <= 0 or au >= units.size() - 1
 	_down_btn.disabled = au <= 1
 
@@ -686,7 +708,7 @@ func _on_duplicate() -> void:
 	if not d or not stack:
 		return
 	if _is_layer_brush_row(stack.get_active_layer()):
-		_refuse_layer_brush_action("duplicate the node instead.")
+		_duplicate_layer_brush(stack.get_active_layer())
 		return
 	var before := _stack_snapshot()
 	var idx: int = d.layer_duplicate(stack.get_active_layer())
@@ -695,6 +717,54 @@ func _on_duplicate() -> void:
 	refresh()
 	_mark_unsaved()
 	_commit_stack_action("Duplicate Pasture3D Layer", before)
+
+
+## Duplicate on a Layer brush row copies the NODE, children included, as the Scene dock would. The rows come
+## with it: the copy claims a fresh uid on ready, makes its own pair and adopts its copied members.
+func _duplicate_layer_brush(p_idx: int) -> void:
+	var node := _layer_brush_node(p_idx)
+	if node == null:
+		_refuse_layer_brush_action("its Layer brush node is missing, so there is nothing to copy.")
+		return
+	var parent := node.get_parent()
+	var root := EditorInterface.get_edited_scene_root()
+	var dup := node.duplicate()
+	var ur := EditorInterface.get_editor_undo_redo()
+	if ur == null:
+		parent.add_child(dup, true)
+		parent.move_child(dup, node.get_index() + 1)
+		_own_subtree(dup, root)
+		return
+	ur.create_action("Duplicate Layer Brush '%s'" % node.name, UndoRedo.MERGE_DISABLE, terrain)
+	ur.add_do_method(parent, "add_child", dup, true)
+	ur.add_do_method(parent, "move_child", dup, node.get_index() + 1)
+	ur.add_do_method(self, "_own_subtree", dup, root)
+	ur.add_do_reference(dup)
+	ur.add_undo_method(parent, "remove_child", dup)
+	ur.commit_action()
+	_mark_unsaved()
+
+
+## Remove on a Layer brush row deletes the NODE, undoably, as the Scene dock would. Its delete check takes the
+## rows off the stack, and undo puts the same rows back (Pasture3DLayerBrush D6).
+func _remove_layer_brush(p_idx: int) -> bool:
+	var node := _layer_brush_node(p_idx)
+	if node == null:
+		return false
+	var parent := node.get_parent()
+	var ur := EditorInterface.get_editor_undo_redo()
+	if ur == null:
+		parent.remove_child(node)
+		return true
+	ur.create_action("Delete Layer Brush '%s'" % node.name, UndoRedo.MERGE_DISABLE, terrain)
+	ur.add_do_method(parent, "remove_child", node)
+	ur.add_undo_method(parent, "add_child", node, true)
+	ur.add_undo_method(parent, "move_child", node, node.get_index())
+	ur.add_undo_method(self, "_own_subtree", node, node.owner)
+	ur.add_undo_reference(node)
+	ur.commit_action()
+	_mark_unsaved()
+	return true
 
 
 ## Snapshot of the stack's structure: which layer objects it holds, in order, and which is active.
@@ -778,7 +848,16 @@ func _on_clear() -> void:
 	if layer == null or layer.is_base():
 		return
 	if _is_layer_brush_row(idx):
-		_refuse_layer_brush_action("its node rebuilds it on every bake.")
+		# Both rows of the pair: the base and the main row the members paint. With the node live, the rebuild
+		# re-solves the base and repaints the members that still exist, so there is nothing to undo back to.
+		var lb := _layer_brush_node(idx)
+		if lb != null:
+			lb.rebuild_layer()
+		else:
+			for r in _unit_rows(idx):
+				_apply_clear(r)
+		refresh()
+		_mark_unsaved()
 		return
 	var ur := EditorInterface.get_editor_undo_redo()
 	if ur == null:
@@ -895,10 +974,18 @@ func _on_remove() -> void:
 	var stack := _stack()
 	if not d or not stack:
 		return
-	if _is_layer_brush_row(stack.get_active_layer()):
-		_refuse_layer_brush_action("delete the node instead.")
-		return
 	var before := _stack_snapshot()
+	if _is_layer_brush_row(stack.get_active_layer()):
+		if _remove_layer_brush(stack.get_active_layer()):
+			return
+		# An orphaned pair has no node to delete: take both rows off, highest first so the indices hold.
+		var rows := _unit_rows(stack.get_active_layer())
+		for k in range(rows.size() - 1, -1, -1):
+			d.layer_remove(rows[k])
+		refresh()
+		_mark_unsaved()
+		_commit_stack_action("Remove Pasture3D Layer", before)
+		return
 	d.layer_remove(stack.get_active_layer())
 	refresh()
 	_mark_unsaved()
