@@ -56,6 +56,11 @@ struct GradientFrame {
 };
 GradientFrame gradient_frame(const float *p_params);
 
+// Value Ramp (spec §6). `p_params`: 0 stop count, 1 interpolation mode, 2 colour space, 3 channel, 4-5 input
+// window, 6 repeat, 7 output mode, 8-9 height min/max, 10 amount. `p_stops` is [offset, r, g, b, a] x count.
+PackedFloat32Array value_ramp_grid(const PackedFloat32Array &p_surface, const float *p_params,
+		const PackedFloat32Array &p_stops);
+
 PackedFloat32Array mask_grid(const PackedFloat32Array &p_surface, int p_gw, int p_gh,
 		const Rect2 &p_rect, int p_property, double p_band_min, double p_band_max,
 		double p_falloff_lo, double p_falloff_hi, bool p_invert, double p_strength);

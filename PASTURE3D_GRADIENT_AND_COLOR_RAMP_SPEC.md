@@ -6,10 +6,13 @@
 commit 337bb27c): `lut_buf_of()` + GLSL `p3d_lut` on binding `c`, `GKM_CURVE = 35`, Path Carve moved onto
 the helper; `GraphCurveGpuGate` passes with a slope-scaled tolerance. Phase 2b audit done (2026-09-14,
 commit d1758a14): outcomes in §9.1; Strata moved to GPU (`GKM_STRATA = 36`) and its dropped terrace profile
-fixed. Phase 2c built and gated (2026-09-14, uncommitted): Gradient, op 62, `gradient_grid` +
+fixed. Phase 2c built and gated (2026-09-14, commit 7604db27): Gradient, op 62, `gradient_grid` +
 `gradient_frame`, `GKM_GRADIENT = 37` (push-constant pads became `f8` / `f9`), `[Dev/GD] Gradient`, host
 placement stamped by `Pasture3DGraphSources.resolve_host_placements`; `GraphGradientGate` passes windowed,
-GR-A to GR-K, every control live. §4.3 and §4.4 carry Phase 2c amendments. Phases 3–5 are unbuilt. Check
+GR-A to GR-K, every control live. §4.3 and §4.4 carry Phase 2c amendments. Phase 3 built and gated
+(2026-09-14, uncommitted): `src/pasture_3d_ramp_eval.h`, Value Ramp op 63, `value_ramp_grid`,
+`GKM_VALUE_RAMP = 38` over `GRAPH_RAMP_EVAL_GLSL`, `[Dev/GD] Value Ramp`; `GraphValueRampGate` passes
+windowed, VR-A to VR-J, every control live. §5.3 and VR-B carry Phase 3 amendments. Phases 4–5 are unbuilt. Check
 the symbols named in §10 before planning from this header, which will go stale.
 
 **Decisions taken before writing:**
@@ -291,6 +294,19 @@ LUT smears a CONSTANT band edge by 0.4 m.
 | GLSL | `GRAPH_RAMP_EVAL_GLSL`, reading the stops from the Phase 2a LUT binding |
 | GDScript oracle | **`Gradient.sample(t)`**, so the engine itself is the reference. It is not a transcription |
 
+**Phase 3 amendments.**
+
+* **Lowering order.** `stop_table()` calls `gradient.sample(0.0)` before reading `offsets` / `colors`. That
+  runs the engine's lazy sort, so the table is in the order `get_color_at_offset` searches. That order is
+  what settles an equal-offset tie. The engine's own rule is kept as transcribed, including its exact-hit
+  early return. VR-C confirms in both authoring orders that it returns the later sorted stop past the tie.
+* **GPU exact hit.** The GLSL search treats `|offset - t| ≤ 4e-7` as an exact hit. A round-number window
+  (−20 .. 80, x = 60) puts t exactly on the 0.8 stop on the CPU. On the device, the float division landed
+  one ulp short, so every CONSTANT case flipped a band at that cell. The C++ search stays exact. A CPU t
+  within 4e-7 of a stop but not on it is the case left unmatched.
+* **Default colour space.** Not initialised by the node. A null gradient passes t through, and a
+  `Gradient.new()` is already SRGB, so the §5.1 default holds without code.
+
 ---
 
 ## 6. Value Ramp node (Phase 3)
@@ -345,7 +361,7 @@ Output 0: MASK or HEIGHT per `output_mode`.
 | Id | Criterion | Control that must fail |
 |---|---|---|
 | VR-A | Native vs `Gradient.sample`, 3 modes × 3 colour spaces × 3 repeats × 6 channels, 4097 t, within 1e-5 (CUBIC and OKLAB within 1e-4) | A kernel copy using a 256-LUT must fail CONSTANT at a band edge |
-| VR-B | CONSTANT edge exact: stop at 0.5; t = 0.5 ± 1e-6 fall in different bands | — |
+| VR-B | CONSTANT edge exact: stop at 0.5; t = 0.5 ± 1e-6 fall in different bands, native and GPU. *Amended:* a round-number window landing exactly on a stop (x = 60 on −20 .. 80, the 0.8 stop) agrees across native, GPU and oracle | — |
 | VR-C | Equal-offset tie, both authoring orders; native, GPU and oracle all return the later stop | A kernel with the earlier-stop rule |
 | VR-D | Colour space matters: a red→blue gradient at t = 0.5 differs between SRGB and OKLAB by more than 0.05 on `channel = RED`, and each matches the oracle | A kernel that ignores `params[2]` must fail the OKLAB half |
 | VR-E | Native vs GPU (direct call, route checked), within 1e-4 | As DM-B |

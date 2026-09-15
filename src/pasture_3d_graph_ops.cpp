@@ -1184,6 +1184,14 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
 			} break;
 
+			case GRAPH_OP_VALUE_RAMP: {
+				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
+				const PackedFloat32Array stops = (size_t)s < p_prog.luts.size() ? p_prog.luts[(size_t)s]
+																				 : PackedFloat32Array();
+				PackedFloat32Array res = value_ramp_grid(in_arr, &P[0], stops);
+				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
+			} break;
+
 			case GRAPH_OP_PATH_MASK: {
 				const Pasture3DPathGeom empty;
 				PackedFloat32Array res = path_mask_grid_geom(geo ? geo->geom : empty, p_gw, p_gh, p_rect,

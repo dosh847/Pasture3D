@@ -74,6 +74,8 @@ enum GraphKernelMode {
 	GKM_STRATA = 36,
 	// Phase 2c: Gradient. CURVE profile on the LUT binding; f8 carries the warp scale.
 	GKM_GRADIENT = 37,
+	// Phase 3: Value Ramp. The stop table rides the LUT binding.
+	GKM_VALUE_RAMP = 38,
 };
 
 struct GraphKernelModeName {
@@ -120,6 +122,7 @@ static const GraphKernelModeName GRAPH_KERNEL_MODES[] = {
 	{ "GKM_CURVE", GKM_CURVE },
 	{ "GKM_STRATA", GKM_STRATA },
 	{ "GKM_GRADIENT", GKM_GRADIENT },
+	{ "GKM_VALUE_RAMP", GKM_VALUE_RAMP },
 };
 
 // `#version` has to be the first line of the source, so it is prepended here rather than living in the
@@ -190,6 +193,69 @@ float p3d_lut(int n, float x) {
 	float f = clamp(x, 0.0, 1.0) * float(n - 1);
 	int i0 = min(int(f), n - 2);
 	return mix(c[i0], c[i0 + 1], f - float(i0));
+}
+
+// GRAPH_RAMP_EVAL_GLSL (spec §5.3): the GLSL twin of src/pasture_3d_ramp_eval.h, which cites the pinned engine
+// lines. Stops on `c` as [offset, r, g, b, a] x n. Kept in this macro because it reads `c` too.
+float p3d_ramp_off(int k) { return c[k * 5]; }
+vec4 p3d_ramp_stop(int k) { return vec4(c[k * 5 + 1], c[k * 5 + 2], c[k * 5 + 3], c[k * 5 + 4]); }
+float p3d_ramp_s2l(float x) { return x < 0.04045 ? x * (1.0 / 12.92) : pow((x + 0.055) * (1.0 / 1.055), 2.4); }
+float p3d_ramp_l2s(float x) { return x < 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1.0 / 2.4) - 0.055; }
+float p3d_ramp_cbrt(float x) { return sign(x) * pow(abs(x), 1.0 / 3.0); }
+vec4 p3d_ramp_to_space(vec4 k, int sp) {
+	if (sp != 1 && sp != 2) { return k; }
+	vec3 l = vec3(p3d_ramp_s2l(k.r), p3d_ramp_s2l(k.g), p3d_ramp_s2l(k.b));
+	if (sp == 1) { return vec4(l, k.a); }
+	float L = p3d_ramp_cbrt(0.4122214708 * l.r + 0.5363325363 * l.g + 0.0514459929 * l.b);
+	float M = p3d_ramp_cbrt(0.2119034982 * l.r + 0.6806995451 * l.g + 0.1073969566 * l.b);
+	float S = p3d_ramp_cbrt(0.0883024619 * l.r + 0.2817188376 * l.g + 0.6299787005 * l.b);
+	return vec4(0.2104542553 * L + 0.7936177850 * M - 0.0040720468 * S,
+			1.9779984951 * L - 2.4285922050 * M + 0.4505937099 * S,
+			0.0259040371 * L + 0.7827717662 * M - 0.8086757660 * S, k.a);
+}
+vec4 p3d_ramp_from_space(vec4 k, int sp) {
+	if (sp == 1) { return vec4(p3d_ramp_l2s(k.r), p3d_ramp_l2s(k.g), p3d_ramp_l2s(k.b), k.a); }
+	if (sp != 2) { return k; }
+	float l_ = k.r + 0.3963377774 * k.g + 0.2158037573 * k.b;
+	float m_ = k.r - 0.1055613458 * k.g - 0.0638541728 * k.b;
+	float s_ = k.r - 0.0894841775 * k.g - 1.2914855480 * k.b;
+	float l = l_ * l_ * l_; float m = m_ * m_ * m_; float s = s_ * s_ * s_;
+	return vec4(p3d_ramp_l2s(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+			p3d_ramp_l2s(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+			p3d_ramp_l2s(-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s), k.a);
+}
+vec4 p3d_ramp_cubic(vec4 from, vec4 to, vec4 pre, vec4 post, float w) {
+	return 0.5 * ((from * 2.0) + (-pre + to) * w + (2.0 * pre - 5.0 * from + 4.0 * to - post) * (w * w)
+			+ (-pre + 3.0 * from - 3.0 * to + post) * (w * w * w));
+}
+vec4 p3d_ramp_sample(int n, int mode, int sp, float t) {
+	if (n <= 0) { return vec4(0.0, 0.0, 0.0, 1.0); }
+	int low = 0; int high = n - 1; int mid = 0;
+	// The exact-hit test takes a few ulp: a round-number window (-20 .. 80, x = 60) puts t exactly on a stop in
+	// double on the CPU, and this device's float division lands one ulp short, flipping a CONSTANT band. Treating
+	// the near-hit as the hit reproduces the CPU; a CPU t that is within 4e-7 of a stop but not on it is the rarer
+	// case, and the gate's B criterion measures the round-number one.
+	while (low <= high) {
+		mid = (low + high) / 2;
+		float off = p3d_ramp_off(mid);
+		if (abs(off - t) <= 4.0e-7) { return p3d_ramp_stop(mid); }
+		if (off > t) { high = mid - 1; } else { low = mid + 1; }
+	}
+	if (p3d_ramp_off(mid) > t) { mid--; }
+	int first = mid; int second = mid + 1;
+	if (second >= n) { return p3d_ramp_stop(n - 1); }
+	if (first < 0) { return p3d_ramp_stop(0); }
+	float w = (t - p3d_ramp_off(first)) / (p3d_ramp_off(second) - p3d_ramp_off(first));
+	if (mode == 1) { return p3d_ramp_stop(first); }
+	vec4 c1 = p3d_ramp_to_space(p3d_ramp_stop(first), sp);
+	vec4 c2 = p3d_ramp_to_space(p3d_ramp_stop(second), sp);
+	if (mode == 2) {
+		int p0 = first - 1 < 0 ? first : first - 1;
+		int p3 = second + 1 >= n ? second : second + 1;
+		return p3d_ramp_from_space(p3d_ramp_cubic(c1, c2, p3d_ramp_to_space(p3d_ramp_stop(p0), sp),
+				p3d_ramp_to_space(p3d_ramp_stop(p3), sp), w), sp);
+	}
+	return p3d_ramp_from_space(c1 + w * (c2 - c1), sp);
 }
 )"
 
@@ -1402,6 +1468,28 @@ static const char *GRAPH_GRID_GLSL_4 = R"(
 		o[i] = ((p.ip2 & 8192) != 0) ? p.f5 + (p.f6 - p.f5) * t : t;
 		return;
 	}
+
+	// ---- VALUE RAMP (spec §6) --------------------------------------------------------------------------
+	// a = in, c = stops (ip of them; 0 = no gradient, output t). f0 / f1 input window, f2 / f3 height min /
+	// max, f4 amount. ip2: bits 0-1 mode, 2-3 colour space, 4-7 channel, 8-9 repeat, bit 10 HEIGHT.
+	if (p.mode == GKM_VALUE_RAMP) {
+		float x = a[i];
+		if (isnan(x)) { o[i] = x; return; }
+		float span = p.f1 - p.f0;
+		float t = abs(span) > 1.0e-9 ? (x - p.f0) / span : 0.0;
+		t = p3d_repeat((p.ip2 >> 8) & 3, t);
+		float v = t;
+		if (p.ip > 0) {
+			vec4 k = p3d_ramp_sample(p.ip, p.ip2 & 3, (p.ip2 >> 2) & 3, t);
+			int ch = (p.ip2 >> 4) & 15;
+			if (ch == 1) { v = 0.2126 * k.r + 0.7152 * k.g + 0.0722 * k.b; }
+			else if (ch == 2) { v = k.r; } else if (ch == 3) { v = k.g; } else if (ch == 4) { v = k.b; }
+			else if (ch == 5) { v = k.a; } else { v = (k.r + k.g + k.b) / 3.0; }
+		}
+		v = t + p.f4 * (v - t);
+		o[i] = ((p.ip2 & 1024) != 0) ? p.f2 + (p.f3 - p.f2) * v : clamp(v, 0.0, 1.0);
+		return;
+	}
 }
 )";
 
@@ -2037,6 +2125,33 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				d.f4 = std::clamp(P[5], 0.0f, 1.0f); // strength
 				d.f5 = P[6]; // invert
 				d.f6 = P[7]; // distance_noise
+				plan.push_back(d);
+				slot_buf[s] = out;
+			} break;
+			case GRAPH_OP_VALUE_RAMP: {
+				// Spec §6. A stop table that does not match its count is no table, as in value_ramp_grid.
+				const RID src = in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf;
+				int stops = std::max((int)P[0], 0);
+				if (stops * 5 != (int)p_prog.luts[(size_t)s].size()) {
+					stops = 0;
+				}
+				RID lut_buf = zero_buf;
+				if (stops > 0) {
+					lut_buf = lut_buf_of(s);
+					if (!lut_buf.is_valid()) {
+						return fail();
+					}
+				}
+				const RID out = empty_buf();
+				GraphDispatch d{ out, src, zero_buf, lut_buf, GKM_VALUE_RAMP, stops };
+				d.f0 = P[4];
+				d.f1 = P[5];
+				d.f2 = P[8];
+				d.f3 = P[9];
+				d.f4 = P[10];
+				d.ip2 = (std::clamp((int)P[1], 0, 3)) | (std::clamp((int)P[2], 0, 3) << 2) |
+						(std::clamp((int)P[3], 0, 15) << 4) | (std::clamp((int)P[6], 0, 3) << 8) |
+						(P[7] > 0.5f ? 1024 : 0);
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;

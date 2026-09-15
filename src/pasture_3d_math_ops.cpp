@@ -1,6 +1,7 @@
 // Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 
 #include "pasture_3d_math_ops.h"
+#include "pasture_3d_ramp_eval.h"
 #include "pasture_3d_util.h"
 #include "pasture_3d_thread_pool.h"
 
@@ -369,6 +370,54 @@ PackedFloat32Array godot::gradient_grid(const PackedFloat32Array &p_warp, int p_
 				}
 				dst[i] = (float)(height ? hmin + (hmax - hmin) * t : t);
 			}
+		}
+	});
+	return result;
+}
+
+// --- Value Ramp (PASTURE3D_GRADIENT_AND_COLOR_RAMP_SPEC.md §6) ----------------------------------------
+PackedFloat32Array godot::value_ramp_grid(const PackedFloat32Array &p_surface, const float *p_params,
+		const PackedFloat32Array &p_stops) {
+	const int n = p_surface.size();
+	PackedFloat32Array result;
+	result.resize(n);
+	if (n <= 0) {
+		return result;
+	}
+	int stops = std::max((int)p_params[0], 0);
+	if (stops * 5 != p_stops.size()) {
+		stops = 0; // a stop table that does not match its count is no table; the node warns on an empty one
+	}
+	const int mode = (int)p_params[1];
+	const int space = (int)p_params[2];
+	const int channel = (int)p_params[3];
+	const double in_min = (double)p_params[4];
+	const double span = (double)p_params[5] - in_min;
+	const int repeat = (int)p_params[6];
+	const bool height = p_params[7] > 0.5f;
+	const double hmin = (double)p_params[8];
+	const double hmax = (double)p_params[9];
+	const double amount = (double)p_params[10];
+	const float *src = p_surface.ptr();
+	const float *sp = stops > 0 ? p_stops.ptr() : nullptr;
+	float *dst = result.ptrw();
+
+	Pasture3DThreadPool::parallel_for_elements(n, 1024, [&](int i0, int i1) {
+		for (int i = i0; i < i1; i++) {
+			const float x = src[i];
+			if (std::isnan(x)) {
+				dst[i] = x;
+				continue;
+			}
+			double t = std::abs(span) > 1.0e-9 ? ((double)x - in_min) / span : 0.0;
+			t = p3d_repeat(repeat, t);
+			double v = t;
+			if (stops > 0) {
+				// Gradient::get_color_at_offset takes a float; the offset is narrowed exactly where sample() would.
+				v = (double)p3d_ramp_channel(p3d_ramp_sample(sp, stops, mode, space, (float)t), channel);
+			}
+			v = t + amount * (v - t);
+			dst[i] = (float)(height ? hmin + (hmax - hmin) * v : std::clamp(v, 0.0, 1.0));
 		}
 	});
 	return result;
