@@ -1308,11 +1308,11 @@ static var _op_ids_cache: Dictionary = {}
 
 static func op_ids() -> Dictionary:
 	if _op_ids_cache.is_empty() and ClassDB.class_has_method("Pasture3DUtil", "graph_op_ids"):
+		# No colour node belongs in this table. COLOR wires are a compile-time sideband resolved by walking
+		# upstream (Pasture3DGraphChannelSinks._color_of); the editor preview keeps colour roots out of the
+		# compile and compiles only their field sources. Color Mix/Blend once had GRAPH_OP_CONST aliases here
+		# and in C++ to paper over a preview that bailed on them.
 		_op_ids_cache = Pasture3DUtil.graph_op_ids().duplicate()
-		if not _op_ids_cache.has(&"color_mix"):
-			_op_ids_cache[&"color_mix"] = 2 # GRAPH_OP_CONST
-		if not _op_ids_cache.has(&"color_blend"):
-			_op_ids_cache[&"color_blend"] = 2 # GRAPH_OP_CONST
 	return _op_ids_cache
 
 

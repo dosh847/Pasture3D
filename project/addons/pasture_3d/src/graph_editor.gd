@@ -2200,13 +2200,41 @@ func _refresh_previews() -> void:
 		# must not keep a stale badge from the last time one was on.
 		_clear_previews_stale()
 		return
-	var compiled: Dictionary = graph.compile_graph_program_multi(roots)
+	# COLOR roots never enter the compile. A colour is a sideband resolved by walking upstream, not a kernel
+	# op, so handing one to the compiler bailed the WHOLE preview (which once earned Color Mix and Color Blend
+	# fake op ids). What a colour node needs from the program is its field input -- Color Blend's mask, Color
+	# Ramp's `in` -- so that source node is compiled as a root in its place.
+	var path_roots: Array = []
+	var color_roots: Array = []
+	var compile_roots: Array = []
+	for i in roots:
+		var ot: int = graph.nodes[i].output_port_type()
+		if ot == Pasture3DGraphNode.PortType.PATH:
+			path_roots.append(i)
+			compile_roots.append(i)
+		elif ot == Pasture3DGraphNode.PortType.COLOR:
+			color_roots.append(i)
+			if graph.nodes[i].has_method("graph_color_cells"):
+				var fsrc := source_of(graph, i, graph.nodes[i].color_field_port())
+				if not fsrc.is_empty() and not compile_roots.has(int(fsrc["node"])):
+					compile_roots.append(int(fsrc["node"]))
+		elif not compile_roots.has(i):
+			compile_roots.append(i)
+	if compile_roots.is_empty():
+		# Only unwired or constant colours are previewed: nothing to compile, and nothing failed.
+		_preview_color_roots = color_roots
+		_preview_blend_mask_slot = {}
+		last_preview_taps = {"count": 0, "path_count": 0, "color_count": color_roots.size()}
+		_render_color_previews(color_roots, {}, {}, _preview_pixels())
+		_clear_previews_stale()
+		return
+	var compiled: Dictionary = graph.compile_graph_program_multi(compile_roots)
 	if compiled.is_empty():
 		# THE bail §5.5 is about. `compile_graph_program_multi` returning empty means this graph does not
 		# lower, so every thumbnail on screen is frozen at whatever it last managed — and the comment that
 		# used to be here ("leave the last thumbnails in place") described the defect rather than a policy.
 		# The report names the responsible node where one node is responsible.
-		var report: Dictionary = graph.native_block_report(roots)
+		var report: Dictionary = graph.native_block_report(compile_roots)
 		if report.is_empty():
 			# The scan found nothing but the compile still failed. Say exactly that rather than inventing
 			# a cause: a disagreement between the two is a real bug and hiding it would cost the next
@@ -2230,15 +2258,6 @@ func _refresh_previews() -> void:
 	# zeros that made `PathDrape`'s thumbnail black in the first place. Diverted HERE, before `tap_slots`
 	# is appended to, so criterion [E] can count the request at the tap call rather than infer it from
 	# the picture.
-	var path_roots: Array = []
-	var color_roots: Array = []
-	for i in roots:
-		if graph.nodes[i] != null:
-			var ot: int = graph.nodes[i].output_port_type()
-			if ot == Pasture3DGraphNode.PortType.PATH:
-				path_roots.append(i)
-			elif ot == Pasture3DGraphNode.PortType.COLOR:
-				color_roots.append(i)
 	for i in roots:
 		if path_roots.has(i) or color_roots.has(i):
 			continue

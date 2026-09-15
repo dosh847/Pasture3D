@@ -86,6 +86,12 @@ func _g_every_palette_op_is_lowerable() -> void:
 		if node != null and node.has_method("has_output") and not node.has_output():
 			declared += 1
 			continue
+		#   * or every output is COLOR. A colour is a sideband: sinks resolve it by walking upstream and the
+		#     preview compiles only its field source, so no compile ever emits an op for it. The node's
+		#     port types are the declaration, as has_output() is for terminals.
+		if node != null and _all_color_outputs(node):
+			declared += 1
+			continue
 		missing.append(String(op))
 	_assert(missing.is_empty(),
 			"%d palette op(s) missing from op_ids(): %s — each drops its whole graph to GDScript"
@@ -104,6 +110,33 @@ func _g_every_palette_op_is_lowerable() -> void:
 	print("    control: a fictional op is correctly seen as unlowerable: %s"
 			% str(not ids.has(&"no_such_op_xyz")))
 	_assert(not ids.has(&"no_such_op_xyz"), "op_ids() does not claim to implement a made-up op")
+
+	# CONTROL: the COLOR exemption is by port type, not a blanket pass. A scalar node (Value Ramp) must
+	# not qualify, and a colour node (Color Ramp) must; if either answer flips, the exemption is either
+	# inert or swallowing the S1 bug.
+	var scalar_exempt := _all_color_outputs(Pasture3DGraphNodeRegistry.create(&"value_ramp"))
+	var color_exempt := _all_color_outputs(Pasture3DGraphNodeRegistry.create(&"color_ramp"))
+	print("    control: COLOR exemption — value_ramp %s (want false), color_ramp %s (want true)"
+			% [str(scalar_exempt), str(color_exempt)])
+	_assert(not scalar_exempt and color_exempt, "the COLOR exemption separates colour nodes from scalar ones")
+	# CONTROL: no colour node still carries a fake op id.
+	var aliased := []
+	for op in [&"const_color", &"color_mix", &"color_blend", &"color_ramp"]:
+		if ids.has(op):
+			aliased.append(op)
+	_assert(aliased.is_empty(), "no colour node is aliased in op_ids() (found %s)" % str(aliased))
+
+
+func _all_color_outputs(p_node: Pasture3DGraphNode) -> bool:
+	if p_node == null or not p_node.has_output():
+		return false
+	var types: Array = p_node.output_port_types() if p_node.has_method("output_port_types") else [p_node.output_port_type()]
+	if types.is_empty():
+		return false
+	for t in types:
+		if int(t) != Pasture3DGraphNode.PortType.COLOR:
+			return false
+	return true
 
 
 func _a_parameter_socket_definitions() -> void:

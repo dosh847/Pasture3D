@@ -45,6 +45,16 @@ const PATH_ENVELOPE_COLOR := Color(0.35, 0.62, 0.95)
 ## The drop lines. Red because a visible drop is a FAILED DRAPE, and the correct state is none at all.
 const PATH_DROP_COLOR := Color(1.0, 0.35, 0.3)
 
+## Gradient node start / end handles (PASTURE3D_GRADIENT_AND_COLOR_RAMP_SPEC.md §12). The geometry and the
+## drag inverse live in a RefCounted a gate can drive; this file only draws and commits.
+const GradientHandles: Script = preload("res://addons/pasture_3d/src/graph_gradient_handles.gd")
+## Magenta, distinct from every other handle colour here: a gradient handle edits a GRAPH NODE, not the
+## brush's own geometry, and should never be mistaken for a loop point.
+const GRADIENT_COLOR := Color(1.0, 0.45, 0.85)
+## Pre-drag property value of each touched gradient handle (id -> Vector2), kept apart from `_orig`
+## because loop handles store Vector3 there and the cancel path restores every key it holds.
+var _grad_orig: Dictionary = {}
+
 
 ## Per-drag capture of the true pre-drag value of each touched subgizmo (id -> Vector3): position for a
 ## point handle, in/out offset for a tangent. Lets undo restore exactly (esp. a stubbed zero tangent
@@ -90,6 +100,8 @@ func _init() -> void:
 	create_material("path_line", PATH_LINE_COLOR, false, false)
 	create_material("path_envelope", PATH_ENVELOPE_COLOR, false, false)
 	create_material("path_drop", PATH_DROP_COLOR, false, false)
+	# on_top, like the markers: a gradient's start may sit under a hill and must stay grabbable.
+	create_material("gradient_line", GRADIENT_COLOR, false, true)
 
 
 ## The marker material for one colour, registering it the first time it is asked for.
@@ -230,6 +242,18 @@ func _redraw(p_gizmo: EditorNode3DGizmo) -> void:
 		# resolved yet contributes NOTHING rather than its input; see graph_path_overlay.gd's header for
 		# why drawing the input would be worse than drawing nothing.
 		_draw_path_overlay(p_gizmo, node)
+		_draw_gradient_handles(p_gizmo, node)
+
+
+## Gradient start / end: a line between them, the radius ring for radial shapes, and a dot per handle —
+## filled when draggable, hollow when the coordinate is wired and the property is not what the kernel reads.
+func _draw_gradient_handles(p_gizmo: EditorNode3DGizmo, p_node: Node3D) -> void:
+	var ln: PackedVector3Array = GradientHandles.lines(p_node)
+	if ln.size() >= 2:
+		p_gizmo.add_lines(ln, get_material("gradient_line", p_gizmo))
+	for h in GradientHandles.handles(p_node):
+		var size: float = Sprites.POINT_SIZE if int(h["which"]) == 0 else Sprites.TANGENT_SIZE
+		Sprites._dot_sprite(p_gizmo, h["local"], size, GRADIENT_COLOR, not h["driven"])
 
 
 ## Add the V3 overlay's four contributions. Geometry comes from `PathOverlay.build`, which is where the
@@ -264,7 +288,12 @@ func _subgizmos_intersect_ray(p_gizmo: EditorNode3DGizmo, p_camera: Camera3D, p_
 	var node := p_gizmo.get_node_3d()
 	if not _brush_selected(node):
 		return -1
-	return _h.pick_handle(node, p_camera, p_point)
+	# Loop handles first: they are the brush's own geometry, and a gradient handle lying on a loop point
+	# must not steal the click that shapes the brush.
+	var id := _h.pick_handle(node, p_camera, p_point)
+	if id >= 0:
+		return id
+	return GradientHandles.pick(node, p_camera, p_point)
 
 
 ## [Path3D, point index] of the currently-selected loop point on `p_brush`, or [null, -1]. Lets the
@@ -313,6 +342,9 @@ func _subgizmos_intersect_frustum(p_gizmo: EditorNode3DGizmo, _camera: Camera3D,
 ## The handle's transform (translation only) in the gizmo node's local space — where the gizmo appears.
 func _get_subgizmo_transform(p_gizmo: EditorNode3DGizmo, p_id: int) -> Transform3D:
 	var node := p_gizmo.get_node_3d()
+	if p_id >= GradientHandles.ID_BASE:
+		var gh: Dictionary = GradientHandles.resolve(node, p_id)
+		return Transform3D(Basis(), gh["local"]) if not gh.is_empty() else Transform3D()
 	var res := _h.resolve_handle(node, p_id)
 	var path: Path3D = res[0]
 	if path == null:
@@ -327,6 +359,16 @@ func _get_subgizmo_transform(p_gizmo: EditorNode3DGizmo, p_id: int) -> Transform
 ##   level (offset Y = 0) while Snap to Surface is on, so the loop stays planar with the surface.
 func _set_subgizmo_transform(p_gizmo: EditorNode3DGizmo, p_id: int, p_transform: Transform3D) -> void:
 	var node := p_gizmo.get_node_3d()
+	if p_id >= GradientHandles.ID_BASE:
+		var gh: Dictionary = GradientHandles.resolve(node, p_id)
+		if gh.is_empty():
+			return
+		var prop: StringName = GradientHandles.property_of(gh)
+		if not _grad_orig.has(p_id):
+			_grad_orig[p_id] = gh["node"].get(prop)
+		gh["node"].set(prop, GradientHandles.value_for_world(node, gh, node.to_global(p_transform.origin)))
+		node.update_gizmos()
+		return
 	var res := _h.resolve_handle(node, p_id)
 	var path: Path3D = res[0]
 	if path == null:
@@ -381,6 +423,10 @@ func _set_subgizmo_transform(p_gizmo: EditorNode3DGizmo, p_id: int, p_transform:
 ## cleanly back to zero.
 func _commit_subgizmos(p_gizmo: EditorNode3DGizmo, p_ids: PackedInt32Array, p_restores: Array[Transform3D], p_cancel: bool) -> void:
 	var node := p_gizmo.get_node_3d()
+	if not _grad_orig.is_empty():
+		_commit_gradient_handles(node, p_cancel)
+		if p_ids.size() > 0 and p_ids[0] >= GradientHandles.ID_BASE:
+			return
 	if p_cancel:
 		# Restore every handle we touched — including mirrored partners not in p_ids (their pre-drag value
 		# lives in _orig, so the passed restore transform is unused for them).
@@ -444,6 +490,33 @@ func _commit_subgizmos(p_gizmo: EditorNode3DGizmo, p_ids: PackedInt32Array, p_re
 	_start.clear()
 	_smooth_drag.clear()
 	node.update_gizmos()
+
+
+## Commit (or cancel) a gradient handle drag as one undoable property edit per touched handle. The setter
+## emits `changed`, which bumps the graph revision and rebakes, on do and on undo alike.
+func _commit_gradient_handles(p_node: Node3D, p_cancel: bool) -> void:
+	if p_cancel:
+		for id in _grad_orig.keys():
+			var gh: Dictionary = GradientHandles.resolve(p_node, id)
+			if not gh.is_empty():
+				gh["node"].set(GradientHandles.property_of(gh), _grad_orig[id])
+		_grad_orig.clear()
+		p_node.update_gizmos()
+		return
+	var ur := EditorInterface.get_editor_undo_redo()
+	ur.create_action("Move Gradient Handle" if _grad_orig.size() == 1 else "Move Gradient Handles")
+	for id in _grad_orig.keys():
+		var gh: Dictionary = GradientHandles.resolve(p_node, id)
+		if gh.is_empty():
+			continue
+		var prop: StringName = GradientHandles.property_of(gh)
+		ur.add_do_property(gh["node"], prop, gh["node"].get(prop))
+		ur.add_undo_property(gh["node"], prop, _grad_orig[id])
+	ur.add_do_method(p_node, "update_gizmos")
+	ur.add_undo_method(p_node, "update_gizmos")
+	ur.commit_action()
+	_grad_orig.clear()
+	p_node.update_gizmos()
 
 
 ## Put one handle back to a transform (used on drag-cancel), preferring the captured pre-drag value.

@@ -1189,10 +1189,9 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "const", GRAPH_OP_CONST },
 		{ "const_int", GRAPH_OP_CONST },
 		{ "const_vector", GRAPH_OP_CONST },
-		{ "const_color", GRAPH_OP_CONST },
-		{ "color_mix", GRAPH_OP_CONST },
-		{ "color_blend", GRAPH_OP_CONST },
-		{ "color_ramp", GRAPH_OP_CONST }, // as color_blend: a sideband colour node, aliased so the palette walk passes
+		// No colour node is listed. A COLOR output is a sideband resolved by walking upstream
+		// (graph_channel_sinks.gd _color_of) and never enters a compile, so an id here would be a tag no
+		// kernel serves. GraphAllNodeSocketsGate exempts COLOR-output nodes by their port type instead.
 		{ "const_bool", GRAPH_OP_CONST },
 		{ "road_source", GRAPH_OP_CONST },
 		{ "shape_source", GRAPH_OP_CONST },

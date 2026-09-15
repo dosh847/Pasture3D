@@ -19,7 +19,8 @@ colour preview generalised from Color Blend to any `graph_color_cells` node; `Gr
 CR-A to CR-I, every control live. CR-G carries a Phase 4 amendment. Phase 4 committed as 1ece4467.
 Phase 5 built and gated (2026-09-14, uncommitted): presets `earth_tones`, `snowline`, `slope_bands` under
 `addons/pasture_3d/graph/presets/`; `GraphRampPresetGate` passes headless (palette visibility with the
-dev flag off, presets exact in both ramps). §7 carries a Phase 5 amendment (the `color_ramp` op alias). Check
+dev flag off, presets exact in both ramps). Phase 5 committed as d328dcf2. The colour op-id conflict is settled (§7 amendment). The §12 viewport
+handles for Gradient start / end are built and gated (`GraphGradientGizmoGate`), uncommitted. Check
 the symbols named in §10 before planning from this header, which will go stale.
 
 **Decisions taken before writing:**
@@ -386,11 +387,13 @@ Output 0: MASK or HEIGHT per `output_mode`.
 **No native op id and no `graph_op_ids()` entry.** The node has no scalar output, so, like Color Blend and
 Color Mix, it never lowers and cannot cost a graph its native route.
 
-*Phase 5 amendment.* `graph_op_ids()` does carry `color_ramp`, aliased to `GRAPH_OP_CONST`, the same
-way `const_color`, `color_mix` and `color_blend` already are. `GraphAllNodeSocketsGate` [G] requires every
-palette op to be in the table, while `GraphOperatorGate` [E] forbids the alias for `color_mix`. The two
-gates contradict each other for all four colour nodes. Color Ramp follows Color Blend until that is
-settled, and whatever settles it should treat all four colour nodes the same way.
+*Phase 5 amendment, settled the same day.* Phase 5 briefly aliased `color_ramp` to `GRAPH_OP_CONST`,
+as `const_color`, `color_mix` and `color_blend` were, because `GraphAllNodeSocketsGate` [G] required
+every palette op in the table, while `GraphOperatorGate` [E] forbade the alias. **Settled:** no colour
+node is in `graph_op_ids()`, in C++ or in the GDScript `op_ids()` cache. [G] exempts a node whose outputs
+are all COLOR, and has two controls: Value Ramp must not qualify while Color Ramp must, and none of the
+four colour ops may be aliased. The editor preview keeps COLOR roots out of the compile and compiles
+only their field source.
 
 ### 7.1 Role and shape
 
@@ -507,11 +510,16 @@ adding ports that behave differently from every other node's.
 | `.../graph/pasture3d_graph_node_gradient.gd`, `..._value_ramp.gd`, `..._color_ramp.gd` | **new** |
 | `.../graph/pasture3d_graph_node_dev_gradient.gd`, `..._dev_value_ramp.gd`, `..._dev_color_ramp.gd` | **new**: `[Dev/GD]` |
 | Phase 2b nodes | as the audit decides |
-| `project/bench/GraphDistanceMetricGate.gd`, `GraphCurveGpuGate.gd`, `GraphGradientGate.gd`, `GraphValueRampGate.gd`, `GraphColorRampGate.gd` | **new** |
+| `project/bench/GraphDistanceMetricGate.gd`, `GraphCurveGpuGate.gd`, `GraphGradientGate.gd`, `GraphValueRampGate.gd`, `GraphColorRampGate.gd`, `GraphRampPresetGate.gd` | **new** |
+| `.../graph/presets/earth_tones.tres`, `snowline.tres`, `slope_bands.tres` | **new** (Phase 5) |
+| `.../src/graph_gradient_handles.gd` | **new** (§12): handle geometry, pick, drag inverse |
+| `.../src/brush_gizmo.gd` | §12: draws gradient handles; subgizmo ids from `ID_BASE`; undoable commit |
+| `project/bench/GraphGradientGizmoGate.gd` | **new** (§12) |
+| `src/pasture_3d_util.cpp`, `project/bench/GraphAllNodeSocketsGate.gd` | Colour op-id settlement: no colour node in `graph_op_ids()`; the gate exempts all-COLOR-output nodes, with controls |
 
 ## 11. Deliberately not in this spec
 
-* **Viewport gizmos** for `start` / `end`.
+* ~~**Viewport gizmos** for `start` / `end`.~~ Taken up as §12.
 * **Host-space Falloff.** Falloff stays world-space. Adding `space` to it is a small follow-up once §4.3
   exists, but it changes the meaning of saved graphs, so it needs its own decision.
 * **A 2D ramp** (height × slope). Two ramps combined through Color Blend cover the common case.
@@ -520,3 +528,38 @@ adding ports that behave differently from every other node's.
   takes the sideband.
 * **Driven window ports on Color Ramp** (§7.4).
 * **Replacing Falloff with Gradient + Blend.** The two share math, not role.
+
+## 12. Viewport handles for Gradient `start` / `end` (follow-up, 2026-09-14)
+
+**What.** While a brush is selected, every Gradient node on its graphs shows two handles in the 3D
+viewport: `start` (larger dot) and `end` (smaller dot), joined by a line. RADIAL and SPHERICAL also draw
+the ring at `|end − start|` around `start`. Dragging a handle writes the node's property through
+`EditorUndoRedo`. The setter's `changed` then bumps the graph revision and rebakes.
+
+**Where.** `src/graph_gradient_handles.gd` holds the geometry, the pick and the drag inverse. It is a
+RefCounted, so a gate can drive it headless. `src/brush_gizmo.gd` draws the handles and exposes them as
+subgizmos with ids from `ID_BASE = 1 << 24`, clear of the loop handles' `gpi * 3 + kind`.
+
+**Rules.**
+* **The placement comes from the brush, not the node.** Both directions use
+  `Pasture3DGraphSources.host_placement(brush)`, the function `resolve` stamps with, and never
+  `host_xform`. That value lags until the next resolve, and is identity before the first one. WORLD space
+  uses identity.
+* **Height is ignored in the drag.** Handles draw on the terrain surface plus 0.5 m, and the drag keeps
+  only XZ.
+* **A driven coordinate is drawn hollow and is not picked.** If either wire for a handle
+  (`start_x`/`start_z` or `end_x`/`end_z`) is connected, the kernel does not read the property that the
+  drag would write.
+* **Loop handles win the pick.** A gradient handle lying on a loop point must not take the click that
+  shapes the brush.
+* Box selection never takes gradient handles.
+
+### 12.1 Gate: `GraphGradientGizmoGate`
+
+| Id | Criterion | Control that must fail |
+|---|---|---|
+| GZ-A | A HOST handle sits at the brush's placement applied to the property. The position is derived independently from the yaw formula, not from `host_placement`, within 1e-3 m | The HOST handle is not at the raw property; a WORLD handle IS at its raw property |
+| GZ-B | **The handle is where the kernel puts it.** For LINEAR + CLAMP + MASK, the native evaluation (resolved on the brush) is 0 at the start handle, 1 at the end handle and 0.5 at their midpoint, within 1e-3 | The midpoint of the *raw* HOST properties does not evaluate to 0.5 |
+| GZ-C | Drag round trip: `value_for_world` to a handle moved by (+37, −21) m re-derives the handle at the target, within 1e-3 m, on both spaces. A write to a gradient wired to Output bumps the graph revision | The same world point inverted through identity for the HOST node gives a value more than 1 m off; a write to an unwired gradient does not bump the revision (the graph's downstream filter) |
+| GZ-D | Pick: a real camera over the brush picks the start handle at its projected pixel | 40 px away picks nothing; a driven gradient's handle is not picked at its own pixel |
+| GZ-E | Completion count | — |
