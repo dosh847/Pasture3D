@@ -150,6 +150,12 @@ public:
 	// GraphWorkerThreadGate can assert that refusal instead of assuming it, and so an operator can read
 	// back the `pasture_3d/performance/graph_gpu_threshold` setting GraphGpuBenchGate tells them to set.
 	static int gd_graph_gpu_threshold();
+	// Color Ramp's per-cell mapping (gradient spec §7.2): `p_field` through the lowered stop table
+	// ([offset, r, g, b, a] x n) with p3d_ramp_sample. A non-finite cell takes the colour at offset 0; no stops
+	// gives grey t.
+	static PackedColorArray color_ramp_cells(const PackedFloat32Array &p_field, const PackedFloat32Array &p_stops,
+			const int p_n, const int p_mode, const int p_space, const double p_in_min, const double p_in_max,
+			const int p_repeat);
 
 	// The cap every native parallel region honours (0 = every hardware thread), and a count of the regions
 	// that actually split. Bound so a gate can run a kernel at 1 thread and at N and prove both halves of a

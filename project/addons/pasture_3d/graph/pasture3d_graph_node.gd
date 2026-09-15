@@ -471,6 +471,18 @@ func native_param_ports() -> PackedInt32Array:
 	return PackedInt32Array()
 
 
+## The scalar input a per-cell colour node (one answering `graph_color_cells`) needs tapped, or -1. The colour
+## resolver asks this, never a position. Defaults to `color_mask_port()`, Color Blend's older name for it, so
+## Color Blend needs no change; a converter whose field is not a mask (Color Ramp) overrides this instead.
+func color_field_port() -> int:
+	return color_mask_port()
+
+
+## Color Blend's name for `color_field_port()`. -1 on every node that taps no field.
+func color_mask_port() -> int:
+	return -1
+
+
 ## Marshal this node's parameters into the flat 16-slot scalar block the native op table reads, plus its
 ## FastNoiseLite and its 256-entry curve LUT when it has them:
 ##

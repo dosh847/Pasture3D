@@ -2262,8 +2262,8 @@ func _refresh_previews() -> void:
 	var blend_mask_slot: Dictionary = {}
 	for i in color_roots:
 		var n: Pasture3DGraphNode = graph.nodes[i]
-		if n is Pasture3DGraphNodeColorBlend:
-			var mport: int = n.color_mask_port() if n.has_method("color_mask_port") else 2
+		if n.has_method("graph_color_cells"):
+			var mport: int = n.color_field_port()
 			var src := source_of(graph, i, mport)
 			if not src.is_empty():
 				var src_node: int = int(src["node"])
@@ -2468,10 +2468,10 @@ func _resolve_color_node(p_idx: int, p_slot_to_field: Dictionary, p_blend_mask_s
 		r_color_of_node[p_idx] = col
 		return col
 
-	if node is Pasture3DGraphNodeColorBlend:
+	if node.has_method("graph_color_cells"):
 		var upstream := {}
 		var names: PackedStringArray = node.input_names()
-		var mport: int = node.color_mask_port() if node.has_method("color_mask_port") else 2
+		var mport: int = node.color_field_port()
 		for port in range(node.input_count()):
 			if port == mport:
 				continue
@@ -2562,7 +2562,11 @@ func _render_color_previews(p_color_roots: Array, p_slot_to_field: Dictionary,
 				chip_live = wired
 				tooltip_str = "Color Blend: %s" % ("waiting on mask tap" if wired else "unwired mask, falling back to Color A")
 		else:
-			if res is Color:
+			if res is PackedColorArray:
+				img = preview_image_color_cells(res, p_px, p_px)
+				chip_str = n.display_name()
+				tooltip_str = "%s mapped per cell" % n.display_name()
+			elif res is Color:
 				img = preview_image_solid_color(res, p_px, p_px)
 				chip_str = "#%s" % res.to_html(res.a < 1.0).to_upper()
 				tooltip_str = "Color: %s" % chip_str

@@ -34,6 +34,7 @@
 #include "pasture_3d_math_ops.h"
 #include "pasture_3d_noise_jordan.h"
 #include "pasture_3d_noise_swiss.h"
+#include "pasture_3d_ramp_eval.h"
 #include "pasture_3d_scree.h"
 #include "pasture_3d_spectral_equalizer.h"
 #include "pasture_3d_strata.h"
@@ -2643,6 +2644,40 @@ int Pasture3DUtil::gd_graph_gpu_threshold() {
 	return graph_gpu_threshold();
 }
 
+PackedColorArray Pasture3DUtil::color_ramp_cells(const PackedFloat32Array &p_field, const PackedFloat32Array &p_stops,
+		const int p_n, const int p_mode, const int p_space, const double p_in_min, const double p_in_max,
+		const int p_repeat) {
+	PackedColorArray out;
+	const int n = std::max(0, std::min(p_n, (int)p_field.size()));
+	out.resize(n);
+	if (n == 0) {
+		return out;
+	}
+	const int stops = (int)p_stops.size() / 5;
+	const float *sp = stops > 0 ? p_stops.ptr() : nullptr;
+	const float *src = p_field.ptr();
+	const double span = p_in_max - p_in_min;
+	Color *dst = out.ptrw();
+	Pasture3DThreadPool::parallel_for_elements(n, 1024, [&](int i0, int i1) {
+		for (int i = i0; i < i1; i++) {
+			const float x = src[i];
+			double t = 0.0;
+			if (std::isfinite(x)) {
+				t = std::abs(span) > 1.0e-9 ? ((double)x - p_in_min) / span : 0.0;
+				t = p3d_repeat(p_repeat, t);
+			}
+			if (stops <= 0) {
+				const float g = (float)t;
+				dst[i] = Color(g, g, g, 1.0f);
+				continue;
+			}
+			const P3DRampColor c = p3d_ramp_sample(sp, stops, p_mode, p_space, (float)t);
+			dst[i] = Color(c.r, c.g, c.b, c.a);
+		}
+	});
+	return out;
+}
+
 void Pasture3DUtil::gd_set_max_threads(const int p_count) {
 	Pasture3DThreadPool::s_max_threads.store(MAX(p_count, 0), std::memory_order_relaxed);
 }
@@ -2658,6 +2693,9 @@ int64_t Pasture3DUtil::gd_parallel_dispatch_count() {
 void Pasture3DUtil::_bind_methods() {
 	// Control map converters
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("graph_gpu_threshold"), &gd_graph_gpu_threshold);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("color_ramp_cells", "field", "stops", "n", "mode", "space", "in_min", "in_max", "repeat"),
+			&Pasture3DUtil::color_ramp_cells);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("set_max_threads", "count"), &gd_set_max_threads);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("get_max_threads"), &gd_get_max_threads);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("parallel_dispatch_count"), &gd_parallel_dispatch_count);

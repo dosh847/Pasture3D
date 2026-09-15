@@ -349,8 +349,8 @@ static func _color_of(p_graph, p_index: int, p_ctx: Dictionary = {}, p_depth: in
 		# same way the sink's own mask is, so a wire cannot mean one thing here and another to the
 		# kernel — and when it cannot be tapped (no grid context, or an unwired mask) the node's own
 		# uniform `graph_color` answers instead, which is why that method is not optional.
-		if node.has_method("graph_color_cells") and node.has_method("color_mask_port") and not p_ctx.is_empty():
-			var field := _tap_field(p_graph, p_index, int(node.color_mask_port()), p_ctx)
+		if node.has_method("graph_color_cells") and node.has_method("color_field_port") and not p_ctx.is_empty():
+			var field := _tap_field(p_graph, p_index, int(node.color_field_port()), p_ctx)
 			var cells: int = int(p_ctx.get("gw", 0)) * int(p_ctx.get("gh", 0))
 			if field.size() == cells and cells > 0:
 				var per_cell = node.graph_color_cells(upstream, field, cells)

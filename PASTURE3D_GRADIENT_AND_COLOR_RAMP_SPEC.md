@@ -10,9 +10,13 @@ fixed. Phase 2c built and gated (2026-09-14, commit 7604db27): Gradient, op 62, 
 `gradient_frame`, `GKM_GRADIENT = 37` (push-constant pads became `f8` / `f9`), `[Dev/GD] Gradient`, host
 placement stamped by `Pasture3DGraphSources.resolve_host_placements`; `GraphGradientGate` passes windowed,
 GR-A to GR-K, every control live. §4.3 and §4.4 carry Phase 2c amendments. Phase 3 built and gated
-(2026-09-14, uncommitted): `src/pasture_3d_ramp_eval.h`, Value Ramp op 63, `value_ramp_grid`,
+(2026-09-14, commit 7530cdf8): `src/pasture_3d_ramp_eval.h`, Value Ramp op 63, `value_ramp_grid`,
 `GKM_VALUE_RAMP = 38` over `GRAPH_RAMP_EVAL_GLSL`, `[Dev/GD] Value Ramp`; `GraphValueRampGate` passes
-windowed, VR-A to VR-J, every control live. §5.3 and VR-B carry Phase 3 amendments. Phases 4–5 are unbuilt. Check
+windowed, VR-A to VR-J, every control live. §5.3 and VR-B carry Phase 3 amendments. Phase 4 built and gated
+(2026-09-14, uncommitted): Color Ramp (no op id), `Pasture3DUtil.color_ramp_cells`, base
+`color_field_port()`, `Pasture3DGraphNodeValueRamp.stops_of` shared by both ramps, the editor's per-cell
+colour preview generalised from Color Blend to any `graph_color_cells` node; `GraphColorRampGate` passes,
+CR-A to CR-I, every control live. CR-G carries a Phase 4 amendment. Phase 5 is unbuilt. Check
 the symbols named in §10 before planning from this header, which will go stale.
 
 **Decisions taken before writing:**
@@ -436,7 +440,7 @@ adding ports that behave differently from every other node's.
 | CR-D | Color Ramp and Value Ramp (channel RED) agree per cell on the same gradient and field | — |
 | CR-E | **Native route kept:** a graph with a Color Ramp → Color Sink branch plus a height branch reports `native_supported() == true` | A graph with a genuinely unlowerable node must report false, so the check is live |
 | CR-F | `color_field_port` contract: Color Blend's existing gate passes unchanged, and a Color Ramp's `in` is the port tapped | A Color Ramp returning port −1 falls back to uniform and fails CR-C |
-| CR-G | Wiring regression: `Color Ramp.color` → a HEIGHT input is refused by the editor's connection table (asserted headless on `is_valid_connection_type`) | COLOR → COLOR must be accepted |
+| CR-G | Wiring regression: `Color Ramp.color` → a HEIGHT input is refused by the editor's connection table (asserted headless on `is_valid_connection_type`) | *Amended:* HEIGHT → MASK, a pair the table registers, must read as accepted. COLOR → COLOR cannot be the control: GraphEdit allows same-type wires without registering them, so `is_valid_connection_type` answers false for it either way |
 | CR-H | An in-place `gradient.set_color` repaints on the next bake | — |
 | CR-I | Completion count ≥ 8 | — |
 

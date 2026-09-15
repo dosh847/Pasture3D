@@ -137,12 +137,17 @@ func input_unwired_default(p_port: int) -> float:
 ## so the points read back are the order get_color_at_offset searches — which is what decides an
 ## equal-offset tie. Reading `offsets` from an unsorted resource would lower a different tie.
 func stop_table() -> PackedFloat32Array:
+	return stops_of(gradient)
+
+
+## The lowering shared with the Color Ramp, so the two ramps cannot sort a tie differently.
+static func stops_of(p_gradient: Gradient) -> PackedFloat32Array:
 	var out := PackedFloat32Array()
-	if gradient == null or gradient.get_point_count() == 0:
+	if p_gradient == null or p_gradient.get_point_count() == 0:
 		return out
-	gradient.sample(0.0)
-	var offs := gradient.offsets
-	var cols := gradient.colors
+	p_gradient.sample(0.0)
+	var offs := p_gradient.offsets
+	var cols := p_gradient.colors
 	var n := mini(offs.size(), cols.size())
 	out.resize(n * 5)
 	for k in n:
