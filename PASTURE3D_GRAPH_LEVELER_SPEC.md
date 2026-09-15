@@ -46,7 +46,8 @@ Multi-output slots are contiguous from row 0, so port index == channel index.
 | `statistic` | enum | MEAN | `MEAN`, `MEDIAN`, `MIN`, `MAX`. Flatten only. |
 | `target_height` | float (m, world Y) | 0.0 | Level at Height only; overridden by input 3. |
 | `cut_fill` | enum | BOTH | `BOTH`, `CUT_ONLY` (only lower cells above L), `FILL_ONLY` (only raise cells below L). |
-| `feather` | float (m) | 5.0 | Wall width, built OUTSIDE the area boundary. 0 = hard edge. |
+| `feather_side` | enum | INSIDE | `INSIDE` (wall within the area, §4.1a), `OUTSIDE` (wall beyond it). Added 2026-09-14: a brush can only write inside its own footprint, so an outward wall there has nowhere to go. Slot 10. |
+| `feather` | float (m) | 5.0 | Wall width, on the `feather_side` of the area boundary. 0 = hard edge. |
 | `feather_from_path_width` | bool | false | Use the loop's own width as the feather distance (§4.2). |
 | `path_width_scale` | float | 1.0 | Multiplier on the path width when the above is on. |
 | `falloff` | Curve | smoothstep-like ease | Shapes the wall: x = 0 at area edge → 1 at feather edge, y = weight (1→0). Lowered as a 256-entry LUT like `Pasture3DGraphNodeCurve`. |
@@ -106,6 +107,24 @@ untouched on every output.
 The falloff is always a full 256-entry LUT — the unassigned default `1 - smoothstep(x)` is baked into it
 too, so the kernel has no second definition — sampled by the `raster_ramp` rule
 (`pasture_3d_brush_raster.cpp`): `f = x*(n-1)`, lerp between `lut[int(f)]` and the next entry.
+
+### 4.1a Inward wall (`feather_side = INSIDE`, the default)
+
+The edge is everything that is not the core: non-core cells (the loop's outside, a soft mask, non-finite
+footprint cells) **and the grid border**. For a core cell, `d` = the nearest of:
+
+- the exact polygon distance, when a closed loop is wired, the mask is trivial and **no cell is
+  non-finite** (a footprint is an edge the polygon does not know about);
+- otherwise the JFA distance to the nearest non-core cell (`_field(core, false)`, the Distance Transform's
+  INSIDE; the no-seed fallback is the field diagonal);
+- the border: `min((ix+1)dx, (gw-ix)dx, (iz+1)dz, (gh-iz)dz)`, the cell one past the grid, centre to centre.
+
+Core cells with `F > 0 and d < F` are the ring: `t = 1 - d/F`, `w = falloff(t)`, so the LUT reads the same
+way on both sides (x = 0 at the flat end, 1 at the untouched edge). Deeper core cells: `w = 1`. Non-core
+cells: `w = A`. The statistic is still taken over the whole core `I`, band included. `walls` follows §4.3
+with this `t`. **GPU:** the same plan as outward — the JFA is seeded from non-core cells (`DT_SEED` want 0),
+`GKM_LEVELER_APPLY` takes `ip2` bit 4 and applies the border minimum, and the exact-route test counts
+finite cells with `GKM_LEVELER_PREP` kind 5 (one extra readback, only with a loop and a trivial mask).
 
 ### 4.2 Feather from path width
 

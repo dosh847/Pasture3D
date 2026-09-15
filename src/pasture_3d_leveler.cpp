@@ -59,6 +59,7 @@ Pasture3DLevelerParams godot::leveler_params_from(const float *p_params, int p_c
 	r.walls_shape = (int)at(7, LEVELER_BAND);
 	r.wall_depth = std::max(at(8, 1.0), 0.0);
 	r.median_bins = std::clamp((int)at(9, 4096.0), 16, 65536);
+	r.feather_side = at(10, LEVELER_INSIDE) > 0.5 ? LEVELER_OUTSIDE : LEVELER_INSIDE;
 	return r;
 }
 
@@ -116,6 +117,7 @@ Dictionary godot::leveler_grid_geom(const Pasture3DPathGeom *p_loop, const Packe
 	std::vector<uint8_t> core((size_t)n, 0);
 	std::vector<int64_t> row_core((size_t)p_gh, 0);
 	std::vector<uint8_t> row_shaped((size_t)p_gh, 0);
+	std::vector<uint8_t> row_nonfinite((size_t)p_gh, 0);
 	Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int z0, int z1) {
 		for (int iz = z0; iz < z1; iz++) {
 			const int row = iz * p_gw;
@@ -125,6 +127,7 @@ Dictionary godot::leveler_grid_geom(const Pasture3DPathGeom *p_loop, const Packe
 			for (int ix = 0; ix < p_gw; ix++) {
 				const int i = row + ix;
 				if (!std::isfinite(h[i])) {
+					row_nonfinite[(size_t)iz] = 1;
 					continue;
 				}
 				double mv = m ? (double)m[i] : 1.0;
@@ -148,10 +151,14 @@ Dictionary godot::leveler_grid_geom(const Pasture3DPathGeom *p_loop, const Packe
 	});
 	int64_t core_count = 0;
 	bool mask_trivial = true;
+	bool any_nonfinite = false;
 	for (int iz = 0; iz < p_gh; iz++) {
 		core_count += row_core[(size_t)iz];
 		if (row_shaped[(size_t)iz]) {
 			mask_trivial = false;
+		}
+		if (row_nonfinite[(size_t)iz]) {
+			any_nonfinite = true;
 		}
 	}
 	if (core_count == 0) {
@@ -253,8 +260,12 @@ Dictionary godot::leveler_grid_geom(const Pasture3DPathGeom *p_loop, const Packe
 	}
 	std::fill_n(ol, n, (float)level);
 
-	// ---- 3. DISTANCE OUTSIDE THE CORE ----
-	const bool exact = loop != nullptr && mask_trivial;
+	// ---- 3. DISTANCE FROM THE CORE EDGE ----
+	// OUTSIDE measures non-core cells to the nearest core cell. INSIDE measures core cells to the nearest
+	// non-core cell or past the grid border, whichever is nearer. The exact route needs the polygon to BE the
+	// edge; for INSIDE a non-finite cell is an edge too, so a footprint sends it to the raster route.
+	const bool inside = p_params.feather_side == LEVELER_INSIDE;
+	const bool exact = loop != nullptr && mask_trivial && (!inside || !any_nonfinite);
 	PackedFloat32Array d_jfa;
 	if (!exact) {
 		PackedFloat32Array seed;
@@ -264,7 +275,8 @@ Dictionary godot::leveler_grid_geom(const Pasture3DPathGeom *p_loop, const Packe
 			sw[i] = core[(size_t)i] ? 1.f : 0.f;
 		}
 		double divisor = 1.0;
-		d_jfa = distance_transform_solve(seed, p_gw, p_gh, p_rect, 0.5, DISTANCE_TRANSFORM_OUTSIDE,
+		d_jfa = distance_transform_solve(seed, p_gw, p_gh, p_rect, 0.5,
+				inside ? DISTANCE_TRANSFORM_INSIDE : DISTANCE_TRANSFORM_OUTSIDE,
 				DISTANCE_TRANSFORM_EUCLIDEAN, DISTANCE_TRANSFORM_METRES, 0.0, &divisor);
 		if (d_jfa.size() != n) {
 			out["ok"] = false;
@@ -309,9 +321,10 @@ Dictionary godot::leveler_grid_geom(const Pasture3DPathGeom *p_loop, const Packe
 					continue;
 				}
 				const bool is_core = core[(size_t)i] != 0;
+				const bool measured = inside ? is_core : !is_core;
 				double d = 0.0;
 				double s = 0.0;
-				if (!is_core) {
+				if (measured) {
 					if (exact || use_width) {
 						const Pasture3DPathHit hit = loop->nearest(min_x + (double)ix * dx, wz, scratch);
 						s = hit.s;
@@ -322,16 +335,33 @@ Dictionary godot::leveler_grid_geom(const Pasture3DPathGeom *p_loop, const Packe
 					if (!exact) {
 						d = (double)dj[i];
 					}
+					if (inside) {
+						// The grid border is an edge: the cell one past it, centre to centre.
+						d = std::min({ d, (double)(ix + 1) * dx, (double)(p_gw - ix) * dx, (double)(iz + 1) * dz,
+								(double)(p_gh - iz) * dz });
+					}
 				}
 				double fw = p_params.feather;
-				if (use_width && !is_core) {
+				if (use_width && measured) {
 					fw = p_params.path_width_scale * loop->half_width_at(s);
 				}
 
 				double w = 1.0;
 				double t = 0.0;
 				bool in_ring = false;
-				if (!is_core) {
+				if (inside) {
+					// x = 0 at the flat end of the wall, 1 at the untouched edge — the LUT's convention on
+					// both sides, so one falloff curve reads the same way whichever side it is built on.
+					if (is_core) {
+						if (fw > 0.0 && d < fw) {
+							t = 1.0 - d / fw;
+							in_ring = true;
+							w = leveler_lut_sample(lut, lut_n, t);
+						}
+					} else {
+						w = (double)area[(size_t)i];
+					}
+				} else if (!is_core) {
 					if (fw > 0.0 && d < fw) {
 						t = d / fw;
 						in_ring = true;

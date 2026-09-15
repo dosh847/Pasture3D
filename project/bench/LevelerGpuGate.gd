@@ -107,6 +107,7 @@ func _io_graph() -> Pasture3DTerrainGraph:
 ## Leveler[channel] -> Output.
 func _graph(p_cfg: Dictionary, p_opts: Dictionary, p_channel := 0) -> Pasture3DTerrainGraph:
 	var lev := Pasture3DGraphNodeLeveler.new()
+	lev.feather_side = Pasture3DGraphNodeLevelerBase.FeatherSide.OUTSIDE # the original cases; INSIDE ones set it
 	for k in p_cfg:
 		lev.set(String(k), p_cfg[k])
 	var loop_src := Pasture3DGraphNodeRoadSource.new()
@@ -171,6 +172,16 @@ func _a_gpu_matches_cpu() -> void:
 		["loop+mask JFA MEAN", {"statistic": 0, "feather": 7.0}, {"loop": true, "road_mask": true}, surf],
 		["no area MEAN", {"statistic": 0}, {}, surf],
 		["NaN footprint MEDIAN", {"statistic": 1, "feather": 6.0}, {"loop": true}, _terrain(true)],
+		# INSIDE: the wall within the area — exact loop, raster mask, grid border, footprint, path width.
+		["IN loop LEVEL", {"mode": 1, "target_height": 30.0, "feather": 9.0, "feather_side": 0}, {"loop": true}, surf],
+		["IN loop MEDIAN SLOPE", {"statistic": 1, "feather": 9.0, "feather_side": 0, "walls_shape": 1},
+				{"loop": true}, surf],
+		["IN mask JFA", {"mode": 1, "target_height": 30.0, "feather": 12.0, "feather_side": 0}, {"road_mask": true}, surf],
+		["IN no area (border)", {"mode": 1, "target_height": 30.0, "feather": 20.0, "feather_side": 0}, {}, surf],
+		["IN NaN footprint loop", {"mode": 1, "target_height": 30.0, "feather": 9.0, "feather_side": 0},
+				{"loop": true}, _terrain(true)],
+		["IN path width CUT", {"mode": 1, "target_height": 14.0, "feather_side": 0, "cut_fill": 1,
+				"feather_from_path_width": true, "path_width_scale": 1.5}, {"loop": true}, surf],
 	]
 	var worst := 0.0
 	var bailed := []

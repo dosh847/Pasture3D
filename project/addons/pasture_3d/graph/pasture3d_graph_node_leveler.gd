@@ -33,6 +33,7 @@ func native_lower() -> Dictionary:
 	p[7] = float(walls_shape)
 	p[8] = wall_depth
 	p[9] = float(median_bins)
+	p[10] = float(feather_side)
 	return {"params": p, "lut": falloff_lut()}
 
 

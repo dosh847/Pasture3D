@@ -29,7 +29,7 @@ const GH := 64
 const RECT := Rect2(-64.0, -64.0, 128.0, 128.0) # 2 m cells, centres on odd metres
 const HALF := 20.0 # square loop half-size
 const EPS := 1.0e-4
-const PER_ROUTE := 8
+const PER_ROUTE := 9
 
 var _fail := 0
 var _ran := 0
@@ -53,6 +53,7 @@ func _ready() -> void:
 		_f_pass_through_cases()
 		_g_walls_only_where_moved()
 		_h_non_finite_is_outside()
+		_i_inside_feather()
 	var want := PER_ROUTE * Route.size()
 	if _ran != want:
 		_fail += 1
@@ -109,6 +110,7 @@ func _square_signed(p_w: Vector2) -> float:
 func _node() -> Pasture3DGraphNodeLevelerBase:
 	var n: Pasture3DGraphNodeLevelerBase = Pasture3DGraphNodeDevLeveler.new() if _route == Route.ORACLE \
 			else Pasture3DGraphNodeLeveler.new()
+	n.feather_side = Pasture3DGraphNodeLevelerBase.FeatherSide.OUTSIDE # A-H measure the outward wall; I the inward
 	n.feather = 6.0
 	return n
 
@@ -453,6 +455,80 @@ func _g_walls_only_where_moved() -> void:
 		shape_diff = maxf(shape_diff, absf(o4[4][i] - o2[4][i]))
 	print("    SLOPE vs BAND differ by up to %.4f (want > 0.1)" % shape_diff)
 	_check(shape_diff > 0.1, "walls_shape does nothing")
+	_ran += 1
+
+
+# --- I ----------------------------------------------------------------------------------------------
+## The inward wall, computed independently: d = the nearest of the grid border (one cell past it, centre to
+## centre), the square's edge (when a loop is wired) and the first non-finite column (cells x > 10, whose
+## first centre is x = 11); w = 1 - smoothstep(1 - d/F) inside the band, 1 beyond it. Returns
+## [cells checked, band cells, worst |out - want| over the core, worst change outside the core].
+func _i_measure(p_out: PackedFloat32Array, p_h: PackedFloat32Array, p_loop: bool, p_nan: bool, p_level: float,
+		p_feather: float) -> Array:
+	var dx := RECT.size.x / GW
+	var checked := 0
+	var band := 0
+	var worst := 0.0
+	var outside := 0.0
+	for i in p_h.size():
+		if not is_finite(p_h[i]):
+			continue
+		var w := _world(i)
+		if p_loop and not _in_square(w):
+			outside = maxf(outside, absf(p_out[i] - p_h[i]))
+			continue
+		var ix := i % GW
+		var iz := i / GW
+		var d := minf(minf(float(ix + 1) * dx, float(GW - ix) * dx), minf(float(iz + 1) * dx, float(GH - iz) * dx))
+		if p_loop:
+			d = minf(d, HALF - maxf(absf(w.x), absf(w.y)))
+		if p_nan:
+			d = minf(d, 11.0 - w.x)
+		var wt := 1.0
+		if d < p_feather:
+			var t := clampf(1.0 - d / p_feather, 0.0, 1.0)
+			wt = 1.0 - t * t * (3.0 - 2.0 * t)
+			band += 1
+		checked += 1
+		worst = maxf(worst, absf(p_out[i] - (p_h[i] + (p_level - p_h[i]) * wt)))
+	return [checked, band, worst, outside]
+
+
+func _i_inside_feather() -> void:
+	print("[I] Feather Side INSIDE: the wall is built within the area, from the grid border, footprint and loop")
+	const F := 10.0
+	const TOL := 2.0e-3 # the 256-entry LUT's linear interpolation of smoothstep, times a 40 m move
+	var h := _sloped()
+	var nan_h := _sloped()
+	for i in nan_h.size():
+		if _world(i).x > 10.0:
+			nan_h[i] = NAN
+	var cases := [["nothing wired (grid border)", h, false, false], ["NaN footprint", nan_h, false, true],
+			["closed loop (exact)", h, true, false]]
+	for c in cases:
+		var node := _node()
+		node.feather_side = Pasture3DGraphNodeLevelerBase.FeatherSide.INSIDE
+		node.mode = Pasture3DGraphNodeLevelerBase.Mode.LEVEL_AT_HEIGHT
+		node.target_height = 40.0
+		node.feather = F
+		var o: Array = _run(node, c[1], _square() if c[2] else null)
+		var m: Array = _i_measure(o[0], c[1], c[2], c[3], 40.0, F)
+		var walls_band := 0
+		for i in c[1].size():
+			if o[4][i] > 0.0:
+				walls_band += 1
+		print("    %s: %d cells, %d in the band, worst |out - want| %.5f, outside moved %.5f, walls cells %d"
+				% [c[0], m[0], m[1], m[2], m[3], walls_band])
+		_check(m[1] > 0, "NO-SIGNAL: %s has no band cells" % c[0])
+		_check(m[2] < TOL, "%s: the inward wall is not 1 - smoothstep(1 - d/F)" % c[0])
+		_check(m[3] == 0.0, "%s: a cell outside the loop moved" % c[0])
+		_check(walls_band > 0, "%s: walls never fired in the inward band" % c[0])
+		# CONTROL: the OUTSIDE wall on the same input has no band inside the area, and must fail the formula.
+		node.feather_side = Pasture3DGraphNodeLevelerBase.FeatherSide.OUTSIDE
+		var oc: Array = _run(node, c[1], _square() if c[2] else null)
+		var mc: Array = _i_measure(oc[0], c[1], c[2], c[3], 40.0, F)
+		print("    control: the OUTSIDE wall reads %.3f against the inward formula (want > 1)" % mc[2])
+		_check(mc[2] > 1.0, "control dead: %s cannot tell an inward wall from an outward one" % c[0])
 	_ran += 1
 
 

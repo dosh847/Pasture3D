@@ -92,6 +92,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	var core := PackedByteArray()
 	core.resize(n)
 	var mask_trivial := true
+	var any_nonfinite := false
 	var core_count := 0
 	for iz in p_gh:
 		var row := iz * p_gw
@@ -100,6 +101,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 			var i := row + ix
 			if not is_finite(h[i]):
 				area[i] = 0.0
+				any_nonfinite = true
 				continue
 			var m := mask_in[i]
 			m = clampf(m, 0.0, 1.0) if is_finite(m) else 0.0
@@ -127,12 +129,17 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	last_level = level
 	level_ch = Pasture3DGraphOps.filled(n, level)
 
-	# ---- 3. DISTANCE OUTSIDE THE CORE ----
-	var exact := _path != null and mask_trivial
+	# ---- 3. DISTANCE FROM THE CORE EDGE ----
+	# OUTSIDE measures non-core cells to the nearest core cell. INSIDE measures core cells to the nearest
+	# non-core cell or past the grid border, whichever is nearer — the brush footprint arrives as non-finite
+	# cells and the grid edge, so both are edges. The exact route needs the polygon to BE the edge; for INSIDE
+	# a non-finite cell is an edge too, so any footprint sends it to the raster route.
+	var inside := feather_side == FeatherSide.INSIDE
+	var exact := _path != null and mask_trivial and (not inside or not any_nonfinite)
 	var d_jfa := PackedFloat64Array()
 	if not exact:
 		var dt := Pasture3DGraphNodeDevDistanceTransform.new()
-		d_jfa = dt._field(core, true, p_gw, p_gh, dx, dz)
+		d_jfa = dt._field(core, not inside, p_gw, p_gh, dx, dz)
 	var use_width := feather_from_path_width and _path != null
 
 	var lut := falloff_lut()
@@ -149,20 +156,35 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 			var hv := h[i]
 			if not is_finite(hv):
 				continue
+			var is_core := core[i] == 1
+			var measured := is_core if inside else not is_core
 			var d := 0.0
 			var q := {}
-			if core[i] == 0:
+			if measured:
 				if exact or use_width:
 					q = _path.nearest(Vector2(min_x + float(ix) * dx, wz))
 				d = float(q["distance"]) if exact else d_jfa[i]
+				if inside:
+					# The grid border is an edge: the cell one past it, centre to centre.
+					d = minf(d, minf(minf(float(ix + 1) * dx, float(p_gw - ix) * dx),
+							minf(float(iz + 1) * dz, float(p_gh - iz) * dz)))
 			var f_w := feather
-			if use_width and core[i] == 0:
+			if use_width and measured:
 				f_w = path_width_scale * _path.half_width_at(float(q["s"]))
 
 			var w := 1.0
 			var t := 0.0
 			var in_ring := false
-			if core[i] == 0:
+			if inside:
+				# x = 0 at the flat end of the wall, 1 at the untouched edge — the LUT reads the same either side.
+				if is_core:
+					if f_w > 0.0 and d < f_w:
+						t = 1.0 - d / f_w
+						in_ring = true
+						w = sample_lut(lut, t)
+				else:
+					w = area[i]
+			elif not is_core:
 				if f_w > 0.0 and d < f_w:
 					t = d / f_w
 					in_ring = true

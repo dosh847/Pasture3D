@@ -96,7 +96,9 @@ func _falloff_curve() -> Curve:
 	return c
 
 
+## Outward unless the config says otherwise, so the original cases keep measuring what they were written for.
 func _apply(p_node: Pasture3DGraphNode, p_cfg: Dictionary) -> void:
+	p_node.set("feather_side", Pasture3DGraphNodeLevelerBase.FeatherSide.OUTSIDE)
 	for k in p_cfg:
 		p_node.set(String(k), p_cfg[k])
 
@@ -167,6 +169,11 @@ func _p_binding_parity() -> void:
 		{"mode": 1, "target_height": 22.5, "feather_from_path_width": true, "path_width_scale": 1.5},
 		{"mode": 1, "target_height": 22.5, "feather": 0.0},
 		{"mode": 1, "target_height": 22.5, "falloff": _falloff_curve(), "walls_shape": 1},
+		# INSIDE: the wall within the area, from the loop / mask / footprint / grid border.
+		{"mode": 1, "target_height": 22.5, "feather_side": 0},
+		{"mode": 0, "statistic": 1, "feather_side": 0, "cut_fill": 1},
+		{"mode": 1, "target_height": 22.5, "feather_side": 0, "feather_from_path_width": true, "walls_shape": 1,
+				"falloff": _falloff_curve()},
 	]
 	var cases := 0
 	var moved_cases := 0
@@ -199,6 +206,8 @@ func _p_binding_parity() -> void:
 	# CONTROL: a parameter off by 1.5 m of feather must be visible, or EPS is too loose to see a rule.
 	var ora2 := Pasture3DGraphNodeDevLeveler.new()
 	var nat2 := Pasture3DGraphNodeLeveler.new()
+	_apply(ora2, {})
+	_apply(nat2, {})
 	ora2.mode = Pasture3DGraphNodeLevelerBase.Mode.LEVEL_AT_HEIGHT
 	nat2.mode = Pasture3DGraphNodeLevelerBase.Mode.LEVEL_AT_HEIGHT
 	ora2.target_height = 22.5
@@ -232,6 +241,7 @@ func _t_thread_identity() -> void:
 		["MEDIAN, exact loop", {"mode": 0, "statistic": 1}, loop, null],
 		["LEVEL, path width, SLOPE", {"mode": 1, "target_height": 5.0, "feather_from_path_width": true,
 				"walls_shape": 1}, loop, null],
+		["LEVEL INSIDE, mask route", {"mode": 1, "target_height": 5.0, "feather_side": 0, "feather": 30.0}, null, soft],
 	]
 	for r in runs:
 		var node := Pasture3DGraphNodeLeveler.new()
@@ -281,6 +291,9 @@ func _r_lowered_route() -> void:
 		# B: mask wired from a Path Mask, no loop: the JFA route, MEDIAN.
 		{"name": "wired mask, MEDIAN", "cfg": {"mode": 0, "statistic": 1, "feather": 6.0}, "target": null,
 				"mask": pm_grid, "path": null},
+		# C: exact loop, INSIDE wall, wired target.
+		{"name": "loop INSIDE", "cfg": {"mode": 1, "feather_side": 0, "feather": 8.0}, "target": 4.0,
+				"mask": null, "path": loop},
 	]
 	var checked := 0
 	for gd in graphs:
@@ -313,7 +326,7 @@ func _r_lowered_route() -> void:
 	if cw <= 1.0:
 		_fail += 1
 		print("    !! control dead: R cannot tell a lowered Leveler from a pass-through")
-	if checked != 10:
+	if checked != 15:
 		_fail += 1
 	_ran += 1
 

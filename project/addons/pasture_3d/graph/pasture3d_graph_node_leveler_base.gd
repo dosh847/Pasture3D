@@ -18,6 +18,8 @@ enum Mode { FLATTEN, LEVEL_AT_HEIGHT }
 enum Statistic { MEAN, MEDIAN, MIN, MAX }
 enum CutFill { BOTH, CUT_ONLY, FILL_ONLY }
 enum WallsShape { BAND, SLOPE }
+## MUST match LevelerFeatherSide in src/pasture_3d_leveler.h.
+enum FeatherSide { INSIDE, OUTSIDE }
 
 ## Rows per summation block for the mean. MUST match LEVELER_MEAN_BLOCK_ROWS in src/pasture_3d_leveler.h.
 const MEAN_BLOCK_ROWS := 64
@@ -50,7 +52,15 @@ const LUT_SIZE := 256
 		emit_changed()
 
 @export_group("Walls")
-## Wall width in metres, built OUTSIDE the area. 0 is a hard edge.
+## INSIDE builds the wall within the area, from its edge (the loop, the mask, the brush footprint or the grid
+## border) inward, so a brush that can only write inside its own footprint still gets one. OUTSIDE builds
+## it beyond the area, which needs terrain outside it to write to — a graph on a full terrain.
+@export var feather_side: FeatherSide = FeatherSide.INSIDE:
+	set(v):
+		feather_side = v
+		emit_changed()
+
+## Wall width in metres, on the `feather_side` of the area edge. 0 is a hard edge.
 @export_range(0.0, 200.0, 0.1, "or_greater") var feather: float = 5.0:
 	set(v):
 		feather = maxf(v, 0.0)

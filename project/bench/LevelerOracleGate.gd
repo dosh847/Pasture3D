@@ -83,6 +83,7 @@ func _square_distance(p_w: Vector2) -> float:
 
 func _node() -> Pasture3DGraphNodeDevLeveler:
 	var n := Pasture3DGraphNodeDevLeveler.new()
+	n.feather_side = Pasture3DGraphNodeLevelerBase.FeatherSide.OUTSIDE # A-H are the outward wall's criteria
 	n.feather = 6.0
 	return n
 

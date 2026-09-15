@@ -138,6 +138,38 @@ static String _graph_kernel_defines() {
 // One compute shader, dispatched once per GRID node with a `mode` selecting the op. Reads up to two input
 // buffers (A, B) and writes one output buffer (OUT), all std430 float arrays over the gw*gh grid.
 // NOTE: no `#version` here -- _graph_kernel_defines() supplies it along with the GKM_* constants.
+// The GLSL twin of pasture_3d_distance_metric.h (PASTURE3D_GRADIENT_AND_COLOR_RAMP_SPEC.md §3). A MACRO, not a
+// `static const char *`, so it can be spliced into GRAPH_GRID_GLSL's preamble by literal concatenation: it
+// has to sit before main(), and main() lives inside that one literal. It is spliced in exactly once.
+// Metric and repeat numbers are the C++ enums' numbers; keep the three copies in step.
+#define GRAPH_DISTANCE_METRIC_GLSL R"(
+float p3d_distance_metric(int m, float wx, float wz, float ax, float az, float ux, float uz) {
+	float dx = wx - ax;
+	float dz = wz - az;
+	if (m == 2) { return abs(dx); }
+	if (m == 3) { return abs(dz); }
+	if (m == 1 || (m >= 4 && m <= 7)) {
+		float px = dx * ux + dz * uz;
+		float pz = dz * ux - dx * uz;
+		if (m == 1) { return max(abs(px), abs(pz)); }
+		if (m == 4) { return px; }
+		if (m == 5) { return abs(px); }
+		if (m == 6) { return abs(px) + abs(pz); }
+		float ang = atan(pz, px);
+		if (ang < 0.0) { ang += 6.283185307179586; }
+		return ang;
+	}
+	return sqrt(dx * dx + dz * dz);
+}
+
+float p3d_repeat(int mode, float t) {
+	if (isnan(t) || isinf(t)) { return t; }
+	if (mode == 1) { return t - floor(t); }
+	if (mode == 2) { float h = t * 0.5; return 1.0 - abs((h - floor(h)) * 2.0 - 1.0); }
+	return clamp(t, 0.0, 1.0);
+}
+)"
+
 static const char *GRAPH_GRID_GLSL = R"(
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -205,6 +237,7 @@ uint gavHashCell(int cx, int cz, int sd, uint salt) {
 }
 
 // 24 bits into [0,1) — exact in a 32-bit float.
+)" GRAPH_DISTANCE_METRIC_GLSL R"(
 float gavRnd01(uint h) {
 	return float(h & 0x00ffffffu) / 16777216.0;
 }
@@ -429,13 +462,9 @@ static const char *GRAPH_GRID_GLSL_1B = R"(	if (p.mode == GKM_FALLOFF) { // FALL
 		if (isnan(v)) { o[i] = v; return; }
 		float wx = p.ox + (float(ix) + 0.5) * p.dx;
 		float wz = p.oz + (float(iz) + 0.5) * p.dz;
-		float ddx = wx - p.f0;
-		float ddz = wz - p.f1;
-		float d;
-		if (p.ip == 1) { d = max(abs(ddx), abs(ddz)); }
-		else if (p.ip == 2) { d = abs(ddx); }
-		else if (p.ip == 3) { d = abs(ddz); }
-		else { d = sqrt(ddx * ddx + ddz * ddz); }
+		// The shared metric, axis-aligned (+X frame). Shapes past 3 are RADIAL, as the old chain's else was.
+		int fm = (p.ip >= 0 && p.ip <= 3) ? p.ip : 0;
+		float d = p3d_distance_metric(fm, wx, wz, p.f0, p.f1, 1.0, 0.0);
 		float nv = b[i];
 		if (!isnan(nv)) { d += p.f6 * nv; }
 		float t;
@@ -1197,9 +1226,11 @@ static const char *GRAPH_GRID_GLSL_4 = R"(
 	//   1 core height, NaN elsewhere      2 core indicator 1/0
 	//   3 mask over finite cells, NaN elsewhere (the trivial-mask test)
 	//   4 core AND height < f0 (a median rank count; f0 is an exact float32 bin cut from the host)
+	//   5 finite-height indicator 1/0 (does a footprint edge exist? the inward exact-route test)
 	if (p.mode == GKM_LEVELER_PREP) {
 		float hv = a[i];
 		bool fin = !isnan(hv) && !isinf(hv);
+		if (p.ip == 5) { o[i] = fin ? 1.0 : 0.0; return; }
 		if (p.ip == 3) {
 			if (!fin) { o[i] = 0.0 / 0.0; return; }
 			float mv = b[i];
@@ -1213,16 +1244,21 @@ static const char *GRAPH_GRID_GLSL_4 = R"(
 		return;
 	}
 
-	// APPLY: a = height, b = area, c = raster distance from the core (read only off the exact route),
-	// g = the loop's stripes followed by the falloff LUT at 2 + 5*ip. ip = vertex count; ip2 bit0 exact
-	// route, bit1 width from path, bits 2-3 cut/fill. f0 level, f1 feather, f2 path width scale, f3 core
-	// threshold, f4 LUT size.
+	// APPLY: a = height, b = area, c = raster distance (read only off the exact route: from the core when
+	// outward, to the non-core set when inward), g = the loop's stripes followed by the falloff LUT at
+	// 2 + 5*ip. ip = vertex count; ip2 bit0 exact route, bit1 width from path, bits 2-3 cut/fill, bit4
+	// INSIDE. f0 level, f1 feather, f2 path width scale, f3 core threshold, f4 LUT size.
 	if (p.mode == GKM_LEVELER_APPLY) {
 		float hv = a[i];
 		if (isnan(hv) || isinf(hv)) { o[i] = hv; return; }
 		float av = b[i];
 		float w = 1.0;
-		if (!(av >= p.f3)) {
+		bool isCore = av >= p.f3;
+		bool inward = (p.ip2 & 16) != 0;
+		if (inward && !isCore) {
+			w = av;
+			if (w <= 0.0) { o[i] = hv; return; }
+		} else if (inward || !isCore) {
 			int gn = p.ip;
 			bool exact = (p.ip2 & 1) != 0;
 			bool useW = (p.ip2 & 2) != 0;
@@ -1253,15 +1289,20 @@ static const char *GRAPH_GRID_GLSL_4 = R"(
 					fw = p.f2 * pathHalfWidth(gn, 2 + 2 * gn, GC0, sarc);
 				}
 			}
+			if (inward) {
+				// The grid border is an edge: the cell one past it, centre to centre.
+				d = min(d, min(min(float(ix + 1) * p.dx, float(p.gw - ix) * p.dx),
+						min(float(iz + 1) * p.dz, float(p.gh - iz) * p.dz)));
+			}
 			if (fw > 0.0 && d < fw) {
 				int nl = int(p.f4);
 				int L0 = 2 + 5 * gn;
-				float fl = clamp(d / fw, 0.0, 1.0) * float(nl - 1);
+				float fl = clamp(inward ? 1.0 - d / fw : d / fw, 0.0, 1.0) * float(nl - 1);
 				int i0 = int(fl);
 				float lv = (i0 >= nl - 1) ? g[L0 + nl - 1] : mix(g[L0 + i0], g[L0 + i0 + 1], fl - float(i0));
-				w = max(av, lv);
+				w = inward ? lv : max(av, lv);
 			} else {
-				w = av;
+				w = inward ? 1.0 : av;
 			}
 			if (w <= 0.0) { o[i] = hv; return; }
 		}
@@ -2393,6 +2434,7 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				// statistic is a scalar the apply pass takes as a push constant.
 				const RID src = in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf;
 				const Pasture3DLevelerParams lp = leveler_params_from(P, 16);
+				const bool inward = lp.feather_side == LEVELER_INSIDE;
 				// Counts are summed as floats, exact only to 2^24, and JFA sites are cell indices in floats.
 				if (n > (1 << 24)) {
 					return fail();
@@ -2597,10 +2639,21 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				}
 
 				// ---- 3. DISTANCE ----
-				const bool exact = lg != nullptr && mask_trivial;
+				// Inward, a non-finite cell is an edge the polygon does not know about: the kernel's rule, so
+				// count finite cells (only when it can change the route).
+				bool any_nonfinite = false;
+				if (inward && lg != nullptr && mask_trivial) {
+					double finite_d = 0.0;
+					if (!sum_of(prep(5, zero_buf, 0.f), finite_d)) {
+						return fail();
+					}
+					any_nonfinite = std::llround(finite_d) != (int64_t)n;
+				}
+				const bool exact = lg != nullptr && mask_trivial && !(inward && any_nonfinite);
 				RID dist = zero_buf;
 				if (!exact) {
-					// The Distance Transform's own JFA+1 plan over the core indicator: OUTSIDE, EUCLIDEAN, metres.
+					// The Distance Transform's own JFA+1 plan over the core indicator, EUCLIDEAN, metres:
+					// seeded from the core (OUTSIDE) or from every non-core cell (INSIDE).
 					int max_step = 1;
 					while (max_step < std::max(p_gw, p_gh)) {
 						max_step <<= 1;
@@ -2608,7 +2661,7 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 					const RID seed = empty_buf();
 					GraphDispatch sd{ seed, core_ind, zero_buf, zero_buf, GKM_DT_SEED, 0 };
 					sd.f0 = 0.5f;
-					sd.f1 = 1.0f;
+					sd.f1 = inward ? 0.0f : 1.0f;
 					plan.push_back(sd);
 					RID cur = seed;
 					RID other = empty_buf();
@@ -2630,7 +2683,7 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				const RID out = empty_buf();
 				GraphDispatch d{ out, src, area, dist, GKM_LEVELER_APPLY, gn };
 				d.geo = lvl_geo;
-				d.ip2 = (exact ? 1 : 0) | ((lp.feather_from_path_width && lg != nullptr) ? 2 : 0) | ((lp.cut_fill & 3) << 2);
+				d.ip2 = (exact ? 1 : 0) | ((lp.feather_from_path_width && lg != nullptr) ? 2 : 0) | ((lp.cut_fill & 3) << 2) | (inward ? 16 : 0);
 				d.f0 = (float)level;
 				d.f1 = (float)lp.feather;
 				d.f2 = (float)lp.path_width_scale;

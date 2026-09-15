@@ -60,6 +60,11 @@ enum LevelerWallsShape {
 	LEVELER_SLOPE = 1,
 };
 
+enum LevelerFeatherSide {
+	LEVELER_INSIDE = 0, // the wall is built within the area, from its edge inward (the default)
+	LEVELER_OUTSIDE = 1,
+};
+
 // MUST match Pasture3DGraphNodeLevelerBase.MEAN_BLOCK_ROWS and CORE_EPS.
 constexpr int LEVELER_MEAN_BLOCK_ROWS = 64;
 constexpr double LEVELER_CORE_EPS = 1.0e-6;
@@ -75,6 +80,7 @@ struct Pasture3DLevelerParams {
 	int walls_shape = LEVELER_BAND;
 	double wall_depth = 1.0;
 	int median_bins = 4096;
+	int feather_side = LEVELER_INSIDE;
 };
 
 // The sixteen-slot block, unpacked. The ONLY reader of the slot order, on both routes — the Pasture3DUtil
