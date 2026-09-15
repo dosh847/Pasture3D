@@ -218,6 +218,12 @@ func _paint_spline(path: Path3D) -> void:
 		sdf = _blur_field(sdf[0], gw, gh, crease_smoothing, vs)
 	var field: PackedFloat32Array = sdf[0]
 	var ramp_denom := maxf(falloff_width, 0.001)
+	# The footprint crease (`_crease_profile_table`): this brush's mask has the same kink at the rim a
+	# Mound's profile has, and gets the same 1-D smoothing. Constant past the falloff, so the table only
+	# has to cover the ramp.
+	var mask_of := func(d: float) -> float:
+		return _ramp(falloff_curve, d / ramp_denom)
+	var crease_mask := _crease_profile_table(mask_of, ramp_denom, vs)
 	var add := _blend == BLEND_ADD
 
 	var amp := PackedFloat64Array()
@@ -245,12 +251,13 @@ func _paint_spline(path: Path3D) -> void:
 			# Computed for EVERY cell, including the ones the loop skips below: the band is made of exactly
 			# those, and they are where the extended ramp has to carry a value.
 			if margin_m > 0.0:
-				profile_ext[row + ix] = clampf(_ramp(falloff_curve, (signed_d + margin_m) / ramp_denom), 0.0, 1.0)
-			if signed_d <= 0.0:
-				amp[row + ix] = NAN
-				profile[row + ix] = 0.0
-				continue
-			var mask := _ramp(falloff_curve, signed_d / ramp_denom)
+				profile_ext[row + ix] = _crease_profile_at(crease_mask, signed_d + margin_m) \
+					if not crease_mask.is_empty() \
+					else clampf(_ramp(falloff_curve, (signed_d + margin_m) / ramp_denom), 0.0, 1.0)
+			# The smoothed mask carries the rim past the outline, so it decides for itself where the brush
+			# stops; the bare ramp cannot, because a custom curve need not be 0 at 0.
+			var mask: float = _crease_profile_at(crease_mask, signed_d) if not crease_mask.is_empty() \
+				else (0.0 if signed_d <= 0.0 else _ramp(falloff_curve, signed_d / ramp_denom))
 			if mask <= 0.0:
 				amp[row + ix] = NAN
 				profile[row + ix] = 0.0

@@ -70,7 +70,11 @@ inline float raster_ramp(const PackedFloat32Array &lut, float x) {
 // A blur is the right operator here for a reason that is also its safety proof: across a straight edge
 // the distance field is LINEAR, and a symmetric kernel is the identity on a linear function. So this
 // does nothing along straight runs and nothing at the rim, and bites only where the field has curvature
-// -- the creases and the corners. It is also independent of how finely the polygon was decimated, which
+// -- the creases and the corners.
+//
+// Inertness AT THE RIM is why this half cannot round the crease the FOOTPRINT makes, where the brush meets
+// the ground: that kink is not in the field, it is in the profile-of-distance, which is 0 outside and
+// starts rising at the rim. `RasterCreaseProfile` below is the other half, and smooths exactly that. It is also independent of how finely the polygon was decimated, which
 // is what a smooth-minimum over segments could not manage.
 //
 // Three box passes, not a Gaussian: the radius is authored in METRES over mounds that can be hundreds
@@ -193,6 +197,81 @@ float raster_blur_field(std::vector<float> &field, int gw, int gh, float sigma_c
 		}
 	}
 	return max_inside;
+}
+
+// ---- FOOTPRINT CREASE (`crease_smoothing`, second half) ----
+//
+// Blurring the distance field cannot touch the crease the FOOTPRINT makes, and by the same argument that
+// makes it safe: across the rim the field is linear, so the blur is the identity there. The rim crease is
+// not in the field at all -- it is in the PROFILE as a function of distance, which is 0 for every d <= 0
+// and starts rising at d = 0 with whatever slope the curve (or a cone, or a narrow falloff) gives it. That
+// kink, swept along the outline, is the hard line where the brush meets the ground.
+//
+// So the profile itself is smoothed, in one dimension, with the SAME three-box kernel the field gets. The
+// raw profile is tabulated at one sample per cell of distance, blurred with `raster_blur_field` on a
+// single row, and read back by linear interpolation. The kernel is compact, so the brush now reaches the
+// kernel's reach past the outline and no further -- which is exactly the reach `_crease_blur_reach` already
+// pads the grid by. Where the profile is flat or linear over the kernel (a plateau, the run of a cone) the
+// blur is again the identity, so what moves is the rim and the ramp's shoulder, and nothing else.
+//
+// Returns false, leaving the table empty, when the kernel is the identity; the caller then keeps the
+// exact un-tabulated profile, so crease_smoothing 0 is still the historical bake to the bit.
+// Mirrored by Pasture3DTerrainBrush._crease_profile_table.
+struct RasterCreaseProfile {
+	std::vector<float> tab;
+	double d0 = 0.0;
+	double inv_h = 1.0;
+
+	bool active() const { return !tab.empty(); }
+
+	double at(const double p_d) const {
+		const double t = (p_d - d0) * inv_h;
+		if (t <= 0.0) {
+			return tab[0];
+		}
+		const int i = (int)t;
+		const int last = (int)tab.size() - 1;
+		if (i >= last) {
+			return tab[last];
+		}
+		const double f = t - (double)i;
+		return (double)tab[i] * (1.0 - f) + (double)tab[i + 1] * f;
+	}
+};
+
+// `p_d_hi` is the largest distance any caller will read. The table runs the kernel's reach plus two cells
+// past both ends, so the linear extrapolation the blur reads off each end only ever continues a flat zero
+// (outside) or the profile's own tail.
+template <typename F>
+static bool raster_crease_profile_build(RasterCreaseProfile &r_prof, const double p_sigma_m, const double p_vs,
+		const double p_d_hi, F &&p_raw) {
+	r_prof.tab.clear();
+	if (p_sigma_m <= 0.0 || p_vs <= 0.0) {
+		return false;
+	}
+	const float sigma_cells = (float)(p_sigma_m / p_vs);
+	int sizes[3];
+	raster_box_sizes(sigma_cells, 3, sizes);
+	int reach = 0;
+	for (int i = 0; i < 3; i++) {
+		reach += (sizes[i] - 1) / 2;
+	}
+	if (reach < 1) {
+		return false;
+	}
+	const int pad = reach + 2;
+	const int hi = MAX((int)std::ceil(MAX(p_d_hi, 0.0) / p_vs), 1);
+	const int count = hi + 2 * pad + 1;
+	std::vector<float> tab((size_t)count, 0.f);
+	for (int k = 0; k < count; k++) {
+		const double d = (double)(k - pad) * p_vs;
+		tab[(size_t)k] = d <= 0.0 ? 0.f : (float)p_raw(d);
+	}
+	raster_blur_field(tab, count, 1, sigma_cells);
+	r_prof.tab = std::move(tab);
+	r_prof.d0 = -(double)pad * p_vs;
+	r_prof.inv_h = 1.0 / p_vs;
+	return true;
 }
 
 // Signed distance field of a closed world polygon over the grid (port of _signed_distance_field).
@@ -1601,7 +1680,7 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	// Extracted into one expression because TWO things now evaluate it — the host-profile pre-pass below
 	// and the main cell loop — and a second copy of this arithmetic is exactly how the field a selector
 	// reads would quietly stop being the shape the brush stamps.
-	const auto host_profile_at = [&](const double p_signed_d, double &r_amp, double &r_profile) -> bool {
+	const auto raw_profile_at = [&](const double p_signed_d, double &r_amp, double &r_profile) -> bool {
 		if (p_signed_d <= 0.0) {
 			return false;
 		}
@@ -1617,6 +1696,43 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 			return false;
 		}
 		r_amp = sign * height * r_profile;
+		return true;
+	};
+
+	// THE FOOTPRINT CREASE. `crease_smoothing` blurs the distance field, which is inert at the rim by
+	// construction, so it never touched the hard line where the brush meets the ground. That line is the
+	// profile's own kink at distance 0, and this smooths it with the same kernel (see RasterCreaseProfile).
+	// Built only when there is smoothing to do: with none, every call below goes straight through to
+	// `raw_profile_at` and the bake is what it always was, to the bit.
+	//
+	// A cone gets a SECOND table. Its height rises with distance and clips at the safety cap, so its
+	// amplitude is not `height * profile` and cannot be rebuilt from the profile table.
+	const double crease_d_hi = (double)max_inside + edge_offset + modifier_margin;
+	RasterCreaseProfile crease_profile;
+	RasterCreaseProfile crease_amp;
+	if (raster_crease_profile_build(crease_profile, crease_smoothing, vs, crease_d_hi,
+				[&](const double p_d) {
+					double a = 0.0;
+					double pr = 0.0;
+					return raw_profile_at(p_d, a, pr) ? pr : 0.0;
+				}) &&
+			cone) {
+		raster_crease_profile_build(crease_amp, crease_smoothing, vs, crease_d_hi,
+				[&](const double p_d) {
+					double a = 0.0;
+					double pr = 0.0;
+					return raw_profile_at(p_d, a, pr) ? a : 0.0;
+				});
+	}
+	const auto host_profile_at = [&](const double p_signed_d, double &r_amp, double &r_profile) -> bool {
+		if (!crease_profile.active()) {
+			return raw_profile_at(p_signed_d, r_amp, r_profile);
+		}
+		r_profile = crease_profile.at(p_signed_d);
+		if (r_profile <= 0.0) {
+			return false;
+		}
+		r_amp = crease_amp.active() ? crease_amp.at(p_signed_d) : sign * height * r_profile;
 		return true;
 	};
 
@@ -1787,7 +1903,13 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 				if (pre_clip && (x < cx0 || x >= cx1)) {
 					continue;
 				}
-				if (signed_d <= 0.0) {
+				double a = 0.0;
+				double pr = 0.0;
+				// A SMOOTHED RIM REACHES PAST THE OUTLINE, so "off the loop" is no longer "signed_d <= 0":
+				// a cell out there can still carry brush amplitude, and such a cell is a brush cell, not a
+				// margin cell. With no crease smoothing this is exactly the historical test.
+				const bool on_brush = host_profile_at(signed_d, a, pr);
+				if (signed_d <= 0.0 && !on_brush) {
 					// Off the loop. With a Modifier Margin this is a MARGIN cell: record the real ground and
 					// materialise `amp` as 0 — "the brush adds nothing here, but this cell is in play" — so the
 					// stack below sees a working surface that extends past the loop onto real terrain and every
@@ -1813,9 +1935,7 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 					}
 					continue;
 				}
-				double a = 0.0;
-				double pr = 0.0;
-				if (!host_profile_at(signed_d, a, pr)) {
+				if (!on_brush) {
 					continue;
 				}
 				if (relative) {
@@ -2245,6 +2365,7 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 
 	// Field: GPU analytic when the box is large enough + a local RD exists, else the C++ chamfer (Plow/Splat
 	// ignore max_inside; they normalise on falloff_width). Same 3-tier fallback as Mound (spec §4).
+	const double crease_smoothing = p_params.get("crease_smoothing", 0.0);
 	std::vector<float> field;
 	{
 		bool got_field = false;
@@ -2259,7 +2380,6 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 		if (!got_field) {
 			raster_sdf(p_poly, min_x, min_z, vs, gw, gh, field);
 		}
-		const double crease_smoothing = p_params.get("crease_smoothing", 0.0);
 		if (crease_smoothing > 0.0 && vs > 0.0) {
 			raster_blur_field(field, gw, gh, (float)(crease_smoothing / vs));
 		}
@@ -2304,6 +2424,12 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 	const double inv_ez = 1.0 / MAX((double)p_params.get("fit_ez", 1.0), 0.001);
 
 	const double ramp_denom = MAX(falloff_width, 0.001);
+	// The footprint crease: this brush's mask has the same kink at the rim a Mound's profile has, and gets
+	// the same 1-D smoothing (see RasterCreaseProfile). The mask is constant past the falloff, so the table
+	// only has to cover the ramp itself.
+	RasterCreaseProfile crease_mask;
+	raster_crease_profile_build(crease_mask, crease_smoothing, vs, ramp_denom,
+			[&](const double p_d) { return (double)raster_ramp(p_lut, (float)(p_d / ramp_denom)); });
 	const bool add = (blend == 1); // BLEND_ADD
 
 	Pasture3DLayer *wlayer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
@@ -2357,10 +2483,14 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 		const int row = iz * gw;
 		for (int ix = 0; ix < gw; ix++) {
 			const double signed_d = (double)field[row + ix] + edge_offset;
-			if (signed_d <= 0.0) {
+			// The smoothed mask carries the rim past the outline, so it decides for itself where the brush
+			// stops; the bare ramp cannot, because a custom curve need not be 0 at 0.
+			if (signed_d <= 0.0 && !crease_mask.active()) {
 				continue;
 			}
-			const double mask = raster_ramp(p_lut, (float)(signed_d / ramp_denom));
+			const double mask = crease_mask.active()
+					? crease_mask.at(signed_d)
+					: (double)raster_ramp(p_lut, (float)(signed_d / ramp_denom));
 			if (mask <= 0.0) {
 				continue;
 			}
@@ -2466,6 +2596,7 @@ void Pasture3DData::stamp_splat_loop(const int p_layer_id, const PackedVector2Ar
 
 	// Field: GPU analytic when the box is large enough + a local RD exists, else the C++ chamfer (Plow/Splat
 	// ignore max_inside; they normalise on falloff_width). Same 3-tier fallback as Mound (spec §4).
+	const double crease_smoothing = p_params.get("crease_smoothing", 0.0);
 	std::vector<float> field;
 	{
 		bool got_field = false;
@@ -2480,7 +2611,6 @@ void Pasture3DData::stamp_splat_loop(const int p_layer_id, const PackedVector2Ar
 		if (!got_field) {
 			raster_sdf(p_poly, min_x, min_z, vs, gw, gh, field);
 		}
-		const double crease_smoothing = p_params.get("crease_smoothing", 0.0);
 		if (crease_smoothing > 0.0 && vs > 0.0) {
 			raster_blur_field(field, gw, gh, (float)(crease_smoothing / vs));
 		}
@@ -2498,6 +2628,11 @@ void Pasture3DData::stamp_splat_loop(const int p_layer_id, const PackedVector2Ar
 	Ref<FastNoiseLite> noise = Object::cast_to<FastNoiseLite>(noise_obj);
 
 	const double ramp_denom = MAX(falloff_width, 0.001);
+	// The footprint crease, on the coverage ramp this time (see RasterCreaseProfile): the painted patch
+	// gets the same softened edge the height brushes get, rather than a hard line at the outline.
+	RasterCreaseProfile crease_mask;
+	raster_crease_profile_build(crease_mask, crease_smoothing, vs, ramp_denom,
+			[&](const double p_d) { return (double)raster_ramp(p_lut, (float)(p_d / ramp_denom)); });
 
 	// Phase 1d batched control apply: accumulate per-cell control words into a box buffer (+ skip mask),
 	// then commit one tile at a time. Used for the deferred non-base TYPE_CONTROL overlay; otherwise the
@@ -2525,14 +2660,19 @@ void Pasture3DData::stamp_splat_loop(const int p_layer_id, const PackedVector2Ar
 		const int row = iz * gw;
 		for (int ix = 0; ix < gw; ix++) {
 			const double signed_d = (double)field[row + ix] + edge_offset;
-			if (signed_d <= 0.0) {
+			// See the twin in stamp_plow_loop: with a smoothed mask the rim reaches past the outline, and
+			// the mask itself is what decides where the paint stops.
+			if (signed_d <= 0.0 && !crease_mask.active()) {
 				continue;
 			}
 			const double x = min_x + ix * vs;
 			if (has_clip && (x < cx0 || x >= cx1)) {
 				continue;
 			}
-			double t = (double)raster_ramp(p_lut, (float)(signed_d / ramp_denom)) * strength;
+			double t = (crease_mask.active()
+							   ? crease_mask.at(signed_d)
+							   : (double)raster_ramp(p_lut, (float)(signed_d / ramp_denom))) *
+					strength;
 			if (noise.is_valid()) {
 				t += noise_strength * noise->get_noise_2d(x, z);
 			}

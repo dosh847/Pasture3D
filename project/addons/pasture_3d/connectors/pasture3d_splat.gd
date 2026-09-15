@@ -177,16 +177,22 @@ func _paint_spline(path: Path3D) -> void:
 		sdf = _blur_field(sdf[0], gw, gh, crease_smoothing, vs)
 	var field: PackedFloat32Array = sdf[0]
 	var ramp_denom := maxf(falloff_width, 0.001)
+	# The footprint crease (`_crease_profile_table`), on the coverage ramp: the painted patch gets the same
+	# softened edge the height brushes get, instead of a hard line at the outline.
+	var mask_of := func(d: float) -> float:
+		return _ramp(falloff_curve, d / ramp_denom)
+	var crease_mask := _crease_profile_table(mask_of, ramp_denom, vs)
 
 	for iz in range(gh):
 		var z := min_z + iz * vs
 		var row := iz * gw
 		for ix in range(gw):
 			var signed_d := field[row + ix] + edge_offset
-			if signed_d <= 0.0:
+			if signed_d <= 0.0 and crease_mask.is_empty():
 				continue
 			var x := min_x + ix * vs
-			var t := _ramp(falloff_curve, signed_d / ramp_denom) * strength
+			var t: float = (_crease_profile_at(crease_mask, signed_d) if not crease_mask.is_empty() \
+				else _ramp(falloff_curve, signed_d / ramp_denom)) * strength
 			if noise:
 				t += noise_strength * noise.get_noise_2d(x, z)
 			t = clampf(t, 0.0, 1.0)
