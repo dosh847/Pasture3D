@@ -47,7 +47,7 @@ func input_port_types() -> PackedInt32Array:
 	# `base`/`overlay` INT ports which are read from cell 0: a texture index is one value for a whole
 	# sink, an index MAP is one per cell. The tap returns the source slot's entire grid either way, so
 	# the difference is in what the consumer does with it, not in what the wire carries.
-	return PackedInt32Array([PortType.INT])
+	return PackedInt32Array([PortType.FIELD]) # a grid of indices, tapped per cell: a field, not a value
 
 
 func native_param_ports() -> PackedInt32Array:

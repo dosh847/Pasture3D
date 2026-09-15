@@ -86,7 +86,7 @@ func input_names() -> PackedStringArray:
 
 
 func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.HEIGHT, PortType.HEIGHT, PortType.MASK])
+	return PackedInt32Array([PortType.HEIGHT, PortType.SIGNED, PortType.SIGNED, PortType.MASK])
 
 
 func input_unwired_default(p_port: int) -> float:

@@ -60,16 +60,16 @@ place the membership is decided; do not restate it.
 | 0 | `HEIGHT` | Sky Blue | Elevation in **metres**, absolute. The terrain itself. |
 | 1 | `MASK` | Amber | A **normalised [0,1] weight**, by construction. See §4 — this is the type people get wrong. |
 | 10 | `FIELD` | Yellow-Green | An **unsigned quantity in its own units**, unbounded. Flow in m², depth in metres, a distance. |
-| 11 | `SIGNED` | Magenta | A **signed quantity in its own units**, where **zero is meaningful**. A cut/fill, a residual, a gradient component. |
-| 8 | `TERRAIN_BUS` | Warm Gold | A bundle of several channels travelling together. Not a scalar; connects only to itself. |
-| 9 | `PATH` | Slate | A `Pasture3DGraphPath` **resource**, not a grid at all. Connects only to itself (see §6). |
+| 11 | `SIGNED` | Crimson | A **signed quantity in its own units**, where **zero is meaningful**. A cut/fill, a residual, a gradient component. |
+| 8 | `TERRAIN_BUS` | Bronze | A bundle of several channels travelling together. Not a scalar; connects only to itself. |
+| 9 | `PATH` | Dark Slate | A `Pasture3DGraphPath` **resource**, not a grid at all. Connects only to itself (see §6). |
 
 ### Value types — one value per port
 
 | # | Type | Colour | Meaning |
 |---|---|---|---|
 | 4 | `FLOAT` | Cyan | A general scalar: a strength, a rate, a radius. The default for a driven parameter. |
-| 5 | `INT` | Cobalt Blue | A discrete count or an enum selector. |
+| 5 | `INT` | Navy | A discrete count or an enum selector. |
 | 7 | `BOOL` | Lime Yellow | A toggle. |
 | 2 | `VECTOR` | Purple | A direction or angle. **See the caveat in §7.** |
 | 3 | `CURVE` | Emerald | A transfer curve. |
@@ -129,6 +129,20 @@ grid of floats underneath and the type is a reading instruction, so refusing the
 cost the author a Reroute node. `PATH` and `TERRAIN_BUS` connect **only to themselves**: a `PATH` wire carries
 a resource, so a `HEIGHT` plugged into it would be a null the consumer must defend against on every cell.
 
+The scalar **value** types — `FLOAT`, `INT`, `BOOL` — connect to each other and, in both directions, to the
+four field types: a constant fills every cell, and a field read by a value port is read at cell 0. `BOOL` is
+0.0 / 1.0 on both routes; until 2026-09-15 it was unregistered and Const Bool connected to nothing.
+`COLOR`, `VECTOR` and `CURVE` connect only to themselves. No node declares a `CURVE` input, so Const Curve
+drives nothing (`GraphPortTypeGate [F]` lists it as known).
+
+**Unwired ports.** An unwired port reads `input_unwired_default`. A port with an inline property shows it as a
+spin box (`SLOT_SPINS`); a scalar port with none (a Salève's `dx`/`dy`, an optional mask) shows a **+** button
+that adds a Const Float wired to it, starting at the unwired value. Every input row's tooltip names its type
+and what it reads while unwired.
+
+Colours must stay at least 0.3 apart in RGB (`GraphPortTypeGate [G]`): the magenta `SIGNED` that sat 0.29 from
+`COLOR`'s pink was reported as "a pin I can't wire a constant into".
+
 **This is where a new type bites you.** A type nobody registers connects to nothing but itself, and the
 failure arrives late and looks unrelated — as *"I can't re-make a wire that is already in my graph"*, because
 a stored connection is a pair of **indices** and keeps evaluating either way. `GraphPortTypeGate [E]` drives
@@ -147,6 +161,12 @@ It is unrepresentable rather than merely unfinished: the graph bus is scalar flo
 carry a `Vector2` at all. Fixing it means removing the socket, which **shifts every later port index down by
 one and silently rewires existing saved graphs**. That is a migration, not a retype, and it is deliberately
 not done here. `GraphPortTypeGate [C]` reports it.
+
+One more port is listed as known in `[C]`: `export_normal_map.normal` (declared early, refused by name when
+wired — see that node's header).
+
+Retypes approved 2026-09-15: `export_index_map.index` INT → `FIELD` (the sink taps it as a grid), and the
+`dx`/`dy` displacement inputs of the six mountain generators (and their Dev twins) HEIGHT → `SIGNED`.
 
 ---
 

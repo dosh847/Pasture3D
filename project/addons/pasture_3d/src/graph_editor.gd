@@ -18,13 +18,13 @@ const PORT_COLORS: Array[Color] = [
 	Color(0.69, 0.48, 0.77), # 2: VECTOR (#af7ac5) - Purple
 	Color(0.18, 0.80, 0.44), # 3: CURVE (#2ecc71) - Emerald
 	Color(0.00, 0.82, 0.83), # 4: FLOAT (#00d2d3) - Cyan
-	Color(0.18, 0.53, 0.87), # 5: INT (#2e86de) - Cobalt Blue
+	Color(0.10, 0.35, 0.70), # 5: INT (#1a59b3) - Navy. Was cobalt, 0.24 from HEIGHT's sky blue
 	Color(1.00, 0.42, 0.51), # 6: COLOR (#ff6b81) - Magenta/Pink
 	Color(0.66, 0.90, 0.81), # 7: BOOL (#a8e6cf) - Lime Yellow
-	Color(0.95, 0.77, 0.06), # 8: TERRAIN_BUS (#f1c40f) - Warm Gold
-	Color(0.58, 0.65, 0.71), # 9: PATH (#95a5a6) - Slate: road-coloured, and the only non-field port
+	Color(0.62, 0.42, 0.28), # 8: TERRAIN_BUS (#9e6b47) - Bronze. Was gold, 0.17 from MASK's amber (GraphPortTypeGate [G])
+	Color(0.35, 0.40, 0.45), # 9: PATH (#596673) - Dark Slate: road-coloured, and the only non-field port. Was a light slate within 0.3 of three pastels
 	Color(0.65, 0.85, 0.25), # 10: FIELD (#a6d940) - Yellow-Green: an unsigned quantity, not a mask
-	Color(0.85, 0.35, 0.75), # 11: SIGNED (#d959bf) - Magenta: signed, so zero is mid-ramp
+	Color(0.86, 0.20, 0.24), # 11: SIGNED (#db333d) - Crimson: signed, so zero is mid-ramp. Was magenta, 0.29 from COLOR's pink
 ]
 
 var plugin: EditorPlugin
@@ -1111,7 +1111,15 @@ func _populate_node_slots_and_controls(p_gn: GraphNode, p_index: int, p_node: Pa
 		if not p_node.collapsed and r < n_in:
 			var is_wired := wired_inputs.has(r)
 			if not is_wired:
+				var before := row_box.get_child_count()
 				_append_slot_inline_widget(row_box, p_node, r)
+				if row_box.get_child_count() == before and _promotable(in_types, r):
+					_append_promote_button(row_box, p_index, p_node, r)
+
+		if r < n_in:
+			var t_in: int = in_types[r] if r < in_types.size() else 0
+			row_box.tooltip_text = "%s (%s)%s" % [in_name, _port_type_name(t_in),
+					"" if wired_inputs.has(r) else " — unwired, reads %s" % str(p_node.input_unwired_default(r))]
 
 		# Label each output channel on the right so a multi-output node's ports are told apart.
 		if multi_out and r < n_out:
@@ -1271,6 +1279,55 @@ func _append_slot_inline_widget(p_row: HBoxContainer, p_node: Pasture3DGraphNode
 	for prop in SLOT_SPINS.get(p_node.op(), {}).get(p_port, []):
 		_spin_from_hint(p_row, p_node, prop)
 	_append_slot_special_widget(p_row, p_node, p_port)
+
+
+## True when an unwired input of this type can be driven by a Const Float: every scalar field and value
+## port. PATH, TERRAIN_BUS, VECTOR, CURVE and COLOR carry something a float constant cannot be.
+static func _promotable(p_types: PackedInt32Array, p_port: int) -> bool:
+	var t: int = p_types[p_port] if p_port < p_types.size() else Pasture3DGraphNode.PortType.HEIGHT
+	return t in [Pasture3DGraphNode.PortType.HEIGHT, Pasture3DGraphNode.PortType.MASK,
+			Pasture3DGraphNode.PortType.FIELD, Pasture3DGraphNode.PortType.SIGNED,
+			Pasture3DGraphNode.PortType.FLOAT, Pasture3DGraphNode.PortType.INT]
+
+
+static func _port_type_name(p_type: int) -> String:
+	for k in Pasture3DGraphNode.PortType:
+		if int(Pasture3DGraphNode.PortType[k]) == p_type:
+			return String(k).capitalize()
+	return "Unknown"
+
+
+## The fallback for an unwired port with no inline property (a Salève's `dx`/`dy`, every optional field
+## input): one button that creates a Const Float holding the port's current unwired value and wires it in.
+## A real node rather than a stored per-port value, so both evaluator routes see an ordinary wire and
+## nothing in the lowering has to learn about it.
+func _append_promote_button(p_row: HBoxContainer, p_index: int, p_node: Pasture3DGraphNode, p_port: int) -> void:
+	var btn := Button.new()
+	btn.text = "+"
+	btn.flat = true
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.tooltip_text = "Add a Const Float wired to this port, starting at its unwired value."
+	btn.pressed.connect(_action_promote_constant.bind(p_index, p_port))
+	p_row.add_child(btn)
+
+
+func _action_promote_constant(p_index: int, p_port: int) -> void:
+	if graph == null or p_index < 0 or p_index >= graph.nodes.size() or graph.nodes[p_index] == null:
+		return
+	var target: Pasture3DGraphNode = graph.nodes[p_index]
+	var c := Pasture3DGraphNodeRegistry.create(&"const")
+	if c == null:
+		return
+	var dv := target.input_unwired_default(p_port)
+	c.set("value", 0.0 if is_nan(dv) or is_inf(dv) else dv)
+	var new_idx := graph.nodes.size()
+	var pos := target.graph_position + Vector2(-240.0, 32.0 * float(p_port))
+	_ur_create_action("Promote Port to Constant")
+	_ur_add_do_method(graph, &"add_node", [c, pos])
+	_ur_add_do_method(graph, &"connect_ports", [new_idx, 0, p_index, p_port])
+	_ur_add_undo_property(graph, &"nodes", graph.nodes.duplicate())
+	_ur_add_undo_property(graph, &"connections", graph.connections.duplicate())
+	_ur_commit()
 
 
 ## The widgets that are not a number in a range: colour pickers, checkboxes, enum dropdowns, the seed dice,
@@ -3134,9 +3191,12 @@ static func register_connection_types(p_graphedit: GraphEdit) -> void:
 	# The footgun is real and is accepted deliberately: cell 0 of a NOISE field is an arbitrary number,
 	# so wiring a generator into a `direction` port gives a value nobody chose. The alternative is 107
 	# ports that no wire can reach, and the node's own inline property remains the obvious way to set one.
+	# BOOL is a scalar value too: Const Bool writes 0.0 / 1.0 on both routes, so it drives a FLOAT, INT or
+	# field port exactly as a Const Float of 0 or 1 would. Left out, it connected to nothing at all.
 	var scalar_values: Array[int] = [
 		Pasture3DGraphNode.PortType.FLOAT,
 		Pasture3DGraphNode.PortType.INT,
+		Pasture3DGraphNode.PortType.BOOL,
 	]
 	for from_t in scalar_values:
 		for to_t in scalar_values:
@@ -3164,5 +3224,6 @@ static func register_connection_types(p_graphedit: GraphEdit) -> void:
 		p_graphedit.add_valid_right_disconnect_type(t)
 	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.VECTOR)
 	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.CURVE)
+	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.COLOR)
 	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.PATH)
 	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.TERRAIN_BUS)

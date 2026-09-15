@@ -104,7 +104,7 @@ func input_names() -> PackedStringArray:
 
 
 func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.HEIGHT])
+	return PackedInt32Array([PortType.SIGNED, PortType.SIGNED])
 
 
 func output_count() -> int:

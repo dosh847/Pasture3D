@@ -140,6 +140,8 @@ func bake_label() -> String:
 
 ## The amplitude this evaluation was asked for, which may come from a wired port rather than the export.
 var _wired_amplitude: float = 0.0
+var _wired_coverage: float = 0.95
+var _wired_detail_size: float = 0.12
 
 
 ## A cached massif rescales exactly, so a change of amplitude alone does not need a re-growth: the DLA
@@ -224,7 +226,13 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	# The wired amplitude is read on the way IN rather than passed through, because `_on_cache_hit` below
 	# needs it and the base's freeze knows nothing about this node's ports.
 	_wired_amplitude = a
-	return solve_cached(_surface_hash(surface, p_gw, p_gh), func(): return _solve(surface, p_gw, p_gh, p_rect))
+	# Coverage and detail size restyle the growth, so unlike amplitude they cannot be rescaled out of a cached
+	# massif: they are read the same way and folded into the cache key. They used to be declared ports that
+	# nothing read, so a wire into either did nothing.
+	_wired_coverage = clampf(float(p_inputs[2][0]), 0.2, 1.0) if (p_inputs.size() > 2 and p_inputs[2] is PackedFloat32Array and p_inputs[2].size() > 0) else coverage
+	_wired_detail_size = clampf(float(p_inputs[3][0]), 0.03, 0.50) if (p_inputs.size() > 3 and p_inputs[3] is PackedFloat32Array and p_inputs[3].size() > 0) else detail_size
+	var key := solver_cache_key(p_gw, p_gh, [surface, PackedFloat32Array([_wired_coverage, _wired_detail_size])])
+	return solve_cached(key, func(): return _solve(surface, p_gw, p_gh, p_rect))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -286,10 +294,10 @@ func _solve(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2) 
 ## that host — it only wants the growth. See the engine's own header for what each field means.
 func _make_engine(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2) -> Object:
 	var e = ReliefDLA.new()
-	e.coverage = coverage
+	e.coverage = _wired_coverage
 	e.resolution = resolution
 	e.hierarchy_levels = hierarchy_levels
-	e.detail_size = detail_size
+	e.detail_size = _wired_detail_size
 	e.wander = wander
 	e.seed = seed
 	e.blur_levels = blur_levels

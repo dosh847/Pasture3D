@@ -27,6 +27,9 @@
 #   [D] every PortType member has its own PORT_COLORS entry — the table has not fallen behind the enum
 #   [E] every field type the registry actually declares can be wired to every other, through the real
 #       matrix in graph_editor.gd — not through a copy of it here
+#   [F] every declared output type reaches some declared input type and can be dragged off its socket
+#   [G] no two port colours are near-identical (SIGNED used to share COLOR's magenta)
+#   [H] DLA's coverage and detail_size ports reach the growth when wired
 #
 # CONTROLS. [A]-[D] are decided by pure predicates that this gate also runs against fabricated BAD
 # declarations, so each prints its control alongside its verdict: a criterion that only ever sees healthy
@@ -55,7 +58,9 @@ const FIELD_TYPE_NAMES := ["HEIGHT", "MASK", "FIELD", "SIGNED", "TERRAIN_BUS", "
 ##   floats, so the socket is unrepresentable rather than unfinished. Removing it shifts every later port
 ##   index down by one and silently rewires saved graphs — a migration, not a retype.
 ##   PASTURE3D_GRAPH_PORT_TYPES_GUIDE.md §7.
-const KNOWN_INERT_PORTS := {"transform": [1]}
+##   export_normal_map port 1 ('normal') is declared now so the node's shape is final, and a wire into it is
+##   REFUSED BY NAME by the writer until the program can carry a vector grid. See that node's header.
+const KNOWN_INERT_PORTS := {"transform": [1], "export_normal_map": [1]}
 
 var _fail := 0
 var _checks := 0
@@ -69,6 +74,9 @@ func _ready() -> void:
 	_c_field_value_split(nodes)
 	_d_every_type_has_a_colour(nodes)
 	_e_field_types_are_wireable(nodes)
+	_f_every_output_reaches_an_input(nodes)
+	_g_type_colours_distinct()
+	_h_dla_reads_its_ports()
 
 	# A criterion that threw before asserting increments nothing, so count completions, not just failures.
 	if _checks < 12:
@@ -209,7 +217,7 @@ func _c_field_value_split(p_nodes: Array) -> void:
 	_check(bad.is_empty(), "%d contradictions, %d known and documented" % [bad.size(), known.size()])
 	# An allowlist that stops matching anything is an allowlist nobody will ever delete. Fail if the known
 	# defect has been fixed, so the entry goes with the fix rather than outliving it.
-	_check(known.size() == 1, "the one known inert port is still present (found %d)" % known.size())
+	_check(known.size() == 2, "the two known inert ports are still present (found %d)" % known.size())
 	_check(Pasture3DGraphNode.is_field_type(Pasture3DGraphNode.PortType.FIELD)
 			and Pasture3DGraphNode.is_field_type(Pasture3DGraphNode.PortType.SIGNED)
 			and not Pasture3DGraphNode.is_field_type(Pasture3DGraphNode.PortType.FLOAT)
@@ -285,9 +293,111 @@ func _e_field_types_are_wireable(p_nodes: Array) -> void:
 			% [scalars.size(), ", ".join(scalars.map(func(t): return _type_name(t)))])
 	_check(missing.is_empty(), "%d ordered pairs, %d refused" % [pairs, missing.size()])
 	# Without this the criterion would pass on a GraphEdit that accepts everything.
-	_check(not ge.is_valid_connection_type(Pasture3DGraphNode.PortType.FLOAT,
+	# FLOAT -> HEIGHT used to be half of this control. It became a legal wire when Const Float was retyped
+	# (a constant is a flat field), so the control now uses types that must still be refused.
+	_check(not ge.is_valid_connection_type(Pasture3DGraphNode.PortType.COLOR,
 					Pasture3DGraphNode.PortType.HEIGHT)
 			and not ge.is_valid_connection_type(Pasture3DGraphNode.PortType.PATH,
 					Pasture3DGraphNode.PortType.HEIGHT),
-			"control: FLOAT -> HEIGHT and PATH -> HEIGHT are still refused")
+			"control: COLOR -> HEIGHT and PATH -> HEIGHT are still refused")
 	ge.queue_free()
+
+
+# --- F: every declared output type can reach some declared input type, and can be dragged off -------------
+## Output types with no possible consumer, and why. CURVE carries a Resource the scalar bus cannot, and no
+## node declares a CURVE input yet, so Const Curve drives nothing. Printed every run; remove with the fix.
+const KNOWN_UNREACHABLE_OUTPUTS := {"CURVE": "no CURVE input exists; the bus cannot carry a Curve"}
+
+func _f_every_output_reaches_an_input(p_nodes: Array) -> void:
+	print("[F] every declared output type connects to at least one declared input type, and right-disconnects")
+	var ge := GraphEdit.new()
+	add_child(ge)
+	GraphEditorScript.register_connection_types(ge)
+	var outs := {}
+	var ins := {}
+	for pair in p_nodes:
+		for t in Array(pair[1].output_port_types()):
+			outs[int(t)] = true
+		for t in Array(pair[1].input_port_types()):
+			ins[int(t)] = true
+	var dead: Array[String] = []
+	var known: Array[String] = []
+	for o in outs:
+		var reach := false
+		for i in ins:
+			if o == i or ge.is_valid_connection_type(o, i):
+				reach = true
+				break
+		if not reach:
+			if KNOWN_UNREACHABLE_OUTPUTS.has(_type_name(o)):
+				known.append("%s — %s" % [_type_name(o), KNOWN_UNREACHABLE_OUTPUTS[_type_name(o)]])
+			else:
+				dead.append(_type_name(o))
+	for k in known:
+		print("        KNOWN  " + k)
+	_check(dead.is_empty(), "%d output types, unreachable: %s" % [outs.size(), ", ".join(dead)])
+	_check(known.size() == 1, "the one known unreachable output type is still present (found %d)" % known.size())
+	_check(ge.is_valid_connection_type(Pasture3DGraphNode.PortType.BOOL, Pasture3DGraphNode.PortType.FLOAT)
+			and ge.is_valid_connection_type(Pasture3DGraphNode.PortType.FLOAT, Pasture3DGraphNode.PortType.SIGNED),
+			"BOOL -> FLOAT and FLOAT -> SIGNED are accepted (Const Bool and Const Float can drive a Salève dx)")
+	# GraphEdit has no getter for right-disconnect types, so that registration is checked by reading the
+	# real function's source for every value type that shipped without one.
+	var src: String = (GraphEditorScript as Script).source_code
+	var body := src.substr(src.find("static func register_connection_types"))
+	body = body.substr(0, body.find("\nfunc ", 10) if body.find("\nfunc ", 10) > 0 else body.length())
+	_check(body.contains("add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.COLOR)"),
+			"COLOR outputs are registered for right-disconnect (BOOL via the scalar value loop)")
+	# Control: an empty GraphEdit reaches nothing, so the sweep would notice a missing registration.
+	var bare := GraphEdit.new()
+	_check(not bare.is_valid_connection_type(Pasture3DGraphNode.PortType.BOOL, Pasture3DGraphNode.PortType.FLOAT),
+			"control: an unregistered GraphEdit refuses BOOL -> FLOAT")
+	bare.free()
+	ge.queue_free()
+
+
+# --- G: no two type colours are near-identical -------------------------------------------------------------
+## 0.3, because the clash an author actually reported (magenta SIGNED beside pink COLOR) was 0.29 apart.
+const MIN_COLOUR_DISTANCE := 0.3
+
+func _colour_clashes(p_colours: Array) -> Array[String]:
+	var out: Array[String] = []
+	for a in range(p_colours.size()):
+		for b in range(a + 1, p_colours.size()):
+			var ca: Color = p_colours[a]
+			var cb: Color = p_colours[b]
+			if Vector3(ca.r - cb.r, ca.g - cb.g, ca.b - cb.b).length() < MIN_COLOUR_DISTANCE:
+				out.append("%s ~ %s" % [_type_name(a), _type_name(b)])
+	return out
+
+func _g_type_colours_distinct() -> void:
+	print("[G] every pair of port colours is at least %.2f apart in RGB" % MIN_COLOUR_DISTANCE)
+	var clashes := _colour_clashes(Array(GraphEditorScript.PORT_COLORS))
+	_check(clashes.is_empty(), "clashing pairs: %s" % ", ".join(clashes))
+	var old: Array = []
+	for c in GraphEditorScript.PORT_COLORS:
+		old.append(c)
+	old[11] = Color(0.85, 0.35, 0.75) # the SIGNED colour before this fix
+	_check(not _colour_clashes(old).is_empty(), "control: the old magenta SIGNED is caught (%s)" % ", ".join(_colour_clashes(old)))
+
+
+# --- H: DLA's coverage and detail_size ports change the result when wired ---------------------------------
+func _h_dla_reads_its_ports() -> void:
+	print("[H] a wired DLA coverage / detail_size reaches the growth")
+	var d: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"dla")
+	if d == null:
+		_check(false, "dla did not instantiate")
+		return
+	# LIVE: a FROZEN solver serves its first cache and only flags a key change as stale, by design, so a
+	# frozen node would pass the control and fail the criterion whether or not the ports were read.
+	d.set("evaluation", Pasture3DGraphSolverNode.Evaluation.LIVE)
+	var gw := 48
+	var n := gw * gw
+	var surf := PackedFloat32Array(); surf.resize(n)
+	var rect := Rect2(0, 0, 256, 256)
+	var un: PackedFloat32Array = d.eval_grid([surf], gw, gw, null, rect)
+	var wired: PackedFloat32Array = d.eval_grid([surf, PackedFloat32Array([float(d.get("amplitude"))]),
+			PackedFloat32Array([0.3]), PackedFloat32Array([0.4])], gw, gw, null, rect)
+	var same_as_props: PackedFloat32Array = d.eval_grid([surf, PackedFloat32Array([float(d.get("amplitude"))]),
+			PackedFloat32Array([float(d.get("coverage"))]), PackedFloat32Array([float(d.get("detail_size"))])], gw, gw, null, rect)
+	_check(wired != un, "wiring coverage 0.3 / detail 0.4 changes the massif")
+	_check(same_as_props == un, "control: wiring the property values reproduces the unwired massif")

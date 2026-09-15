@@ -274,13 +274,13 @@ enum PortType {
 	VECTOR = 2,       # Directional 2D/3D vector / angle value - Purple
 	CURVE = 3,        # Spline / transfer curve - Emerald
 	FLOAT = 4,        # General scalar float VALUE / factor (never a grid) - Cyan
-	INT = 5,          # Discrete count / integer value - Cobalt Blue
+	INT = 5,          # Discrete count / integer value - Navy
 	COLOR = 6,        # RGBA color / tint / gradient band - Magenta/Pink
 	BOOL = 7,         # Boolean toggle / gate switch - Lime Yellow
-	TERRAIN_BUS = 8,  # Bundled multi-channel stream - Warm Gold
-	PATH = 9,         # World-space polyline with per-vertex width (Pasture3DGraphPath) - Slate
+	TERRAIN_BUS = 8,  # Bundled multi-channel stream - Bronze
+	PATH = 9,         # World-space polyline with per-vertex width (Pasture3DGraphPath) - Dark Slate
 	FIELD = 10,       # Unsigned scalar field in its OWN units, unbounded - Yellow-Green
-	SIGNED = 11,      # Signed scalar field in its own units; zero is meaningful - Magenta
+	SIGNED = 11,      # Signed scalar field in its own units; zero is meaningful - Crimson
 }
 
 
