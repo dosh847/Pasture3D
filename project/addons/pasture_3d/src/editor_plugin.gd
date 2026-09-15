@@ -61,6 +61,8 @@ var placement_brush_label: String = "Mound"
 ## Vertical (Y) offset added to the surface hit when dropping a brush (set from the bottom-bar selector;
 ## defaults per brush type — Ridge 20, Trough -10, others 0). See tool_settings.build_placement_selector.
 var placement_y_offset: float = 0.0
+## Where placed brushes go: a NodePath relative to the terrain (bottom-bar Parent dropdown), "" for the terrain.
+var placement_parent_path: String = ""
 
 
 func _init() -> void:
@@ -809,11 +811,15 @@ func place_brush_at(world_pos: Vector3) -> void:
 	world_pos.y += placement_y_offset
 	# Name it uniquely among the terrain's children up front (Mound, Mound1, Mound2…), so add_child keeps
 	# a readable name instead of falling back to "@Node3D@<id>" on a collision.
-	node.name = _unique_child_name(t, placement_brush_label)
+	# The Parent dropdown's node, when it still exists under this terrain; the terrain otherwise.
+	var parent: Node = t.get_node_or_null(NodePath(placement_parent_path)) if placement_parent_path != "" else null
+	if parent == null or not t.is_ancestor_of(parent):
+		parent = t
+	node.name = _unique_child_name(parent, placement_brush_label)
 	var ur: EditorUndoRedoManager = get_undo_redo()
 	ur.create_action("Place %s" % placement_brush_label, UndoRedo.MERGE_DISABLE, t)
 	ur.add_do_reference(node)
-	ur.add_do_method(self, "_do_place_brush", t, node, root, world_pos)
+	ur.add_do_method(self, "_do_place_brush", t, node, root, world_pos, parent)
 	ur.add_undo_method(self, "_undo_place_brush", node)
 	ur.commit_action(true) # execute the do-method now → performs the initial placement + bake
 
@@ -821,12 +827,15 @@ func place_brush_at(world_pos: Vector3) -> void:
 ## Do/redo: add the brush under the terrain (owned by the scene so it saves), bind + position it, and
 ## bake. Auto-refresh is suspended around the scripted add so only the explicit synchronous refresh()
 ## runs (no debounced second bake that could race a fast undo — spec §4.3).
-func _do_place_brush(t: Pasture3D, node: Node3D, root: Node, world_pos: Vector3) -> void:
+func _do_place_brush(t: Pasture3D, node: Node3D, root: Node, world_pos: Vector3, parent: Node = null) -> void:
 	if not is_instance_valid(node) or not is_instance_valid(t):
 		return
+	# A redo after the chosen parent was deleted falls back to the terrain rather than losing the brush.
+	if not is_instance_valid(parent) or not parent.is_inside_tree():
+		parent = t
 	node.set("_suspend_auto", true)
 	if node.get_parent() == null:
-		t.add_child(node, true) # force_readable_name → keep "Mound1" etc., not "@Node3D@<id>"
+		parent.add_child(node, true) # force_readable_name → keep "Mound1" etc., not "@Node3D@<id>"
 		node.owner = root
 	if node.get("terrain") != t:
 		node.set("terrain", t) # deterministic bind (don't depend on the ancestor-walk auto-assign)

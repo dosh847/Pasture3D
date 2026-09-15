@@ -8,6 +8,8 @@ signal setting_changed(setting: Variant)
 signal placement_type_changed(script: String, label: String, icon: String)
 ## Vertical (Y) placement offset for the Place-Brush tool, in metres (bottom-bar selector).
 signal placement_offset_changed(offset: float)
+## Where the Place-Brush tool parents a new brush: a NodePath relative to the terrain, "" for the terrain itself.
+signal placement_parent_changed(path: String)
 
 enum Layout {
 	HORIZONTAL,
@@ -61,6 +63,9 @@ var placement_selector: OptionButton
 var placement_selector_row: HBoxContainer
 var placement_offset_spin: EditorSpinSlider
 var _placement_entries: Array = []
+var placement_parent_selector: OptionButton
+## The chosen parent's path relative to the terrain, kept across repopulating the list.
+var _placement_parent_path: String = ""
 
 
 func _ready() -> void:
@@ -679,6 +684,19 @@ func build_placement_selector(p_entries: Array) -> void:
 	placement_selector_row.add_child(label, true)
 	placement_selector_row.add_child(placement_selector, true)
 
+	# Parent for the new brush: the terrain, or a grouping node under it. Refilled every time it opens, so
+	# nodes added or renamed since are listed.
+	var parent_label := Label.new()
+	parent_label.text = "  Parent: "
+	placement_parent_selector = OptionButton.new()
+	placement_parent_selector.set_v_size_flags(SIZE_SHRINK_CENTER)
+	placement_parent_selector.tooltip_text = "Node the placed brush is added under: the Pasture3D node, or a Node3D, Layer brush, road network or road group beneath it."
+	placement_parent_selector.get_popup().about_to_popup.connect(_populate_placement_parents)
+	placement_parent_selector.item_selected.connect(_on_placement_parent_selected)
+	placement_selector_row.add_child(parent_label, true)
+	placement_selector_row.add_child(placement_parent_selector, true)
+	_populate_placement_parents()
+
 	# Vertical placement offset: editable value applied to the surface hit's Y when a brush is dropped.
 	# Switching brush type resets this to that type's default (Ridge 20, Trough -10, others 0).
 	var offset_label := Label.new()
@@ -721,6 +739,65 @@ func _on_placement_offset_changed(p_value: float) -> void:
 func show_placement_selector(p_visible: bool) -> void:
 	if is_instance_valid(placement_selector_row):
 		placement_selector_row.visible = p_visible
+	if p_visible:
+		_populate_placement_parents()
+
+
+## Fill the Parent dropdown: the terrain first, then every Node3D (a plain one, no script), Layer brush, road
+## network and road group beneath it, indented by depth. Keeps the current choice when it still exists and
+## falls back to the terrain when it does not.
+func _populate_placement_parents() -> void:
+	if not is_instance_valid(placement_parent_selector):
+		return
+	placement_parent_selector.clear()
+	var t: Node = plugin.get_terrain() if plugin else null
+	placement_parent_selector.add_item(str(t.name) if is_instance_valid(t) else "Pasture3D")
+	placement_parent_selector.set_item_metadata(0, "")
+	var selected := 0
+	if is_instance_valid(t):
+		var found: Array = []
+		_collect_placement_parents(t, 1, found)
+		for entry: Array in found:
+			var node: Node = entry[0]
+			var path := str(t.get_path_to(node))
+			var idx := placement_parent_selector.item_count
+			placement_parent_selector.add_item("%s%s" % ["    ".repeat(int(entry[1])), node.name])
+			placement_parent_selector.set_item_metadata(idx, path)
+			placement_parent_selector.set_item_tooltip(idx, "%s (%s)" % [path, _placement_parent_kind(node)])
+			if path == _placement_parent_path:
+				selected = idx
+	placement_parent_selector.select(selected)
+	if selected == 0 and _placement_parent_path != "":
+		_placement_parent_path = ""
+		emit_signal("placement_parent_changed", "")
+
+
+func _collect_placement_parents(p_node: Node, p_depth: int, p_out: Array) -> void:
+	for c in p_node.get_children():
+		if _placement_parent_kind(c) != "":
+			p_out.append([c, p_depth])
+			_collect_placement_parents(c, p_depth + 1, p_out)
+		elif c is Node3D:
+			# A brush or other node may still hold grouping nodes below it; list those without listing it.
+			_collect_placement_parents(c, p_depth, p_out)
+
+
+## The kind of parent `p_node` can be, or "" when it is not one.
+func _placement_parent_kind(p_node: Node) -> String:
+	if p_node is Pasture3DLayerBrush:
+		return "Layer brush"
+	if p_node is Pasture3DRoadNetwork:
+		return "road network"
+	if p_node is Pasture3DRoadGroup:
+		return "road group"
+	if p_node.get_class() == "Node3D" and p_node.get_script() == null:
+		return "Node3D"
+	return ""
+
+
+func _on_placement_parent_selected(p_idx: int) -> void:
+	_placement_parent_path = str(placement_parent_selector.get_item_metadata(p_idx))
+	emit_signal("placement_parent_changed", _placement_parent_path)
 
 
 func _on_setting_changed(p_setting: Variant = null) -> void:

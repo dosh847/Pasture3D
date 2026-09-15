@@ -111,6 +111,7 @@ func _enter_tree() -> void:
 	tool_settings.build_placement_selector(toolbar.PLACEABLE_BRUSHES)
 	tool_settings.placement_type_changed.connect(_on_placement_type_changed)
 	tool_settings.placement_offset_changed.connect(_on_placement_offset_changed)
+	tool_settings.placement_parent_changed.connect(_on_placement_parent_changed)
 
 	_on_tool_changed(Pasture3DEditor.REGION, Pasture3DEditor.ADD)
 	
@@ -349,6 +350,10 @@ func _on_placement_type_changed(p_script: String, p_label: String, p_icon: Strin
 
 func _on_placement_offset_changed(p_offset: float) -> void:
 	plugin.placement_y_offset = p_offset
+
+
+func _on_placement_parent_changed(p_path: String) -> void:
+	plugin.placement_parent_path = p_path
 
 
 func _on_setting_changed(p_setting: Variant = null) -> void:
