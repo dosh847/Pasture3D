@@ -272,6 +272,8 @@ func _r() -> void:
 	var results := []
 	for keep in [false, true]:
 		m.reseat_keeps_layer_id = keep
+		# The snap now re-resolves a stale row itself (BrushAccumulationGate [R]); the control turns that off too.
+		s.seat_trusts_cached_layer_id = keep
 		s._layer_id = -1 # a mate that has not baked this session
 		nz.noise.seed += 1
 		lb._base_key = ""

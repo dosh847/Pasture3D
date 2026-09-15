@@ -225,6 +225,8 @@ bench/GraphPhase1BrushTest.tscn
 # under test was fine and the node beside it was the one un-accelerating everything.
 bench/GraphAllNodeSocketsGate.tscn
 bench/GraphPortTypeGate.tscn
+# Brushes follow ground moved under them: stamp key, stale Frozen rebase, and a stale or unset row.
+bench/BrushAccumulationGate.tscn
 bench/GraphPreviewReprGate.tscn
 # --- V2: channel-addressable taps (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §8) ---
 # graph_eval_grid_taps takes a (slot, CHANNEL) pair, and a tapped channel is ALLOCATED because it was

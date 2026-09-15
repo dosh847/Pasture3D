@@ -1727,7 +1727,7 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 				return
 			for st: Dictionary in pending_graph:
 				if st.has("zo"):
-					_file_solved(st["mod"], st["extent"], {"key": st["key"], "grid": st["zo"]},
+					_file_solved(st["mod"], st["extent"], {"key": st["key"], "grid": st["zo"], "z": st["z"]},
 							bool(st.get("live", false)))
 
 		# ---- Phase C: the erosion solve, against the surface phase A & B finished.
@@ -2002,7 +2002,7 @@ func _store_solved_erosion(p_state: Dictionary) -> void:
 	var m: Pasture3DNodeErosion = p_state["mod"]
 	var z0: PackedFloat32Array = p_state["z0"]
 	var zo: PackedFloat32Array = p_state["z"]
-	var entry := {"key": int(p_state["key"]), "grid": zo,
+	var entry := {"key": int(p_state["key"]), "grid": zo, "z": z0,
 			"flow": PackedFloat32Array(), "ero": PackedFloat32Array(),
 			"dep": PackedFloat32Array(), "wet": PackedFloat32Array()}
 	var res: Dictionary = p_state["res"]
@@ -2470,8 +2470,25 @@ func _compute_stamp_key(path: Path3D) -> int:
 		global_transform,
 		path.curve.get_baked_points(),
 		_brush_param_signature(),
-		_modifier_signature()
+		_modifier_signature(),
+		_below_signature(path),
 	])
+
+
+## Hash of the ground below this brush's row over the spline's footprint. A cached stamp holds ABSOLUTE heights
+## (a relative mound is basey + amplitude), so a stamp replayed after a road or another layer moved that ground
+## kept the old heights until an explicit Bake — the brush read as gaining whatever was cut beneath it.
+func _below_signature(path: Path3D) -> int:
+	if stamp_key_ignores_below or not is_configured():
+		return 0
+	var fp := _spline_footprint_aabb(path)
+	var vs: float = terrain.vertex_spacing
+	var gw := int(ceil(fp.size.x / vs)) + 1
+	var gh := int(ceil(fp.size.z / vs)) + 1
+	if fp.size.x <= 0.0 or fp.size.z <= 0.0 or gw * gh > 4096 * 4096:
+		return 0
+	var g := _base_below_grid(snappedf(fp.position.x, vs), snappedf(fp.position.z, vs), vs, gw, gh)
+	return hash(g)
 
 
 func _brush_param_signature() -> Array:
@@ -4880,8 +4897,8 @@ func _road_native_is_complete() -> bool:
 func _base_below_grid(min_x: float, min_z: float, vs: float, gw: int, gh: int) -> PackedFloat32Array:
 	if not is_configured():
 		return PackedFloat32Array()
-	if _layer_id > 0 and terrain.data.has_method("composite_height_below"):
-		var lid := _layer_id
+	var lid := _layer_id_now()
+	if lid > 0 and terrain.data.has_method("composite_height_below"):
 		if read_past_base_row and _layer_owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
 			var base_row: int = terrain.data.get_layer_stack().find_layer_by_owner(_layer_owner + "#base")
 			if base_row >= 0:
@@ -4894,6 +4911,31 @@ func _base_below_grid(min_x: float, min_z: float, vs: float, gw: int, gh: int) -
 var read_past_base_row: bool = false
 ## Gate control (LB-I clipping): a rect bake ignores the box a re-solved base moved.
 var rect_ignores_base_change: bool = false
+## Gate control (BrushAccumulationGate [L]): trust the cached `_layer_id` even after a row delete/move shifted it.
+var seat_trusts_cached_layer_id: bool = false
+## Gate control ([S]): the stamp cache key leaves out the ground below, so a moved ground replays old heights.
+var stamp_key_ignores_below: bool = false
+## Gate control ([E]/[G]): a stale Frozen cache is served as its old absolute heights, not rebased.
+var stale_cache_pins_absolute: bool = false
+
+
+## This brush's row as the stack has it NOW. `_layer_id` is a stack index cached at the last bake, and a row
+## deleted or moved below it since (the dock, a Layer brush pairing its rows) leaves it pointing one row off —
+## at this brush's own row, whose height a "below" read then includes, and a snap climbs. After a reload it is
+## -1, which read the full composite for the same result. One get_layer per call while it is right; a lookup
+## by owner only when it is not. -1 when the brush has no row yet (nothing of its own to exclude).
+func _layer_id_now() -> int:
+	if seat_trusts_cached_layer_id or _layer_owner == "" or not is_configured() \
+			or not terrain.data.has_method("get_layer_stack"):
+		return _layer_id
+	var st = terrain.data.get_layer_stack()
+	if st == null:
+		return _layer_id
+	if _layer_id > 0 and _layer_id < st.get_layer_count():
+		var ly = st.get_layer(_layer_id)
+		if ly != null and ly.get_owner_id() == _layer_owner:
+			return _layer_id
+	return st.find_layer_by_owner(_layer_owner)
 
 
 ## Height of the layers below this brush's, at a world position (snap + the GDScript fallback rasteriser).
@@ -4906,10 +4948,11 @@ var rect_ignores_base_change: bool = false
 func _base_height_below(pos: Vector3) -> float:
 	if not is_configured():
 		return NAN
-	if _layer_id > 0 and terrain.data.has_method("get_height_below"):
-		var h: float = terrain.data.get_height_below(_layer_id, pos)
-		if is_finite(h):
-			return h
+	var lid := _layer_id_now()
+	if lid > 0 and terrain.data.has_method("get_height_below"):
+		# No full-composite fallback while the row exists: the Base row covers every region, so NaN here means
+		# no region, where the composite is NaN too — and any other NaN must not become this brush's own top.
+		return terrain.data.get_height_below(lid, pos)
 	return terrain.data.get_height(pos)
 
 
@@ -5433,6 +5476,7 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 			blk["frozen"] = live_async or m.evaluation == Pasture3DNode.Evaluation.FROZEN
 			blk["cache_key"] = int(entry.get("key", 0))
 			blk["cache"] = entry.get("grid", PackedFloat32Array())
+			blk["cache_z"] = PackedFloat32Array() if stale_cache_pins_absolute else entry.get("z", PackedFloat32Array())
 			blk["cache_flow"] = entry.get("flow", PackedFloat32Array())
 			blk["cache_ero"] = entry.get("ero", PackedFloat32Array())
 			blk["cache_dep"] = entry.get("dep", PackedFloat32Array())
@@ -5621,7 +5665,7 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 		var live_async: bool = step.get("live_async", false)
 		if out.has("grid") and not live_async:
 			m.store_cache(p_extent, {
-				"key": out["key"], "grid": out["grid"],
+				"key": out["key"], "grid": out["grid"], "z": out.get("z", PackedFloat32Array()),
 				"flow": out.get("flow", PackedFloat32Array()),
 				"ero": out.get("ero", PackedFloat32Array()),
 				"dep": out.get("dep", PackedFloat32Array()),
@@ -6154,11 +6198,19 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	var key: int = hash([g.content_key(), z]) if reads else g.content_key()
 	var entry: Dictionary = {}
 	if live_async:
-		entry = {"key": p_step.get("cache_key", 0), "grid": p_step.get("cache", PackedFloat32Array())}
+		entry = {"key": p_step.get("cache_key", 0), "grid": p_step.get("cache", PackedFloat32Array()),
+				"z": p_step.get("cache_z", PackedFloat32Array())}
 	elif frozen and extent != "":
 		entry = m.cache_for(extent)
 	var zo: PackedFloat32Array = entry.get("grid", PackedFloat32Array())
 	if zo.size() == n and (not live_async or int(entry.get("key", 0)) == key):
+		var czs: PackedFloat32Array = entry.get("z", PackedFloat32Array())
+		if int(entry.get("key", 0)) != key and czs.size() == n and not stale_cache_pins_absolute:
+			# Stale: carry the cached CHANGE onto today's surface, not the old absolute heights.
+			zo = zo.duplicate()
+			for k in range(n):
+				if is_finite(czs[k]) and is_finite(z[k]):
+					zo[k] += z[k] - czs[k]
 		_composite_graph(p_vals, z, zo, mask, amount, basey, add, n)
 		out_slot["stale"] = int(entry.get("key", 0)) != key
 		out_slot["served"] = true
@@ -6197,6 +6249,7 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	if p_step.has("out"):
 		out_slot["key"] = key
 		out_slot["grid"] = zo
+		out_slot["z"] = z
 		out_slot["stale"] = false
 		out_slot["served"] = false
 	return p_vals
@@ -6333,10 +6386,15 @@ func _apply_erosion_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	if cached.size() == n:
 		if m.publish_fields and entry.has("flow"):
 			p_ctx["sim_fields"] = [entry["flow"], entry["ero"], entry["dep"], entry["wet"]]
+		var czs: PackedFloat32Array = entry.get("z", PackedFloat32Array())
+		var rebase: bool = int(entry.get("key", 0)) != key and czs.size() == n and not stale_cache_pins_absolute
 		for i in range(n):
 			if not is_finite(p_vals[i]):
 				continue
-			p_vals[i] = (cached[i] - basey[i]) if add else cached[i]
+			var served: float = cached[i]
+			if rebase and is_finite(czs[i]) and is_finite(z[i]):
+				served += z[i] - czs[i]
+			p_vals[i] = (served - basey[i]) if add else served
 		out["stale"] = int(entry.get("key", 0)) != key
 		out["served"] = true
 		return p_vals
@@ -6385,6 +6443,7 @@ func _apply_erosion_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	if p_step.has("out"):
 		out["key"] = key
 		out["grid"] = zo
+		out["z"] = z
 		out["stale"] = false
 		out["served"] = false
 		var pub: Array = p_ctx["sim_fields"]
@@ -6603,7 +6662,7 @@ func _terrain_fields(min_x: float, min_z: float, vs: float, gw: int, gh: int) ->
 		for ix in range(gw):
 			var h: float = below[row + ix] if has_below else NAN
 			if not is_finite(h):
-				h = terrain.data.get_height(Vector3(min_x + ix * vs, 0.0, min_z + iz * vs))
+				h = _base_height_below(Vector3(min_x + ix * vs, 0.0, min_z + iz * vs))
 			alt[row + ix] = h if is_finite(h) else 0.0
 	return _derive_fields(alt, vs, gw, gh)
 

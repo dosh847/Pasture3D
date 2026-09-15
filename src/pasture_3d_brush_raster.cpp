@@ -403,6 +403,10 @@ struct BrushModStep {
 	bool has_out = false;
 	int64_t cache_key = 0;
 	PackedFloat32Array cache, cache_flow, cache_ero, cache_dep, cache_wet;
+	// The surface `cache` was solved against. A STALE serve adds (cache - cache_z) onto today's surface
+	// instead of pinning the old absolute heights: without it, ground a road or another layer moved under
+	// the brush was ignored until an explicit Bake, and the brush read as having gained the cut's depth.
+	PackedFloat32Array cache_z;
 	Dictionary out;
 };
 
@@ -544,6 +548,7 @@ bool brush_mod_build(const Dictionary &p_params, std::vector<BrushModStep> &r_st
 			st.cache_ero = d.get("cache_ero", PackedFloat32Array());
 			st.cache_dep = d.get("cache_dep", PackedFloat32Array());
 			st.cache_wet = d.get("cache_wet", PackedFloat32Array());
+			st.cache_z = d.get("cache_z", PackedFloat32Array());
 			st.has_out = d.has("out");
 			st.out = d.get("out", Dictionary());
 			if (st.erosion.iterations < 1 || (st.erosion.erosion_rate == 0.0 && st.erosion.diffusion == 0.0)) {
@@ -572,6 +577,7 @@ bool brush_mod_build(const Dictionary &p_params, std::vector<BrushModStep> &r_st
 			st.preview_scale = CLAMP((int)d.get("preview_scale", 1), 1, 16);
 			st.cache_key = d.get("cache_key", (int64_t)0);
 			st.cache = d.get("cache", PackedFloat32Array());
+			st.cache_z = d.get("cache_z", PackedFloat32Array());
 			st.has_out = d.has("out");
 			st.out = d.get("out", Dictionary());
 		} else {
@@ -635,11 +641,16 @@ void brush_mod_erode(BrushModStep &p_step, std::vector<float> &r_vals,
 			r_fields.sim_wetness.assign(p_step.cache_wet.ptr(), p_step.cache_wet.ptr() + n);
 			r_fields.has_sim = true;
 		}
+		const bool rebase = stale && p_step.cache_z.size() == (int)n;
 		for (size_t i = 0; i < n; i++) {
 			if (std::isnan(r_vals[i])) {
 				continue;
 			}
-			r_vals[i] = p_add ? (float)((double)p_step.cache[i] - (double)p_basey[i]) : p_step.cache[i];
+			double served = (double)p_step.cache[i];
+			if (rebase && std::isfinite(p_step.cache_z[i]) && std::isfinite(z[i])) {
+				served += (double)z[i] - (double)p_step.cache_z[i];
+			}
+			r_vals[i] = p_add ? (float)(served - (double)p_basey[i]) : (float)served;
 		}
 		p_step.out["stale"] = stale;
 		p_step.out["served"] = true;
@@ -711,8 +722,12 @@ void brush_mod_erode(BrushModStep &p_step, std::vector<float> &r_vals,
 		PackedFloat32Array grid;
 		grid.resize((int)n);
 		std::memcpy(grid.ptrw(), res.z.data(), n * sizeof(float));
+		PackedFloat32Array zin;
+		zin.resize((int)n);
+		std::memcpy(zin.ptrw(), z.data(), n * sizeof(float));
 		p_step.out["key"] = key;
 		p_step.out["grid"] = grid;
+		p_step.out["z"] = zin;
 		p_step.out["stale"] = false;
 		p_step.out["served"] = false;
 		if (r_fields.has_sim && p_step.publish_fields) {
@@ -818,7 +833,18 @@ void brush_mod_graph(BrushModStep &p_step, std::vector<float> &r_vals, const std
 	const bool have_cache = p_step.frozen && p_step.cache.size() == (int)n
 			&& (p_step.serve_stale || p_step.cache_key == key);
 	if (have_cache) {
-		brush_mod_graph_composite(r_vals, z, p_step.cache.ptr(), p_profile, amount, p_basey, p_add, n);
+		if (p_step.cache_key != key && p_step.cache_z.size() == (int)n) {
+			// Stale: carry the cached CHANGE onto today's surface (see BrushModStep::cache_z).
+			std::vector<float> zo(n);
+			for (size_t i = 0; i < n; i++) {
+				const double c = (double)p_step.cache[i];
+				const double cz = (double)p_step.cache_z[i];
+				zo[i] = (std::isfinite(cz) && std::isfinite(z[i])) ? (float)(c + (double)z[i] - cz) : (float)c;
+			}
+			brush_mod_graph_composite(r_vals, z, zo.data(), p_profile, amount, p_basey, p_add, n);
+		} else {
+			brush_mod_graph_composite(r_vals, z, p_step.cache.ptr(), p_profile, amount, p_basey, p_add, n);
+		}
 		p_step.out["stale"] = p_step.cache_key != key;
 		p_step.out["served"] = true;
 		return;
@@ -852,6 +878,7 @@ void brush_mod_graph(BrushModStep &p_step, std::vector<float> &r_vals, const std
 	if (want_key) {
 		p_step.out["key"] = key;
 		p_step.out["grid"] = zo;
+		p_step.out["z"] = zin;
 		p_step.out["stale"] = false;
 		p_step.out["served"] = false;
 	}

@@ -219,9 +219,11 @@ func cache_for(p_extent: String) -> Dictionary:
 	# the next one, so a spline dragged two cells at a time would walk the borrowed grid arbitrarily far
 	# from where it was solved, one tolerated step after another. Each shift is measured from the entry
 	# that was actually solved.
+	var src_z: PackedFloat32Array = src.get("z", PackedFloat32Array())
 	return {
 		"key": src.get("key", 0),
 		"grid": _shift_grid(src["grid"], want["gw"], want["gh"], best["dx"], best["dz"]),
+		"z": _shift_grid(src_z, want["gw"], want["gh"], best["dx"], best["dz"]) if src_z.size() == src["grid"].size() else PackedFloat32Array(),
 		"gw": want["gw"],
 		"gh": want["gh"],
 	}
