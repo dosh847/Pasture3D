@@ -12,13 +12,21 @@
 #       `_layer_id` is stale, with a layer above adding 5 m; control: `reseat_keeps_layer_id` climbs onto it
 #   [U] a duplicated Layer arrives with the original's uid, claims its own, makes its own pair and adopts its
 #       copied member; the original keeps its rows and member (the dock's Duplicate relies on all of it)
+#   [B] a blend mode set on a Layer's main row survives a member bake; control: a plain brush's own layer still
+#       has its blend synced back to the brush's blend_mode
+#   [I] the Layer's Inspector blend_mode sets its main row (base stays Replace) and recomposites, reads back a
+#       row set from the dock, and seeds fresh rows; control: the stored copy alone changes nothing
 #
 # Not covered: the Layers dock's button handlers, which need EditorInterface and so a windowed editor run.
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/LayerBrushFixesGate.tscn
 extends Node
 
-const CRITERIA := 5
+const CRITERIA := 7
+const BLEND_REPLACE := 0
+const BLEND_ADD := 1
+const BLEND_MAX := 2
+const BLEND_MIN := 3
 var RS := 64
 
 var _fail := 0
@@ -36,7 +44,7 @@ func _ready() -> void:
 	_terrain.data.add_region_blankp(Vector3.ZERO)
 	_terrain.data.ensure_layer_stack()
 	RS = _terrain.region_size
-	for f in [_d, _f, _c, _r, _u]:
+	for f in [_d, _f, _c, _r, _u, _b, _i]:
 		await f.call()
 	if _ran != CRITERIA:
 		_check("completed", false, "%d of %d criteria ran" % [_ran, CRITERIA])
@@ -288,6 +296,79 @@ func _r() -> void:
 			"stale _layer_id: mate inside the rect %s, climbs %.4f m" % [results[1][0], results[1][1]])
 	d.layer_remove(_row("gate:above"))
 	_drop([lb])
+	await _settle()
+	_ran += 1
+
+
+## A blend mode that is not `p_mode`, so a set-then-bake can tell "kept" from "synced back".
+func _other_blend(p_mode: int) -> int:
+	return Pasture3DTerrainBrush.BLEND_MIN if p_mode != Pasture3DTerrainBrush.BLEND_MIN else Pasture3DTerrainBrush.BLEND_ADD
+
+
+func _b() -> void:
+	var stack := _terrain.data.get_layer_stack()
+	var lb := _layer("Blend", false)
+	var m := _mound(lb, "Kid", _square(32, 32, 6))
+	await _settle()
+	lb.bake_layer()
+	var want := _other_blend(m._get_blend_mode())
+	stack.get_layer(_row(lb.layer_owner_id())).set_blend_mode(want)
+	m._refresh_owner(m._layer_owner, false, [])
+	var kept: int = stack.get_layer(_row(lb.layer_owner_id())).get_blend_mode()
+	_check("B layer blend kept", kept == want, "set %d on the Layer's row, after a member bake it is %d (member's own %d)" % [
+			want, kept, m._get_blend_mode()])
+	var p := _mound(_terrain, "Plain", _square(16, 48, 5))
+	await _settle()
+	var pid := p._ensure_layer_for(p._layer_owner, true)
+	var pwant := _other_blend(p._get_blend_mode())
+	if pid >= 0:
+		stack.get_layer(pid).set_blend_mode(pwant)
+		pid = p._ensure_layer_for(p._layer_owner, true)
+	var synced: int = stack.get_layer(pid).get_blend_mode() if pid >= 0 else -1
+	_check("B control", pid >= 0 and synced == p._get_blend_mode(),
+			"a plain brush's layer (row %d) set to %d is synced back to %d" % [pid, pwant, synced])
+	_drop([lb, p])
+	await _settle()
+	_ran += 1
+
+
+func _i() -> void:
+	var stack := _terrain.data.get_layer_stack()
+	var lb := _layer("Insp", false)
+	var m := _mound(lb, "Kid", _square(32, 32, 6))
+	await _settle()
+	lb.bake_layer()
+	var c := Vector3(32, 0, 32)
+	var h_replace: float = _terrain.data.get_height(c)
+	lb.blend_mode = Pasture3DLayerBrush.BlendMode.MIN
+	var main_b: int = stack.get_layer(_row(lb.layer_owner_id())).get_blend_mode()
+	var base_b: int = stack.get_layer(_row(lb.base_owner_id())).get_blend_mode()
+	var h_min: float = _terrain.data.get_height(c)
+	# Earlier criteria leave ground under the Layer, so expect MIN of what lies below and the Replace result.
+	var below: float = _terrain.data.composite_height_below(_row(lb.layer_owner_id()), 0.0, 0.0, 1.0, RS, RS)[32 * RS + 32]
+	var want := minf(below, h_replace)
+	_check("I inspector sets row", main_b == BLEND_MIN and base_b == BLEND_REPLACE and absf(h_min - want) < 0.001
+			and absf(h_min - h_replace) > 0.5,
+			"main row %d, base row %d, centre %.3f m -> %.3f m (below %.3f, want %.3f)" % [
+			main_b, base_b, h_replace, h_min, below, want])
+	stack.get_layer(_row(lb.layer_owner_id())).set_blend_mode(BLEND_ADD)
+	_check("I dock reads back", int(lb.blend_mode) == BLEND_ADD, "row set to ADD, property reads %d" % int(lb.blend_mode))
+	var fresh := Pasture3DLayerBrush.new()
+	fresh.name = "InspFresh"
+	fresh.terrain = _terrain
+	fresh.auto_refresh = false
+	fresh.blend_mode = Pasture3DLayerBrush.BlendMode.MAX
+	_terrain.add_child(fresh)
+	fresh.ensure_rows()
+	var fr := _row(fresh.layer_owner_id())
+	var fresh_b: int = stack.get_layer(fr).get_blend_mode() if fr >= 0 else -1
+	_check("I new rows", fresh_b == BLEND_MAX, "a Layer set to MAX before its rows exist creates its main row %d" % fresh_b)
+	stack.get_layer(_row(lb.layer_owner_id())).set_blend_mode(BLEND_REPLACE)
+	_terrain.data.recomposite_layer(_row(lb.layer_owner_id()))
+	lb._blend_mode = Pasture3DLayerBrush.BlendMode.MIN
+	var ctl: float = _terrain.data.get_height(c)
+	_check("I control", absf(ctl - h_replace) < 0.001,"writing only the stored copy leaves the row alone: centre %.3f m" % ctl)
+	_drop([lb, fresh])
 	await _settle()
 	_ran += 1
 

@@ -3014,6 +3014,10 @@ func _ensure_layer_for(owner: String, sync_blend: bool) -> int:
 		# the destructive-fallback path this function's docstring already defines, and every caller
 		# already branches on it.
 		return -1
+	# A Layer brush's rows belong to the Layer: their blend is set in the Layers dock, and a member pushing its
+	# own blend_mode on every bake silently reverted that choice (last refresher wins, and members refresh).
+	if owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
+		sync_blend = false
 	if sync_blend and layer and layer.has_method("get_blend_mode") and layer.get_blend_mode() != _get_blend_mode():
 		layer.set_blend_mode(_get_blend_mode())
 	return id

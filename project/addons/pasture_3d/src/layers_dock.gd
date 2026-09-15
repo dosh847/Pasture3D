@@ -576,6 +576,21 @@ func _on_opacity(p_idx: int, p_value: float) -> void:
 func _on_blend(p_idx: int, p_selected: int) -> void:
 	if p_selected < 0 or p_selected >= BLEND_MODES.size():
 		return
+	var lb := _layer_brush_node(p_idx) if _is_layer_brush_row(p_idx) else null
+	if lb != null:
+		# Through the node's property, so the Inspector shows it and the undo is the node's own.
+		if int(lb.blend_mode) == BLEND_MODES[p_selected]:
+			return
+		var ur := EditorInterface.get_editor_undo_redo()
+		ur.create_action("Set Pasture3D Layer Blend Mode", UndoRedo.MERGE_DISABLE, lb)
+		ur.add_do_property(lb, "blend_mode", BLEND_MODES[p_selected])
+		ur.add_undo_property(lb, "blend_mode", lb.blend_mode)
+		ur.add_do_method(self, "refresh")
+		ur.add_undo_method(self, "refresh")
+		ur.commit_action()
+		lb.notify_property_list_changed()
+		_mark_unsaved()
+		return
 	_set_unit_property("Set Pasture3D Layer Blend Mode", PackedInt32Array([_blend_row(p_idx)]),
 		"get_blend_mode", "set_blend_mode", BLEND_MODES[p_selected], true)
 

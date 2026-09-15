@@ -142,6 +142,25 @@ enum ExtentMode { WHOLE_TERRAIN, CHILDREN_FOOTPRINTS, WHOLE_REGION }
 		notify_property_list_changed()
 		_schedule_refresh()
 
+## Append only: the int is stored, and matches Pasture3DLayer.BlendMode.
+enum BlendMode { REPLACE, ADD, MAX, MIN }
+
+## How the Layer's main row (the one its children paint) composites onto the rows below. The base row stays
+## Replace. Proxies the row, so the Layers dock and the Inspector show and set the same value; the stored copy
+## is only used when the rows are first created.
+@export var blend_mode: BlendMode = BlendMode.REPLACE:
+	get:
+		var row := _row_for(layer_owner_id()) if _layer_uid != "" else null
+		return (row.get_blend_mode() as BlendMode) if row != null else _blend_mode
+	set(v):
+		_blend_mode = v
+		var row := _row_for(layer_owner_id()) if _layer_uid != "" else null
+		if row == null or row.get_blend_mode() == int(v):
+			return
+		row.set_blend_mode(int(v))
+		terrain.data.recomposite_layer(_stack().find_layer_by_owner(layer_owner_id()))
+var _blend_mode: BlendMode = BlendMode.REPLACE
+
 ## The key the base row was last solved under (§6.2). Stored, so a reload skips stage 1 until something changes.
 @export_storage var _base_key: String = ""
 ## The extent the base row was last written over, so the next solve clears it even when the extent shrinks.
@@ -903,7 +922,7 @@ func ensure_rows() -> void:
 	# Base first: `add_layer` appends, so a fresh pair is created already adjacent and in the right order.
 	if d.create_owned_layer_typed(base_owner_id(), str(name), BLEND_REPLACE, PASTURE_3D_MAPTYPE_HEIGHT) < 0:
 		return
-	if d.create_owned_layer_typed(layer_owner_id(), str(name), BLEND_REPLACE, PASTURE_3D_MAPTYPE_HEIGHT) < 0:
+	if d.create_owned_layer_typed(layer_owner_id(), str(name), int(_blend_mode) if not existed else BLEND_REPLACE, PASTURE_3D_MAPTYPE_HEIGHT) < 0:
 		return
 	_repair_pair(existed)
 
