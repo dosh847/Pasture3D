@@ -302,6 +302,16 @@ func selected_point(p_brush: Node3D) -> Array:
 	return _h.selected_point(p_brush)
 
 
+## Where Godot draws the transform gizmo for `p_brush`: on the selected handle while one is selected, on the
+## node otherwise. The plugin uses it to give that gizmo the click before any brush picking does.
+func transform_gizmo_origin(p_brush: Node3D) -> Vector3:
+	if _h.selection_valid(p_brush):
+		var res := _h.resolve_handle(p_brush, _h.sel_gpi * 3 + _h.sel_kind)
+		if res[0] != null:
+			return p_brush.to_global(_h.handle_display_local(p_brush, res[0], res[1], res[2]))
+	return p_brush.global_position
+
+
 ## Forget the selected point (e.g. after it was deleted) so its now-stale index isn't reused.
 func clear_point_selection() -> void:
 	_h.clear_point_selection()

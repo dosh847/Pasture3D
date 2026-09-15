@@ -448,7 +448,8 @@ func _forward_3d_gui_input(p_viewport_camera: Camera3D, p_event: InputEvent) -> 
 				return AFTER_GUI_INPUT_STOP
 			
 			# If no sculpt tool is active (or selection mode is on), clicking on a road ribbon / brush selects it
-			if editor.get_tool() == Pasture3DEditor.TOOL_MAX or selection_mode:
+			if (editor.get_tool() == Pasture3DEditor.TOOL_MAX or selection_mode) \
+					and not _over_transform_gizmo(p_viewport_camera, terrain.global_position, mouse_pos, full_resolution):
 				var clicked_brush: Node3D = _pick_brush_screen(p_viewport_camera, mouse_pos, 24.0)
 				if clicked_brush != null:
 					selection_mode = false
@@ -473,6 +474,27 @@ func _forward_3d_gui_input(p_viewport_camera: Camera3D, p_event: InputEvent) -> 
 			return AFTER_GUI_INPUT_STOP
 
 	return AFTER_GUI_INPUT_PASS
+
+
+## ---- THE TRANSFORM GIZMO GETS THE CLICK FIRST ----
+##
+## Godot offers a viewport click to this plugin BEFORE its own transform gizmo. Click-to-select a road picks
+## within 24 px of the whole ribbon, so an arrow lying over another brush's point or a road re-selected that
+## brush and the drag never started. Clicks on the gizmo now pass; hiding the gizmo is one keypress.
+##
+## Godot keeps the gizmo a constant `manipulator_gizmo_size` in screen pixels, and its arrows reach about
+## 1.55 of that from the centre (arrow offset 1.2 + arrow length 0.35). The radius is a disc, not the axes.
+const TRANSFORM_GIZMO_REACH: float = 1.6
+
+func _over_transform_gizmo(p_camera: Camera3D, p_origin: Vector3, p_mouse: Vector2, p_full_res: bool) -> bool:
+	if p_camera.is_position_behind(p_origin):
+		return false
+	var es := EditorInterface.get_editor_settings()
+	var size: float = float(es.get_setting("editors/3d/manipulator_gizmo_size")) if es.has_setting("editors/3d/manipulator_gizmo_size") else 80.0
+	var reach := size * EditorInterface.get_editor_scale() * TRANSFORM_GIZMO_REACH
+	if not p_full_res:
+		reach *= 0.5 # the camera's viewport renders at half size, and `p_mouse` is in its pixels
+	return p_camera.unproject_position(p_origin).distance_to(p_mouse) <= reach
 
 
 ## The currently-selected Pasture3D brush, or null. Drives the loop-point editing input path.
@@ -688,7 +710,8 @@ func _forward_brush_input(p_camera: Camera3D, p_event: InputEvent, p_brush: Past
 		# ray decided, or a click can both grab a handle and re-select a different brush.
 		var picked_self: Array = brush_gizmo.pick_handle_at(p_brush, p_camera, mouse_pos) if brush_gizmo \
 				else [null, -1, -1]
-		if picked_self[0] == null:
+		var gizmo_origin: Vector3 = brush_gizmo.transform_gizmo_origin(p_brush) if brush_gizmo else p_brush.global_position
+		if picked_self[0] == null and not _over_transform_gizmo(p_camera, gizmo_origin, mouse_pos, full_res):
 			var other: Node3D = _pick_brush_screen(p_camera, mouse_pos, 24.0)
 			if other != null and other != p_brush:
 				var sel: EditorSelection = EditorInterface.get_selection()
