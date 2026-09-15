@@ -185,15 +185,14 @@ func _d_defer_reaches_the_gdscript_step() -> void:
 func _e_a_rejected_tick_does_not_eat_the_edit() -> void:
 	print("[E] a rejected refresh tick defers the edit instead of eating it (§3.4)")
 	var m := _make_mound()
-	m._dirty = true
+	# `_dirty` was deleted as dead in f2c733ad; `_full_dirty` is the queued edit now.
 	m._full_dirty = true
 	remove_child(m) # detached: is_configured() still passes, is_inside_tree() does not
 	_check("fixture", m.is_configured() and not m.is_inside_tree(),
 			"the fixture is detached but still is_configured() — the state the guard has to catch")
 	m._on_refresh_timer()
-	_check("edit kept", m._dirty and m._full_dirty,
-			"after a rejected tick the queued edit is still pending (dirty %s, full %s)"
-					% [m._dirty, m._full_dirty])
+	_check("edit kept", m._full_dirty,
+			"after a rejected tick the queued edit is still pending (full %s)" % m._full_dirty)
 
 	# CONTROL. The path that DOES bake is unreachable here — `_on_refresh_timer` requires
 	# `Engine.is_editor_hint()`, which is false in a headless run — so the control cannot be "the tick
@@ -203,10 +202,9 @@ func _e_a_rejected_tick_does_not_eat_the_edit() -> void:
 	# `_on_refresh_timer` that returned at its first line would keep the edit too, for the wrong reason).
 	add_child(m)
 	var run: int = m._begin_deferred_run()
-	m._dirty = true
 	m._full_dirty = true
 	m._on_refresh_timer()
-	_check("control", is_instance_valid(m._timer) and m._dirty and m._full_dirty,
+	_check("control", is_instance_valid(m._timer) and m._full_dirty,
 			"with a run in flight the tick re-armed (timer %s) and kept the edit"
 					% is_instance_valid(m._timer))
 	m._end_deferred_run(run)
