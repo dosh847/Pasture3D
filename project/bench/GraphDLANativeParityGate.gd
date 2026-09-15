@@ -15,6 +15,9 @@
 #       amplitude and a ridge-seeded input with NaN cells. Then the freeze: a GDScript FROZEN solve served on
 #       the native route after an Amplitude edit is the new amplitude times the mask and not stale. Controls:
 #       every graph really lowered, the next seed differs, and a Coverage edit does stale.
+#   [T] the row-parallel passes (blur, mass, grid sampling) change nothing: the growth and the native graph at
+#       1 thread equal the same at N, bit for bit. Control: the dispatch counter proves the 1-thread arm split
+#       no region and the N-thread arm split several; a small grid would run serial and prove nothing.
 extends Node
 
 const ReliefDLA = preload("res://addons/pasture_3d/connectors/pasture3d_relief_dla.gd")
@@ -29,8 +32,8 @@ func _ready() -> void:
 		print("!! Pasture3DUtil.dla_grow_field is not bound; rebuild the extension")
 		get_tree().quit(1)
 		return
-	# `-- --only=R` (or G, N) runs one criterion; the completion count only binds a full run.
-	var only := "RGN"
+	# `-- --only=R` (or G, N, T) runs one criterion; the completion count only binds a full run.
+	var only := "RGNT"
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--only="):
 			only = a.trim_prefix("--only=")
@@ -41,9 +44,11 @@ func _ready() -> void:
 	if only.contains("N"):
 		_n_node_routes()
 		_n_frozen_amplitude()
-	if only == "RGN" and _done != 4:
+	if only.contains("T"):
+		_t_thread_parity()
+	if only == "RGNT" and _done != 5:
 		_fail += 1
-		print("\n!! only %d of 4 criteria reached their assertion" % _done)
+		print("\n!! only %d of 5 criteria reached their assertion" % _done)
 	print("\n=== %s (%d failures) ===\n" % ["GRAPH DLA NATIVE PARITY PASS" if _fail == 0 else "GRAPH DLA NATIVE PARITY FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -210,6 +215,37 @@ func _n_frozen_amplitude() -> void:
 		% [native_ok, d[1], stale_after_amp, stale_after_cov])
 	_check(native_ok and d[1] == 0 and _max(served) > 1.0 and not stale_after_amp and stale_after_cov,
 		"a FROZEN DLA did not serve amplitude*mask on the native route, or the stale flag was wrong")
+
+
+# ---- [T] ---------------------------------------------------------------------------------------------
+
+func _t_thread_parity() -> void:
+	print("\n[T] 1 thread equals N threads: the growth at 512, and the native graph on a 192x160 grid")
+	var cfg := {"resolution": 512, "hierarchy_levels": 4, "seed": 5}
+	var rect := Rect2(-120, -100, 240, 200)
+	var arms := {}
+	for threads in [1, 0]:
+		Pasture3DUtil.set_max_threads(threads)
+		var d0: int = Pasture3DUtil.parallel_dispatch_count()
+		var grown: Dictionary = Pasture3DUtil.dla_grow_field(_params_for(cfg))
+		var d_grow: int = Pasture3DUtil.parallel_dispatch_count() - d0
+		d0 = Pasture3DUtil.parallel_dispatch_count()
+		var g := _n_graph(_n_node({"resolution": 128}, 0), 1, -1.0)
+		var sampled := g.evaluate(192, 160, rect, null, PackedFloat32Array())
+		var d_graph: int = Pasture3DUtil.parallel_dispatch_count() - d0
+		arms[threads] = {"grown": grown["field"], "sampled": sampled, "d_grow": d_grow, "d_graph": d_graph, "native": g.native_supported()}
+	Pasture3DUtil.set_max_threads(0)
+	var s: Dictionary = arms[1]
+	var t: Dictionary = arms[0]
+	var dg := _diff(s["grown"], t["grown"])
+	var ds := _diff_nan(s["sampled"], t["sampled"])
+	print("    growth: differing=%d | graph: differing=%d native=%s peak=%.3f"
+		% [dg[1], ds[1], t["native"], _max(t["sampled"])])
+	print("    splits: 1 thread grow=%d graph=%d (want 0) | N threads grow=%d graph=%d (want > 0)"
+		% [s["d_grow"], s["d_graph"], t["d_grow"], t["d_graph"]])
+	_check(dg[1] == 0 and ds[1] == 0 and t["native"] and _max(t["sampled"]) > 0.5
+			and s["d_grow"] == 0 and s["d_graph"] == 0 and t["d_grow"] > 0 and t["d_graph"] > 0,
+		"threading changed the DLA field, or an arm did not run the way it claims")
 
 
 func _n_node(p_props: Dictionary, p_eval: int) -> Pasture3DGraphNode:

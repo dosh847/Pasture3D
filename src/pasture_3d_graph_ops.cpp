@@ -1811,33 +1811,36 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 					}
 					cg = crop.data();
 				}
-				for (int iz = 0; iz < p_gh; iz++) {
-					const double v = ((double)iz + 0.5) / (double)p_gh;
-					const double fy = v * (double)(h - 1);
-					for (int ix = 0; ix < p_gw; ix++) {
-						const int i = iz * p_gw + ix;
-						if (wired && Math::is_nan(sp[i])) {
-							g_ptr[i] = sp[i];
-							if (ch_mask) ch_mask[i] = 0.f;
-							continue;
+				// Per cell and independent, so rows split on the pool with no effect on any value.
+				Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int z0, int z1) {
+					for (int iz = z0; iz < z1; iz++) {
+						const double v = ((double)iz + 0.5) / (double)p_gh;
+						const double fy = v * (double)(h - 1);
+						for (int ix = 0; ix < p_gw; ix++) {
+							const int i = iz * p_gw + ix;
+							if (wired && Math::is_nan(sp[i])) {
+								g_ptr[i] = sp[i];
+								if (ch_mask) ch_mask[i] = 0.f;
+								continue;
+							}
+							const double fx = (((double)ix + 0.5) / (double)p_gw) * (double)(w - 1);
+							// _bilinear01, clamped edges.
+							const int bx0 = std::clamp((int)fx, 0, w - 1);
+							const int by0 = std::clamp((int)fy, 0, h - 1);
+							const int bx1 = std::min(bx0 + 1, w - 1);
+							const int by1 = std::min(by0 + 1, h - 1);
+							const double tx = std::clamp(fx - (double)bx0, 0.0, 1.0);
+							const double ty = std::clamp(fy - (double)by0, 0.0, 1.0);
+							const double a = cg[by0 * w + bx0];
+							const double b = cg[by0 * w + bx1];
+							const double c = cg[by1 * w + bx0];
+							const double e = cg[by1 * w + bx1];
+							const float sv = (float)((a * (1.0 - tx) + b * tx) * (1.0 - ty) + (c * (1.0 - tx) + e * tx) * ty);
+							g_ptr[i] = sv;
+							if (ch_mask) ch_mask[i] = sv;
 						}
-						const double fx = (((double)ix + 0.5) / (double)p_gw) * (double)(w - 1);
-						// _bilinear01, clamped edges.
-						const int bx0 = std::clamp((int)fx, 0, w - 1);
-						const int by0 = std::clamp((int)fy, 0, h - 1);
-						const int bx1 = std::min(bx0 + 1, w - 1);
-						const int by1 = std::min(by0 + 1, h - 1);
-						const double tx = std::clamp(fx - (double)bx0, 0.0, 1.0);
-						const double ty = std::clamp(fy - (double)by0, 0.0, 1.0);
-						const double a = cg[by0 * w + bx0];
-						const double b = cg[by0 * w + bx1];
-						const double c = cg[by1 * w + bx0];
-						const double e = cg[by1 * w + bx1];
-						const float sv = (float)((a * (1.0 - tx) + b * tx) * (1.0 - ty) + (c * (1.0 - tx) + e * tx) * ty);
-						g_ptr[i] = sv;
-						if (ch_mask) ch_mask[i] = sv;
 					}
-				}
+				});
 			} break;
 
 			default:

@@ -2,6 +2,8 @@
 
 #include "pasture_3d_dla.h"
 
+#include "pasture_3d_thread_pool.h"
+
 #include <godot_cpp/classes/random_number_generator.hpp>
 
 #include <algorithm>
@@ -552,33 +554,65 @@ struct DLAGrower {
 		return out;
 	}
 
+	// ---- PARALLEL, AND STILL THE SCRIPT BIT FOR BIT ----
+	//
+	// The passes below split into rows (or columns) on the thread pool. Each row's running sum is its own, in
+	// the script's order, so a row's values do not depend on which thread or chunk computed it; the per-cell
+	// blend is independent per cell; and a max is the same max in any order. GraphDLANativeParityGate [T]
+	// holds 1 thread against N on a grid large enough to split, and reads the dispatch counter to prove it did.
+	static constexpr int k_rows_per_chunk = 16;
+
 	// _box_blur
 	static std::vector<float> box_blur(const std::vector<float> &src, int n, int r) {
 		std::vector<float> tmp((size_t)n * n);
 		const double inv = 1.0 / (double)(2 * r + 1);
-		for (int y = 0; y < n; y++) {
-			const int row = y * n;
-			double acc = (double)src[(size_t)row] * (double)(r + 1);
-			for (int i = 1; i < r + 1; i++) {
-				acc += (double)src[(size_t)(row + std::min(i, n - 1))];
+		Pasture3DThreadPool::parallel_for_rows(n, k_rows_per_chunk, [&](int y0, int y1) {
+			for (int y = y0; y < y1; y++) {
+				const int row = y * n;
+				double acc = (double)src[(size_t)row] * (double)(r + 1);
+				for (int i = 1; i < r + 1; i++) {
+					acc += (double)src[(size_t)(row + std::min(i, n - 1))];
+				}
+				for (int x = 0; x < n; x++) {
+					tmp[(size_t)(row + x)] = (float)(acc * inv);
+					acc += (double)src[(size_t)(row + std::min(x + r + 1, n - 1))] - (double)src[(size_t)(row + std::max(x - r, 0))];
+				}
 			}
-			for (int x = 0; x < n; x++) {
-				tmp[(size_t)(row + x)] = (float)(acc * inv);
-				acc += (double)src[(size_t)(row + std::min(x + r + 1, n - 1))] - (double)src[(size_t)(row + std::max(x - r, 0))];
-			}
-		}
+		});
 		std::vector<float> out((size_t)n * n);
-		for (int x = 0; x < n; x++) {
-			double acc = (double)tmp[(size_t)x] * (double)(r + 1);
-			for (int i = 1; i < r + 1; i++) {
-				acc += (double)tmp[(size_t)(std::min(i, n - 1) * n + x)];
+		// Columns, split the same way: the pool's "rows" are just an index range.
+		Pasture3DThreadPool::parallel_for_rows(n, k_rows_per_chunk, [&](int x0, int x1) {
+			for (int x = x0; x < x1; x++) {
+				double acc = (double)tmp[(size_t)x] * (double)(r + 1);
+				for (int i = 1; i < r + 1; i++) {
+					acc += (double)tmp[(size_t)(std::min(i, n - 1) * n + x)];
+				}
+				for (int y = 0; y < n; y++) {
+					out[(size_t)(y * n + x)] = (float)(acc * inv);
+					acc += (double)tmp[(size_t)(std::min(y + r + 1, n - 1) * n + x)] - (double)tmp[(size_t)(std::max(y - r, 0) * n + x)];
+				}
 			}
-			for (int y = 0; y < n; y++) {
-				out[(size_t)(y * n + x)] = (float)(acc * inv);
-				acc += (double)tmp[(size_t)(std::min(y + r + 1, n - 1) * n + x)] - (double)tmp[(size_t)(std::max(y - r, 0) * n + x)];
-			}
-		}
+		});
 		return out;
+	}
+
+	// The largest cell, per row on the pool and folded serially.
+	static double max_of(const std::vector<float> &g, int n) {
+		std::vector<double> row_max((size_t)n, 0.0);
+		Pasture3DThreadPool::parallel_for_rows(n, k_rows_per_chunk, [&](int y0, int y1) {
+			for (int y = y0; y < y1; y++) {
+				double m = 0.0;
+				for (int x = 0; x < n; x++) {
+					m = std::max(m, (double)g[(size_t)(y * n + x)]);
+				}
+				row_max[(size_t)y] = m;
+			}
+		});
+		double m = 0.0;
+		for (double v : row_max) {
+			m = std::max(m, v);
+		}
+		return m;
 	}
 
 	// _mass
@@ -590,36 +624,34 @@ struct DLAGrower {
 		double total = 0.0;
 		for (int r : blur_radii(n)) {
 			img = box_blur(img, n, r);
-			double lvl = 0.0;
-			for (size_t i = 0; i < nn; i++) {
-				lvl = std::max(lvl, (double)img[i]);
-			}
+			const double lvl = max_of(img, n);
 			if (lvl <= 0.0) {
 				continue;
 			}
 			const double k = weight / lvl;
-			for (size_t i = 0; i < nn; i++) {
-				out[i] = (float)((double)out[i] + (double)img[i] * k);
-			}
+			Pasture3DThreadPool::parallel_for_rows(n, k_rows_per_chunk, [&](int y0, int y1) {
+				for (size_t i = (size_t)y0 * n; i < (size_t)y1 * n; i++) {
+					out[i] = (float)((double)out[i] + (double)img[i] * k);
+				}
+			});
 			total += weight;
 			weight *= p.blur_growth;
 		}
 		if (total <= 0.0) {
 			return out;
 		}
-		double peak = 0.0;
-		for (size_t i = 0; i < nn; i++) {
-			peak = std::max(peak, (double)out[i]);
-		}
+		const double peak = max_of(out, n);
 		if (peak <= 0.0) {
 			return out;
 		}
 		const double inv = 1.0 / peak;
 		const double pw = p.profile_power;
-		for (size_t i = 0; i < nn; i++) {
-			const double v = (double)out[i] * inv;
-			out[i] = (float)(pw == 1.0 ? v : std::pow(v, pw));
-		}
+		Pasture3DThreadPool::parallel_for_rows(n, k_rows_per_chunk, [&](int y0, int y1) {
+			for (size_t i = (size_t)y0 * n; i < (size_t)y1 * n; i++) {
+				const double v = (double)out[i] * inv;
+				out[i] = (float)(pw == 1.0 ? v : std::pow(v, pw));
+			}
+		});
 		return out;
 	}
 };
