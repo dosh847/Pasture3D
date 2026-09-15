@@ -10,6 +10,11 @@
 #   [G] the grown field, its grid size and its crop dims are identical across configurations that walk
 #       every branch: small and default grids, a non-square loop, zero wander, a profile power, and ridge
 #       seeding from a surface. Control: the next seed's field differs by far more than the parity bound.
+#   [N] the DLA NODE through a graph: the native route (GRAPH_OP_DLA) equals the GDScript route bit for bit,
+#       height and mask, over a non-representable coverage, a 64-bit seed, a non-square rect, a wired
+#       amplitude and a ridge-seeded input with NaN cells. Then the freeze: a GDScript FROZEN solve served on
+#       the native route after an Amplitude edit is the new amplitude times the mask and not stale. Controls:
+#       every graph really lowered, the next seed differs, and a Coverage edit does stale.
 extends Node
 
 const ReliefDLA = preload("res://addons/pasture_3d/connectors/pasture3d_relief_dla.gd")
@@ -24,8 +29,8 @@ func _ready() -> void:
 		print("!! Pasture3DUtil.dla_grow_field is not bound; rebuild the extension")
 		get_tree().quit(1)
 		return
-	# `-- --only=R` or `--only=G` runs one criterion; the completion count only binds a full run.
-	var only := "RG"
+	# `-- --only=R` (or G, N) runs one criterion; the completion count only binds a full run.
+	var only := "RGN"
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--only="):
 			only = a.trim_prefix("--only=")
@@ -33,9 +38,12 @@ func _ready() -> void:
 		_r_rng_stream()
 	if only.contains("G"):
 		_g_growth_parity()
-	if only == "RG" and _done != 2:
+	if only.contains("N"):
+		_n_node_routes()
+		_n_frozen_amplitude()
+	if only == "RGN" and _done != 4:
 		_fail += 1
-		print("\n!! only %d of 2 criteria reached their assertion" % _done)
+		print("\n!! only %d of 4 criteria reached their assertion" % _done)
 	print("\n=== %s (%d failures) ===\n" % ["GRAPH DLA NATIVE PARITY PASS" if _fail == 0 else "GRAPH DLA NATIVE PARITY FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -132,6 +140,130 @@ func _g_growth_parity() -> void:
 			all_ok = false
 			print("      !! the next seed grew (nearly) the same field; parity above proves nothing")
 	_check(all_ok, "the native growth diverged from the GDScript growth")
+
+
+# ---- [N] ---------------------------------------------------------------------------------------------
+
+const NGW := 48
+const NGH := 32
+
+func _n_node_routes() -> void:
+	print("\n[N] the DLA node: native route equals GDScript route, height and mask")
+	var configs := [
+		{"name": "small, odd coverage", "rect": Rect2(-100, -100, 200, 200), "props": {"coverage": 0.63, "detail_size": 0.17}},
+		{"name": "64-bit seed, 3:1 rect", "rect": Rect2(-150, -50, 300, 100), "props": {"seed": -123456789012, "wander": 0.47}},
+		{"name": "wired amplitude", "rect": Rect2(-100, -100, 200, 200), "props": {"profile_power": 1.7}, "amp": 37.25},
+		{"name": "ridge seeded, NaN cells", "rect": Rect2(-100, -100, 200, 200), "props": {"ridge_seeding": true, "ridge_amount": 0.12}, "surface": true},
+	]
+	var all_ok := true
+	for cfg in configs:
+		var surf := _n_surface(bool(cfg.get("surface", false)))
+		var got := {}
+		for route in ["native", "gdscript"]:
+			for port in [0, 1]:
+				var node := _n_node(cfg["props"], 0)
+				var g := _n_graph(node, port, cfg.get("amp", -1.0))
+				g.force_gdscript_evaluation = route == "gdscript"
+				if route == "native" and not g.native_supported():
+					all_ok = false
+					print("    !! %s did not lower to native; the comparison would be GDScript against itself" % cfg["name"])
+				got["%s%d" % [route, port]] = g.evaluate(NGW, NGH, cfg["rect"], null, surf)
+		var dh := _diff_nan(got["native0"], got["gdscript0"])
+		var dm := _diff_nan(got["native1"], got["gdscript1"])
+		var nans := 0
+		for v in got["native0"]:
+			if is_nan(v):
+				nans += 1
+		# CONTROL: the next seed through the native route.
+		var p2: Dictionary = cfg["props"].duplicate()
+		p2["seed"] = int(p2.get("seed", 0)) + 1
+		var other := _n_graph(_n_node(p2, 0), 1, cfg.get("amp", -1.0)).evaluate(NGW, NGH, cfg["rect"], null, surf)
+		var cd := _diff_nan(got["native1"], other)
+		var ok: bool = dh[1] == 0 and dm[1] == 0 and _max(got["gdscript1"]) > 0.5 and cd[0] > 0.05
+		print("    %-24s height differing=%d mask differing=%d | NaN cells=%d peak mask=%.3f | control seed+1 max %.3f%s"
+			% [cfg["name"], dh[1], dm[1], nans, _max(got["gdscript1"]), cd[0], "" if ok else "  <-- MISMATCH"])
+		all_ok = all_ok and ok
+	_check(all_ok, "the native DLA op and the GDScript DLA node disagree")
+
+
+func _n_frozen_amplitude() -> void:
+	print("\n[N] FROZEN: a GDScript solve is served natively after an Amplitude edit, rescaled and not stale")
+	var rect := Rect2(-100, -100, 200, 200)
+	var surf := _n_surface(false)
+	var node := _n_node({"amplitude": 100.0}, 1)
+	var g := _n_graph(node, 0, -1.0)
+	g.force_gdscript_evaluation = true
+	g.evaluate(NGW, NGH, rect, null, surf)
+	node.amplitude = 250.0
+	g.force_gdscript_evaluation = false
+	var native_ok := g.native_supported()
+	var served := g.evaluate(NGW, NGH, rect, null, surf)
+	var stale_after_amp: bool = node._stale
+	var want := _n_graph(_n_node({"amplitude": 250.0}, 0), 0, -1.0)
+	want.force_gdscript_evaluation = true
+	var d := _diff_nan(served, want.evaluate(NGW, NGH, rect, null, surf))
+	# CONTROL: Coverage restyles the growth, so the same served cache must now be stale.
+	node.coverage = 0.5
+	g.evaluate(NGW, NGH, rect, null, surf)
+	var stale_after_cov: bool = node._stale
+	print("    native=%s | served at 250 vs LIVE 250: differing=%d, stale=%s | control: coverage edit stale=%s"
+		% [native_ok, d[1], stale_after_amp, stale_after_cov])
+	_check(native_ok and d[1] == 0 and _max(served) > 1.0 and not stale_after_amp and stale_after_cov,
+		"a FROZEN DLA did not serve amplitude*mask on the native route, or the stale flag was wrong")
+
+
+func _n_node(p_props: Dictionary, p_eval: int) -> Pasture3DGraphNode:
+	var n: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"dla")
+	n.set("resolution", 64)
+	n.set("hierarchy_levels", 3)
+	n.set("blur_levels", 4)
+	n.set("amplitude", 100.0)
+	for k in p_props:
+		n.set(k, p_props[k])
+	n.set("evaluation", p_eval)
+	return n
+
+
+func _n_graph(p_node: Pasture3DGraphNode, p_port: int, p_amp: float) -> Pasture3DTerrainGraph:
+	var g := Pasture3DTerrainGraph.new()
+	var i_in := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"))
+	var i_n := g.add_node(p_node)
+	var i_out := g.add_node(Pasture3DGraphNodeRegistry.create(&"output"))
+	g.connect_ports(i_in, 0, i_n, 0)
+	g.connect_ports(i_n, p_port, i_out, 0)
+	if p_amp >= 0.0:
+		var c: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const")
+		c.set("value", p_amp)
+		g.connect_ports(g.add_node(c), 0, i_n, 1)
+	return g
+
+
+## Zero (unwired-looking) or a ridged surface with a NaN block, the brush-loop boundary.
+func _n_surface(p_ridged: bool) -> PackedFloat32Array:
+	var s := PackedFloat32Array()
+	s.resize(NGW * NGH)
+	if not p_ridged:
+		return s
+	for iz in range(NGH):
+		for ix in range(NGW):
+			s[iz * NGW + ix] = NAN if (ix < 6 and iz < 5) else 20.0 * absf(sin(float(ix) / float(NGW - 1) * TAU * 1.5)) + 2.0
+	return s
+
+
+## _diff, with NaN equal to NaN.
+func _diff_nan(p_a: PackedFloat32Array, p_b: PackedFloat32Array) -> Array:
+	if p_a.size() != p_b.size():
+		return [INF, maxi(p_a.size(), p_b.size())]
+	var m := 0.0
+	var c := 0
+	for i in range(p_a.size()):
+		if is_nan(p_a[i]) and is_nan(p_b[i]):
+			continue
+		if p_a[i] != p_b[i]:
+			c += 1
+			var d := absf(p_a[i] - p_b[i])
+			m = maxf(m, d if is_finite(d) else INF)
+	return [m, c]
 
 
 func _engine_for(p_cfg: Dictionary) -> Object:

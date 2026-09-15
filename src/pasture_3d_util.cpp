@@ -1282,6 +1282,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "leveler", GRAPH_OP_LEVELER },
 		{ "gradient", GRAPH_OP_GRADIENT },
 		{ "value_ramp", GRAPH_OP_VALUE_RAMP },
+		{ "dla", GRAPH_OP_DLA },
 	};
 	Dictionary d;
 	for (const auto &e : k_ops) {

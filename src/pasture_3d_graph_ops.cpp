@@ -12,6 +12,7 @@
 #include "pasture_3d_crater.h"
 #include "pasture_3d_curvature.h"
 #include "pasture_3d_depression_filling.h"
+#include "pasture_3d_dla.h"
 #include "pasture_3d_dunes.h"
 #include "pasture_3d_erosion.h"
 #include "pasture_3d_erosion_hydraulic.h"
@@ -1743,6 +1744,102 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				}
 			} break;
 
+			case GRAPH_OP_DLA: {
+				// Channel 0 here is the UNIT massif — the mask, or NaN on a no-data cell of a wired input — and
+				// amplitude is applied after the freeze, below, so a FROZEN massif is cached without it and an
+				// Amplitude edit moves the output without a re-growth. The sampling is
+				// Pasture3DGraphNodeDLA._solve's, arithmetic width included, because the GDScript node is the
+				// oracle this op is gated against.
+				//
+				// P1 coverage, P2 detail_size, P3 profile_power, P4..P6 seed as 24/24/16-bit chunks (a float32
+				// slot is exact only to 2^24), P7 resolution, P8 hierarchy_levels, P9 wander, P10 blur_levels,
+				// P11 blur_growth, P12 ridge_seeding, P13 ridge_amount.
+				PackedFloat32Array surf = get_grid_packed(in0[s], c_in0);
+				const float *sp = surf.ptr();
+				bool wired = false; // an unwired HEIGHT reads all-zero, and a flat-zero surface is not a seed
+				for (int i = 0; i < n; i++) {
+					if (sp[i] != 0.f) { // NaN compares unequal, so a brush-loop boundary counts as wired
+						wired = true;
+						break;
+					}
+				}
+				DLAParams d;
+				d.coverage = std::clamp((double)P[1], 0.2, 1.0);
+				d.detail_size = std::clamp((double)P[2], 0.03, 0.50);
+				d.profile_power = P[3];
+				d.seed = (int64_t)((uint64_t)P[4] | ((uint64_t)P[5] << 24) | ((uint64_t)P[6] << 48));
+				d.resolution = (int)P[7];
+				d.hierarchy_levels = (int)P[8];
+				d.wander = P[9];
+				d.blur_levels = (int)P[10];
+				d.blur_growth = P[11];
+				d.ridge_seeding = P[12] != 0.f;
+				d.ridge_amount = P[13];
+				d.host_ex = std::max((double)p_rect.size.x * 0.5, 0.001);
+				d.host_ez = std::max((double)p_rect.size.y * 0.5, 0.001);
+				if (d.ridge_seeding && wired) {
+					const double dx = (double)p_rect.size.x / (double)std::max(p_gw, 1);
+					const double dz = (double)p_rect.size.y / (double)std::max(p_gh, 1);
+					const double ex = (double)p_rect.size.x * 0.5;
+					const double ez = (double)p_rect.size.y * 0.5;
+					const double fr[9] = { (double)p_rect.position.x + ex, (double)p_rect.position.y + ez, 1.0, 0.0, ex, ez,
+						(double)p_rect.position.x + 0.5 * dx, (double)p_rect.position.y + 0.5 * dz, dx };
+					std::copy_n(fr, 9, d.frame);
+					d.frame_size = 9;
+					d.seed_surface = surf;
+					d.seed_gw = p_gw;
+					d.seed_gh = p_gh;
+				}
+				const DLAResult r = dla_grow(d);
+				float *ch_mask = want_aux(1);
+				const int fn = r.n;
+				const int w = r.dims.x;
+				const int h = r.dims.y;
+				if (r.field.size() == 0 || fn <= 0 || w <= 0 || h <= 0) {
+					std::fill_n(g_ptr, n, 0.f); // growth produced nothing: a flat zero massif, as the node answers
+					break;
+				}
+				// Pasture3DReliefDLA._crop: the loop's own rectangle out of the square working grid.
+				std::vector<float> crop;
+				const float *cg = r.field.ptr();
+				if (!(w >= fn && h >= fn)) {
+					const int x0 = (fn - w) / 2;
+					const int y0 = (fn - h) / 2;
+					crop.resize((size_t)w * (size_t)h);
+					for (int y = 0; y < h; y++) {
+						std::copy_n(r.field.ptr() + (y0 + y) * fn + x0, w, crop.data() + (size_t)y * (size_t)w);
+					}
+					cg = crop.data();
+				}
+				for (int iz = 0; iz < p_gh; iz++) {
+					const double v = ((double)iz + 0.5) / (double)p_gh;
+					const double fy = v * (double)(h - 1);
+					for (int ix = 0; ix < p_gw; ix++) {
+						const int i = iz * p_gw + ix;
+						if (wired && Math::is_nan(sp[i])) {
+							g_ptr[i] = sp[i];
+							if (ch_mask) ch_mask[i] = 0.f;
+							continue;
+						}
+						const double fx = (((double)ix + 0.5) / (double)p_gw) * (double)(w - 1);
+						// _bilinear01, clamped edges.
+						const int bx0 = std::clamp((int)fx, 0, w - 1);
+						const int by0 = std::clamp((int)fy, 0, h - 1);
+						const int bx1 = std::min(bx0 + 1, w - 1);
+						const int by1 = std::min(by0 + 1, h - 1);
+						const double tx = std::clamp(fx - (double)bx0, 0.0, 1.0);
+						const double ty = std::clamp(fy - (double)by0, 0.0, 1.0);
+						const double a = cg[by0 * w + bx0];
+						const double b = cg[by0 * w + bx1];
+						const double c = cg[by1 * w + bx0];
+						const double e = cg[by1 * w + bx1];
+						const float sv = (float)((a * (1.0 - tx) + b * tx) * (1.0 - ty) + (c * (1.0 - tx) + e * tx) * ty);
+						g_ptr[i] = sv;
+						if (ch_mask) ch_mask[i] = sv;
+					}
+				}
+			} break;
+
 			default:
 				std::fill_n(g_ptr, n, 0.f);
 				break;
@@ -1778,6 +1875,16 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 			}
 			for (int c = 1; c < n_out(s); c++) {
 				release_consumer(s, c);
+			}
+		}
+
+		// DLA's amplitude, applied to the unit massif AFTER the freeze on both of its paths — served and solved —
+		// so the cache never carries it. A float32 product, which is the correctly rounded double product the
+		// GDScript node stores; NaN stays NaN.
+		if (ops[s] == GRAPH_OP_DLA) {
+			const float amp = P[0];
+			for (int i = 0; i < n; i++) {
+				g_ptr[i] = amp * g_ptr[i];
 			}
 		}
 

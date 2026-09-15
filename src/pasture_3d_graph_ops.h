@@ -94,6 +94,7 @@ enum GraphCellOpType {
 	GRAPH_OP_LEVELER = 61, // FILTER grid: flatten/level in0 inside in_g and/or the in2 mask (5 outputs)
 	GRAPH_OP_GRADIENT = 62, // GENERATOR cell: metric gradient from start/end, in0 = warp (gradient spec §4)
 	GRAPH_OP_VALUE_RAMP = 63, // FILTER cell: in0 through a Godot Gradient to a scalar (gradient spec §6)
+	GRAPH_OP_DLA = 64, // SOLVER grid: a DLA massif, optionally seeded by in0's ridges (2 outputs: height, mask)
 };
 
 // Blend modes — sync with Pasture3DGraphNodeBlend.Mode { ADD, SUB, MUL, MAX, MIN } (0..4). Prefixed

@@ -6,15 +6,13 @@
 # dual of a drainage network, so a DLA massif lands on the same branching statistics erosion produces
 # WITHOUT simulating water — which is why `Input → DLA → Erosion` reinforces rather than fights.
 #
-# ---- Why this composes Pasture3DReliefDLA instead of reimplementing it ----
+# ---- Two routes, one answer ----
 #
-# The growth is ~600 lines of delicately tuned GDScript with a documented history of six growth bugs that
-# each produced a *plausible* field. It lives on `Pasture3DReliefDLA` and its `grow_into(state)` hook grows
-# the cluster into a state Dictionary and touches nothing on the material. This node OWNS a configured
-# engine instance and drives that hook, so the entire growth path is reused byte-for-byte and only the thin
-# adapter here is new: mirror the params, hand the engine the loop frame + optional seed surface, and sample
-# its grown field onto the output grid. (Per the DLA design note: a DLA needs a grid at COMPILE time only
-# and is a point operator where it counts — so it is a graph node, never a brush modifier.)
+# Native (GRAPH_OP_DLA) runs the C++ port of the growth, src/pasture_3d_dla.cpp. The GDScript route here
+# composes Pasture3DReliefDLA and drives its `grow_into` hook, so the tuned growth path — six growth bugs,
+# each a *plausible* field — is reused byte-for-byte and stays the oracle the port is gated against
+# (GraphDLANativeParityGate). Every float parameter is rounded to float32 before the growth sees it,
+# because that is all the native program can carry; without it the two routes grow different massifs.
 #
 # ---- Two outputs ----
 #
@@ -30,8 +28,9 @@
 #
 # ---- Per-solver freeze (defaults to FROZEN) ----
 #
-# Growing a cluster is seconds of GDScript; re-running it on every evaluation is unusable, so this node
-# defaults to FROZEN with the same per-solver cache/stale/Bake as Erosion. In memory only.
+# Growing a cluster is seconds; re-running it on every evaluation is unusable, so this node defaults to
+# FROZEN, on both routes. The cache is the UNIT massif — [mask-or-NaN, mask] — and amplitude is multiplied in
+# after it, so an Amplitude edit moves the mountain without a re-growth and without going stale.
 @tool
 class_name Pasture3DGraphNodeDLA
 extends Pasture3DGraphSolverNode
@@ -44,7 +43,7 @@ const ReliefDLA = preload("res://addons/pasture_3d/connectors/pasture3d_relief_d
 @export_range(0.0, 4000.0, 1.0, "or_greater") var amplitude: float = 400.0:
 	set(v):
 		amplitude = maxf(v, 0.0)
-		# Not `_param_changed`: a served cache is rebuilt as amplitude * mask, so the frozen massif is not stale.
+		# Not `_param_changed`: amplitude is applied after the cache, so the frozen massif is not stale.
 		emit_changed()
 
 @export_group("Shape")
@@ -121,8 +120,6 @@ const ReliefDLA = preload("res://addons/pasture_3d/connectors/pasture3d_relief_d
 
 @export_tool_button("Bake Mountain") var _bake_btn = clear_cache
 
-# ---- Runtime freeze state (not serialised — the caches rebuild on demand) ----
-
 
 ## This solve is heavy enough that FROZEN is the right default; the base defaults to LIVE.
 func _init() -> void:
@@ -139,37 +136,53 @@ func bake_label() -> String:
 	return "Bake Mountain"
 
 
-## The amplitude this evaluation was asked for, which may come from a wired port rather than the export.
-var _wired_amplitude: float = 0.0
-var _wired_coverage: float = 0.95
-var _wired_detail_size: float = 0.12
-
-
-## A cached massif rescales exactly, so a change of amplitude alone does not need a re-growth: the DLA
-## shape is amplitude-independent and the height is linear in it. Every other solver serves its cache
-## unchanged, which is why this is a hook and not a branch in the shared freeze.
-##
-## The height is rebuilt from the cached normalised mask, not rescaled from the cached height. A ratio of
-## wired to exported amplitude assumed the cache was grown at the CURRENT export, so editing Amplitude after
-## a bake scaled the massif by the wrong factor; the mask carries no amplitude at all. A NaN cell in the
-## cached height (a brush-loop boundary) stays NaN.
+## Amplitude never enters the cache; see the header.
 func serve_time_properties() -> PackedStringArray:
 	return PackedStringArray(["amplitude"])
 
 
-func _on_cache_hit(p_cached: Variant) -> Variant:
-	var cached: Array = p_cached
-	var cached_h: PackedFloat32Array = cached[0]
-	var mask: PackedFloat32Array = cached[1]
-	var h := PackedFloat32Array()
-	h.resize(mask.size())
-	for i in range(mask.size()):
-		h[i] = NAN if is_nan(cached_h[i]) else _wired_amplitude * mask[i]
-	return [h, mask]
-
-
 func op() -> StringName:
 	return &"dla"
+
+
+## P0 amplitude, P1 coverage, P2 detail_size, P3 profile_power, P4..P6 seed as 24/24/16-bit chunks (a float32
+## slot is exact only to 2^24, and a seed is an int64), P7 resolution, P8 hierarchy_levels, P9 wander,
+## P10 blur_levels, P11 blur_growth, P12 ridge_seeding, P13 ridge_amount. Read by GRAPH_OP_DLA.
+func native_lower() -> Dictionary:
+	var p := PackedFloat32Array()
+	p.resize(16)
+	p[0] = amplitude
+	p[1] = coverage
+	p[2] = detail_size
+	p[3] = profile_power
+	p[4] = float(seed & 0xFFFFFF)
+	p[5] = float((seed >> 24) & 0xFFFFFF)
+	p[6] = float((seed >> 48) & 0xFFFF)
+	p[7] = float(resolution)
+	p[8] = float(hierarchy_levels)
+	p[9] = wander
+	p[10] = float(blur_levels)
+	p[11] = blur_growth
+	p[12] = 1.0 if ridge_seeding else 0.0
+	p[13] = ridge_amount
+	return {"params": p}
+
+
+func native_param_ports() -> PackedInt32Array:
+	return PackedInt32Array([-1, 0, 1, 2])
+
+
+func native_out_count() -> int:
+	return 2 # height, mask
+
+
+## The seed surface, then coverage and detail size: those restyle the growth. Amplitude is not in the key.
+func freeze_key_grid_ports() -> PackedInt32Array:
+	return PackedInt32Array([0])
+
+
+func freeze_key_scalar_ports() -> PackedInt32Array:
+	return PackedInt32Array([2, 3])
 
 
 func role() -> Role:
@@ -225,25 +238,23 @@ func node_warnings() -> PackedStringArray:
 	return w
 
 
-## Two channels: [0] massif height (metres), [1] normalised field [0,1]. Applies the per-solver freeze.
+## Two channels: [0] massif height (metres), [1] normalised field [0,1]. Applies the per-solver freeze to the
+## unit massif, then the amplitude — the same order GRAPH_OP_DLA uses.
 func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> Array:
 	var n := p_gw * p_gh
 	var surface: PackedFloat32Array = (p_inputs[0] as PackedFloat32Array) if (p_inputs.size() > 0 and p_inputs[0] is PackedFloat32Array) else Pasture3DGraphOps.zeros(n)
-	var a: float = float(p_inputs[1][0]) if (p_inputs.size() > 1 and p_inputs[1] is PackedFloat32Array and p_inputs[1].size() > 0) else amplitude
-
 	if surface.size() != n:
 		surface = Pasture3DGraphOps.zeros(n)
-
-	# The wired amplitude is read on the way IN rather than passed through, because `_on_cache_hit` below
-	# needs it and the base's freeze knows nothing about this node's ports.
-	_wired_amplitude = a
-	# Coverage and detail size restyle the growth, so unlike amplitude they cannot be rescaled out of a cached
-	# massif: they are read the same way and folded into the cache key. They used to be declared ports that
-	# nothing read, so a wire into either did nothing.
-	_wired_coverage = clampf(float(p_inputs[2][0]), 0.2, 1.0) if (p_inputs.size() > 2 and p_inputs[2] is PackedFloat32Array and p_inputs[2].size() > 0) else coverage
-	_wired_detail_size = clampf(float(p_inputs[3][0]), 0.03, 0.50) if (p_inputs.size() > 3 and p_inputs[3] is PackedFloat32Array and p_inputs[3].size() > 0) else detail_size
-	var key := solver_cache_key(p_gw, p_gh, [surface, PackedFloat32Array([_wired_coverage, _wired_detail_size])])
-	return solve_cached(key, func(): return _solve(surface, p_gw, p_gh, p_rect))
+	var a := _f32(_scalar(p_inputs, 1, amplitude))
+	var cov := clampf(_f32(_scalar(p_inputs, 2, coverage)), 0.2, 1.0)
+	var det := clampf(_f32(_scalar(p_inputs, 3, detail_size)), 0.03, 0.50)
+	var unit: Array = solve_cached(freeze_key(p_inputs, p_gw, p_gh), func(): return _solve(surface, p_gw, p_gh, p_rect, cov, det))
+	var cached_h: PackedFloat32Array = unit[0]
+	var h := PackedFloat32Array()
+	h.resize(cached_h.size())
+	for i in range(cached_h.size()):
+		h[i] = a * cached_h[i]
+	return [h, unit[1]]
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -257,24 +268,35 @@ func _param_changed() -> void:
 	emit_changed()
 
 
-## Grow the cluster and sample the field onto the output grid. The growth itself runs on a configured
-## Pasture3DReliefDLA through its `grow_into` hook (which writes only into a state Dictionary), so nothing
-## in the tuned growth path is duplicated here. The field is normalised [0,1] and stretched once over the
-## whole rect, exactly as the relief samplers do. A NaN in a wired input passes through as NaN height / 0
-## mask — the brush-loop boundary is where the mountain stops.
-func _solve(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2) -> Array:
+## A driven scalar port's value, or the export when unwired.
+static func _scalar(p_inputs: Array, p_port: int, p_default: float) -> float:
+	if p_inputs.size() > p_port and p_inputs[p_port] is PackedFloat32Array and p_inputs[p_port].size() > 0:
+		return float(p_inputs[p_port][0])
+	return p_default
+
+
+## The value a float32 params slot holds. The native program carries nothing wider.
+static func _f32(p_v: float) -> float:
+	return PackedFloat32Array([p_v])[0]
+
+
+## Grow the cluster and sample the UNIT field onto the output grid: [mask-or-NaN, mask]. The growth runs on a
+## configured Pasture3DReliefDLA through its `grow_into` hook (which writes only into a state Dictionary). The
+## field is normalised [0,1] and stretched once over the whole rect, exactly as the relief samplers do. A NaN
+## in a wired input passes through as NaN / 0 mask — the brush-loop boundary is where the mountain stops.
+func _solve(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_coverage: float, p_detail: float) -> Array:
 	var n := p_gw * p_gh
-	var engine := _make_engine(p_surface, p_gw, p_gh, p_rect)
+	var engine := _make_engine(p_surface, p_gw, p_gh, p_rect, p_coverage, p_detail)
 	var state := {}
 	engine.grow_into(state)
 	var field: PackedFloat32Array = state.get("field", PackedFloat32Array())
 	var grown_n: int = int(state.get("n", 0))
 	var dims: Vector2i = state.get("dims", Vector2i.ZERO)
-	var height := PackedFloat32Array(); height.resize(n)
+	var unit := PackedFloat32Array(); unit.resize(n)
 	var mask := PackedFloat32Array(); mask.resize(n)
 	if field.is_empty() or grown_n <= 0 or dims.x <= 0 or dims.y <= 0:
 		# Growth produced nothing (e.g. degenerate params): a flat zero massif is the honest empty result.
-		return [height, mask]
+		return [unit, mask]
 	# Crop the square working field to the loop's own rectangle (the relief material's own crop), then
 	# stretch that w×h field over the whole rect.
 	var cropped: PackedFloat32Array = engine._crop(field, grown_n, dims.x, dims.y)
@@ -288,36 +310,34 @@ func _solve(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2) 
 		for ix in range(p_gw):
 			var i := row + ix
 			if input_wired and is_nan(p_surface[i]):
-				height[i] = NAN
+				unit[i] = NAN
 				mask[i] = 0.0
 				continue
 			var u := (float(ix) + 0.5) / float(p_gw)
 			var fx := u * float(w - 1)
 			var s := _bilinear01(cropped, w, h, fx, fy)
 			mask[i] = s
-			# The wired amplitude, which a cache miss used to ignore: the first solve read the export. Scaled from
-			# the STORED float32 mask cell, not `s`, so a miss and a later hit (`_on_cache_hit`) are bit-identical.
-			height[i] = _wired_amplitude * mask[i]
-	return [height, mask]
+			unit[i] = s
+	return [unit, mask]
 
 
 ## A fresh Pasture3DReliefDLA configured to this node's params, its loop frame, and (when seeding) the
 ## input surface as the seed. Private fields are set directly rather than through the material's setters:
 ## the setters emit `changed` / set brush-dirty flags meant for the relief stack host, and this node is not
 ## that host — it only wants the growth. See the engine's own header for what each field means.
-func _make_engine(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2) -> Object:
+func _make_engine(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_coverage: float, p_detail: float) -> Object:
 	var e = ReliefDLA.new()
-	e.coverage = _wired_coverage
+	e.coverage = p_coverage
 	e.resolution = resolution
 	e.hierarchy_levels = hierarchy_levels
-	e.detail_size = _wired_detail_size
-	e.wander = wander
+	e.detail_size = p_detail
+	e.wander = _f32(wander)
 	e.seed = seed
 	e.blur_levels = blur_levels
-	e.blur_growth = blur_growth
-	e.profile_power = profile_power
+	e.blur_growth = _f32(blur_growth)
+	e.profile_power = _f32(profile_power)
 	e.ridge_seeding = ridge_seeding
-	e.ridge_amount = ridge_amount
+	e.ridge_amount = _f32(ridge_amount)
 	# The loop's half-extents drive the field's aspect (the engine crops the square grid to this ratio).
 	e._host_ex = maxf(p_rect.size.x * 0.5, 0.001)
 	e._host_ez = maxf(p_rect.size.y * 0.5, 0.001)

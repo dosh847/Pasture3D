@@ -33,8 +33,7 @@
 #   return solve_cached(key, func(): return _solve(surface, hardness, p_gw, p_gh, p_rect))
 #
 # plus, optionally, `bake_label()` for the warning text, `_init()` to default to FROZEN, and
-# `_on_cache_hit()` when a cached solve can be adjusted more cheaply than re-solved (DLA rescales its
-# amplitude that way).
+# `serve_time_properties()` for a setting applied after the cache rather than inside it (DLA's amplitude).
 @tool
 class_name Pasture3DGraphSolverNode
 extends Pasture3DGraphNode
@@ -129,7 +128,7 @@ func solve_cached(p_key: int, p_solve: Callable) -> Variant:
 			# reported rather than acted on: re-solving here would defeat the freeze, which is the point.
 			if _dirty_since_bake or p_key != _cache_key:
 				_set_stale(true)
-			return _on_cache_hit(_cache[_cache_key])
+			return _cache[_cache_key]
 		var solved: Variant = p_solve.call()
 		_cache = {p_key: solved}
 		_cache_key = p_key
@@ -145,16 +144,15 @@ func solve_cached(p_key: int, p_solve: Callable) -> Variant:
 	return p_solve.call()
 
 
-## Properties `_on_cache_hit` applies exactly to a served cache, so changing one moves a FROZEN output
-## without a re-solve and without going stale. DLA's amplitude is the one: the massif is linear in it.
+## Properties the node applies to its output AFTER the freeze, so the cache never holds them and changing one
+## moves a FROZEN output without a re-solve and without going stale. DLA's amplitude is the one: its cache
+## is the unit massif and both routes multiply afterwards.
+##
+## There is deliberately no hook to adjust a served cache. The native route serves the cache as stored, so a
+## node that rewrote its cache on a hit would answer differently on the two routes; a property that does not
+## belong in the cache belongs after it, in the node's own eval and in its op.
 func serve_time_properties() -> PackedStringArray:
 	return PackedStringArray()
-
-
-## Last chance to adjust a served cache. The default serves it unchanged; DLA overrides this to rescale
-## the cached height by its amplitude, which is exact and far cheaper than re-growing the massif.
-func _on_cache_hit(p_cached: Variant) -> Variant:
-	return p_cached
 
 
 # ---- The native freeze ----------------------------------------------------------------------------
@@ -162,8 +160,6 @@ func _on_cache_hit(p_cached: Variant) -> Variant:
 # A solver opts in by naming its freeze key's operands. The key is then built by ONE recipe on both routes:
 # `freeze_key` here, and the native evaluator from the `frozen` table `native_freeze_entry` compiles. Both
 # hash the same values with the same Variant hash, so a solve made on one route is a hit on the other.
-#
-# A node that overrides `_on_cache_hit` must NOT opt in: the native route serves the cache as stored.
 
 ## Input ports whose GRIDS form the freeze key, in order. Non-empty opts this node into the native freeze.
 ## Ports 0..3 only — the program carries four grid operands.

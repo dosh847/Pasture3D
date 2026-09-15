@@ -18,7 +18,8 @@ const RECT := Rect2(-64.0, -64.0, 128.0, 128.0)
 const RECT_WIDE := Rect2(-64.0, -32.0, 128.0, 64.0) # dx = 4, dz = 2
 const EPS := 1.0e-5
 # Criteria that must reach their assertion on a full run: five sections, [K] and [C] once per opted-in op.
-const WANT := 1 + 3 * 2 + 1 + 1
+const FREEZE_OPS := [&"erosion", &"erosion_hydraulic", &"erosion_thermal", &"dla"]
+const WANT := 1 + 4 * 2 + 1 + 1 # 4 == FREEZE_OPS.size(), which is not a constant expression
 
 var _fail := 0
 var _done := 0
@@ -37,7 +38,7 @@ func _ready() -> void:
 			only = a.trim_prefix("--only=")
 	if only.contains("P"):
 		_p_native_supported()
-	for op in [&"erosion", &"erosion_hydraulic", &"erosion_thermal"]:
+	for op in FREEZE_OPS:
 		if only.contains("K"):
 			_k_key_parity(op)
 		if only.contains("C"):
