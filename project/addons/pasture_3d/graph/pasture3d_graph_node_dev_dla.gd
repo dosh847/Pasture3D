@@ -41,15 +41,7 @@ const ReliefDLA = preload("res://addons/pasture_3d/connectors/pasture3d_relief_d
 		profile_power = clampf(v, 0.5, 4.0)
 		_param_changed()
 
-@export_range(2, 8, 1) var blur_levels: int = 5:
-	set(v):
-		blur_levels = clampi(v, 2, 8)
-		_param_changed()
 
-@export_range(1.4, 2.5, 0.05) var blur_growth: float = 1.6:
-	set(v):
-		blur_growth = clampf(v, 1.4, 2.5)
-		_param_changed()
 
 @export_group("Seeding")
 @export var ridge_seeding: bool = false:
@@ -191,8 +183,6 @@ func _make_engine(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: R
 	e.detail_size = detail_size
 	e.wander = wander
 	e.seed = seed
-	e.blur_levels = blur_levels
-	e.blur_growth = blur_growth
 	e.profile_power = profile_power
 	e.ridge_seeding = ridge_seeding
 	e.ridge_amount = ridge_amount

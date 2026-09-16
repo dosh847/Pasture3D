@@ -203,7 +203,9 @@ func _gate_cq_dendritic() -> void:
 	white.resize(n * n)
 	for i in range(n * n):
 		white[i] = rng.randf()
-	var noise: PackedFloat32Array = mat._mass(white, n)
+	# Smoothed here rather than through the material: the massing that used to blur an arbitrary raster is
+	# gone, and this control only needs noise at the massif's own scale to compare branchiness against.
+	var noise := _smooth(white, n, 3)
 
 	# CONTROL 2 — a featureless cone over the same footprint.
 	var cone := PackedFloat32Array()
@@ -455,9 +457,15 @@ func _gate_cx_size_and_detail() -> void:
 			return
 		if _span(f) < 0.9:
 			flat = true
-		# The envelope is a Vector2 since the material learned about non-square loops; these fixtures are
-		# all square, and the gate asserts that rather than assuming it.
-		var env: Vector2 = m._grow_extent(n)
+		# The envelope is [semi-axes, per-direction radii]: it grew that second half when loops learned to
+		# have OUTLINES. These fixtures are square AND unhosted - nothing captured a surface - so the outline
+		# must be absent, and CX measures against the ellipse's own semi-axes. Both are asserted rather than
+		# assumed: an outline turning up here would quietly change what "the radius Coverage allows" means.
+		var env_pair: Array = m._grow_extent(n)
+		if not (env_pair[1] as PackedFloat32Array).is_empty():
+			_fail += 1
+			print("    !! an unhosted fixture grew an OUTLINE envelope; CX is measuring the wrong thing")
+		var env: Vector2 = env_pair[0]
 		if not is_equal_approx(env.x, env.y):
 			_fail += 1
 			print("    !! a square fixture grew a non-square envelope %s; CX is measuring the wrong thing" % env)
@@ -700,6 +708,26 @@ func _support(g: PackedFloat32Array, n: int) -> float:
 
 ## Radius, in cells, inside which `q` of the field's mass sits. Used instead of a threshold because the
 ## fringe of a blurred dendrite is faint and a threshold reads whatever level you picked.
+## A few box passes, for the white-noise control above.
+func _smooth(p_src: PackedFloat32Array, n: int, r: int) -> PackedFloat32Array:
+	var cur := p_src
+	for pass_i in range(3):
+		var out := PackedFloat32Array()
+		out.resize(n * n)
+		for y in range(n):
+			for x in range(n):
+				var acc := 0.0
+				var cnt := 0
+				for dy in range(-r, r + 1):
+					var yy := clampi(y + dy, 0, n - 1)
+					for dx in range(-r, r + 1):
+						acc += cur[yy * n + clampi(x + dx, 0, n - 1)]
+						cnt += 1
+				out[y * n + x] = acc / float(cnt)
+		cur = out
+	return cur
+
+
 func _r_mass(g: PackedFloat32Array, n: int, q: float) -> float:
 	var c := float(n) * 0.5
 	var bins := PackedFloat32Array()
@@ -871,7 +899,7 @@ func _clock_grown(p_res: int) -> PackedFloat32Array:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = Time.get_ticks_usec()
 	var n0: int = maxi(p_res >> (m.hierarchy_levels - 1), 16)
-	return m._mass(m._rasterise(m._grow(rng, n0, p_res), p_res), p_res)
+	return m._massif(m._grow(rng, n0, p_res), p_res)
 
 
 ## Bitwise-equal, with NaN counted as equal to NaN. A captured brush surface is NaN wherever the brush

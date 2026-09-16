@@ -1668,8 +1668,6 @@ Dictionary Pasture3DUtil::dla_grow_field(const Dictionary &p_params) {
 	p.hierarchy_levels = (int)p_params.get("hierarchy_levels", 4);
 	p.detail_size = (double)p_params.get("detail_size", 0.12);
 	p.wander = (double)p_params.get("wander", 0.32);
-	p.blur_levels = (int)p_params.get("blur_levels", 5);
-	p.blur_growth = (double)p_params.get("blur_growth", 1.6);
 	p.profile_power = (double)p_params.get("profile_power", 1.0);
 	p.coverage = (double)p_params.get("coverage", 0.95);
 	p.ridge_seeding = (bool)p_params.get("ridge_seeding", false);
@@ -1689,6 +1687,7 @@ Dictionary Pasture3DUtil::dla_grow_field(const Dictionary &p_params) {
 	out["field"] = r.field;
 	out["n"] = r.n;
 	out["dims"] = r.dims;
+	out["walk_dispatches"] = r.walk_dispatches;
 	return out;
 }
 

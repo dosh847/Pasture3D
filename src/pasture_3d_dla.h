@@ -30,8 +30,6 @@ struct DLAParams {
 	int hierarchy_levels = 4;
 	double detail_size = 0.12;
 	double wander = 0.32;
-	int blur_levels = 5;
-	double blur_growth = 1.6;
 	double profile_power = 1.0;
 	double coverage = 0.95;
 	bool ridge_seeding = false;
@@ -43,6 +41,11 @@ struct DLAParams {
 	PackedFloat32Array seed_surface;
 	int seed_gw = 0;
 	int seed_gh = 0;
+	// The captured outline surface (Pasture3DReliefDLA._shape) — the same grid, read for its NaN boundary
+	// rather than its ridges. Empty = no loop to follow, and the envelope falls back to the ellipse.
+	PackedFloat32Array shape_surface;
+	int shape_gw = 0;
+	int shape_gh = 0;
 	// [cx, cz, cos, sin, ex, ez, min_x, min_z, vs] — the loop frame, as the script's `frame` array.
 	double frame[9] = { 0, 0, 1, 0, 0, 0, 0, 0, 0 };
 	int frame_size = 0;
@@ -52,6 +55,9 @@ struct DLAResult {
 	PackedFloat32Array field; // n x n, normalised [0,1]
 	int n = 0;
 	Vector2i dims; // the loop's crop of the square grid (Pasture3DReliefDLA._field_dims)
+	// Walk batches that actually split across threads — for the thread-parity gate, which must be able to tell
+	// a threaded walk from a batch too small to split.
+	int64_t walk_dispatches = 0;
 };
 
 // Pasture3DReliefDLA.grow_into, returning what it writes into its state Dictionary (minus the key).

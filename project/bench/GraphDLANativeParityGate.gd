@@ -111,11 +111,11 @@ func _engine_stream(p_seed: int, p_rounds: int, p_dev: float) -> PackedFloat64Ar
 func _g_growth_parity() -> void:
 	print("\n[G] the grown field is identical, config by config")
 	var configs := [
-		{"name": "small 64/3", "resolution": 64, "hierarchy_levels": 3, "blur_levels": 4, "coverage": 0.9},
+		{"name": "small 64/3", "resolution": 64, "hierarchy_levels": 3, "coverage": 0.9},
 		{"name": "default 256/4", "resolution": 256},
 		{"name": "non-square 3:1", "resolution": 128, "hierarchy_levels": 3, "host_ex": 150.0, "host_ez": 50.0},
 		{"name": "no wander, power 2", "resolution": 128, "hierarchy_levels": 3, "wander": 0.0, "profile_power": 2.0, "seed": 17},
-		{"name": "coarse detail 0.4", "resolution": 128, "detail_size": 0.4, "blur_growth": 0.8, "seed": -3},
+		{"name": "coarse detail 0.4", "resolution": 128, "detail_size": 0.4, "seed": -3},
 		{"name": "ridge seeded", "resolution": 128, "hierarchy_levels": 3, "ridge_seeding": true, "ridge_amount": 0.1, "seeded": true},
 	]
 	var all_ok := true
@@ -229,11 +229,12 @@ func _t_thread_parity() -> void:
 		var d0: int = Pasture3DUtil.parallel_dispatch_count()
 		var grown: Dictionary = Pasture3DUtil.dla_grow_field(_params_for(cfg))
 		var d_grow: int = Pasture3DUtil.parallel_dispatch_count() - d0
+		var d_walk: int = int(grown.get("walk_dispatches", -1))
 		d0 = Pasture3DUtil.parallel_dispatch_count()
 		var g := _n_graph(_n_node({"resolution": 128}, 0), 1, -1.0)
 		var sampled := g.evaluate(192, 160, rect, null, PackedFloat32Array())
 		var d_graph: int = Pasture3DUtil.parallel_dispatch_count() - d0
-		arms[threads] = {"grown": grown["field"], "sampled": sampled, "d_grow": d_grow, "d_graph": d_graph, "native": g.native_supported()}
+		arms[threads] = {"grown": grown["field"], "sampled": sampled, "d_grow": d_grow, "d_walk": d_walk, "d_graph": d_graph, "native": g.native_supported()}
 	Pasture3DUtil.set_max_threads(0)
 	var s: Dictionary = arms[1]
 	var t: Dictionary = arms[0]
@@ -241,10 +242,11 @@ func _t_thread_parity() -> void:
 	var ds := _diff_nan(s["sampled"], t["sampled"])
 	print("    growth: differing=%d | graph: differing=%d native=%s peak=%.3f"
 		% [dg[1], ds[1], t["native"], _max(t["sampled"])])
-	print("    splits: 1 thread grow=%d graph=%d (want 0) | N threads grow=%d graph=%d (want > 0)"
-		% [s["d_grow"], s["d_graph"], t["d_grow"], t["d_graph"]])
+	print("    splits: 1 thread grow=%d walks=%d graph=%d (want 0) | N threads grow=%d walks=%d graph=%d (want > 0)"
+		% [s["d_grow"], s["d_walk"], s["d_graph"], t["d_grow"], t["d_walk"], t["d_graph"]])
 	_check(dg[1] == 0 and ds[1] == 0 and t["native"] and _max(t["sampled"]) > 0.5
-			and s["d_grow"] == 0 and s["d_graph"] == 0 and t["d_grow"] > 0 and t["d_graph"] > 0,
+			and s["d_grow"] == 0 and s["d_walk"] == 0 and s["d_graph"] == 0
+			and t["d_grow"] > 0 and t["d_walk"] > 0 and t["d_graph"] > 0,
 		"threading changed the DLA field, or an arm did not run the way it claims")
 
 
@@ -252,7 +254,6 @@ func _n_node(p_props: Dictionary, p_eval: int) -> Pasture3DGraphNode:
 	var n: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"dla")
 	n.set("resolution", 64)
 	n.set("hierarchy_levels", 3)
-	n.set("blur_levels", 4)
 	n.set("amplitude", 100.0)
 	for k in p_props:
 		n.set(k, p_props[k])
@@ -305,8 +306,7 @@ func _diff_nan(p_a: PackedFloat32Array, p_b: PackedFloat32Array) -> Array:
 func _engine_for(p_cfg: Dictionary) -> Object:
 	var e = ReliefDLA.new()
 	var pp := _params_for(p_cfg)
-	for k in ["coverage", "resolution", "hierarchy_levels", "detail_size", "wander", "seed", "blur_levels",
-			"blur_growth", "profile_power", "ridge_seeding", "ridge_amount"]:
+	for k in ["coverage", "resolution", "hierarchy_levels", "detail_size", "wander", "seed", "profile_power", "ridge_seeding", "ridge_amount"]:
 		e.set(k, pp[k])
 	e._host_ex = pp["host_ex"]
 	e._host_ez = pp["host_ez"]
@@ -324,8 +324,6 @@ func _params_for(p_cfg: Dictionary) -> Dictionary:
 		"hierarchy_levels": int(p_cfg.get("hierarchy_levels", 4)),
 		"detail_size": float(p_cfg.get("detail_size", 0.12)),
 		"wander": float(p_cfg.get("wander", 0.32)),
-		"blur_levels": int(p_cfg.get("blur_levels", 5)),
-		"blur_growth": float(p_cfg.get("blur_growth", 1.6)),
 		"profile_power": float(p_cfg.get("profile_power", 1.0)),
 		"coverage": float(p_cfg.get("coverage", 0.95)),
 		"ridge_seeding": bool(p_cfg.get("ridge_seeding", false)),

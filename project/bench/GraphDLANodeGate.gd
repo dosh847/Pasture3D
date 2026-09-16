@@ -49,7 +49,6 @@ func _new_dla(p_eval) -> Pasture3DGraphNodeDLA:
 	var d := Pasture3DGraphNodeDLA.new()
 	d.resolution = 64
 	d.hierarchy_levels = 3
-	d.blur_levels = 4
 	d.coverage = 0.9
 	d.amplitude = 100.0
 	d.evaluation = p_eval

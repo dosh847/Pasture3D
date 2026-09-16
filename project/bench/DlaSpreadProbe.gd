@@ -77,7 +77,6 @@ func _run(p_name: String, p_label: String, p_capped: bool, p_flank: int, p_cover
 	mat.resolution = 256
 	mat.coverage = p_coverage
 	mat.profile_power = p_power
-	mat.blur_growth = p_growth
 	mat.seed = 5
 	# LIVE: the sweep varies growth inputs and reads the mountain each one produces.
 	mat.evaluation = Pasture3DReliefDLA.Evaluation.LIVE

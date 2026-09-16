@@ -114,6 +114,16 @@ const int REF_PARTICLES = 3000;
 const int REF_RESOLUTION = 512;
 const double REF_BLUR_SHARE = 0.3243;
 const double BLUR_CEILING = 0.70;
+const double WINDOW_BAND = 0.05;
+// The slope's run as a share of the massif's radius. See the script.
+const double SLOPE_RUN = 0.18;
+// How much of a crest's height its depth in the tree can take away. See the script.
+const double DEPTH_BITE = 0.55;
+const int SHAPE_DIRS = 64;
+const int SHAPE_STEPS = 256;
+// sqrt(2): the working grid is a SQUARE, so a march must be able to reach its corners. See the script.
+const double SHAPE_REACH = 1.4142135623730951;
+const double SHAPE_MIN_FRAC = 0.05;
 const int FIELD_MIN = 8;
 const double TAU_D = 6.283185307179586;
 
@@ -121,6 +131,8 @@ struct DLAGrower {
 	const DLAParams &p;
 	DLAPcg rng;
 	std::vector<float> seed_samples; // scratch for _sample_seed
+	mutable std::vector<float> shape_tbl; // the loop's outline, measured once (see shape_table)
+	mutable bool shape_ready = false;
 
 	explicit DLAGrower(const DLAParams &p_params) :
 			p(p_params) {}
@@ -153,47 +165,184 @@ struct DLAGrower {
 		return v;
 	}
 
+	// An envelope: the ellipse's semi-axes, plus a radius per direction that supersedes them when the loop's
+	// outline is known. `tbl` empty = the ellipse, and that branch is the expression the script always used,
+	// so an unhosted growth stays bit-identical. Mirrors the script's `[Vector2, PackedFloat32Array]`.
+	struct Env {
+		V2f semi;
+		std::vector<float> tbl;
+	};
+
+	// _shape_table. Cached: the march is over the captured grid and does not depend on the level.
+	const std::vector<float> &shape_table() const {
+		if (shape_ready) {
+			return shape_tbl;
+		}
+		shape_ready = true;
+		shape_tbl.clear();
+		const int gw = p.shape_gw;
+		const int gh = p.shape_gh;
+		if (p.shape_surface.size() != (int64_t)gw * gh || gw < 2 || gh < 2 || p.frame_size < 9) {
+			return shape_tbl;
+		}
+		const double cx = p.frame[0];
+		const double cz = p.frame[1];
+		const double fcos = p.frame[2];
+		const double fsin = p.frame[3];
+		const double min_x = p.frame[6];
+		const double min_z = p.frame[7];
+		const double vs = p.frame[8];
+		if (vs <= 0.0) {
+			return shape_tbl;
+		}
+		const double side = std::max(p.frame[4], p.frame[5]);
+		const float *g = p.shape_surface.ptr();
+		if (!std::isfinite(bilinear(g, gw, gh, (cx - min_x) / vs, (cz - min_z) / vs))) {
+			return shape_tbl; // no data at the centre: the ellipse, as the script falls back
+		}
+		shape_tbl.assign((size_t)SHAPE_DIRS, 0.0f);
+		for (int k = 0; k < SHAPE_DIRS; k++) {
+			const double ang = TAU_D * (double)k / (double)SHAPE_DIRS;
+			const double ca = std::cos(ang);
+			const double sa = std::sin(ang);
+			double last = 0.0;
+			for (int s = 1; s <= SHAPE_STEPS; s++) {
+				const double f = (double)s / (double)SHAPE_STEPS * SHAPE_REACH;
+				const double lx = f * side * ca;
+				const double lz = f * side * sa;
+				const double wx = cx + lx * fcos - lz * fsin;
+				const double wz = cz + lx * fsin + lz * fcos;
+				if (!std::isfinite(bilinear(g, gw, gh, (wx - min_x) / vs, (wz - min_z) / vs))) {
+					break;
+				}
+				last = f;
+			}
+			shape_tbl[(size_t)k] = (float)std::max(last, SHAPE_MIN_FRAC);
+		}
+		return shape_tbl;
+	}
+
+	// _radius_at
+	static double radius_at(const std::vector<float> &tbl, double ang) {
+		const int k = (int)tbl.size();
+		double m = std::fmod(ang, TAU_D);
+		if (m < 0.0) {
+			m += TAU_D; // GDScript's fposmod
+		}
+		const double t = m / TAU_D * (double)k;
+		const int i0 = (int)t % k;
+		const int i1 = (i0 + 1) % k;
+		const double w = t - std::floor(t);
+		return lerpd((double)tbl[(size_t)i0], (double)tbl[(size_t)i1], w);
+	}
+
+	// _reach_bins
+	static int reach_bins(const Env &e) {
+		return e.tbl.empty() ? 1 : (int)e.tbl.size();
+	}
+
+	// _reach_bin
+	static int reach_bin(double dx, double dy, int bins) {
+		if (bins <= 1) {
+			return 0;
+		}
+		double m = std::fmod(std::atan2(dy, dx), TAU_D);
+		if (m < 0.0) {
+			m += TAU_D;
+		}
+		return (int)(m / TAU_D * (double)bins) % bins;
+	}
+
+	// _env_typical: the median of an outline, the shorter semi-axis of an ellipse. See the script for why the
+	// median and not the minimum — a non-convex loop's notch directions would otherwise set the blur.
+	static double env_typical(const Env &e) {
+		if (e.tbl.empty()) {
+			return std::min((double)e.semi.x, (double)e.semi.y);
+		}
+		std::vector<float> v = e.tbl;
+		std::sort(v.begin(), v.end());
+		return (double)v[v.size() / 2];
+	}
+
+	// _env_max
+	static double env_max(const Env &e) {
+		if (e.tbl.empty()) {
+			return std::max((double)e.semi.x, (double)e.semi.y);
+		}
+		double m = 0.0;
+		for (float v : e.tbl) {
+			m = std::max(m, (double)v);
+		}
+		return m;
+	}
+
+	// _env_launch
+	static V2f env_launch(const Env &e, double ang) {
+		if (e.tbl.empty()) {
+			return e.semi;
+		}
+		const float r = (float)radius_at(e.tbl, ang);
+		V2f v;
+		v.x = r;
+		v.y = r;
+		return v;
+	}
+
 	// _outer: Vector2 * float converts the scalar to real_t first, then multiplies in float32.
-	V2f outer(int n) const {
+	Env outer(int n) const {
 		const V2f a = aspect_scale();
 		const float s = (float)(p.coverage * 0.5 * (double)n);
-		V2f o;
-		o.x = a.x * s;
-		o.y = a.y * s;
+		Env o;
+		o.semi.x = a.x * s;
+		o.semi.y = a.y * s;
+		const std::vector<float> &t = shape_table();
+		if (!t.empty()) {
+			const double sc = p.coverage * 0.5 * (double)n;
+			o.tbl.resize(t.size());
+			for (size_t i = 0; i < t.size(); i++) {
+				o.tbl[i] = (float)((double)t[i] * sc);
+			}
+		}
 		return o;
 	}
 
 	// _rho
-	static double rho(double dx, double dy, const V2f &e) {
-		const double u = dx / std::max((double)e.x, 0.001);
-		const double v = dy / std::max((double)e.y, 0.001);
-		return std::sqrt(u * u + v * v);
+	static double rho(double dx, double dy, const Env &e) {
+		if (e.tbl.empty()) {
+			const double u = dx / std::max((double)e.semi.x, 0.001);
+			const double v = dy / std::max((double)e.semi.y, 0.001);
+			return std::sqrt(u * u + v * v);
+		}
+		return std::sqrt(dx * dx + dy * dy) / std::max(radius_at(e.tbl, std::atan2(dy, dx)), 0.001);
 	}
 
-	// _blur_budget
-	int blur_budget(int n) const {
-		const V2f o = outer(n);
-		const double m = std::min((double)o.x, (double)o.y);
-		const double ask = 4.0 * p.detail_size;
-		return std::clamp((int)(m * std::min(ask / (1.0 + ask), BLUR_CEILING)), 1, std::max(1, (int)(m * BLUR_CEILING)));
+	// _slope_run
+	int slope_run(int n) const {
+		return std::max(1, (int)(env_typical(outer(n)) * SLOPE_RUN));
 	}
 
 	// _grow_extent
-	V2f grow_extent(int n) const {
-		const V2f o = outer(n);
-		const double b = (double)blur_budget(n);
-		V2f e;
-		e.x = (float)std::max(std::min(4.0, (double)o.x * 0.5), (double)o.x - b);
-		e.y = (float)std::max(std::min(4.0, (double)o.y * 0.5), (double)o.y - b);
+	Env grow_extent(int n) const {
+		const Env o = outer(n);
+		const double b = (double)slope_run(n);
+		Env e;
+		e.semi.x = (float)std::max(std::min(4.0, (double)o.semi.x * 0.5), (double)o.semi.x - b);
+		e.semi.y = (float)std::max(std::min(4.0, (double)o.semi.y * 0.5), (double)o.semi.y - b);
+		if (!o.tbl.empty()) {
+			e.tbl.resize(o.tbl.size());
+			for (size_t i = 0; i < o.tbl.size(); i++) {
+				const double r = (double)o.tbl[i];
+				e.tbl[i] = (float)std::max(std::min(4.0, r * 0.5), r - b);
+			}
+		}
 		return e;
 	}
 
 	// _particles
 	int particles() const {
-		const V2f e = grow_extent(grid_size());
-		const double r = std::max((double)e.x, (double)e.y);
+		const double r = env_max(grow_extent(grid_size()));
 		const double ref_r = REF_COVERAGE * 0.5 * (double)REF_RESOLUTION * (1.0 - REF_BLUR_SHARE);
-		return std::clamp((int)((double)REF_PARTICLES * (r / ref_r) * std::pow(REF_DETAIL / p.detail_size, 0.7)), 64, 24000);
+		return std::clamp((int)((double)REF_PARTICLES * (r / ref_r) * std::pow(REF_DETAIL / p.detail_size, 0.45)), 64, 24000);
 	}
 
 	// _bilinear (NaN-propagating)
@@ -268,7 +417,7 @@ struct DLAGrower {
 		}
 		const std::vector<float> &h = seed_samples;
 		const double c = (double)n * 0.5;
-		const V2f limit = grow_extent(n);
+		const Env limit = grow_extent(n);
 		std::vector<float> ridge((size_t)n * n, -std::numeric_limits<float>::infinity());
 		std::vector<float> live;
 		const int nbr[4] = { -1, 1, -n, n };
@@ -346,63 +495,124 @@ struct DLAGrower {
 	void grow_level(int n, double p_frac, int p_particles, std::vector<float> &xs, std::vector<float> &ys,
 			std::vector<int32_t> &parents, std::vector<int32_t> &owner) {
 		const double c = (double)n * 0.5;
-		const V2f env = grow_extent(n);
+		const Env env = grow_extent(n);
 		const double limit = p_frac;
-		const double per_cell = 1.0 / std::max(std::min((double)env.x, (double)env.y), 1.0);
-		double reach = per_cell;
+		const double per_cell = 1.0 / std::max(env_typical(env), 1.0);
+		// The cluster's reach PER DIRECTION — one bin for an ellipse, one per outline entry. See the script
+		// for why a single scalar stalls an outlined growth.
+		const int dirs = reach_bins(env);
+		std::vector<float> reach((size_t)dirs, (float)per_cell);
 		for (size_t i = 0; i < xs.size(); i++) {
-			reach = std::max(reach, rho((double)xs[i] - c, (double)ys[i] - c, env));
+			const double dx = (double)xs[i] - c;
+			const double dy = (double)ys[i] - c;
+			const int b = reach_bin(dx, dy, dirs);
+			reach[(size_t)b] = (float)std::max((double)reach[(size_t)b], rho(dx, dy, env));
 		}
 		const int budget = n * 4;
-		for (int pi = 0; pi < p_particles; pi++) {
-			const bool growing = reach < limit && pi * 10 < p_particles * 7;
-			const double base = std::min(reach + 3.0 * per_cell, limit);
-			const double launch = base * ((growing || (pi & 1) == 0) ? 1.0 : std::sqrt((double)rng.randf()));
-			const double ang = (double)rng.randf() * TAU_D;
-			int px = iround(c + std::cos(ang) * launch * (double)env.x);
-			int py = iround(c + std::sin(ang) * launch * (double)env.y);
-			const double kill = limit + 6.0 * per_cell;
-			int stuck = -1;
-			for (int s = 0; s < budget; s++) {
-				if (px < 1 || py < 1 || px >= n - 1 || py >= n - 1) {
-					break;
+		const double kill = limit + 6.0 * per_cell;
+		// BATCHED WALKS (see the script's _grow_level for why each rule is what it is). A batch walks against
+		// the cluster as it stood when the batch began — `owner` is only read — each particle on its own stream,
+		// so the batch splits on the pool with nothing shared. The commit is serial and in particle order.
+		std::vector<int32_t> result;
+		int pi = 0;
+		while (pi < p_particles) {
+			const int batch = std::min(std::clamp((int)(xs.size() >> 3), 1, 256), p_particles - pi);
+			const std::vector<float> reach0 = reach;
+			const int first = pi;
+			result.assign((size_t)batch * 3, -1);
+			const int64_t d0 = Pasture3DThreadPool::s_dispatches.load(std::memory_order_relaxed);
+			Pasture3DThreadPool::parallel_for_rows(batch, 8, [&](int b0, int b1) {
+				DLAPcg prng;
+				for (int b = b0; b < b1; b++) {
+					const int q = first + b;
+					prng.seed(walk_seed(n, q));
+					// The ellipse draws in the original order (interior factor, then angle); an outline must
+					// know the angle before it can read the reach in that direction, so it draws the angle
+					// first. Different streams on purpose — see the script's _walk.
+					int px = 0;
+					int py = 0;
+					if (!env.tbl.empty()) {
+						const double oang = (double)prng.randf() * TAU_D;
+						const double olr = (double)reach0[(size_t)reach_bin(std::cos(oang), std::sin(oang), (int)reach0.size())];
+						const bool ogrowing = olr < limit && q * 10 < p_particles * 7;
+						const double olaunch = std::min(olr + 3.0 * per_cell, limit) * ((ogrowing || (q & 1) == 0) ? 1.0 : std::sqrt((double)prng.randf()));
+						const double orad = radius_at(env.tbl, oang);
+						px = iround(c + std::cos(oang) * olaunch * orad);
+						py = iround(c + std::sin(oang) * olaunch * orad);
+					} else {
+						const bool growing = (double)reach0[0] < limit && q * 10 < p_particles * 7;
+						const double base = std::min((double)reach0[0] + 3.0 * per_cell, limit);
+						const double launch = base * ((growing || (q & 1) == 0) ? 1.0 : std::sqrt((double)prng.randf()));
+						const double ang = (double)prng.randf() * TAU_D;
+						const V2f lv = env_launch(env, ang);
+						px = iround(c + std::cos(ang) * launch * (double)lv.x);
+						py = iround(c + std::sin(ang) * launch * (double)lv.y);
+					}
+					int stuck = -1;
+					for (int s = 0; s < budget; s++) {
+						if (px < 1 || py < 1 || px >= n - 1 || py >= n - 1) {
+							break;
+						}
+						if (rho((double)px - c, (double)py - c, env) > kill) {
+							break;
+						}
+						stuck = neighbour_owner(owner, n, px, py);
+						if (stuck >= 0) {
+							break;
+						}
+						switch (prng.rand() & 3u) {
+							case 0:
+								px += 1;
+								break;
+							case 1:
+								px -= 1;
+								break;
+							case 2:
+								py += 1;
+								break;
+							default:
+								py -= 1;
+								break;
+						}
+					}
+					result[(size_t)b * 3] = stuck;
+					result[(size_t)b * 3 + 1] = px;
+					result[(size_t)b * 3 + 2] = py;
 				}
-				if (rho((double)px - c, (double)py - c, env) > kill) {
-					break;
+			});
+			walk_dispatches += Pasture3DThreadPool::s_dispatches.load(std::memory_order_relaxed) - d0;
+			for (int b = 0; b < batch; b++) {
+				const int stuck = result[(size_t)b * 3];
+				if (stuck < 0) {
+					continue;
 				}
-				stuck = neighbour_owner(owner, n, px, py);
-				if (stuck >= 0) {
-					break;
+				const int px = result[(size_t)b * 3 + 1];
+				const int py = result[(size_t)b * 3 + 2];
+				if (rho((double)px - c, (double)py - c, env) > limit) {
+					continue;
 				}
-				switch (rng.rand() & 3u) {
-					case 0:
-						px += 1;
-						break;
-					case 1:
-						px -= 1;
-						break;
-					case 2:
-						py += 1;
-						break;
-					default:
-						py -= 1;
-						break;
+				if (owner[(size_t)(py * n + px)] >= 0) {
+					continue; // an earlier particle of this batch took the cell
 				}
+				const int32_t id = (int32_t)xs.size();
+				xs.push_back((float)px);
+				ys.push_back((float)py);
+				parents.push_back(stuck);
+				owner[(size_t)(py * n + px)] = id;
+				const int rb = reach_bin((double)px - c, (double)py - c, dirs);
+				reach[(size_t)rb] = (float)std::max((double)reach[(size_t)rb], rho((double)px - c, (double)py - c, env));
 			}
-			if (stuck < 0) {
-				continue;
-			}
-			if (rho((double)px - c, (double)py - c, env) > limit) {
-				continue;
-			}
-			const int32_t id = (int32_t)xs.size();
-			xs.push_back((float)px);
-			ys.push_back((float)py);
-			parents.push_back(stuck);
-			owner[(size_t)(py * n + px)] = id;
-			reach = std::max(reach, rho((double)px - c, (double)py - c, env));
+			pi += batch;
 		}
 	}
+
+	// _walk_seed: one stream per (level grid, particle). Shifted clear of the seed's low bits, then XORed in,
+	// on uint64 so the script's wrapping int64 and this agree.
+	uint64_t walk_seed(int n, int q) const {
+		return (uint64_t)p.seed ^ ((((uint64_t)n << 20) | (uint64_t)q) << 24);
+	}
+
+	int64_t walk_dispatches = 0;
 
 	// _stamp_edge
 	static void stamp_edge(std::vector<int32_t> &owner, int n, const std::vector<float> &xs,
@@ -521,7 +731,7 @@ struct DLAGrower {
 		std::vector<float> out((size_t)p_res * p_res, 0.0f);
 		for (size_t i = 0; i < xs.size(); i++) {
 			const int pa = parents[i];
-			if (pa < 0) {
+			if (pa < 0 || (size_t)pa >= xs.size()) {
 				plot(out, p_res, xs[i], ys[i]);
 				continue;
 			}
@@ -536,67 +746,10 @@ struct DLAGrower {
 		return out;
 	}
 
-	// _blur_radii
-	std::vector<int> blur_radii(int n) const {
-		const int budget = blur_budget(n);
-		const int span = (1 << p.blur_levels) - 1;
-		const int r0 = std::max(1, budget / span);
-		std::vector<int> out;
-		int used = 0;
-		for (int k = 0; k < p.blur_levels; k++) {
-			const int r = r0 << k;
-			if (used + r > budget && !out.empty()) {
-				break;
-			}
-			out.push_back(r);
-			used += r;
-		}
-		return out;
-	}
-
-	// ---- PARALLEL, AND STILL THE SCRIPT BIT FOR BIT ----
-	//
-	// The passes below split into rows (or columns) on the thread pool. Each row's running sum is its own, in
-	// the script's order, so a row's values do not depend on which thread or chunk computed it; the per-cell
-	// blend is independent per cell; and a max is the same max in any order. GraphDLANativeParityGate [T]
-	// holds 1 thread against N on a grid large enough to split, and reads the dispatch counter to prove it did.
 	static constexpr int k_rows_per_chunk = 16;
 
-	// _box_blur
-	static std::vector<float> box_blur(const std::vector<float> &src, int n, int r) {
-		std::vector<float> tmp((size_t)n * n);
-		const double inv = 1.0 / (double)(2 * r + 1);
-		Pasture3DThreadPool::parallel_for_rows(n, k_rows_per_chunk, [&](int y0, int y1) {
-			for (int y = y0; y < y1; y++) {
-				const int row = y * n;
-				double acc = (double)src[(size_t)row] * (double)(r + 1);
-				for (int i = 1; i < r + 1; i++) {
-					acc += (double)src[(size_t)(row + std::min(i, n - 1))];
-				}
-				for (int x = 0; x < n; x++) {
-					tmp[(size_t)(row + x)] = (float)(acc * inv);
-					acc += (double)src[(size_t)(row + std::min(x + r + 1, n - 1))] - (double)src[(size_t)(row + std::max(x - r, 0))];
-				}
-			}
-		});
-		std::vector<float> out((size_t)n * n);
-		// Columns, split the same way: the pool's "rows" are just an index range.
-		Pasture3DThreadPool::parallel_for_rows(n, k_rows_per_chunk, [&](int x0, int x1) {
-			for (int x = x0; x < x1; x++) {
-				double acc = (double)tmp[(size_t)x] * (double)(r + 1);
-				for (int i = 1; i < r + 1; i++) {
-					acc += (double)tmp[(size_t)(std::min(i, n - 1) * n + x)];
-				}
-				for (int y = 0; y < n; y++) {
-					out[(size_t)(y * n + x)] = (float)(acc * inv);
-					acc += (double)tmp[(size_t)(std::min(y + r + 1, n - 1) * n + x)] - (double)tmp[(size_t)(std::max(y - r, 0) * n + x)];
-				}
-			}
-		});
-		return out;
-	}
-
-	// The largest cell, per row on the pool and folded serially.
+	// The peak of a field, by rows. Row-parallel and then reduced in row order, so the answer does not
+	// depend on how the pool split the work.
 	static double max_of(const std::vector<float> &g, int n) {
 		std::vector<double> row_max((size_t)n, 0.0);
 		Pasture3DThreadPool::parallel_for_rows(n, k_rows_per_chunk, [&](int y0, int y1) {
@@ -615,41 +768,184 @@ struct DLAGrower {
 		return m;
 	}
 
-	// _mass
-	std::vector<float> mass(const std::vector<float> &raster, int n) const {
+	// _massif -- the mountain: every point of the ridge tree is a crest whose height falls with how central
+	// it is, and the ground away from a crest falls to nothing over one slope run. A max-plus distance
+	// transform, two chamfer sweeps, carrying the crest AND the distance so every crest's foot lands at the
+	// same radius. See the script for why a sum of blurred skeletons could not make this shape.
+	std::vector<float> massif(const std::vector<float> &xs, const std::vector<float> &ys,
+			const std::vector<int32_t> &parents, int n) const {
 		const size_t nn = (size_t)n * n;
 		std::vector<float> out(nn, 0.0f);
-		std::vector<float> img = raster;
-		double weight = 1.0;
-		double total = 0.0;
-		for (int r : blur_radii(n)) {
-			img = box_blur(img, n, r);
-			const double lvl = max_of(img, n);
-			if (lvl <= 0.0) {
-				continue;
-			}
-			const double k = weight / lvl;
-			Pasture3DThreadPool::parallel_for_rows(n, k_rows_per_chunk, [&](int y0, int y1) {
-				for (size_t i = (size_t)y0 * n; i < (size_t)y1 * n; i++) {
-					out[i] = (float)((double)out[i] + (double)img[i] * k);
-				}
-			});
-			total += weight;
-			weight *= p.blur_growth;
-		}
-		if (total <= 0.0) {
+		const int count = (int)xs.size();
+		if (count < 1) {
 			return out;
 		}
+		const double run = (double)slope_run(n);
+		const Env env = outer(n);
+		const double c = (double)n * 0.5;
+		const std::vector<int32_t> depth = depths(parents);
+		int deepest = 1;
+		for (int32_t v : depth) {
+			deepest = std::max(deepest, (int)v);
+		}
+		const double span = (double)(deepest + 1);
+		for (int i = 0; i < count; i++) {
+			const int pa = parents[(size_t)i];
+			if (pa < 0 || pa >= count) {
+				crest(out, n, xs[(size_t)i], ys[(size_t)i],
+						crest_height((double)xs[(size_t)i] - c, (double)ys[(size_t)i] - c, env,
+								(double)depth[(size_t)i] / span));
+				continue;
+			}
+			const double dx = (double)xs[(size_t)pa] - (double)xs[(size_t)i];
+			const double dy = (double)ys[(size_t)pa] - (double)ys[(size_t)i];
+			const int steps = std::max(1, (int)std::ceil(std::max(std::fabs(dx), std::fabs(dy))));
+			const double fi = (double)depth[(size_t)i] / span;
+			const double fp = (double)depth[(size_t)pa] / span;
+			for (int st = 0; st < steps + 1; st++) {
+				const double t = (double)st / (double)steps;
+				const double px = (double)xs[(size_t)i] + dx * t;
+				const double py = (double)ys[(size_t)i] + dy * t;
+				crest(out, n, px, py, crest_height(px - c, py - c, env, lerpd(fi, fp, t)));
+			}
+		}
+		std::vector<float> src = out;
+		std::vector<float> dist(nn, std::numeric_limits<float>::infinity());
+		for (size_t i = 0; i < nn; i++) {
+			if (out[i] > 0.0f) {
+				dist[i] = 0.0f;
+			}
+		}
+		const double diag = 1.4142135623730951;
+		// SERIAL, both sweeps: a chamfer carries each cell's answer to the next one, so splitting it by rows
+		// would change the result at every chunk boundary and the script could not be matched.
+		for (int y = 0; y < n; y++) {
+			for (int x = 0; x < n; x++) {
+				const int i = y * n + x;
+				if (x > 0) {
+					relax(src, dist, i, i - 1, 1.0, run);
+				}
+				if (y > 0) {
+					relax(src, dist, i, i - n, 1.0, run);
+					if (x > 0) {
+						relax(src, dist, i, i - n - 1, diag, run);
+					}
+					if (x < n - 1) {
+						relax(src, dist, i, i - n + 1, diag, run);
+					}
+				}
+			}
+		}
+		for (int y = n - 1; y >= 0; y--) {
+			for (int x = n - 1; x >= 0; x--) {
+				const int i = y * n + x;
+				if (x < n - 1) {
+					relax(src, dist, i, i + 1, 1.0, run);
+				}
+				if (y < n - 1) {
+					relax(src, dist, i, i + n, 1.0, run);
+					if (x < n - 1) {
+						relax(src, dist, i, i + n + 1, diag, run);
+					}
+					if (x > 0) {
+						relax(src, dist, i, i + n - 1, diag, run);
+					}
+				}
+			}
+		}
+		for (size_t i = 0; i < nn; i++) {
+			out[i] = (float)std::max(0.0, (double)src[i] * (1.0 - std::min((double)dist[i], run) / run));
+		}
+		return finish(std::move(out), n);
+	}
+
+	// _relax
+	static void relax(std::vector<float> &src, std::vector<float> &dist, int i, int j, double w, double run) {
+		const double d = (double)dist[(size_t)j] + w;
+		if (d >= run) {
+			return;
+		}
+		const double v = (double)src[(size_t)j] * (1.0 - d / run);
+		if (v > (double)src[(size_t)i] * (1.0 - std::min((double)dist[(size_t)i], run) / run)) {
+			src[(size_t)i] = src[(size_t)j];
+			dist[(size_t)i] = (float)d;
+		}
+	}
+
+	// _crest
+	static void crest(std::vector<float> &g, int n, double x, double y, double v) {
+		const int ix = iround(x);
+		const int iy = iround(y);
+		if (ix >= 0 && iy >= 0 && ix < n && iy < n && v > (double)g[(size_t)(iy * n + ix)]) {
+			g[(size_t)(iy * n + ix)] = (float)v;
+		}
+	}
+
+	// _crest_height
+	static double crest_height(double dx, double dy, const Env &e, double p_depth) {
+		const double radial = std::sqrt(std::max(0.0, 1.0 - std::min(1.0, rho(dx, dy, e))));
+		return radial * (1.0 - DEPTH_BITE * std::clamp(p_depth, 0.0, 1.0));
+	}
+
+	// _depths -- path length to the root. Walks and memoises: an upscale re-points a node at a midpoint it
+	// appends later, so parents can point FORWARD and a backward sweep would get those subtrees wrong.
+	static std::vector<int32_t> depths(const std::vector<int32_t> &parents) {
+		const int count = (int)parents.size();
+		std::vector<int32_t> d((size_t)count, -1);
+		std::vector<int32_t> stack;
+		for (int i = 0; i < count; i++) {
+			if (d[(size_t)i] >= 0) {
+				continue;
+			}
+			stack.clear();
+			int j = i;
+			// -2 marks "on the stack", so a cycle cannot spin here forever.
+			while (j >= 0 && j < count && d[(size_t)j] == -1) {
+				stack.push_back((int32_t)j);
+				d[(size_t)j] = -2;
+				j = parents[(size_t)j];
+			}
+			int base = 0;
+			if (j >= 0 && j < count && d[(size_t)j] >= 0) {
+				base = d[(size_t)j];
+			}
+			for (int k = (int)stack.size() - 1; k >= 0; k--) {
+				base += 1;
+				d[(size_t)stack[(size_t)k]] = (int32_t)base;
+			}
+		}
+		return d;
+	}
+
+	// _finish
+	std::vector<float> finish(std::vector<float> out, int n) const {
 		const double peak = max_of(out, n);
 		if (peak <= 0.0) {
 			return out;
 		}
 		const double inv = 1.0 / peak;
 		const double pw = p.profile_power;
+		// The envelope is ENFORCED here, matching the oracle: the cluster grows to what the blur spends, and
+		// the cascade's faint tail past `coverage` is windowed to zero on the envelope rather than left to
+		// be cropped square by a FIT-mapped brush. Applied after the profile power so the power cannot lift
+		// the tail back over the edge.
+		const Env env = outer(n);
+		const double c = (double)n * 0.5;
 		Pasture3DThreadPool::parallel_for_rows(n, k_rows_per_chunk, [&](int y0, int y1) {
-			for (size_t i = (size_t)y0 * n; i < (size_t)y1 * n; i++) {
-				const double v = (double)out[i] * inv;
-				out[i] = (float)(pw == 1.0 ? v : std::pow(v, pw));
+			for (int y = y0; y < y1; y++) {
+				for (int x = 0; x < n; x++) {
+					const size_t i = (size_t)y * n + x;
+					double v = (double)out[i] * inv;
+					v = pw == 1.0 ? v : std::pow(v, pw);
+					const double r = rho((double)x - c, (double)y - c, env);
+					if (r >= 1.0) {
+						v = 0.0;
+					} else if (r > 1.0 - WINDOW_BAND) {
+						const double t = (1.0 - r) / WINDOW_BAND;
+						v *= t * t * (3.0 - 2.0 * t);
+					}
+					out[i] = (float)v;
+				}
 			}
 		});
 		return out;
@@ -667,11 +963,12 @@ DLAResult dla_grow(const DLAParams &p_params) {
 	std::vector<float> ys;
 	std::vector<int32_t> parents;
 	g.grow(n0, res, xs, ys, parents);
-	const std::vector<float> field = g.mass(DLAGrower::rasterise(xs, ys, parents, res), res);
+	const std::vector<float> field = g.massif(xs, ys, parents, res);
 
 	DLAResult out;
 	out.n = res;
 	out.dims = g.field_dims();
+	out.walk_dispatches = g.walk_dispatches;
 	out.field.resize((int64_t)field.size());
 	std::copy(field.begin(), field.end(), out.field.ptrw());
 	return out;
