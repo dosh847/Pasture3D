@@ -529,6 +529,12 @@ public:
 			const double p_asymmetry, const double p_crest_sharpness, const double p_wander_amount,
 			const double p_wander_size, const int p_seed);
 
+	// Native Fractal generator (the relief FRACTAL material: fBm / ridged / billow + domain warp).
+	static PackedFloat32Array fractal_grid(const int p_gw, const int p_gh, const Rect2 &p_rect,
+			const int p_style, const double p_amplitude, const double p_feature_size, const int p_octaves,
+			const double p_lacunarity, const double p_gain, const double p_sharpness, const int p_seed,
+			const double p_warp_amount, const double p_warp_size, const int p_warp_octaves);
+
 	// Native Crater generator (impact craters).
 	static PackedFloat32Array crater_grid(const int p_gw, const int p_gh, const Rect2 &p_rect,
 			const double p_amplitude, const double p_floor_depth, const double p_rim_height,

@@ -697,7 +697,7 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 			var s0: int = inputs_of[ni][0] if not inputs_of[ni].is_empty() else -1
 			var sp0: int = input_ports_of[ni][0] if not input_ports_of[ni].is_empty() else 0
 			grids[ni] = _read_channel(s0, sp0, grids, aux, n).duplicate()
-		elif node.op() == &"noise_jordan" or node.op() == &"noise_swiss" or node.op() == &"furrows" or node.op() == &"dunes":
+		elif node.op() == &"noise_jordan" or node.op() == &"noise_swiss" or node.op() == &"furrows" or node.op() == &"dunes" or node.op() == &"fractal":
 			var in_grids := _input_grids(ni, grids, aux, n, p_input)
 			grids[ni] = node.eval_grid(in_grids, p_gw, p_gh, p_mask, p_rect)
 		elif node.needs_grid():
@@ -2157,7 +2157,7 @@ func _eval_unfolded(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input 
 		var in_grids := _input_grids(ni, grids, aux, n, p_input)
 		if node.muted:
 			grids[ni] = (in_grids[0] as PackedFloat32Array) if not in_grids.is_empty() else Pasture3DGraphOps.zeros(n)
-		elif node.op() == &"noise_jordan" or node.op() == &"noise_swiss" or node.op() == &"furrows" or node.op() == &"dunes":
+		elif node.op() == &"noise_jordan" or node.op() == &"noise_swiss" or node.op() == &"furrows" or node.op() == &"dunes" or node.op() == &"fractal":
 			# These are cell nodes, so the generic branch below would evaluate them one cell at a time in
 			# script; each has a whole-grid kernel, and this shortcut takes it. It must still go through
 			# `eval_grid(in_grids, ...)` — the previous version called the Pasture3DUtil kernel directly with

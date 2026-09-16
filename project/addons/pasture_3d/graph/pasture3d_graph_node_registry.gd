@@ -45,6 +45,7 @@ const ConstCurveScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_
 const ConstBoolScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_const_bool.gd")
 const FurrowsScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_furrows.gd")
 const DunesScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_dunes.gd")
+const FractalScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_fractal.gd")
 const CraterScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_crater.gd")
 const GeologicalPrimitiveScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_geological_primitive.gd")
 const MountainConeScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_mountain_cone.gd")
@@ -241,6 +242,7 @@ static func entries(p_include_dev: bool = false) -> Array[Dictionary]:
 		{"op": &"const_curve", "title": "Const Curve", "category": "Constants", "role": "Constant", "script": ConstCurveScript, "tags": ["constant", "curve", "spline", "ramp", "profile"], "description": "Provides a Curve profile resource constant."},
 		{"op": &"const_bool", "title": "Const Bool", "category": "Constants", "role": "Constant", "script": ConstBoolScript, "tags": ["constant", "bool", "boolean", "toggle", "switch", "flag"], "description": "Generates a boolean true/false toggle constant."},
 		{"op": &"furrows", "title": "Furrows", "category": "Generators", "role": "Generator", "script": FurrowsScript, "tags": ["ridges", "grooves", "stripes", "waves", "corrugation"], "description": "Directional corrugated ridge and furrow waves."},
+		{"op": &"fractal", "title": "Fractal", "category": "Generators", "role": "Generator", "script": FractalScript, "tags": ["fbm", "ridged", "billow", "multifractal", "noise", "craggy", "hills", "lumpy", "warp", "relief"], "description": "The relief Fractal material: multi-octave rolling hills (fBm), craggy ridged rock, or lumpy billow, with optional domain warping."},
 		{"op": &"dunes", "title": "Dunes", "category": "Generators", "role": "Generator", "script": DunesScript, "tags": ["sand", "wind", "waves", "desert"], "description": "Asymmetric sand dune wave patterns."},
 		{"op": &"crater", "title": "Crater", "category": "Generators", "role": "Generator", "script": CraterScript, "tags": ["meteor", "hole", "impact", "ring", "caldera"], "description": "Impact crater with raised rim and central cavity."},
 		{"op": &"geological_primitive", "title": "Geological Primitive", "category": "Generators", "role": "Generator", "script": GeologicalPrimitiveScript, "tags": ["inselberg", "monadnock", "bornhardt", "caldera", "volcano", "dome", "cuesta", "badlands", "primitive", "landform", "macro"], "description": "Parametric macro geological landforms: solitary inselberg domes, volcanic calderas, and cuesta badland ridges."},

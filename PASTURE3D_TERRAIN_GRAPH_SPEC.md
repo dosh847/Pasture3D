@@ -209,7 +209,11 @@ failures) ===`.
 5. **Graph-native relief & solver nodes — clean-category split (in progress).** The relief material system
    conflates categories in single ops; the graph splits each into a node that does ONE category's job, so
    the palette and the fold can reason about them:
-   * **Generators** (0 inputs, 1 output — a field): `Noise`, `Const`, `Furrows`, `Dunes`, `Crater`. **BUILT.**
+   * **Generators** (0 inputs, 1 output — a field): `Noise`, `Const`, `Furrows`, `Dunes`, `Crater`, `Fractal`. **BUILT.**
+     `Fractal` is the relief FRACTAL material as a generator — fBm / ridged / billow with a ridge
+     `sharpness` and a standalone domain warp, neither of which `Noise` can express. Gate
+     `bench/GraphFractalNodeGate`, which holds it to a `Pasture3DReliefFractal` built from the same
+     numbers, and the native kernel to the GDScript route.
    * **Filters** (1 input, transform it, invent nothing): `Smooth`, `Terrace`, `Strata`, `Curve`, `Mask`,
      `Reroute`. **BUILT.** Gate `bench/GraphReliefNodeGate` (Furrows generator + Terrace filter, each vs an
      independent re-derivation reusing the vetted relief statics `_furrows`/`_dunes`/`_crater`/`_scree`).

@@ -22,6 +22,7 @@
 #include "pasture_3d_erosion.h"
 #include "pasture_3d_erosion_hydraulic.h"
 #include "pasture_3d_erosion_thermal.h"
+#include "pasture_3d_fractal.h"
 #include "pasture_3d_furrows.h"
 #include "pasture_3d_geo_primitives.h"
 #include "pasture_3d_geological_primitive.h"
@@ -1283,6 +1284,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "gradient", GRAPH_OP_GRADIENT },
 		{ "value_ramp", GRAPH_OP_VALUE_RAMP },
 		{ "dla", GRAPH_OP_DLA },
+		{ "fractal", GRAPH_OP_FRACTAL },
 	};
 	Dictionary d;
 	for (const auto &e : k_ops) {
@@ -2178,6 +2180,14 @@ PackedFloat32Array Pasture3DUtil::dunes_grid(const int p_gw, const int p_gh, con
 		const double p_wander_size, const int p_seed) {
 	return godot::dunes_grid(p_gw, p_gh, p_rect, p_amplitude, p_wavelength, p_direction_deg,
 			p_asymmetry, p_crest_sharpness, p_wander_amount, p_wander_size, p_seed);
+}
+
+PackedFloat32Array Pasture3DUtil::fractal_grid(const int p_gw, const int p_gh, const Rect2 &p_rect,
+		const int p_style, const double p_amplitude, const double p_feature_size, const int p_octaves,
+		const double p_lacunarity, const double p_gain, const double p_sharpness, const int p_seed,
+		const double p_warp_amount, const double p_warp_size, const int p_warp_octaves) {
+	return godot::fractal_grid(p_gw, p_gh, p_rect, p_style, p_amplitude, p_feature_size, p_octaves,
+			p_lacunarity, p_gain, p_sharpness, p_seed, p_warp_amount, p_warp_size, p_warp_octaves);
 }
 
 PackedFloat32Array Pasture3DUtil::crater_grid(const int p_gw, const int p_gh, const Rect2 &p_rect,
@@ -3103,6 +3113,9 @@ void Pasture3DUtil::_bind_methods() {
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("dunes_grid", "gw", "gh", "rect", "amplitude", "wavelength", "direction_deg", "asymmetry", "crest_sharpness", "wander_amount", "wander_size", "seed"),
 			&Pasture3DUtil::dunes_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("fractal_grid", "gw", "gh", "rect", "style", "amplitude", "feature_size", "octaves", "lacunarity", "gain", "sharpness", "seed", "warp_amount", "warp_size", "warp_octaves"),
+			&Pasture3DUtil::fractal_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("crater_grid", "gw", "gh", "rect", "amplitude", "floor_depth", "rim_height", "rim_width", "ejecta_falloff", "floor_flatness", "terrace_steps"),
 			&Pasture3DUtil::crater_grid);

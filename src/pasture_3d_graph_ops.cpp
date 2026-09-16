@@ -14,6 +14,7 @@
 #include "pasture_3d_depression_filling.h"
 #include "pasture_3d_dla.h"
 #include "pasture_3d_dunes.h"
+#include "pasture_3d_fractal.h"
 #include "pasture_3d_erosion.h"
 #include "pasture_3d_erosion_hydraulic.h"
 #include "pasture_3d_erosion_thermal.h"
@@ -1031,6 +1032,16 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				PackedFloat32Array res = dunes_grid(p_gw, p_gh, p_rect,
 						P[0], P[1], P[2],
 						P[3], P[4], P[5], P[6], (int)P[7]);
+				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
+			} break;
+
+			case GRAPH_OP_FRACTAL: {
+				// Param layout — Pasture3DGraphNodeFractal.native_lower(). The four PORT-DRIVEN slots
+				// (0..3) sit first so native_param_ports() is the identity on them.
+				PackedFloat32Array res = fractal_grid(p_gw, p_gh, p_rect,
+						(int)P[4], P[0], P[1], (int)P[5],
+						P[6], P[7], P[2], (int)P[8],
+						P[3], P[9], (int)P[10]);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
 			} break;
 
