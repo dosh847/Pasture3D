@@ -16,7 +16,8 @@
 #
 # ---- Two outputs ----
 #
-#   port 0  "height"  HEIGHT  the massif, in metres (amplitude · normalised field)
+#   port 0  "height"  HEIGHT  unwired: the massif, in metres (amplitude · normalised field). Wired: the INPUT
+#                             with the massif applied as a filter over it — see `_compose`.
 #   port 1  "mask"    MASK    the normalised field itself [0,1] — the mountain's footprint/intensity, for a
 #                             downstream Blend that stamps rock detail only on the massif.
 #
@@ -38,8 +39,9 @@ extends Pasture3DGraphSolverNode
 const ReliefDLA = preload("res://addons/pasture_3d/connectors/pasture3d_relief_dla.gd")
 
 
-## The massif's height, in metres — the amplitude of the finished mountain. The grown field is normalised
-## [0,1], so this is a straight multiplier on it.
+## The relief the massif ADDS, in metres. Unwired, that is the mountain's whole height. With an input wired,
+## it is added on top of the input: a flat summit rises by this much, a flat plain by nothing, and the
+## slopes between carry the grown ridges.
 @export_range(0.0, 4000.0, 1.0, "or_greater") var amplitude: float = 30.0:
 	set(v):
 		amplitude = maxf(v, 0.0)
@@ -58,6 +60,12 @@ const ReliefDLA = preload("res://addons/pasture_3d/connectors/pasture3d_relief_d
 @export_range(0.03, 0.50, 0.005) var detail_size: float = 0.12:
 	set(v):
 		detail_size = clampf(v, 0.03, 0.50)
+		_param_changed()
+## How wide each ridge's slopes are, as a share of the massif's radius. Narrow is sharp separate crests,
+## wide is broad faces merging into one mountain. Coverage still sizes it.
+@export_range(0.08, 0.50, 0.01) var ridge_width: float = 0.18:
+	set(v):
+		ridge_width = clampf(v, 0.08, 0.50)
 		_param_changed()
 ## Remap on the normalised field: 1 linear, above 1 pulls the flanks down and sharpens the summit, below 1
 ## fattens toward a plateau.
@@ -139,7 +147,7 @@ func op() -> StringName:
 
 ## P0 amplitude, P1 coverage, P2 detail_size, P3 profile_power, P4..P6 seed as 24/24/16-bit chunks (a float32
 ## slot is exact only to 2^24, and a seed is an int64), P7 resolution, P8 hierarchy_levels, P9 wander,
-## P10, P11 reserved (were blur_levels, blur_growth), P12 ridge_seeding, P13 ridge_amount. Read by GRAPH_OP_DLA.
+## P10 reserved (was blur_levels), P11 ridge_width, P12 ridge_seeding, P13 ridge_amount. Read by GRAPH_OP_DLA.
 func native_lower() -> Dictionary:
 	var p := PackedFloat32Array()
 	p.resize(16)
@@ -154,7 +162,7 @@ func native_lower() -> Dictionary:
 	p[8] = float(hierarchy_levels)
 	p[9] = wander
 	p[10] = 0.0 # reserved (was blur_levels)
-	p[11] = 0.0 # reserved (was blur_growth)
+	p[11] = ridge_width
 	p[12] = 1.0 if ridge_seeding else 0.0
 	p[13] = ridge_amount
 	return {"params": p}
@@ -242,11 +250,89 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	var det := clampf(_f32(_scalar(p_inputs, 3, detail_size)), 0.03, 0.50)
 	var unit: Array = solve_cached(freeze_key(p_inputs, p_gw, p_gh), func(): return _solve(surface, p_gw, p_gh, p_rect, cov, det))
 	var cached_h: PackedFloat32Array = unit[0]
+	if _is_input_wired(surface):
+		return [_compose(surface, cached_h, a, p_gw, p_gh, p_rect), unit[1]]
 	var h := PackedFloat32Array()
 	h.resize(cached_h.size())
 	for i in range(cached_h.size()):
 		h[i] = a * cached_h[i]
 	return [h, unit[1]]
+
+
+## THE MASSIF AS A FILTER OVER ITS INPUT, which is what keeps the mountain the input already is. Before this,
+## a wired input only told the growth where to grow and the output was `amplitude * massif` alone, so a mound
+## fed in came out as whatever shape the tree grew: its volume and its summit were thrown away.
+##
+## The approach is runevision's erosion filter's "fade" (blog.runevision.com, 2026-03): detail is applied at
+## full strength on slopes and FADED OUT where the input is flat, toward a target taken from altitude, so a
+## flat summit fades to fully raised and a flat valley floor or plain to not raised at all. Peaks and valleys
+## stay where the input put them, and the plain around a brush gets nothing, so no step at the loop.
+##
+##   out = h + amplitude * lerp(target, massif, mask)
+##   target = inverse_lerp(lowest, highest, h)            in [0, 1]
+##   mask   = ease_out(|grad h| / mean |grad h|)          1 - (1 - t)^2, clamped
+##
+## The slope is normalised by its own mean over the input, the article's "pretend slope", so the fade does not
+## depend on how tall the input is. The ease is the article's too: a square root starts vertically and folds.
+## A flat input (no slope anywhere) has no shape to keep and takes the massif unfaded. NaN stays NaN.
+static func _compose(p_surface: PackedFloat32Array, p_unit: PackedFloat32Array, p_amp: float, p_gw: int,
+		p_gh: int, p_rect: Rect2) -> PackedFloat32Array:
+	var n := p_gw * p_gh
+	var out := PackedFloat32Array()
+	out.resize(n)
+	var dx := float(p_rect.size.x) / float(maxi(p_gw, 1))
+	var dz := float(p_rect.size.y) / float(maxi(p_gh, 1))
+	var lo := INF
+	var hi := -INF
+	for v in p_surface:
+		if is_finite(v):
+			lo = minf(lo, v)
+			hi = maxf(hi, v)
+	var slope := PackedFloat64Array()
+	slope.resize(n)
+	var sum := 0.0
+	var cnt := 0
+	for z in range(p_gh):
+		for x in range(p_gw):
+			var i := z * p_gw + x
+			if not is_finite(p_surface[i]):
+				continue
+			var gx := _diff(p_surface, i, x > 0, x < p_gw - 1, 1, dx)
+			var gz := _diff(p_surface, i, z > 0, z < p_gh - 1, p_gw, dz)
+			slope[i] = sqrt(gx * gx + gz * gz)
+			sum += slope[i]
+			cnt += 1
+	var mean := sum / float(cnt) if cnt > 0 else 0.0
+	var span := hi - lo
+	for i in range(n):
+		var h := p_surface[i]
+		var u := p_unit[i]
+		if not is_finite(h) or is_nan(u):
+			out[i] = NAN
+			continue
+		var m := 1.0
+		if mean > 0.0:
+			var q := 1.0 - clampf(slope[i] / mean, 0.0, 1.0)
+			m = 1.0 - q * q
+		var t := (h - lo) / span if span > 0.0 else 0.0
+		out[i] = h + p_amp * (t + (u - t) * m)
+	return out
+
+
+## A central difference in metres per metre, one-sided where a neighbour is off the grid or NaN, 0 if both are.
+static func _diff(g: PackedFloat32Array, i: int, p_has_lo: bool, p_has_hi: bool, p_step: int, p_d: float) -> float:
+	var c := g[i]
+	var a := g[i - p_step] if p_has_lo else NAN
+	var b := g[i + p_step] if p_has_hi else NAN
+	var fa := is_finite(a)
+	var fb := is_finite(b)
+	if fa and fb:
+		return (b - a) / (2.0 * p_d)
+	if fb:
+		return (b - c) / p_d
+	if fa:
+		return (c - a) / p_d
+	return 0.0
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -323,6 +409,7 @@ func _make_engine(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: R
 	e.resolution = resolution
 	e.hierarchy_levels = hierarchy_levels
 	e.detail_size = p_detail
+	e.ridge_width = _f32(ridge_width)
 	e.wander = _f32(wander)
 	e.seed = seed
 	e.profile_power = _f32(profile_power)

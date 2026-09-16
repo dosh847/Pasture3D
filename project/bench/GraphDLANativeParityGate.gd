@@ -116,6 +116,7 @@ func _g_growth_parity() -> void:
 		{"name": "non-square 3:1", "resolution": 128, "hierarchy_levels": 3, "host_ex": 150.0, "host_ez": 50.0},
 		{"name": "no wander, power 2", "resolution": 128, "hierarchy_levels": 3, "wander": 0.0, "profile_power": 2.0, "seed": 17},
 		{"name": "coarse detail 0.4", "resolution": 128, "detail_size": 0.4, "seed": -3},
+		{"name": "wide ridges 0.37", "resolution": 128, "ridge_width": 0.37, "seed": 9},
 		{"name": "ridge seeded", "resolution": 128, "hierarchy_levels": 3, "ridge_seeding": true, "ridge_amount": 0.1, "seeded": true},
 	]
 	var all_ok := true
@@ -155,7 +156,7 @@ const NGH := 32
 func _n_node_routes() -> void:
 	print("\n[N] the DLA node: native route equals GDScript route, height and mask")
 	var configs := [
-		{"name": "small, odd coverage", "rect": Rect2(-100, -100, 200, 200), "props": {"coverage": 0.63, "detail_size": 0.17}},
+		{"name": "small, odd coverage", "rect": Rect2(-100, -100, 200, 200), "props": {"coverage": 0.63, "detail_size": 0.17, "ridge_width": 0.29}},
 		{"name": "64-bit seed, 3:1 rect", "rect": Rect2(-150, -50, 300, 100), "props": {"seed": -123456789012, "wander": 0.47}},
 		{"name": "wired amplitude", "rect": Rect2(-100, -100, 200, 200), "props": {"profile_power": 1.7}, "amp": 37.25},
 		{"name": "ridge seeded, NaN cells", "rect": Rect2(-100, -100, 200, 200), "props": {"ridge_seeding": true, "ridge_amount": 0.12}, "surface": true},
@@ -306,7 +307,7 @@ func _diff_nan(p_a: PackedFloat32Array, p_b: PackedFloat32Array) -> Array:
 func _engine_for(p_cfg: Dictionary) -> Object:
 	var e = ReliefDLA.new()
 	var pp := _params_for(p_cfg)
-	for k in ["coverage", "resolution", "hierarchy_levels", "detail_size", "wander", "seed", "profile_power", "ridge_seeding", "ridge_amount"]:
+	for k in ["coverage", "resolution", "hierarchy_levels", "detail_size", "ridge_width", "wander", "seed", "profile_power", "ridge_seeding", "ridge_amount"]:
 		e.set(k, pp[k])
 	e._host_ex = pp["host_ex"]
 	e._host_ez = pp["host_ez"]
@@ -323,6 +324,7 @@ func _params_for(p_cfg: Dictionary) -> Dictionary:
 		"resolution": int(p_cfg.get("resolution", 256)),
 		"hierarchy_levels": int(p_cfg.get("hierarchy_levels", 4)),
 		"detail_size": float(p_cfg.get("detail_size", 0.12)),
+		"ridge_width": float(p_cfg.get("ridge_width", 0.18)),
 		"wander": float(p_cfg.get("wander", 0.32)),
 		"profile_power": float(p_cfg.get("profile_power", 1.0)),
 		"coverage": float(p_cfg.get("coverage", 0.95)),

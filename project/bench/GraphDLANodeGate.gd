@@ -18,6 +18,16 @@
 #       reports stale; Bake regrows. Control: LIVE regrows immediately and never goes stale.
 #   [E] Multi-output routing: the footprint MASK (port 1) drives a Blend's mask input through the evaluator.
 #       Control: unwiring the mask leaves the plain blend (mask == 1).
+#   [G] A wired input is FILTERED, not replaced: fed a plateau mound, the flat plain around it comes out
+#       exactly as it went in (no step at the loop), the flat summit is raised by the full amplitude, and the
+#       slopes carry the massif's detail. Control: `amplitude * mask`, what the node output before, does not
+#       keep the mound's shape (its correlation with the input is measured against the filter's).
+#   [H] Stacked fading keeps fine levels off coarse ridge tops and creases: where the coarsest level's surface
+#       is flat, the finished massif stays close to it. Control: the same cluster combined by plain max over
+#       every level (no marks) moves those cells by clearly more.
+#   [I] Ridge Width widens the flanks without resizing the mountain: 0.10 -> 0.40 lowers the massif's mean
+#       slope, while the support (cells above 1% of peak) moves under 8%. Control: the same growth at one width
+#       twice is identical, so a difference is the width and not noise.
 #
 # Every criterion measures a concrete delta and carries a control that must fail if the path is dead.
 extends Node
@@ -40,6 +50,9 @@ func _ready() -> void:
 	_d_per_solver_freeze()
 	_e_multi_output_mask_routing()
 	_f_wired_amplitude_frozen()
+	_g_wired_input_is_filtered()
+	_h_stacked_fading()
+	_i_ridge_width()
 	print("\n=== %s (%d failures) ===\n" % ["GRAPH DLA NODE PASS" if _fail == 0 else "GRAPH DLA NODE FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -302,6 +315,183 @@ func _f_wired_amplitude_frozen() -> void:
 		_fail += 1; print("    !! a cache hit did not rebuild height as amplitude*mask")
 	if not served:
 		_fail += 1; print("    !! the frozen mask was regrown instead of served")
+
+
+# ---- [G] --------------------------------------------------------------------------------------------
+
+func _g_wired_input_is_filtered() -> void:
+	print("[G] A wired input is filtered, not replaced: plain unchanged, summit raised by amplitude, slopes carry detail")
+	var d := _new_dla(DLAScript.Evaluation.LIVE)
+	var amp := 100.0
+	# A plateau mound: flat top inside r 0.2, flat plain outside r 0.7, a smooth flank between.
+	var g := PackedFloat32Array(); g.resize(GW * GH)
+	var radius := PackedFloat32Array(); radius.resize(GW * GH)
+	for iz in range(GH):
+		for ix in range(GW):
+			var u := (float(ix) + 0.5) / float(GW) * 2.0 - 1.0
+			var v := (float(iz) + 0.5) / float(GH) * 2.0 - 1.0
+			var r := sqrt(u * u + v * v)
+			var t := clampf((0.7 - r) / 0.5, 0.0, 1.0)
+			g[iz * GW + ix] = 60.0 * t * t * (3.0 - 2.0 * t)
+			radius[iz * GW + ix] = r
+	var ch: Array = d.eval_grid_channels([g], GW, GH, null, RECT)
+	var out: PackedFloat32Array = ch[0]
+	var mask: PackedFloat32Array = ch[1]
+	var plain_err := 0.0
+	var summit_err := 0.0
+	var old := PackedFloat32Array(); old.resize(GW * GH)
+	var resid := PackedFloat32Array()
+	for i in range(GW * GH):
+		old[i] = amp * mask[i]
+		var r := radius[i]
+		if r > 0.75:
+			plain_err = maxf(plain_err, absf(out[i] - g[i]))
+		elif r < 0.15:
+			summit_err = maxf(summit_err, absf(out[i] - (g[i] + amp)))
+		elif r > 0.35 and r < 0.55:
+			resid.append(out[i] - g[i] - amp * (g[i] / 60.0)) # what the massif changed on the flank
+	var spread := 0.0
+	var mean := 0.0
+	for v in resid:
+		mean += v
+	mean /= maxf(float(resid.size()), 1.0)
+	for v in resid:
+		spread += (v - mean) * (v - mean)
+	spread = sqrt(spread / maxf(float(resid.size()), 1.0))
+	var c_new := _corr(out, g)
+	var c_old := _corr(old, g)
+	print("    plain max |out - in| = %.6f m   summit max |out - (in + amp)| = %.4f m   flank detail spread = %.3f m"
+			% [plain_err, summit_err, spread])
+	print("    correlation with the input: filtered %.3f   CONTROL amplitude*mask %.3f" % [c_new, c_old])
+	if plain_err > 1.0e-3:
+		_fail += 1; print("    !! the plain around the mound moved; the filter steps at the loop")
+	if summit_err > 0.01 * amp:
+		_fail += 1; print("    !! the flat summit was not raised by the amplitude; the peak is not preserved")
+	if spread < 0.02 * amp:
+		_fail += 1; print("    !! the flank carries no massif detail; the filter faded everything out")
+	if c_new < 0.9 or c_new <= c_old:
+		_fail += 1; print("    !! the filtered output does not keep the input's shape better than the massif alone")
+
+
+# ---- [H] --------------------------------------------------------------------------------------------
+
+func _h_stacked_fading() -> void:
+	print("[H] Stacked fading: fine levels stay off the coarse level's ridge tops and creases")
+	var m := Pasture3DReliefDLA.new()
+	m.resolution = 128
+	m.hierarchy_levels = 4
+	m.coverage = 0.9
+	m.detail_size = 0.12
+	m.profile_power = 1.0
+	var n := 128
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 3
+	var cl: Array = m._grow(rng, 16, n)
+	var marks: PackedInt32Array = cl[3]
+	var parents: PackedInt32Array = cl[2]
+	var xs := Pasture3DReliefDLA._unstair(cl[0], parents)
+	var ys := Pasture3DReliefDLA._unstair(cl[1], parents)
+	var depth := Pasture3DReliefDLA._depths(parents)
+	var deepest := 1
+	for dv in depth:
+		deepest = maxi(deepest, dv)
+	var coarse := m._cone_field(xs, ys, parents, depth, float(deepest + 1), marks[0], n, false,
+			PackedFloat32Array(), m._outer(n), float(m._slope_run(n)))
+	var cpk := 0.0
+	for v in coarse:
+		cpk = maxf(cpk, v)
+	var flatmask := Pasture3DReliefDLA._slope_mask(coarse, n)
+	var stacked := m._massif(cl, n)
+	var plain := m._massif([cl[0], cl[1], cl[2], PackedInt32Array(), cl[4]], n)
+	var spk := 0.0
+	var ppk := 0.0
+	for i in range(n * n):
+		spk = maxf(spk, stacked[i])
+		ppk = maxf(ppk, plain[i])
+	var ds := 0.0
+	var dp := 0.0
+	var k := 0
+	for i in range(n * n):
+		if coarse[i] <= 0.0 or flatmask[i] >= 0.2:
+			continue
+		ds += absf(stacked[i] / spk - coarse[i] / cpk)
+		dp += absf(plain[i] / ppk - coarse[i] / cpk)
+		k += 1
+	ds /= maxf(float(k), 1.0)
+	dp /= maxf(float(k), 1.0)
+	print("    levels=%d  flat coarse cells=%d  mean move off the coarse surface: stacked %.4f   CONTROL plain max %.4f"
+			% [marks.size(), k, ds, dp])
+	if marks.size() < 2 or k < 20:
+		_fail += 1; print("    !! nothing to measure: one level, or no flat coarse cells")
+	elif ds >= 0.8 * dp:
+		_fail += 1; print("    !! stacking did not keep fine detail off the coarse ridge tops")
+
+
+# ---- [I] --------------------------------------------------------------------------------------------
+
+func _i_ridge_width() -> void:
+	print("[I] Ridge Width widens the flanks without resizing the mountain")
+	var narrow := _i_stats(0.10)
+	var wide := _i_stats(0.40)
+	var again := _i_stats(0.10)
+	var drift := absf(wide[1] - narrow[1]) / maxf(narrow[1], 1.0)
+	print("    width 0.10: mean slope %.4f  support %d cells | width 0.40: mean slope %.4f  support %d cells | support moved %.1f%%"
+			% [narrow[0], narrow[1], wide[0], wide[1], 100.0 * drift])
+	print("    CONTROL width 0.10 twice: mean slope %.4f vs %.4f" % [narrow[0], again[0]])
+	if narrow[0] != again[0]:
+		_fail += 1; print("    !! the same width grew two different massifs; the comparison is noise")
+	if wide[0] >= 0.8 * narrow[0]:
+		_fail += 1; print("    !! a wider ridge did not make gentler flanks; the control is inert")
+	if drift > 0.08:
+		_fail += 1; print("    !! Ridge Width resized the mountain; Coverage is not the size control it claims")
+
+
+## [mean |grad| over the support, support cells] of the unit massif at one ridge width.
+func _i_stats(p_width: float) -> Array:
+	var m := Pasture3DReliefDLA.new()
+	m.resolution = 128
+	m.hierarchy_levels = 3
+	m.coverage = 0.9
+	m.detail_size = 0.12
+	m.ridge_width = p_width
+	var n := 128
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 11
+	var f := m._massif(m._grow(rng, 32, n), n)
+	var pk := 0.0
+	for v in f:
+		pk = maxf(pk, v)
+	var sum := 0.0
+	var k := 0
+	for y in range(1, n - 1):
+		for x in range(1, n - 1):
+			var i := y * n + x
+			if f[i] <= 0.01 * pk:
+				continue
+			var gx := (f[i + 1] - f[i - 1]) * 0.5
+			var gy := (f[i + n] - f[i - n]) * 0.5
+			sum += sqrt(gx * gx + gy * gy)
+			k += 1
+	return [sum / maxf(float(k), 1.0), k]
+
+
+func _corr(p_a: PackedFloat32Array, p_b: PackedFloat32Array) -> float:
+	var n := float(p_a.size())
+	var ma := 0.0
+	var mb := 0.0
+	for i in range(p_a.size()):
+		ma += p_a[i]
+		mb += p_b[i]
+	ma /= n
+	mb /= n
+	var sab := 0.0
+	var saa := 0.0
+	var sbb := 0.0
+	for i in range(p_a.size()):
+		sab += (p_a[i] - ma) * (p_b[i] - mb)
+		saa += (p_a[i] - ma) * (p_a[i] - ma)
+		sbb += (p_b[i] - mb) * (p_b[i] - mb)
+	return sab / sqrt(maxf(saa * sbb, 1.0e-30))
 
 
 func _amp_err(p_h: PackedFloat32Array, p_mask: PackedFloat32Array, p_amp: float) -> float:

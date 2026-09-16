@@ -108,6 +108,13 @@ enum Evaluation { LIVE, FROZEN }
 ## How far a branch's inserted midpoint is thrown sideways when the grid doubles, as a fraction of the
 ## branch's length, and how far every existing node is jittered at the same time. 0 keeps the cluster on
 ## its lattice and the arms come out visibly axis-aligned; ~0.3 reads as a ridge.
+## How wide each ridge's slopes are, as a share of the massif's radius: how far a crest's flank runs before it
+## reaches the ground. Narrow reads as sharp separate crests, wide as broad faces merging into one mountain.
+## Coverage still sizes the massif: the growth leaves room for the slope, whatever its width.
+@export_range(0.08, 0.50, 0.01) var ridge_width: float = 0.18:
+	set(v):
+		ridge_width = clampf(v, 0.08, 0.50)
+		_touch()
 @export_range(0.0, 1.0, 0.01) var wander: float = 0.32:
 	set(v):
 		wander = clampf(v, 0.0, 1.0)
@@ -244,14 +251,25 @@ const BLUR_CEILING := 0.70
 ## the cluster actually grew, which is the shortfall this whole change exists to remove.
 const WINDOW_BAND := 0.05
 
-## The slope's run, as a share of the massif's radius. Big enough that neighbouring slopes MERGE into
-## continuous faces -- a mountain, not a field of bumps -- and small enough that the ridges still read as
-## separate crests rather than washing into one dome. Gate CQ holds the second half, CX the first.
-const SLOPE_RUN := 0.18
 
 ## How much of a crest's height its depth in the tree can take away. 0 is a dome, 1 hands the whole height
 ## to the tree and takes the size control with it. See `_crest_height`.
 const DEPTH_BITE := 0.55
+## One ridge cell in this many seeds the cluster. Seeding EVERY cell above the ridge quantile laid a solid,
+## unbroken line of roots on each crest, re-laid at every level, and the massif stamped those roots at full
+## height: the output was the seed ridges themselves, flat-topped and one ridge-width wide, with the grown
+## branches as fuzz on them. Scattered, the ridges only ATTRACT the growth.
+const SEED_KEEP := 4
+## How deep a valley may cut, as the share of the ground under it that it may NOT remove. Without a floor
+## every gap between branches wider than a slope run fell to zero, so the middle of the massif was cut into
+## pits and a seeded mound lost most of its volume to the gaps between its ridges.
+const VALLEY_FLOOR := 0.3
+## Passes of `_unstair`. Each moves a node halfway to its parent, so a right-angle step is bent across this many
+## nodes of the chain.
+const UNSTAIR_PASSES := 2
+## How far stacked fading lets fine detail spread off coarse slopes: the article's `detail`. Higher keeps more
+## fine branches, lower restricts them to the steepest coarse flanks.
+const STACK_DETAIL := 1.5
 ## Fewest cells the baked field may have on its short side. Below 2 the bilinear samplers read a defined
 ## zero and the material vanishes; 8 is where a massif still has somewhere to be. A loop elongated past
 ## `resolution / FIELD_MIN` is warned about rather than silently un-squished, because the honest answer
@@ -490,7 +508,7 @@ static func _rho(dx: float, dy: float, e: Array) -> float:
 ## The cluster gives this back: `_grow_extent` stops a slope run short of the envelope, so crest plus slope
 ## lands exactly on `coverage` and the field outside it is still zero.
 func _slope_run(n: int) -> int:
-	return maxi(1, int(_env_typical(_outer(n)) * SLOPE_RUN))
+	return maxi(1, int(_env_typical(_outer(n)) * ridge_width))
 
 
 ## The cluster's own reach on each axis: everything the blur did not take.
@@ -632,8 +650,8 @@ func set_seed_surface(p_surface: Dictionary) -> bool:
 ## moves a single cell of the cluster.
 func _growth_key() -> String:
 	var d := _field_dims()
-	return "%d|%d|%d|%.4f|%.4f|%.4f|%.4f|%d|%.4f|%d|%d|%d" % [seed, resolution,
-			hierarchy_levels, detail_size, wander, profile_power, coverage,
+	return "%d|%d|%d|%.4f|%.4f|%.4f|%.4f|%.4f|%d|%.4f|%d|%d|%d" % [seed, resolution,
+			hierarchy_levels, detail_size, ridge_width, wander, profile_power, coverage,
 			1 if ridge_seeding else 0, ridge_amount, _seed_hash, d.x, d.y] + "|%d" % _shape_hash
 
 
@@ -837,13 +855,19 @@ func _grow(rng: RandomNumberGenerator, p_n0: int, p_res: int) -> Array:
 		# limit the moment the grid doubled -- which is exactly what an earlier version did, and it grew
 		# 33 nodes at level 0 and then nothing at all for five rounds. Coarse levels decide the trunk
 		# inside a smaller disc; the last level is the one that reaches GROW_EXTENT.
-		_grow_level(n, lerpf(0.7, 1.0, float(level) / float(maxi(rounds, 1))),
-				maxi(24, _particles() * n / p_res), xs, ys, parents, owner)
+		# THE SKELETON ENDS ON AN UPSCALE, never on growth. Growth moves in 4-neighbour steps, so a level
+		# grown at the final resolution has nothing after it to jitter or throw its midpoints, and every twig
+		# of it came out a comb of right angles. So the last growth runs one grid short, with the particles
+		# that level would have had, and the final doubling only bends what is there.
+		_grow_level(n, lerpf(0.7, 1.0, float(level) / float(maxi(rounds - 1, 1))),
+				maxi(24, _particles() * mini(n * 2, p_res) / p_res), xs, ys, parents, owner)
 		if n >= p_res:
 			break
 		n *= 2
 		level += 1
 		owner = _upscale(rng, n, xs, ys, parents)
+		if n >= p_res:
+			break
 		# Re-seed at every scale, not only the coarsest. Seeding once at level 0 puts the ridge lines on a
 		# 32-cell grid where five arms are a few pixels wide, and three upscales plus a few thousand
 		# particles bury them: measured, a star-shaped seed and no seed at all produced fields that
@@ -853,7 +877,7 @@ func _grow(rng: RandomNumberGenerator, p_n0: int, p_res: int) -> Array:
 			_seed_ridges(n, xs, ys, parents, owner)
 		marks.append(xs.size())
 	marks.append(xs.size())
-	return [xs, ys, parents, marks]
+	return [xs, ys, parents, marks, seeded]
 
 
 ## Place the starting cluster on the ridge lines of the captured surface. False when there is no surface,
@@ -909,6 +933,8 @@ func _seed_ridges(n: int, xs: PackedFloat32Array, ys: PackedFloat32Array, parent
 			var i := y * n + x
 			if ridge[i] < cut:
 				continue
+			if _seed_scatter(x, y, n) != 0:
+				continue
 			if owner[i] >= 0:
 				continue # already cluster, from the upscale of a coarser level
 			owner[i] = xs.size()
@@ -916,6 +942,12 @@ func _seed_ridges(n: int, xs: PackedFloat32Array, ys: PackedFloat32Array, parent
 			ys.append(float(y))
 			parents.append(-1)
 	return not xs.is_empty()
+
+
+## Which ridge cells seed: a fixed integer hash of the cell, so the scatter is the same in the C++ port and
+## on every run, and different at every level because `n` is in it.
+static func _seed_scatter(x: int, y: int, n: int) -> int:
+	return (((x * 73856093) ^ (y * 19349663) ^ (n * 83492791)) & 0x7fffffff) % SEED_KEEP
 
 
 ## The captured surface resampled onto the level-0 grid, through the LOOP FRAME rather than by a plain
@@ -1107,9 +1139,13 @@ func _walk(rng: RandomNumberGenerator, pi: int, n: int, c: float, env: Array, li
 		var oang := rng.randf() * TAU
 		var olr: float = reach[_reach_bin(cos(oang), sin(oang), reach.size())]
 		var ogrowing := olr < limit and pi * 10 < p_particles * 7
-		var olaunch: float = minf(olr + 3.0 * per_cell, limit) * (
-				1.0 if (ogrowing or (pi & 1) == 0) else sqrt(rng.randf()))
+		# THREE CELLS IN THIS DIRECTION'S OWN RADIUS. `per_cell` is one over the outline's TYPICAL radius, and
+		# on a narrow loop that is the short axis: along a diagonal bar it put the launch ~20 real cells past
+		# the cluster's tip, in a corridor the walker leaves through the side long before it arrives. Measured,
+		# the bar's outer fifth at each end grew no node at all.
 		var orad := _radius_at(tbl, oang)
+		var olaunch: float = minf(olr + 3.0 / maxf(orad, 1.0), limit) * (
+				1.0 if (ogrowing or (pi & 1) == 0) else sqrt(rng.randf()))
 		return _walk_from(rng, n, c, env, kill, budget, owner,
 				int(round(c + cos(oang) * olaunch * orad)), int(round(c + sin(oang) * olaunch * orad)))
 	var growing: bool = reach[0] < limit and pi * 10 < p_particles * 7
@@ -1175,9 +1211,21 @@ func _upscale(rng: RandomNumberGenerator, n: int, xs: PackedFloat32Array, ys: Pa
 	# the throw stays sub-cell forever and the cluster reads as a set of axis-aligned bars. Jittering
 	# every node as well is what puts the kink in each run.
 	var jit := wander * 0.75
+	# A node or midpoint may not land on a cell another node already holds: measured, 213 of 3809 nodes did,
+	# which stacks crests and reads as a cut. Every draw is still made, so the stream does not depend on it.
+	var occ := PackedByteArray()
+	occ.resize(n * n)
 	for i in range(count):
-		xs[i] = xs[i] * 2.0 + rng.randfn(0.0, jit)
-		ys[i] = ys[i] * 2.0 + rng.randfn(0.0, jit)
+		var bx := xs[i] * 2.0
+		var by := ys[i] * 2.0
+		var jx := bx + rng.randfn(0.0, jit)
+		var jy := by + rng.randfn(0.0, jit)
+		if _occupied(occ, n, jx, jy):
+			jx = bx
+			jy = by
+		xs[i] = jx
+		ys[i] = jy
+		_occupy(occ, n, jx, jy)
 	var lo := 1.0
 	var hi := float(n - 2)
 	for i in range(count):
@@ -1191,11 +1239,19 @@ func _upscale(rng: RandomNumberGenerator, n: int, xs: PackedFloat32Array, ys: Pa
 		var my := (ys[i] + ys[pa]) * 0.5
 		if seg > 0.0001 and wander > 0.0:
 			var throw := rng.randfn(0.0, seg * wander * 0.5)
-			mx += (-dy / seg) * throw
-			my += (dx / seg) * throw
+			var tx := clampf(mx + (-dy / seg) * throw, lo, hi)
+			var ty := clampf(my + (dx / seg) * throw, lo, hi)
+			if not _occupied(occ, n, tx, ty):
+				mx = tx
+				my = ty
+		mx = clampf(mx, lo, hi)
+		my = clampf(my, lo, hi)
+		if _occupied(occ, n, mx, my):
+			continue # no free cell for the midpoint: the edge stays one segment
+		_occupy(occ, n, mx, my)
 		var mid := xs.size()
-		xs.append(clampf(mx, lo, hi))
-		ys.append(clampf(my, lo, hi))
+		xs.append(mx)
+		ys.append(my)
 		parents.append(pa)
 		parents[i] = mid
 	var owner := PackedInt32Array()
@@ -1204,6 +1260,19 @@ func _upscale(rng: RandomNumberGenerator, n: int, xs: PackedFloat32Array, ys: Pa
 	for i in range(xs.size()):
 		_stamp_edge(owner, n, xs, ys, parents, i)
 	return owner
+
+
+static func _occupied(occ: PackedByteArray, n: int, x: float, y: float) -> bool:
+	var ix := int(round(x))
+	var iy := int(round(y))
+	return ix >= 0 and iy >= 0 and ix < n and iy < n and occ[iy * n + ix] != 0
+
+
+static func _occupy(occ: PackedByteArray, n: int, x: float, y: float) -> void:
+	var ix := int(round(x))
+	var iy := int(round(y))
+	if ix >= 0 and iy >= 0 and ix < n and iy < n:
+		occ[iy * n + ix] = 1
 
 
 ## Walk the segment from node i to its parent, claiming every cell it crosses for node i. Bresenham would
@@ -1287,9 +1356,9 @@ func _plot(g: PackedFloat32Array, n: int, x: float, y: float) -> void:
 ## propagates. The chamfer is the 3x3 one, orthogonal 1 and diagonal sqrt(2); it is not perfectly Euclidean
 ## and does not need to be, since both implementations run the same sweep and agree cell for cell.
 func _massif(p_cluster: Array, n: int) -> PackedFloat32Array:
-	var xs: PackedFloat32Array = p_cluster[0]
-	var ys: PackedFloat32Array = p_cluster[1]
 	var parents: PackedInt32Array = p_cluster[2]
+	var xs := _unstair(p_cluster[0], parents)
+	var ys := _unstair(p_cluster[1], parents)
 	var count := xs.size()
 	var out := PackedFloat32Array()
 	out.resize(n * n)
@@ -1314,12 +1383,54 @@ func _massif(p_cluster: Array, n: int) -> PackedFloat32Array:
 	for d in depth:
 		deepest = maxi(deepest, d)
 	var span := float(deepest + 1)
+	# SEEDED, the crest follows the surface it grew from. A radial height ignores it, so a ridge on the
+	# brush's flank came out as tall as one on its summit and the seeded massif lost the mound's shape.
+	var seeded: bool = p_cluster.size() > 4 and p_cluster[4]
+	var lift := _seed_lift(n) if seeded else PackedFloat32Array()
+	# The ground a valley may not cut below, unseeded: a radial dome. Seeded there is none -- the surface grown
+	# from IS the ground, and the graph node now keeps it by filtering over its input rather than by a floor.
+	var ground := PackedFloat32Array()
+	ground.resize(n * n)
+	if not seeded:
+		for y in range(n):
+			for x in range(n):
+				ground[y * n + x] = _floor_dome(float(x) - c, float(y) - c, env) * VALLEY_FLOOR
+	var marks: PackedInt32Array = p_cluster[3] if p_cluster.size() > 3 else PackedInt32Array()
+	# STACKED FADING (runevision's erosion filter, 2026-03): each finer level may only change the field where
+	# the coarser levels' surface is STEEP. Combined by max, every level competed on equal terms, and a fine
+	# branch crossing a coarse ridge top or running along a coarse valley cut it: the deepening pits in the
+	# middle of the massif. The mask is the coarser field's slope, eased, and it stacks -- once a coarse ridge
+	# has claimed a cell, nothing finer gets it back.
+	var field := _cone_field(xs, ys, parents, depth, span, marks[0] if marks.size() > 1 else count, n,
+			seeded, lift, env, run)
+	var combi := PackedFloat32Array()
+	combi.resize(n * n)
+	combi.fill(1.0)
+	for level in range(1, marks.size()):
+		var raw := _cone_field(xs, ys, parents, depth, span, marks[level], n, seeded, lift, env, run)
+		var slope := _slope_mask(field, n)
+		for i in range(n * n):
+			var q := 1.0 - clampf(combi[i], 0.0, 1.0)
+			combi[i] = (1.0 - pow(q, STACK_DETAIL)) * slope[i]
+			field[i] = field[i] + (raw[i] - field[i]) * combi[i]
+	return _finish(field, n, ground)
+
+
+## The cone field of the first `p_limit` nodes: every edge a crest, falling to nothing over one slope run.
+func _cone_field(xs: PackedFloat32Array, ys: PackedFloat32Array, parents: PackedInt32Array,
+		depth: PackedInt32Array, span: float, p_limit: int, n: int, seeded: bool, lift: PackedFloat32Array,
+		env: Array, run: float) -> PackedFloat32Array:
+	var c := float(n) * 0.5
 	# Stamped along each edge, so a ridge is a continuous line rather than a row of dots, and combined by
 	# MAX where branches cross.
-	for i in range(count):
-		var pa := parents[i]
-		if pa < 0 or pa >= count:
-			_crest(out, n, xs[i], ys[i], _crest_height(xs[i] - c, ys[i] - c, env, float(depth[i]) / span))
+	var out := PackedFloat32Array()
+	out.resize(n * n)
+	for i in range(p_limit):
+		var pa := _ancestor_below(parents, i, p_limit)
+		if pa < 0:
+			# A seeded root is scaffolding: it stands only if growth reached it, through a child's edge.
+			if not seeded:
+				_crest(out, n, xs[i], ys[i], _crest_height(xs[i] - c, ys[i] - c, env, float(depth[i]) / span))
 			continue
 		var dx := xs[pa] - xs[i]
 		var dy := ys[pa] - ys[i]
@@ -1330,7 +1441,10 @@ func _massif(p_cluster: Array, n: int) -> PackedFloat32Array:
 			var t := float(st) / float(steps)
 			var px := xs[i] + dx * t
 			var py := ys[i] + dy * t
-			_crest(out, n, px, py, _crest_height(px - c, py - c, env, lerpf(fi, fp, t)))
+			var hv := _crest_height(px - c, py - c, env, lerpf(fi, fp, t))
+			if seeded:
+				hv = _lifted(lift, n, px, py, lerpf(fi, fp, t))
+			_crest(out, n, px, py, hv)
 
 	# Two sweeps of the chamfer, forward then backward. Each cell carries the CREST IT BELONGS TO and how
 	# far it is from it, not just a height, so that a low crest's slope still runs the full ridge width
@@ -1344,7 +1458,11 @@ func _massif(p_cluster: Array, n: int) -> PackedFloat32Array:
 	dist.resize(n * n)
 	for i in range(n * n):
 		dist[i] = 0.0 if out[i] > 0.0 else INF
+	# The 5x5 chamfer (1, sqrt 2, sqrt 5). The 3x3 one's cones are octagons, and where two of them meet the
+	# valley runs along an axis or a diagonal: the rectangular cuts. The knight's move takes the error from 8%
+	# to 2%, which is what lets a valley take the angle its ridges set.
 	var diag := 1.4142135623730951
+	var knight := 2.2360679774997898
 	for y in range(n):
 		for x in range(n):
 			var i := y * n + x
@@ -1356,6 +1474,15 @@ func _massif(p_cluster: Array, n: int) -> PackedFloat32Array:
 					_relax(src, dist, i, i - n - 1, diag, run)
 				if x < n - 1:
 					_relax(src, dist, i, i - n + 1, diag, run)
+				if x > 1:
+					_relax(src, dist, i, i - n - 2, knight, run)
+				if x < n - 2:
+					_relax(src, dist, i, i - n + 2, knight, run)
+			if y > 1:
+				if x > 0:
+					_relax(src, dist, i, i - 2 * n - 1, knight, run)
+				if x < n - 1:
+					_relax(src, dist, i, i - 2 * n + 1, knight, run)
 	for y in range(n - 1, -1, -1):
 		for x in range(n - 1, -1, -1):
 			var i := y * n + x
@@ -1367,9 +1494,75 @@ func _massif(p_cluster: Array, n: int) -> PackedFloat32Array:
 					_relax(src, dist, i, i + n + 1, diag, run)
 				if x > 0:
 					_relax(src, dist, i, i + n - 1, diag, run)
+				if x < n - 2:
+					_relax(src, dist, i, i + n + 2, knight, run)
+				if x > 1:
+					_relax(src, dist, i, i + n - 2, knight, run)
+			if y < n - 2:
+				if x < n - 1:
+					_relax(src, dist, i, i + 2 * n + 1, knight, run)
+				if x > 0:
+					_relax(src, dist, i, i + 2 * n - 1, knight, run)
 	for i in range(n * n):
 		out[i] = maxf(0.0, src[i] * (1.0 - minf(dist[i], run) / run))
-	return _finish(out, n)
+	return out
+
+
+## The nearest ancestor of node `i` inside the prefix `[0, p_limit)`, or -1. An upscale re-points a coarse node
+## at a midpoint appended after the prefix ends, so a coarse level's edge has to skip to the node beyond it.
+static func _ancestor_below(parents: PackedInt32Array, i: int, p_limit: int) -> int:
+	var pa := parents[i]
+	var guard := parents.size()
+	while pa >= p_limit and guard > 0:
+		pa = parents[pa]
+		guard -= 1
+	return pa if pa < p_limit else -1
+
+
+## Where finer detail may go, from the coarser field's slope: `ease_out(|grad| / mean |grad|)` over the
+## massif, and 1 where the coarser field is still bare ground, so a fine branch past a coarse cone's foot is
+## not faded to nothing.
+static func _slope_mask(g: PackedFloat32Array, n: int) -> PackedFloat32Array:
+	var slope := PackedFloat32Array()
+	slope.resize(n * n)
+	var sum := 0.0
+	var cnt := 0
+	for y in range(n):
+		for x in range(n):
+			var i := y * n + x
+			if g[i] <= 0.0:
+				continue
+			var gx := (g[y * n + mini(x + 1, n - 1)] - g[y * n + maxi(x - 1, 0)]) * 0.5
+			var gy := (g[mini(y + 1, n - 1) * n + x] - g[maxi(y - 1, 0) * n + x]) * 0.5
+			slope[i] = sqrt(gx * gx + gy * gy)
+			sum += slope[i]
+			cnt += 1
+	var mean := sum / float(cnt) if cnt > 0 else 0.0
+	var out := PackedFloat32Array()
+	out.resize(n * n)
+	for i in range(n * n):
+		if g[i] <= 0.0 or mean <= 0.0:
+			out[i] = 1.0
+			continue
+		var q := 1.0 - clampf(slope[i] / mean, 0.0, 1.0)
+		out[i] = 1.0 - q * q
+	return out
+
+
+## Node positions with the grid staircase taken out: two passes moving each node halfway to its parent. The
+## last level grows by 4-neighbour steps and has no upscale after it to bend them, so without this its
+## branches are chains of right angles.
+static func _unstair(p_v: PackedFloat32Array, parents: PackedInt32Array) -> PackedFloat32Array:
+	var v := PackedFloat32Array(p_v)
+	var count := v.size()
+	for _pass in range(UNSTAIR_PASSES):
+		var nv := PackedFloat32Array(v)
+		for i in range(count):
+			var pa := parents[i]
+			if pa >= 0 and pa < count:
+				nv[i] = (v[i] + v[pa]) * 0.5
+		v = nv
+	return v
 
 
 ## One chamfer step: cell `i` takes neighbour `j`'s crest if standing on `j`'s slope puts it higher than
@@ -1409,6 +1602,39 @@ static func _relax(src: PackedFloat32Array, dist: PackedFloat32Array, i: int, j:
 static func _crest_height(dx: float, dy: float, e: Array, p_depth: float) -> float:
 	var radial := sqrt(maxf(0.0, 1.0 - minf(1.0, _rho(dx, dy, e))))
 	return radial * (1.0 - DEPTH_BITE * clampf(p_depth, 0.0, 1.0))
+
+
+## The seed surface on the final grid, normalised to its own peak inside the brush; 0 outside it.
+func _seed_lift(n: int) -> PackedFloat32Array:
+	var h := _sample_seed(n)
+	if h.is_empty():
+		return h
+	var lo := INF
+	var hi := -INF
+	for v in h:
+		if is_finite(v):
+			lo = minf(lo, v)
+			hi = maxf(hi, v)
+	var span := hi - lo
+	for i in range(h.size()):
+		h[i] = (h[i] - lo) / span if is_finite(h[i]) and span > 0.0 else 0.0
+	return h
+
+
+## A seeded crest's height: the surface under it, with the same depth bite as the unseeded one.
+static func _lifted(lift: PackedFloat32Array, n: int, x: float, y: float, p_depth: float) -> float:
+	if lift.is_empty():
+		return 0.0
+	var ix := clampi(int(round(x)), 0, n - 1)
+	var iy := clampi(int(round(y)), 0, n - 1)
+	return lift[iy * n + ix] * (1.0 - DEPTH_BITE * clampf(p_depth, 0.0, 1.0))
+
+
+## The unseeded valley floor: `(1 - rho)^2`, which meets the ground flat at the rim. The crest profile's
+## square root meets it steeply, and under the crests that read as a pedestal the massif sat on.
+static func _floor_dome(dx: float, dy: float, e: Array) -> float:
+	var q := 1.0 - minf(1.0, _rho(dx, dy, e))
+	return q * q
 
 
 ## Stamp a crest height, keeping the higher of what is already there.
@@ -1452,7 +1678,7 @@ static func _depths(parents: PackedInt32Array) -> PackedInt32Array:
 
 ## Normalise to the peak, apply the profile power, and window the result to zero on its envelope. Shared by
 ## both massing routes so a field built either way lands in the same range and inside the same loop.
-func _finish(out: PackedFloat32Array, n: int) -> PackedFloat32Array:
+func _finish(out: PackedFloat32Array, n: int, ground := PackedFloat32Array()) -> PackedFloat32Array:
 	var peak := 0.0
 	for i in range(n * n):
 		peak = maxf(peak, out[i])
@@ -1474,6 +1700,9 @@ func _finish(out: PackedFloat32Array, n: int) -> PackedFloat32Array:
 			var i := y * n + x
 			var v := out[i] * inv
 			v = v if pw == 1.0 else pow(v, pw)
+			# The valley floor goes in AFTER the power, or a profile of 2 squares a 0.4 floor down to 0.16.
+			if not ground.is_empty():
+				v = maxf(v, ground[i])
 			var r := _rho(float(x) - c, float(y) - c, env)
 			if r >= 1.0:
 				v = 0.0

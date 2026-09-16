@@ -15,6 +15,10 @@ const ReliefDLA = preload("res://addons/pasture_3d/connectors/pasture3d_relief_d
 		_param_changed()
 
 @export_group("Shape")
+@export_range(0.08, 0.50, 0.01) var ridge_width: float = 0.18:
+	set(v):
+		ridge_width = clampf(v, 0.08, 0.50)
+		_param_changed()
 @export_range(0.2, 1.0, 0.01) var coverage: float = 0.95:
 	set(v):
 		coverage = clampf(v, 0.2, 1.0)
@@ -181,6 +185,7 @@ func _make_engine(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: R
 	e.resolution = resolution
 	e.hierarchy_levels = hierarchy_levels
 	e.detail_size = detail_size
+	e.ridge_width = ridge_width
 	e.wander = wander
 	e.seed = seed
 	e.profile_power = profile_power
