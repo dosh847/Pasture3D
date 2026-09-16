@@ -133,16 +133,24 @@ const REFRESH_DELAY: float = 0.1
 		corner_radius = maxf(v, 0.0)
 		_schedule_refresh()
 
-## Metres of smoothing applied to the loop's distance field before the height profile reads it. This is
-## what softens the FOLD LINES running inward from each spline point — the loop's medial axis, where two
-## edges are equidistant. The height is a function of distance, so it inherits that fold; `corner_radius`
-## moves where the fold starts but cannot remove it, because the fold is not at the corner, it radiates
-## in from it.
+## Metres of smoothing on the creases this brush's shape makes. It softens two of them, with the same
+## kernel, and they are different creases in different places:
 ##
-## Straight runs and the rim do not move. Across a straight edge the distance field is linear and a
-## symmetric blur is the identity on a linear function, so this only bites where the field has curvature
-## — the creases and the corners. Cost does not grow with the radius (three box passes, not a Gaussian),
-## so a large value on a large mound is no more expensive than a small one.
+##   THE MEDIAL AXIS — the FOLD LINES running inward from each spline point, where two edges of the loop
+##       are equidistant. The height is a function of distance, so it inherits that fold; `corner_radius`
+##       moves where the fold starts but cannot remove it, because the fold is not at the corner, it
+##       radiates in from it. Smoothed by blurring the distance field.
+##   THE FOOTPRINT — the crease around the outline itself, where the brush meets the surrounding ground.
+##       That one is not in the distance field (across the rim the field is linear, and a symmetric blur
+##       is the identity on a linear function, which is why field smoothing leaves it alone). It is in the
+##       height profile, which is flat 0 outside and starts rising at the rim. Smoothed by blurring that
+##       profile against distance.
+##
+## Because the second half rounds the join, the brush now reaches this far PAST its outline — a rounded
+## foot has to land somewhere — and the footprint it stamps grows to match. Straight runs, plateaus and a
+## cone's flanks still do not move: the kernel is symmetric, so it is the identity wherever the shape is
+## already flat or linear over its reach. Cost does not grow with the radius (three box passes, not a
+## Gaussian), so a large value on a large mound is no more expensive than a small one.
 @export_range(0.0, 100.0, 0.5, "or_greater", "suffix:m") var crease_smoothing: float = 0.0:
 	set(v):
 		crease_smoothing = maxf(v, 0.0)
@@ -4835,6 +4843,61 @@ func _blur_field(p_field: PackedFloat32Array, gw: int, gh: int, p_metres: float,
 	return [out, max_inside]
 
 
+## THE FOOTPRINT CREASE, the other half of `crease_smoothing`. Oracle for `raster_crease_profile_build`.
+##
+## Blurring the distance field cannot round the crease where the brush meets the ground, and the reason is
+## the same one that makes that blur safe: across the rim the field is LINEAR, so a symmetric kernel is the
+## identity there. The rim crease is not in the field at all. It is in the profile as a function of
+## distance — flat 0 outside, rising from the rim inward — and that kink, swept along the outline, is the
+## hard line you see.
+##
+## So the profile gets blurred too, in ONE dimension, with the same three box passes. `p_raw` is tabulated
+## at one sample per cell out to `p_d_hi` (the largest distance any caller will read), blurred, and read
+## back by `_crease_profile_at`. Consequences worth stating, because they are the design:
+##   - the brush reaches the kernel's REACH past its outline and no further — the kernel is compact, and
+##     that reach is exactly what `_crease_blur_reach` already pads the grid by;
+##   - where the profile is flat or linear over the kernel (a plateau, a cone's flank) the blur is again
+##     the identity, so what moves is the rim and the ramp's shoulder, and nothing else;
+##   - a radius whose kernel is the identity returns [] rather than a table, so 0 metres is still the
+##     original bake bit for bit rather than a round trip through an interpolated table.
+##
+## Returns [] (no smoothing to do) or [table, d0, inv_h] for `_crease_profile_at`.
+func _crease_profile_table(p_raw: Callable, p_d_hi: float, p_vs: float) -> Array:
+	if crease_smoothing <= 0.0 or p_vs <= 0.0:
+		return []
+	var reach := 0
+	for w in _blur_box_sizes(crease_smoothing / p_vs, 3):
+		reach += (w - 1) / 2
+	if reach < 1:
+		return []
+	# Two cells past the kernel's reach at both ends, so the linear extrapolation the blur reads off each
+	# end only ever continues a flat zero (outside) or the profile's own tail.
+	var pad := reach + 2
+	var hi := maxi(int(ceil(maxf(p_d_hi, 0.0) / p_vs)), 1)
+	var count := hi + 2 * pad + 1
+	var tab := PackedFloat32Array()
+	tab.resize(count)
+	for k in range(count):
+		var d := float(k - pad) * p_vs
+		tab[k] = 0.0 if d <= 0.0 else float(p_raw.call(d))
+	tab = _blur_field(tab, count, 1, crease_smoothing, p_vs)[0]
+	return [tab, -float(pad) * p_vs, 1.0 / p_vs]
+
+
+## Read a `_crease_profile_table` at a signed distance (positive inside). Mirrors `RasterCreaseProfile::at`.
+func _crease_profile_at(p_table: Array, p_d: float) -> float:
+	var tab: PackedFloat32Array = p_table[0]
+	var t: float = (p_d - float(p_table[1])) * float(p_table[2])
+	if t <= 0.0:
+		return tab[0]
+	var i := int(t)
+	var last := tab.size() - 1
+	if i >= last:
+		return tab[last]
+	var f := t - float(i)
+	return tab[i] * (1.0 - f) + tab[i + 1] * f
+
+
 ## True when the native C++ rasteriser for `method` is available (post-Round-2 build). Falls back to the
 ## GDScript reference loop otherwise.
 func _native_raster(method: String) -> bool:
@@ -7105,6 +7168,9 @@ func _total_padding() -> float:
 ## full reach and not a tail that can be truncated cheaply. The grid therefore grows with the radius the
 ## user asked for — at 34 m over a 100 m mound that is roughly nine times the cells — which is the honest
 ## cost of the setting rather than a cheaper wrong answer.
+##
+## It is ALSO how far the smoothed footprint rim reaches past the outline (`_crease_profile_table`), which
+## needs the same padding for the same reason and to the same distance: both are that one kernel's reach.
 func _crease_blur_reach() -> float:
 	if crease_smoothing <= 0.0 or not _has_corner_rounding():
 		return 0.0

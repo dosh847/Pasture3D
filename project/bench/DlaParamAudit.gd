@@ -30,7 +30,6 @@ func _init() -> void:
 	_sweep("detail_size", [0.03, 0.08, 0.12, 0.16, 0.20, 0.28, 0.35, 0.42, 0.50])
 	_sweep("hierarchy_levels", [1, 2, 3, 4, 5, 6, 7, 8])
 	_sweep("resolution", [64, 128, 256, 512, 1024])
-	_sweep("blur_levels", [1, 3, 5, 7])
 	_sweep("ridge_amount", [0.01, 0.05, 0.10, 0.20, 0.30])
 	quit()
 
@@ -48,4 +47,4 @@ func _sweep(p_name: String, p_values: Array) -> void:
 		var n0: int = maxi(n >> (levels - 1), 16)
 		print("    %-10s %8.3f %8.3f %8.3f %10d %8d %s"
 				% [str(v), m._grow_extent(n).x / half, float(m._blur_budget(n)) / half,
-				m._outer(n).x / half, m._particles(), n0, str(m._blur_radii(n))])
+				m._outer(n).x / half, m._particles(), n0, str(m._blur_budget(n))])

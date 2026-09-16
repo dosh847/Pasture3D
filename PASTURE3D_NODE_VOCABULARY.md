@@ -112,7 +112,7 @@ material*. It has outgrown that. Verdict: **keep it as a generator category, dis
 structure.**
 
 ### Keep — relief is a real domain term here
-The **shape family** genuinely produces relief (elevation variation): Crater, Strata, Dunes, Scree,
+The **shape family** genuinely produces relief (elevation variation): Crater, Strata, Dunes, Fractal, Scree,
 Terraces, Furrows, Fractal, DLA. These become **generator ops**, and **"Relief" stays their category
 label** (a node-palette group). `Pasture3DRelief{Crater,Strata,…}` keep their names.
 

@@ -13,6 +13,12 @@
 #    leave a straight run and the rim EXACTLY where they are (the blur is the identity on a linear
 #    field, and that is the whole safety argument, so it has to be measured rather than asserted); it
 #    must be independent of the decimation step; and 0 must be the original field bit for bit.
+# 1d. crease_smoothing ALSO rounds the crease the footprint makes. 1c's inertness at the rim is exactly
+#    why the field blur cannot do this: the rim crease lives in the profile-of-distance, not in the
+#    field. Controls: the fixture profile must actually HAVE a rim kink to remove, or the criterion is
+#    vacuous; a linear flank must not move (same identity argument, now in one dimension); the smoothed
+#    rim must reach outside the outline but no further than `_crease_blur_reach` pads the grid for; and
+#    0 metres must build no table at all, so an un-smoothed bake never goes through an interpolation.
 # 3. A zero-length tangent's grab stub scales with its segment. Control: a SHORT segment must keep the
 #    old stub exactly, so the change is confined to the span where the handle was unpickable.
 #
@@ -41,11 +47,12 @@ func _ready() -> void:
 	print("\n=== BrushCornerAndUniqueGate ===\n")
 	_check_fillet()
 	_check_crease_smoothing()
+	_check_footprint_crease()
 	_check_property_visibility()
 	_check_make_unique()
 	_check_tangent_stub()
-	var ok := _fail == 0 and _done == 5
-	print("\n=== %s (%d failures, %d/5 criteria completed) ===\n"
+	var ok := _fail == 0 and _done == 6
+	print("\n=== %s (%d failures, %d/6 criteria completed) ===\n"
 		% ["BRUSH CORNER + UNIQUE PASS" if ok else "BRUSH CORNER + UNIQUE FAIL", _fail, _done])
 	get_tree().quit(0 if ok else 1)
 
@@ -348,6 +355,69 @@ func _check_crease_smoothing() -> void:
 	print("    blur cost: 6 m %d us, 60 m %d us (want the same order)" % [t_small, t_big])
 	if t_big > t_small * 4 + 2000:
 		_bad("cost grows with the radius — the passes are not O(1) per cell")
+
+	mound.free()
+	_done += 1
+
+
+## The OTHER crease: the one the footprint makes where the brush meets the ground. 1c proves the field
+## blur is the identity at the rim, which is precisely why it can never round this join — the kink is in
+## the profile as a function of distance, and that is what gets smoothed here.
+func _check_footprint_crease() -> void:
+	print("[1d] crease_smoothing also rounds the crease the FOOTPRINT makes:")
+	var mound := Pasture3DMound.new()
+	# A cone's profile: 0 outside, rising linearly from the rim, flat once it hits the cap. LINEAR is the
+	# case that matters — a smoothstep falloff already meets the ground flat, so it could not tell a
+	# working blur from an inert one — and it is also the shape whose flank the blur must NOT move.
+	var raw := func(d: float) -> float:
+		return minf(0.5 * d, 10.0)
+	mound.crease_smoothing = 2.0
+	var reach: float = mound._crease_blur_reach()
+	var tab := mound._crease_profile_table(raw, 40.0, VS)
+	if tab.is_empty():
+		_bad("no profile table at 2 m of smoothing — nothing below would measure anything")
+		mound.free()
+		return
+	var at := func(d: float) -> float:
+		return mound._crease_profile_at(tab, d)
+
+	# The kink itself, as the second difference across the rim. Outside, the profile is 0 by definition,
+	# so the raw value at -1 m is 0 and the raw kink is the cone's whole slope.
+	var raw_kink: float = absf(raw.call(1.0) - 2.0 * raw.call(0.0) + 0.0)
+	var soft_kink: float = absf(at.call(1.0) - 2.0 * at.call(0.0) + at.call(-1.0))
+	print("    rim second difference: raw %.4f  smoothed %.4f (want a fraction of it)" % [raw_kink, soft_kink])
+	if raw_kink < 0.1:
+		_bad("the fixture profile has no rim kink to remove — this criterion is vacuous")
+	if soft_kink > raw_kink * 0.25:
+		_bad("the footprint crease is still there — the rim kink was not smoothed")
+
+	# A rounded foot has to land somewhere, so the rim must carry height AT and just OUTSIDE the outline.
+	print("    profile at the rim: %.4f, 1 m outside: %.4f (want both > 0)" % [at.call(0.0), at.call(-1.0)])
+	if at.call(0.0) <= 0.0 or at.call(-1.0) <= 0.0:
+		_bad("the join was not rounded — the profile still starts flat at the outline")
+
+	# Control: a linear flank must not move. Same argument as 1c's straight run, now in one dimension: the
+	# probes sit clear of both the rim and the cone's cap, so the kernel sees nothing but the line.
+	for d in [10.0, 12.0, 14.0]:
+		var moved: float = absf(at.call(d) - raw.call(d))
+		print("    cone flank at %.0f m: raw %.3f  smoothed %.3f  (moved %.6f)"
+			% [d, raw.call(d), at.call(d), moved])
+		if moved > 1.0e-3:
+			_bad("smoothing moved a linear flank, where a symmetric kernel must be the identity")
+
+	# Control: the reach is finite AND is the reach the footprint is padded for. A profile that bled past
+	# `_crease_blur_reach` would be stamping into cells the grid was never widened to hold.
+	var outside: float = at.call(-(reach + 1.0))
+	print("    reach %.0f m; profile %.0f m outside the outline: %.6f (want exactly 0)"
+		% [reach, reach + 1.0, outside])
+	if absf(outside) > 0.0:
+		_bad("the smoothed rim reaches further out than _crease_blur_reach pads the footprint for")
+
+	# Control: 0 m must build no table, so an un-smoothed bake is the original profile rather than a round
+	# trip through an interpolated one.
+	mound.crease_smoothing = 0.0
+	if not mound._crease_profile_table(raw, 40.0, VS).is_empty():
+		_bad("0 m built a table — an un-smoothed bake must not go through an interpolated profile")
 
 	mound.free()
 	_done += 1

@@ -40,7 +40,7 @@ const ReliefDLA = preload("res://addons/pasture_3d/connectors/pasture3d_relief_d
 
 ## The massif's height, in metres — the amplitude of the finished mountain. The grown field is normalised
 ## [0,1], so this is a straight multiplier on it.
-@export_range(0.0, 4000.0, 1.0, "or_greater") var amplitude: float = 400.0:
+@export_range(0.0, 4000.0, 1.0, "or_greater") var amplitude: float = 30.0:
 	set(v):
 		amplitude = maxf(v, 0.0)
 		# Not `_param_changed`: amplitude is applied after the cache, so the frozen massif is not stale.
@@ -90,18 +90,10 @@ const ReliefDLA = preload("res://addons/pasture_3d/connectors/pasture3d_relief_d
 		wander = clampf(v, 0.0, 1.0)
 		_param_changed()
 
-@export_group("Massing")
-## How many times the skeleton is blurred and summed — the number of scales the massif is built from.
-@export_range(1, 7) var blur_levels: int = 5:
-	set(v):
-		blur_levels = clampi(v, 1, 7)
-		_param_changed()
-## Weight ratio between one blur level and the next-wider. Above 1 the broad blurs carry the mass (a
-## MOUNTAIN with ridges); below 1 the sharp skeleton dominates (a bare ridge network).
-@export_range(0.25, 4.0, 0.05) var blur_growth: float = 1.6:
-	set(v):
-		blur_growth = clampf(v, 0.25, 4.0)
-		_param_changed()
+# The Massing group is gone with the blur cascade that needed it: `blur_levels` and `blur_growth` shaped a
+# sum of blurred skeletons, and the massif is now a max-plus distance transform off the ridge tree, which
+# takes its one length from `detail_size` and its curve from `profile_power`. P10 and P11 stay reserved and
+# are written as 0 rather than renumbering every parameter after them.
 
 @export_group("Ridge Seeding")
 ## Grow the cluster OUT OF the ridges in the wired input field instead of from a single central point. The
@@ -147,7 +139,7 @@ func op() -> StringName:
 
 ## P0 amplitude, P1 coverage, P2 detail_size, P3 profile_power, P4..P6 seed as 24/24/16-bit chunks (a float32
 ## slot is exact only to 2^24, and a seed is an int64), P7 resolution, P8 hierarchy_levels, P9 wander,
-## P10 blur_levels, P11 blur_growth, P12 ridge_seeding, P13 ridge_amount. Read by GRAPH_OP_DLA.
+## P10, P11 reserved (were blur_levels, blur_growth), P12 ridge_seeding, P13 ridge_amount. Read by GRAPH_OP_DLA.
 func native_lower() -> Dictionary:
 	var p := PackedFloat32Array()
 	p.resize(16)
@@ -161,8 +153,8 @@ func native_lower() -> Dictionary:
 	p[7] = float(resolution)
 	p[8] = float(hierarchy_levels)
 	p[9] = wander
-	p[10] = float(blur_levels)
-	p[11] = blur_growth
+	p[10] = 0.0 # reserved (was blur_levels)
+	p[11] = 0.0 # reserved (was blur_growth)
 	p[12] = 1.0 if ridge_seeding else 0.0
 	p[13] = ridge_amount
 	return {"params": p}
@@ -333,8 +325,6 @@ func _make_engine(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: R
 	e.detail_size = p_detail
 	e.wander = _f32(wander)
 	e.seed = seed
-	e.blur_levels = blur_levels
-	e.blur_growth = _f32(blur_growth)
 	e.profile_power = _f32(profile_power)
 	e.ridge_seeding = ridge_seeding
 	e.ridge_amount = _f32(ridge_amount)
@@ -345,15 +335,21 @@ func _make_engine(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: R
 	# that maps loop-local metres back to grid indices; our grid is axis-aligned over the rect with square
 	# cells, so cos/sin are 1/0 and vs is the cell size. min_x/min_z carry the half-cell so a world point at
 	# a cell centre lands on an integer index (the engine's _bilinear reads cell centres at integers).
-	if ridge_seeding and _is_input_wired(p_surface):
+	if _is_input_wired(p_surface):
 		var dx := p_rect.size.x / float(maxi(p_gw, 1))
 		var dz := p_rect.size.y / float(maxi(p_gh, 1))
 		var ex := p_rect.size.x * 0.5
 		var ez := p_rect.size.y * 0.5
 		var frame := [p_rect.position.x + ex, p_rect.position.y + ez, 1.0, 0.0, ex, ez,
 				p_rect.position.x + 0.5 * dx, p_rect.position.y + 0.5 * dz, dx]
-		e._seed = {"surface": p_surface, "gw": p_gw, "gh": p_gh, "frame": frame}
-		e._seed_hash = hash(p_surface) ^ (hash(p_gw) * 31)
+		var cap := {"surface": p_surface, "gw": p_gw, "gh": p_gh, "frame": frame}
+		# The outline whenever an input is wired; the ridges only when asked. A wired input is NaN outside the
+		# brush loop, and that boundary is the envelope the cluster grows to — see the engine's `_shape`.
+		e._shape = cap
+		e._shape_hash = hash(p_surface) ^ (hash(p_gw) * 31)
+		if ridge_seeding:
+			e._seed = cap
+			e._seed_hash = e._shape_hash
 	return e
 
 

@@ -1208,6 +1208,7 @@ const SLOT_SPINS := {
 	&"noise_jordan": {0: [&"amplitude"], 1: [&"warp_strength"], 2: [&"damp_strength"], 3: [&"gain"], 4: [&"frequency"]},
 	&"furrows": {0: [&"amplitude"], 1: [&"spacing"], 2: [&"direction_degrees"], 3: [&"wobble_amount"]},
 	&"dunes": {0: [&"amplitude"], 1: [&"wavelength"], 2: [&"direction_degrees"], 3: [&"asymmetry"], 4: [&"crest_sharpness"]},
+	&"fractal": {0: [&"amplitude"], 1: [&"feature_size"], 2: [&"sharpness"], 3: [&"warp_amount"]},
 	&"crater": {0: [&"amplitude"], 1: [&"floor_depth"], 2: [&"rim_height"], 3: [&"rim_width"]},
 	&"geological_primitive": {0: [&"height"], 1: [&"radius"], 2: [&"steepness"], 3: [&"eccentricity"]},
 	&"warp": {1: [&"strength"], 2: [&"amplitude"], 3: [&"frequency"]},
@@ -1403,6 +1404,11 @@ func _append_slot_special_widget(p_row: HBoxContainer, p_node: Pasture3DGraphNod
 				seed_btn.pressed.connect(func(): p_node.set("seed", randi() % 100000))
 				p_row.add_child(seed_btn)
 		&"dunes":
+			if p_port == 0:
+				var seed_btn := Button.new(); seed_btn.text = "🎲"; seed_btn.tooltip_text = "Randomize seed"
+				seed_btn.pressed.connect(func(): p_node.set("seed", randi() % 100000))
+				p_row.add_child(seed_btn)
+		&"fractal":
 			if p_port == 0:
 				var seed_btn := Button.new(); seed_btn.text = "🎲"; seed_btn.tooltip_text = "Randomize seed"
 				seed_btn.pressed.connect(func(): p_node.set("seed", randi() % 100000))

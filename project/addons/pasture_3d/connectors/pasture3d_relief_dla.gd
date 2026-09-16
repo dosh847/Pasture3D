@@ -144,21 +144,14 @@ enum Evaluation { LIVE, FROZEN }
 		_touch()
 
 @export_group("Massing")
-## How many times the skeleton is blurred and summed. Each level roughly doubles the radius, so this is
-## the number of scales the massif is built from, not a quality slider.
-@export_range(1, 7) var blur_levels: int = 5:
-	set(v):
-		blur_levels = clampi(v, 1, 7)
-		_touch()
-## Weight ratio between one blur level and the next-wider one. Above 1 the broad blurs carry the mass and
-## the result reads as a MOUNTAIN with ridges on it; below 1 the sharp skeleton dominates and it reads as
-## a bare ridge network. 1 weights every scale equally.
-@export_range(0.25, 4.0, 0.05) var blur_growth: float = 1.6:
-	set(v):
-		blur_growth = clampf(v, 0.25, 4.0)
-		_touch()
-## Remap applied to the normalised field: 1 = linear, above 1 pulls the flanks down towards the base and
-## sharpens the summit, below 1 fattens the massif out towards a plateau.
+# `blur_levels` and `blur_growth` USED TO LIVE HERE, and their two slots in the native program (P10, P11)
+# are left reserved rather than renumbered. They configured a cascade of box blurs that was summed to make
+# the massif, and the massif is no longer built that way: a sum of blurs averages a skeleton into a field
+# of round bumps, which is the cauliflower the editor kept showing. `_massif` replaces it, and the only
+# things it needs are the ridge width (derived from `detail_size`) and the flank curve below.
+## The flank curve. Remap applied to the normalised field: 1 = straight slopes, above 1 pulls the flanks
+## down towards the base and sharpens the summit, below 1 fattens the massif out towards a plateau. With
+## the cone massing this is the dial that decides whether the result reads as a peak or as a massif.
 @export_range(0.25, 4.0, 0.05) var profile_power: float = 1.0:
 	set(v):
 		profile_power = clampf(v, 0.25, 4.0)
@@ -174,6 +167,19 @@ enum Evaluation { LIVE, FROZEN }
 # the .tres and quietly seed the wrong mountain.
 var _seed: Dictionary = {}
 var _seed_hash := 0
+# THE LOOP'S OWN OUTLINE, which is what the growth's envelope is measured against. Same captured surface
+# as `_seed` — the host hands over one grid, NaN wherever the brush does not contribute, and that NaN
+# boundary IS the loop. Held separately because the two uses are independent: the envelope follows the
+# outline whenever there is a capture, while seeding from the ridges inside it stays opt-in.
+#
+# Empty (no capture, or no data at the loop's centre) falls back to the inscribed ellipse, which is what
+# this material grew before the outline existed. That fallback is not a leftover: an unhosted growth — a
+# gate, a graph node with nothing wired — has no loop to follow, and an ellipse in its rectangle is the
+# honest answer there.
+var _shape: Dictionary = {}
+var _shape_hash := 0
+var _shape_tbl := PackedFloat32Array()
+var _shape_tbl_ready := false
 var _dla_key := ""
 var _dla_field := PackedFloat32Array()
 var _dla_n := 0
@@ -204,6 +210,18 @@ var _host_dims := Vector2i.ZERO
 # The reference point the derived quantities are calibrated at. Everything below is expressed as a ratio
 # to it, so the shipped defaults reproduce a geometry that was tuned by looking at the result, and moving
 # either control scales away from that rather than away from an abstraction.
+## Directions the loop's outline is measured in, and steps each march takes. 64 directions put a sample
+## every 5.6°, which resolves an arm of a hand-drawn loop without making the table itself the detail.
+const SHAPE_DIRS := 64
+const SHAPE_STEPS := 256
+## How far a march may reach, in half-sides. sqrt(2) — the working grid covers a SQUARE and its corners are
+## a half-diagonal out, so a march capped at 1.0 would report the inscribed circle as the outline and cut
+## every loop that runs cornerwise. Written out because a `const` cannot call sqrt().
+const SHAPE_REACH := 1.4142135623730951
+## The smallest fraction of the half-side a direction can report. A direction that hits no-data immediately
+## would otherwise divide by zero in `_rho` and kill every particle launched near it.
+const SHAPE_MIN_FRAC := 0.05
+
 const REF_DETAIL := 0.12
 const REF_COVERAGE := 0.9
 const REF_PARTICLES := 3000
@@ -220,6 +238,20 @@ const REF_BLUR_SHARE := 0.3243
 ## is 4d/(1+4d) of the radius, which reaches 0.70 only at d = 0.58. A ceiling that binds mid-range is a
 ## slider that stops working half way along, which is exactly what the previous 0.38 did.
 const BLUR_CEILING := 0.70
+
+## Width of the window that takes the finished massif to exactly zero on its envelope, as a share of rho.
+## Narrow on purpose: everything it touches is the blur's tail, so widening it would start eating ridges
+## the cluster actually grew, which is the shortfall this whole change exists to remove.
+const WINDOW_BAND := 0.05
+
+## The slope's run, as a share of the massif's radius. Big enough that neighbouring slopes MERGE into
+## continuous faces -- a mountain, not a field of bumps -- and small enough that the ridges still read as
+## separate crests rather than washing into one dome. Gate CQ holds the second half, CX the first.
+const SLOPE_RUN := 0.18
+
+## How much of a crest's height its depth in the tree can take away. 0 is a dome, 1 hands the whole height
+## to the tree and takes the size control with it. See `_crest_height`.
+const DEPTH_BITE := 0.55
 ## Fewest cells the baked field may have on its short side. Below 2 the bilinear samplers read a defined
 ## zero and the material vanishes; 8 is where a massif still has somewhere to be. A loop elongated past
 ## `resolution / FIELD_MIN` is warned about rather than silently un-squished, because the honest answer
@@ -291,37 +323,174 @@ func _aspect_scale() -> Vector2:
 ## which is the invariant that keeps a FIT-mapped DLA from stepping at its loop boundary — and the ellipse
 ## is the loop's own rectangle scaled by `coverage`, so the invariant now holds on both axes rather than
 ## on the one that happened to be longer.
-func _outer(n: int) -> Vector2:
-	return _aspect_scale() * (coverage * 0.5 * float(n))
+## AN ENVELOPE IS `[Vector2 semi, PackedFloat32Array radii]`: the ellipse's two semi-axes, and a radius per
+## direction that supersedes them when the loop's outline is known. An empty table means the ellipse, and it
+## is then the EXACT expression this material always used — an unhosted growth is unchanged to the bit.
+func _outer(n: int) -> Array:
+	var semi: Vector2 = _aspect_scale() * (coverage * 0.5 * float(n))
+	var tbl := _shape_table()
+	if tbl.is_empty():
+		return [semi, PackedFloat32Array()]
+	# The table is a fraction of the working square's half-side, and the square is what the grid's cells
+	# are — so scaling by `coverage * n/2` lands it in cells the same way the ellipse's semi-axes do. Stored
+	# float32, because every radius the script holds is (see the port's header).
+	var s := coverage * 0.5 * float(n)
+	var out := PackedFloat32Array()
+	out.resize(tbl.size())
+	for i in range(tbl.size()):
+		out[i] = tbl[i] * s
+	return [semi, out]
+
+
+## The loop's outline: the distance from its centre out to the last cell that carries data, in each of
+## `SHAPE_DIRS` directions, as a fraction of the working square's half-side. A direction may report MORE
+## than 1.0 — the grid's square has corners, and a loop is allowed to run into them (see `SHAPE_REACH`).
+##
+## Measured by MARCHING OUT FROM THE CENTRE and stopping at the first no-data cell, rather than by taking
+## the farthest data in that direction. A loop is not required to be convex or even connected — a brush can
+## leave a hole, and another one can sit across the grid — and the envelope has to be the region the
+## cluster can actually grow through, not the bounding extent of everything the grid happens to contain.
+func _shape_table() -> PackedFloat32Array:
+	if _shape_tbl_ready:
+		return _shape_tbl
+	_shape_tbl_ready = true
+	_shape_tbl = PackedFloat32Array()
+	var g: PackedFloat32Array = _shape.get("surface", PackedFloat32Array())
+	var gw: int = _shape.get("gw", 0)
+	var gh: int = _shape.get("gh", 0)
+	var frame: Array = _shape.get("frame", [])
+	if g.size() != gw * gh or gw < 2 or gh < 2 or frame.size() < 9:
+		return _shape_tbl
+	var cx: float = frame[0]
+	var cz: float = frame[1]
+	var fcos: float = frame[2]
+	var fsin: float = frame[3]
+	var ex: float = frame[4]
+	var ez: float = frame[5]
+	var min_x: float = frame[6]
+	var min_z: float = frame[7]
+	var vs: float = frame[8]
+	if vs <= 0.0:
+		return _shape_tbl
+	var side: float = maxf(ex, ez)
+	# No data at the centre means the cluster's own seed point is outside the brush, and every march would
+	# stop on its first step. The ellipse is the honest fallback rather than a table of minimum radii.
+	if not is_finite(_bilinear(g, gw, gh, (cx - min_x) / vs, (cz - min_z) / vs)):
+		return _shape_tbl
+	var tbl := PackedFloat32Array()
+	tbl.resize(SHAPE_DIRS)
+	for k in range(SHAPE_DIRS):
+		var ang := TAU * float(k) / float(SHAPE_DIRS)
+		var ca := cos(ang)
+		var sa := sin(ang)
+		var last := 0.0
+		for s in range(1, SHAPE_STEPS + 1):
+			var f := float(s) / float(SHAPE_STEPS) * SHAPE_REACH
+			var lx := f * side * ca
+			var lz := f * side * sa
+			var wx := cx + lx * fcos - lz * fsin
+			var wz := cz + lx * fsin + lz * fcos
+			if not is_finite(_bilinear(g, gw, gh, (wx - min_x) / vs, (wz - min_z) / vs)):
+				break
+			last = f
+		tbl[k] = maxf(last, SHAPE_MIN_FRAC)
+	_shape_tbl = tbl
+	return _shape_tbl
+
+
+## How many directions the cluster's reach is tracked in: one for an ellipse, one per outline entry.
+static func _reach_bins(p_env: Array) -> int:
+	var tbl: PackedFloat32Array = p_env[1]
+	return 1 if tbl.is_empty() else tbl.size()
+
+
+## Which reach bin a point falls in. Always 0 when there is only one, so the ellipse keeps a single number.
+static func _reach_bin(dx: float, dy: float, p_bins: int) -> int:
+	if p_bins <= 1:
+		return 0
+	return int(fposmod(atan2(dy, dx), TAU) / TAU * float(p_bins)) % p_bins
+
+
+## The envelope's radius in a given direction, interpolated between the table's two nearest entries.
+static func _radius_at(p_tbl: PackedFloat32Array, p_ang: float) -> float:
+	var k := p_tbl.size()
+	var t := fposmod(p_ang, TAU) / TAU * float(k)
+	var i0 := int(t) % k
+	var i1 := (i0 + 1) % k
+	return lerpf(p_tbl[i0], p_tbl[i1], t - floor(t))
+
+
+## The envelope's REPRESENTATIVE radius, in cells — what the blur and the "one cell in envelope units"
+## conversion are both sized by. An ellipse answers with its shorter semi-axis, exactly as before.
+##
+## An outline answers with its MEDIAN, not its minimum, and the difference is not cosmetic: a loop is under
+## no obligation to be convex, and on one that is not — a plus, an L, anything with a notch — the directions
+## that cross the notch report almost nothing. Sizing one isotropic blur off those collapsed it to a single
+## cell and the massif came out as bare branches: measured on a plus-shaped loop, the arms filled 0.109
+## against the inscribed ellipse's 0.591, i.e. following the outline made the mountain WORSE.
+##
+## The narrow directions are not thereby ignored. They are handled where they belong — per direction, by the
+## floor in `_grow_extent` — rather than by letting the tightest one set the width of the whole massif.
+static func _env_typical(p_env: Array) -> float:
+	var tbl: PackedFloat32Array = p_env[1]
+	if tbl.is_empty():
+		var s: Vector2 = p_env[0]
+		return minf(s.x, s.y)
+	var v := PackedFloat32Array(tbl)
+	v.sort()
+	return v[v.size() / 2]
+
+
+## The envelope's largest radius, in cells — what the particle budget is scaled by.
+static func _env_max(p_env: Array) -> float:
+	var tbl: PackedFloat32Array = p_env[1]
+	if tbl.is_empty():
+		var s: Vector2 = p_env[0]
+		return maxf(s.x, s.y)
+	var m := 0.0
+	for v in tbl:
+		m = maxf(m, v)
+	return m
+
+
+## What a launch at angle `ang` is scaled by on each axis. The ellipse keeps its two semi-axes (see the
+## note in `_walk` on why that parametrisation is the right one); an outline uses its one radius in that
+## direction, which is the same statement for a shape that is not an ellipse.
+static func _env_launch(p_env: Array, p_ang: float) -> Vector2:
+	var tbl: PackedFloat32Array = p_env[1]
+	if tbl.is_empty():
+		return p_env[0]
+	var r := _radius_at(tbl, p_ang)
+	return Vector2(r, r)
 
 
 ## How far out something is as a fraction of what it is allowed: 1.0 is ON the envelope. Every reach test
 ## in the growth is written in these units so that one number means the same thing on a square loop and on
 ## a 3:1 one, and so the cluster's ENVELOPE is the only anisotropic thing about it — the branching inside
 ## it stays on a square lattice with square cells and comes out the same shape everywhere.
-static func _rho(dx: float, dy: float, e: Vector2) -> float:
-	var u := dx / maxf(e.x, 0.001)
-	var v := dy / maxf(e.y, 0.001)
-	return sqrt(u * u + v * v)
+static func _rho(dx: float, dy: float, e: Array) -> float:
+	var tbl: PackedFloat32Array = e[1]
+	if tbl.is_empty():
+		var s: Vector2 = e[0]
+		var u := dx / maxf(s.x, 0.001)
+		var v := dy / maxf(s.y, 0.001)
+		return sqrt(u * u + v * v)
+	return sqrt(dx * dx + dy * dy) / maxf(_radius_at(tbl, atan2(dy, dx)), 0.001)
 
 
-## How wide the ridges are, in cells. The blur asks for four times the branch spacing and the spacing is
-## `detail_size` of the cluster's reach, so this and `_grow_extent` are one equation solved together:
-## blur = 4d * grow and grow = outer - blur gives blur = outer * 4d/(1+4d), which is what this returns.
+## How far a slope runs from its crest before it reaches the ground, in cells, as a share of the massif's
+## own radius. This is the one length the massing needs.
 ##
-## THE TWO SUM TO `coverage` EXACTLY. Nothing is reserved and left unspent, which is the whole point: the
-## previous version fixed the split at 62/38 whatever the blur actually wanted, and the difference was
-## empty ground between the mountain and its loop.
+## NOT derived from `detail_size`, and that is the whole point. The blur cascade this replaced sized its
+## spread off `detail_size`, and carrying that over made the massif's SUPPORT track the ridge width -- gate
+## CX.3 measured 28 % of drift across the range, which is `detail_size` resizing the mountain, the exact
+## complaint the control was split out to answer. A fixed share of the radius keeps `coverage` the only
+## size control, and leaves `detail_size` doing what its name says: how far apart the ridges are.
 ##
-## Sized off the SHORTER semi-axis. The blur is one isotropic radius in cells — it has to be, because a
-## blur with two radii is precisely the squashing this material is built to avoid — so the axis that can
-## afford the least is the one that can set it. It is also the axis on which "everything outside
-## `coverage` is zero" would break first, and that invariant is worth more than a ridge or two of width.
-func _blur_budget(n: int) -> int:
-	var o := _outer(n)
-	var m := minf(o.x, o.y)
-	var ask := 4.0 * detail_size
-	return clampi(int(m * minf(ask / (1.0 + ask), BLUR_CEILING)), 1, maxi(1, int(m * BLUR_CEILING)))
+## The cluster gives this back: `_grow_extent` stops a slope run short of the envelope, so crest plus slope
+## lands exactly on `coverage` and the field outside it is still zero.
+func _slope_run(n: int) -> int:
+	return maxi(1, int(_env_typical(_outer(n)) * SLOPE_RUN))
 
 
 ## The cluster's own reach on each axis: everything the blur did not take.
@@ -331,10 +500,20 @@ func _blur_budget(n: int) -> int:
 ## it is not: the floor would push that level's cluster out past its own envelope, the upscales carry it,
 ## and the massif is then cut off square at the crop edge — the loop-boundary step this whole budget
 ## exists to prevent, reintroduced on the one axis nobody was looking at.
-func _grow_extent(n: int) -> Vector2:
+func _grow_extent(n: int) -> Array:
 	var o := _outer(n)
-	var b := float(_blur_budget(n))
-	return Vector2(maxf(minf(4.0, o.x * 0.5), o.x - b), maxf(minf(4.0, o.y * 0.5), o.y - b))
+	var b := float(_slope_run(n))
+	var semi: Vector2 = o[0]
+	var e := Vector2(maxf(minf(4.0, semi.x * 0.5), semi.x - b), maxf(minf(4.0, semi.y * 0.5), semi.y - b))
+	var tbl: PackedFloat32Array = o[1]
+	var out := PackedFloat32Array()
+	if not tbl.is_empty():
+		out.resize(tbl.size())
+		# The same floor the ellipse takes, applied per direction: a direction the blur cannot afford keeps
+		# half its radius rather than going to zero, so a narrow arm of a loop still grows something.
+		for i in range(tbl.size()):
+			out[i] = maxf(minf(4.0, tbl[i] * 0.5), tbl[i] - b)
+	return [e, out]
 
 
 ## Particles walked at the FINAL grid; coarser rounds get proportionally fewer, in the ratio of their grid
@@ -357,10 +536,9 @@ func _grow_extent(n: int) -> Vector2:
 ## is A/B blobs of radius B laid end to end, and cells = area / spacing = A*B / (d*B) = A/d — the same
 ## count a circle of radius A would need, and identical to the old expression when A = B.
 func _particles() -> int:
-	var e := _grow_extent(_grid_size())
-	var r := maxf(e.x, e.y)
+	var r := _env_max(_grow_extent(_grid_size()))
 	var ref_r := REF_COVERAGE * 0.5 * float(REF_RESOLUTION) * (1.0 - REF_BLUR_SHARE)
-	return clampi(int(float(REF_PARTICLES) * (r / ref_r) * pow(REF_DETAIL / detail_size, 0.7)), 64, 24000)
+	return clampi(int(float(REF_PARTICLES) * (r / ref_r) * pow(REF_DETAIL / detail_size, 0.45)), 64, 24000)
 
 
 ## THREE OUTCOMES, and which one this is depends on `evaluation` and on what is already held:
@@ -393,6 +571,15 @@ func _build() -> void:
 
 ## True when this material is waiting on the host to hand it a surface to seed from. The host asks before
 ## every bake, and captures only when something says yes — so an unseeded DLA costs nothing.
+## STILL `ridge_seeding`, deliberately, even though the capture now also carries the loop's OUTLINE and every
+## growth would like one. Answering true unconditionally was tried and is wrong: this hook is a bake-
+## scheduling contract, not a free request. DLAGate caught it four ways — every stack in the project was
+## charged for a capture it never asked for, a stack that never asked was charged too, a ridge-free surface
+## started changing the result, and the worker and the main thread grew different mountains.
+##
+## So a brush-hosted DLA follows its loop's outline only when it is seeding, and grows in the inscribed
+## ellipse otherwise. The graph node has no such limit: it sets the outline directly from its wired input
+## (Pasture3DGraphNodeDLA._make_engine) and never goes through this hook.
 func wants_seed_surface() -> bool:
 	return ridge_seeding
 
@@ -412,6 +599,15 @@ func set_seed_surface(p_surface: Dictionary) -> bool:
 		return false
 	_seed = p_surface
 	_seed_hash = h
+	# DELIBERATELY NOT `_shape`. The captured grid does carry the loop's outline, and a brush-hosted DLA would
+	# grow a better mountain for following it — but the capture only happens when `ridge_seeding` is on, so
+	# taking the outline here would make the Ridge Seeding checkbox silently change the massif's SHAPE as
+	# well as what it grows from. DLAGate's CY control states the invariant exactly: a captured surface with
+	# no ridges in it must produce the unseeded field bitwise, and an outline taken here breaks that.
+	#
+	# Giving the relief material an outline needs the capture to happen for every DLA, which is a change to
+	# the bake-scheduling contract (`wants_seed_surface`) and not a change to this line. The graph node has
+	# no such problem: its input is wired or it is not, and it sets `_shape` itself.
 	# FROZEN and already grown: KEEP THE SURFACE, do not regrow, and do not ask for another bake.
 	#
 	# This is the freeze the whole change is about. The captured surface moves whenever anything on the
@@ -436,9 +632,9 @@ func set_seed_surface(p_surface: Dictionary) -> bool:
 ## moves a single cell of the cluster.
 func _growth_key() -> String:
 	var d := _field_dims()
-	return "%d|%d|%d|%.4f|%.4f|%d|%.4f|%.4f|%.4f|%d|%.4f|%d|%d|%d" % [seed, resolution,
-			hierarchy_levels, detail_size, wander, blur_levels, blur_growth, profile_power, coverage,
-			1 if ridge_seeding else 0, ridge_amount, _seed_hash, d.x, d.y]
+	return "%d|%d|%d|%.4f|%.4f|%.4f|%.4f|%d|%.4f|%d|%d|%d" % [seed, resolution,
+			hierarchy_levels, detail_size, wander, profile_power, coverage,
+			1 if ridge_seeding else 0, ridge_amount, _seed_hash, d.x, d.y] + "|%d" % _shape_hash
 
 
 ## Grow the cluster and take the result, on whichever thread called. The synchronous path: what every
@@ -506,7 +702,7 @@ func grow_into(p_state: Dictionary) -> void:
 	var res := _grid_size()
 	var n0 := maxi(res >> (hierarchy_levels - 1), 16)
 	var cluster := _grow(rng, n0, res)
-	p_state["field"] = _mass(_rasterise(cluster, res), res)
+	p_state["field"] = _massif(cluster, res)
 	p_state["n"] = res
 	p_state["dims"] = _field_dims()
 
@@ -623,6 +819,10 @@ func _grow(rng: RandomNumberGenerator, p_n0: int, p_res: int) -> Array:
 	# cluster is a FOREST rather than a tree -- separate crest lines have no reason to be connected, and
 	# nothing downstream needs them to be (a parentless node rasterises as a point and is skipped by the
 	# upscale's midpoint pass).
+	# Where each hierarchy level ENDED, as a node count. Nodes are only ever appended, so level L's cluster
+	# is exactly the prefix `xs[0 .. marks[L])` -- which is what lets the massing blur each level's own
+	# skeleton without keeping a copy of any of them.
+	var marks := PackedInt32Array()
 	var seeded := _seed_ridges(n, xs, ys, parents, owner)
 	if not seeded:
 		xs.append(float(n) * 0.5)
@@ -637,7 +837,7 @@ func _grow(rng: RandomNumberGenerator, p_n0: int, p_res: int) -> Array:
 		# limit the moment the grid doubled -- which is exactly what an earlier version did, and it grew
 		# 33 nodes at level 0 and then nothing at all for five rounds. Coarse levels decide the trunk
 		# inside a smaller disc; the last level is the one that reaches GROW_EXTENT.
-		_grow_level(rng, n, lerpf(0.7, 1.0, float(level) / float(maxi(rounds, 1))),
+		_grow_level(n, lerpf(0.7, 1.0, float(level) / float(maxi(rounds, 1))),
 				maxi(24, _particles() * n / p_res), xs, ys, parents, owner)
 		if n >= p_res:
 			break
@@ -651,7 +851,9 @@ func _grow(rng: RandomNumberGenerator, p_n0: int, p_res: int) -> Array:
 		# each level is what makes the finest branches follow the finest ridges.
 		if seeded:
 			_seed_ridges(n, xs, ys, parents, owner)
-	return [xs, ys, parents]
+		marks.append(xs.size())
+	marks.append(xs.size())
+	return [xs, ys, parents, marks]
 
 
 ## Place the starting cluster on the ridge lines of the captured surface. False when there is no surface,
@@ -789,80 +991,163 @@ func _bilinear(g: PackedFloat32Array, gw: int, gh: int, fx: float, fy: float) ->
 ## thing the loop's shape changes is where the boundary is — not how the walk behaves on the way to it.
 ## The two fixed margins that were in cells stay in cells, converted through the SHORT semi-axis so that
 ## "three cells past the current reach" is still three cells on the axis where three cells is the most.
-func _grow_level(rng: RandomNumberGenerator, n: int, p_frac: float, p_particles: int,
+func _grow_level(n: int, p_frac: float, p_particles: int,
 		xs: PackedFloat32Array, ys: PackedFloat32Array, parents: PackedInt32Array,
 		owner: PackedInt32Array) -> void:
 	var c := float(n) * 0.5
 	var env := _grow_extent(n)
 	var limit := p_frac
-	var per_cell := 1.0 / maxf(minf(env.x, env.y), 1.0)
-	var reach := per_cell
+	var per_cell := 1.0 / maxf(_env_typical(env), 1.0)
+	# THE CLUSTER'S REACH, PER DIRECTION. One bin for an ellipse — where a single number is exactly right,
+	# because rho is normalised by the envelope and so means the same thing everywhere — and one bin per
+	# outline direction otherwise.
+	#
+	# A single scalar is not merely imprecise on an outline, it stops the growth. Measured on a loop running
+	# down the diagonal: the envelope allowed 85 cells along the bar and 9 across it, a node nine cells off
+	# centre put the shared `reach` at its limit, and from then on every particle launched at the FAR
+	# envelope instead of just beyond the cluster's own tip. Those walkers have to cross the loop's narrow
+	# waist to find anything, they are killed before they arrive, and the massif stalled at half the radius
+	# it was allowed — the "coverage does not fill the loop" complaint, in its second form.
+	var dirs := _reach_bins(env)
+	var reach := PackedFloat32Array()
+	reach.resize(dirs)
+	reach.fill(per_cell)
 	for i in range(xs.size()):
-		reach = maxf(reach, _rho(xs[i] - c, ys[i] - c, env))
+		var dx := xs[i] - c
+		var dy := ys[i] - c
+		var b := _reach_bin(dx, dy, dirs)
+		reach[b] = maxf(reach[b], _rho(dx, dy, env))
 	# Steps, not nodes: a particle takes one step per iteration and the budget has to cover crossing the
 	# launch gap several times over. Bounded so an unstickable particle cannot spin.
 	var budget := n * 4
-	for pi in range(p_particles):
-		# HALF the particles launch on the envelope and half anywhere inside it, alternately. Pure DLA is
-		# all envelope, and it is tip-dominated: every particle meets the outside first, so once the
-		# cluster has touched its limit the remaining mass piles into a shell and the massif comes out
-		# HOLLOW - a ring of ridges round an empty middle, which is a crater, not a mountain. All-interior
-		# is the opposite failure: the cluster stops reaching outward and never fills its loop. The split
-		# is deterministic (alternating, not sampled) so the mix does not itself vary with the seed.
-		#
-		# The interior draw is `sqrt(u)`, which is uniform over the DISC. Drawing the radius uniformly
-		# instead over-weights the middle by 1/r, and measured, that is what kept the massif at 0.67 of a
-		# loop it was allowed 0.96 of: the mass piled into the centre, the mean node sat at 0.23 of the
-		# half-extent, and raising `particles` fourfold bought 0.05.
-		# Reaching the limit comes FIRST and the fill takes what is left. A flat 50/50 ties the cluster's
-		# reach to its particle count, and that count now follows `detail_size` -- so a coarse setting spent
-		# its whole budget without ever arriving, and the mountain came out small when only its texture was
-		# supposed to change. Capped at 70% of the budget so a limit that cannot be reached at all still
-		# leaves something to fill the middle with, rather than starving it into a hollow ring.
-		var growing := reach < limit and pi * 10 < p_particles * 7
-		var launch: float = minf(reach + 3.0 * per_cell, limit) * (
-				1.0 if (growing or (pi & 1) == 0) else sqrt(rng.randf()))
-		# Uniform in the ANGLE and then scaled onto the envelope's two semi-axes, which looks like the
-		# sampling bug it is not: for an ellipse that parametrisation is exactly the harmonic measure —
-		# where a random walker released at infinity actually arrives — so it is the launch distribution
-		# a DLA is supposed to have, and the circle case is the special case of it. Correcting it to
-		# uniform arc length would UNDER-feed the tips of an elongated massif.
-		var ang := rng.randf() * TAU
-		var px := int(round(c + cos(ang) * launch * env.x))
-		var py := int(round(c + sin(ang) * launch * env.y))
-		var kill := limit + 6.0 * per_cell
-		var stuck := -1
-		for _s in range(budget):
-			if px < 1 or py < 1 or px >= n - 1 or py >= n - 1:
-				break
-			if _rho(float(px) - c, float(py) - c, env) > kill:
-				break
-			stuck = _neighbour_owner(owner, n, px, py)
-			if stuck >= 0:
-				break
-			# 4-neighbour walk. An 8-neighbour one sticks through diagonals and produces a visibly
-			# blockier cluster at these grid sizes.
-			match rng.randi() & 3:
-				0: px += 1
-				1: px -= 1
-				2: py += 1
-				_: py -= 1
-		if stuck < 0:
-			continue
-		# Reject rather than stop. An earlier version broke out of the particle loop the moment the
-		# cluster touched its limit, which meant a level whose upscaled cluster ALREADY touched it grew
-		# nothing at all -- and a displaced midpoint can push the reach out past the ramp's headroom, so
-		# that was most levels. Dropping the one particle instead lets the level keep filling in behind
-		# the envelope, which is where a hierarchy's finer branches come from.
-		if _rho(float(px) - c, float(py) - c, env) > limit:
-			continue
-		var id := xs.size()
-		xs.append(float(px))
-		ys.append(float(py))
-		parents.append(stuck)
-		owner[py * n + px] = id
-		reach = maxf(reach, _rho(float(px) - c, float(py) - c, env))
+	var kill := limit + 6.0 * per_cell
+	# BATCHED WALKS. Particles walk in batches against the cluster as it stood when the batch began, each on
+	# its own random stream, and stick in particle order afterwards. That is what lets the C++ port
+	# (src/pasture_3d_dla.cpp) walk a batch on every core and still grow THIS mountain bit for bit, at any
+	# thread count: nothing a walk reads is written until the batch is done. This script runs the batches
+	# serially; it is the oracle, not the fast path.
+	#
+	# The batch grows with the cluster — an eighth of its nodes, capped at 256 — because the approximation is
+	# "a particle cannot stick to another of its own batch". One particle per batch while the trunk forms keeps
+	# that exact where it matters; by the time a batch is 256 wide the cluster is thousands of nodes and the
+	# odds that two walkers of one batch meet are negligible. A walker that lands on a cell an earlier one of
+	# its batch took is dropped, as a walker past the limit is.
+	var prng := RandomNumberGenerator.new()
+	var pi := 0
+	while pi < p_particles:
+		var reach0 := PackedFloat32Array(reach) # the batch walks against the cluster as it stood
+		var batch := mini(clampi(xs.size() >> 3, 1, 256), p_particles - pi)
+		var walked := PackedInt32Array()
+		walked.resize(batch * 3)
+		for b in range(batch):
+			var q := pi + b
+			prng.seed = _walk_seed(n, q)
+			var out := _walk(prng, q, n, c, env, limit, kill, per_cell, reach0, budget, p_particles, owner)
+			walked[b * 3] = out[0]
+			walked[b * 3 + 1] = out[1]
+			walked[b * 3 + 2] = out[2]
+		for b in range(batch):
+			var stuck := walked[b * 3]
+			if stuck < 0:
+				continue
+			var px := walked[b * 3 + 1]
+			var py := walked[b * 3 + 2]
+			# Reject rather than stop. An earlier version broke out of the particle loop the moment the
+			# cluster touched its limit, which meant a level whose upscaled cluster ALREADY touched it grew
+			# nothing at all -- and a displaced midpoint can push the reach out past the ramp's headroom, so
+			# that was most levels. Dropping the one particle instead lets the level keep filling in behind
+			# the envelope, which is where a hierarchy's finer branches come from.
+			if _rho(float(px) - c, float(py) - c, env) > limit:
+				continue
+			if owner[py * n + px] >= 0:
+				continue # an earlier particle of this batch took the cell
+			var id := xs.size()
+			xs.append(float(px))
+			ys.append(float(py))
+			parents.append(stuck)
+			owner[py * n + px] = id
+			var rb := _reach_bin(float(px) - c, float(py) - c, dirs)
+			reach[rb] = maxf(reach[rb], _rho(float(px) - c, float(py) - c, env))
+		pi += batch
 
+
+## One particle's stream: the level's grid size and the particle's index, shifted clear of the seed's low
+## bits and XORed in. The shift cannot carry past bit 63 (n < 2^11, q < 2^20), so int64 here and uint64 in
+## the port agree.
+func _walk_seed(n: int, q: int) -> int:
+	return seed ^ (((n << 20) | q) << 24)
+
+
+## Walk particle `q` against `owner` without writing it. Returns [stuck node or -1, px, py].
+func _walk(rng: RandomNumberGenerator, pi: int, n: int, c: float, env: Array, limit: float, kill: float,
+		per_cell: float, reach: PackedFloat32Array, budget: int, p_particles: int,
+		owner: PackedInt32Array) -> Array:
+	# HALF the particles launch on the envelope and half anywhere inside it, alternately. Pure DLA is
+	# all envelope, and it is tip-dominated: every particle meets the outside first, so once the
+	# cluster has touched its limit the remaining mass piles into a shell and the massif comes out
+	# HOLLOW - a ring of ridges round an empty middle, which is a crater, not a mountain. All-interior
+	# is the opposite failure: the cluster stops reaching outward and never fills its loop. The split
+	# is deterministic (alternating, not sampled) so the mix does not itself vary with the seed.
+	#
+	# The interior draw is `sqrt(u)`, which is uniform over the DISC. Drawing the radius uniformly
+	# instead over-weights the middle by 1/r, and measured, that is what kept the massif at 0.67 of a
+	# loop it was allowed 0.96 of: the mass piled into the centre, the mean node sat at 0.23 of the
+	# half-extent, and raising `particles` fourfold bought 0.05.
+	# Reaching the limit comes FIRST and the fill takes what is left. A flat 50/50 ties the cluster's
+	# reach to its particle count, and that count now follows `detail_size` -- so a coarse setting spent
+	# its whole budget without ever arriving, and the mountain came out small when only its texture was
+	# supposed to change. Capped at 70% of the budget so a limit that cannot be reached at all still
+	# leaves something to fill the middle with, rather than starving it into a hollow ring.
+	# THE ELLIPSE DRAWS IN THE ORIGINAL ORDER — interior factor first, then the angle. An outline has to know
+	# the angle before it can read the reach in that direction, so it draws the angle first. The two orders
+	# give different streams, which is exactly why the ellipse keeps its own: an unhosted growth is the same
+	# mountain, to the bit, as it was before loops had outlines.
+	var tbl: PackedFloat32Array = env[1]
+	if not tbl.is_empty():
+		var oang := rng.randf() * TAU
+		var olr: float = reach[_reach_bin(cos(oang), sin(oang), reach.size())]
+		var ogrowing := olr < limit and pi * 10 < p_particles * 7
+		var olaunch: float = minf(olr + 3.0 * per_cell, limit) * (
+				1.0 if (ogrowing or (pi & 1) == 0) else sqrt(rng.randf()))
+		var orad := _radius_at(tbl, oang)
+		return _walk_from(rng, n, c, env, kill, budget, owner,
+				int(round(c + cos(oang) * olaunch * orad)), int(round(c + sin(oang) * olaunch * orad)))
+	var growing: bool = reach[0] < limit and pi * 10 < p_particles * 7
+	var launch: float = minf(reach[0] + 3.0 * per_cell, limit) * (
+			1.0 if (growing or (pi & 1) == 0) else sqrt(rng.randf()))
+	# Uniform in the ANGLE and then scaled onto the envelope's two semi-axes, which looks like the
+	# sampling bug it is not: for an ellipse that parametrisation is exactly the harmonic measure —
+	# where a random walker released at infinity actually arrives — so it is the launch distribution
+	# a DLA is supposed to have, and the circle case is the special case of it. Correcting it to
+	# uniform arc length would UNDER-feed the tips of an elongated massif.
+	var ang := rng.randf() * TAU
+	var lv := _env_launch(env, ang)
+	return _walk_from(rng, n, c, env, kill, budget, owner,
+			int(round(c + cos(ang) * launch * lv.x)), int(round(c + sin(ang) * launch * lv.y)))
+
+
+## The walk itself, from a launch point both envelope kinds have already chosen. Returns [stuck, px, py].
+func _walk_from(rng: RandomNumberGenerator, n: int, c: float, env: Array, kill: float, budget: int,
+		owner: PackedInt32Array, p_px: int, p_py: int) -> Array:
+	var px := p_px
+	var py := p_py
+	var stuck := -1
+	for _s in range(budget):
+		if px < 1 or py < 1 or px >= n - 1 or py >= n - 1:
+			break
+		if _rho(float(px) - c, float(py) - c, env) > kill:
+			break
+		stuck = _neighbour_owner(owner, n, px, py)
+		if stuck >= 0:
+			break
+		# 4-neighbour walk. An 8-neighbour one sticks through diagonals and produces a visibly
+		# blockier cluster at these grid sizes.
+		match rng.randi() & 3:
+			0: px += 1
+			1: px -= 1
+			2: py += 1
+			_: py -= 1
+	return [stuck, px, py]
 
 ## The node index of an occupied 4-neighbour, or -1.
 func _neighbour_owner(owner: PackedInt32Array, n: int, px: int, py: int) -> int:
@@ -950,12 +1235,12 @@ func _stamp_edge(owner: PackedInt32Array, n: int, xs: PackedFloat32Array, ys: Pa
 
 ## Draw the finished graph into a float grid: every cell a branch crosses is 1, everything else 0.
 ##
-## DELIBERATELY BINARY. An earlier version weighted each branch by its SUBTREE MASS -- trunk bright, tips
-## dim -- on the reasoning that a massif should be heaviest where the cluster is heaviest. Measured, that
-## is wrong twice over: the mass range across a cluster spans four decades, so under any remapping the
-## trunk becomes a spike with the branches barely visible, and the massing it was trying to produce is
-## what the blur stack already does for free -- a cell surrounded by dense cluster gets a high value from
-## the wide blurs without being told to. The skeleton's job is to say WHERE the ridges are, and only that.
+## DELIBERATELY BINARY, and that is safe only because the massing now blurs each hierarchy level at its own
+## scale (`_massif`). An earlier version weighted every branch by its SUBTREE MASS -- trunk bright, tips dim
+## -- and it was removed because the mass range spans four decades and the trunk becomes a spike. Re-tried
+## with a log remap against the per-level massing, it moved the finished field's ring profile by under 0.03
+## and added summits; the level scales already say which structure is big. What was NOT safe was the other
+## half of that old reasoning -- that one cascade over the final skeleton massifies for free. See `_massif`.
 func _rasterise(p_cluster: Array, p_res: int) -> PackedFloat32Array:
 	var xs: PackedFloat32Array = p_cluster[0]
 	var ys: PackedFloat32Array = p_cluster[1]
@@ -966,7 +1251,7 @@ func _rasterise(p_cluster: Array, p_res: int) -> PackedFloat32Array:
 	out.fill(0.0)
 	for i in range(count):
 		var pa := parents[i]
-		if pa < 0:
+		if pa < 0 or pa >= count:
 			_plot(out, p_res, xs[i], ys[i])
 			continue
 		var dx := xs[pa] - xs[i]
@@ -985,37 +1270,189 @@ func _plot(g: PackedFloat32Array, n: int, x: float, y: float) -> void:
 		g[iy * n + ix] = 1.0
 
 
-## Blur the skeleton at increasing radii and sum the copies, weighted. This is what turns a one-cell-wide
-## line drawing into terrain: the narrow blurs keep the ridge crests, the wide ones supply the mass they
-## sit on. Applied cumulatively (each level blurs the previous level's output) rather than re-blurring the
-## original, because N cumulative box passes at doubling radii cost the same as one apiece and land on the
-## same exponential series of supports.
-func _mass(p_raster: PackedFloat32Array, n: int) -> PackedFloat32Array:
+## Turn a grown cluster into a massif: every point of the skeleton is a crest whose height falls with its
+## DEPTH IN THE TREE, and the ground away from a crest falls at a constant slope until it reaches zero.
+##
+## THE OPERATOR IS THE SHAPE. Two earlier versions summed blurred copies of the skeleton -- first of the
+## final one, then of each hierarchy level at its own scale -- and both produced a cauliflower: a sum of
+## blurs averages a skeleton into a field of round bumps, one per node, because every node contributes
+## roughly the same blob. Rendered side by side at the same seed the difference is not subtle, and no
+## setting of the old controls reached this shape. What a mountain needs is for neighbouring slopes to
+## MERGE into continuous faces, which is what a max of wide cones does and a sum of narrow blurs cannot:
+## where two ridges' slopes meet, they meet in a valley.
+##
+## Computed as a max-plus distance transform rather than by splatting cones. Splatting is O(nodes * R^2)
+## and R is tens of cells, which is minutes of GDScript on a 512 grid; two chamfer sweeps are O(n^2) and
+## give the same field, because "the highest crest minus the distance to it" is exactly what a sweep
+## propagates. The chamfer is the 3x3 one, orthogonal 1 and diagonal sqrt(2); it is not perfectly Euclidean
+## and does not need to be, since both implementations run the same sweep and agree cell for cell.
+func _massif(p_cluster: Array, n: int) -> PackedFloat32Array:
+	var xs: PackedFloat32Array = p_cluster[0]
+	var ys: PackedFloat32Array = p_cluster[1]
+	var parents: PackedInt32Array = p_cluster[2]
+	var count := xs.size()
 	var out := PackedFloat32Array()
 	out.resize(n * n)
 	out.fill(0.0)
-	var img := p_raster
-	var weight := 1.0
-	var total := 0.0
-	for r in _blur_radii(n):
-		img = _box_blur(img, n, r)
-		# EACH LEVEL IS RENORMALISED TO ITS OWN PEAK before it is weighted, and that is not a tidiness
-		# measure -- it is what makes `blur_growth` mean anything. A box blur of a one-cell-wide skeleton
-		# divides its amplitude by roughly the radius, so raw copies fall off far faster than any sane
-		# weight ramp can lift them and the sum is the NARROWEST blur every time: glowing thin lines on
-		# black, with no massing at all. Renormalised, the ramp sets the balance between scales directly.
-		var lvl := 0.0
-		for i in range(n * n):
-			lvl = maxf(lvl, img[i])
-		if lvl <= 0.0:
-			continue
-		var k := weight / lvl
-		for i in range(n * n):
-			out[i] += img[i] * k
-		total += weight
-		weight *= blur_growth
-	if total <= 0.0:
+	if count < 1:
 		return out
+	# The fall per cell of distance. The ridge width the rest of the material already derives from
+	# `detail_size` IS the slope's run: a crest at full height reaches the ground `_blur_budget` cells away,
+	# which is the same distance the blur cascade used to spend and keeps `_grow_extent` summing to
+	# `coverage` exactly. So nothing outside the loop is touched, and no new constant enters.
+	var run := float(_slope_run(n))
+	# The crest heights. A crest is as high as it is CENTRAL: full height over the seed, falling to nothing
+	# at the envelope. Scale-free on purpose -- the first version took the height from the node's DEPTH IN
+	# THE TREE, which reads well but rescales with `detail_size`, because coarse ridges make a shallow tree
+	# whose tips are a large fraction of its depth. Gate CX.3 saw that as `detail_size` resizing the
+	# mountain by 16 %. Radial position cannot drift with the spacing, and it puts the summit over the seed
+	# by construction rather than wherever the tree happened to run deepest.
+	var env := _outer(n)
+	var c := float(n) * 0.5
+	var depth := _depths(parents)
+	var deepest := 1
+	for d in depth:
+		deepest = maxi(deepest, d)
+	var span := float(deepest + 1)
+	# Stamped along each edge, so a ridge is a continuous line rather than a row of dots, and combined by
+	# MAX where branches cross.
+	for i in range(count):
+		var pa := parents[i]
+		if pa < 0 or pa >= count:
+			_crest(out, n, xs[i], ys[i], _crest_height(xs[i] - c, ys[i] - c, env, float(depth[i]) / span))
+			continue
+		var dx := xs[pa] - xs[i]
+		var dy := ys[pa] - ys[i]
+		var steps := maxi(1, int(ceil(maxf(absf(dx), absf(dy)))))
+		var fi := float(depth[i]) / span
+		var fp := float(depth[pa]) / span
+		for st in range(steps + 1):
+			var t := float(st) / float(steps)
+			var px := xs[i] + dx * t
+			var py := ys[i] + dy * t
+			_crest(out, n, px, py, _crest_height(px - c, py - c, env, lerpf(fi, fp, t)))
+
+	# Two sweeps of the chamfer, forward then backward. Each cell carries the CREST IT BELONGS TO and how
+	# far it is from it, not just a height, so that a low crest's slope still runs the full ridge width
+	# instead of dying in proportion to how low it is. Subtracting distance outright (`h - d/R`) was the
+	# first version and it made `detail_size` resize the mountain by 28 %: a tip crest is near zero, so its
+	# ground reached zero almost immediately and the massif's support tracked the ridge width. Scaling
+	# instead (`h * (1 - d/R)`) puts every crest's foot at the same R, which is what lets `_grow_extent` and
+	# the slope sum to `coverage` for every setting of `detail_size`.
+	var src := PackedFloat32Array(out)      # the crest each cell is claimed by
+	var dist := PackedFloat32Array()        # chamfer distance to it
+	dist.resize(n * n)
+	for i in range(n * n):
+		dist[i] = 0.0 if out[i] > 0.0 else INF
+	var diag := 1.4142135623730951
+	for y in range(n):
+		for x in range(n):
+			var i := y * n + x
+			if x > 0:
+				_relax(src, dist, i, i - 1, 1.0, run)
+			if y > 0:
+				_relax(src, dist, i, i - n, 1.0, run)
+				if x > 0:
+					_relax(src, dist, i, i - n - 1, diag, run)
+				if x < n - 1:
+					_relax(src, dist, i, i - n + 1, diag, run)
+	for y in range(n - 1, -1, -1):
+		for x in range(n - 1, -1, -1):
+			var i := y * n + x
+			if x < n - 1:
+				_relax(src, dist, i, i + 1, 1.0, run)
+			if y < n - 1:
+				_relax(src, dist, i, i + n, 1.0, run)
+				if x < n - 1:
+					_relax(src, dist, i, i + n + 1, diag, run)
+				if x > 0:
+					_relax(src, dist, i, i + n - 1, diag, run)
+	for i in range(n * n):
+		out[i] = maxf(0.0, src[i] * (1.0 - minf(dist[i], run) / run))
+	return _finish(out, n)
+
+
+## One chamfer step: cell `i` takes neighbour `j`'s crest if standing on `j`'s slope puts it higher than
+## where it is. Both the crest and the distance travel, which is what makes the slope's run the same for
+## every crest.
+static func _relax(src: PackedFloat32Array, dist: PackedFloat32Array, i: int, j: int, w: float,
+		run: float) -> void:
+	var d := dist[j] + w
+	if d >= run:
+		return
+	var v := src[j] * (1.0 - d / run)
+	if v > src[i] * (1.0 - minf(dist[i], run) / run):
+		src[i] = src[j]
+		dist[i] = d
+
+
+
+## How high a crest stands: mostly from how CENTRAL it is, and partly from how deep in the tree it sits.
+##
+## Both halves are load-bearing and each one alone was measurably wrong.
+##
+## Depth alone reads beautifully -- the trunk is the summit, every branch starts lower than the branch it
+## left, and the silhouette is dendritic because the tips fade out -- but it is not scale-free. Coarse
+## ridges make a SHALLOW tree whose tips are a large fraction of its depth, so the massif's size moved with
+## `detail_size`: gate CX.3 measured 16 %, against a 5 % limit, on the control that exists precisely to
+## stop Detail Size resizing the mountain.
+##
+## Radial alone is perfectly stable and produces a DISC. Every direction reaches the envelope, so every
+## direction is equally high at the rim and the dendritic outline the cluster worked for is thrown away.
+##
+## So the radial term sets the height and the depth term takes a bounded bite out of it -- a tip stands at
+## `1 - DEPTH_BITE` of what its position allows. Size stays radial, the outline stays dendritic.
+##
+## The square root is the third measured thing: a straight `1 - rho` drops the outer crests so low that
+## they stop reading as ridges near the rim, and on a 3:1 loop it does so at different rates along the two
+## axes, which gate DA saw as ridges 1.3x the size one way.
+static func _crest_height(dx: float, dy: float, e: Array, p_depth: float) -> float:
+	var radial := sqrt(maxf(0.0, 1.0 - minf(1.0, _rho(dx, dy, e))))
+	return radial * (1.0 - DEPTH_BITE * clampf(p_depth, 0.0, 1.0))
+
+
+## Stamp a crest height, keeping the higher of what is already there.
+func _crest(g: PackedFloat32Array, n: int, x: float, y: float, v: float) -> void:
+	var ix := int(round(x))
+	var iy := int(round(y))
+	if ix >= 0 and iy >= 0 and ix < n and iy < n and v > g[iy * n + ix]:
+		g[iy * n + ix] = v
+
+
+## Path length from each node to its root, which is what sets a crest's height: the trunk is the summit and
+## every branch off it starts lower than the branch it left.
+##
+## Walks and memoises rather than sweeping the array backwards. A particle sticks to a node that already
+## exists, so parents mostly point BACKWARD -- but an upscale re-points an existing node at a midpoint it
+## appends later, so some point forward, and a backward sweep silently gets those subtrees wrong.
+static func _depths(parents: PackedInt32Array) -> PackedInt32Array:
+	var count := parents.size()
+	var d := PackedInt32Array()
+	d.resize(count)
+	d.fill(-1)
+	var stack := PackedInt32Array()
+	for i in range(count):
+		if d[i] >= 0:
+			continue
+		stack.clear()
+		var j := i
+		# -2 marks "on the stack", so a cycle cannot spin here forever.
+		while j >= 0 and j < count and d[j] == -1:
+			stack.append(j)
+			d[j] = -2
+			j = parents[j]
+		var base := 0
+		if j >= 0 and j < count and d[j] >= 0:
+			base = d[j]
+		for k in range(stack.size() - 1, -1, -1):
+			base += 1
+			d[stack[k]] = base
+	return d
+
+
+## Normalise to the peak, apply the profile power, and window the result to zero on its envelope. Shared by
+## both massing routes so a field built either way lands in the same range and inside the same loop.
+func _finish(out: PackedFloat32Array, n: int) -> PackedFloat32Array:
 	var peak := 0.0
 	for i in range(n * n):
 		peak = maxf(peak, out[i])
@@ -1023,58 +1460,27 @@ func _mass(p_raster: PackedFloat32Array, n: int) -> PackedFloat32Array:
 		return out
 	var inv := 1.0 / peak
 	var pw := profile_power
-	for i in range(n * n):
-		var v := out[i] * inv
-		out[i] = v if pw == 1.0 else pow(v, pw)
-	return out
-
-
-## Doubling radii whose TOTAL is capped at the blur's share of `coverage`. The cap is the invariant that
-## keeps the massif inside the field: the cluster reaches `_grow_extent` and the blur can push material at
-## most `_blur_budget` further, so everything outside `coverage` of the half-extent is still exactly zero
-## and the material fades out inside its own loop rather than being cut off at the edge.
-##
-## Levels are DROPPED, not shrunk, when the budget runs out: the smallest useful radius is 1 cell, so on a
-## small grid the widest levels are simply not affordable. Keeping them by clamping r0 to 1 would break the
-## invariant instead of the level count, which is the wrong thing to give up - a mountain with one fewer
-## scale of massing still fades out inside its loop.
-func _blur_radii(n: int) -> PackedInt32Array:
-	var budget := _blur_budget(n)
-	var span := (1 << blur_levels) - 1 # 1 + 2 + 4 + ... = 2^levels - 1
-	var r0 := maxi(1, budget / span)
-	var out := PackedInt32Array()
-	var used := 0
-	for k in range(blur_levels):
-		var r := r0 << k
-		if used + r > budget and not out.is_empty():
-			break
-		out.append(r)
-		used += r
-	return out
-
-
-## Separable box blur with a running sum, so the cost is independent of the radius. Edges clamp.
-func _box_blur(p_src: PackedFloat32Array, n: int, r: int) -> PackedFloat32Array:
-	var tmp := PackedFloat32Array()
-	tmp.resize(n * n)
-	var inv := 1.0 / float(2 * r + 1)
+	# THE ENVELOPE IS ENFORCED HERE, not merely reserved for. The cluster now grows to what the blur
+	# actually spends (`_blur_spread`) rather than to what it could conceivably reach, which buys the massif
+	# most of the empty band it used to leave inside its loop — and leaves the cascade's own faint tail
+	# sitting a few percent past `coverage`. Tiny (under 1e-4 of amplitude) and still a step, because a
+	# FIT-mapped brush crops at exactly that radius. So the finished unit massif is windowed to zero ON the
+	# envelope: a smoothstep over the last `WINDOW_BAND` of rho, applied AFTER the profile power so the
+	# power cannot lift the tail back over the edge. Outside rho 1 the field is exactly zero again.
+	var env := _outer(n)
+	var c := float(n) * 0.5
 	for y in range(n):
-		var row := y * n
-		var acc := p_src[row] * float(r + 1)
-		for i in range(1, r + 1):
-			acc += p_src[row + mini(i, n - 1)]
 		for x in range(n):
-			tmp[row + x] = acc * inv
-			acc += p_src[row + mini(x + r + 1, n - 1)] - p_src[row + maxi(x - r, 0)]
-	var out := PackedFloat32Array()
-	out.resize(n * n)
-	for x in range(n):
-		var acc := tmp[x] * float(r + 1)
-		for i in range(1, r + 1):
-			acc += tmp[mini(i, n - 1) * n + x]
-		for y in range(n):
-			out[y * n + x] = acc * inv
-			acc += tmp[mini(y + r + 1, n - 1) * n + x] - tmp[maxi(y - r, 0) * n + x]
+			var i := y * n + x
+			var v := out[i] * inv
+			v = v if pw == 1.0 else pow(v, pw)
+			var r := _rho(float(x) - c, float(y) - c, env)
+			if r >= 1.0:
+				v = 0.0
+			elif r > 1.0 - WINDOW_BAND:
+				var t := (1.0 - r) / WINDOW_BAND
+				v *= t * t * (3.0 - 2.0 * t)
+			out[i] = v
 	return out
 
 
@@ -1103,8 +1509,7 @@ func _configuration_warning() -> String:
 	# Branch spacing measured in CELLS, not in fractions: below about two cells apart the grid cannot hold
 	# the branches separately and the detail control silently stops doing anything. Measured on the SHORT
 	# semi-axis, which is the one the blur is sized from and therefore the one that runs out first.
-	var e := _grow_extent(_grid_size())
-	var spacing := detail_size * minf(e.x, e.y)
+	var spacing := detail_size * _env_typical(_grow_extent(_grid_size()))
 	if spacing < 2.0:
 		return (("Relief DLA's ridges would be %.1f cells apart at this Resolution, which the working grid "
 			+ "cannot resolve. Raise Resolution, raise Detail Size, or raise Coverage.") % spacing)

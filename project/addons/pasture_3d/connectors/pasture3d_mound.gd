@@ -332,7 +332,7 @@ func _paint_spline(path: Path3D) -> void:
 	# or `[]` where it contributes nothing. Written once and called from both the host-profile pre-pass and
 	# the cell loop, for the same reason the C++ path extracts it: a second copy of this arithmetic is how
 	# the field a selector reads would quietly stop being the shape the brush stamps.
-	var host_profile_at := func(signed_d: float) -> Array:
+	var raw_profile_at := func(signed_d: float) -> Array:
 		if signed_d <= 0.0:
 			return []
 		if cone:
@@ -341,6 +341,31 @@ func _paint_spline(path: Path3D) -> void:
 		var pr := _ramp(falloff_curve, signed_d / (ramp_denom if capped else dome_denom))
 		if pr <= 0.0:
 			return []
+		return [sign * height * pr, pr]
+
+	# THE FOOTPRINT CREASE (`_crease_profile_table`): the profile's own kink at the rim, smoothed by the
+	# same kernel the distance field gets — which cannot round that join itself, being the identity on the
+	# linear field across the rim. Empty = nothing to smooth, and then this is the raw profile untouched.
+	#
+	# A cone gets a SECOND table: its height rises with distance and clips at the safety cap, so its
+	# amplitude is not `height * profile` and cannot be rebuilt from the profile table.
+	var crease_hi := max_inside + edge_offset + _effective_modifier_margin()
+	var prof_of := func(d: float) -> float:
+		var raw: Array = raw_profile_at.call(d)
+		return 0.0 if raw.is_empty() else raw[1]
+	var amp_of := func(d: float) -> float:
+		var raw: Array = raw_profile_at.call(d)
+		return 0.0 if raw.is_empty() else raw[0]
+	var crease_prof := _crease_profile_table(prof_of, crease_hi, vs)
+	var crease_amp: Array = _crease_profile_table(amp_of, crease_hi, vs) if cone and not crease_prof.is_empty() else []
+	var host_profile_at := func(signed_d: float) -> Array:
+		if crease_prof.is_empty():
+			return raw_profile_at.call(signed_d)
+		var pr := _crease_profile_at(crease_prof, signed_d)
+		if pr <= 0.0:
+			return []
+		if not crease_amp.is_empty():
+			return [_crease_profile_at(crease_amp, signed_d), pr]
 		return [sign * height * pr, pr]
 
 	# The HOST PROFILE fields. A pre-pass over the WHOLE grid, because slope and curvature need
@@ -468,7 +493,7 @@ func generate_preview_surface(w: int, h: int) -> Array:
 	if use_angle and capped:
 		ramp_denom = maxf(absf(height) / slope_tan, 0.001)
 
-	var host_profile_at := func(signed_d: float) -> float:
+	var raw_profile_at := func(signed_d: float) -> float:
 		if signed_d <= 0.0:
 			return 0.0
 		if cone:
@@ -477,6 +502,14 @@ func generate_preview_surface(w: int, h: int) -> Array:
 		if pr <= 0.0:
 			return 0.0
 		return sign_val * height * pr
+
+	# The preview shows what the brush stamps, so it takes the same smoothed rim (see the paint route). The
+	# amplitude is tabulated directly here — the preview never needs the 0..1 profile beside it.
+	var crease_amp := _crease_profile_table(raw_profile_at, max_inside + edge_offset, vs)
+	var host_profile_at := func(signed_d: float) -> float:
+		if crease_amp.is_empty():
+			return raw_profile_at.call(signed_d)
+		return _crease_profile_at(crease_amp, signed_d)
 
 	var n := w * h
 	var vals := PackedFloat32Array()

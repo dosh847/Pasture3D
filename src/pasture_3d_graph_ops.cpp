@@ -14,6 +14,7 @@
 #include "pasture_3d_depression_filling.h"
 #include "pasture_3d_dla.h"
 #include "pasture_3d_dunes.h"
+#include "pasture_3d_fractal.h"
 #include "pasture_3d_erosion.h"
 #include "pasture_3d_erosion_hydraulic.h"
 #include "pasture_3d_erosion_thermal.h"
@@ -1034,6 +1035,16 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
 			} break;
 
+			case GRAPH_OP_FRACTAL: {
+				// Param layout — Pasture3DGraphNodeFractal.native_lower(). The four PORT-DRIVEN slots
+				// (0..3) sit first so native_param_ports() is the identity on them.
+				PackedFloat32Array res = fractal_grid(p_gw, p_gh, p_rect,
+						(int)P[4], P[0], P[1], (int)P[5],
+						P[6], P[7], P[2], (int)P[8],
+						P[3], P[9], (int)P[10]);
+				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
+			} break;
+
 			case GRAPH_OP_CRATER: {
 				PackedFloat32Array res = crater_grid(p_gw, p_gh, p_rect,
 						P[0], P[1],
@@ -1752,8 +1763,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				// oracle this op is gated against.
 				//
 				// P1 coverage, P2 detail_size, P3 profile_power, P4..P6 seed as 24/24/16-bit chunks (a float32
-				// slot is exact only to 2^24), P7 resolution, P8 hierarchy_levels, P9 wander, P10 blur_levels,
-				// P11 blur_growth, P12 ridge_seeding, P13 ridge_amount.
+				// slot is exact only to 2^24), P7 resolution, P8 hierarchy_levels, P9 wander, P10, P11 reserved (were blur_levels, blur_growth), P12 ridge_seeding, P13 ridge_amount.
 				PackedFloat32Array surf = get_grid_packed(in0[s], c_in0);
 				const float *sp = surf.ptr();
 				bool wired = false; // an unwired HEIGHT reads all-zero, and a flat-zero surface is not a seed
@@ -1771,13 +1781,11 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				d.resolution = (int)P[7];
 				d.hierarchy_levels = (int)P[8];
 				d.wander = P[9];
-				d.blur_levels = (int)P[10];
-				d.blur_growth = P[11];
 				d.ridge_seeding = P[12] != 0.f;
 				d.ridge_amount = P[13];
 				d.host_ex = std::max((double)p_rect.size.x * 0.5, 0.001);
 				d.host_ez = std::max((double)p_rect.size.y * 0.5, 0.001);
-				if (d.ridge_seeding && wired) {
+				if (wired) {
 					const double dx = (double)p_rect.size.x / (double)std::max(p_gw, 1);
 					const double dz = (double)p_rect.size.y / (double)std::max(p_gh, 1);
 					const double ex = (double)p_rect.size.x * 0.5;
@@ -1786,9 +1794,16 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 						(double)p_rect.position.x + 0.5 * dx, (double)p_rect.position.y + 0.5 * dz, dx };
 					std::copy_n(fr, 9, d.frame);
 					d.frame_size = 9;
-					d.seed_surface = surf;
-					d.seed_gw = p_gw;
-					d.seed_gh = p_gh;
+					// The outline on every wired input; the ridges only when seeding is on. Pasture3DGraphNodeDLA
+					// ._make_engine splits the one capture the same way.
+					d.shape_surface = surf;
+					d.shape_gw = p_gw;
+					d.shape_gh = p_gh;
+					if (d.ridge_seeding) {
+						d.seed_surface = surf;
+						d.seed_gw = p_gw;
+						d.seed_gh = p_gh;
+					}
 				}
 				const DLAResult r = dla_grow(d);
 				float *ch_mask = want_aux(1);

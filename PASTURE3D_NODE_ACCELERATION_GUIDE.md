@@ -759,6 +759,7 @@ The bullets in 3.4 hold. Four more, each paid for on 2026-09-04:
 | | Furrows | `furrows` | `pasture_3d_furrows.*` | `GRAPH_OP_FURROWS` (16) |
 | | Dunes | `dunes` | `pasture_3d_dunes.*` | `GRAPH_OP_DUNES` (17) |
 | | Crater | `crater` | `pasture_3d_crater.*` | `GRAPH_OP_CRATER` (18) |
+| | Fractal | `fractal` | `pasture_3d_fractal.*` | `GRAPH_OP_FRACTAL` (65) |
 | | Domain Warp | `warp` | `pasture_3d_warp.*` | `GRAPH_OP_WARP` (19) |
 | **Combiners** | Blend | `blend` | ADD, SUB, MUL, MAX, MIN math modes | `GRAPH_OP_BLEND` (3) |
 | **Filters** | Terrace | `terrace` | Power-law / custom profile steps | `GRAPH_OP_TERRACE` (4) |
