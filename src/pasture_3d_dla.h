@@ -29,6 +29,7 @@ struct DLAParams {
 	int resolution = 256;
 	int hierarchy_levels = 4;
 	double detail_size = 0.12;
+	double ridge_width = 0.18;
 	double wander = 0.32;
 	double profile_power = 1.0;
 	double coverage = 0.95;

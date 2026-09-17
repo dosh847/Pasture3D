@@ -437,6 +437,75 @@ bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 	return true;
 }
 
+// Pasture3DGraphNodeDLA._compose: the massif as a filter over its wired input, faded out where the input is
+// flat toward an altitude target so the input's peaks and valleys survive. Serial and in the script's order,
+// because the mean slope is an order-dependent double sum. Writes the result over p_unit.
+static double dla_diff(const float *g, int i, bool p_has_lo, bool p_has_hi, int p_step, double p_d) {
+	const double c = (double)g[i];
+	const double a = p_has_lo ? (double)g[i - p_step] : std::numeric_limits<double>::quiet_NaN();
+	const double b = p_has_hi ? (double)g[i + p_step] : std::numeric_limits<double>::quiet_NaN();
+	const bool fa = std::isfinite(a);
+	const bool fb = std::isfinite(b);
+	if (fa && fb) {
+		return (b - a) / (2.0 * p_d);
+	}
+	if (fb) {
+		return (b - c) / p_d;
+	}
+	if (fa) {
+		return (c - a) / p_d;
+	}
+	return 0.0;
+}
+
+static void dla_compose(const float *p_surface, float *p_unit, double p_amp, int p_gw, int p_gh, const Rect2 &p_rect) {
+	const int n = p_gw * p_gh;
+	const double dx = (double)p_rect.size.x / (double)std::max(p_gw, 1);
+	const double dz = (double)p_rect.size.y / (double)std::max(p_gh, 1);
+	double lo = std::numeric_limits<double>::infinity();
+	double hi = -std::numeric_limits<double>::infinity();
+	for (int i = 0; i < n; i++) {
+		const double v = (double)p_surface[i];
+		if (std::isfinite(v)) {
+			lo = std::min(lo, v);
+			hi = std::max(hi, v);
+		}
+	}
+	std::vector<double> slope((size_t)n, 0.0);
+	double sum = 0.0;
+	int cnt = 0;
+	for (int z = 0; z < p_gh; z++) {
+		for (int x = 0; x < p_gw; x++) {
+			const int i = z * p_gw + x;
+			if (!std::isfinite(p_surface[i])) {
+				continue;
+			}
+			const double gx = dla_diff(p_surface, i, x > 0, x < p_gw - 1, 1, dx);
+			const double gz = dla_diff(p_surface, i, z > 0, z < p_gh - 1, p_gw, dz);
+			slope[(size_t)i] = std::sqrt(gx * gx + gz * gz);
+			sum += slope[(size_t)i];
+			cnt += 1;
+		}
+	}
+	const double mean = cnt > 0 ? sum / (double)cnt : 0.0;
+	const double span = hi - lo;
+	for (int i = 0; i < n; i++) {
+		const double h = (double)p_surface[i];
+		const double u = (double)p_unit[i];
+		if (!std::isfinite(h) || std::isnan(u)) {
+			p_unit[i] = std::numeric_limits<float>::quiet_NaN();
+			continue;
+		}
+		double m = 1.0;
+		if (mean > 0.0) {
+			const double q = 1.0 - std::clamp(slope[(size_t)i] / mean, 0.0, 1.0);
+			m = 1.0 - q * q;
+		}
+		const double t = span > 0.0 ? (h - lo) / span : 0.0;
+		p_unit[i] = (float)(h + p_amp * (t + (u - t) * m));
+	}
+}
+
 // Core whole-graph evaluation: runs the SSA program into a scratch-buffer arena and leaves the live
 // buffers in r_pool / r_slot_buffer so the caller can copy out any protected slot. Slots in
 // p_extra_protect get the same recycle-protection the output slot gets (an extra ref count that never
@@ -1763,7 +1832,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				// oracle this op is gated against.
 				//
 				// P1 coverage, P2 detail_size, P3 profile_power, P4..P6 seed as 24/24/16-bit chunks (a float32
-				// slot is exact only to 2^24), P7 resolution, P8 hierarchy_levels, P9 wander, P10, P11 reserved (were blur_levels, blur_growth), P12 ridge_seeding, P13 ridge_amount.
+				// slot is exact only to 2^24), P7 resolution, P8 hierarchy_levels, P9 wander, P10 reserved (was blur_levels), P11 ridge_width (0 = an older program: the default), P12 ridge_seeding, P13 ridge_amount.
 				PackedFloat32Array surf = get_grid_packed(in0[s], c_in0);
 				const float *sp = surf.ptr();
 				bool wired = false; // an unwired HEIGHT reads all-zero, and a flat-zero surface is not a seed
@@ -1781,6 +1850,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				d.resolution = (int)P[7];
 				d.hierarchy_levels = (int)P[8];
 				d.wander = P[9];
+				d.ridge_width = P[11] > 0.f ? std::clamp((double)P[11], 0.08, 0.50) : 0.18;
 				d.ridge_seeding = P[12] != 0.f;
 				d.ridge_amount = P[13];
 				d.host_ex = std::max((double)p_rect.size.x * 0.5, 0.001);
@@ -1901,8 +1971,21 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 		// GDScript node stores; NaN stays NaN.
 		if (ops[s] == GRAPH_OP_DLA) {
 			const float amp = P[0];
-			for (int i = 0; i < n; i++) {
-				g_ptr[i] = amp * g_ptr[i];
+			PackedFloat32Array surf = get_grid_packed(in0[s], c_in0);
+			const float *sp = surf.ptr();
+			bool wired = false;
+			for (int i = 0; i < n && surf.size() == n; i++) {
+				if (sp[i] != 0.f) {
+					wired = true;
+					break;
+				}
+			}
+			if (!wired) {
+				for (int i = 0; i < n; i++) {
+					g_ptr[i] = amp * g_ptr[i];
+				}
+			} else {
+				dla_compose(sp, g_ptr, (double)amp, p_gw, p_gh, p_rect);
 			}
 		}
 

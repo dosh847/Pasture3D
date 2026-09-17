@@ -11,10 +11,16 @@
 #     meaning anything, so the reach has to keep tracking it.
 #
 #   [A] The outline is measured and used: on a loop running across the DIAGONAL, following it puts markedly
-#       more of the loop under mountain than growing in the ellipse inscribed in the loop's bounding box,
-#       which spends most of its massif outside the loop entirely. Control: the same growth with no outline
-#       captured (the ellipse fallback), masked by the same loop — and both runs must be non-empty, so a
-#       dead growth cannot pass either side.
+#       more mountain in the bar's FAR ENDS -- the loop cells past 0.85 of the half-extent, which the ellipse
+#       inscribed in the bounding box barely reaches -- than growing in that ellipse does. Control: the same
+#       growth with no outline captured (the ellipse fallback), masked by the same loop -- and both runs must
+#       be non-empty, so a dead growth cannot pass either side.
+#
+#       NOT the whole loop. That was the first version of this criterion and it was red for as long as it
+#       existed, for a reason in the metric: across the bar's middle the ellipse overshoots both long sides
+#       and is sliced by them, so it scores full, while the outline fades INSIDE them as [B] demands. The whole-
+#       loop share rewarded exactly the cut-off [B] forbids. It also hid a real bug: the far ends grew no node
+#       at all, because the launch offset was measured in the outline's typical (short-axis) radius.
 #   [B] It fades INSIDE the loop rather than being cut off at it: the ring just inside the outline carries
 #       only a small share of the peak. Control: the ellipse run, which overshoots the bar's long sides and
 #       is sliced by them, must show materially more mass on that ring.
@@ -135,12 +141,16 @@ func _mean(p_g: PackedFloat32Array, p_cells: PackedInt32Array) -> float:
 # ---- [A] --------------------------------------------------------------------------------------------
 
 func _a_outline_fills_the_arms() -> void:
-	print("[A] The loop's outline is measured and grown into: a plus-shaped loop gets its arms filled")
+	print("[A] The loop's outline is measured and grown into: a diagonal bar gets its far ends filled")
 	var mask := _bar_mask()
 	var inside := PackedInt32Array()
-	for i in range(GW * GH):
-		if mask[i] == 1:
-			inside.append(i)
+	for iz in range(GH):
+		var v := (float(iz) + 0.5) / float(GH) * 2.0 - 1.0
+		for ix in range(GW):
+			var u := (float(ix) + 0.5) / float(GW) * 2.0 - 1.0
+			var i := iz * GW + ix
+			if mask[i] == 1 and u * u + v * v > 0.85 * 0.85:
+				inside.append(i)
 	var shaped := _mask_channel(1.0, _surface_from(mask))
 	# The control: nothing captured, so the growth falls back to the inscribed ellipse. Masked by the same
 	# plus here, so the only difference between the two numbers is the envelope the cluster grew to.
@@ -154,13 +164,30 @@ func _a_outline_fills_the_arms() -> void:
 	var pk_e := _peak(ellipse)
 	var fill_s := _fill(shaped, inside, pk_s)
 	var fill_e := _fill(ellipse, inside, pk_e)
-	print("    loop cells=%d   outline fills %.3f of the loop (peak %.3f)   ellipse fills %.3f (peak %.3f)" % [
+	print("    far-end cells=%d   outline fills %.3f of them (peak %.3f)   ellipse fills %.3f (peak %.3f)" % [
 		inside.size(), fill_s, pk_s, fill_e, pk_e])
 	if pk_s <= 0.0 or pk_e <= 0.0:
 		_fail += 1; print("    !! a growth produced nothing — neither side of this comparison measured a massif")
 		return
 	if fill_s < fill_e * 1.25:
-		_fail += 1; print("    !! CONTROL: following the outline filled no more of the loop than the inscribed ellipse did (%.3f vs %.3f) — the outline is not being used" % [fill_s, fill_e])
+		_fail += 1; print("    !! CONTROL: following the outline filled no more of the bar's far ends than the inscribed ellipse did (%.3f vs %.3f) — the outline is not being used" % [fill_s, fill_e])
+	# The fill above cannot see a starved end on its own: slopes from growth nearer the middle spill into it
+	# either way (measured 1.41x with the launch bug in, 1.68x fixed). The bug grew NO NODES there, so count them.
+	var e = _new_dla(1.0)._make_engine(_surface_from(mask), GW, GH, RECT, 1.0, 0.12)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 0
+	var cl: Array = e._grow(rng, 32, 128)
+	var xs: PackedFloat32Array = cl[0]
+	var ys: PackedFloat32Array = cl[1]
+	var far := 0
+	for i in range(xs.size()):
+		var u := xs[i] / 128.0 * 2.0 - 1.0
+		var v := ys[i] / 128.0 * 2.0 - 1.0
+		if u * u + v * v > 0.85 * 0.85:
+			far += 1
+	print("    nodes grown in the far ends: %d of %d" % [far, xs.size()])
+	if far < 40:
+		_fail += 1; print("    !! the growth never reached the bar's far ends; walkers launched there die in the corridor")
 
 
 # ---- [B] --------------------------------------------------------------------------------------------

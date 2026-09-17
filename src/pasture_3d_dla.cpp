@@ -115,10 +115,15 @@ const int REF_RESOLUTION = 512;
 const double REF_BLUR_SHARE = 0.3243;
 const double BLUR_CEILING = 0.70;
 const double WINDOW_BAND = 0.05;
-// The slope's run as a share of the massif's radius. See the script.
-const double SLOPE_RUN = 0.18;
 // How much of a crest's height its depth in the tree can take away. See the script.
 const double DEPTH_BITE = 0.55;
+// One ridge cell in this many seeds the cluster. See the script.
+const int SEED_KEEP = 4;
+// Valley floor share, and _unstair passes. See the script.
+const double VALLEY_FLOOR = 0.3;
+const int UNSTAIR_PASSES = 2;
+// Stacked fading's detail exponent. See the script.
+const double STACK_DETAIL = 1.5;
 const int SHAPE_DIRS = 64;
 const int SHAPE_STEPS = 256;
 // sqrt(2): the working grid is a SQUARE, so a march must be able to reach its corners. See the script.
@@ -318,7 +323,7 @@ struct DLAGrower {
 
 	// _slope_run
 	int slope_run(int n) const {
-		return std::max(1, (int)(env_typical(outer(n)) * SLOPE_RUN));
+		return std::max(1, (int)(env_typical(outer(n)) * p.ridge_width));
 	}
 
 	// _grow_extent
@@ -368,6 +373,12 @@ struct DLAGrower {
 
 	bool has_seed() const {
 		return p.ridge_seeding && !p.seed_surface.is_empty();
+	}
+
+	// _seed_scatter -- 64-bit like GDScript's int, then masked, so both agree.
+	static int seed_scatter(int x, int y, int n) {
+		const int64_t h = ((int64_t)x * 73856093) ^ ((int64_t)y * 19349663) ^ ((int64_t)n * 83492791);
+		return (int)((h & 0x7fffffff) % SEED_KEEP);
 	}
 
 	// _sample_seed. Empty when the surface or frame is unusable.
@@ -462,6 +473,9 @@ struct DLAGrower {
 				if ((double)ridge[(size_t)i] < cut) {
 					continue;
 				}
+				if (seed_scatter(x, y, n) != 0) {
+					continue;
+				}
 				if (owner[(size_t)i] >= 0) {
 					continue;
 				}
@@ -535,8 +549,9 @@ struct DLAGrower {
 						const double oang = (double)prng.randf() * TAU_D;
 						const double olr = (double)reach0[(size_t)reach_bin(std::cos(oang), std::sin(oang), (int)reach0.size())];
 						const bool ogrowing = olr < limit && q * 10 < p_particles * 7;
-						const double olaunch = std::min(olr + 3.0 * per_cell, limit) * ((ogrowing || (q & 1) == 0) ? 1.0 : std::sqrt((double)prng.randf()));
+						// Three cells in this direction's own radius, not the outline's typical one. See the script.
 						const double orad = radius_at(env.tbl, oang);
+						const double olaunch = std::min(olr + 3.0 / std::max(orad, 1.0), limit) * ((ogrowing || (q & 1) == 0) ? 1.0 : std::sqrt((double)prng.randf()));
 						px = iround(c + std::cos(oang) * olaunch * orad);
 						py = iround(c + std::sin(oang) * olaunch * orad);
 					} else {
@@ -646,13 +661,38 @@ struct DLAGrower {
 	}
 
 	// _upscale
+	static bool occupied(const std::vector<uint8_t> &occ, int n, double x, double y) {
+		const int ix = iround(x);
+		const int iy = iround(y);
+		return ix >= 0 && iy >= 0 && ix < n && iy < n && occ[(size_t)(iy * n + ix)] != 0;
+	}
+
+	static void occupy(std::vector<uint8_t> &occ, int n, double x, double y) {
+		const int ix = iround(x);
+		const int iy = iround(y);
+		if (ix >= 0 && iy >= 0 && ix < n && iy < n) {
+			occ[(size_t)(iy * n + ix)] = 1;
+		}
+	}
+
 	void upscale(int n, std::vector<float> &xs, std::vector<float> &ys, std::vector<int32_t> &parents,
 			std::vector<int32_t> &r_owner) {
 		const int count = (int)xs.size();
 		const float jit = (float)(p.wander * 0.75);
+		// No node or midpoint on a cell another node holds. Every draw is still made. See the script.
+		std::vector<uint8_t> occ((size_t)n * n, 0);
 		for (int i = 0; i < count; i++) {
-			xs[(size_t)i] = (float)((double)xs[(size_t)i] * 2.0 + (double)rng.randfn(0.0f, jit));
-			ys[(size_t)i] = (float)((double)ys[(size_t)i] * 2.0 + (double)rng.randfn(0.0f, jit));
+			const double bx = (double)xs[(size_t)i] * 2.0;
+			const double by = (double)ys[(size_t)i] * 2.0;
+			double jx = bx + (double)rng.randfn(0.0f, jit);
+			double jy = by + (double)rng.randfn(0.0f, jit);
+			if (occupied(occ, n, jx, jy)) {
+				jx = bx;
+				jy = by;
+			}
+			xs[(size_t)i] = (float)jx;
+			ys[(size_t)i] = (float)jy;
+			occupy(occ, n, jx, jy);
 		}
 		const double lo = 1.0;
 		const double hi = (double)(n - 2);
@@ -668,12 +708,22 @@ struct DLAGrower {
 			double my = ((double)ys[(size_t)i] + (double)ys[(size_t)pa]) * 0.5;
 			if (seg > 0.0001 && p.wander > 0.0) {
 				const double thr = (double)rng.randfn(0.0f, (float)(seg * p.wander * 0.5));
-				mx += (-dy / seg) * thr;
-				my += (dx / seg) * thr;
+				const double tx = std::clamp(mx + (-dy / seg) * thr, lo, hi);
+				const double ty = std::clamp(my + (dx / seg) * thr, lo, hi);
+				if (!occupied(occ, n, tx, ty)) {
+					mx = tx;
+					my = ty;
+				}
 			}
+			mx = std::clamp(mx, lo, hi);
+			my = std::clamp(my, lo, hi);
+			if (occupied(occ, n, mx, my)) {
+				continue;
+			}
+			occupy(occ, n, mx, my);
 			const int32_t mid = (int32_t)xs.size();
-			xs.push_back((float)std::clamp(mx, lo, hi));
-			ys.push_back((float)std::clamp(my, lo, hi));
+			xs.push_back((float)mx);
+			ys.push_back((float)my);
 			parents.push_back(pa);
 			parents[(size_t)i] = mid;
 		}
@@ -684,7 +734,8 @@ struct DLAGrower {
 	}
 
 	// _grow
-	void grow(int p_n0, int p_res, std::vector<float> &xs, std::vector<float> &ys, std::vector<int32_t> &parents) {
+	bool grow(int p_n0, int p_res, std::vector<float> &xs, std::vector<float> &ys, std::vector<int32_t> &parents,
+			std::vector<int32_t> &marks) {
 		int n = p_n0;
 		int rounds = 0;
 		int probe = p_n0;
@@ -702,18 +753,25 @@ struct DLAGrower {
 		}
 		int level = 0;
 		while (true) {
-			grow_level(n, lerpd(0.7, 1.0, (double)level / (double)std::max(rounds, 1)),
-					std::max(24, particles() * n / p_res), xs, ys, parents, owner);
+			// The skeleton ends on an upscale, never on growth. See the script.
+			grow_level(n, lerpd(0.7, 1.0, (double)level / (double)std::max(rounds - 1, 1)),
+					std::max(24, particles() * std::min(n * 2, p_res) / p_res), xs, ys, parents, owner);
 			if (n >= p_res) {
 				break;
 			}
 			n *= 2;
 			level += 1;
 			upscale(n, xs, ys, parents, owner);
+			if (n >= p_res) {
+				break;
+			}
 			if (seeded) {
 				seed_ridges(n, xs, ys, parents, owner);
 			}
+			marks.push_back((int32_t)xs.size());
 		}
+		marks.push_back((int32_t)xs.size());
+		return seeded;
 	}
 
 	// _plot
@@ -772,8 +830,33 @@ struct DLAGrower {
 	// it is, and the ground away from a crest falls to nothing over one slope run. A max-plus distance
 	// transform, two chamfer sweeps, carrying the crest AND the distance so every crest's foot lands at the
 	// same radius. See the script for why a sum of blurred skeletons could not make this shape.
-	std::vector<float> massif(const std::vector<float> &xs, const std::vector<float> &ys,
-			const std::vector<int32_t> &parents, int n) const {
+	// _unstair
+	static std::vector<float> unstair(const std::vector<float> &p_v, const std::vector<int32_t> &parents) {
+		std::vector<float> v = p_v;
+		const int count = (int)v.size();
+		for (int pass = 0; pass < UNSTAIR_PASSES; pass++) {
+			std::vector<float> nv = v;
+			for (int i = 0; i < count; i++) {
+				const int pa = parents[(size_t)i];
+				if (pa >= 0 && pa < count) {
+					nv[(size_t)i] = (float)(((double)v[(size_t)i] + (double)v[(size_t)pa]) * 0.5);
+				}
+			}
+			v = std::move(nv);
+		}
+		return v;
+	}
+
+	// _floor_dome
+	static double floor_dome(double dx, double dy, const Env &e) {
+		const double q = 1.0 - std::min(1.0, rho(dx, dy, e));
+		return q * q;
+	}
+
+	std::vector<float> massif(const std::vector<float> &p_xs, const std::vector<float> &p_ys,
+			const std::vector<int32_t> &parents, const std::vector<int32_t> &marks, int n, bool seeded) const {
+		const std::vector<float> xs = unstair(p_xs, parents);
+		const std::vector<float> ys = unstair(p_ys, parents);
 		const size_t nn = (size_t)n * n;
 		std::vector<float> out(nn, 0.0f);
 		const int count = (int)xs.size();
@@ -789,9 +872,48 @@ struct DLAGrower {
 			deepest = std::max(deepest, (int)v);
 		}
 		const double span = (double)(deepest + 1);
-		for (int i = 0; i < count; i++) {
-			const int pa = parents[(size_t)i];
-			if (pa < 0 || pa >= count) {
+		std::vector<float> lift;
+		if (seeded) {
+			seed_lift(n, lift);
+		}
+		std::vector<float> ground(nn, 0.0f);
+		for (int y = 0; y < n; y++) {
+			for (int x = 0; x < n; x++) {
+				const size_t gi = (size_t)y * n + x;
+				if (!seeded) { // seeded, the input is the ground. See the script.
+					ground[gi] = (float)(floor_dome((double)x - c, (double)y - c, env) * VALLEY_FLOOR);
+				}
+			}
+		}
+		// Stacked fading: each finer level changes the field only where the coarser surface is steep. See the script.
+		std::vector<float> field = cone_field(xs, ys, parents, depth, span, marks.size() > 1 ? marks[0] : count, n,
+				seeded, lift, env, run);
+		std::vector<float> combi(nn, 1.0f);
+		for (size_t level = 1; level < marks.size(); level++) {
+			const std::vector<float> raw = cone_field(xs, ys, parents, depth, span, marks[level], n, seeded, lift, env, run);
+			const std::vector<float> slope = slope_mask(field, n);
+			for (size_t i = 0; i < nn; i++) {
+				const double q = 1.0 - std::clamp((double)combi[i], 0.0, 1.0);
+				combi[i] = (float)((1.0 - std::pow(q, STACK_DETAIL)) * (double)slope[i]);
+				field[i] = (float)((double)field[i] + ((double)raw[i] - (double)field[i]) * (double)combi[i]);
+			}
+		}
+		return finish(std::move(field), n, &ground);
+	}
+
+	// _cone_field
+	std::vector<float> cone_field(const std::vector<float> &xs, const std::vector<float> &ys,
+			const std::vector<int32_t> &parents, const std::vector<int32_t> &depth, double span, int p_limit, int n,
+			bool seeded, const std::vector<float> &lift, const Env &env, double run) const {
+		const size_t nn = (size_t)n * n;
+		const double c = (double)n * 0.5;
+		std::vector<float> out(nn, 0.0f);
+		for (int i = 0; i < p_limit; i++) {
+			const int pa = ancestor_below(parents, i, p_limit);
+			if (pa < 0) {
+				if (seeded) {
+					continue; // a seeded root is scaffolding
+				}
 				crest(out, n, xs[(size_t)i], ys[(size_t)i],
 						crest_height((double)xs[(size_t)i] - c, (double)ys[(size_t)i] - c, env,
 								(double)depth[(size_t)i] / span));
@@ -806,7 +928,8 @@ struct DLAGrower {
 				const double t = (double)st / (double)steps;
 				const double px = (double)xs[(size_t)i] + dx * t;
 				const double py = (double)ys[(size_t)i] + dy * t;
-				crest(out, n, px, py, crest_height(px - c, py - c, env, lerpd(fi, fp, t)));
+				const double dd = lerpd(fi, fp, t);
+				crest(out, n, px, py, seeded ? lifted(lift, n, px, py, dd) : crest_height(px - c, py - c, env, dd));
 			}
 		}
 		std::vector<float> src = out;
@@ -817,6 +940,7 @@ struct DLAGrower {
 			}
 		}
 		const double diag = 1.4142135623730951;
+		const double knight = 2.2360679774997898;
 		// SERIAL, both sweeps: a chamfer carries each cell's answer to the next one, so splitting it by rows
 		// would change the result at every chunk boundary and the script could not be matched.
 		for (int y = 0; y < n; y++) {
@@ -832,6 +956,20 @@ struct DLAGrower {
 					}
 					if (x < n - 1) {
 						relax(src, dist, i, i - n + 1, diag, run);
+					}
+					if (x > 1) {
+						relax(src, dist, i, i - n - 2, knight, run);
+					}
+					if (x < n - 2) {
+						relax(src, dist, i, i - n + 2, knight, run);
+					}
+				}
+				if (y > 1) {
+					if (x > 0) {
+						relax(src, dist, i, i - 2 * n - 1, knight, run);
+					}
+					if (x < n - 1) {
+						relax(src, dist, i, i - 2 * n + 1, knight, run);
 					}
 				}
 			}
@@ -850,13 +988,70 @@ struct DLAGrower {
 					if (x > 0) {
 						relax(src, dist, i, i + n - 1, diag, run);
 					}
+					if (x < n - 2) {
+						relax(src, dist, i, i + n + 2, knight, run);
+					}
+					if (x > 1) {
+						relax(src, dist, i, i + n - 2, knight, run);
+					}
+				}
+				if (y < n - 2) {
+					if (x < n - 1) {
+						relax(src, dist, i, i + 2 * n + 1, knight, run);
+					}
+					if (x > 0) {
+						relax(src, dist, i, i + 2 * n - 1, knight, run);
+					}
 				}
 			}
 		}
 		for (size_t i = 0; i < nn; i++) {
 			out[i] = (float)std::max(0.0, (double)src[i] * (1.0 - std::min((double)dist[i], run) / run));
 		}
-		return finish(std::move(out), n);
+		return out;
+	}
+
+	// _ancestor_below
+	static int ancestor_below(const std::vector<int32_t> &parents, int i, int p_limit) {
+		int pa = parents[(size_t)i];
+		int guard = (int)parents.size();
+		while (pa >= p_limit && guard > 0) {
+			pa = parents[(size_t)pa];
+			guard -= 1;
+		}
+		return pa < p_limit ? pa : -1;
+	}
+
+	// _slope_mask
+	static std::vector<float> slope_mask(const std::vector<float> &g, int n) {
+		const size_t nn = (size_t)n * n;
+		std::vector<float> slope(nn, 0.0f);
+		double sum = 0.0;
+		int cnt = 0;
+		for (int y = 0; y < n; y++) {
+			for (int x = 0; x < n; x++) {
+				const size_t i = (size_t)y * n + x;
+				if (g[i] <= 0.0f) {
+					continue;
+				}
+				const double gx = ((double)g[(size_t)(y * n + std::min(x + 1, n - 1))] - (double)g[(size_t)(y * n + std::max(x - 1, 0))]) * 0.5;
+				const double gy = ((double)g[(size_t)(std::min(y + 1, n - 1) * n + x)] - (double)g[(size_t)(std::max(y - 1, 0) * n + x)]) * 0.5;
+				slope[i] = (float)std::sqrt(gx * gx + gy * gy);
+				sum += (double)slope[i];
+				cnt += 1;
+			}
+		}
+		const double mean = cnt > 0 ? sum / (double)cnt : 0.0;
+		std::vector<float> out(nn, 0.0f);
+		for (size_t i = 0; i < nn; i++) {
+			if (g[i] <= 0.0f || mean <= 0.0) {
+				out[i] = 1.0f;
+				continue;
+			}
+			const double q = 1.0 - std::clamp((double)slope[i] / mean, 0.0, 1.0);
+			out[i] = (float)(1.0 - q * q);
+		}
+		return out;
 	}
 
 	// _relax
@@ -879,6 +1074,37 @@ struct DLAGrower {
 		if (ix >= 0 && iy >= 0 && ix < n && iy < n && v > (double)g[(size_t)(iy * n + ix)]) {
 			g[(size_t)(iy * n + ix)] = (float)v;
 		}
+	}
+
+	// _seed_lift
+	void seed_lift(int n, std::vector<float> &r_out) const {
+		r_out.clear();
+		if (!sample_seed(n, r_out)) {
+			r_out.clear();
+			return;
+		}
+		double lo = std::numeric_limits<double>::infinity();
+		double hi = -std::numeric_limits<double>::infinity();
+		for (float v : r_out) {
+			if (std::isfinite(v)) {
+				lo = std::min(lo, (double)v);
+				hi = std::max(hi, (double)v);
+			}
+		}
+		const double sp = hi - lo;
+		for (float &v : r_out) {
+			v = (std::isfinite(v) && sp > 0.0) ? (float)(((double)v - lo) / sp) : 0.0f;
+		}
+	}
+
+	// _lifted
+	static double lifted(const std::vector<float> &lift, int n, double x, double y, double p_depth) {
+		if (lift.empty()) {
+			return 0.0;
+		}
+		const int ix = std::clamp(iround(x), 0, n - 1);
+		const int iy = std::clamp(iround(y), 0, n - 1);
+		return (double)lift[(size_t)(iy * n + ix)] * (1.0 - DEPTH_BITE * std::clamp(p_depth, 0.0, 1.0));
 	}
 
 	// _crest_height
@@ -918,7 +1144,7 @@ struct DLAGrower {
 	}
 
 	// _finish
-	std::vector<float> finish(std::vector<float> out, int n) const {
+	std::vector<float> finish(std::vector<float> out, int n, const std::vector<float> *ground = nullptr) const {
 		const double peak = max_of(out, n);
 		if (peak <= 0.0) {
 			return out;
@@ -937,6 +1163,9 @@ struct DLAGrower {
 					const size_t i = (size_t)y * n + x;
 					double v = (double)out[i] * inv;
 					v = pw == 1.0 ? v : std::pow(v, pw);
+					if (ground != nullptr && !ground->empty()) {
+						v = std::max(v, (double)(*ground)[i]);
+					}
 					const double r = rho((double)x - c, (double)y - c, env);
 					if (r >= 1.0) {
 						v = 0.0;
@@ -962,8 +1191,9 @@ DLAResult dla_grow(const DLAParams &p_params) {
 	std::vector<float> xs;
 	std::vector<float> ys;
 	std::vector<int32_t> parents;
-	g.grow(n0, res, xs, ys, parents);
-	const std::vector<float> field = g.massif(xs, ys, parents, res);
+	std::vector<int32_t> marks;
+	const bool seeded = g.grow(n0, res, xs, ys, parents, marks);
+	const std::vector<float> field = g.massif(xs, ys, parents, marks, res, seeded);
 
 	DLAResult out;
 	out.n = res;

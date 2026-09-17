@@ -124,13 +124,46 @@ func _init() -> void:
 	var m := Pasture3DReliefDLA.new()
 	m.resolution = 256
 	m.hierarchy_levels = 5
-	m.wander = 0.35
+	m.wander = 0.32
 	m.coverage = 0.95
-	m.detail_size = 0.23
-	m.profile_power = 1.0
+	m.detail_size = 0.175
+	m.profile_power = 1.45
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 0
 	var cluster: Array = m._grow(rng, maxi(256 >> 4, 16), N)
+	var sk := Image.create(N, N, false, Image.FORMAT_L8)
+	var cxs := m._unstair(cluster[0], cluster[2])
+	var cys := m._unstair(cluster[1], cluster[2])
+	var raw := m._rasterise([cxs, cys, cluster[2]], N)
+	for yy in N:
+		for xx in N:
+			sk.set_pixel(xx, yy, Color(raw[yy * N + xx], raw[yy * N + xx], raw[yy * N + xx]))
+	sk.save_png(OUT + "/d_skeleton.png")
 	_shade("cone massing", m._massif(cluster, N), N, OUT + "/a_today.png")
+	# Seeded: a dome with a few ridges on it, the Mound-brush case.
+	var sg := 128
+	var surf := PackedFloat32Array(); surf.resize(sg * sg)
+	for y in range(sg):
+		for x in range(sg):
+			var u := float(x) / (sg - 1) * 2.0 - 1.0
+			var v := float(y) / (sg - 1) * 2.0 - 1.0
+			var r := sqrt(u * u + v * v)
+			var dome := maxf(0.0, 1.0 - r * r)
+			surf[y * sg + x] = dome * (1.0 + 0.15 * absf(sin(atan2(v, u) * 2.5))) * 40.0
+	var sm := Pasture3DReliefDLA.new()
+	sm.resolution = 256
+	sm.hierarchy_levels = 3
+	sm.wander = 0.47
+	sm.coverage = 0.95
+	sm.detail_size = 0.11
+	sm.profile_power = 2.15
+	sm.ridge_seeding = true
+	sm.ridge_amount = 0.05
+	sm.set_seed_surface({"surface": surf, "gw": sg, "gh": sg,
+			"frame": [0.0, 0.0, 1.0, 0.0, 64.0, 64.0, -64.0, -64.0, 128.0 / 127.0]})
+	rng.seed = 0
+	var sc: Array = sm._grow(rng, 32, N)
+	_shade("seeded mound", sm._massif(sc, N), N, OUT + "/b_seeded.png")
+	_shade("seed surface", surf, sg, OUT + "/c_surface.png")
 	print(ProjectSettings.globalize_path(OUT))
 	quit(0)
