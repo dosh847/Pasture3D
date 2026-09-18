@@ -13,7 +13,8 @@ using namespace godot;
 PackedFloat32Array godot::strata_grid(const PackedFloat32Array &p_surface, int p_gw, int p_gh,
 		const Rect2 &p_rect, double p_band_height, double p_hardness,
 		double p_amount, double p_dip, double p_dip_direction_deg,
-		double p_break_amount, double p_break_size, int p_seed, const PackedFloat32Array &p_profile_lut) {
+		double p_break_amount, double p_break_size, int p_seed, const PackedFloat32Array &p_profile_lut,
+		int p_profile_mode, double p_hardness_variation) {
 	const int n = p_gw * p_gh;
 	PackedFloat32Array out;
 	out.resize(n);
@@ -26,7 +27,9 @@ PackedFloat32Array godot::strata_grid(const PackedFloat32Array &p_surface, int p
 	}
 
 	Ref<FastNoiseLite> nz;
-	if (p_break_amount > 0.0) {
+	// One noise field drives both the boundary wander and the hardness variation.
+	const double variation = std::clamp(p_hardness_variation, 0.0, 1.0);
+	if (p_break_amount > 0.0 || variation > 0.0) {
 		nz.instantiate();
 		nz->set_noise_type(FastNoiseLite::TYPE_SIMPLEX_SMOOTH);
 		nz->set_fractal_type(FastNoiseLite::FRACTAL_FBM);
@@ -44,7 +47,7 @@ PackedFloat32Array godot::strata_grid(const PackedFloat32Array &p_surface, int p
 	const double cos_dip = std::cos(dipdir);
 	const double sin_dip = std::sin(dipdir);
 	const double bh = std::max(p_band_height, 0.001);
-	const double exponent = 1.0 + std::clamp(p_hardness, 0.0, 1.0) * 15.0;
+	const double gamma = strata_hardness_to_gamma(p_hardness);
 
 	Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int z0, int z1) {
 		for (int iz = z0; iz < z1; iz++) {
@@ -61,8 +64,11 @@ PackedFloat32Array godot::strata_grid(const PackedFloat32Array &p_surface, int p
 				graph_cell_to_world(ix, iz, p_gw, p_gh, p_rect, wx, wz);
 
 				double tilt = p_dip * (wx * cos_dip + wz * sin_dip) * 0.01;
-				if (p_break_amount > 0.0 && nz.is_valid()) {
-					tilt += (double)nz->get_noise_2d((real_t)wx, (real_t)wz) * p_break_amount;
+				double g = gamma;
+				if (nz.is_valid()) {
+					const double nv = (double)nz->get_noise_2d((real_t)wx, (real_t)wz);
+					tilt += nv * p_break_amount;
+					g = strata_local_gamma(gamma, variation, nv);
 				}
 
 				const double xj = (double)x + tilt;
@@ -71,7 +77,7 @@ PackedFloat32Array godot::strata_grid(const PackedFloat32Array &p_surface, int p
 				const double f = t - q;
 
 				// A custom profile is the lowered LUT, sampled as every graph LUT is (clamp, lower index capped at
-				// n - 2, linear); the GPU's p3d_lut is its twin. Shorter than 2 = the power law.
+				// n - 2, linear); the GPU's p3d_lut is its twin. Shorter than 2 = the built-in profile.
 				double profile_val;
 				if (lut_n >= 2) {
 					const double f_idx = std::clamp(f, 0.0, 1.0) * (double)(lut_n - 1);
@@ -79,9 +85,11 @@ PackedFloat32Array godot::strata_grid(const PackedFloat32Array &p_surface, int p
 					const double frac = f_idx - (double)i0;
 					profile_val = (double)lut_ptr[i0] * (1.0 - frac) + (double)lut_ptr[i0 + 1] * frac;
 				} else {
-					profile_val = std::pow(std::clamp(f, 0.0, 1.0), exponent);
+					profile_val = strata_profile(p_profile_mode, f, g);
 				}
-				const double stepped = (q + profile_val) * bh;
+				// The tilt only chooses WHERE the beds fall; it comes back off, or the dip would tilt the
+				// ground itself (4 m per 100 m at the default).
+				const double stepped = (q + profile_val) * bh - tilt;
 
 				w[i] = (float)((double)x + ((stepped - (double)x) * p_amount));
 			}

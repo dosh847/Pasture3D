@@ -229,13 +229,14 @@ func _h_strata_bands_its_input_tilted() -> void:
 	print("    max |graph - oracle| = %.7f (want < %.7f)" % [d, EPS])
 	if d > EPS:
 		_fail += 1; print("    !! the Strata node diverged from the re-derivation")
-	# CONTROL: it forms benches; amount 0 is the identity.
-	var flats := _horizontal_flats(got)
+	# CONTROL: it forms benches; amount 0 is the identity. A Strata bench is a steep riser then a sloping tread
+	# (spec T1), not a flat shelf, so count risers: steps more than twice as steep as the input ramp.
+	var risers := _risers(got, surf)
 	var t0 := _strata(7.0, 1.0, 0.0, 5.0, 30.0, 2.0, 45.0, 4)
 	var id := _max_abs_diff(_filter_graph(t0).evaluate(GW, GH, RECT, null, surf), surf)
-	print("    control: %d flat steps (want > %d) ; amount 0 identity diff %.7f (want < %.7f)"
-		% [flats, GW, id, EPS])
-	if flats <= GW or id > EPS:
+	print("    control: %d risers (want > %d) ; amount 0 identity diff %.7f (want < %.7f)"
+		% [risers, GH, id, EPS])
+	if risers <= GH or id > EPS:
 		_fail += 1; print("    !! no benches formed, or amount 0 was not the identity")
 	# CONTROL: dip actually tilts — beds under a nonzero dip differ from horizontal beds.
 	var horiz := _strata(7.0, 1.0, 1.0, 0.0, 30.0, 0.0, 45.0, 4) # dip 0, break 0
@@ -283,7 +284,7 @@ func _h2_strata_profile_reaches_native_and_gpu() -> void:
 		return
 	var broken := _strata(7.0, 1.0, 0.8, 5.0, 30.0, 2.0, 45.0, 4) # break noise on, amount < 1
 	broken.terrace_profile = _s_profile()
-	var cases := [["profile + break", broken], ["power law + break", _strata(7.0, 0.6, 1.0, -8.0, 22.0, 1.5, 120.0, 9)]]
+	var cases := [["profile + break", broken], ["sharp + break", _strata(7.0, 0.6, 1.0, -8.0, 22.0, 1.5, 120.0, 9)]]
 	for c in cases:
 		var prog: Dictionary = _filter_graph(c[1]).compile_graph_program()
 		var gpu: PackedFloat32Array = Pasture3DUtil.graph_eval_grid_gpu(prog, GW, GH, RECT, surf)
@@ -606,12 +607,21 @@ func _strata_oracle(st: Pasture3DGraphNodeStrata, p_field: PackedFloat32Array) -
 				continue
 			var w := Pasture3DTerrainGraph.cell_to_world(ix, iz, GW, GH, RECT)
 			var tilt := st.dip * (w.x * cos(dipdir) + w.y * sin(dipdir)) * 0.01
-			if st.break_amount > 0.0:
-				tilt += noise.get_noise_2d(w.x, w.y) * st.break_amount
+			var g := 1.0 - 0.85 * clampf(st.hardness, 0.0, 1.0)
+			if st.break_amount > 0.0 or st.hardness_variation > 0.0:
+				var nv := noise.get_noise_2d(w.x, w.y)
+				tilt += nv * st.break_amount
+				g = clampf(pow(g, 1.0 + st.hardness_variation * nv), 0.05, 10.0)
 			var t := (x + tilt) / bh
 			var q := floorf(t)
 			var fr := t - q
-			out[i] = lerpf(x, (q + pow(fr, 1.0 + st.hardness * 15.0)) * bh, st.amount)
+			# Written out here, not borrowed from the node: SHARP knee (a, b) and the tilt taken back off.
+			var pv := fr
+			if absf(g - 1.0) >= 1.0e-3:
+				var ka := pow(1.0 / g, 1.0 / (g - 1.0))
+				var kb := pow(g, -g / (g - 1.0))
+				pv = fr * kb / ka if fr < ka else kb + (1.0 - kb) * (fr - ka) / (1.0 - ka)
+			out[i] = lerpf(x, (q + pv) * bh - tilt, st.amount)
 	return out
 
 
@@ -703,6 +713,17 @@ func _horizontal_flats(p: PackedFloat32Array) -> int:
 		for ix in range(1, GW):
 			var i := iz * GW + ix
 			if absf(p[i] - p[i - 1]) < EPS:
+				c += 1
+	return c
+
+
+## Horizontal steps in p more than twice as steep as the same step in the input.
+func _risers(p: PackedFloat32Array, p_in: PackedFloat32Array) -> int:
+	var c := 0
+	for iz in range(GH):
+		for ix in range(1, GW):
+			var i := iz * GW + ix
+			if absf(p[i] - p[i - 1]) > 2.0 * absf(p_in[i] - p_in[i - 1]):
 				c += 1
 	return c
 

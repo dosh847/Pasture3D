@@ -24,10 +24,28 @@ var strata_frequency: float:
 		if v > 0.0:
 			band_height = 100.0 / v
 
-## Layer resistance / hardness contrast. 0 leaves the field untouched; 1 gives sheer cliff faces between flat shelves.
+## Bench shape. SHARP: a steep riser at the foot of each bed, then a gentle tread (two straight segments).
+## SMOOTH: the same idea as a continuous curve. A Terrace Profile curve, when assigned, overrides both.
+enum Profile { SHARP, SMOOTH }
+
+## Layer resistance / hardness contrast. 0 leaves the field untouched; 1 gives a strong ledge at the foot of
+## every bed. Maps to the profile gamma as 1 - 0.85 * hardness.
 @export_range(0.0, 1.0, 0.01) var hardness: float = 0.75:
 	set(v):
 		hardness = clampf(v, 0.0, 1.0)
+		emit_changed()
+
+## Bench shape; ignored while a Terrace Profile curve is assigned.
+@export var profile: Profile = Profile.SHARP:
+	set(v):
+		profile = v
+		emit_changed()
+
+## How much hardness wanders across the ground, so some beds ledge and others weather soft. Driven by the same
+## noise as Break Up (its size is Break Size, its pattern the seed).
+@export_range(0.0, 1.0, 0.01) var hardness_variation: float = 0.5:
+	set(v):
+		hardness_variation = clampf(v, 0.0, 1.0)
 		emit_changed()
 
 ## Hardness contrast alias for geological parameter naming.
@@ -43,7 +61,7 @@ var hardness_contrast: float:
 		amount = clampf(v, 0.0, 1.0)
 		emit_changed()
 
-## Optional custom cross-section profile for strata ledges. When null, uses power-law profile.
+## Optional custom cross-section profile for strata ledges. When null, uses the Profile setting.
 @export var terrace_profile: Curve:
 	set(v):
 		if terrace_profile != null and terrace_profile.changed.is_connected(emit_changed):
@@ -122,10 +140,12 @@ func native_lower() -> Dictionary:
 	p[5] = break_amount
 	p[6] = break_size
 	p[7] = float(seed)
+	p[8] = float(profile)
+	p[9] = hardness_variation
 	return {"params": p, "lut": profile_lut()}
 
 
-## The terrace profile as 256 samples over [0, 1], or empty for the power-law profile. It was never lowered
+## The terrace profile as 256 samples over [0, 1], or empty for the built-in profile. It was never lowered
 ## before spec Phase 2b, so the native and GPU routes ignored a custom profile that eval_cell honoured.
 func profile_lut() -> PackedFloat32Array:
 	var lut := PackedFloat32Array()
@@ -185,7 +205,7 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) ->
 	# The profile goes to native as its LUT, the same table the compiled program carries. eval_cell stays the
 	# exact-curve oracle.
 	return Pasture3DUtil.strata_grid(s, p_gw, p_gh, p_rect, bh, h, amt, d, dir, break_amount, break_size, seed,
-			profile_lut())
+			profile_lut(), int(profile), hardness_variation)
 
 
 func eval_cell(p_wx: float, p_wz: float, p_inputs: PackedFloat32Array) -> float:
@@ -201,8 +221,11 @@ func eval_cell(p_wx: float, p_wz: float, p_inputs: PackedFloat32Array) -> float:
 
 	var dipdir := deg_to_rad(dir)
 	var tilt := d * (p_wx * cos(dipdir) + p_wz * sin(dipdir)) * 0.01
-	if break_amount > 0.0:
-		tilt += _break_field().get_noise_2d(p_wx, p_wz) * break_amount
+	var g := hardness_to_gamma(h)
+	if break_amount > 0.0 or hardness_variation > 0.0:
+		var nv := _break_field().get_noise_2d(p_wx, p_wz)
+		tilt += nv * break_amount
+		g = local_gamma(g, hardness_variation, nv)
 	var xj := x + tilt
 	var bh_clean := maxf(bh, 0.001)
 	var t := xj / bh_clean
@@ -213,10 +236,34 @@ func eval_cell(p_wx: float, p_wz: float, p_inputs: PackedFloat32Array) -> float:
 	if terrace_profile != null:
 		profile_val = terrace_profile.sample_baked(clampf(f, 0.0, 1.0))
 	else:
-		profile_val = pow(f, 1.0 + h * 15.0)
+		profile_val = profile_value(int(profile), f, g)
 
-	var stepped := (q + profile_val) * bh_clean
+	# The tilt only chooses where the beds fall; it comes back off, or the dip would tilt the ground itself.
+	var stepped := (q + profile_val) * bh_clean - tilt
 	return lerpf(x, stepped, amt)
+
+
+## Hardness [0, 1] to the profile gamma: 0 = identity, 1 = a strong ledge. Twin of strata_hardness_to_gamma.
+static func hardness_to_gamma(p_hardness: float) -> float:
+	return lerpf(1.0, 0.15, clampf(p_hardness, 0.0, 1.0))
+
+
+## The gamma under lateral hardness variation, n = the break noise in [-1, 1]. A power, so hardness 0 (gamma 1)
+## stays the identity. Twin of strata_local_gamma.
+static func local_gamma(p_gamma: float, p_variation: float, p_n: float) -> float:
+	return clampf(pow(p_gamma, 1.0 + p_variation * p_n), 0.05, 10.0)
+
+
+## The bench profile over one bed, [0, 1] onto [0, 1]. Twin of strata_profile (C++) and GKM_STRATA (GLSL).
+static func profile_value(p_mode: int, p_u: float, p_g: float) -> float:
+	var u := clampf(p_u, 0.0, 1.0)
+	if p_mode == Profile.SMOOTH:
+		return pow(u, p_g) * (1.0 - exp(-(50.0 / p_g) * u))
+	if absf(p_g - 1.0) < 1.0e-3:
+		return u
+	var a := pow(1.0 / p_g, 1.0 / (p_g - 1.0))
+	var b := pow(p_g, -p_g / (p_g - 1.0))
+	return u * b / a if u < a else b + (1.0 - b) * (u - a) / (1.0 - a)
 
 
 func node_warnings() -> PackedStringArray:
