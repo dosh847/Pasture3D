@@ -1,6 +1,6 @@
 # Pasture3D Salève and Strata Fidelity Spec
 
-**Status: T1 built 2026-09-18 (`GraphStrataProfileGate`); T2–T3 and S1–S4 unbuilt.** Check the symbols named in each phase before planning from
+**Status: T1–T2 built 2026-09-18 (`GraphStrataProfileGate`); T3 and S1–S4 unbuilt.** Check the symbols named in each phase before planning from
 this header — spec status headers go stale.
 
 The graph's **Salève Hydraulic Erosion** (`Pasture3DGraphNodeHydraulicSaleve`, `src/pasture_3d_hydraulic_saleve.cpp`)
@@ -69,9 +69,10 @@ Problem: one pass gives one set of beds. Hesiod stacks the operation, which give
    fine beds wander proportionally less than coarse ones. Dip tilt is shared by all octaves.
 3. `octaves = 1` must reproduce T1 exactly (regression control).
 
-Gate: octaves=1 bit-matches the T1 output; octaves=3 produces a riser count per band of the base layer
-≥ lacunarity² on a linear ramp input (count sign changes of the second difference); control: forcing
-lacunarity = 1 must fail the riser-count criterion. Parity across routes as in T1.
+Gate: octaves=1 bit-matches the T1 output; octaves=3 produces at least twice the risers of octaves=1 on
+a linear ramp input; control: forcing lacunarity = 1 must fail the riser-count criterion. Parity across
+routes as in T1. (Built: the original ≥ lacunarity² bound was wrong — a finer boundary that lands inside
+a coarser riser merges with it, so hardness 1 gives 2 risers per base bed at 3 octaves, not 4.)
 
 ### Phase T3 — Where strata show: elevation and outcrop masks, mask port
 

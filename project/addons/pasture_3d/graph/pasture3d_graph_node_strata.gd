@@ -48,6 +48,18 @@ enum Profile { SHARP, SMOOTH }
 		hardness_variation = clampf(v, 0.0, 1.0)
 		emit_changed()
 
+## Beds inside beds: each octave re-bands the previous one at Band Height / Lacunarity^k. 1 = a single set.
+@export_range(1, 8, 1) var octaves: int = 3:
+	set(v):
+		octaves = clampi(v, 1, 8)
+		emit_changed()
+
+## How much thinner each octave's beds are than the last.
+@export_range(1.0, 4.0, 0.05) var lacunarity: float = 2.0:
+	set(v):
+		lacunarity = maxf(v, 1.0)
+		emit_changed()
+
 ## Hardness contrast alias for geological parameter naming.
 var hardness_contrast: float:
 	get:
@@ -142,6 +154,8 @@ func native_lower() -> Dictionary:
 	p[7] = float(seed)
 	p[8] = float(profile)
 	p[9] = hardness_variation
+	p[10] = float(octaves)
+	p[11] = lacunarity
 	return {"params": p, "lut": profile_lut()}
 
 
@@ -205,7 +219,7 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) ->
 	# The profile goes to native as its LUT, the same table the compiled program carries. eval_cell stays the
 	# exact-curve oracle.
 	return Pasture3DUtil.strata_grid(s, p_gw, p_gh, p_rect, bh, h, amt, d, dir, break_amount, break_size, seed,
-			profile_lut(), int(profile), hardness_variation)
+			profile_lut(), int(profile), hardness_variation, octaves, lacunarity)
 
 
 func eval_cell(p_wx: float, p_wz: float, p_inputs: PackedFloat32Array) -> float:
@@ -220,27 +234,33 @@ func eval_cell(p_wx: float, p_wz: float, p_inputs: PackedFloat32Array) -> float:
 		return x
 
 	var dipdir := deg_to_rad(dir)
-	var tilt := d * (p_wx * cos(dipdir) + p_wz * sin(dipdir)) * 0.01
+	var dip_tilt := d * (p_wx * cos(dipdir) + p_wz * sin(dipdir)) * 0.01
 	var g := hardness_to_gamma(h)
+	var nv := 0.0
 	if break_amount > 0.0 or hardness_variation > 0.0:
-		var nv := _break_field().get_noise_2d(p_wx, p_wz)
-		tilt += nv * break_amount
+		nv = _break_field().get_noise_2d(p_wx, p_wz)
 		g = local_gamma(g, hardness_variation, nv)
-	var xj := x + tilt
 	var bh_clean := maxf(bh, 0.001)
-	var t := xj / bh_clean
-	var q := floorf(t)
-	var f := t - q
+	var lac := maxf(lacunarity, 1.0)
 
-	var profile_val: float
-	if terrace_profile != null:
-		profile_val = terrace_profile.sample_baked(clampf(f, 0.0, 1.0))
-	else:
-		profile_val = profile_value(int(profile), f, g)
-
-	# The tilt only chooses where the beds fall; it comes back off, or the dip would tilt the ground itself.
-	var stepped := (q + profile_val) * bh_clean - tilt
-	return lerpf(x, stepped, amt)
+	# Octave k bands octave k-1's output at band_height / lacunarity^k; the break wander shrinks with the bed.
+	var val := x
+	var scale := 1.0
+	for k in clampi(octaves, 1, 8):
+		var bh_k := bh_clean / scale
+		var tilt := dip_tilt + nv * break_amount / scale
+		var t := (val + tilt) / bh_k
+		var q := floorf(t)
+		var f := t - q
+		var profile_val: float
+		if terrace_profile != null:
+			profile_val = terrace_profile.sample_baked(clampf(f, 0.0, 1.0))
+		else:
+			profile_val = profile_value(int(profile), f, g)
+		# The tilt only chooses where the beds fall; it comes back off, or the dip would tilt the ground itself.
+		val = (q + profile_val) * bh_k - tilt
+		scale *= lac
+	return lerpf(x, val, amt)
 
 
 ## Hardness [0, 1] to the profile gamma: 0 = identity, 1 = a strong ledge. Twin of strata_hardness_to_gamma.

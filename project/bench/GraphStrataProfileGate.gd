@@ -1,6 +1,6 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
-# GraphStrataProfileGate — PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md Phase T1.
+# GraphStrataProfileGate — PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md Phases T1 and T2.
 #
 # The claims:
 #   [A] The bench profile maps [0,1] onto [0,1] and rises monotonically, for a sweep of gamma, in both
@@ -12,7 +12,12 @@
 #   [D] Hardness variation 0 gives one gamma everywhere; variation 1 does not. CONTROL is the second half.
 #   [E] eval_cell == native == GPU on a 128-row grid (the thread pool runs serial below that), with break,
 #       variation and each profile mode on. CONTROL: GPU SMOOTH must disagree with native SHARP, or the mode
-#       never reached the shader.
+#       never reached the shader. Runs at the node's default octaves (3), so it also proves T2's octave loop
+#       agrees across routes.
+#   [F] (T2) Octaves put beds inside beds: on a ramp spanning 10 base beds, 3 octaves at lacunarity 2 give at
+#       least twice the risers of 1 octave. Not lacunarity^2: a finer boundary that lands inside a coarser
+#       riser merges with it (at hardness 1, 0.25 and 0.5 of each bed do). CONTROL: lacunarity 1 re-bands the
+#       same beds and must not.
 #
 # Counts completed criteria; a criterion that throws before asserting cannot pass by silence.
 extends Node
@@ -20,7 +25,7 @@ extends Node
 const RECT := Rect2(-200.0, -200.0, 400.0, 400.0)
 const EPS := 1.0e-5
 const EPS_GPU := 2.0e-3 # float32 world coordinates and tilt at +-200 m, a pow() chain in the shader
-const CRITERIA := 5
+const CRITERIA := 6
 
 var _fail := 0
 var _done := 0
@@ -33,6 +38,7 @@ func _ready() -> void:
 	_c_hardness_zero_is_identity()
 	_d_variation_varies_gamma()
 	_e_route_parity()
+	_f_octaves_nest_beds()
 	if _done != CRITERIA:
 		_fail += 1; print("!! only %d of %d criteria completed" % [_done, CRITERIA])
 	print("\n=== %s (%d failures, %d/%d criteria) ===\n" % ["STRATA PROFILE PASS" if _fail == 0 else "STRATA PROFILE FAIL", _fail, _done, CRITERIA])
@@ -205,6 +211,40 @@ func _e_route_parity() -> void:
 	print("    control: GPU SMOOTH vs native SHARP differ by %.3f m (want > 0.1)" % ctl)
 	if ctl <= 0.1:
 		_fail += 1; print("    !! the profile mode never reached the shader")
+	_done += 1
+
+
+## Steep runs (steps more than twice the input's slope) along one 4096-cell row spanning 10 base beds.
+func _riser_runs(p_octaves: int, p_lacunarity: float) -> int:
+	var n := 4096
+	var surf := PackedFloat32Array()
+	surf.resize(n)
+	for i in n:
+		surf[i] = 10.0 * float(i) / float(n)
+	var out := Pasture3DUtil.strata_grid(surf, n, 1, RECT, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 45.0, 0,
+			PackedFloat32Array(), 0, 0.0, p_octaves, p_lacunarity)
+	var runs := 0
+	var in_run := false
+	for i in range(1, n):
+		var steep := (out[i] - out[i - 1]) > 2.0 * (surf[i] - surf[i - 1])
+		if steep and not in_run:
+			runs += 1
+		in_run = steep
+	return runs
+
+
+func _f_octaves_nest_beds() -> void:
+	print("[F] octaves nest beds inside beds (T2)")
+	var one := _riser_runs(1, 2.0)
+	var three := _riser_runs(3, 2.0)
+	var flat_lac := _riser_runs(3, 1.0)
+	print("    risers over 10 base beds: octaves 1 = %d ; octaves 3 = %d (want >= %d) ; control lacunarity 1 = %d (want < %d)" % [one, three, 2 * one, flat_lac, 2 * one])
+	if three < 2 * one:
+		_fail += 1; print("    !! 3 octaves did not nest finer beds")
+	if flat_lac >= 2 * one:
+		_fail += 1; print("    !! control: lacunarity 1 still nested beds, so the count cannot see the octaves")
+	if one < 9 or one > 11:
+		_fail += 1; print("    !! a single octave should give one riser per bed")
 	_done += 1
 
 

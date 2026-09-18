@@ -49,6 +49,7 @@ PackedFloat32Array strata_grid(const PackedFloat32Array &p_surface, int p_gw, in
 		double p_amount, double p_dip, double p_dip_direction_deg,
 		double p_break_amount, double p_break_size, int p_seed,
 		const PackedFloat32Array &p_profile_lut = PackedFloat32Array(),
-		int p_profile_mode = STRATA_PROFILE_SHARP, double p_hardness_variation = 0.0);
+		int p_profile_mode = STRATA_PROFILE_SHARP, double p_hardness_variation = 0.0,
+		int p_octaves = 1, double p_lacunarity = 2.0);
 
 } // namespace godot

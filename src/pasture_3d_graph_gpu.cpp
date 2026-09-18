@@ -1424,7 +1424,8 @@ static const char *GRAPH_GRID_GLSL_4 = R"(
 	// a = the input, b = the RAW break noise in [-1, 1] (the zero buffer when there is none), c = the
 	// terrace profile LUT (ip entries; fewer than 2 = the built-in profile). f0 band height (floored at
 	// 1 mm on the host), f1 the profile gamma, f2 amount, f3 dip, f4 / f5 cos / sin of the dip direction,
-	// f6 break_amount, f7 hardness variation, ip2 the profile mode (0 SHARP, 1 SMOOTH).
+	// f6 break_amount, f7 hardness variation, ip2 the profile mode (0 SHARP, 1 SMOOTH), f8 octaves, f9
+	// lacunarity. Octave k bands octave k-1's output at f0 / f9^k with the break wander shrunk to match.
 	// src/pasture_3d_strata.h strata_profile, in float32. A zero amount is a host-side COPY.
 	if (p.mode == GKM_STRATA) {
 		float x = a[i];
@@ -1432,27 +1433,36 @@ static const char *GRAPH_GRID_GLSL_4 = R"(
 		float wx = p.ox + (float(ix) + 0.5) * p.dx;
 		float wz = p.oz + (float(iz) + 0.5) * p.dz;
 		float nv = b[i];
-		float tilt = p.f3 * (wx * p.f4 + wz * p.f5) * 0.01 + nv * p.f6;
-		float t = (x + tilt) / p.f0;
-		float q = floor(t);
-		float fr = t - q;
-		float pv;
-		if (p.ip >= 2) {
-			pv = p3d_lut(p.ip, fr);
-		} else {
-			float g = clamp(pow(p.f1, 1.0 + p.f7 * nv), 0.05, 10.0);
-			float u = clamp(fr, 0.0, 1.0);
-			if (p.ip2 == 1) {
-				pv = pow(u, g) * (1.0 - exp(-(50.0 / g) * u));
-			} else if (abs(g - 1.0) < 1.0e-3) {
-				pv = u;
+		float dip_tilt = p.f3 * (wx * p.f4 + wz * p.f5) * 0.01;
+		float g = clamp(pow(p.f1, 1.0 + p.f7 * nv), 0.05, 10.0);
+		float val = x;
+		float scale = 1.0;
+		int octaves = int(p.f8 + 0.5);
+		for (int k = 0; k < octaves; k++) {
+			float bh = p.f0 / scale;
+			float tilt = dip_tilt + nv * p.f6 / scale;
+			float t = (val + tilt) / bh;
+			float q = floor(t);
+			float fr = t - q;
+			float pv;
+			if (p.ip >= 2) {
+				pv = p3d_lut(p.ip, fr);
 			} else {
-				float ka = pow(1.0 / g, 1.0 / (g - 1.0));
-				float kb = pow(g, -g / (g - 1.0));
-				pv = (u < ka) ? u * kb / ka : kb + (1.0 - kb) * (u - ka) / (1.0 - ka);
+				float u = clamp(fr, 0.0, 1.0);
+				if (p.ip2 == 1) {
+					pv = pow(u, g) * (1.0 - exp(-(50.0 / g) * u));
+				} else if (abs(g - 1.0) < 1.0e-3) {
+					pv = u;
+				} else {
+					float ka = pow(1.0 / g, 1.0 / (g - 1.0));
+					float kb = pow(g, -g / (g - 1.0));
+					pv = (u < ka) ? u * kb / ka : kb + (1.0 - kb) * (u - ka) / (1.0 - ka);
+				}
 			}
+			val = (q + pv) * bh - tilt;
+			scale *= p.f9;
 		}
-		o[i] = x + ((q + pv) * p.f0 - tilt - x) * p.f2;
+		o[i] = x + (val - x) * p.f2;
 		return;
 	}
 
@@ -2231,7 +2241,7 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 			} break;
 			case GRAPH_OP_STRATA: {
 				// Spec Phase 2b. P: 0 band_height, 1 hardness, 2 amount, 3 dip, 4 dip direction deg,
-				// 5 break_amount, 6 break_size, 7 seed, 8 profile mode, 9 hardness variation. The break noise is
+				// 5 break_amount, 6 break_size, 7 seed, 8 profile mode, 9 hardness variation, 10 octaves, 11 lacunarity. The break noise is
 				// FastNoiseLite, which no shader runs, so it is filled here RAW with strata_grid's exact
 				// configuration: the kernel scales it by break_amount for the tilt and by the variation for
 				// the local gamma, so one field serves both.
@@ -2281,6 +2291,8 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				d.f6 = P[5]; // break_amount
 				d.f7 = (float)variation;
 				d.ip2 = (int)P[8]; // profile mode
+				d.f8 = (float)std::clamp((int)P[10], 1, 8); // octaves
+				d.f9 = (float)std::max((double)P[11], 1.0); // lacunarity
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;
