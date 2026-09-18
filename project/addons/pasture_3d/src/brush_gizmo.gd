@@ -26,6 +26,9 @@ const Sprites: Script = preload("res://addons/pasture_3d/src/gizmo_sprites.gd")
 
 ## Cyan-white point markers, distinct from the purple origin marker.
 const POINT_COLOR := Color(0.55, 0.95, 1.0)
+## An OPEN spline's first and last points, so its direction reads at a glance: red start, green end.
+const START_POINT_COLOR := Color(1.0, 0.3, 0.3)
+const END_POINT_COLOR := Color(0.35, 1.0, 0.4)
 ## World half-size of the small tangent-handle marker.
 const TANGENT_R: float = 0.8
 ## Orange tangent handles, distinct from cyan points and purple origin.
@@ -221,7 +224,13 @@ func _redraw(p_gizmo: EditorNode3DGizmo) -> void:
 		for path in _h.loop_paths(node):
 			for i in path.curve.point_count:
 				var c := node.to_local(path.to_global(path.curve.get_point_position(i)))
-				Sprites._dot_sprite(p_gizmo, c, Sprites.POINT_SIZE, POINT_COLOR,
+				var pc := POINT_COLOR
+				if not path.curve.closed and path.curve.point_count >= 2:
+					if i == 0:
+						pc = START_POINT_COLOR
+					elif i == path.curve.point_count - 1:
+						pc = END_POINT_COLOR
+				Sprites._dot_sprite(p_gizmo, c, Sprites.POINT_SIZE, pc,
 						_h.is_selected(node, gpi, 0))
 				# Tangents only for the selected point (or all, when the toggle is on) — declutter.
 				if _h.show_tangents(node, gpi):

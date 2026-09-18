@@ -1424,10 +1424,8 @@ func _merge_junction_earthwork(p_out: PackedFloat32Array, p_ground: PackedFloat3
 	var partner_lo := {}
 	var partner_hi := {}
 	for j in net.junctions_for(mine):
-		# END_TO_END connections meet flush at a single seam rather than laterally crossing;
-		# re-grading the foreign road over the entire terrain grid is redundant and expensive.
-		if j.kind == Pasture3DRoadJunction.JunctionKind.END_TO_END:
-			continue
+		# END_TO_END joins are included: both corridors run up to the pad, so without the merge the
+		# road that bakes last paves over its partner's batter.
 		var j_lo := Vector2(INF, INF)
 		var j_hi := Vector2(-INF, -INF)
 		var bnd: PackedVector2Array = net.junction_surface(j).get("boundary", PackedVector2Array())
@@ -2989,6 +2987,21 @@ func road_length() -> float:
 	if mod == null or mod.last_alignment == null or mod.last_alignment.count() == 0:
 		return NAN
 	return float(mod.last_alignment.count() - 1) * mod.last_alignment.ds
+
+
+## Reversing the spline flips arc length (s -> L - s), so every segment range is mirrored to stay on
+## the same stretch of road. The length does not change, and the map is its own inverse, as undo needs.
+func _on_splines_reversed() -> void:
+	var total := total_arc_length()
+	if total <= 0.0:
+		return
+	for sg: Pasture3DRoadSegment in segments:
+		if sg == null:
+			continue
+		var a := total - sg.to_distance
+		var b := total - sg.from_distance
+		sg.from_distance = a
+		sg.to_distance = b
 
 
 ## Total arc length of this road's plan centreline, metres.

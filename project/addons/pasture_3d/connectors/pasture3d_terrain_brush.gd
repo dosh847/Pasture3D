@@ -101,6 +101,9 @@ const REFRESH_DELAY: float = 0.1
 
 @export_tool_button("Refresh") var _refresh_btn = _refresh_button
 @export_tool_button("Add Spline") var _add_spline_btn = add_spline
+## Reverse the point order of every child spline, so an open spline runs the other way. The gizmo
+## draws an open spline's FIRST point red and its LAST point green, so the direction is visible.
+@export_tool_button("Reverse Direction") var _reverse_btn = reverse_splines
 ## Fill this brush's closed spline(s) with a Pasture3DPool — the one-press path from "I carved a
 ## basin" to "there is water in it". Asks first if this brush RAISES terrain, because water authored
 ## inside a landform is water you cannot see. See PASTURE3D_WATER_BODIES_SPEC.md §7.8.
@@ -3488,6 +3491,61 @@ func _set_curve_points_and_repaint(points: Array) -> void:
 	_suspend_auto = false
 	if Engine.is_editor_hint() and is_configured():
 		refresh()
+
+
+## Reverse every child spline's point order, as one undoable action. Reversal is its own inverse, so
+## the undo is the same call.
+func reverse_splines() -> void:
+	var ur := _editor_undo()
+	if ur:
+		ur.create_action("Pasture3D Reverse %s" % _spline_basename())
+		ur.add_do_method(self, "_reverse_splines_and_repaint")
+		ur.add_undo_method(self, "_reverse_splines_and_repaint")
+		ur.commit_action()
+	else:
+		_reverse_splines_and_repaint()
+
+
+func _reverse_splines_and_repaint() -> void:
+	_suspend_auto = true
+	for path: Path3D in _get_splines():
+		if path.curve != null and path.curve.point_count >= 2:
+			reverse_curve(path.curve)
+	_suspend_auto = false
+	# Re-seat every point on the ground under its NEW position. Without this the points keep heights
+	# that no bake refreshes, because a full refresh does not snap and nothing registers as moved.
+	if snap_to_surface and is_configured():
+		_apply_surface_snap()
+	_on_splines_reversed()
+	if Engine.is_editor_hint() and is_configured():
+		refresh()
+
+
+## Hook for brushes that store data measured ALONG the spline (a road's arc-length segments). Called
+## after the points are reversed; must itself be an involution, because undo calls it again.
+func _on_splines_reversed() -> void:
+	pass
+
+
+## Reverse a curve in place: positions and tilts in reverse order, and each point's in/out handles
+## swapped, so the shape is unchanged and only the direction flips. A closed curve reverses too.
+static func reverse_curve(p_curve: Curve3D) -> void:
+	var n := p_curve.point_count
+	var pos := PackedVector3Array()
+	var tin := PackedVector3Array()
+	var tout := PackedVector3Array()
+	var tilt := PackedFloat32Array()
+	for i in n:
+		pos.append(p_curve.get_point_position(i))
+		tin.append(p_curve.get_point_in(i))
+		tout.append(p_curve.get_point_out(i))
+		tilt.append(p_curve.get_point_tilt(i))
+	for i in n:
+		var k := n - 1 - i
+		p_curve.set_point_position(i, pos[k])
+		p_curve.set_point_in(i, tout[k])
+		p_curve.set_point_out(i, tin[k])
+		p_curve.set_point_tilt(i, tilt[k])
 
 
 ## ---- Surface snapping (PASTURE3D_SPLINE_SURFACE_SNAP_SPEC.md) ----
