@@ -14,14 +14,21 @@ extends Pasture3DGraphSolverNode
 
 
 @export_group("Simulation")
-## Total simulation passes.
-@export_range(1, 100, 1, "or_greater") var iterations: int = 25:
+## Upper bound on drainage passes. The solve stops as soon as it converges below Tolerance, so this is a
+## ceiling, not a cost.
+@export_range(1, 1000, 1, "or_greater") var iterations: int = 200:
 	set(v):
 		iterations = maxi(v, 1)
 		_param_changed()
 
+## Convergence threshold: mean height change per pass, as a fraction of the current relief.
+@export_range(0.0, 0.01, 0.0001) var tolerance: float = 1.0e-3:
+	set(v):
+		tolerance = maxf(v, 0.0)
+		_param_changed()
+
 ## Large-scale drainage erosion strength.
-@export_range(0.0, 1.0, 0.01) var erosion_strength: float = 0.5:
+@export_range(0.0, 1.0, 0.01) var erosion_strength: float = 0.7:
 	set(v):
 		erosion_strength = clampf(v, 0.0, 1.0)
 		_param_changed()
@@ -56,9 +63,28 @@ extends Pasture3DGraphSolverNode
 		_param_changed()
 
 ## Transverse river channel bank smoothing rate [0.0..0.5].
-@export_range(0.0, 0.5, 0.01) var bank_smoothing: float = 0.1:
+@export_range(0.0, 0.5, 0.01) var bank_smoothing: float = 0.0:
 	set(v):
 		bank_smoothing = clampf(v, 0.0, 0.5)
+		_param_changed()
+
+## Steepest slope (m/m) the drainage solve allows at the centre of the domain. It falls along a smooth
+## radial pulse to Max Slope Border at a distance of the smaller domain side.
+@export_range(0.0, 20.0, 0.1, "or_greater") var max_slope_center: float = 6.0:
+	set(v):
+		max_slope_center = maxf(v, 0.0)
+		_param_changed()
+
+## Steepest slope (m/m) allowed toward the domain border.
+@export_range(0.0, 20.0, 0.1, "or_greater") var max_slope_border: float = 0.0:
+	set(v):
+		max_slope_border = maxf(v, 0.0)
+		_param_changed()
+
+## Use Max Slope Center everywhere, with no radial falloff.
+@export var uniform_slope: bool = false:
+	set(v):
+		uniform_slope = v
 		_param_changed()
 
 ## Noise seed for drainage branch perturbation.
@@ -101,23 +127,6 @@ extends Pasture3DGraphSolverNode
 		enable_post_smoothing = v
 		_param_changed()
 
-## Tonal gain scaling multiplier.
-@export_range(0.0, 5.0, 0.05) var gain: float = 1.0:
-	set(v):
-		gain = maxf(v, 0.0)
-		_param_changed()
-
-## Gamma curve contrast exponent.
-@export_range(0.1, 4.0, 0.05) var gamma: float = 1.0:
-	set(v):
-		gamma = maxf(v, 0.01)
-		_param_changed()
-
-## Overall mix factor blending eroded terrain with input surface.
-@export_range(0.0, 1.0, 0.01) var mix_factor: float = 1.0:
-	set(v):
-		mix_factor = clampf(v, 0.0, 1.0)
-		_param_changed()
 
 
 @export_group("Evaluation")
@@ -149,9 +158,9 @@ func native_lower() -> Dictionary:
 	p[7] = deposition_strength
 	p[8] = stream_strength
 	p[9] = stream_exp
-	p[10] = gain
-	p[11] = gamma
-	p[12] = mix_factor
+	p[10] = tolerance
+	p[11] = max_slope_center
+	p[12] = max_slope_center if uniform_slope else max_slope_border
 	p[13] = float(seed)
 	p[14] = 1.0 if bool(enable_post_smoothing) else 0.0
 	p[15] = reference_relief
@@ -241,7 +250,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	if surface.size() != n:
 		surface = Pasture3DGraphOps.zeros(n)
 
-	return solve_cached(_surface_hash(surface, p_gw, p_gh), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, dx_in, dy_in, mask_in))
+	return solve_cached(solver_cache_key(p_gw, p_gh, [surface, dx_in, dy_in, mask_in]), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, dx_in, dy_in, mask_in))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -253,10 +262,6 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> 
 func _param_changed() -> void:
 	mark_dirty_since_bake()
 	emit_changed()
-
-
-func _surface_hash(p_surface: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
-	return solver_cache_key(p_gw, p_gh, [p_surface])
 
 
 func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_dx: PackedFloat32Array, p_dy: PackedFloat32Array, p_mask: PackedFloat32Array) -> Array:
@@ -278,9 +283,9 @@ func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect:
 		"stream_strength": stream_strength,
 		"stream_exp": stream_exp,
 		"enable_post_smoothing": enable_post_smoothing,
-		"gain": gain,
-		"gamma": gamma,
-		"mix_factor": mix_factor,
+		"tolerance": tolerance,
+		"max_slope_center": max_slope_center,
+		"max_slope_border": max_slope_center if uniform_slope else max_slope_border,
 	}
 
 	if not ClassDB.class_has_method("Pasture3DUtil", "hydraulic_saleve_solve_grid"):

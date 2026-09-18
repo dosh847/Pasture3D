@@ -1,6 +1,6 @@
 # Pasture3D Salève and Strata Fidelity Spec
 
-**Status: T1–T3 built 2026-09-18 (`GraphStrataProfileGate`; T3's mask port deferred, see T3); S1–S4 unbuilt.** Check the symbols named in each phase before planning from
+**Status: T1–T3 built 2026-09-18 (`GraphStrataProfileGate`; T3's mask port deferred, see T3); S1 built 2026-09-18 (`GraphSaleveNetworkGate`); S2–S4 unbuilt.** Check the symbols named in each phase before planning from
 this header — spec status headers go stale.
 
 The graph's **Salève Hydraulic Erosion** (`Pasture3DGraphNodeHydraulicSaleve`, `src/pasture_3d_hydraulic_saleve.cpp`)
@@ -152,6 +152,29 @@ checked == n); input with an interior pit — control: disabling rerouting leave
 converges below tolerance before max iterations on the fixture (control: per-iteration noise re-enabled
 must not converge in the same budget); drainage area at outlets sums to the domain area. Re-record the
 Salève gate baselines at phase end.
+
+**As built (S1):**
+- Stage 1 walks an adjacency (neighbour lists + edge lengths), never the grid, so S2 swaps the graph only.
+  `order` is the BFS outlet → leaves; `root_of` names each vertex's terminal.
+- Rerouting: Dijkstra from every outlet, keyed (distance, index) so the result does not depend on heap
+  internals (the GDScript oracle has its own heap and matches to 6e-6 m). The first settled vertex of an
+  undrained basin has its chain to the pit reversed onto its Dijkstra predecessor.
+- Slope cap is `s(r)·vref/zptp` in unit elevation per unit length, i.e. `s` is a true m/m gradient.
+  `uniform_slope` is lowered as border = centre, so it needs no slot of its own.
+- Flat breaking: value noise on a fixed **50 m world lattice** (not a grid fraction, so a margin does not
+  move it), amplitude 1e-3 of the unit relief, working copy only.
+- Convergence: mean |Δz| per pass < `tolerance` × the current z range. The result dict carries
+  `iterations` and `cell_area`; `debug_network` adds `receivers` and `drainage_area`. `reroute_lakes`
+  and `stable_noise` are dictionary-only gate hooks.
+- **Beyond the spec:** `gain`, `gamma` and `mix_factor` were deleted too. All 16 lowered slots were in
+  use; slots 10–12 now carry `tolerance`, `max_slope_center`, `max_slope_border`. Gain/gamma is the
+  Contrast node's job and `mix_factor` duplicated `erosion_strength`. The node's cache key now includes
+  dx, dy and mask (it hashed the surface only, so rewiring them served a stale solve).
+- Baselines re-recorded: `GraphHydraulicSaleveGate` [C] now wants > 0.01 m (was 0.2 m; the one-line
+  incision runs on a different Stage 1 surface and S3 deletes it); [E] tests post-smoothing instead of
+  the deleted tonal pass. `SolverThreadParityGate` wants ≥ 4 splits (the gain pass is gone).
+  `SaleveMarginInvarianceProbe` worst drift at 60 m margin: auto 26.1 m, pinned 25.4 m. The radial slope
+  pulse is centred on the *solved* domain, so a margin moves it — S2's margin decision must cover it.
 
 ### Phase S2 — Coarse irregular solve, smooth reconstruction
 

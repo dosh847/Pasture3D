@@ -5,16 +5,19 @@
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/rect2.hpp>
 
 namespace godot {
 
 struct HydraulicSaleveParams {
-	int iterations = 25;
-	float erosion_strength = 0.5f;
+	// Upper bound on Stage 1 passes; the solve stops earlier once it converges below `tolerance`.
+	int iterations = 200;
+	// Mean |dz| per pass, as a fraction of the current relief, below which Stage 1 has converged.
+	float tolerance = 1.0e-3f;
+	float erosion_strength = 0.7f;
 	float drainage_exponent = 0.15f;
 	float drainage_noise = 0.15f;
-	float fine_erosion_strength = 0.05f;
 	float shape_preservation = 2.0f;
 	// The vertical scale (metres) every length in the solver is measured against, so the drainage network
 	// is a property of the TERRAIN and not of the grid it happens to be solved on. 0 = take it from the
@@ -22,8 +25,11 @@ struct HydraulicSaleveParams {
 	// — most visibly under a brush's Modifier Margin, where the band brings surrounding ground into range.
 	// Pin it to hold a shape steady across margins, resizes and re-bakes.
 	float reference_relief = 0.0f;
-	float bank_smoothing = 0.1f;
-	float sediment_strength = 0.3f;
+	float bank_smoothing = 0.0f;
+	// Radial slope limit (dimensionless, m/m): `max_slope_center` at the domain centre falling to
+	// `max_slope_border` at a distance of the smaller domain side, along 1 - r^2(3 - 2r).
+	float max_slope_center = 6.0f;
+	float max_slope_border = 0.0f;
 	int seed = 0;
 	PackedFloat32Array mask;
 	PackedFloat32Array dx;
@@ -38,11 +44,15 @@ struct HydraulicSaleveParams {
 	float stream_strength = 0.02f;
 	float stream_exp = 0.8f;
 
-	// Stage 4: Post-Processing & Tonal Controls
+	// Stage 4: Post-Processing
 	bool enable_post_smoothing = false;
-	float gain = 1.0f;
-	float gamma = 1.0f;
-	float mix_factor = 1.0f;
+
+	// Gate hooks, dictionary only. `reroute_lakes` off leaves pits as terminals; `stable_noise` off re-hashes
+	// the routing noise every pass (the old behaviour, which never settles); `debug_network` returns the
+	// final receivers and drainage areas.
+	bool reroute_lakes = true;
+	bool stable_noise = true;
+	bool debug_network = false;
 
 	static HydraulicSaleveParams from_dict(const Dictionary &p_dict);
 };
@@ -52,6 +62,10 @@ struct HydraulicSaleveResult {
 	PackedFloat32Array height;
 	PackedFloat32Array eroded_rock;
 	PackedFloat32Array sediment;
+	int iterations = 0; // Stage 1 passes actually run
+	PackedInt32Array receivers; // debug_network only
+	PackedFloat32Array drainage_area; // debug_network only, in (cell metres / reference relief)^2
+	float cell_area = 0.0f; // same unit as drainage_area
 
 	Dictionary to_dict() const;
 };

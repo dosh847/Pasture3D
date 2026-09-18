@@ -1699,9 +1699,7 @@ func _insert_preset(p_id: int, p_pos: Vector2) -> void:
 			cone.set("cone_alpha", 1.2)
 
 			var saleve = Pasture3DGraphNodeRegistry.create(&"hydraulic_saleve")
-			saleve.set("iterations", 25)
 			saleve.set("erosion_strength", 0.5)
-			saleve.set("fine_erosion_strength", 0.05)
 			saleve.set("shape_preservation", 0.2)
 
 			_ur_add_do_method(graph, &"add_node", [cone, p_pos])
@@ -1716,7 +1714,6 @@ func _insert_preset(p_id: int, p_pos: Vector2) -> void:
 			range_rad.set("angle_spread_ratio", 0.4)
 
 			var saleve = Pasture3DGraphNodeRegistry.create(&"hydraulic_saleve")
-			saleve.set("iterations", 20)
 			saleve.set("erosion_strength", 0.4)
 
 			var talus = Pasture3DGraphNodeRegistry.create(&"talus_projection")

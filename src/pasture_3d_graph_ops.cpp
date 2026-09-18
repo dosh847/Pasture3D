@@ -1658,9 +1658,9 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				p.deposition_strength = (PH[7] ? P[7] : 0.5f);
 				p.stream_strength = (PH[8] ? P[8] : 0.02f);
 				p.stream_exp = (PH[9] ? P[9] : 0.8f);
-				p.gain = (PH[10] ? P[10] : 1.0f);
-				p.gamma = (PH[11] ? P[11] : 1.0f);
-				p.mix_factor = (PH[12] ? P[12] : 1.0f);
+				p.tolerance = (PH[10] ? std::max(0.0f, P[10]) : 1.0e-3f);
+				p.max_slope_center = (PH[11] ? std::max(0.0f, P[11]) : 6.0f);
+				p.max_slope_border = (PH[12] ? std::max(0.0f, P[12]) : 0.0f);
 				p.seed = params_n ? (int)P[13] : 0;
 				p.enable_post_smoothing = params_o ? (P[14] > 0.5f) : false;
 				if (in1 && in1[s] >= 0) {

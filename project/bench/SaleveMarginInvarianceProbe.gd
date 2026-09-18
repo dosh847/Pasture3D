@@ -147,9 +147,6 @@ func _solve(p_core: int, p_margin_cells: int, p_reference_relief: float) -> Pack
 		"stream_strength": 0.02,
 		"stream_exp": 0.8,
 		"enable_post_smoothing": false,
-		"gain": 1.0,
-		"gamma": 1.0,
-		"mix_factor": 1.0,
 		"seed": 0,
 	}
 	var res: Dictionary = Pasture3DUtil.hydraulic_saleve_solve_grid(surface, w, w, rect, params)
