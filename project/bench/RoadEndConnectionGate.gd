@@ -5,7 +5,7 @@
 @tool
 extends Node
 
-const CRITERIA: Array[String] = ["A", "B", "C", "D", "E", "F", "G"]
+const CRITERIA: Array[String] = ["A", "B", "C", "D", "E", "F", "G", "H"]
 
 var _fail: int = 0
 var _reported: Dictionary = {}
@@ -14,12 +14,13 @@ var _reported: Dictionary = {}
 func _ready() -> void:
 	print("=== RoadEndConnectionGate: end-to-end connections and junction remediation (P10) ===\n")
 	_a_collinear_roads_connect_end_to_end()
-	_b_collinear_matching_trim_is_zero()
+	_b_collinear_matching_trim_is_pad()
 	_c_lane_solver_connects_without_stop_lines_or_crossing_markings()
 	_d_terminating_road_emits_one_arm()
 	_e_indirect_acute_cluster_calculates_tangent_angle()
 	_f_lane_count_transition_generates_trapezoid_and_taper()
 	_g_route_traversal_is_continuous_across_seam()
+	_h_angled_join_clears_inner_edge_and_fillet()
 	_account_for_silent_criteria()
 	print("\n=== %s (%d failures) ===\n" % ["ROAD END CONNECTION PASS" if _fail == 0 else "ROAD END CONNECTION FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
@@ -93,9 +94,10 @@ func _a_collinear_roads_connect_end_to_end() -> void:
 	_check("A", control_ok, "control: roads separated by 5.0 m do not connect (got %d junctions)" % js_far.size())
 
 
-## [B] Trim-back on collinear matching roads is <= 1e-3 m (zero gap).
-func _b_collinear_matching_trim_is_zero() -> void:
-	print("[B] trim-back on collinear matching roads is <= 1e-3 m (zero gap)")
+## [B] Collinear matching roads meet at a PAD, not a seam: each is trimmed back by the narrower
+## half-width, so the join has a footprint to grade and batter instead of one road paving the other.
+func _b_collinear_matching_trim_is_pad() -> void:
+	print("[B] collinear matching roads are trimmed to a pad of the narrower half-width")
 	var r_a := _solver_run("road_a", PackedVector2Array([Vector2(-50.0, 0.0), Vector2(0.0, 0.0)]), 10, 4.0)
 	var r_b := _solver_run("road_b", PackedVector2Array([Vector2(0.0, 0.0), Vector2(50.0, 0.0)]), 10, 4.0)
 	var js := Pasture3DRoadJunctionSolver.resolve([r_a, r_b])
@@ -105,18 +107,51 @@ func _b_collinear_matching_trim_is_zero() -> void:
 	var j: Pasture3DRoadJunction = js[0]
 	var trim_a := j.trim_back_for("road_a")
 	var trim_b := j.trim_back_for("road_b")
-	var trim_ok := absf(trim_a) <= 1e-3 and absf(trim_b) <= 1e-3
-	_check("B", trim_ok, "trims are zero (trim_a=%.4f, trim_b=%.4f)" % [trim_a, trim_b])
-	_check("B", j.radius <= 1e-3, "junction radius is <= 1e-3 m (got %.4f)" % j.radius)
-
-	# Footprint polygon for matching flush roads is empty (ribbons touch directly, no gap)
+	_check("B", absf(trim_a - 4.0) <= 1e-3 and absf(trim_b - 4.0) <= 1e-3,
+			"trims equal the 4.0 m half-width pad (trim_a=%.4f, trim_b=%.4f)" % [trim_a, trim_b])
 	var poly := Pasture3DRoadMesher.plan_footprint(j.center, j.footprint_arms(), j.effective_corner_radius())
-	_check("B", poly.is_empty(), "matching flush collinear footprint polygon is empty (got %d verts)" % poly.size())
+	var area := absf(_area(poly))
+	# 8 m long x 8 m wide pad; the check is loose because the crown vertices sit on the cut faces.
+	_check("B", absf(area - 64.0) < 1.0, "pad footprint is 8 m x 8 m (got %.2f m² over %d verts)" % [area, poly.size()])
+	_check("B", Geometry2D.is_point_in_polygon(j.center, poly), "the seam lies inside the pad")
 
-	# Control mutation: crossing formula w / sin θ would yield > 30 m trim
-	var naive_sin: float = sin(Pasture3DRoadJunctionSolver.MIN_CROSSING_ANGLE)
-	var naive_trim: float = 4.0 / naive_sin
-	_check("B", naive_trim > 30.0, "control: w / sin θ diverges to %.2f m at shallow angles" % naive_trim)
+	# Control: the crossing formula w / sin θ would yield > 30 m trim here — the pad must not.
+	var naive_trim: float = 4.0 / sin(Pasture3DRoadJunctionSolver.MIN_CROSSING_ANGLE)
+	_check("B", naive_trim > 30.0 and trim_a < 5.0, "control: w / sin θ diverges to %.2f m, the pad stays %.2f m" % [naive_trim, trim_a])
+
+
+## [H] Two ends meeting at a right angle are trimmed to clear each other's inner edge plus the fillet
+## (w·cot(θ/2) + R/tan(θ/2) = 4 + 6 m), and the footprint covers the corner — this is the case that
+## used to trim to zero and let one ribbon pave over the other.
+func _h_angled_join_clears_inner_edge_and_fillet() -> void:
+	print("[H] a right-angled end-to-end join trims to inner edge + fillet and paves the corner")
+	var r_a := _solver_run("road_a", PackedVector2Array([Vector2(-50.0, 0.0), Vector2(0.0, 0.0)]), 10, 4.0)
+	var r_b := _solver_run("road_b", PackedVector2Array([Vector2(0.0, 0.0), Vector2(0.0, 50.0)]), 5, 4.0)
+	var js := Pasture3DRoadJunctionSolver.resolve([r_a, r_b])
+	if js.size() != 1:
+		_check("H", false, "expected one junction (got %d)" % js.size())
+		return
+	var j: Pasture3DRoadJunction = js[0]
+	_check("H", j.kind == Pasture3DRoadJunction.JunctionKind.END_TO_END, "classified as END_TO_END")
+	var want := 4.0 + Pasture3DRoadMesher.fillet_allowance(j.effective_corner_radius(), PI * 0.5)
+	var ta := j.trim_back_for("road_a")
+	var tb := j.trim_back_for("road_b")
+	_check("H", want > 4.5 and absf(ta - want) < 1e-2 and absf(tb - want) < 1e-2,
+			"trims = %.2f m (got %.2f and %.2f)" % [want, ta, tb])
+	var poly := Pasture3DRoadMesher.plan_footprint(j.center, j.footprint_arms(), j.effective_corner_radius())
+	_check("H", Geometry2D.is_point_in_polygon(Vector2(-2.0, 2.0), poly),
+			"the inside of the corner, where both ribbons used to overlap, is in the footprint")
+	# Control: two roads 4 m wide whose ends overlap by 3 m (> the old 1.5 m snap) still join.
+	var r_c := _solver_run("road_c", PackedVector2Array([Vector2(3.0, 0.0), Vector2(3.0, 50.0)]), 5, 4.0)
+	_check("H", Pasture3DRoadJunctionSolver.resolve([r_a, r_c]).size() == 1,
+			"control: ends 3 m apart within the half-width still connect")
+
+
+func _area(p: PackedVector2Array) -> float:
+	var s := 0.0
+	for i in p.size():
+		s += p[i].cross(p[(i + 1) % p.size()])
+	return s * 0.5
 
 
 ## [C] Lane solver connects incoming lanes 1-to-1 without stop lines; markings are suppressed.

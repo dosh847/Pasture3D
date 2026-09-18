@@ -121,7 +121,11 @@ static func find_crossings(p_runs: Array, p_opts: Dictionary = {}) -> Array:
 				for tb_info: Dictionary in terms_b:
 					var pt_a: Vector2 = ta_info["p"]
 					var pt_b: Vector2 = tb_info["p"]
-					if pt_a.distance_to(pt_b) > endpoint_tol:
+					# Two ends lying within the narrower road's half-width of each other overlap on the
+					# ground, so they are one join however loosely the author snapped them.
+					var tol_pair := maxf(endpoint_tol, minf(float(ra.get("half_width", 0.0)),
+							float(rb.get("half_width", 0.0))))
+					if pt_a.distance_to(pt_b) > tol_pair:
 						continue
 					var sa_t: float = float(ta_info["s"])
 					var sb_t: float = float(tb_info["s"])
@@ -154,7 +158,7 @@ static func find_crossings(p_runs: Array, p_opts: Dictionary = {}) -> Array:
 					var matched := false
 					for oi in range(pair_start_idx, out.size()):
 						var oc: Dictionary = out[oi]
-						if (oc["point"] as Vector2).distance_to(p_meet) <= endpoint_tol + 0.5:
+						if (oc["point"] as Vector2).distance_to(p_meet) <= tol_pair + 0.5:
 							out[oi]["point"] = p_meet
 							out[oi]["s_a"] = sa_t if oc["a"] == ia else sb_t
 							out[oi]["s_b"] = sb_t if oc["a"] == ia else sa_t
@@ -520,8 +524,25 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 	arm_trims.fill(0.0)
 
 	if is_e2e:
+		# END-TO-END IS A TWO-ARM JUNCTION, not a seam. Each arm stops where the two INNER edges meet
+		# (for arms at θ: (w_other + w_self·cos θ) / sin θ, which is w·cot(θ/2) for equal widths and 0 for
+		# a straight run), plus the kerb-return fillet, plus at least a pad of the narrower half-width so
+		# even a straight join has a footprint to grade and batter. Without the pad the two corridors meet
+		# at a line and whichever road bakes last paves over the other's earthwork.
+		var pad: float = INF
 		for ai in n_arms:
-			arm_trims[ai] = trims[arm_roads[ai]]
+			pad = minf(pad, halfs[ai])
+		if not is_finite(pad):
+			pad = 0.0
+		for ai in n_arms:
+			var t: float = maxf(trims[arm_roads[ai]], pad)
+			if n_arms == 2:
+				var io: int = 1 - ai
+				var theta := acos(clampf(dirs[ai].dot(dirs[io]), -1.0, 1.0))
+				if theta > MIN_CROSSING_ANGLE and theta < PI - MIN_CROSSING_ANGLE:
+					var clear := (halfs[io] + halfs[ai] * cos(theta)) / sin(theta)
+					t = maxf(t, maxf(clear, 0.0) + Pasture3DRoadMesher.fillet_allowance(r_eff, theta))
+			arm_trims[ai] = t
 	elif n_arms >= 2:
 		var order: Array = []
 		for i in n_arms:
