@@ -1127,7 +1127,8 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				// The terrace profile rides the LUT (spec Phase 2b). It used to be dropped at lowering, so a
 				// custom profile shaped the GDScript route and was silently ignored natively.
 				PackedFloat32Array res = strata_grid(in_arr, p_gw, p_gh, p_rect, P[0], P[1], P[2], P[3], P[4], P[5], P[6], (int)P[7],
-						p_prog.luts[(size_t)s], (int)P[8], P[9], (int)P[10], P[11]);
+						p_prog.luts[(size_t)s], (int)P[8], P[9], (int)P[10], P[11],
+						P[12], P[13], P[14], P[15]);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
 			} break;
 

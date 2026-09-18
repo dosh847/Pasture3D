@@ -1,6 +1,6 @@
 # Pasture3D Salève and Strata Fidelity Spec
 
-**Status: T1–T2 built 2026-09-18 (`GraphStrataProfileGate`); T3 and S1–S4 unbuilt.** Check the symbols named in each phase before planning from
+**Status: T1–T3 built 2026-09-18 (`GraphStrataProfileGate`; T3's mask port deferred, see T3); S1–S4 unbuilt.** Check the symbols named in each phase before planning from
 this header — spec status headers go stale.
 
 The graph's **Salève Hydraulic Erosion** (`Pasture3DGraphNodeHydraulicSaleve`, `src/pasture_3d_hydraulic_saleve.cpp`)
@@ -96,6 +96,26 @@ valleys.
 Gate: with both masks off and mask unwired, output bit-matches T2 (control); with the elevation mask on,
 change at the input minimum is 0 and at the maximum equals the unmasked change; the outcrop mask produces
 cells with zero change and cells with full change on a 256² ramp. Route parity.
+
+**As built (2026-09-18), and where it departs from the above:**
+- **No auto range.** `mask_low` / `mask_high` are plain metres (defaults 0 / 100). An auto range needs
+  the grid's min/max, which the per-cell `eval_cell` cannot see, and it is the extent-dependent hazard
+  this repo already paid for once.
+- **The outcrop mask is smaller than Hesiod's.** Fixed 45° off the dip, fixed 3:1 stretch, break noise on
+  the long axis. `outcrop_strength` (default 0.4) and `outcrop_size` (180 m) replace
+  angle-shift / two sizes / clamp-min / remap-min — P[12..15] are the last four param slots, and the GPU
+  push constants were already full. Factor = `1 − strength · clamp(F2 − F1, 0, 1)`; at strength 1 it
+  does reach 0. The GPU fills it on the host with the same C++ function (`strata_outcrop`), in the
+  extended noise buffer `[noise | outcrop | lo, hi]`, so no Voronoi runs in GLSL.
+- **The elevation-mask flag rides P[8]** as bit 1 beside the profile mode (`StrataFlags`).
+- **The `mask` port is NOT built.** The native program carries four field inputs per op (`in0..in3`);
+  ports 4+ can drive scalar params but not grids. Strata's ports 1–5 are scalars, so a mask appended
+  last (port 6) cannot reach native or GPU, and moving it to port 1 breaks saved wiring. Open: either
+  widen the program to more field inputs, or add a port migration. Until then, mask a Strata node with a
+  downstream Blend.
+- Gate: `GraphStrataProfileGate` [G] (elevation window, control: mask off changes cells below Mask Low)
+  and [H] (outcrop factor spans [0, 1] at strength 1). [E] parity runs at the defaults, so both masks
+  are covered on all three routes.
 
 ---
 

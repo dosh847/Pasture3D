@@ -14,7 +14,8 @@ PackedFloat32Array godot::strata_grid(const PackedFloat32Array &p_surface, int p
 		const Rect2 &p_rect, double p_band_height, double p_hardness,
 		double p_amount, double p_dip, double p_dip_direction_deg,
 		double p_break_amount, double p_break_size, int p_seed, const PackedFloat32Array &p_profile_lut,
-		int p_profile_mode, double p_hardness_variation, int p_octaves, double p_lacunarity) {
+		int p_profile_mode, double p_hardness_variation, int p_octaves, double p_lacunarity,
+		double p_mask_low, double p_mask_high, double p_outcrop_strength, double p_outcrop_size) {
 	const int n = p_gw * p_gh;
 	PackedFloat32Array out;
 	out.resize(n);
@@ -50,6 +51,10 @@ PackedFloat32Array godot::strata_grid(const PackedFloat32Array &p_surface, int p
 	const double gamma = strata_hardness_to_gamma(p_hardness);
 	const int octaves = std::clamp(p_octaves, 1, 8);
 	const double lacunarity = std::max(p_lacunarity, 1.0);
+	// p_profile_mode carries the flags (StrataFlags); bit 0 alone is the profile.
+	const int profile_mode = p_profile_mode & STRATA_FLAG_SMOOTH;
+	const bool elevation_mask = (p_profile_mode & STRATA_FLAG_ELEVATION_MASK) != 0;
+	const double outcrop_strength = std::clamp(p_outcrop_strength, 0.0, 1.0);
 
 	Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int z0, int z1) {
 		for (int iz = z0; iz < z1; iz++) {
@@ -94,7 +99,7 @@ PackedFloat32Array godot::strata_grid(const PackedFloat32Array &p_surface, int p
 						const double frac = f_idx - (double)i0;
 						profile_val = (double)lut_ptr[i0] * (1.0 - frac) + (double)lut_ptr[i0 + 1] * frac;
 					} else {
-						profile_val = strata_profile(p_profile_mode, f, g);
+						profile_val = strata_profile(profile_mode, f, g);
 					}
 					// The tilt only chooses WHERE the beds fall; it comes back off, or the dip would tilt the
 					// ground itself.
@@ -103,7 +108,13 @@ PackedFloat32Array godot::strata_grid(const PackedFloat32Array &p_surface, int p
 				}
 				const double stepped = val;
 
-				w[i] = (float)((double)x + ((stepped - (double)x) * p_amount));
+				// Where the strata show: the elevation window on the INPUT height, and the outcrop cells.
+				double t = p_amount;
+				if (elevation_mask) {
+					t *= strata_elevation_mask((double)x, p_mask_low, p_mask_high);
+				}
+				t *= strata_outcrop(wx, wz, cos_dip, sin_dip, nv, p_outcrop_size, outcrop_strength, p_seed);
+				w[i] = (float)((double)x + ((stepped - (double)x) * t));
 			}
 		}
 	});

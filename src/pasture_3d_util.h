@@ -553,7 +553,8 @@ public:
 			const double p_amount, const double p_dip, const double p_dip_direction_deg,
 			const double p_break_amount, const double p_break_size, const int p_seed,
 			const PackedFloat32Array &p_profile_lut, const int p_profile_mode, const double p_hardness_variation,
-			const int p_octaves, const double p_lacunarity);
+			const int p_octaves, const double p_lacunarity, const double p_mask_low, const double p_mask_high,
+			const double p_outcrop_strength, const double p_outcrop_size);
 
 	// Native Curve transfer filter.
 	static PackedFloat32Array curve_grid(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_lut,

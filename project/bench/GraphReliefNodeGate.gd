@@ -444,6 +444,8 @@ func _strata(band_h: float, hardness: float, amount: float, dip: float, break_si
 	n.band_height = band_h; n.hardness = hardness; n.amount = amount; n.dip = dip
 	n.break_size = break_size; n.break_amount = break_amt; n.dip_direction_degrees = dip_dir; n.seed = seed
 	n.octaves = 1 # the oracle is one octave; T1's single-set output (GraphStrataProfileGate covers octaves)
+	n.elevation_mask = false # and it has no masks (GraphStrataProfileGate [G]/[H] cover those)
+	n.outcrop_strength = 0.0
 	return n
 
 

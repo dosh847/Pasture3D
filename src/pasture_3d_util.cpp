@@ -2212,10 +2212,12 @@ PackedFloat32Array Pasture3DUtil::strata_grid(const PackedFloat32Array &p_surfac
 		const double p_amount, const double p_dip, const double p_dip_direction_deg,
 		const double p_break_amount, const double p_break_size, const int p_seed,
 		const PackedFloat32Array &p_profile_lut, const int p_profile_mode, const double p_hardness_variation,
-		const int p_octaves, const double p_lacunarity) {
+		const int p_octaves, const double p_lacunarity, const double p_mask_low, const double p_mask_high,
+		const double p_outcrop_strength, const double p_outcrop_size) {
 	return godot::strata_grid(p_surface, p_gw, p_gh, p_rect, p_band_height, p_hardness,
 			p_amount, p_dip, p_dip_direction_deg, p_break_amount, p_break_size, p_seed, p_profile_lut,
-			p_profile_mode, p_hardness_variation, p_octaves, p_lacunarity);
+			p_profile_mode, p_hardness_variation, p_octaves, p_lacunarity,
+			p_mask_low, p_mask_high, p_outcrop_strength, p_outcrop_size);
 }
 
 PackedFloat32Array Pasture3DUtil::curve_grid(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_lut,
@@ -3127,8 +3129,10 @@ void Pasture3DUtil::_bind_methods() {
 			&Pasture3DUtil::scree_solve_grid);
 	// Terrain graph — Modifiers & Math Operations.
 	ClassDB::bind_static_method("Pasture3DUtil",
-			D_METHOD("strata_grid", "surface", "gw", "gh", "rect", "band_height", "hardness", "amount", "dip", "dip_direction_deg", "break_amount", "break_size", "seed", "profile_lut", "profile_mode", "hardness_variation", "octaves", "lacunarity"),
-			&Pasture3DUtil::strata_grid, DEFVAL(PackedFloat32Array()), DEFVAL(0), DEFVAL(0.0), DEFVAL(1), DEFVAL(2.0));
+			D_METHOD("strata_grid", "surface", "gw", "gh", "rect", "band_height", "hardness", "amount", "dip", "dip_direction_deg", "break_amount", "break_size", "seed", "profile_lut", "profile_mode", "hardness_variation", "octaves", "lacunarity",
+					"mask_low", "mask_high", "outcrop_strength", "outcrop_size"),
+			&Pasture3DUtil::strata_grid, DEFVAL(PackedFloat32Array()), DEFVAL(0), DEFVAL(0.0), DEFVAL(1), DEFVAL(2.0),
+			DEFVAL(0.0), DEFVAL(0.0), DEFVAL(0.0), DEFVAL(180.0));
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("curve_grid", "surface", "lut", "in_min", "in_max", "out_min", "out_max", "amount"),
 			&Pasture3DUtil::curve_grid);

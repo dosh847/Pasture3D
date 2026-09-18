@@ -1,6 +1,6 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
-# GraphStrataProfileGate — PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md Phases T1 and T2.
+# GraphStrataProfileGate — PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md Phases T1, T2 and T3.
 #
 # The claims:
 #   [A] The bench profile maps [0,1] onto [0,1] and rises monotonically, for a sweep of gamma, in both
@@ -18,6 +18,13 @@
 #       least twice the risers of 1 octave. Not lacunarity^2: a finer boundary that lands inside a coarser
 #       riser merges with it (at hardness 1, 0.25 and 0.5 of each bed do). CONTROL: lacunarity 1 re-bands the
 #       same beds and must not.
+#   [G] (T3) The elevation mask: on a ramp with the window 20..80 m, no change at or below 20 m and the full
+#       unmasked change at or above 80 m. CONTROL: with the mask off, cells below 20 m do change.
+#   [H] (T3) The outcrop mask scales the change by a factor in [1 - strength, 1] that genuinely varies across
+#       the ground: at strength 1 some cells keep the full change and others lose a large part of it.
+#       CONTROL: the ratio is against the same call at strength 0, so an outcrop mask that never reached the
+#       profile reads [1, 1] and fails `lo < 0.6`.
+#   [E] runs at the node's defaults (elevation mask 0..100 m, outcrop 0.4), so route parity covers both masks.
 #
 # Counts completed criteria; a criterion that throws before asserting cannot pass by silence.
 extends Node
@@ -25,7 +32,7 @@ extends Node
 const RECT := Rect2(-200.0, -200.0, 400.0, 400.0)
 const EPS := 1.0e-5
 const EPS_GPU := 2.0e-3 # float32 world coordinates and tilt at +-200 m, a pow() chain in the shader
-const CRITERIA := 6
+const CRITERIA := 8
 
 var _fail := 0
 var _done := 0
@@ -39,6 +46,8 @@ func _ready() -> void:
 	_d_variation_varies_gamma()
 	_e_route_parity()
 	_f_octaves_nest_beds()
+	_g_elevation_mask()
+	_h_outcrop_mask()
 	if _done != CRITERIA:
 		_fail += 1; print("!! only %d of %d criteria completed" % [_done, CRITERIA])
 	print("\n=== %s (%d failures, %d/%d criteria) ===\n" % ["STRATA PROFILE PASS" if _fail == 0 else "STRATA PROFILE FAIL", _fail, _done, CRITERIA])
@@ -245,6 +254,74 @@ func _f_octaves_nest_beds() -> void:
 		_fail += 1; print("    !! control: lacunarity 1 still nested beds, so the count cannot see the octaves")
 	if one < 9 or one > 11:
 		_fail += 1; print("    !! a single octave should give one riser per bed")
+	_done += 1
+
+
+func _ramp_field(p_n: int, p_top: float) -> PackedFloat32Array:
+	var s := PackedFloat32Array()
+	s.resize(p_n * p_n)
+	for iz in p_n:
+		for ix in p_n:
+			s[iz * p_n + ix] = p_top * float(ix) / float(p_n - 1)
+	return s
+
+
+## strata_grid with the T2 defaults and hardness 1, dip 3, break 2, plus the given mask settings.
+func _masked(p_surf: PackedFloat32Array, p_n: int, p_flags: int, p_lo: float, p_hi: float,
+		p_outcrop: float) -> PackedFloat32Array:
+	return Pasture3DUtil.strata_grid(p_surf, p_n, p_n, RECT, 7.0, 1.0, 1.0, 3.0, 30.0, 2.0, 40.0, 3,
+			PackedFloat32Array(), p_flags, 0.5, 3, 2.0, p_lo, p_hi, p_outcrop, 120.0)
+
+
+func _g_elevation_mask() -> void:
+	print("[G] elevation mask: none below Mask Low, full above Mask High (T3)")
+	var n := 128
+	var surf := _ramp_field(n, 100.0)
+	var full := _masked(surf, n, 0, 20.0, 80.0, 0.0)
+	var masked := _masked(surf, n, 2, 20.0, 80.0, 0.0)
+	var below := 0.0
+	var below_ctl := 0.0
+	var above := 0.0
+	var checked := 0
+	for i in surf.size():
+		if surf[i] <= 20.0:
+			below = maxf(below, absf(masked[i] - surf[i]))
+			below_ctl = maxf(below_ctl, absf(full[i] - surf[i]))
+			checked += 1
+		elif surf[i] >= 80.0:
+			above = maxf(above, absf(masked[i] - full[i]))
+			checked += 1
+	print("    %d cells checked ; below 20 m max change %.7f (want 0) ; above 80 m max |masked - full| %.7f (want 0) ; control mask off below 20 m %.3f (want > 0.5)" % [checked, below, above, below_ctl])
+	if checked < n * n / 3:
+		_fail += 1; print("    !! too few cells in the checked bands")
+	if below > EPS or above > EPS:
+		_fail += 1; print("    !! the elevation window is wrong")
+	if below_ctl <= 0.5:
+		_fail += 1; print("    !! control: without the mask nothing changed below 20 m either, so this saw nothing")
+	_done += 1
+
+
+func _h_outcrop_mask() -> void:
+	print("[H] outcrop mask: a factor in [1 - strength, 1] that varies across the ground (T3)")
+	var n := 256
+	var surf := _field(n, n)
+	var full := _masked(surf, n, 0, 0.0, 0.0, 0.0)
+	var lo := INF
+	var hi := -INF
+	var one := _masked(surf, n, 0, 0.0, 0.0, 1.0)
+	var counted := 0
+	for i in surf.size():
+		var dfull := full[i] - surf[i]
+		if absf(dfull) < 0.5:
+			continue # too little change to read a ratio from
+		counted += 1
+		var r := (one[i] - surf[i]) / dfull
+		lo = minf(lo, r); hi = maxf(hi, r)
+	print("    %d cells ; strength 1 factor range [%.3f, %.3f] (want lo < 0.6, hi > 0.95, within [0, 1])" % [counted, lo, hi])
+	if counted < 1000:
+		_fail += 1; print("    !! too few cells changed to read the factor")
+	if lo >= 0.6 or hi <= 0.95 or lo < -1.0e-4 or hi > 1.0 + 1.0e-4:
+		_fail += 1; print("    !! the outcrop factor does not span the range it should")
 	_done += 1
 
 

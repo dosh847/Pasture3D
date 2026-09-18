@@ -131,6 +131,43 @@ var strike_direction: float:
 		_dirty = true
 		emit_changed()
 
+@export_group("Where Strata Show")
+## Fade the strata in by the INPUT height: none at or below Mask Low, full at or above Mask High, so beds
+## stand out on high ground and valleys stay smooth. Metres, not the grid's own range: an auto range would
+## move whenever the solved extent did (a Modifier Margin brings surrounding ground into it).
+@export var elevation_mask: bool = true:
+	set(v):
+		elevation_mask = v
+		emit_changed()
+
+## Height, in metres, below which no strata show.
+@export_range(-500.0, 2000.0, 0.5, "or_less", "or_greater", "suffix:m") var mask_low: float = 0.0:
+	set(v):
+		mask_low = v
+		emit_changed()
+
+## Height, in metres, above which the strata show in full.
+@export_range(-500.0, 2000.0, 0.5, "or_less", "or_greater", "suffix:m") var mask_high: float = 100.0:
+	set(v):
+		mask_high = v
+		emit_changed()
+
+## Break the strata into elongated outcrops: along the borders of long cells turned 45 degrees off the dip,
+## the beds show in full; inside the cells they fade by this much. 0 = an even skin of strata.
+@export_range(0.0, 1.0, 0.01) var outcrop_strength: float = 0.4:
+	set(v):
+		outcrop_strength = clampf(v, 0.0, 1.0)
+		emit_changed()
+
+## Length of the outcrop cells along their long axis, in metres (they are a third as wide).
+@export_range(10.0, 2000.0, 1.0, "or_greater", "suffix:m") var outcrop_size: float = 180.0:
+	set(v):
+		outcrop_size = maxf(v, 0.01)
+		emit_changed()
+
+const _U32 := 0xffffffff
+const _FLAG_ELEVATION_MASK := 2
+
 var _break: FastNoiseLite = null
 var _dirty := true
 
@@ -152,10 +189,14 @@ func native_lower() -> Dictionary:
 	p[5] = break_amount
 	p[6] = break_size
 	p[7] = float(seed)
-	p[8] = float(profile)
+	p[8] = float(int(profile) | (_FLAG_ELEVATION_MASK if elevation_mask else 0))
 	p[9] = hardness_variation
 	p[10] = float(octaves)
 	p[11] = lacunarity
+	p[12] = mask_low
+	p[13] = mask_high
+	p[14] = outcrop_strength
+	p[15] = outcrop_size
 	return {"params": p, "lut": profile_lut()}
 
 
@@ -219,7 +260,8 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) ->
 	# The profile goes to native as its LUT, the same table the compiled program carries. eval_cell stays the
 	# exact-curve oracle.
 	return Pasture3DUtil.strata_grid(s, p_gw, p_gh, p_rect, bh, h, amt, d, dir, break_amount, break_size, seed,
-			profile_lut(), int(profile), hardness_variation, octaves, lacunarity)
+			profile_lut(), int(profile) | (_FLAG_ELEVATION_MASK if elevation_mask else 0), hardness_variation,
+			octaves, lacunarity, mask_low, mask_high, outcrop_strength, outcrop_size)
 
 
 func eval_cell(p_wx: float, p_wz: float, p_inputs: PackedFloat32Array) -> float:
@@ -260,7 +302,67 @@ func eval_cell(p_wx: float, p_wz: float, p_inputs: PackedFloat32Array) -> float:
 		# The tilt only chooses where the beds fall; it comes back off, or the dip would tilt the ground itself.
 		val = (q + profile_val) * bh_k - tilt
 		scale *= lac
-	return lerpf(x, val, amt)
+	# Where the strata show: the elevation window on the input height, then the outcrop cells.
+	var t := amt
+	if elevation_mask:
+		t *= elevation_factor(x, mask_low, mask_high)
+	t *= outcrop_factor(p_wx, p_wz, cos(dipdir), sin(dipdir), nv, outcrop_size, outcrop_strength, seed)
+	return x + (val - x) * t
+
+
+## 0 at or below p_lo, 1 at or above p_hi, linear between. Twin of strata_elevation_mask.
+static func elevation_factor(p_x: float, p_lo: float, p_hi: float) -> float:
+	if p_hi <= p_lo:
+		return 1.0 if p_x >= p_lo else 0.0
+	return clampf((p_x - p_lo) / (p_hi - p_lo), 0.0, 1.0)
+
+
+## The outcrop factor in [1 - strength, 1]. Twin of strata_outcrop (src/pasture_3d_strata.h), which the GPU
+## route also fills its buffer with; the hash is integer and masked to 32 bits so all three agree exactly.
+static func outcrop_factor(p_wx: float, p_wz: float, p_cos: float, p_sin: float, p_nv: float,
+		p_size: float, p_strength: float, p_seed: int) -> float:
+	if p_strength <= 0.0:
+		return 1.0
+	var size := maxf(p_size, 0.01)
+	var k := 0.70710678118654752
+	var lc := (p_cos - p_sin) * k
+	var ls := (p_sin + p_cos) * k
+	var u := (p_wx * lc + p_wz * ls) / size + 0.4 * p_nv
+	var v := (p_wx * p_cos + p_wz * p_sin) / (size / 3.0)
+	var cu := floori(u)
+	var cv := floori(v)
+	var f1 := 1.0e30
+	var f2 := 1.0e30
+	for dz in range(-1, 2):
+		for dx in range(-1, 2):
+			var cx := cu + dx
+			var cz := cv + dz
+			var fx := float(cx) + float(_hash_cell(cx, cz, p_seed, 0x51) & 0x00ffffff) / 16777216.0
+			var fz := float(cz) + float(_hash_cell(cx, cz, p_seed, 0x52) & 0x00ffffff) / 16777216.0
+			var d := sqrt((u - fx) * (u - fx) + (v - fz) * (v - fz))
+			if d < f1:
+				f2 = f1
+				f1 = d
+			elif d < f2:
+				f2 = d
+	return 1.0 - clampf(p_strength, 0.0, 1.0) * clampf(f2 - f1, 0.0, 1.0)
+
+
+static func _hash_u32(p_x: int) -> int:
+	var x := p_x & _U32
+	x = (x ^ (x >> 16)) & _U32
+	x = (x * 0x7feb352d) & _U32
+	x = (x ^ (x >> 15)) & _U32
+	x = (x * 0x846ca68b) & _U32
+	x = (x ^ (x >> 16)) & _U32
+	return x
+
+
+static func _hash_cell(p_cx: int, p_cz: int, p_seed: int, p_salt: int) -> int:
+	var h := _hash_u32((p_cx * 0x9e3779b1) & _U32)
+	h = _hash_u32(h ^ ((p_cz * 0x85ebca6b) & _U32))
+	h = _hash_u32(h ^ (p_seed & _U32))
+	return _hash_u32(h ^ p_salt)
 
 
 ## Hardness [0, 1] to the profile gamma: 0 = identity, 1 = a strong ledge. Twin of strata_hardness_to_gamma.
