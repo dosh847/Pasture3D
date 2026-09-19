@@ -1682,15 +1682,18 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 					if (lut.size() > 0) {
 						p.droplet_density = std::max(0.0, (double)lut[0]);
 					}
+					if (lut.size() > 1) {
+						p.deposit_at_death = lut[1] > 0.5f;
+					}
 				}
 				if (in1 && in1[s] >= 0) {
 					p.mask = get_grid_packed(in1[s], c_in1);
 				}
 				HydraulicParticleResult res = hydraulic_particle_solve(in_arr, p_gw, p_gh, p_rect, p);
 				if (res.ok && res.height.size() == n) {
-					copy_aux(1, res.sediment);
-					copy_aux(2, res.flow);
-					copy_aux(3, res.water_depth);
+					copy_aux(1, res.eroded);
+					copy_aux(2, res.deposited);
+					copy_aux(3, res.flow);
 					std::copy_n(res.height.ptr(), n, g_ptr);
 				}
 			} break;

@@ -60,6 +60,9 @@ HydraulicParticleParams HydraulicParticleParams::from_dict(const Dictionary &p_d
 	if (p_dict.has("droplet_density")) {
 		p.droplet_density = std::max(0.0, (double)p_dict["droplet_density"]);
 	}
+	if (p_dict.has("deposit_at_death")) {
+		p.deposit_at_death = (bool)p_dict["deposit_at_death"];
+	}
 	if (p_dict.has("mask")) {
 		p.mask = p_dict["mask"];
 	}
@@ -70,9 +73,9 @@ Dictionary HydraulicParticleResult::to_dict() const {
 	Dictionary d;
 	d["ok"] = ok;
 	d["height"] = height;
-	d["sediment"] = sediment;
+	d["eroded"] = eroded;
+	d["deposited"] = deposited;
 	d["flow"] = flow;
-	d["water_depth"] = water_depth;
 	return d;
 }
 
@@ -151,9 +154,7 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 	const float *src_height = p_surface.ptr();
 	std::vector<float> height(src_height, src_height + n);
 	std::vector<float> original_height(src_height, src_height + n);
-	std::vector<float> sediment(n, 0.0f);
 	std::vector<float> flow(n, 0.0f);
-	std::vector<float> water_depth(n, 0.0f);
 
 	const bool has_mask = (p_params.mask.size() == n);
 	const float *mask_ptr = has_mask ? p_params.mask.ptr() : nullptr;
@@ -200,6 +201,22 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 	const double tau = 6.283185307179586;
 
 	Footprint fp;
+
+	// Lay `p_amt` (metres at the droplet at p_px, p_pz) over the disc, or the four bilinear corners given.
+	const auto lay_at = [&](double p_px, double p_pz, int p_i00, int p_i10, int p_i01, int p_i11,
+								double p_w00, double p_w10, double p_w01, double p_w11, double p_amt, bool p_disc) {
+		const double a = p_amt * scale;
+		if (p_disc && disc_footprint(height, p_gw, p_gh, p_px, p_pz, cell_dx, cell_dz, radius_m, fp)) {
+			for (size_t k = 0; k < fp.idx.size(); k++) {
+				add_rounded(height[fp.idx[k]], a * fp.w[k]);
+			}
+			return;
+		}
+		add_rounded(height[p_i00], a * p_w00);
+		add_rounded(height[p_i10], a * p_w10);
+		add_rounded(height[p_i01], a * p_w01);
+		add_rounded(height[p_i11], a * p_w11);
+	};
 
 	for (int d = 0; d < droplet_count; d++) {
 		// Spawn droplet randomly on domain
@@ -319,36 +336,17 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 						w01 * (double)mask_ptr[i01] + w11 * (double)mask_ptr[i11];
 			}
 
-			// Lay `p_amt` (metres at the droplet) on the terrain, and on the sediment record, over the chosen
-			// footprint. Erosion passes a negative amount and no sediment record.
-			const auto lay = [&](double p_amt, bool p_disc, bool p_record) {
-				const double a = p_amt * scale;
-				if (p_disc && disc_footprint(height, p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m, fp)) {
-					for (size_t k = 0; k < fp.idx.size(); k++) {
-						add_rounded(height[fp.idx[k]], a * fp.w[k]);
-						if (p_record) {
-							add_rounded(sediment[fp.idx[k]], a * fp.w[k]);
-						}
-					}
-					return;
-				}
-				add_rounded(height[i00], a * w00);
-				add_rounded(height[i10], a * w10);
-				add_rounded(height[i01], a * w01);
-				add_rounded(height[i11], a * w11);
-				if (p_record) {
-					add_rounded(sediment[i00], a * w00);
-					add_rounded(sediment[i10], a * w10);
-					add_rounded(sediment[i01], a * w01);
-					add_rounded(sediment[i11], a * w11);
-				}
+			// Lay `p_amt` (metres at the droplet) on the terrain over the chosen footprint. Erosion passes a
+			// negative amount.
+			const auto lay = [&](double p_amt, bool p_disc) {
+				lay_at(px, pz, i00, i10, i01, i11, w00, w10, w01, w11, p_amt, p_disc);
 			};
 
 			if (delta_h > 0.0) {
 				// Moving uphill into pit — deposit sediment
 				double deposit_amt = std::min(sed, delta_h) * mask_val;
 				sed -= deposit_amt;
-				lay(deposit_amt, disc_deposit, true);
+				lay(deposit_amt, disc_deposit);
 				break;
 			} else {
 				// Moving downhill: compute sediment transport capacity
@@ -358,7 +356,7 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 					// Drop excess sediment
 					double drop = (sed - c) * deposition_speed * mask_val;
 					sed -= drop;
-					lay(drop, disc_deposit, true);
+					lay(drop, disc_deposit);
 				} else {
 					// Erode bedrock with Hesiod Bedrock Floor protection
 					double erode_amt = std::min((c - sed) * erosion_speed, -delta_h) * mask_val;
@@ -405,7 +403,7 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 					}
 
 					sed += erode_amt;
-					lay(-erode_amt, disc_erode, false);
+					lay(-erode_amt, disc_erode);
 				}
 
 				speed = std::sqrt(std::max(0.0, speed * speed + delta_h * -gravity));
@@ -416,13 +414,36 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 				add_rounded(flow[i01], (water * w01));
 				add_rounded(flow[i11], (water * w11));
 
-				water_depth[i00] = std::max(water_depth[i00], (float)(water * 0.05 * w00));
-				water_depth[i10] = std::max(water_depth[i10], (float)(water * 0.05 * w10));
-				water_depth[i01] = std::max(water_depth[i01], (float)(water * 0.05 * w01));
-				water_depth[i11] = std::max(water_depth[i11], (float)(water * 0.05 * w11));
-
 				px = next_px;
 				pz = next_pz;
+			}
+		}
+
+		// Death. Every way out of the step loop leaves (px, pz) where the droplet last stood, which was a valid
+		// cell -- except a droplet that died at its first check -- so what it still carries lands there.
+		// The mask scales it, as it scales every other deposit: masked-off terrain stays untouched.
+		if (p_params.deposit_at_death && sed > 0.0) {
+			const int ix = (int)std::floor(px);
+			const int iz = (int)std::floor(pz);
+			if (ix >= 0 && ix < p_gw - 1 && iz >= 0 && iz < p_gh - 1) {
+				const int i00 = iz * p_gw + ix;
+				const int i10 = i00 + 1;
+				const int i01 = i00 + p_gw;
+				const int i11 = i01 + 1;
+				if (std::isfinite(height[i00]) && std::isfinite(height[i10]) && std::isfinite(height[i01]) && std::isfinite(height[i11])) {
+					const double u = px - (double)ix;
+					const double v = pz - (double)iz;
+					const double w00 = (1.0 - u) * (1.0 - v);
+					const double w10 = u * (1.0 - v);
+					const double w01 = (1.0 - u) * v;
+					const double w11 = u * v;
+					double mask_val = 1.0;
+					if (has_mask) {
+						mask_val = w00 * (double)mask_ptr[i00] + w10 * (double)mask_ptr[i10] +
+								w01 * (double)mask_ptr[i01] + w11 * (double)mask_ptr[i11];
+					}
+					lay_at(px, pz, i00, i10, i01, i11, w00, w10, w01, w11, sed * mask_val, disc_deposit);
+				}
 			}
 		}
 	}
@@ -431,14 +452,27 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 	res.height.resize(n);
 	std::memcpy(res.height.ptrw(), height.data(), n * sizeof(float));
 
-	res.sediment.resize(n);
-	std::memcpy(res.sediment.ptrw(), sediment.data(), n * sizeof(float));
+	// Net change against the input, in metres; no-data stays 0.
+	res.eroded.resize(n);
+	res.deposited.resize(n);
+	float *out_e = res.eroded.ptrw();
+	float *out_d = res.deposited.ptrw();
+	for (int i = 0; i < n; i++) {
+		const double change = (double)height[i] - (double)original_height[i];
+		const bool ok = std::isfinite(change);
+		out_e[i] = ok ? (float)std::max(0.0, -change) : 0.0f;
+		out_d[i] = ok ? (float)std::max(0.0, change) : 0.0f;
+	}
 
+	// flow: the water-weighted visits times the step length is path length per cell; over the cell's area
+	// and the rain's density (droplets per m^2), that is n * step / droplets, in metres.
+	const double step_len = metric ? step_m : std::sqrt(cell_dx * cell_dz);
+	const double flow_scale = (double)n * step_len / (double)std::max(droplet_count, 1);
 	res.flow.resize(n);
-	std::memcpy(res.flow.ptrw(), flow.data(), n * sizeof(float));
-
-	res.water_depth.resize(n);
-	std::memcpy(res.water_depth.ptrw(), water_depth.data(), n * sizeof(float));
+	float *out_f = res.flow.ptrw();
+	for (int i = 0; i < n; i++) {
+		out_f[i] = (float)((double)flow[i] * flow_scale);
+	}
 
 	return res;
 }

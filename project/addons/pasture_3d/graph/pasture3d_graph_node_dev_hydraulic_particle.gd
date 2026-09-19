@@ -108,6 +108,16 @@ enum { UNITS_CELLS = 0, UNITS_METRIC = 1 }
 		seed = v
 		_param_changed()
 
+## A droplet that dies still carrying sediment -- out of lifetime, an edge ahead, or stuck in a pit --
+## drops it where it stands instead of losing it, so the solve moves no mass off the terrain (except
+## where the mask scales it down). Off by default: the original solver discarded it, and turning this on
+## raises the ends of channels and the floors of pits.
+@export var deposit_at_death: bool = false:
+	set(v):
+		deposit_at_death = v
+		_param_changed()
+
+
 @export_group("Evaluation")
 
 @export_tool_button("Bake Particle Erosion") var _bake_btn = clear_cache
@@ -151,7 +161,7 @@ func output_count() -> int:
 
 
 func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "sediment", "flow", "water_depth"])
+	return PackedStringArray(["height", "eroded", "deposited", "flow"])
 
 
 func output_port_types() -> PackedInt32Array:
@@ -194,6 +204,7 @@ func _params_for_oracle(p_mask: PackedFloat32Array) -> Dictionary:
 		"seed": self.seed,
 		"units": units,
 		"radius_m": radius_m,
+		"deposit_at_death": deposit_at_death,
 		"step_length_m": step_length_m,
 		"droplet_density": droplet_density,
 		"mask": p_mask,
@@ -252,15 +263,9 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 
 	var n: int = p_gw * p_gh
 	var height := p_surface.duplicate()
-	var sediment := PackedFloat32Array()
 	var flow := PackedFloat32Array()
-	var water_depth := PackedFloat32Array()
-	sediment.resize(n)
-	sediment.fill(0.0)
 	flow.resize(n)
 	flow.fill(0.0)
-	water_depth.resize(n)
-	water_depth.fill(0.0)
 
 	var max_lifetime: int = maxi(1, int(p_params.get("max_lifetime", 30)))
 	var inertia: float = clampf(float(p_params.get("inertia", 0.05)), 0.0, 1.0)
@@ -293,6 +298,7 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 		droplet_count = maxi(1, roundi(density * p_rect.size.x * p_rect.size.y / 100.0))
 	var min_fall: float = min_slope * step_m if metric else min_slope
 
+	var deposit_at_death: bool = bool(p_params.get("deposit_at_death", false))
 	var mask: PackedFloat32Array = p_params.get("mask", PackedFloat32Array())
 	var has_mask: bool = (mask.size() == n)
 
@@ -423,7 +429,7 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 				# Moving uphill into pit — deposit sediment
 				var deposit_amt: float = minf(sed, delta_h) * mask_val
 				sed -= deposit_amt
-				_lay(height, sediment, deposit_amt * scale, disc_deposit, true, quad_i, quad_w,
+				_lay(height, deposit_amt * scale, disc_deposit, quad_i, quad_w,
 						p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m)
 				break
 			else:
@@ -434,7 +440,7 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 				if sed > cap:
 					var dep: float = (sed - cap) * deposition_speed * mask_val
 					sed -= dep
-					_lay(height, sediment, dep * scale, disc_deposit, true, quad_i, quad_w,
+					_lay(height, dep * scale, disc_deposit, quad_i, quad_w,
 							p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m)
 				else:
 					# Erode bedrock with Hesiod Bedrock Floor protection
@@ -462,7 +468,7 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 							ero = minf(ero, max_allowed)
 
 					sed += ero
-					_lay(height, sediment, -ero * scale, disc_erode, false, quad_i, quad_w,
+					_lay(height, -ero * scale, disc_erode, quad_i, quad_w,
 							p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m)
 
 				speed = sqrt(maxf(0.0, speed * speed - delta_h * gravity))
@@ -474,21 +480,53 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 				flow[i01] += water * w01
 				flow[i11] += water * w11
 
-				water_depth[i00] = maxf(water_depth[i00], water * 0.05 * w00)
-				water_depth[i10] = maxf(water_depth[i10], water * 0.05 * w10)
-				water_depth[i01] = maxf(water_depth[i01], water * 0.05 * w01)
-				water_depth[i11] = maxf(water_depth[i11], water * 0.05 * w11)
-
 				px = next_px
 				pz = next_pz
 
-	return [height, sediment, flow, water_depth]
+		# Death: whatever the droplet still carries lands where it last stood -- the native solver's twin.
+		if deposit_at_death and sed > 0.0:
+			var dix: int = int(floor(px))
+			var diz: int = int(floor(pz))
+			if dix >= 0 and dix < p_gw - 1 and diz >= 0 and diz < p_gh - 1:
+				var di00: int = diz * p_gw + dix
+				var di10: int = di00 + 1
+				var di01: int = di00 + p_gw
+				var di11: int = di01 + 1
+				if is_finite(height[di00]) and is_finite(height[di10]) and is_finite(height[di01]) and is_finite(height[di11]):
+					var du: float = px - float(dix)
+					var dv: float = pz - float(diz)
+					var dw00: float = (1.0 - du) * (1.0 - dv)
+					var dw10: float = du * (1.0 - dv)
+					var dw01: float = (1.0 - du) * dv
+					var dw11: float = du * dv
+					var dmask: float = 1.0
+					if has_mask:
+						dmask = dw00 * mask[di00] + dw10 * mask[di10] + dw01 * mask[di01] + dw11 * mask[di11]
+					_lay(height, sed * dmask * scale, disc_deposit,
+							PackedInt32Array([di00, di10, di01, di11]), PackedFloat64Array([dw00, dw10, dw01, dw11]),
+							p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m)
+
+	# Net change against the input, in metres, and flow as path length per area at unit droplet density.
+	var eroded := PackedFloat32Array()
+	var deposited := PackedFloat32Array()
+	eroded.resize(n)
+	deposited.resize(n)
+	var step_len: float = step_m if metric else sqrt(cell_dx * cell_dz)
+	var flow_scale: float = float(n) * step_len / float(maxi(droplet_count, 1))
+	for i in range(n):
+		var change: float = height[i] - p_surface[i]
+		var ok: bool = is_finite(change)
+		eroded[i] = maxf(0.0, -change) if ok else 0.0
+		deposited[i] = maxf(0.0, change) if ok else 0.0
+		flow[i] = flow[i] * flow_scale
+
+	return [height, eroded, deposited, flow]
 
 
-## Lay `p_a` (already times `scale`) on the height, and on the sediment record when `p_record`, over the disc
-## when asked and it has weight, else over the bilinear quad.
-static func _lay(r_height: PackedFloat32Array, r_sediment: PackedFloat32Array, p_a: float, p_disc: bool,
-		p_record: bool, p_qi: PackedInt32Array, p_qw: PackedFloat64Array, p_gw: int, p_gh: int, p_px: float,
+## Lay `p_a` (already times `scale`) on the height, over the disc when asked and it has weight, else over
+## the bilinear quad.
+static func _lay(r_height: PackedFloat32Array, p_a: float, p_disc: bool,
+		p_qi: PackedInt32Array, p_qw: PackedFloat64Array, p_gw: int, p_gh: int, p_px: float,
 		p_pz: float, p_dx: float, p_dz: float, p_radius_m: float) -> void:
 	var fi := p_qi
 	var fw := p_qw
@@ -499,5 +537,3 @@ static func _lay(r_height: PackedFloat32Array, r_sediment: PackedFloat32Array, p
 			fw = fp[1]
 	for k in fi.size():
 		r_height[fi[k]] += p_a * fw[k]
-		if p_record:
-			r_sediment[fi[k]] += p_a * fw[k]

@@ -6,9 +6,12 @@
 #
 # ---- Outputs ----
 #   port 0  "height"       HEIGHT  eroded surface elevation (metres)
-#   port 1  "sediment"     MASK    accumulated sediment deposition concentration
-#   port 2  "flow"         MASK    droplet path flow density
-#   port 3  "water_depth"  MASK    droplet water depth
+#   port 1  "eroded"       FIELD   metres cut from the input surface, net (max(0, input - height))
+#   port 2  "deposited"    FIELD   metres laid on the input surface, net (max(0, height - input))
+#   port 3  "flow"         FIELD   droplet path length per unit area at unit droplet density (metres)
+#
+# `eroded` and `deposited` describe the FINAL surface, not what passed through: a deposit later cut away
+# shows in neither. They are metres, not 0..1 -- put a Float to Mask after them for a mask.
 @tool
 class_name Pasture3DGraphNodeHydraulicParticle
 extends Pasture3DGraphSolverNode
@@ -122,6 +125,16 @@ enum Units { CELLS, METRIC }
 		_param_changed()
 
 
+## A droplet that dies still carrying sediment -- out of lifetime, an edge ahead, or stuck in a pit --
+## drops it where it stands instead of losing it, so the solve moves no mass off the terrain (except
+## where the mask scales it down). Off by default: the original solver discarded it, and turning this on
+## raises the ends of channels and the floors of pits.
+@export var deposit_at_death: bool = false:
+	set(v):
+		deposit_at_death = v
+		_param_changed()
+
+
 @export_group("Evaluation")
 
 @export_tool_button("Bake Particle Erosion") var _bake_btn = clear_cache
@@ -160,7 +173,7 @@ func native_lower() -> Dictionary:
 	p[14] = radius_m
 	p[15] = step_length_m
 	# The 16 slots are full; droplet_density rides the LUT.
-	return {"params": p, "lut": PackedFloat32Array([droplet_density])}
+	return {"params": p, "lut": PackedFloat32Array([droplet_density, 1.0 if deposit_at_death else 0.0])}
 
 
 func native_param_ports() -> PackedInt32Array:
@@ -228,11 +241,11 @@ func output_count() -> int:
 ## refusal is graph-wide: reading `sediment` off this node dropped the whole graph, erosion and all, onto
 ## the GDScript evaluator. The solver had already computed the field and the op was discarding it.
 func native_out_count() -> int:
-	return 4 # height, sediment, flow, water_depth
+	return 4 # height, eroded, deposited, flow
 
 
 func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "sediment", "flow", "water_depth"])
+	return PackedStringArray(["height", "eroded", "deposited", "flow"])
 
 
 func output_port_types() -> PackedInt32Array:
@@ -304,6 +317,7 @@ func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect:
 		"units": int(units),
 		"radius_m": _f32(radius_m),
 		"step_length_m": _f32(step_length_m),
+		"deposit_at_death": deposit_at_death,
 		"droplet_density": _f32(droplet_density),
 		"mask": p_mask,
 	}
@@ -319,7 +333,7 @@ func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect:
 
 	return [
 		res["height"] as PackedFloat32Array,
-		res["sediment"] as PackedFloat32Array,
+		res["eroded"] as PackedFloat32Array,
+		res["deposited"] as PackedFloat32Array,
 		res["flow"] as PackedFloat32Array,
-		res["water_depth"] as PackedFloat32Array,
 	]

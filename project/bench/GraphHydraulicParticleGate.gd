@@ -35,6 +35,10 @@ func _ready() -> void:
 	_test_b_seed_determinism()
 	_test_c_nan_boundary_handling()
 	_test_d_channel_generation()
+	_test_e1_net_channels()
+	_test_e2_mass_balance()
+	_test_e3_flow_invariance()
+	_test_e4_channel_route()
 
 	_finish()
 
@@ -98,14 +102,14 @@ func _test_a_native_parity() -> void:
 	var cpp_res: Dictionary = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gh, rect, p)
 
 	var diff_h := _max_abs_diff(gd_res[0], cpp_res["height"])
-	var diff_s := _max_abs_diff(gd_res[1], cpp_res["sediment"])
-	var diff_f := _max_abs_diff(gd_res[2], cpp_res["flow"])
-	var diff_w := _max_abs_diff(gd_res[3], cpp_res["water_depth"])
+	var diff_s := _max_abs_diff(gd_res[1], cpp_res["eroded"])
+	var diff_f := _max_abs_diff(gd_res[2], cpp_res["deposited"])
+	var diff_w := _max_abs_diff(gd_res[3], cpp_res["flow"])
 
 	print("    Height      max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_h, EPS_MULTI_DROPLET])
-	print("    Sediment    max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_s, EPS_MULTI_DROPLET])
-	print("    Flow        max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_f, EPS_MULTI_DROPLET])
-	print("    Water Depth max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_w, EPS_MULTI_DROPLET])
+	print("    Eroded      max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_s, EPS_MULTI_DROPLET])
+	print("    Deposited   max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_f, EPS_MULTI_DROPLET])
+	print("    Flow        max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_w, EPS_MULTI_DROPLET])
 
 	if diff_h > EPS_MULTI_DROPLET or diff_s > EPS_MULTI_DROPLET or diff_f > EPS_MULTI_DROPLET or diff_w > EPS_MULTI_DROPLET:
 		_fail += 1
@@ -125,7 +129,7 @@ func _test_a3_default_lifetime_parity() -> void:
 	var gd: Array = DevHydraulicParticle.solve_oracle(surf, gw, gw, rect, p)
 	var cpp: Dictionary = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, p)
 	var worst := 0.0
-	var names := ["height", "sediment", "flow", "water_depth"]
+	var names := ["height", "eroded", "deposited", "flow"]
 	for c in names.size():
 		var d := _max_abs_diff(gd[c], cpp[names[c]])
 		print("    %-11s max |cpp - gdscript| = %.9f" % [names[c], d])
@@ -238,7 +242,7 @@ func _test_a5_metric_and_radius_parity() -> void:
 		"cells r6": {"droplet_count": 2000, "radius_m": 6.0, "seed": 7},
 		"metric r9": {"units": 1, "droplet_density": 3.0, "step_length_m": 2.0, "radius_m": 9.0, "seed": 7},
 	}
-	var names := ["height", "sediment", "flow", "water_depth"]
+	var names := ["height", "eroded", "deposited", "flow"]
 	var ok := true
 	for label in cases:
 		var p: Dictionary = cases[label]
@@ -362,6 +366,148 @@ func _test_n_metric_route() -> void:
 	_completed += 1
 
 
+## `eroded` and `deposited` are net metres against the FINAL surface, so together they are exactly the
+## height change, and neither counts a deposit that was later cut away. Checked against the input and the
+## output, not against the numbers they were derived from.
+func _test_e1_net_channels() -> void:
+	print("\n[E1] eroded and deposited are net metres against the final surface")
+	var gw := 96
+	var rect := Rect2(0.0, 0.0, 384.0, 384.0)
+	var surf := _make_test_surface(gw, gw)
+	var res: Dictionary = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect,
+			{"droplet_count": 12000, "seed": 7})
+	var h: PackedFloat32Array = res["height"]
+	var e: PackedFloat32Array = res["eroded"]
+	var d: PackedFloat32Array = res["deposited"]
+	var worst := 0.0
+	var both := 0
+	var max_e := 0.0
+	var max_d := 0.0
+	for i in surf.size():
+		worst = maxf(worst, absf((d[i] - e[i]) - (h[i] - surf[i])))
+		if e[i] > 0.0 and d[i] > 0.0:
+			both += 1
+		max_e = maxf(max_e, e[i])
+		max_d = maxf(max_d, d[i])
+	# In metres, not 0..1: a normalised channel would peak at exactly 1.
+	print("    max |(dep - ero) - (h - in)| = %.9f (want <= %.7f) | cells in both = %d (want 0) | peaks %.4f / %.4f m"
+		% [worst, EPS_SINGLE_DROPLET, both, max_e, max_d])
+	if worst > EPS_SINGLE_DROPLET or both != 0 or max_e <= 0.01 or max_d <= 0.01 or is_equal_approx(max_e, 1.0) or is_equal_approx(max_d, 1.0):
+		_fail += 1
+		print("    !! the channels do not describe the final surface, or they are still normalised")
+	_completed += 1
+
+
+## deposit_at_death conserves mass: every grain a droplet carries is laid down somewhere, so the solve
+## moves no material off the terrain. The default (off) is the control and must lose mass.
+func _test_e2_mass_balance() -> void:
+	print("\n[E2] deposit_at_death conserves mass; the default loses it")
+	var gw := 96
+	var rect := Rect2(0.0, 0.0, 384.0, 384.0)
+	var surf := _make_test_surface(gw, gw)
+	var cut := {}
+	for on in [true, false]:
+		var res: Dictionary = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect,
+				{"droplet_count": 12000, "seed": 7, "deposit_at_death": on})
+		var h: PackedFloat32Array = res["height"]
+		var net := 0.0
+		var gross := 0.0
+		for i in surf.size():
+			net += h[i] - surf[i]
+			gross += absf(h[i] - surf[i])
+		cut[on] = [net, gross]
+	var rel_on: float = absf(cut[true][0]) / maxf(cut[true][1], 1e-9)
+	var rel_off: float = absf(cut[false][0]) / maxf(cut[false][1], 1e-9)
+	print("    net/gross change: on = %.5f (want < 0.002) | off = %.5f (control, want > 0.02)" % [rel_on, rel_off])
+	if rel_on >= 0.002 or rel_off <= 0.02 or cut[false][0] >= 0.0:
+		_fail += 1
+		print("    !! deposit_at_death did not conserve mass, or the default already did")
+	_completed += 1
+
+
+## `flow` is path length per unit area at unit droplet density, in metres, so the same world reports the
+## same drainage at any resolution under METRIC. Measured with erosion and deposition OFF: with them on,
+## the two resolutions carve different pits and droplets die in different places, which is the solver's
+## own resolution sensitivity ([U] measures that) and not the channel's. CELLS is the control.
+func _test_e3_flow_invariance() -> void:
+	print("
+[E3] flow holds across resolutions under METRIC (frozen terrain)")
+	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
+	var modes := {
+		"metric": {"units": 1, "droplet_density": 30.0, "step_length_m": 4.0},
+		"cells": {"droplet_count": 80000},
+	}
+	var rel := {}
+	for label in modes:
+		var mean_flow := []
+		for g in [128, 256]:
+			var p: Dictionary = modes[label].duplicate()
+			p["max_lifetime"] = 30
+			p["seed"] = 7
+			p["erosion_speed"] = 0.0
+			p["deposition_speed"] = 0.0
+			if label == "cells":
+				p["droplet_count"] = int(p["droplet_count"]) * (g / 128) * (g / 128)
+			var s := _world_mound(g, rect)
+			var f: PackedFloat32Array = Pasture3DUtil.hydraulic_particle_solve_grid(s, g, g, rect, p)["flow"]
+			var t := 0.0
+			for v in f:
+				t += v
+			mean_flow.append(t / float(f.size()))
+		rel[label] = absf(mean_flow[0] - mean_flow[1]) / maxf(mean_flow[0], 1e-9)
+		print("    %-6s mean flow: 128 -> %.4f m, 256 -> %.4f m, relative %.3f" % [label, mean_flow[0], mean_flow[1], rel[label]])
+	if rel["metric"] >= 0.02 or rel["cells"] < 0.1:
+		_fail += 1
+		print("    !! flow is not resolution-invariant under METRIC, or the CELLS control could not tell")
+	_completed += 1
+
+
+## The aux channels survive the lowering in the right ORDER: reading port k off the native route must
+## equal reading port k off the GDScript route, for every k. A swapped copy_aux shows up here and nowhere
+## else -- the kernel parity checks compare the solver with the oracle, not the op's wiring.
+func _test_e4_channel_route() -> void:
+	print("\n[E4] every channel survives the lowering, in order")
+	var gw := 64
+	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
+	var surf := _make_test_surface(gw, gw)
+	var worst := 0.0
+	var spread := INF
+	var seen := []
+	for port in 4:
+		var node: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"hydraulic_particle")
+		node.set("droplet_count", 4000)
+		node.set("seed", 7)
+		# deposit_at_death rides the LUT beside droplet_density, so this run proves that slot too.
+		node.set("deposit_at_death", true)
+		var g := Pasture3DTerrainGraph.new()
+		var i_in := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"))
+		var i_n := g.add_node(node)
+		var i_out := g.add_node(Pasture3DGraphNodeRegistry.create(&"output"))
+		g.connect_ports(i_in, 0, i_n, 0)
+		g.connect_ports(i_n, port, i_out, 0)
+		var rn := g.evaluate(gw, gw, rect, null, surf)
+		g.force_gdscript_evaluation = true
+		var rg := g.evaluate(gw, gw, rect, null, surf)
+		worst = maxf(worst, _max_abs_diff(rn, rg))
+		seen.append(rn)
+	# Control: the death deposit must have reached the native op -- without it the height differs.
+	var off: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"hydraulic_particle")
+	off.set("droplet_count", 4000)
+	off.set("seed", 7)
+	var g_off := _graph_with(off)
+	var flag_effect := _max_abs_diff(seen[0], g_off.evaluate(gw, gw, rect, null, surf))
+	# Control: the four channels must not be the same grid, or a swap would be invisible here.
+	for a in 4:
+		for b in range(a + 1, 4):
+			spread = minf(spread, _max_abs_diff(seen[a], seen[b]))
+	print("    max |native - gdscript| over 4 ports = %.9f (want <= %.7f) | closest two channels differ by %.4f (want > 1e-3) | death flag moves height %.4f (want > 1e-3)"
+		% [worst, EPS_MULTI_DROPLET, spread, flag_effect])
+	if worst > EPS_MULTI_DROPLET or spread <= 1.0e-3 or flag_effect <= 1.0e-3:
+		_fail += 1
+		print("    !! a channel or the death flag did not survive the lowering, or two channels are alike")
+	_completed += 1
+
+
 func _world_mound(p_g: int, p_rect: Rect2) -> PackedFloat32Array:
 	var s := PackedFloat32Array()
 	s.resize(p_g * p_g)
@@ -479,7 +625,7 @@ func _test_d_channel_generation() -> void:
 
 	var res: Dictionary = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gh, rect, p)
 	var h: PackedFloat32Array = res["height"]
-	var s: PackedFloat32Array = res["sediment"]
+	var s: PackedFloat32Array = res["deposited"]
 	var f: PackedFloat32Array = res["flow"]
 
 	var eroded_depth := _max_abs_diff(surf, h)
@@ -487,7 +633,7 @@ func _test_d_channel_generation() -> void:
 	var max_flow := _max_val(f)
 
 	print("    Max erosion delta = %.4f m" % eroded_depth)
-	print("    Max sediment = %.4f" % max_sed)
+	print("    Max deposited = %.4f m" % max_sed)
 	print("    Max flow = %.4f" % max_flow)
 
 	if eroded_depth < 0.01 or max_sed < 0.001 or max_flow < 0.1:

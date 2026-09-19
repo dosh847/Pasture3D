@@ -40,6 +40,9 @@ struct HydraulicParticleParams {
 	// METRIC only: the length of one droplet step, and droplets per 100 m^2 of the rect.
 	double step_length_m = 1.0;
 	double droplet_density = 40.0;
+	// A droplet that dies (lifetime out, an edge ahead, a pit) still carrying sediment drops it where it
+	// stands, so no mass leaves except by the mask. Off by default: the original solver discarded it.
+	bool deposit_at_death = false;
 	PackedFloat32Array mask;
 
 	static HydraulicParticleParams from_dict(const Dictionary &p_dict);
@@ -48,9 +51,13 @@ struct HydraulicParticleParams {
 struct HydraulicParticleResult {
 	bool ok = false;
 	PackedFloat32Array height;
-	PackedFloat32Array sediment;
+	// Net against the input, in metres: max(0, input - height) and max(0, height - input). What the final
+	// surface shows, not what passed through (a deposit later eroded away is in neither).
+	PackedFloat32Array eroded;
+	PackedFloat32Array deposited;
+	// Water-weighted droplet path length per unit area, per unit droplet density (droplets per m^2): metres.
+	// Proportional to drainage, and the same at every resolution under METRIC.
 	PackedFloat32Array flow;
-	PackedFloat32Array water_depth;
 
 	Dictionary to_dict() const;
 };
