@@ -327,6 +327,10 @@ static func _whole_footprint(p_gw: int, p_gh: int, p_input: PackedFloat32Array) 
 static var fallback_taps := 0
 ## Sink passes served from the height solve's own taps, and passes that ran their own evaluation. Gates.
 static var pretapped_count := 0
+## Sink writes that went through the native grid writers (the per-cell loop is the old-build fallback).
+static var native_writes := 0
+## Gate control only: write through the per-cell loop even when the grid writers exist.
+static var force_cell_loop := false
 static var own_eval_count := 0
 
 
@@ -570,7 +574,14 @@ static func _write_one(p_sink, p_index: int, p_data, p_owner_base: String, p_gw:
 	# STEP 3 — write, and ONLY where the mask is on. Outside it nothing is authored, so the cell stays
 	# uncovered in this layer and the composite leaves whatever is beneath byte-identical. That is the
 	# write-stencil rule, and it is why this is an `if` and not a weight.
-	var written := 0
+	var written := _write_native(p_sink, p_data, layer_id, is_color, p_gw, p_gh, p_rect, p_mask, p_values)
+	if written >= 0:
+		native_writes += 1
+		write_count += written
+		p_data.composite_area(area, true)
+		return written
+	# An older build without the grid writers: the same rule, one engine call per cell.
+	written = 0
 	for iz in range(p_gh):
 		var wz: float = p_rect.position.y + (float(iz) + 0.5) * p_rect.size.y / float(p_gh)
 		var row := iz * p_gw
@@ -599,3 +610,41 @@ static func _write_one(p_sink, p_index: int, p_data, p_owner_base: String, p_gw:
 	# STEP 4 — recomposite once over the whole footprint, and push it.
 	p_data.composite_area(area, true)
 	return written
+
+
+## Write one sink's grid through the native writer: one call for the whole grid rather than one engine call
+## per cell from a GDScript loop. Returns the cells written, or -1 when this build has no grid writer (or the
+## sink is not one the writer knows), so the caller runs the per-cell loop instead.
+##
+## The per-cell rules are the sinks' own, moved rather than restated: Color Sink `color_at` (a PackedColorArray
+## where it has the cell, else the uniform colour) and Control Sink `control_word` (base or the base beneath,
+## overlay, blend, and the carried low bits; out-of-range ids refused). GraphSinkNativeWriteGate compares the
+## two routes cell for cell.
+static func _write_native(p_sink, p_data, p_layer_id: int, p_is_color: bool, p_gw: int, p_gh: int,
+		p_rect: Rect2, p_mask: PackedFloat32Array, p_values: Dictionary) -> int:
+	if force_cell_loop:
+		return -1
+	var eps: float = Pasture3DGraphNodeChannelSink.MASK_EPSILON
+	if p_is_color:
+		if not (p_sink is Pasture3DGraphNodeColorSink) or not p_data.has_method("set_colors_on_layer_grid"):
+			return -1
+		var c = p_values.get("color", null)
+		var colors := PackedColorArray()
+		var fallback: Color = p_sink.color
+		if c is PackedColorArray:
+			colors = c
+		elif c is Color:
+			fallback = c
+		return p_data.set_colors_on_layer_grid(p_layer_id, p_rect, p_gw, p_gh, p_mask, eps, colors, fallback)
+	if not (p_sink is Pasture3DGraphNodeControlSink) or not p_data.has_method("set_controls_on_layer_grid"):
+		return -1
+	var bf = p_values.get("blend", null)
+	var blend: float = p_sink.blend_amount
+	var field := PackedFloat32Array()
+	if bf is PackedFloat32Array:
+		field = bf
+	elif bf is float:
+		blend = bf
+	return p_data.set_controls_on_layer_grid(p_layer_id, p_rect, p_gw, p_gh, p_mask, eps, p_sink.preserve_base,
+			int(p_values.get("base", p_sink.base_texture)), int(p_values.get("overlay", p_sink.overlay_texture)),
+			blend, field)
