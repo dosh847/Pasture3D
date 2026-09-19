@@ -1663,6 +1663,17 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				p.max_slope_border = (PH[12] ? std::max(0.0f, P[12]) : 0.0f);
 				p.seed = params_n ? (int)P[13] : 0;
 				p.enable_post_smoothing = params_o ? (P[14] > 0.5f) : false;
+				// Every one of the 16 slots is taken, so the S2 control-point and reconstruction settings ride
+				// the op's LUT: [control_points, point_spacing, reconstruction, default_warp, warp_amount, warp_size].
+				if ((size_t)s < p_prog.luts.size() && p_prog.luts[(size_t)s].size() >= 6) {
+					const PackedFloat32Array &ext = p_prog.luts[(size_t)s];
+					p.control_points = std::clamp((int)ext[0], 16, 1000000);
+					p.point_spacing = std::max(0.0f, ext[1]);
+					p.reconstruction = std::clamp((int)ext[2], 0, 1);
+					p.default_warp = ext[3] > 0.5f;
+					p.warp_amount = std::max(0.0f, ext[4]);
+					p.warp_size = std::max(0.0f, ext[5]);
+				}
 				if (in1 && in1[s] >= 0) {
 					p.dx = get_grid_packed(in1[s], c_in1);
 				}

@@ -141,6 +141,11 @@ func _solve(p_core: int, p_margin_cells: int, p_reference_relief: float) -> Pack
 		"drainage_noise": 0.15,
 		"shape_preservation": 2.0,
 		"reference_relief": p_reference_relief,
+		# S2: the pinned arm pins every extent-derived length, not just the vertical one. The point
+		# lattice is world-anchored, so a pinned spacing keeps each interior point where it was.
+		"point_spacing": 2.0 if p_reference_relief > 0.0 else 0.0,
+		"warp_amount": 2.5 if p_reference_relief > 0.0 else 0.0,
+		"warp_size": 32.0 if p_reference_relief > 0.0 else 0.0,
 		"bank_smoothing": 0.1,
 		"deposition_radius": 25.0,
 		"deposition_strength": 0.5,

@@ -6,6 +6,7 @@
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
+#include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/rect2.hpp>
 
 namespace godot {
@@ -35,6 +36,20 @@ struct HydraulicSaleveParams {
 	PackedFloat32Array dx;
 	PackedFloat32Array dy;
 
+	// Coarse irregular solve (S2). Stage 1 runs on jittered control points triangulated by Delaunay, then is
+	// reconstructed onto the grid. `point_spacing` (metres) wins when > 0 and pins the point lattice to the
+	// world, so a margin adds points without moving any; 0 derives it from `control_points` over the rect.
+	int control_points = 15000;
+	float point_spacing = 0.0f;
+	// 0 LINEAR (barycentric), 1 GRADIENT (per-vertex gradients blended by squared barycentrics).
+	// 2 NEAREST is a gate control only.
+	int reconstruction = 1;
+	// dx/dy (metres) warp the reconstruction's sample position; `default_warp` ADDS seeded fBm on top, so an
+	// unwired port (absent or a zeros grid, the two evaluators disagree which) means the same thing.
+	bool default_warp = true;
+	float warp_amount = 0.0f; // metres; 0 = 2% of the smaller rect side
+	float warp_size = 0.0f; // metres; 0 = a quarter of the smaller rect side
+
 	// Stage 2: Sediment Deposition (Deposition / Alluvial flats)
 	// Radius in METRES (it was a fraction of the smaller grid dimension, which grew with the footprint).
 	float deposition_radius = 25.0f;
@@ -53,6 +68,10 @@ struct HydraulicSaleveParams {
 	bool reroute_lakes = true;
 	bool stable_noise = true;
 	bool debug_network = false;
+	// Gate hooks: `grid_solve` runs Stage 1 on the 8-connected grid (the S1 solver, the orientation control);
+	// `reconstruct_only` samples the input onto the mesh and reconstructs it with no erosion.
+	bool grid_solve = false;
+	bool reconstruct_only = false;
 
 	static HydraulicSaleveParams from_dict(const Dictionary &p_dict);
 };
@@ -66,6 +85,8 @@ struct HydraulicSaleveResult {
 	PackedInt32Array receivers; // debug_network only
 	PackedFloat32Array drainage_area; // debug_network only, in (cell metres / reference relief)^2
 	float cell_area = 0.0f; // same unit as drainage_area
+	int vertex_count = 0;
+	PackedVector2Array vertices; // debug_network only, world metres
 
 	Dictionary to_dict() const;
 };

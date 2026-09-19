@@ -1,6 +1,6 @@
 # Pasture3D Salève and Strata Fidelity Spec
 
-**Status: T1–T3 built 2026-09-18 (`GraphStrataProfileGate`; T3's mask port deferred, see T3); S1 built 2026-09-18 (`GraphSaleveNetworkGate`); S2–S4 unbuilt.** Check the symbols named in each phase before planning from
+**Status: T1–T3 built 2026-09-18 (`GraphStrataProfileGate`; T3's mask port deferred, see T3); S1 built 2026-09-18 (`GraphSaleveNetworkGate`); S2 built 2026-09-18 (`GraphSaleveMeshGate`); S3–S4 unbuilt.** Check the symbols named in each phase before planning from
 this header — spec status headers go stale.
 
 The graph's **Salève Hydraulic Erosion** (`Pasture3DGraphNodeHydraulicSaleve`, `src/pasture_3d_hydraulic_saleve.cpp`)
@@ -207,6 +207,35 @@ Gate: reconstruction reproduces an analytic plane exactly and a paraboloid withi
 nearest-vertex reconstruction must fail the paraboloid); no NaN; channel orientation histogram on a cone
 fixture has no peaks at multiples of 45° beyond a threshold (control: S1 grid solver must exceed it);
 `SaleveMarginInvarianceProbe` stays within its current bound. Re-record baselines.
+
+**As built (S2):**
+- **Margin decision (item 7):** new `point_spacing` (metres, 0 = auto from `control_points` over the
+  rect). The interior lattice is anchored to WORLD coordinates (cell `(i, j)` of pitch `s`, jitter hashed
+  on `(i, j)`), so with a pinned spacing a margin adds points without moving any — the same auto/pinned
+  pattern as `reference_relief`. `SaleveMarginInvarianceProbe`'s pinned arm now pins spacing and warp too;
+  worst drift at 60 m margin fell from 26.1/25.4 m (S1, auto/pinned) to 20.1/18.9 m.
+- Spacing is clamped to at least one grid cell. Boundary ring at pitch ≈ s along the rect edges, corners
+  included; interior points closer than 0.4 s to the edge are dropped. Zero-area slivers are discarded.
+- Input heights are sampled bilinearly, extrapolating across the half cell between the outermost cell
+  centres and the rect edge (clamping there bent a plane at the ring).
+- `GRADIENT`: per-vertex gradients by 1/len²-weighted least squares; each vertex's tangent plane blended
+  by squared barycentrics (exact on planes; on an edge only its two vertices take part, so neighbouring
+  triangles agree). Point location through a bucket grid of pitch ≈ 1.5 × spacing.
+- **dx/dy are ADDED to the default fBm when `default_warp` is on**, not replaced by it: the GDScript
+  evaluator hands an unwired port over as a zeros grid while the native program passes nothing, so
+  "unwired" could not be detected identically on both routes. Wire dx/dy and turn Default Warp off for
+  your warp alone. Fade is `16·u(1−u)·v(1−v)`, and the warped sample is clamped into the rect.
+- The 16 param slots were full, so the six S2 settings ride the op's LUT:
+  `[control_points, point_spacing, reconstruction, default_warp, warp_amount, warp_size]`.
+- Stage 3's one-line incision now runs on the mesh vertices (where the receivers live) before
+  reconstruction; Stage 2 runs on the reconstructed grid. S3 replaces both.
+- Gate hooks (dictionary only): `grid_solve` (the S1 grid solver, the orientation control),
+  `reconstruct_only`, and `reconstruction` 2 = NEAREST.
+- The receiver pass is `parallel_for_elements`, which the pool runs serial under 16384 vertices, so
+  `SolverThreadParityGate` solves on 20000 points to cover it.
+- `GraphSaleveMeshGate`: plane 8e-6 m; paraboloid GRADIENT 0.090 m vs LINEAR 0.133 m vs NEAREST 5.6 m
+  (tolerance 0.12); channel edges within 3° of a 45° multiple: mesh 0.16 vs grid 1.00; native program
+  == dictionary route bit for bit, control 1.12 m off.
 
 ### Phase S3 — Deposition and fine incision
 

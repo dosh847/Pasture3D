@@ -19,6 +19,7 @@ const EXPECTED := 4
 
 var _fail := 0
 var _done := 0
+var _verts := PackedVector2Array() # the solve's vertices (S2 mesh); border == on the rect's edge
 
 
 func _ready() -> void:
@@ -38,10 +39,10 @@ func _a_chains_reach_outlets() -> void:
 	var res := _solve(_crater(), {"iterations": 60})
 	var rec: PackedInt32Array = res.receivers
 	var reached := _cells_reaching_border(rec)
-	print("    cells reaching a border outlet: %d / %d" % [reached, GW * GH])
-	if reached != GW * GH:
+	print("    vertices reaching a border outlet: %d / %d" % [reached, rec.size()])
+	if reached != rec.size() or rec.size() < 100:
 		_fail += 1
-		print("    !! %d cells drain to an interior terminal or a cycle" % (GW * GH - reached))
+		print("    !! %d vertices drain to an interior terminal or a cycle" % (rec.size() - reached))
 		return
 	_done += 1
 
@@ -110,9 +111,11 @@ func _d_area_conserved() -> void:
 # ---- helpers ------------------------------------------------------------------------------------
 
 func _solve(p_surface: PackedFloat32Array, p_extra: Dictionary) -> Dictionary:
-	var params := {"seed": 7, "debug_network": true}
+	var params := {"seed": 7, "debug_network": true, "control_points": 3000}
 	params.merge(p_extra, true)
-	return Pasture3DUtil.hydraulic_saleve_solve_grid(p_surface, GW, GH, RECT, params)
+	var r: Dictionary = Pasture3DUtil.hydraulic_saleve_solve_grid(p_surface, GW, GH, RECT, params)
+	_verts = r.get("vertices", PackedVector2Array())
+	return r
 
 
 # A dome with a crater at its centre: the crater floor is a pit the plain D8 network cannot leave.
@@ -131,13 +134,12 @@ func _crater() -> PackedFloat32Array:
 
 
 func _is_border(p_idx: int) -> bool:
-	var ix := p_idx % GW
-	var iz := p_idx / GW
-	return ix == 0 or iz == 0 or ix == GW - 1 or iz == GH - 1
+	var v := _verts[p_idx]
+	return v.x <= RECT.position.x or v.y <= RECT.position.y or v.x >= RECT.end.x or v.y >= RECT.end.y
 
 
 func _cells_reaching_border(p_rec: PackedInt32Array) -> int:
-	var n := GW * GH
+	var n := p_rec.size()
 	var count := 0
 	for i in range(n):
 		var c := i

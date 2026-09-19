@@ -4,6 +4,13 @@
 # Implements large-scale dendritic drainage routing with noise perturbation, secondary micro-rill flow,
 # mountain shape preservation, and transverse channel bank diffusion.
 #
+# The drainage network is solved on jittered control points (Delaunay-triangulated) and reconstructed onto
+# the grid, as Hesiod does; see PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md phases S1-S2.
+#
+# ---- Inputs ----
+#   port 1/2 "dx"/"dy"  SIGNED  reconstruction warp in METRES (added to Default Warp's fBm, if on)
+#   port 3   "mask"     MASK    blend of the eroded result over the input
+#
 # ---- Outputs ----
 #   port 0  "height"       HEIGHT  eroded surface elevation (metres)
 #   port 1  "eroded_rock"  MASK    cumulative bedrock incision intensity
@@ -93,6 +100,49 @@ extends Pasture3DGraphSolverNode
 		seed = v
 		_param_changed()
 
+@export_group("Control Points")
+## How many control points the drainage network is solved on. Channels are about one point apart, so
+## more points give finer valleys. Ignored when Point Spacing is set.
+@export_range(500, 100000, 100, "or_greater") var control_points: int = 15000:
+	set(v):
+		control_points = clampi(v, 16, 1000000)
+		_param_changed()
+
+## Distance between control points, in metres. 0 derives it from Control Points over the solved area,
+## which moves when the area does (a Modifier Margin). Set it to hold the network steady across margins:
+## the point lattice is anchored to the world, so a wider area adds points without moving any.
+@export_range(0.0, 50.0, 0.1, "or_greater", "suffix:m") var point_spacing: float = 0.0:
+	set(v):
+		point_spacing = maxf(v, 0.0)
+		_param_changed()
+
+enum Reconstruction { LINEAR, GRADIENT }
+## How the solved points become the grid. Gradient blends each point's tangent plane for smooth valley
+## walls; Linear is flat within each triangle.
+@export var reconstruction: Reconstruction = Reconstruction.GRADIENT:
+	set(v):
+		reconstruction = v
+		_param_changed()
+
+@export_group("Warp")
+## Adds seeded fBm to the dx/dy warp, so valleys meander instead of following triangle edges.
+@export var default_warp: bool = true:
+	set(v):
+		default_warp = v
+		_param_changed()
+
+## Warp distance in metres. 0 = 2% of the smaller side of the solved area.
+@export_range(0.0, 50.0, 0.1, "or_greater", "suffix:m") var warp_amount: float = 0.0:
+	set(v):
+		warp_amount = maxf(v, 0.0)
+		_param_changed()
+
+## Warp feature size in metres. 0 = a quarter of the smaller side of the solved area.
+@export_range(0.0, 1000.0, 1.0, "or_greater", "suffix:m") var warp_size: float = 0.0:
+	set(v):
+		warp_size = maxf(v, 0.0)
+		_param_changed()
+
 @export_group("Sediment Deposition (Stage 2)")
 ## Alluvial depression hole filling radius, in METRES. It was a fraction of the grid's smaller dimension,
 ## so the flats grew whenever the solved extent did; it is now a size on the ground.
@@ -164,7 +214,10 @@ func native_lower() -> Dictionary:
 	p[13] = float(seed)
 	p[14] = 1.0 if bool(enable_post_smoothing) else 0.0
 	p[15] = reference_relief
-	return {"params": p}
+	# The 16 slots are full; the S2 settings ride the LUT (read by the native op in this order).
+	var ext := PackedFloat32Array([float(control_points), point_spacing, float(reconstruction),
+			1.0 if default_warp else 0.0, warp_amount, warp_size])
+	return {"params": p, "lut": ext}
 
 
 func role() -> Role:
@@ -275,6 +328,12 @@ func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect:
 		"reference_relief": reference_relief,
 		"bank_smoothing": bank_smoothing,
 		"seed": seed,
+		"control_points": control_points,
+		"point_spacing": point_spacing,
+		"reconstruction": int(reconstruction),
+		"default_warp": default_warp,
+		"warp_amount": warp_amount,
+		"warp_size": warp_size,
 		"dx": p_dx,
 		"dy": p_dy,
 		"mask": p_mask,

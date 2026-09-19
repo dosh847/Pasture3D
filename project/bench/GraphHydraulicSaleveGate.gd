@@ -160,7 +160,7 @@ func _test_fine_stream_incision() -> void:
 
 
 func _test_dx_dy_domain_distortion() -> void:
-	print("\n[D] Stage 1: Domain Coordinate Distortion (dx / dy)")
+	print("\n[D] Reconstruction warp (dx / dy, metres)")
 	var gw := 48
 	var gh := 48
 	var rect := Rect2(0, 0, 100, 100)
@@ -172,12 +172,13 @@ func _test_dx_dy_domain_distortion() -> void:
 	dy_arr.resize(gw * gh)
 	for iz in range(gh):
 		for ix in range(gw):
-			dx_arr[iz * gw + ix] = sin(float(iz) * 0.3) * 0.5
-			dy_arr[iz * gw + ix] = cos(float(ix) * 0.3) * 0.5
+			dx_arr[iz * gw + ix] = sin(float(iz) * 0.3) * 3.0
+			dy_arr[iz * gw + ix] = cos(float(ix) * 0.3) * 3.0
 
 	var res_straight: Dictionary = Pasture3DUtil.hydraulic_saleve_solve_grid(surface, gw, gh, rect, {
 		"iterations": 10,
 		"erosion_strength": 0.7,
+		"default_warp": false,
 		"seed": 303,
 	})
 
@@ -186,14 +187,15 @@ func _test_dx_dy_domain_distortion() -> void:
 		"erosion_strength": 0.7,
 		"dx": dx_arr,
 		"dy": dy_arr,
+		"default_warp": false,
 		"seed": 303,
 	})
 
 	var diff := _max_diff(res_straight["height"], res_warped["height"])
-	print("    dx/dy warped drainage delta = %.4f m (want > 0.5 m)" % diff)
+	print("    dx/dy warped reconstruction delta = %.4f m (want > 0.5 m)" % diff)
 	if diff < 0.5:
 		_fail += 1
-		print("    !! dx/dy domain distortion did not influence drainage routing")
+		print("    !! dx/dy did not warp the reconstruction")
 
 
 func _test_post_processing() -> void:
