@@ -1,7 +1,12 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
 # GraphHydraulicAccelerationGate — Native C++ & GPU Hydraulic Erosion acceleration vs Tier 1 GDScript oracle.
-# Verifies bit-level parity (<= 2e-6 m) and benchmarks execution throughput across 128^2, 512^2, and 1024^2 grids.
+# Verifies bit-level parity (<= 2e-6 m) between the C++ kernel, its GDScript oracle and the GPU route.
+#
+# This gate TIMES NOTHING. It used to end in a benchmark across 128^2, 512^2 and 1024^2 that ran the
+# GDScript oracle twice at full size, so a correctness run cost ~17 seconds of CPU and could not be asked
+# for without also asking for the machine. The benchmark lives in GraphHydraulicBenchmark.tscn, which is
+# run deliberately; this gate can be run at any time.
 
 extends Node
 
@@ -28,7 +33,6 @@ func _ready() -> void:
 	_test_a_native_parity()
 	_test_b_edge_cases()
 	_test_c_gpu_parity()
-	_run_benchmarks()
 
 	_finish()
 
@@ -63,11 +67,11 @@ func _test_a_native_parity() -> void:
 	var cpp_res1: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid(surf, gw, gh, rect, p1)
 
 	var diff_h1 := _max_abs_diff(gd_res1[0], cpp_res1["height"])
-	var diff_s1 := _max_abs_diff(gd_res1[1], cpp_res1["sediment"])
-	var diff_f1 := _max_abs_diff(gd_res1[2], cpp_res1["flow"])
+	var diff_s1 := maxf(_max_abs_diff(gd_res1[1], cpp_res1["eroded"]), _max_abs_diff(gd_res1[2], cpp_res1["deposited"]))
+	var diff_f1 := _max_abs_diff(gd_res1[3], cpp_res1["flow"])
 
 	print("    [1 pass] Height   max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_h1, EPS_SINGLE_PASS])
-	print("    [1 pass] Sediment max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_s1, EPS_SINGLE_PASS])
+	print("    [1 pass] Erosion  max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_s1, EPS_SINGLE_PASS])
 	print("    [1 pass] Flow     max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_f1, EPS_SINGLE_PASS])
 
 	if diff_h1 > EPS_SINGLE_PASS or diff_s1 > EPS_SINGLE_PASS or diff_f1 > EPS_SINGLE_PASS:
@@ -89,11 +93,11 @@ func _test_a_native_parity() -> void:
 	var cpp_res15: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid(surf, gw, gh, rect, p15)
 
 	var diff_h15 := _max_abs_diff(gd_res15[0], cpp_res15["height"])
-	var diff_s15 := _max_abs_diff(gd_res15[1], cpp_res15["sediment"])
-	var diff_f15 := _max_abs_diff(gd_res15[2], cpp_res15["flow"])
+	var diff_s15 := maxf(_max_abs_diff(gd_res15[1], cpp_res15["eroded"]), _max_abs_diff(gd_res15[2], cpp_res15["deposited"]))
+	var diff_f15 := _max_abs_diff(gd_res15[3], cpp_res15["flow"])
 
 	print("    [15 pass] Height   max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_h15, EPS_MULTI_PASS])
-	print("    [15 pass] Sediment max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_s15, EPS_MULTI_PASS])
+	print("    [15 pass] Erosion  max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_s15, EPS_MULTI_PASS])
 	print("    [15 pass] Flow     max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_f15, EPS_MULTI_PASS])
 
 	if diff_h15 > EPS_MULTI_PASS or diff_s15 > EPS_MULTI_PASS or diff_f15 > EPS_MULTI_PASS:
@@ -113,8 +117,10 @@ func _test_a_native_parity() -> void:
 	# Control checks: surface must have changed and channels must have values
 	var eroded_cut := _max_abs_diff(surf, cpp_res15["height"])
 	var max_flow := _max_val(cpp_res15["flow"])
-	var max_sed := _max_val(cpp_res15["sediment"])
-	print("    control: max height cut = %.4f m, max flow = %.4f, max sed = %.4f" % [eroded_cut, max_flow, max_sed])
+	# Deposition is legitimately zero at these parameters: the fixture drains off the edge under WALLS
+	# before the capacity is exceeded anywhere, so nothing is laid back down. Printed, not asserted.
+	var max_sed := _max_val(cpp_res15["deposited"])
+	print("    control: max height cut = %.4f m, max flow = %.4f m2, max deposited = %.4f m" % [eroded_cut, max_flow, max_sed])
 	if eroded_cut < 0.01 or max_flow < 0.01:
 		_fail += 1
 		print("    !! control failed: simulation did not perform work")
@@ -176,72 +182,19 @@ func _test_c_gpu_parity() -> void:
 
 	var cpp_res: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid(surf, gw, gh, rect, params)
 	var diff_h := _max_abs_diff(cpp_res["height"], gpu_res["height"])
-	var diff_s := _max_abs_diff(cpp_res["sediment"], gpu_res["sediment"])
-	var diff_f := _max_abs_diff(cpp_res["flow"], gpu_res["flow"])
+	var diff_s := maxf(_max_abs_diff(cpp_res["eroded"], gpu_res["eroded"]), _max_abs_diff(cpp_res["deposited"], gpu_res["deposited"]))
+	# `flow` is a contributing AREA in m^2, not a 0..1 channel: its peak here is in the tens, so the
+	# absolute metre tolerance the height uses says nothing about it. Compared against its own peak.
+	var flow_peak := _max_val(cpp_res["flow"])
+	var diff_f := _max_abs_diff(cpp_res["flow"], gpu_res["flow"]) / maxf(flow_peak, 1e-9)
 
 	print("    GPU vs C++ Height   max diff: %.6f (want < %.4f)" % [diff_h, GPU_TOL])
-	print("    GPU vs C++ Sediment max diff: %.6f (want < %.4f)" % [diff_s, GPU_TOL])
-	print("    GPU vs C++ Flow     max diff: %.6f (want < %.4f)" % [diff_f, GPU_TOL])
+	print("    GPU vs C++ Erosion  max diff: %.6f (want < %.4f)" % [diff_s, GPU_TOL])
+	print("    GPU vs C++ Flow     max diff: %.6f of its %.2f m2 peak (want < %.4f)" % [diff_f, flow_peak, GPU_TOL])
 
-	if diff_h > GPU_TOL or diff_s > GPU_TOL or diff_f > GPU_TOL:
+	if diff_h > GPU_TOL or diff_s > GPU_TOL or diff_f > GPU_TOL or flow_peak <= 1.0:
 		_fail += 1
-		print("    !! GPU compute diverged from C++ native oracle beyond tolerance")
-
-
-# --- Section D: Performance Benchmarking -----------------------------------------------------------
-func _run_benchmarks() -> void:
-	print("\n[D] Performance Benchmarks across Grid Scales (25 Iterations)")
-	print("%-12s | %-12s | %-12s | %-12s | %-12s" % ["Grid Size", "GDScript", "C++ Native", "GPU Compute", "C++ Speedup"])
-	print("-----------------------------------------------------------------------------")
-
-	var grid_sizes := [128, 512, 1024]
-	var params := {
-		"iterations": 25,
-		"rain_rate": 0.05,
-		"evaporation_rate": 0.02,
-		"sediment_capacity": 8.0,
-		"erosion_speed": 0.5,
-		"deposition_speed": 0.4,
-		"min_slope": 0.01,
-	}
-
-	for size: int in grid_sizes:
-		var gw: int = size
-		var gh: int = size
-		var rect := Rect2(-100.0, -100.0, 200.0, 200.0)
-		var surf := _make_test_surface(gw, gh)
-
-		# GDScript timing (skip 1024 for headless gate responsiveness unless requested)
-		var gd_ms := 0.0
-		if size <= 512:
-			var t0 := Time.get_ticks_usec()
-			Pasture3DGraphNodeDevErosionHydraulic.solve_oracle(surf, gw, gh, rect, params)
-			gd_ms = (Time.get_ticks_usec() - t0) / 1000.0
-		else:
-			# Extrapolated estimate based on O(N) scaling
-			gd_ms = -1.0
-
-		# C++ Native timing
-		var t1 := Time.get_ticks_usec()
-		Pasture3DUtil.erosion_hydraulic_solve_grid(surf, gw, gh, rect, params)
-		var cpp_ms := (Time.get_ticks_usec() - t1) / 1000.0
-
-		# GPU Compute timing
-		var t2 := Time.get_ticks_usec()
-		var gpu_res: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid_gpu(surf, gw, gh, rect, params)
-		var gpu_ms := (Time.get_ticks_usec() - t2) / 1000.0
-		var gpu_str := "%.2f ms" % gpu_ms if bool(gpu_res.get("ok", false)) else "N/A (headless)"
-
-		var speedup_str := "%.1fx" % (gd_ms / cpp_ms) if gd_ms > 0.0 else "~120x+ (est)"
-		var gd_str := "%.2f ms" % gd_ms if gd_ms > 0.0 else "(est ~8.4s)"
-
-		print("%-12s | %-12s | %-12.2f ms | %-12s | %-12s" % [
-			"%dx%d" % [size, size],
-			gd_str,
-			cpp_ms,
-			gpu_str,
-			speedup_str
-		])
+		print("    !! GPU compute diverged from C++ native oracle beyond tolerance, or flow came back normalised")
 
 
 # ---- Helpers ----------------------------------------------------------------------------------------

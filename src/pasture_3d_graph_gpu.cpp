@@ -3114,6 +3114,11 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 
 bool Pasture3DGraphGPU::eval_hydraulic(const PackedFloat32Array &p_surface, int p_gw, int p_gh, const Rect2 &p_rect,
 		const ErosionHydraulicParams &p_params, ErosionHydraulicResult &r_out) {
+	// The GPU kernel is the Musgrave model only. Declining here sends PIPE to the CPU solver for this op
+	// alone (erosion_hydraulic_solve_best); nothing else in the graph changes route.
+	if (p_params.model != ErosionHydraulicParams::MODEL_MUSGRAVE) {
+		return false;
+	}
 	if (!_ensure_init_hydraulic()) {
 		return false;
 	}
@@ -3189,11 +3194,16 @@ bool Pasture3DGraphGPU::eval_hydraulic(const PackedFloat32Array &p_surface, int 
 	if (!next_sediment_buf.is_valid()) return fail();
 	to_free.push_back(next_sediment_buf);
 
+	// The input surface, for the OUTLETS base level. Never written.
+	const RID input_height_buf = _rd->storage_buffer_create(bytes, pb_height);
+	if (!input_height_buf.is_valid()) return fail();
+	to_free.push_back(input_height_buf);
+
 	// Uniform set
 	TypedArray<RDUniform> uniforms;
-	const RID bufs[9] = { height_buf, water_buf, sediment_buf, flow_buf, flux_w_buf, flux_s_buf,
-		next_height_buf, next_water_buf, next_sediment_buf };
-	for (int i = 0; i < 9; i++) {
+	const RID bufs[10] = { height_buf, water_buf, sediment_buf, flow_buf, flux_w_buf, flux_s_buf,
+		next_height_buf, next_water_buf, next_sediment_buf, input_height_buf };
+	for (int i = 0; i < 10; i++) {
 		Ref<RDUniform> u;
 		u.instantiate();
 		u->set_uniform_type(RenderingDevice::UNIFORM_TYPE_STORAGE_BUFFER);
@@ -3216,7 +3226,7 @@ bool Pasture3DGraphGPU::eval_hydraulic(const PackedFloat32Array &p_surface, int 
 	push.resize(64);
 	push.encode_s32(4, p_gw);
 	push.encode_s32(8, p_gh);
-	push.encode_s32(12, 0); // pad0
+	push.encode_s32(12, p_params.edge_mode);
 	push.encode_float(16, dx);
 	push.encode_float(20, dz);
 	push.encode_float(24, cell_dist);
@@ -3226,9 +3236,9 @@ bool Pasture3DGraphGPU::eval_hydraulic(const PackedFloat32Array &p_surface, int 
 	push.encode_float(40, (float)p_params.erosion_speed);
 	push.encode_float(44, (float)p_params.deposition_speed);
 	push.encode_float(48, (float)p_params.min_slope);
-	push.encode_float(52, 1.0f); // max_flow (temp)
-	push.encode_float(56, 1.0f); // max_sed (temp)
-	push.encode_float(60, 0.0f); // pad1
+	push.encode_float(52, 0.0f); // unused
+	push.encode_float(56, 0.0f); // unused
+	push.encode_float(60, (float)p_params.outlet_level);
 
 	// Simulation passes
 	int64_t cl = _rd->compute_list_begin();
@@ -3252,41 +3262,12 @@ bool Pasture3DGraphGPU::eval_hydraulic(const PackedFloat32Array &p_surface, int 
 	_rd->submit();
 	_rd->sync();
 
-	// Calculate max_flow and max_sed for normalization
-	PackedByteArray flow_bytes = _rd->buffer_get_data(flow_buf);
-	PackedByteArray sed_bytes = _rd->buffer_get_data(sediment_buf);
+	// Readback: the raw state, exactly what the CPU solver holds when its passes end. The channels are
+	// derived from it by the SHARED finish, so the two routes cannot disagree about what a channel means.
+	// (There used to be a third GPU phase here that normalised flow and sediment by their own maxima.)
 	PackedByteArray height_bytes = _rd->buffer_get_data(height_buf);
-
-	const float *h_ptr = (const float *)height_bytes.ptr();
-	const float *f_ptr = (const float *)flow_bytes.ptr();
-	const float *s_ptr = (const float *)sed_bytes.ptr();
-	float max_flow = 1e-6f;
-	float max_sed = 1e-6f;
-	for (int i = 0; i < n; i++) {
-		if (std::isfinite(h_ptr[i])) {
-			max_flow = std::max(max_flow, f_ptr[i]);
-			max_sed = std::max(max_sed, s_ptr[i]);
-		}
-	}
-
-	// Phase 2: Final Normalization
-	push.encode_s32(0, 2);
-	push.encode_float(52, max_flow);
-	push.encode_float(56, max_sed);
-
-	cl = _rd->compute_list_begin();
-	_rd->compute_list_bind_compute_pipeline(cl, _pipeline_hydraulic);
-	_rd->compute_list_bind_uniform_set(cl, uniform_set, 0);
-	_rd->compute_list_set_push_constant(cl, push, push.size());
-	_rd->compute_list_dispatch(cl, gx, gy, 1);
-	_rd->compute_list_end();
-	_rd->submit();
-	_rd->sync();
-
-	// Readback output channels
-	height_bytes = _rd->buffer_get_data(height_buf);
-	sed_bytes = _rd->buffer_get_data(sediment_buf);
-	flow_bytes = _rd->buffer_get_data(flow_buf);
+	PackedByteArray sed_bytes = _rd->buffer_get_data(sediment_buf);
+	PackedByteArray flow_bytes = _rd->buffer_get_data(flow_buf);
 
 	_rd->free_rid(uniform_set);
 	free_bufs();
@@ -3295,14 +3276,17 @@ bool Pasture3DGraphGPU::eval_hydraulic(const PackedFloat32Array &p_surface, int 
 		return false;
 	}
 
-	r_out.height.resize(n);
-	r_out.sediment.resize(n);
-	r_out.flow.resize(n);
-	std::memcpy(r_out.height.ptrw(), height_bytes.ptr(), bytes);
-	std::memcpy(r_out.sediment.ptrw(), sed_bytes.ptr(), bytes);
-	std::memcpy(r_out.flow.ptrw(), flow_bytes.ptr(), bytes);
-	r_out.ok = true;
-	return true;
+	PackedFloat32Array h;
+	PackedFloat32Array sed;
+	PackedFloat32Array fl;
+	h.resize(n);
+	sed.resize(n);
+	fl.resize(n);
+	std::memcpy(h.ptrw(), height_bytes.ptr(), bytes);
+	std::memcpy(sed.ptrw(), sed_bytes.ptr(), bytes);
+	std::memcpy(fl.ptrw(), flow_bytes.ptr(), bytes);
+	r_out = erosion_hydraulic_finish(p_surface, h, sed, fl, p_gw, p_gh, p_rect, p_params);
+	return r_out.ok;
 }
 
 bool Pasture3DGraphGPU::eval_geo(const GeoGpuParams &p_gp, int p_gw, int p_gh,

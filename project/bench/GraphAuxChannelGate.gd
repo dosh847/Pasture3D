@@ -52,7 +52,7 @@ const EXPECTED := {
 	"hydraulic_stream_log": 3,
 	"hydraulic_saleve": 3,
 	"hydraulic_particle": 4,
-	"erosion_hydraulic": 3,
+	"erosion_hydraulic": 4,
 	"scree": 2,
 	"water_mask": 2,
 	"mudslide": 2,

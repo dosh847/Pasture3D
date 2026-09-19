@@ -189,7 +189,8 @@ public:
 	static Dictionary erosion_solve_grid(const PackedFloat32Array &p_z, const int p_gw, const int p_gh,
 			const double p_cell_size, const Dictionary &p_params, const PackedFloat32Array &p_erodability);
 
-	// Native Hydraulic Erosion solver (hydrodynamic shallow-water). Returns { ok:bool, height, sediment, flow }.
+	// Native grid hydraulic erosion solver (MUSGRAVE or PIPE).
+	// Returns { ok:bool, height, eroded, deposited, flow } -- all in metres; see ErosionHydraulicResult.
 	static Dictionary erosion_hydraulic_solve_grid(const PackedFloat32Array &p_surface, const int p_gw,
 			const int p_gh, const Rect2 &p_rect, const Dictionary &p_params);
 
