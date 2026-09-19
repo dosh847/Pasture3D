@@ -2744,6 +2744,70 @@ PackedColorArray Pasture3DUtil::color_ramp_cells(const PackedFloat32Array &p_fie
 	return out;
 }
 
+PackedColorArray Pasture3DUtil::color_blend_cells(const Variant &p_a, const Variant &p_b,
+		const PackedFloat32Array &p_mask, const int p_n, const int p_mode, const double p_strength,
+		const Color &p_fallback_a, const Color &p_fallback_b) {
+	PackedColorArray out;
+	const int n = std::max(0, p_n);
+	out.resize(n);
+	if (n == 0) {
+		return out;
+	}
+	// Uniform inputs are read once; arrays are read per cell with the fallback past their end.
+	const bool a_arr = p_a.get_type() == Variant::PACKED_COLOR_ARRAY;
+	const bool b_arr = p_b.get_type() == Variant::PACKED_COLOR_ARRAY;
+	const PackedColorArray aa = a_arr ? (PackedColorArray)p_a : PackedColorArray();
+	const PackedColorArray ba = b_arr ? (PackedColorArray)p_b : PackedColorArray();
+	const Color au = p_a.get_type() == Variant::COLOR ? (Color)p_a : p_fallback_a;
+	const Color bu = p_b.get_type() == Variant::COLOR ? (Color)p_b : p_fallback_b;
+	const int an = (int)aa.size();
+	const int bn = (int)ba.size();
+	const Color *ap = an > 0 ? aa.ptr() : nullptr;
+	const Color *bp = bn > 0 ? ba.ptr() : nullptr;
+	const int mn = (int)p_mask.size();
+	const float *mp = mn > 0 ? p_mask.ptr() : nullptr;
+	const float strength = (float)std::clamp(p_strength, 0.0, 1.0);
+	Color *dst = out.ptrw();
+	auto c01 = [](float x) { return std::clamp(x, 0.0f, 1.0f); };
+	auto screen = [](float x, float y) { return 1.0f - (1.0f - x) * (1.0f - y); };
+	auto overlay = [](float x, float y) {
+		return x < 0.5f ? 2.0f * x * y : 1.0f - 2.0f * (1.0f - x) * (1.0f - y);
+	};
+	Pasture3DThreadPool::parallel_for_elements(n, 1024, [&](int i0, int i1) {
+		for (int i = i0; i < i1; i++) {
+			const Color ca = a_arr ? (i < an ? ap[i] : p_fallback_a) : au;
+			const Color cb = b_arr ? (i < bn ? bp[i] : p_fallback_b) : bu;
+			float m = 0.0f;
+			if (i < mn && std::isfinite(mp[i])) {
+				m = c01(mp[i]) * strength;
+			}
+			Color f;
+			switch (p_mode) {
+				case 1: // ADD
+					f = Color(c01(ca.r + cb.r), c01(ca.g + cb.g), c01(ca.b + cb.b), ca.a);
+					break;
+				case 2: // SUB
+					f = Color(c01(ca.r - cb.r), c01(ca.g - cb.g), c01(ca.b - cb.b), ca.a);
+					break;
+				case 3: // MUL
+					f = Color(c01(ca.r * cb.r), c01(ca.g * cb.g), c01(ca.b * cb.b), ca.a);
+					break;
+				case 4: // SCREEN
+					f = Color(c01(screen(ca.r, cb.r)), c01(screen(ca.g, cb.g)), c01(screen(ca.b, cb.b)), ca.a);
+					break;
+				case 5: // OVERLAY
+					f = Color(c01(overlay(ca.r, cb.r)), c01(overlay(ca.g, cb.g)), c01(overlay(ca.b, cb.b)), ca.a);
+					break;
+				default: // MIX is B outright, alpha included.
+					f = cb;
+					break;
+			}
+			dst[i] = ca.lerp(f, m);
+		}
+	});
+	return out;
+}
+
 void Pasture3DUtil::gd_set_max_threads(const int p_count) {
 	Pasture3DThreadPool::s_max_threads.store(MAX(p_count, 0), std::memory_order_relaxed);
 }
@@ -2762,6 +2826,9 @@ void Pasture3DUtil::_bind_methods() {
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("color_ramp_cells", "field", "stops", "n", "mode", "space", "in_min", "in_max", "repeat"),
 			&Pasture3DUtil::color_ramp_cells);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("color_blend_cells", "a", "b", "mask", "n", "mode", "strength", "fallback_a", "fallback_b"),
+			&Pasture3DUtil::color_blend_cells);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("set_max_threads", "count"), &gd_set_max_threads);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("get_max_threads"), &gd_get_max_threads);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("parallel_dispatch_count"), &gd_parallel_dispatch_count);

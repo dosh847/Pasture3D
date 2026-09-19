@@ -163,6 +163,13 @@ public:
 			const int p_n, const int p_mode, const int p_space, const double p_in_min, const double p_in_max,
 			const int p_repeat);
 
+	// Color Blend's per-cell fold: out = lerp(a, fold(a, b), clamp(mask)*strength), the GDScript
+	// ColorBlend._fold arithmetic channel for channel. `p_a` / `p_b` are a Color or a PackedColorArray; a
+	// short array reads the fallback past its end. A non-finite mask cell is 0 (the node's unwired answer is A).
+	static PackedColorArray color_blend_cells(const Variant &p_a, const Variant &p_b, const PackedFloat32Array &p_mask,
+			const int p_n, const int p_mode, const double p_strength, const Color &p_fallback_a,
+			const Color &p_fallback_b);
+
 	// The cap every native parallel region honours (0 = every hardware thread), and a count of the regions
 	// that actually split. Bound so a gate can run a kernel at 1 thread and at N and prove both halves of a
 	// threading claim: the answers match bit for bit, AND the threaded arm really ran threaded.

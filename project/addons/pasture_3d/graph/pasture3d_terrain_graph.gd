@@ -1391,6 +1391,18 @@ func _lower_node_op(node: Pasture3DGraphNode) -> Dictionary:
 ## roots at once. Same ancestor walk + Kahn sort as `_eval_order`, over the combined `needed` set; empty on a
 ## cycle. NOT memoized: the root SET varies with which previews are toggled on, so caching it would thrash;
 ## the single-root `_eval_order` stays the cached hot path the bake rides.
+## A wire into a COLOR port. Colours travel the sideband (graph_channel_sinks `_color_of`), never the
+## program, so the ancestry walks skip these: a Const Color or Color Blend upstream of a Color Sink used to
+## enter the sink's eval order and, having no native op, drop the whole graph to GDScript.
+func _is_color_wire(p_c) -> bool:
+	var to := int(p_c[2])
+	if to < 0 or to >= nodes.size() or nodes[to] == null:
+		return false
+	var types: PackedInt32Array = nodes[to].input_port_types()
+	var port := int(p_c[3])
+	return port >= 0 and port < types.size() and int(types[port]) == Pasture3DGraphNode.PortType.COLOR
+
+
 func _eval_order_multi(p_roots: Array) -> Array:
 	var needed := {}
 	var frontier: Array = []
@@ -1404,7 +1416,7 @@ func _eval_order_multi(p_roots: Array) -> Array:
 	while not frontier.is_empty():
 		var cur: int = frontier.pop_back()
 		for c in connections:
-			if c.size() >= 4 and int(c[2]) == cur:
+			if c.size() >= 4 and int(c[2]) == cur and not _is_color_wire(c):
 				var from := int(c[0])
 				# Null-skip for the same reason as `_eval_order` below.
 				if from >= 0 and from < nodes.size() and nodes[from] != null and not needed.has(from):
@@ -2253,7 +2265,7 @@ func _eval_order(p_root: int = -1) -> Array:
 	while not frontier.is_empty():
 		var cur: int = frontier.pop_back()
 		for c in connections:
-			if c.size() >= 4 and int(c[2]) == cur:
+			if c.size() >= 4 and int(c[2]) == cur and not _is_color_wire(c):
 				var from := int(c[0])
 				# `nodes[from] != null` is not belt-and-braces: a .tres whose node script failed to load
 				# (renamed script, or a dev-flag script absent from a build) leaves a null in `nodes`, and

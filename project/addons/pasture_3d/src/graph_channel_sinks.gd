@@ -163,6 +163,15 @@ static func _resolve_ports(p_graph, p_sink, p_index: int, p_gw: int, p_gh: int, 
 		if not roots.has(int(src["node"])):
 			roots.append(int(src["node"]))
 
+	# Every field a per-cell colour node under this sink will ask for (a Color Blend's mask, a Color
+	# Ramp's input) joins the sink's own tap pass. They used to be tapped one compile each, and a mask that
+	# reads a solver re-ran the solve once per Color Blend. `_tap_field` reads them back from ctx["tapped"].
+	var color_fields: Array = []
+	_collect_color_fields(p_graph, p_index, color_fields, 0)
+	for cf in color_fields:
+		if not roots.has(int(cf["node"])):
+			roots.append(int(cf["node"]))
+
 	var values := {}
 	var mask := PackedFloat32Array()
 
@@ -191,13 +200,27 @@ static func _resolve_ports(p_graph, p_sink, p_index: int, p_gw: int, p_gh: int, 
 		order.append(port)
 		slots.append(int(slot_of[int(src["node"])]))
 		chans.append(int(src["port"]))
-	if order.is_empty():
+	var cf_first := slots.size()
+	var cf_keys: Array = []
+	for cf in color_fields:
+		if not slot_of.has(int(cf["node"])):
+			continue
+		cf_keys.append(_field_key(int(cf["node"]), int(cf["port"])))
+		slots.append(int(slot_of[int(cf["node"])]))
+		chans.append(int(cf["port"]))
+	if order.is_empty() and cf_keys.is_empty():
 		return {"error": "no wired port compiled to a slot"}
 
 	var result: Dictionary = Pasture3DUtil.graph_eval_grid_taps(compiled["program"], p_gw, p_gh, p_rect,
 			p_input, slots, chans)
 	var unserved: PackedInt32Array = result.get("unserved", PackedInt32Array())
 	var fields: Array = result.get("fields", [])
+	var tapped := {}
+	for k in range(cf_keys.size()):
+		var r := cf_first + k
+		if not unserved.has(r) and r < fields.size() and fields[r] is PackedFloat32Array:
+			tapped[cf_keys[k]] = fields[r]
+	ctx["tapped"] = tapped
 	for r in range(order.size()):
 		var port: int = order[r]
 		if unserved.has(r) or r >= fields.size() or not (fields[r] is PackedFloat32Array):
@@ -269,13 +292,15 @@ static func _whole_footprint(p_gw: int, p_gh: int, p_input: PackedFloat32Array) 
 	return out
 
 
+## Count of `_tap_field` calls that missed the sink's pass and compiled their own. A bake should add
+## none; GraphColorBlendGate reads it to prove the colour fields rode the sink's single evaluation.
+static var fallback_taps := 0
+
 ## Evaluate the field wired into `p_port` of the node at `p_to`, over the bake grid in `p_ctx`.
 ##
-## A SECOND PASS, and deliberately so. The sink's own ports are tapped in one multi-root pass because
-## they all hang off the sink; a Color Blend's mask hangs off the Blend, which the sink reaches only
-## through a COLOR wire the program does not carry. Folding it into the sink's pass would mean the
-## colour walk and the tap compile knowing about each other. This is paid once per Color Blend per bake,
-## and only by graphs that contain one.
+## Normally a cache read: `_resolve_ports` taps every colour field in the sink's own pass and stashes it
+## in ctx["tapped"]. The compile-and-tap below is the fallback for a caller that made no such pass. It
+## used to be the only route, and a mask reading a solver re-ran that solve once per Color Blend.
 ##
 ## Empty when the port is unwired, when the graph does not lower, or when the channel is unserved —
 ## three different failures that all mean the same thing to the caller: there is no field, fall back to
@@ -284,6 +309,13 @@ static func _tap_field(p_graph, p_to: int, p_port: int, p_ctx: Dictionary) -> Pa
 	var src := source_of(p_graph, p_to, p_port)
 	if src.is_empty():
 		return PackedFloat32Array()
+	# Already tapped in the sink's own pass (see `_collect_color_fields`). The compile below is the
+	# fallback for a caller with no such pass -- the editor preview, a gate.
+	var tapped: Dictionary = p_ctx.get("tapped", {})
+	var key := _field_key(int(src["node"]), int(src["port"]))
+	if tapped.has(key):
+		return tapped[key]
+	fallback_taps += 1
 	var compiled: Dictionary = p_graph.compile_graph_program_multi([int(src["node"])])
 	if compiled.is_empty():
 		return PackedFloat32Array()
@@ -300,6 +332,39 @@ static func _tap_field(p_graph, p_to: int, p_port: int, p_ctx: Dictionary) -> Pa
 	if fields.is_empty() or not (fields[0] is PackedFloat32Array):
 		return PackedFloat32Array()
 	return fields[0]
+
+
+static func _field_key(p_node: int, p_port: int) -> String:
+	return "%d:%d" % [p_node, p_port]
+
+
+## Every field source a per-cell colour node upstream of `p_index`'s COLOR ports will tap, as
+## {"node", "port"}. Walks COLOR wires only -- the same walk `_color_of` makes -- with its depth cap.
+static func _collect_color_fields(p_graph, p_index: int, r_out: Array, p_depth: int) -> void:
+	if p_depth >= 16 or p_graph == null or p_index < 0 or p_index >= p_graph.nodes.size():
+		return
+	var node = p_graph.nodes[p_index]
+	if node == null:
+		return
+	var types: PackedInt32Array = node.input_port_types()
+	for port in range(node.input_count()):
+		if port >= types.size() or int(types[port]) != Pasture3DGraphNode.PortType.COLOR:
+			continue
+		var src := source_of(p_graph, p_index, port)
+		if src.is_empty():
+			continue
+		var up: int = int(src["node"])
+		var un = p_graph.nodes[up] if up >= 0 and up < p_graph.nodes.size() else null
+		if un != null and un.has_method("graph_color_cells") and un.has_method("color_field_port"):
+			var fsrc := source_of(p_graph, up, int(un.color_field_port()))
+			if not fsrc.is_empty():
+				var dup := false
+				for e in r_out:
+					if int(e["node"]) == int(fsrc["node"]) and int(e["port"]) == int(fsrc["port"]):
+						dup = true
+				if not dup:
+					r_out.append(fsrc)
+		_collect_color_fields(p_graph, up, r_out, p_depth + 1)
 
 
 ## The COLOR produced by the node at `p_index`, or null if it produces none.
