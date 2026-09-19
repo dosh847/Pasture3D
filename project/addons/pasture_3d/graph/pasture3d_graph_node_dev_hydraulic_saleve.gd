@@ -115,8 +115,8 @@ enum Reconstruction { LINEAR, GRADIENT }
 		_param_changed()
 
 @export_group("Sediment Deposition (Stage 2)")
-## Alluvial hole-filling radius in METRES (mirrors the native node).
-@export_range(0.0, 200.0, 0.5, "or_greater", "suffix:m") var deposition_radius: float = 25.0:
+## Fill-blur radius in METRES, 0 = 10% of the smaller side (mirrors the native node).
+@export_range(0.0, 200.0, 0.5, "or_greater", "suffix:m") var deposition_radius: float = 0.0:
 	set(v):
 		deposition_radius = maxf(v, 0.0)
 		_param_changed()
@@ -127,12 +127,12 @@ enum Reconstruction { LINEAR, GRADIENT }
 		_param_changed()
 
 @export_group("Fine River Incision (Stage 3)")
-@export_range(0.0, 1.0, 0.005) var stream_strength: float = 0.02:
+@export_range(0.0, 1.0, 0.005) var stream_strength: float = 0.15:
 	set(v):
 		stream_strength = clampf(v, 0.0, 1.0)
 		_param_changed()
 
-@export_range(0.01, 1.0, 0.01) var stream_exp: float = 0.8:
+@export_range(0.01, 1.0, 0.01) var stream_exp: float = 0.5:
 	set(v):
 		stream_exp = clampf(v, 0.01, 1.0)
 		_param_changed()
@@ -419,6 +419,15 @@ static func _fbm(p_x: float, p_z: float, p_seed: int) -> float:
 	return sum / norm
 
 
+# Odd reflection past either end of a strided run (mirrors the native blur).
+static func _odd(p_a: PackedFloat32Array, p_base: int, p_stride: int, p_len: int, p_i: int) -> float:
+	if p_i < 0:
+		return 2.0 * p_a[p_base] - p_a[p_base - p_i * p_stride]
+	if p_i >= p_len:
+		return 2.0 * p_a[p_base + (p_len - 1) * p_stride] - p_a[p_base + (2 * (p_len - 1) - p_i) * p_stride]
+	return p_a[p_base + p_i * p_stride]
+
+
 static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_params: Dictionary) -> Array:
 	var n: int = p_gw * p_gh
 	if p_surface.size() != n or p_gw < 2 or p_gh < 2:
@@ -446,10 +455,10 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 	var bank_smoothing: float = clampf(float(p_params.get("bank_smoothing", 0.0)), 0.0, 0.5)
 	var p_seed: int = int(p_params.get("seed", 0))
 	var reference_relief: float = maxf(0.0, float(p_params.get("reference_relief", 0.0)))
-	var dep_radius: float = maxf(0.0, float(p_params.get("deposition_radius", 25.0)))
+	var dep_radius: float = maxf(0.0, float(p_params.get("deposition_radius", 0.0)))
 	var dep_strength: float = clampf(float(p_params.get("deposition_strength", 0.5)), 0.0, 1.0)
-	var str_strength: float = clampf(float(p_params.get("stream_strength", 0.02)), 0.0, 1.0)
-	var str_exp: float = clampf(float(p_params.get("stream_exp", 0.8)), 0.01, 1.0)
+	var str_strength: float = clampf(float(p_params.get("stream_strength", 0.15)), 0.0, 1.0)
+	var str_exp: float = clampf(float(p_params.get("stream_exp", 0.5)), 0.01, 1.0)
 	var enable_post_smooth: bool = bool(p_params.get("enable_post_smoothing", false))
 	var control_points: int = clampi(int(p_params.get("control_points", 15000)), 16, 1000000)
 	var point_spacing: float = maxf(0.0, float(p_params.get("point_spacing", 0.0)))
@@ -747,18 +756,6 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 			if diff / float(nv) < tolerance * maxf(zhi - zlo, 1.0e-5):
 				break
 
-		# ---- Stage 3 (interim) on the vertices ----
-		if str_strength > 0.0:
-			var order_f: PackedInt32Array = tree.order
-			for k in range(nv - 1, -1, -1):
-				var idx: int = order_f[k]
-				var r: int = receivers[idx]
-				if r != idx:
-					var d: float = maxf(_edge_len(nbr_start, nbr, nbr_len, idx, r), 1.0e-5)
-					var slope: float = maxf(0.0, (z[idx] - z[r]) / d)
-					var inc: float = str_strength * log(1.0 + pow(maxf(area_acc[idx], area[idx]), str_exp) * slope) * erodibility[idx] * 0.15
-					z[idx] = maxf(z[r], z[idx] - inc)
-
 		var lo: float = INF
 		var hi: float = -INF
 		for v in z:
@@ -905,57 +902,118 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 		zz.resize(n)
 		return [out, zz.duplicate(), zz]
 
-	# ---- Stage 2 on the grid ----
-	var sediment := PackedFloat32Array()
-	sediment.resize(n)
-	if dep_strength > 0.0 and dep_radius > 0.0:
-		var cell_m: float = maxf(minf(cell_dx, cell_dz), 1.0e-4)
-		var ir: int = maxi(1, int(round(dep_radius / cell_m)))
-		ir = mini(ir, maxi(1, mini(p_gw, p_gh) / 2))
-		var z_fill := zg.duplicate()
+	# The grid in METRES from here on (mirrors the native solve).
+	var hm := PackedFloat32Array()
+	hm.resize(n)
+	for i in range(n):
+		hm[i] = zmin + zg[i] * relief_ref
+
+	# ---- Stage 2: priority-flood fill, raised to its odd-reflected blur where concave ----
+	var dep := PackedFloat32Array()
+	dep.resize(n)
+	if dep_strength > 0.0:
+		var filled := hm.duplicate()
+		var done := PackedByteArray()
+		done.resize(n)
+		var hk: Array = []
+		var hv: Array = []
 		for iz in range(p_gh):
 			for ix in range(p_gw):
-				var idx: int = iz * p_gw + ix
-				var max_n: float = z_fill[idx]
-				for dy_i in range(-ir, ir + 1):
-					var ny: int = iz + dy_i
-					if ny < 0 or ny >= p_gh: continue
-					for dx_i in range(-ir, ir + 1):
-						var nx: int = ix + dx_i
-						if nx < 0 or nx >= p_gw: continue
-						if dx_i * dx_i + dy_i * dy_i <= ir * ir:
-							max_n = maxf(max_n, z_fill[ny * p_gw + nx])
-				z_fill[idx] = 0.5 * (z_fill[idx] + max_n)
-		for i in range(n):
-			var dep: float = dep_strength * maxf(0.0, z_fill[i] - zg[i])
-			zg[i] += dep
-			sediment[i] = dep * relief_ref
+				var i: int = iz * p_gw + ix
+				if not is_finite(p_surface[i]) or ix == 0 or iz == 0 or ix == p_gw - 1 or iz == p_gh - 1:
+					done[i] = 1
+					_heap_push(hk, hv, filled[i], i)
+		while not hk.is_empty():
+			var ev: float = hk[0]
+			var ei: int = hv[0]
+			_heap_pop(hk, hv)
+			var cx: int = ei % p_gw
+			var cz: int = ei / p_gw
+			for dz in range(-1, 2):
+				for dxo in range(-1, 2):
+					var nx: int = cx + dxo
+					var nz: int = cz + dz
+					if (dxo == 0 and dz == 0) or nx < 0 or nz < 0 or nx >= p_gw or nz >= p_gh:
+						continue
+					var j: int = nz * p_gw + nx
+					if done[j] != 0:
+						continue
+					done[j] = 1
+					filled[j] = maxf(filled[j], ev)
+					_heap_push(hk, hv, filled[j], j)
+		var radius_m: float = dep_radius if dep_radius > 0.0 else 0.1 * min_side
+		var cell_m: float = maxf(minf(cell_dx, cell_dz), 1.0e-4)
+		var ir: int = clampi(int(round(radius_m / cell_m)), 1, maxi(1, mini(p_gw, p_gh) / 2 - 1))
+		var inv: float = 1.0 / float(2 * ir + 1)
+		var tmp := PackedFloat32Array()
+		tmp.resize(n)
+		var blur := PackedFloat32Array()
+		blur.resize(n)
+		for iz in range(p_gh):
+			for ix in range(p_gw):
+				var acc: float = 0.0
+				for k in range(-ir, ir + 1):
+					acc += _odd(filled, iz * p_gw, 1, p_gw, ix + k)
+				tmp[iz * p_gw + ix] = acc * inv
+		for iz in range(p_gh):
+			for ix in range(p_gw):
+				var acc: float = 0.0
+				for k in range(-ir, ir + 1):
+					acc += _odd(tmp, ix, p_gw, p_gh, iz + k)
+				blur[iz * p_gw + ix] = acc * inv
+		for iz in range(p_gh):
+			for ix in range(p_gw):
+				var i: int = iz * p_gw + ix
+				if not is_finite(p_surface[i]):
+					continue
+				var xl: int = maxi(ix - 1, 0)
+				var xr: int = mini(ix + 1, p_gw - 1)
+				var zl: int = maxi(iz - 1, 0)
+				var zr: int = mini(iz + 1, p_gh - 1)
+				var gxs: float = (filled[iz * p_gw + xr] - filled[iz * p_gw + xl]) / (maxi(xr - xl, 1) * cell_dx)
+				var gzs: float = (filled[zr * p_gw + ix] - filled[zl * p_gw + ix]) / (maxi(zr - zl, 1) * cell_dz)
+				var flat: float = clampf(1.0 - sqrt(gxs * gxs + gzs * gzs) / 0.5, 0.0, 1.0)
+				var target: float = maxf(filled[i], blur[i])
+				dep[i] = dep_strength * flat * (target - hm[i])
+				hm[i] += dep[i]
+
+	# ---- Stage 3: the stream-log oracle on the metric grid ----
+	if str_strength > 0.0:
+		var sl: Array = load("res://addons/pasture_3d/graph/pasture3d_graph_node_dev_hydraulic_stream_log.gd").solve_oracle(
+				hm, p_gw, p_gh, p_rect, {"incision_rate": str_strength, "area_exponent": str_exp})
+		var sh: PackedFloat32Array = sl[0]
+		if sh.size() == n:
+			for i in range(n):
+				if is_finite(sh[i]):
+					hm[i] = sh[i]
 
 	# ---- Stage 4 ----
 	if enable_post_smooth or bank_smoothing > 0.0:
-		var smoothed := zg.duplicate()
+		var smoothed := hm.duplicate()
 		var blend: float = 0.3 if enable_post_smooth else (bank_smoothing * 0.4)
 		for iz in range(1, p_gh - 1):
 			for ix in range(1, p_gw - 1):
 				var idx: int = iz * p_gw + ix
-				var avg: float = 0.25 * (zg[idx - 1] + zg[idx + 1] + zg[idx - p_gw] + zg[idx + p_gw])
-				smoothed[idx] = (1.0 - blend) * zg[idx] + blend * avg
-		zg = smoothed
+				var avg: float = 0.25 * (hm[idx - 1] + hm[idx + 1] + hm[idx - p_gw] + hm[idx + p_gw])
+				smoothed[idx] = (1.0 - blend) * hm[idx] + blend * avg
+		hm = smoothed
 
 	var final_height := PackedFloat32Array()
 	final_height.resize(n)
 	var eroded_rock := PackedFloat32Array()
 	eroded_rock.resize(n)
+	var sediment := PackedFloat32Array()
+	sediment.resize(n)
 	for i in range(n):
 		var orig_h: float = p_surface[i]
 		if not is_finite(orig_h):
 			final_height[i] = orig_h
 			continue
-		var eroded_h: float = zmin + zg[i] * relief_ref
 		var w: float = erosion_strength * (mask[i] if has_mask else 1.0)
-		var res_h: float = (1.0 - w) * orig_h + w * eroded_h
+		var res_h: float = (1.0 - w) * orig_h + w * hm[i]
 		final_height[i] = res_h
 		eroded_rock[i] = maxf(0.0, orig_h - res_h)
+		sediment[i] = w * dep[i]
 	return [final_height, eroded_rock, sediment]
 
 

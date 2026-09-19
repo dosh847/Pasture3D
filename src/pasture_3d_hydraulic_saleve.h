@@ -50,14 +50,16 @@ struct HydraulicSaleveParams {
 	float warp_amount = 0.0f; // metres; 0 = 2% of the smaller rect side
 	float warp_size = 0.0f; // metres; 0 = a quarter of the smaller rect side
 
-	// Stage 2: Sediment Deposition (Deposition / Alluvial flats)
-	// Radius in METRES (it was a fraction of the smaller grid dimension, which grew with the footprint).
-	float deposition_radius = 25.0f;
+	// Stage 2: deposition. Priority-flood fill of the reconstructed grid, blended toward a blur of the fill
+	// on flat ground; only ever raises cells, and is zero where nothing holds water. Radius in METRES,
+	// 0 = 10% of the smaller rect side.
+	float deposition_radius = 0.0f;
 	float deposition_strength = 0.5f;
 
-	// Stage 3: Fine River Channel Incision (HydraulicStreamLog secondary pass)
-	float stream_strength = 0.02f;
-	float stream_exp = 0.8f;
+	// Stage 3: fine incision IS the stream-log solver (hydraulic_stream_log_solve) on the grid, in metres.
+	// stream_strength -> incision_rate, stream_exp -> area_exponent; 0 strength skips it.
+	float stream_strength = 0.15f;
+	float stream_exp = 0.5f;
 
 	// Stage 4: Post-Processing
 	bool enable_post_smoothing = false;
@@ -72,6 +74,10 @@ struct HydraulicSaleveParams {
 	// `reconstruct_only` samples the input onto the mesh and reconstructs it with no erosion.
 	bool grid_solve = false;
 	bool reconstruct_only = false;
+	// Gate hook: return the grid (metres) entering and leaving Stage 3.
+	bool debug_stages = false;
+	// Gate hook: skip Stage 1, so Stages 2-4 run on the reconstructed input itself.
+	bool skip_stage1 = false;
 
 	static HydraulicSaleveParams from_dict(const Dictionary &p_dict);
 };
@@ -87,6 +93,9 @@ struct HydraulicSaleveResult {
 	float cell_area = 0.0f; // same unit as drainage_area
 	int vertex_count = 0;
 	PackedVector2Array vertices; // debug_network only, world metres
+	PackedFloat32Array pre_stream; // debug_stages only, metres
+	PackedFloat32Array post_stream; // debug_stages only, metres
+	PackedFloat32Array deposition; // debug_stages only, Stage 2 raise in metres (before the composite)
 
 	Dictionary to_dict() const;
 };

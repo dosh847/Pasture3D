@@ -112,17 +112,25 @@ func _test_alluvial_sediment_deposition() -> void:
 	var rect := Rect2(0, 0, 100, 100)
 	var surface := _create_mountain_dome(gw, gh, 30.0)
 
-	var res: Dictionary = Pasture3DUtil.hydraulic_saleve_solve_grid(surface, gw, gh, rect, {
+	var params := {
 		"iterations": 10,
 		"erosion_strength": 0.7,
-		"deposition_radius": 0.15,
+		"deposition_radius": 10.0,
 		"deposition_strength": 0.6,
 		"seed": 101,
-	})
+	}
+	var res: Dictionary = Pasture3DUtil.hydraulic_saleve_solve_grid(surface, gw, gh, rect, params)
+	params["deposition_strength"] = 0.0
+	var ctrl: Dictionary = Pasture3DUtil.hydraulic_saleve_solve_grid(surface, gw, gh, rect, params)
 
+	# S3: deposition fills pits and concave valley floors of the Stage 1 relief, so it is thin on a dome.
 	var max_sed: float = _max_val(res["sediment"])
-	print("    Max alluvial sediment thickness = %.4f m (want > 0.5 m)" % max_sed)
-	if max_sed < 0.5:
+	var max_ctrl: float = _max_val(ctrl["sediment"])
+	print("    Max alluvial sediment thickness = %.4f m (want > 0.02 m); control strength 0 = %.6f m (want 0)" % [max_sed, max_ctrl])
+	if max_ctrl != 0.0:
+		_fail += 1
+		print("    !! sediment without deposition, so the output measures something else")
+	elif max_sed < 0.02:
 		_fail += 1
 		print("    !! Insufficient alluvial sediment deposition")
 

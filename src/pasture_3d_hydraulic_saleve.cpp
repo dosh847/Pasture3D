@@ -1,6 +1,7 @@
 // Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 
 #include "pasture_3d_hydraulic_saleve.h"
+#include "pasture_3d_hydraulic_stream_log.h"
 #include "pasture_3d_thread_pool.h"
 
 #include <godot_cpp/classes/geometry2d.hpp>
@@ -138,6 +139,12 @@ HydraulicSaleveParams HydraulicSaleveParams::from_dict(const Dictionary &p_dict)
 	if (p_dict.has("grid_solve")) {
 		p.grid_solve = (bool)p_dict["grid_solve"];
 	}
+	if (p_dict.has("skip_stage1")) {
+		p.skip_stage1 = (bool)p_dict["skip_stage1"];
+	}
+	if (p_dict.has("debug_stages")) {
+		p.debug_stages = (bool)p_dict["debug_stages"];
+	}
 	if (p_dict.has("reconstruct_only")) {
 		p.reconstruct_only = (bool)p_dict["reconstruct_only"];
 	}
@@ -156,6 +163,11 @@ Dictionary HydraulicSaleveResult::to_dict() const {
 	d["iterations"] = iterations;
 	d["cell_area"] = cell_area;
 	d["vertex_count"] = vertex_count;
+	if (!pre_stream.is_empty()) {
+		d["pre_stream"] = pre_stream;
+		d["post_stream"] = post_stream;
+		d["deposition"] = deposition;
+	}
 	if (!vertices.is_empty()) {
 		d["vertices"] = vertices;
 	}
@@ -647,7 +659,7 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 	}
 
 	SaleveStage1 st;
-	if (!p_params.reconstruct_only) {
+	if (!p_params.reconstruct_only && !p_params.skip_stage1) {
 		const uint32_t seed = (uint32_t)p_params.seed;
 		// Break flats: 1e-3 of the unit relief of value noise on a fixed 50 m world lattice. Working copy only.
 		const uint32_t fseed = seed ^ 0x9e3779b9u;
@@ -668,21 +680,6 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 
 		saleve_stage1(g, z, erodibility, slope_cap, p_params, st);
 		res.iterations = st.iterations;
-
-		// Stage 3 (interim, until S3): one-line stream-power incision along the Stage 1 receivers,
-		// upstream first. Runs on the vertices, where the receivers live.
-		if (p_params.stream_strength > 0.0f) {
-			for (int k = nv - 1; k >= 0; k--) {
-				const int idx = st.order[k];
-				const int r = st.receivers[idx];
-				if (r != idx) {
-					const float d = std::max((float)saleve_edge_len(g, idx, r), 1.0e-5f);
-					const float slope = std::max(0.0f, (z[idx] - z[r]) / d);
-					const float inc = p_params.stream_strength * std::log(1.0f + std::pow(std::max(st.area_acc[idx], (float)g.area[idx]), p_params.stream_exp) * slope) * erodibility[idx] * 0.15f;
-					z[idx] = std::max(z[r], z[idx] - inc);
-				}
-			}
-		}
 
 		// Remap Stage 1 back to [0..1].
 		float lo = std::numeric_limits<float>::max();
@@ -892,86 +889,180 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 		return res;
 	}
 
+	// From here on the grid is in METRES: the Stage 1 field scaled by the reference relief, anchored at the
+	// input's low point. Stage 3 (the stream-log solver) is metric, and so are the Stage 2 slopes.
+	std::vector<float> hm(n);
+	for (int i = 0; i < n; i++) {
+		hm[i] = zmin + zg[i] * relief_ref;
+	}
+
 	// ================================================================================================
-	// Stage 2: Sediment Deposition (Deposition / Alluvial Flats), on the grid
+	// Stage 2: deposition. Fill every depression (priority flood from the border and from NaN cells), then
+	// raise the fill to a blur of itself wherever it is concave: pits and valley floors become alluvial
+	// flats, ridges are untouched. The blur reflects oddly at the edges, so it reproduces a plane exactly and
+	// deposition is zero on one. target >= z always, so deposition only raises; it is weighted by flatness.
 	// ================================================================================================
-	std::vector<float> sediment(n, 0.0f);
-	if (p_params.deposition_strength > 0.0f && p_params.deposition_radius > 0.0f) {
-		// Radius in METRES converted to cells: the alluvial flat is a size on the ground.
-		const double cell_m = std::max(std::min(cell_dx, cell_dz), 1.0e-4);
-		int ir = std::max(1, (int)std::lround((double)p_params.deposition_radius / cell_m));
-		ir = std::min(ir, std::max(1, std::min(p_gw, p_gh) / 2));
-		std::vector<float> z_fill = zg;
+	std::vector<float> dep(n, 0.0f);
+	if (p_params.deposition_strength > 0.0f) {
+		std::vector<float> filled = hm;
+		std::vector<uint8_t> done(n, 0);
+		typedef std::pair<float, int> Entry;
+		std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> pq;
 		for (int iz = 0; iz < p_gh; iz++) {
 			for (int ix = 0; ix < p_gw; ix++) {
-				int idx = iz * p_gw + ix;
-				float max_n = z_fill[idx];
-				for (int dy_i = -ir; dy_i <= ir; dy_i++) {
-					int ny = iz + dy_i;
-					if (ny < 0 || ny >= p_gh) continue;
-					for (int dx_i = -ir; dx_i <= ir; dx_i++) {
-						int nx = ix + dx_i;
-						if (nx < 0 || nx >= p_gw) continue;
-						if (dx_i * dx_i + dy_i * dy_i <= ir * ir) {
-							max_n = std::max(max_n, z_fill[ny * p_gw + nx]);
-						}
-					}
+				const int i = iz * p_gw + ix;
+				if (!std::isfinite(src_height[i]) || ix == 0 || iz == 0 || ix == p_gw - 1 || iz == p_gh - 1) {
+					done[i] = 1;
+					pq.push(Entry(filled[i], i));
 				}
-				z_fill[idx] = 0.5f * (z_fill[idx] + max_n);
 			}
 		}
-		for (int i = 0; i < n; i++) {
-			float diff = std::max(0.0f, z_fill[i] - zg[i]);
-			float dep = p_params.deposition_strength * diff;
-			zg[i] += dep;
-			sediment[i] = dep * relief_ref;
+		while (!pq.empty()) {
+			const Entry e = pq.top();
+			pq.pop();
+			const int ix = e.second % p_gw, iz = e.second / p_gw;
+			for (int dz = -1; dz <= 1; dz++) {
+				for (int dxo = -1; dxo <= 1; dxo++) {
+					const int nx = ix + dxo, nz = iz + dz;
+					if ((dxo == 0 && dz == 0) || nx < 0 || nz < 0 || nx >= p_gw || nz >= p_gh) {
+						continue;
+					}
+					const int j = nz * p_gw + nx;
+					if (done[j]) {
+						continue;
+					}
+					done[j] = 1;
+					filled[j] = std::max(filled[j], e.first);
+					pq.push(Entry(filled[j], j));
+				}
+			}
 		}
+		const double radius_m = p_params.deposition_radius > 0.0f ? (double)p_params.deposition_radius : 0.1 * min_side;
+		const double cell_m = std::max(std::min(cell_dx, cell_dz), 1.0e-4);
+		const int ir = std::clamp((int)std::lround(radius_m / cell_m), 1, std::max(1, std::min(p_gw, p_gh) / 2 - 1));
+		// Separable box blur of the fill with odd reflection past the edges (a[-k] = 2 a[0] - a[k]).
+		std::vector<float> tmp(n), blur(n);
+		const float inv = 1.0f / (float)(2 * ir + 1);
+		auto odd = [](const float *p_row, int p_stride, int p_len, int p_i) -> float {
+			if (p_i < 0) {
+				return 2.0f * p_row[0] - p_row[(-p_i) * p_stride];
+			}
+			if (p_i >= p_len) {
+				return 2.0f * p_row[(p_len - 1) * p_stride] - p_row[(2 * (p_len - 1) - p_i) * p_stride];
+			}
+			return p_row[p_i * p_stride];
+		};
+		for (int iz = 0; iz < p_gh; iz++) {
+			for (int ix = 0; ix < p_gw; ix++) {
+				float acc = 0.0f;
+				for (int k = -ir; k <= ir; k++) {
+					acc += odd(&filled[iz * p_gw], 1, p_gw, ix + k);
+				}
+				tmp[iz * p_gw + ix] = acc * inv;
+			}
+		}
+		for (int iz = 0; iz < p_gh; iz++) {
+			for (int ix = 0; ix < p_gw; ix++) {
+				float acc = 0.0f;
+				for (int k = -ir; k <= ir; k++) {
+					acc += odd(&tmp[ix], p_gw, p_gh, iz + k);
+				}
+				blur[iz * p_gw + ix] = acc * inv;
+			}
+		}
+		for (int iz = 0; iz < p_gh; iz++) {
+			for (int ix = 0; ix < p_gw; ix++) {
+				const int i = iz * p_gw + ix;
+				if (!std::isfinite(src_height[i])) {
+					continue;
+				}
+				const int xl = std::max(ix - 1, 0), xr = std::min(ix + 1, p_gw - 1);
+				const int zl = std::max(iz - 1, 0), zr = std::min(iz + 1, p_gh - 1);
+				const double gxs = (filled[iz * p_gw + xr] - filled[iz * p_gw + xl]) / (std::max(xr - xl, 1) * cell_dx);
+				const double gzs = (filled[zr * p_gw + ix] - filled[zl * p_gw + ix]) / (std::max(zr - zl, 1) * cell_dz);
+				const float flat = (float)std::clamp(1.0 - std::sqrt(gxs * gxs + gzs * gzs) / 0.5, 0.0, 1.0);
+				const float target = std::max(filled[i], blur[i]);
+				dep[i] = p_params.deposition_strength * flat * (target - hm[i]);
+				hm[i] += dep[i];
+			}
+		}
+	}
+
+	// ================================================================================================
+	// Stage 3: fine incision, the stream-log solver itself (not a copy of it) on the metric grid.
+	// ================================================================================================
+	if (p_params.debug_stages) {
+		res.pre_stream.resize(n);
+		std::memcpy(res.pre_stream.ptrw(), hm.data(), n * sizeof(float));
+		res.deposition.resize(n);
+		std::memcpy(res.deposition.ptrw(), dep.data(), n * sizeof(float));
+	}
+	if (p_params.stream_strength > 0.0f) {
+		PackedFloat32Array surf;
+		surf.resize(n);
+		std::memcpy(surf.ptrw(), hm.data(), n * sizeof(float));
+		HydraulicStreamLogParams sp;
+		sp.incision_rate = p_params.stream_strength;
+		sp.area_exponent = p_params.stream_exp;
+		const HydraulicStreamLogResult sr = hydraulic_stream_log_solve(surf, p_gw, p_gh, p_rect, sp);
+		if (sr.ok && sr.height.size() == n) {
+			const float *h = sr.height.ptr();
+			for (int i = 0; i < n; i++) {
+				if (std::isfinite(h[i])) {
+					hm[i] = h[i];
+				}
+			}
+		}
+	}
+	if (p_params.debug_stages) {
+		res.post_stream.resize(n);
+		std::memcpy(res.post_stream.ptrw(), hm.data(), n * sizeof(float));
 	}
 
 	// ================================================================================================
 	// Stage 4: Post-Processing
 	// ================================================================================================
 	if (p_params.enable_post_smoothing || p_params.bank_smoothing > 0.0f) {
-		std::vector<float> smoothed = zg;
+		std::vector<float> smoothed = hm;
 		float blend = p_params.enable_post_smoothing ? 0.3f : (p_params.bank_smoothing * 0.4f);
 		Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int r0, int r1) {
 			for (int iz = std::max(r0, 1); iz < std::min(r1, p_gh - 1); iz++) {
 				for (int ix = 1; ix < p_gw - 1; ix++) {
 					int idx = iz * p_gw + ix;
-					float avg = 0.25f * (zg[iz * p_gw + ix - 1] + zg[iz * p_gw + ix + 1] +
-							zg[(iz - 1) * p_gw + ix] + zg[(iz + 1) * p_gw + ix]);
-					smoothed[idx] = (1.0f - blend) * zg[idx] + blend * avg;
+					float avg = 0.25f * (hm[iz * p_gw + ix - 1] + hm[iz * p_gw + ix + 1] +
+							hm[(iz - 1) * p_gw + ix] + hm[(iz + 1) * p_gw + ix]);
+					smoothed[idx] = (1.0f - blend) * hm[idx] + blend * avg;
 				}
 			}
 		});
-		zg = smoothed;
+		hm = smoothed;
 	}
 
-	// Final composite with the original heightfield in world metres.
+	// Composite with the original heightfield. eroded_rock is the net lowering, sediment the Stage 2
+	// raise, both under the same composite weight.
 	res.height.resize(n);
 	res.eroded_rock.resize(n);
+	res.sediment.resize(n);
 	float *h_out = res.height.ptrw();
 	float *r_out = res.eroded_rock.ptrw();
+	float *s_out = res.sediment.ptrw();
 	Pasture3DThreadPool::parallel_for_elements(n, 4096, [&](int i0, int i1) {
 		for (int i = i0; i < i1; i++) {
 			const float orig_h = src_height[i];
 			if (!std::isfinite(orig_h)) {
 				h_out[i] = orig_h;
 				r_out[i] = 0.0f;
+				s_out[i] = 0.0f;
 				continue;
 			}
-			// Stage 1 renormalised the field to [0..1], so the amplitude out is the REFERENCE, anchored at the
-			// input's low point.
-			const float eroded_h = zmin + zg[i] * relief_ref;
 			const float m_val = has_mask ? mask_ptr[i] : 1.0f;
 			const float w = p_params.erosion_strength * m_val;
-			const float res_h = (1.0f - w) * orig_h + w * eroded_h;
+			const float res_h = (1.0f - w) * orig_h + w * hm[i];
 			h_out[i] = res_h;
 			r_out[i] = std::max(0.0f, orig_h - res_h);
+			s_out[i] = w * dep[i];
 		}
 	});
-	res.sediment.resize(n);
-	std::memcpy(res.sediment.ptrw(), sediment.data(), n * sizeof(float));
 	res.ok = true;
 	return res;
 }

@@ -1,6 +1,6 @@
 # Pasture3D Salève and Strata Fidelity Spec
 
-**Status: T1–T3 built 2026-09-18 (`GraphStrataProfileGate`; T3's mask port deferred, see T3); S1 built 2026-09-18 (`GraphSaleveNetworkGate`); S2 built 2026-09-18 (`GraphSaleveMeshGate`); S3–S4 unbuilt.** Check the symbols named in each phase before planning from
+**Status: T1–T3 built 2026-09-18 (`GraphStrataProfileGate`; T3's mask port deferred, see T3); S1 built 2026-09-18 (`GraphSaleveNetworkGate`); S2 built 2026-09-18 (`GraphSaleveMeshGate`); S3 built 2026-09-18 (`GraphSaleveDepositionGate`); S4 unbuilt.** Check the symbols named in each phase before planning from
 this header — spec status headers go stale.
 
 The graph's **Salève Hydraulic Erosion** (`Pasture3DGraphNodeHydraulicSaleve`, `src/pasture_3d_hydraulic_saleve.cpp`)
@@ -252,6 +252,41 @@ fixture has no peaks at multiples of 45° beyond a threshold (control: S1 grid s
 Gate: deposition only raises (never lowers) cells, and is zero on a fixture with no depressions
 (control); stage 3 output matches a direct stream-log call on the same input (route check — not the node
 calling itself, assert against the solver called independently); sediment + eroded mass balance reported.
+
+**As built (S3):**
+
+- Order is Stage 1 → reconstruction → Stage 2 → Stage 3 → Stage 4 → composite. From the reconstruction on,
+  the grid is in METRES (`zmin + z · reference_relief`), so Stage 3 and the Stage 2 slopes are metric and
+  the composite no longer rescales.
+- **Deposition is not "zero where nothing holds water".** Stage 1 ends with `z = z[root] + t`, which is
+  monotone along the receivers, so its output has no pits and a pure pit fill deposited exactly 0 m on
+  every fixture (measured). Stage 2 is now: priority-flood fill (deterministic `(value, idx)` heap, seeded
+  from the border and NaN cells), then `target = max(filled, blur(filled))`, which raises pits AND concave
+  valley floors and leaves ridges alone. The box blur reflects oddly past the edges (`a[-k] = 2a[0] - a[k]`),
+  so it reproduces a plane exactly. That is the gate's zero-deposition fixture instead of "no depressions".
+  Weight = `deposition_strength · clamp(1 - |∇filled| / 0.5, 0, 1)`, with the slope in m/m.
+  `deposition_radius` 0 (the new default) = 10% of the smaller rect side.
+- **Stage 3 is `hydraulic_stream_log_solve` itself**, with `incision_rate = stream_strength` and
+  `area_exponent = stream_exp`; the new defaults are 0.15 and 0.5, the stream-log node's own. The
+  stream-log solver has no talus or deposition parameters, so the spec's "talus 0.1, deposition from
+  stage 2" has nothing to bind to. Its mask is NOT passed: the composite already weights by the mask,
+  and passing it would square it. `sediment` is therefore the Stage 2 raise only, times the composite
+  weight; `eroded_rock` is the net lowering.
+- The dev oracle calls the stream-log dev oracle (`solve_oracle`). Parity with native is unchanged at
+  5.7e-6 m.
+- Gate hooks (dictionary only): `debug_stages` returns `pre_stream`, `post_stream` and `deposition`;
+  `skip_stage1` runs Stages 2–4 on the reconstructed input.
+- **Measured:**
+  - Criterion A runs with Stage 1 and the warp off: the crater fills 16.25 m; the plane control gets 1e-6 m.
+    With the fBm warp on, the plane control took 0.046 m, because the warp bends the plane.
+  - After a real Stage 1, deposition is thin: 0.63 m peak on the crater, and a deposited/eroded volume
+    ratio of 0.004.
+  - Stage 3 against a direct stream-log call: 0 m, with 5.33 m for the incision-0.3 control.
+  - `GraphHydraulicSaleveGate` [B] had passed a 0.15 m radius, a leftover from when the radius was a
+    fraction, and wanted more than 0.5 m. It now passes 10 m, wants more than 0.02 m (measures 0.31 m),
+    and has a strength-0 control that must leave exactly 0.
+  - The margin probe's worst drift rose from 20.1 / 18.9 m to 24.3 / 21.4 m (auto / pinned). Both the
+    auto deposition radius and the stream-log solve depend on the extent. This is open.
 
 ### Phase S4 — Tidy, docs, defaults
 

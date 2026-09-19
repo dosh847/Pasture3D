@@ -1653,11 +1653,11 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				p.drainage_noise = P[3];
 				p.shape_preservation = P[4];
 				p.bank_smoothing = P[5];
-				p.deposition_radius = (PH[6] ? P[6] : 25.0f);
+				p.deposition_radius = (PH[6] ? P[6] : 0.0f);
 				p.reference_relief = params_p ? std::max(0.0f, P[15]) : 0.0f;
 				p.deposition_strength = (PH[7] ? P[7] : 0.5f);
-				p.stream_strength = (PH[8] ? P[8] : 0.02f);
-				p.stream_exp = (PH[9] ? P[9] : 0.8f);
+				p.stream_strength = (PH[8] ? P[8] : 0.15f);
+				p.stream_exp = (PH[9] ? P[9] : 0.5f);
 				p.tolerance = (PH[10] ? std::max(0.0f, P[10]) : 1.0e-3f);
 				p.max_slope_center = (PH[11] ? std::max(0.0f, P[11]) : 6.0f);
 				p.max_slope_border = (PH[12] ? std::max(0.0f, P[12]) : 0.0f);

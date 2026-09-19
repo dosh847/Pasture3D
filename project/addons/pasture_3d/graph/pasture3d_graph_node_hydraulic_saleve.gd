@@ -144,28 +144,29 @@ enum Reconstruction { LINEAR, GRADIENT }
 		_param_changed()
 
 @export_group("Sediment Deposition (Stage 2)")
-## Alluvial depression hole filling radius, in METRES. It was a fraction of the grid's smaller dimension,
-## so the flats grew whenever the solved extent did; it is now a size on the ground.
-@export_range(0.0, 200.0, 0.5, "or_greater", "suffix:m") var deposition_radius: float = 25.0:
+## Blur radius, in METRES, of the alluvial flats: pits are filled and concave ground (valley floors) is
+## raised toward a blur of itself this wide. 0 = 10% of the smaller side of the solved extent. Deposition
+## only raises, never touches ridges, and is zero on a plane whatever this is.
+@export_range(0.0, 200.0, 0.5, "or_greater", "suffix:m") var deposition_radius: float = 0.0:
 	set(v):
 		deposition_radius = maxf(v, 0.0)
 		_param_changed()
 
-## Alluvial sediment deposition strength.
+## How far each depression is filled toward its flat, 0..1. Weighted down on ground steeper than 0.5 m/m.
 @export_range(0.0, 1.0, 0.01) var deposition_strength: float = 0.5:
 	set(v):
 		deposition_strength = clampf(v, 0.0, 1.0)
 		_param_changed()
 
 @export_group("Fine River Incision (Stage 3)")
-## Secondary fine dendritic rill erosion strength.
-@export_range(0.0, 1.0, 0.005) var stream_strength: float = 0.02:
+## Fine incision is the Stream Log solver run on the result: this is its incision_rate. 0 skips it.
+@export_range(0.0, 1.0, 0.005) var stream_strength: float = 0.15:
 	set(v):
 		stream_strength = clampf(v, 0.0, 1.0)
 		_param_changed()
 
-## Secondary stream influence exponent.
-@export_range(0.01, 1.0, 0.01) var stream_exp: float = 0.8:
+## The Stream Log solver's area_exponent (m in A^m S^n).
+@export_range(0.01, 1.0, 0.01) var stream_exp: float = 0.5:
 	set(v):
 		stream_exp = clampf(v, 0.01, 1.0)
 		_param_changed()
