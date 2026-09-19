@@ -8,6 +8,9 @@ class_name Pasture3DGraphNodeDevHydraulicParticle
 extends Pasture3DGraphSolverNode
 
 
+## CELLS: every length is a grid cell (the original solver). METRIC: world metres, resolution-invariant.
+enum { UNITS_CELLS = 0, UNITS_METRIC = 1 }
+
 @export_group("Simulation")
 ## Total number of raindrops / particles simulated across the terrain footprint.
 @export_range(1000, 200000, 1000, "or_greater") var droplet_count: int = 25000:
@@ -76,6 +79,30 @@ extends Pasture3DGraphSolverNode
 		_param_changed()
 
 ## Deterministic random seed for particle distribution.
+## CELLS or METRIC -- see Pasture3DGraphNodeHydraulicParticle.units.
+@export_enum("Cells", "Metric") var units: int = UNITS_CELLS:
+	set(v):
+		units = clampi(v, 0, 1)
+		_param_changed()
+
+## Erosion brush radius in metres; 0 = four bilinear corners.
+@export_range(0.0, 20.0, 0.1, "or_greater", "suffix:m") var radius_m: float = 0.0:
+	set(v):
+		radius_m = maxf(v, 0.0)
+		_param_changed()
+
+## METRIC: step length in metres.
+@export_range(0.1, 20.0, 0.1, "or_greater", "suffix:m") var step_length_m: float = 1.0:
+	set(v):
+		step_length_m = maxf(v, 0.01)
+		_param_changed()
+
+## METRIC: droplets per 100 m².
+@export_range(0.1, 200.0, 0.1, "or_greater") var droplet_density: float = 40.0:
+	set(v):
+		droplet_density = maxf(v, 0.0)
+		_param_changed()
+
 @export var seed: int = 1337:
 	set(v):
 		seed = v
@@ -165,6 +192,10 @@ func _params_for_oracle(p_mask: PackedFloat32Array) -> Dictionary:
 		"bedrock_gap": bedrock_gap,
 		"ridge_forcing": ridge_forcing,
 		"seed": self.seed,
+		"units": units,
+		"radius_m": radius_m,
+		"step_length_m": step_length_m,
+		"droplet_density": droplet_density,
 		"mask": p_mask,
 	}
 
@@ -182,6 +213,39 @@ static func _next_rand(p_state: int) -> Array:
 
 
 ## Pure GDScript reference oracle for particle hydraulic erosion.
+## Beyer's erosion brush: every finite cell within R metres of (p_px, p_pz), weighted by (R - distance) and
+## normalised to 1, in raster order -- the native `disc_footprint`, walked the same way. Returns
+## [indices, weights], or an empty Array when nothing carries weight.
+static func _disc_footprint(p_height: PackedFloat32Array, p_gw: int, p_gh: int, p_px: float, p_pz: float,
+		p_dx: float, p_dz: float, p_radius_m: float) -> Array:
+	var rcx: float = p_radius_m / p_dx
+	var rcz: float = p_radius_m / p_dz
+	var x0: int = maxi(0, int(ceil(p_px - rcx)))
+	var x1: int = mini(p_gw - 1, int(floor(p_px + rcx)))
+	var z0: int = maxi(0, int(ceil(p_pz - rcz)))
+	var z1: int = mini(p_gh - 1, int(floor(p_pz + rcz)))
+	var idx := PackedInt32Array()
+	var w := PackedFloat64Array()
+	var total: float = 0.0
+	for z in range(z0, z1 + 1):
+		for x in range(x0, x1 + 1):
+			var i: int = z * p_gw + x
+			if not is_finite(p_height[i]):
+				continue
+			var ox: float = (float(x) - p_px) * p_dx
+			var oz: float = (float(z) - p_pz) * p_dz
+			var wt: float = p_radius_m - sqrt(ox * ox + oz * oz)
+			if wt > 0.0:
+				idx.append(i)
+				w.append(wt)
+				total += wt
+	if total <= 0.0:
+		return []
+	for k in w.size():
+		w[k] = w[k] / total
+	return [idx, w]
+
+
 static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_params: Dictionary) -> Array:
 	if p_gw < 2 or p_gh < 2 or p_surface.size() != p_gw * p_gh:
 		return [PackedFloat32Array(), PackedFloat32Array(), PackedFloat32Array(), PackedFloat32Array()]
@@ -198,7 +262,6 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 	water_depth.resize(n)
 	water_depth.fill(0.0)
 
-	var droplet_count: int = maxi(1, int(p_params.get("droplet_count", 25000)))
 	var max_lifetime: int = maxi(1, int(p_params.get("max_lifetime", 30)))
 	var inertia: float = clampf(float(p_params.get("inertia", 0.05)), 0.0, 1.0)
 	var sediment_capacity: float = maxf(0.0, float(p_params.get("sediment_capacity", 4.0)))
@@ -210,6 +273,25 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 	var bedrock_gap: float = maxf(0.0, float(p_params.get("bedrock_gap", 2.0)))
 	var ridge_forcing: float = maxf(0.0, float(p_params.get("ridge_forcing", 0.0)))
 	var rng_seed: int = int(p_params.get("seed", 1337))
+	var metric: bool = clampi(int(p_params.get("units", UNITS_CELLS)), 0, 1) == UNITS_METRIC
+	var radius_param: float = maxf(0.0, float(p_params.get("radius_m", 0.0)))
+	var step_param: float = maxf(0.01, float(p_params.get("step_length_m", 1.0)))
+	var density: float = maxf(0.0, float(p_params.get("droplet_density", 40.0)))
+
+	# The native solver's constants, derived the same way -- see its comments.
+	var cell_dx: float = maxf(p_rect.size.x / float(p_gw), 1e-9)
+	var cell_dz: float = maxf(p_rect.size.y / float(p_gh), 1e-9)
+	var step_m: float = step_param if metric else 1.0
+	var step_cx: float = step_m / cell_dx if metric else 1.0
+	var step_cz: float = step_m / cell_dz if metric else 1.0
+	var scale: float = (step_m * step_m) / (cell_dx * cell_dz) if metric else 1.0
+	var radius_m: float = maxf(radius_param, step_m) if metric else radius_param
+	var disc_erode: bool = radius_m >= minf(cell_dx, cell_dz)
+	var disc_deposit: bool = metric and disc_erode
+	var droplet_count: int = maxi(1, int(p_params.get("droplet_count", 25000)))
+	if metric:
+		droplet_count = maxi(1, roundi(density * p_rect.size.x * p_rect.size.y / 100.0))
+	var min_fall: float = min_slope * step_m if metric else min_slope
 
 	var mask: PackedFloat32Array = p_params.get("mask", PackedFloat32Array())
 	var has_mask: bool = (mask.size() == n)
@@ -271,6 +353,9 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 			# Surface gradient
 			var gx: float = (1.0 - v) * (h10 - h00) + v * (h11 - h01)
 			var gz: float = (1.0 - u) * (h01 - h00) + u * (h11 - h10)
+			if metric:
+				gx /= cell_dx
+				gz /= cell_dz
 
 			# Hesiod Ridge Forcing perturbation: adds cross-gradient force
 			if ridge_forcing > 0.0:
@@ -294,8 +379,8 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 				dir_x = cos(ang)
 				dir_z = sin(ang)
 
-			var next_px: float = px + dir_x
-			var next_pz: float = pz + dir_z
+			var next_px: float = px + (dir_x * step_cx if metric else dir_x)
+			var next_pz: float = pz + (dir_z * step_cz if metric else dir_z)
 
 			var next_ix: int = int(floor(next_px))
 			var next_iz: int = int(floor(next_pz))
@@ -331,52 +416,54 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 			if has_mask:
 				mask_val = w00 * mask[i00] + w10 * mask[i10] + w01 * mask[i01] + w11 * mask[i11]
 
+			var quad_i := PackedInt32Array([i00, i10, i01, i11])
+			var quad_w := PackedFloat64Array([w00, w10, w01, w11])
+
 			if delta_h > 0.0:
 				# Moving uphill into pit — deposit sediment
 				var deposit_amt: float = minf(sed, delta_h) * mask_val
 				sed -= deposit_amt
-				height[i00] += deposit_amt * w00
-				height[i10] += deposit_amt * w10
-				height[i01] += deposit_amt * w01
-				height[i11] += deposit_amt * w11
-				sediment[i00] += deposit_amt * w00
-				sediment[i10] += deposit_amt * w10
-				sediment[i01] += deposit_amt * w01
-				sediment[i11] += deposit_amt * w11
+				_lay(height, sediment, deposit_amt * scale, disc_deposit, true, quad_i, quad_w,
+						p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m)
 				break
 			else:
 				# Moving downhill — compute capacity and erode/deposit
-				var slope: float = maxf(-delta_h, min_slope)
+				var slope: float = maxf(-delta_h, min_fall)
 				var cap: float = slope * speed * water * sediment_capacity
 
 				if sed > cap:
 					var dep: float = (sed - cap) * deposition_speed * mask_val
 					sed -= dep
-					height[i00] += dep * w00
-					height[i10] += dep * w10
-					height[i01] += dep * w01
-					height[i11] += dep * w11
-					sediment[i00] += dep * w00
-					sediment[i10] += dep * w10
-					sediment[i01] += dep * w01
-					sediment[i11] += dep * w11
+					_lay(height, sediment, dep * scale, disc_deposit, true, quad_i, quad_w,
+							p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m)
 				else:
 					# Erode bedrock with Hesiod Bedrock Floor protection
 					var ero: float = minf((cap - sed) * erosion_speed, -delta_h) * mask_val
 
 					if bedrock_gap > 0.0:
-						var max_cut00: float = maxf(0.0, height[i00] - (p_surface[i00] - bedrock_gap))
-						var max_cut10: float = maxf(0.0, height[i10] - (p_surface[i10] - bedrock_gap))
-						var max_cut01: float = maxf(0.0, height[i01] - (p_surface[i01] - bedrock_gap))
-						var max_cut11: float = maxf(0.0, height[i11] - (p_surface[i11] - bedrock_gap))
-						var max_allowed: float = w00 * max_cut00 + w10 * max_cut10 + w01 * max_cut01 + w11 * max_cut11
-						ero = minf(ero, max_allowed)
+						# CELLS: the weighted mean of the room above the floor. METRIC: the exact floor --
+						# see the native solver's twin of this block.
+						var fp: Array = []
+						if disc_erode:
+							fp = _disc_footprint(height, p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m)
+						var fi: PackedInt32Array = fp[0] if not fp.is_empty() else quad_i
+						var fw: PackedFloat64Array = fp[1] if not fp.is_empty() else quad_w
+						if metric:
+							var lim: float = INF
+							for k in fi.size():
+								if fw[k] > 0.0:
+									var room: float = maxf(0.0, height[fi[k]] - (p_surface[fi[k]] - bedrock_gap))
+									lim = minf(lim, room / (scale * fw[k]))
+							ero = minf(ero, lim)
+						else:
+							var max_allowed: float = 0.0
+							for k in fi.size():
+								max_allowed += fw[k] * maxf(0.0, height[fi[k]] - (p_surface[fi[k]] - bedrock_gap))
+							ero = minf(ero, max_allowed)
 
 					sed += ero
-					height[i00] -= ero * w00
-					height[i10] -= ero * w10
-					height[i01] -= ero * w01
-					height[i11] -= ero * w11
+					_lay(height, sediment, -ero * scale, disc_erode, false, quad_i, quad_w,
+							p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m)
 
 				speed = sqrt(maxf(0.0, speed * speed - delta_h * gravity))
 				water *= (1.0 - evaporation_rate)
@@ -396,3 +483,21 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 				pz = next_pz
 
 	return [height, sediment, flow, water_depth]
+
+
+## Lay `p_a` (already times `scale`) on the height, and on the sediment record when `p_record`, over the disc
+## when asked and it has weight, else over the bilinear quad.
+static func _lay(r_height: PackedFloat32Array, r_sediment: PackedFloat32Array, p_a: float, p_disc: bool,
+		p_record: bool, p_qi: PackedInt32Array, p_qw: PackedFloat64Array, p_gw: int, p_gh: int, p_px: float,
+		p_pz: float, p_dx: float, p_dz: float, p_radius_m: float) -> void:
+	var fi := p_qi
+	var fw := p_qw
+	if p_disc:
+		var fp := _disc_footprint(r_height, p_gw, p_gh, p_px, p_pz, p_dx, p_dz, p_radius_m)
+		if not fp.is_empty():
+			fi = fp[0]
+			fw = fp[1]
+	for k in fi.size():
+		r_height[fi[k]] += p_a * fw[k]
+		if p_record:
+			r_sediment[fi[k]] += p_a * fw[k]

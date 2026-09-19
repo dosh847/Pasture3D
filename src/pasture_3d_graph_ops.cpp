@@ -1670,6 +1670,15 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				p.seed = params_j ? (int64_t)((uint32_t)P[9] | ((PH[12] ? (uint32_t)P[12] : 0u) << 16)) : 1337;
 				p.bedrock_gap = (PH[10] ? P[10] : 2.0f);
 				p.ridge_forcing = (PH[11] ? P[11] : 0.0f);
+				p.units = PH[13] ? std::clamp((int)P[13], 0, 1) : HydraulicParticleParams::UNITS_CELLS;
+				p.radius_m = PH[14] ? std::max(0.0, (double)P[14]) : 0.0;
+				p.step_length_m = PH[15] ? std::max(0.01, (double)P[15]) : 1.0;
+				{
+					const PackedFloat32Array &lut = (size_t)s < p_prog.luts.size() ? p_prog.luts[(size_t)s] : PackedFloat32Array();
+					if (lut.size() > 0) {
+						p.droplet_density = std::max(0.0, (double)lut[0]);
+					}
+				}
 				if (in1 && in1[s] >= 0) {
 					p.mask = get_grid_packed(in1[s], c_in1);
 				}

@@ -14,8 +14,21 @@ class_name Pasture3DGraphNodeHydraulicParticle
 extends Pasture3DGraphSolverNode
 
 
+enum Units { CELLS, METRIC }
+
 @export_group("Simulation")
-## Total number of raindrops / particles simulated across the terrain footprint.
+## CELLS: a droplet step, its slope and its lifetime are measured in grid cells, so the same terrain at
+## another resolution (or with a wider brush margin) erodes differently. The original behaviour.
+## METRIC: steps are Step Length metres, slopes are metres per metre, and droplets are placed per area
+## (Droplet Density), so the result holds across resolutions once a cell is at most half a step.
+@export var units: Units = Units.CELLS:
+	set(v):
+		units = v
+		_param_changed()
+		notify_property_list_changed()
+
+## Total number of raindrops / particles simulated across the terrain footprint. CELLS only; METRIC uses
+## Droplet Density.
 @export_range(1000, 200000, 1000, "or_greater") var droplet_count: int = 25000:
 	set(v):
 		droplet_count = maxi(v, 1)
@@ -81,6 +94,27 @@ extends Pasture3DGraphSolverNode
 		ridge_forcing = maxf(v, 0.0)
 		_param_changed()
 
+## Erosion brush radius in metres (Beyer): the cut is spread over every cell within it, weighted toward
+## the droplet, instead of the four cells around it. 0 keeps the four-corner cut, which pits. METRIC never
+## uses less than one Step Length.
+@export_range(0.0, 20.0, 0.1, "or_greater", "suffix:m") var radius_m: float = 0.0:
+	set(v):
+		radius_m = maxf(v, 0.0)
+		_param_changed()
+
+## METRIC: the length of one droplet step. Lifetime is in steps, so a droplet travels up to
+## Max Lifetime x Step Length metres.
+@export_range(0.1, 20.0, 0.1, "or_greater", "suffix:m") var step_length_m: float = 1.0:
+	set(v):
+		step_length_m = maxf(v, 0.01)
+		_param_changed()
+
+## METRIC: droplets per 100 m² of the footprint.
+@export_range(0.1, 200.0, 0.1, "or_greater") var droplet_density: float = 40.0:
+	set(v):
+		droplet_density = maxf(v, 0.0)
+		_param_changed()
+
 ## Deterministic random seed for particle distribution.
 @export var seed: int = 1337:
 	set(v):
@@ -122,7 +156,11 @@ func native_lower() -> Dictionary:
 	p[10] = bedrock_gap
 	p[11] = ridge_forcing
 	p[12] = float((seed >> 16) & 0xFFFF)
-	return {"params": p}
+	p[13] = float(units)
+	p[14] = radius_m
+	p[15] = step_length_m
+	# The 16 slots are full; droplet_density rides the LUT.
+	return {"params": p, "lut": PackedFloat32Array([droplet_density])}
 
 
 func native_param_ports() -> PackedInt32Array:
@@ -201,6 +239,14 @@ func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.HEIGHT, PortType.FIELD, PortType.FIELD, PortType.FIELD])
 
 
+func _validate_property(p_property: Dictionary) -> void:
+	var metric_only := [&"step_length_m", &"droplet_density"]
+	if p_property.name in metric_only and units != Units.METRIC:
+		p_property.usage = PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_STORAGE
+	elif p_property.name == &"droplet_count" and units == Units.METRIC:
+		p_property.usage = PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_STORAGE
+
+
 func node_warnings() -> PackedStringArray:
 	var w := super()
 	if droplet_count <= 0 or is_zero_approx(erosion_speed):
@@ -255,6 +301,10 @@ func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect:
 		"bedrock_gap": _f32(bedrock_gap),
 		"ridge_forcing": _f32(ridge_forcing),
 		"seed": seed,
+		"units": int(units),
+		"radius_m": _f32(radius_m),
+		"step_length_m": _f32(step_length_m),
+		"droplet_density": _f32(droplet_density),
 		"mask": p_mask,
 	}
 

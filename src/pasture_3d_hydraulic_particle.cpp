@@ -48,6 +48,18 @@ HydraulicParticleParams HydraulicParticleParams::from_dict(const Dictionary &p_d
 	if (p_dict.has("seed")) {
 		p.seed = (int64_t)p_dict["seed"];
 	}
+	if (p_dict.has("units")) {
+		p.units = std::clamp((int)p_dict["units"], 0, 1);
+	}
+	if (p_dict.has("radius_m")) {
+		p.radius_m = std::max(0.0, (double)p_dict["radius_m"]);
+	}
+	if (p_dict.has("step_length_m")) {
+		p.step_length_m = std::max(0.01, (double)p_dict["step_length_m"]);
+	}
+	if (p_dict.has("droplet_density")) {
+		p.droplet_density = std::max(0.0, (double)p_dict["droplet_density"]);
+	}
 	if (p_dict.has("mask")) {
 		p.mask = p_dict["mask"];
 	}
@@ -75,6 +87,55 @@ static inline double next_rand(uint32_t &p_state) {
 	p_state = p_state * 1664525u + 1013904223u;
 	return (double)p_state / 4294967296.0;
 }
+
+namespace {
+
+// Where one step's erosion or deposition lands: the four bilinear corners, or a disc of cells.
+struct Footprint {
+	std::vector<int> idx;
+	std::vector<double> w; // sums to 1
+};
+
+// Beyer's erosion brush: every finite cell within R metres of the droplet, weighted by (R - distance) and
+// normalised to 1. Raster order, so the oracle (which walks the same box the same way) sums identically.
+// Returns false when no cell carries weight, and the caller falls back to the bilinear corners.
+bool disc_footprint(const std::vector<float> &p_height, int p_gw, int p_gh, double p_px, double p_pz,
+		double p_dx, double p_dz, double p_radius_m, Footprint &r_fp) {
+	r_fp.idx.clear();
+	r_fp.w.clear();
+	const double rcx = p_radius_m / p_dx;
+	const double rcz = p_radius_m / p_dz;
+	const int x0 = std::max(0, (int)std::ceil(p_px - rcx));
+	const int x1 = std::min(p_gw - 1, (int)std::floor(p_px + rcx));
+	const int z0 = std::max(0, (int)std::ceil(p_pz - rcz));
+	const int z1 = std::min(p_gh - 1, (int)std::floor(p_pz + rcz));
+	double sum = 0.0;
+	for (int z = z0; z <= z1; z++) {
+		for (int x = x0; x <= x1; x++) {
+			const int i = z * p_gw + x;
+			if (!std::isfinite(p_height[i])) {
+				continue;
+			}
+			const double ox = ((double)x - p_px) * p_dx;
+			const double oz = ((double)z - p_pz) * p_dz;
+			const double wt = p_radius_m - std::sqrt(ox * ox + oz * oz);
+			if (wt > 0.0) {
+				r_fp.idx.push_back(i);
+				r_fp.w.push_back(wt);
+				sum += wt;
+			}
+		}
+	}
+	if (sum <= 0.0) {
+		return false;
+	}
+	for (double &wt : r_fp.w) {
+		wt /= sum;
+	}
+	return true;
+}
+
+} // namespace
 
 HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array &p_surface,
 		int p_gw, int p_gh, const Rect2 &p_rect, const HydraulicParticleParams &p_params) {
@@ -104,19 +165,41 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 		rng_state = 1337;
 	}
 
-	const int droplet_count = p_params.droplet_count;
+	const bool metric = p_params.units == HydraulicParticleParams::UNITS_METRIC;
+	// Cell size in metres, size / count as the grid hydraulic solver takes it.
+	const double cell_dx = std::max((double)p_rect.size.x / (double)p_gw, 1e-9);
+	const double cell_dz = std::max((double)p_rect.size.y / (double)p_gh, 1e-9);
+	// METRIC: a step is `step_length_m` metres whatever the grid, so the path, the height fall per step and
+	// the lifetime are the same on every resolution. CELLS: a step is one cell, the original units.
+	const double step_m = metric ? p_params.step_length_m : 1.0;
+	const double step_cx = metric ? step_m / cell_dx : 1.0;
+	const double step_cz = metric ? step_m / cell_dz : 1.0;
+	// A step moves the height at a point by `amt`; the volume that stands for is amt * step^2. Spread over
+	// cells of dx*dz, that is `scale` times amt per unit of weight. CELLS keeps 1, its original meaning.
+	const double scale = metric ? (step_m * step_m) / (cell_dx * cell_dz) : 1.0;
+	// The brush. CELLS: the erosion radius alone, 0 being the four bilinear corners. METRIC: never narrower
+	// than a step, or a fine grid would take a whole step's volume on four cells; it lays deposits too.
+	const double radius_m = metric ? std::max(p_params.radius_m, step_m) : p_params.radius_m;
+	const bool disc_erode = radius_m >= std::min(cell_dx, cell_dz);
+	const bool disc_deposit = metric && disc_erode;
+
+	const int droplet_count = metric
+			? std::max(1, (int)std::llround(p_params.droplet_density * (double)p_rect.size.x * (double)p_rect.size.y / 100.0))
+			: p_params.droplet_count;
 	const int max_lifetime = p_params.max_lifetime;
 	const double inertia = (double)p_params.inertia;
 	const double sediment_capacity = (double)p_params.sediment_capacity;
 	const double erosion_speed = (double)p_params.erosion_speed;
 	const double deposition_speed = (double)p_params.deposition_speed;
 	const double evaporation_rate = (double)p_params.evaporation_rate;
-	const double min_slope = (double)p_params.min_slope;
+	const double min_fall = metric ? (double)p_params.min_slope * step_m : (double)p_params.min_slope;
 	const double gravity = (double)p_params.gravity;
 	const double bedrock_gap = (double)p_params.bedrock_gap;
 	const double ridge_forcing = (double)p_params.ridge_forcing;
 
 	const double tau = 6.283185307179586;
+
+	Footprint fp;
 
 	for (int d = 0; d < droplet_count; d++) {
 		// Spawn droplet randomly on domain
@@ -167,6 +250,11 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 			// Differences in double: a float32 subtraction here was the root of the oracle divergence.
 			double gx = (1.0 - v) * ((double)h10 - (double)h00) + v * ((double)h11 - (double)h01);
 			double gz = (1.0 - u) * ((double)h01 - (double)h00) + u * ((double)h11 - (double)h10);
+			if (metric) {
+				// Metres per metre, so inertia weighs the same slope the same on every grid.
+				gx /= cell_dx;
+				gz /= cell_dz;
+			}
 
 			// Hesiod Ridge Forcing perturbation: adds cross-gradient force
 			if (ridge_forcing > 0.0) {
@@ -190,8 +278,8 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 				dir_z = std::sin(ang);
 			}
 
-			double next_px = px + dir_x;
-			double next_pz = pz + dir_z;
+			double next_px = px + (metric ? dir_x * step_cx : dir_x);
+			double next_pz = pz + (metric ? dir_z * step_cz : dir_z);
 
 			int next_ix = (int)std::floor(next_px);
 			int next_iz = (int)std::floor(next_pz);
@@ -231,53 +319,93 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 						w01 * (double)mask_ptr[i01] + w11 * (double)mask_ptr[i11];
 			}
 
+			// Lay `p_amt` (metres at the droplet) on the terrain, and on the sediment record, over the chosen
+			// footprint. Erosion passes a negative amount and no sediment record.
+			const auto lay = [&](double p_amt, bool p_disc, bool p_record) {
+				const double a = p_amt * scale;
+				if (p_disc && disc_footprint(height, p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m, fp)) {
+					for (size_t k = 0; k < fp.idx.size(); k++) {
+						add_rounded(height[fp.idx[k]], a * fp.w[k]);
+						if (p_record) {
+							add_rounded(sediment[fp.idx[k]], a * fp.w[k]);
+						}
+					}
+					return;
+				}
+				add_rounded(height[i00], a * w00);
+				add_rounded(height[i10], a * w10);
+				add_rounded(height[i01], a * w01);
+				add_rounded(height[i11], a * w11);
+				if (p_record) {
+					add_rounded(sediment[i00], a * w00);
+					add_rounded(sediment[i10], a * w10);
+					add_rounded(sediment[i01], a * w01);
+					add_rounded(sediment[i11], a * w11);
+				}
+			};
+
 			if (delta_h > 0.0) {
 				// Moving uphill into pit — deposit sediment
 				double deposit_amt = std::min(sed, delta_h) * mask_val;
 				sed -= deposit_amt;
-				add_rounded(height[i00], (deposit_amt * w00));
-				add_rounded(height[i10], (deposit_amt * w10));
-				add_rounded(height[i01], (deposit_amt * w01));
-				add_rounded(height[i11], (deposit_amt * w11));
-				add_rounded(sediment[i00], (deposit_amt * w00));
-				add_rounded(sediment[i10], (deposit_amt * w10));
-				add_rounded(sediment[i01], (deposit_amt * w01));
-				add_rounded(sediment[i11], (deposit_amt * w11));
+				lay(deposit_amt, disc_deposit, true);
 				break;
 			} else {
 				// Moving downhill: compute sediment transport capacity
-				double c = std::max(-delta_h, min_slope) * speed * water * sediment_capacity;
+				double c = std::max(-delta_h, min_fall) * speed * water * sediment_capacity;
 
 				if (sed > c) {
 					// Drop excess sediment
 					double drop = (sed - c) * deposition_speed * mask_val;
 					sed -= drop;
-					add_rounded(height[i00], (drop * w00));
-					add_rounded(height[i10], (drop * w10));
-					add_rounded(height[i01], (drop * w01));
-					add_rounded(height[i11], (drop * w11));
-					add_rounded(sediment[i00], (drop * w00));
-					add_rounded(sediment[i10], (drop * w10));
-					add_rounded(sediment[i01], (drop * w01));
-					add_rounded(sediment[i11], (drop * w11));
+					lay(drop, disc_deposit, true);
 				} else {
 					// Erode bedrock with Hesiod Bedrock Floor protection
 					double erode_amt = std::min((c - sed) * erosion_speed, -delta_h) * mask_val;
 
 					if (bedrock_gap > 0.0) {
-						double max_cut00 = std::max(0.0, (double)height[i00] - ((double)original_height[i00] - bedrock_gap));
-						double max_cut10 = std::max(0.0, (double)height[i10] - ((double)original_height[i10] - bedrock_gap));
-						double max_cut01 = std::max(0.0, (double)height[i01] - ((double)original_height[i01] - bedrock_gap));
-						double max_cut11 = std::max(0.0, (double)height[i11] - ((double)original_height[i11] - bedrock_gap));
-						double max_allowed = w00 * max_cut00 + w10 * max_cut10 + w01 * max_cut01 + w11 * max_cut11;
-						erode_amt = std::min(erode_amt, max_allowed);
+						// The most the footprint can give, as an amount at the droplet. CELLS keeps its original
+						// rule, the weighted mean of the cells' room above the floor. METRIC takes the exact floor:
+						// cell i moves by amt * scale * w_i, so amt may not exceed room_i / (scale * w_i) anywhere.
+						// The weighted mean divided by `scale` tightened with resolution squared and made the
+						// fine grid erode half as much (GraphHydraulicParticleGate [U]).
+						const auto room = [&](int p_i) {
+							return std::max(0.0, (double)height[p_i] - ((double)original_height[p_i] - bedrock_gap));
+						};
+						double max_allowed = 0.0;
+						if (metric) {
+							double lim = std::numeric_limits<double>::infinity();
+							if (disc_erode && disc_footprint(height, p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m, fp)) {
+								for (size_t k = 0; k < fp.idx.size(); k++) {
+									lim = std::min(lim, room(fp.idx[k]) / (scale * fp.w[k]));
+								}
+							} else {
+								const int ci[4] = { i00, i10, i01, i11 };
+								const double cw[4] = { w00, w10, w01, w11 };
+								for (int k = 0; k < 4; k++) {
+									if (cw[k] > 0.0) {
+										lim = std::min(lim, room(ci[k]) / (scale * cw[k]));
+									}
+								}
+							}
+							erode_amt = std::min(erode_amt, lim);
+						} else if (disc_erode && disc_footprint(height, p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m, fp)) {
+							for (size_t k = 0; k < fp.idx.size(); k++) {
+								max_allowed += fp.w[k] * room(fp.idx[k]);
+							}
+							erode_amt = std::min(erode_amt, max_allowed);
+						} else {
+							double max_cut00 = std::max(0.0, (double)height[i00] - ((double)original_height[i00] - bedrock_gap));
+							double max_cut10 = std::max(0.0, (double)height[i10] - ((double)original_height[i10] - bedrock_gap));
+							double max_cut01 = std::max(0.0, (double)height[i01] - ((double)original_height[i01] - bedrock_gap));
+							double max_cut11 = std::max(0.0, (double)height[i11] - ((double)original_height[i11] - bedrock_gap));
+							max_allowed = w00 * max_cut00 + w10 * max_cut10 + w01 * max_cut01 + w11 * max_cut11;
+							erode_amt = std::min(erode_amt, max_allowed);
+						}
 					}
 
 					sed += erode_amt;
-					add_rounded(height[i00], -(erode_amt * w00));
-					add_rounded(height[i10], -(erode_amt * w10));
-					add_rounded(height[i01], -(erode_amt * w01));
-					add_rounded(height[i11], -(erode_amt * w11));
+					lay(-erode_amt, disc_erode, false);
 				}
 
 				speed = std::sqrt(std::max(0.0, speed * speed + delta_h * -gravity));

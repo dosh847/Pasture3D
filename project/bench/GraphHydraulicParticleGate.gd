@@ -27,6 +27,11 @@ func _ready() -> void:
 	_test_a4_mask_spawn_parity()
 	_test_r_route_parity()
 	_test_s_seed_lowering()
+	_test_a5_metric_and_radius_parity()
+	_test_f_cells_fingerprint()
+	_test_l_radius_smooths()
+	_test_u_resolution_invariance()
+	_test_n_metric_route()
 	_test_b_seed_determinism()
 	_test_c_nan_boundary_handling()
 	_test_d_channel_generation()
@@ -219,6 +224,168 @@ func _test_s_seed_lowering() -> void:
 		_fail += 1
 		print("    !! seed lowering failed")
 	_completed += 1
+
+
+## METRIC and the erosion radius both run the same on the oracle and in C++: the disc footprint, the step
+## in metres, the per-area droplet count and the exact bedrock floor.
+func _test_a5_metric_and_radius_parity() -> void:
+	print("\n[A5] METRIC and radius parity: C++ Native vs GDScript oracle, every channel")
+	var gw := 64
+	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
+	var surf := _make_test_surface(gw, gw)
+	var cases := {
+		"metric": {"units": 1, "droplet_density": 3.0, "step_length_m": 2.0, "max_lifetime": 30, "seed": 7},
+		"cells r6": {"droplet_count": 2000, "radius_m": 6.0, "seed": 7},
+		"metric r9": {"units": 1, "droplet_density": 3.0, "step_length_m": 2.0, "radius_m": 9.0, "seed": 7},
+	}
+	var names := ["height", "sediment", "flow", "water_depth"]
+	var ok := true
+	for label in cases:
+		var p: Dictionary = cases[label]
+		var gd: Array = DevHydraulicParticle.solve_oracle(surf, gw, gw, rect, p)
+		var cpp: Dictionary = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, p)
+		var worst := 0.0
+		for c in names.size():
+			worst = maxf(worst, _max_abs_diff(gd[c], cpp[names[c]]))
+		var cut := _max_abs_diff(surf, cpp["height"])
+		print("    %-9s max |cpp - gdscript| = %.9f   cut = %.4f m (want > 0.1)" % [label, worst, cut])
+		ok = ok and worst <= EPS_SINGLE_DROPLET and cut > 0.1
+	if not ok:
+		_fail += 1
+		print("    !! METRIC / radius parity failed")
+	_completed += 1
+
+
+## CELLS with radius 0 is the solver as it was before METRIC and the radius existed, bit for bit. The hash
+## was taken from the build before either change, on this fixture.
+const CELLS_R0_HEIGHT_HASH := 2608144882
+
+func _test_f_cells_fingerprint() -> void:
+	print("\n[F] CELLS, radius 0: unchanged since before METRIC/radius (height hash)")
+	var gw := 64
+	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
+	var surf := _make_test_surface(gw, gw)
+	var h0: int = hash(Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, {"droplet_count": 2000, "seed": 7})["height"])
+	# Control: the same run with a radius must NOT hash the same, or the hash is not looking at the cut.
+	var h1: int = hash(Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, {"droplet_count": 2000, "seed": 7, "radius_m": 6.0})["height"])
+	print("    radius 0 hash = %d (want %d) | radius 6 hash = %d (control, want different)" % [h0, CELLS_R0_HEIGHT_HASH, h1])
+	if h0 != CELLS_R0_HEIGHT_HASH or h1 == CELLS_R0_HEIGHT_HASH:
+		_fail += 1
+		print("    !! CELLS radius-0 output moved, or the control could not tell")
+	_completed += 1
+
+
+## The radius spreads each cut: the change field's roughness must drop well below the four-corner cut's.
+## Roughness is scale-free -- Laplacian energy over (total |change|)^2 -- because the radius also moves about
+## twice as much (fewer pits, so droplets live longer), and raw energy would count that against it.
+func _test_l_radius_smooths() -> void:
+	print("\n[L] Erosion radius smooths the cut (Laplacian energy of the change)")
+	var gw := 128
+	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
+	var surf := _make_test_surface(gw, gw)
+	var e := []
+	var amount := []
+	for r in [0.0, 6.0]:
+		var h: PackedFloat32Array = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect,
+				{"droplet_count": 8000, "seed": 7, "radius_m": r})["height"]
+		var lap := 0.0
+		var tot := 0.0
+		for z in range(1, gw - 1):
+			for x in range(1, gw - 1):
+				var i := z * gw + x
+				var d := func(j: int) -> float: return h[j] - surf[j]
+				var l: float = d.call(i - 1) + d.call(i + 1) + d.call(i - gw) + d.call(i + gw) - 4.0 * d.call(i)
+				lap += l * l
+				tot += absf(d.call(i))
+		e.append(lap)
+		amount.append(tot)
+	var rough0: float = e[0] / maxf(amount[0] * amount[0], 1e-12)
+	var rough1: float = e[1] / maxf(amount[1] * amount[1], 1e-12)
+	var ratio: float = rough1 / maxf(rough0, 1e-30)
+	print("    roughness r0 = %s  r6 = %s  ratio = %.3f (want < 0.4) | change r0 = %.1f r6 = %.1f (want both > 1)"
+		% [String.num_scientific(rough0), String.num_scientific(rough1), ratio, amount[0], amount[1]])
+	if ratio >= 0.4 or amount[0] <= 1.0 or amount[1] <= 1.0:
+		_fail += 1
+		print("    !! the radius did not smooth the cut, or nothing was cut")
+	_completed += 1
+
+
+## METRIC holds across resolutions: the change field, box-averaged to a common 64^2, must agree between 128^2
+## and 256^2 of the same world. CELLS at the same droplet density per area is the control and must not.
+func _test_u_resolution_invariance() -> void:
+	print("\n[U] Resolution invariance: 128^2 vs 256^2 of one 256 m world")
+	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
+	var modes := {
+		"metric": {"units": 1, "droplet_density": 30.0, "step_length_m": 4.0, "max_lifetime": 30, "seed": 7},
+		"cells": {"droplet_count": 80000, "seed": 7},
+	}
+	var rel := {}
+	for label in modes:
+		var change := []
+		for g in [128, 256]:
+			var p: Dictionary = modes[label].duplicate()
+			if label == "cells":
+				p["droplet_count"] = int(p["droplet_count"]) * (g / 128) * (g / 128)
+			var s := _world_mound(g, rect)
+			var h: PackedFloat32Array = Pasture3DUtil.hydraulic_particle_solve_grid(s, g, g, rect, p)["height"]
+			change.append(_boxed_mean_abs_change(s, h, g, 64))
+		rel[label] = absf(change[0] - change[1]) / maxf(change[0], 1e-9)
+		print("    %-6s mean |change| at 64^2: 128 -> %.4f m, 256 -> %.4f m, relative %.3f" % [label, change[0], change[1], rel[label]])
+	if rel["metric"] >= 0.07 or rel["cells"] < 0.07:
+		_fail += 1
+		print("    !! METRIC is not resolution-invariant, or the CELLS control could not tell")
+	_completed += 1
+
+
+## METRIC rides the program (units, radius and step in slots 13..15, density in the LUT): the node's native
+## route must equal its GDScript route. A density lost on the way would solve 40 per 100 m² instead of 12.
+func _test_n_metric_route() -> void:
+	print("\n[N] METRIC route parity: the node's native route == its GDScript route")
+	var node: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"hydraulic_particle")
+	node.set("units", 1)
+	node.set("droplet_density", 12.0)
+	node.set("step_length_m", 2.0)
+	node.set("radius_m", 5.0)
+	var g := _graph_with(node)
+	var gw := 64
+	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
+	var surf := _make_test_surface(gw, gw)
+	var native := g.native_supported()
+	var rn := g.evaluate(gw, gw, rect, null, surf)
+	g.force_gdscript_evaluation = true
+	var rg := g.evaluate(gw, gw, rect, null, surf)
+	var d := _max_abs_diff(rn, rg)
+	print("    native=%s  max |native - gdscript| = %.9f  cut = %.4f m (want > 0.1)" % [native, d, _max_abs_diff(rn, surf)])
+	if not native or d > EPS_SINGLE_DROPLET or _max_abs_diff(rn, surf) <= 0.1:
+		_fail += 1
+		print("    !! METRIC did not survive the lowering")
+	_completed += 1
+
+
+func _world_mound(p_g: int, p_rect: Rect2) -> PackedFloat32Array:
+	var s := PackedFloat32Array()
+	s.resize(p_g * p_g)
+	for z in p_g:
+		for x in p_g:
+			var wx: float = p_rect.size.x * (float(x) + 0.5) / float(p_g)
+			var wz: float = p_rect.size.y * (float(z) + 0.5) / float(p_g)
+			var r: float = Vector2(wx - 128.0, wz - 128.0).length() / 128.0
+			s[z * p_g + x] = maxf(0.0, 40.0 * (1.0 - r)) + 3.0 * sin(wx * 0.09) * cos(wz * 0.09)
+	return s
+
+
+func _boxed_mean_abs_change(p_before: PackedFloat32Array, p_after: PackedFloat32Array, p_g: int, p_to: int) -> float:
+	var k := p_g / p_to
+	var tot := 0.0
+	for bz in p_to:
+		for bx in p_to:
+			var acc := 0.0
+			for z in k:
+				for x in k:
+					var i := (bz * k + z) * p_g + bx * k + x
+					acc += p_after[i] - p_before[i]
+			tot += absf(acc / float(k * k))
+	return tot / float(p_to * p_to)
 
 
 func _graph_with(p_node: Pasture3DGraphNode) -> Pasture3DTerrainGraph:

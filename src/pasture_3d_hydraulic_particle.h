@@ -32,6 +32,14 @@ struct HydraulicParticleParams {
 	double bedrock_gap = 2.0;
 	double ridge_forcing = 0.0;
 	int64_t seed = 1337;
+	// CELLS: every length is a grid cell (the original solver). METRIC: world metres, resolution-invariant.
+	enum { UNITS_CELLS = 0, UNITS_METRIC = 1 };
+	int units = UNITS_CELLS;
+	// Erosion brush radius in metres (Beyer). 0 = the four bilinear corners. METRIC widens it to one step.
+	double radius_m = 0.0;
+	// METRIC only: the length of one droplet step, and droplets per 100 m^2 of the rect.
+	double step_length_m = 1.0;
+	double droplet_density = 40.0;
 	PackedFloat32Array mask;
 
 	static HydraulicParticleParams from_dict(const Dictionary &p_dict);
