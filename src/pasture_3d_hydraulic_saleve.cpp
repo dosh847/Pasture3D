@@ -196,6 +196,99 @@ Dictionary HydraulicSaleveResult::to_dict() const {
 
 namespace {
 
+// Where material settles on a surface: fill every depression (priority flood from the border and from NaN
+// cells of `p_valid`), then take the larger of the fill and its box blur, odd-reflected past the edges so a
+// plane blurs to itself. `r_target - surface` is the settling depth: zero on ridges and planes, positive in
+// pits, valleys and channels. `r_flat` is 1 on level ground and 0 at a gradient of 0.5, read off the blur
+// (or off the fill with `p_flat_from_fill`, the old reading kept as a gate control).
+// Stage 2 applies it to the Stage 1 surface, eroded_rock uses it to measure Stage 1's valleys, and the
+// sediment output reads it off the final surface.
+void saleve_settle(const std::vector<float> &p_surf, const float *p_valid, int p_gw, int p_gh, int p_ir,
+		double p_cell_dx, double p_cell_dz, bool p_flat_from_fill, std::vector<float> &r_target,
+		std::vector<float> &r_flat) {
+	const int n = p_gw * p_gh;
+	std::vector<float> filled = p_surf;
+	std::vector<uint8_t> done(n, 0);
+	typedef std::pair<float, int> Entry;
+	std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> pq;
+	for (int iz = 0; iz < p_gh; iz++) {
+		for (int ix = 0; ix < p_gw; ix++) {
+			const int i = iz * p_gw + ix;
+			if (!std::isfinite(p_valid[i]) || ix == 0 || iz == 0 || ix == p_gw - 1 || iz == p_gh - 1) {
+				done[i] = 1;
+				pq.push(Entry(filled[i], i));
+			}
+		}
+	}
+	while (!pq.empty()) {
+		const Entry e = pq.top();
+		pq.pop();
+		const int ix = e.second % p_gw, iz = e.second / p_gw;
+		for (int dz = -1; dz <= 1; dz++) {
+			for (int dxo = -1; dxo <= 1; dxo++) {
+				const int nx = ix + dxo, nz = iz + dz;
+				if ((dxo == 0 && dz == 0) || nx < 0 || nz < 0 || nx >= p_gw || nz >= p_gh) {
+					continue;
+				}
+				const int j = nz * p_gw + nx;
+				if (done[j]) {
+					continue;
+				}
+				done[j] = 1;
+				filled[j] = std::max(filled[j], e.first);
+				pq.push(Entry(filled[j], j));
+			}
+		}
+	}
+	const int ir = p_ir;
+	std::vector<float> tmp(n), blur(n);
+	const float inv = 1.0f / (float)(2 * ir + 1);
+	auto odd = [](const float *p_row, int p_stride, int p_len, int p_i) -> float {
+		if (p_i < 0) {
+			return 2.0f * p_row[0] - p_row[(-p_i) * p_stride];
+		}
+		if (p_i >= p_len) {
+			return 2.0f * p_row[(p_len - 1) * p_stride] - p_row[(2 * (p_len - 1) - p_i) * p_stride];
+		}
+		return p_row[p_i * p_stride];
+	};
+	for (int iz = 0; iz < p_gh; iz++) {
+		for (int ix = 0; ix < p_gw; ix++) {
+			float acc = 0.0f;
+			for (int k = -ir; k <= ir; k++) {
+				acc += odd(&filled[iz * p_gw], 1, p_gw, ix + k);
+			}
+			tmp[iz * p_gw + ix] = acc * inv;
+		}
+	}
+	for (int iz = 0; iz < p_gh; iz++) {
+		for (int ix = 0; ix < p_gw; ix++) {
+			float acc = 0.0f;
+			for (int k = -ir; k <= ir; k++) {
+				acc += odd(&tmp[ix], p_gw, p_gh, iz + k);
+			}
+			blur[iz * p_gw + ix] = acc * inv;
+		}
+	}
+	r_target.assign(n, 0.0f);
+	r_flat.assign(n, 0.0f);
+	// Flatness is read off the BLURRED surface, so it is near-uniform across a channel. Read off the fill,
+	// a floor weighted 1 beside walls weighted 0 was raised above its own banks: a ridge down the valley
+	// with a channel either side. With one weight across the section the fill keeps the valley's order.
+	const std::vector<float> &fs = p_flat_from_fill ? filled : blur;
+	for (int iz = 0; iz < p_gh; iz++) {
+		for (int ix = 0; ix < p_gw; ix++) {
+			const int i = iz * p_gw + ix;
+			const int xl = std::max(ix - 1, 0), xr = std::min(ix + 1, p_gw - 1);
+			const int zl = std::max(iz - 1, 0), zr = std::min(iz + 1, p_gh - 1);
+			const double gxs = (fs[iz * p_gw + xr] - fs[iz * p_gw + xl]) / (std::max(xr - xl, 1) * p_cell_dx);
+			const double gzs = (fs[zr * p_gw + ix] - fs[zl * p_gw + ix]) / (std::max(zr - zl, 1) * p_cell_dz);
+			r_flat[i] = (float)std::clamp(1.0 - std::sqrt(gxs * gxs + gzs * gzs) / 0.5, 0.0, 1.0);
+			r_target[i] = std::max(filled[i], blur[i]);
+		}
+	}
+}
+
 // The drainage graph Stage 1 runs on: vertices at world positions, neighbour lists with edge lengths in
 // reference-relief units, and a ground area per vertex in the same squared unit.
 struct SaleveGraph {
@@ -938,94 +1031,28 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 	// flats, ridges are untouched. The blur reflects oddly at the edges, so it reproduces a plane exactly and
 	// deposition is zero on one. target >= z always, so deposition only raises; it is weighted by flatness.
 	// ================================================================================================
+	// The channel scale shared by Stage 2 and both reported masks.
+	const double radius_m = p_params.deposition_radius > 0.0f ? (double)p_params.deposition_radius : 0.1 * min_side;
+	const double cell_m = std::max(std::min(cell_dx, cell_dz), 1.0e-4);
+	const int settle_ir = std::clamp((int)std::lround(radius_m / cell_m), 1, std::max(1, std::min(p_gw, p_gh) / 2 - 1));
+	const float *valid = src_height;
+	std::vector<float> target, flat;
+	// Stage 1's valleys, for eroded_rock: how far the reshaped surface sits below its own settling level,
+	// measured before Stage 2 fills them. Reshaping the relief as a whole reads zero, because a plane or a
+	// ridge settles to itself.
+	std::vector<float> valley1(n, 0.0f);
+	saleve_settle(hm, valid, p_gw, p_gh, settle_ir, cell_dx, cell_dz, p_params.flat_from_fill, target, flat);
+	for (int i = 0; i < n; i++) {
+		valley1[i] = std::max(0.0f, target[i] - hm[i]);
+	}
 	std::vector<float> dep(n, 0.0f);
 	if (p_params.deposition_strength > 0.0f) {
-		std::vector<float> filled = hm;
-		std::vector<uint8_t> done(n, 0);
-		typedef std::pair<float, int> Entry;
-		std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> pq;
-		for (int iz = 0; iz < p_gh; iz++) {
-			for (int ix = 0; ix < p_gw; ix++) {
-				const int i = iz * p_gw + ix;
-				if (!std::isfinite(src_height[i]) || ix == 0 || iz == 0 || ix == p_gw - 1 || iz == p_gh - 1) {
-					done[i] = 1;
-					pq.push(Entry(filled[i], i));
-				}
+		for (int i = 0; i < n; i++) {
+			if (!std::isfinite(src_height[i])) {
+				continue;
 			}
-		}
-		while (!pq.empty()) {
-			const Entry e = pq.top();
-			pq.pop();
-			const int ix = e.second % p_gw, iz = e.second / p_gw;
-			for (int dz = -1; dz <= 1; dz++) {
-				for (int dxo = -1; dxo <= 1; dxo++) {
-					const int nx = ix + dxo, nz = iz + dz;
-					if ((dxo == 0 && dz == 0) || nx < 0 || nz < 0 || nx >= p_gw || nz >= p_gh) {
-						continue;
-					}
-					const int j = nz * p_gw + nx;
-					if (done[j]) {
-						continue;
-					}
-					done[j] = 1;
-					filled[j] = std::max(filled[j], e.first);
-					pq.push(Entry(filled[j], j));
-				}
-			}
-		}
-		const double radius_m = p_params.deposition_radius > 0.0f ? (double)p_params.deposition_radius : 0.1 * min_side;
-		const double cell_m = std::max(std::min(cell_dx, cell_dz), 1.0e-4);
-		const int ir = std::clamp((int)std::lround(radius_m / cell_m), 1, std::max(1, std::min(p_gw, p_gh) / 2 - 1));
-		// Separable box blur of the fill with odd reflection past the edges (a[-k] = 2 a[0] - a[k]).
-		std::vector<float> tmp(n), blur(n);
-		const float inv = 1.0f / (float)(2 * ir + 1);
-		auto odd = [](const float *p_row, int p_stride, int p_len, int p_i) -> float {
-			if (p_i < 0) {
-				return 2.0f * p_row[0] - p_row[(-p_i) * p_stride];
-			}
-			if (p_i >= p_len) {
-				return 2.0f * p_row[(p_len - 1) * p_stride] - p_row[(2 * (p_len - 1) - p_i) * p_stride];
-			}
-			return p_row[p_i * p_stride];
-		};
-		for (int iz = 0; iz < p_gh; iz++) {
-			for (int ix = 0; ix < p_gw; ix++) {
-				float acc = 0.0f;
-				for (int k = -ir; k <= ir; k++) {
-					acc += odd(&filled[iz * p_gw], 1, p_gw, ix + k);
-				}
-				tmp[iz * p_gw + ix] = acc * inv;
-			}
-		}
-		for (int iz = 0; iz < p_gh; iz++) {
-			for (int ix = 0; ix < p_gw; ix++) {
-				float acc = 0.0f;
-				for (int k = -ir; k <= ir; k++) {
-					acc += odd(&tmp[ix], p_gw, p_gh, iz + k);
-				}
-				blur[iz * p_gw + ix] = acc * inv;
-			}
-		}
-		for (int iz = 0; iz < p_gh; iz++) {
-			for (int ix = 0; ix < p_gw; ix++) {
-				const int i = iz * p_gw + ix;
-				if (!std::isfinite(src_height[i])) {
-					continue;
-				}
-				const int xl = std::max(ix - 1, 0), xr = std::min(ix + 1, p_gw - 1);
-				const int zl = std::max(iz - 1, 0), zr = std::min(iz + 1, p_gh - 1);
-				// Flatness is read off the BLURRED surface, so it is near-uniform across a channel. Read off the
-				// fill, a floor weighted 1 beside walls weighted 0 was raised above its own banks: a ridge down
-				// the valley with a channel either side. With one weight across the section the fill keeps the
-				// valley's order. `flat_from_fill` is the old reading, kept as the gate control.
-				const std::vector<float> &fs = p_params.flat_from_fill ? filled : blur;
-				const double gxs = (fs[iz * p_gw + xr] - fs[iz * p_gw + xl]) / (std::max(xr - xl, 1) * cell_dx);
-				const double gzs = (fs[zr * p_gw + ix] - fs[zl * p_gw + ix]) / (std::max(zr - zl, 1) * cell_dz);
-				const float flat = (float)std::clamp(1.0 - std::sqrt(gxs * gxs + gzs * gzs) / 0.5, 0.0, 1.0);
-				const float target = std::max(filled[i], blur[i]);
-				dep[i] = p_params.deposition_strength * flat * (target - hm[i]);
-				hm[i] += dep[i];
-			}
+			dep[i] = p_params.deposition_strength * flat[i] * (target[i] - hm[i]);
+			hm[i] += dep[i];
 		}
 	}
 
@@ -1038,6 +1065,7 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 		res.deposition.resize(n);
 		std::memcpy(res.deposition.ptrw(), dep.data(), n * sizeof(float));
 	}
+	const std::vector<float> pre_stream = hm; // Stage 3's cut is reported exactly: pre minus post.
 	if (p_params.stream_strength > 0.0f) {
 		PackedFloat32Array surf;
 		surf.resize(n);
@@ -1060,6 +1088,7 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 		std::memcpy(res.post_stream.ptrw(), hm.data(), n * sizeof(float));
 	}
 
+	const std::vector<float> post_stream = hm;
 	// ================================================================================================
 	// Stage 4: Post-Processing
 	// ================================================================================================
@@ -1079,8 +1108,21 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 		hm = smoothed;
 	}
 
-	// Composite with the original heightfield. eroded_rock is the net lowering, sediment the Stage 2
-	// raise, both under the same composite weight.
+	// The reported masks describe the FINAL surface:
+	//   eroded_rock  the channel carving: Stage 1's valley depth plus Stage 3's cut. It used to be "input minus
+	//                output", which counted Stage 1's reshaping of the whole relief as erosion (~every cell).
+	//   sediment     where material settles on the final surface: its settling depth, scaled by
+	//                deposition_strength. NOT weighted by flatness: that is read at the settling scale, so it
+	//                zeroes a whole mountain flank, trenches included. Stage 2's own deposit was measured before Stage 3 cut the
+	//                trenches, so it did not lie in them.
+	// Both are metres under the composite weight, like the height.
+	std::vector<float> settle_depth(n, 0.0f);
+	if (p_params.deposition_strength > 0.0f) {
+		saleve_settle(hm, valid, p_gw, p_gh, settle_ir, cell_dx, cell_dz, p_params.flat_from_fill, target, flat);
+		for (int i = 0; i < n; i++) {
+			settle_depth[i] = p_params.deposition_strength * std::max(0.0f, target[i] - hm[i]);
+		}
+	}
 	res.height.resize(n);
 	res.eroded_rock.resize(n);
 	res.sediment.resize(n);
@@ -1098,10 +1140,9 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 			}
 			const float m_val = has_mask ? mask_ptr[i] : 1.0f;
 			const float w = p_params.erosion_strength * m_val;
-			const float res_h = (1.0f - w) * orig_h + w * hm[i];
-			h_out[i] = res_h;
-			r_out[i] = std::max(0.0f, orig_h - res_h);
-			s_out[i] = w * dep[i];
+			h_out[i] = (1.0f - w) * orig_h + w * hm[i];
+			r_out[i] = w * (valley1[i] + std::max(0.0f, pre_stream[i] - post_stream[i]));
+			s_out[i] = w * settle_depth[i];
 		}
 	});
 	res.ok = true;

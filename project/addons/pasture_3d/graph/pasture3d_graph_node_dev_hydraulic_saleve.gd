@@ -444,6 +444,77 @@ static func _odd(p_a: PackedFloat32Array, p_base: int, p_stride: int, p_len: int
 	return p_a[p_base + p_i * p_stride]
 
 
+## Where material settles on a surface (mirrors `saleve_settle`): the priority-flood fill, raised to its
+## odd-reflected blur. Returns [target, flat]; `target - surface` is the settling depth.
+static func _settle(p_surf: PackedFloat32Array, p_valid: PackedFloat32Array, p_gw: int, p_gh: int, p_ir: int,
+		p_cell_dx: float, p_cell_dz: float, p_flat_from_fill: bool) -> Array:
+	var n := p_gw * p_gh
+	var filled := p_surf.duplicate()
+	var done := PackedByteArray()
+	done.resize(n)
+	var hk: Array = []
+	var hv: Array = []
+	for iz in range(p_gh):
+		for ix in range(p_gw):
+			var i: int = iz * p_gw + ix
+			if not is_finite(p_valid[i]) or ix == 0 or iz == 0 or ix == p_gw - 1 or iz == p_gh - 1:
+				done[i] = 1
+				_heap_push(hk, hv, filled[i], i)
+	while not hk.is_empty():
+		var ev: float = hk[0]
+		var ei: int = hv[0]
+		_heap_pop(hk, hv)
+		var cx: int = ei % p_gw
+		var cz: int = ei / p_gw
+		for dz in range(-1, 2):
+			for dxo in range(-1, 2):
+				var nx: int = cx + dxo
+				var nz: int = cz + dz
+				if (dxo == 0 and dz == 0) or nx < 0 or nz < 0 or nx >= p_gw or nz >= p_gh:
+					continue
+				var j: int = nz * p_gw + nx
+				if done[j] != 0:
+					continue
+				done[j] = 1
+				filled[j] = maxf(filled[j], ev)
+				_heap_push(hk, hv, filled[j], j)
+	var ir := p_ir
+	var inv: float = 1.0 / float(2 * ir + 1)
+	var tmp := PackedFloat32Array()
+	tmp.resize(n)
+	var blur := PackedFloat32Array()
+	blur.resize(n)
+	for iz in range(p_gh):
+		for ix in range(p_gw):
+			var acc: float = 0.0
+			for k in range(-ir, ir + 1):
+				acc += _odd(filled, iz * p_gw, 1, p_gw, ix + k)
+			tmp[iz * p_gw + ix] = acc * inv
+	for iz in range(p_gh):
+		for ix in range(p_gw):
+			var acc: float = 0.0
+			for k in range(-ir, ir + 1):
+				acc += _odd(tmp, ix, p_gw, p_gh, iz + k)
+			blur[iz * p_gw + ix] = acc * inv
+	var target := PackedFloat32Array()
+	target.resize(n)
+	var flat := PackedFloat32Array()
+	flat.resize(n)
+	var fs: PackedFloat32Array = filled if p_flat_from_fill else blur
+	for iz in range(p_gh):
+		for ix in range(p_gw):
+			var i: int = iz * p_gw + ix
+			var xl: int = maxi(ix - 1, 0)
+			var xr: int = mini(ix + 1, p_gw - 1)
+			var zl: int = maxi(iz - 1, 0)
+			var zr: int = mini(iz + 1, p_gh - 1)
+			var gxs: float = (fs[iz * p_gw + xr] - fs[iz * p_gw + xl]) / (maxi(xr - xl, 1) * p_cell_dx)
+			var gzs: float = (fs[zr * p_gw + ix] - fs[zl * p_gw + ix]) / (maxi(zr - zl, 1) * p_cell_dz)
+			flat[i] = clampf(1.0 - sqrt(gxs * gxs + gzs * gzs) / 0.5, 0.0, 1.0)
+			target[i] = maxf(filled[i], blur[i])
+	return [target, flat]
+
+
 static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_params: Dictionary) -> Array:
 	var n: int = p_gw * p_gh
 	if p_surface.size() != n or p_gw < 2 or p_gh < 2:
@@ -943,76 +1014,28 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 				w = 1.0 - t * t * (3.0 - 2.0 * t)
 			hm[i] = hm[i] + w * (p_surface[i] - hm[i])
 
-	# ---- Stage 2: priority-flood fill, raised to its odd-reflected blur where concave ----
+	# ---- Stage 2: the settling fill applied to the Stage 1 surface ----
+	var radius_m: float = dep_radius if dep_radius > 0.0 else 0.1 * min_side
+	var cell_m: float = maxf(minf(cell_dx, cell_dz), 1.0e-4)
+	var settle_ir: int = clampi(int(round(radius_m / cell_m)), 1, maxi(1, mini(p_gw, p_gh) / 2 - 1))
+	var st: Array = _settle(hm, p_surface, p_gw, p_gh, settle_ir, cell_dx, cell_dz, flat_from_fill)
+	var target: PackedFloat32Array = st[0]
+	var flat: PackedFloat32Array = st[1]
+	# Stage 1's valleys, for eroded_rock, measured before Stage 2 fills them.
+	var valley1 := PackedFloat32Array()
+	valley1.resize(n)
+	for i in range(n):
+		valley1[i] = maxf(0.0, target[i] - hm[i])
 	var dep := PackedFloat32Array()
 	dep.resize(n)
 	if dep_strength > 0.0:
-		var filled := hm.duplicate()
-		var done := PackedByteArray()
-		done.resize(n)
-		var hk: Array = []
-		var hv: Array = []
-		for iz in range(p_gh):
-			for ix in range(p_gw):
-				var i: int = iz * p_gw + ix
-				if not is_finite(p_surface[i]) or ix == 0 or iz == 0 or ix == p_gw - 1 or iz == p_gh - 1:
-					done[i] = 1
-					_heap_push(hk, hv, filled[i], i)
-		while not hk.is_empty():
-			var ev: float = hk[0]
-			var ei: int = hv[0]
-			_heap_pop(hk, hv)
-			var cx: int = ei % p_gw
-			var cz: int = ei / p_gw
-			for dz in range(-1, 2):
-				for dxo in range(-1, 2):
-					var nx: int = cx + dxo
-					var nz: int = cz + dz
-					if (dxo == 0 and dz == 0) or nx < 0 or nz < 0 or nx >= p_gw or nz >= p_gh:
-						continue
-					var j: int = nz * p_gw + nx
-					if done[j] != 0:
-						continue
-					done[j] = 1
-					filled[j] = maxf(filled[j], ev)
-					_heap_push(hk, hv, filled[j], j)
-		var radius_m: float = dep_radius if dep_radius > 0.0 else 0.1 * min_side
-		var cell_m: float = maxf(minf(cell_dx, cell_dz), 1.0e-4)
-		var ir: int = clampi(int(round(radius_m / cell_m)), 1, maxi(1, mini(p_gw, p_gh) / 2 - 1))
-		var inv: float = 1.0 / float(2 * ir + 1)
-		var tmp := PackedFloat32Array()
-		tmp.resize(n)
-		var blur := PackedFloat32Array()
-		blur.resize(n)
-		for iz in range(p_gh):
-			for ix in range(p_gw):
-				var acc: float = 0.0
-				for k in range(-ir, ir + 1):
-					acc += _odd(filled, iz * p_gw, 1, p_gw, ix + k)
-				tmp[iz * p_gw + ix] = acc * inv
-		for iz in range(p_gh):
-			for ix in range(p_gw):
-				var acc: float = 0.0
-				for k in range(-ir, ir + 1):
-					acc += _odd(tmp, ix, p_gw, p_gh, iz + k)
-				blur[iz * p_gw + ix] = acc * inv
-		for iz in range(p_gh):
-			for ix in range(p_gw):
-				var i: int = iz * p_gw + ix
-				if not is_finite(p_surface[i]):
-					continue
-				var xl: int = maxi(ix - 1, 0)
-				var xr: int = mini(ix + 1, p_gw - 1)
-				var zl: int = maxi(iz - 1, 0)
-				var zr: int = mini(iz + 1, p_gh - 1)
-				var fs: PackedFloat32Array = filled if flat_from_fill else blur
-				var gxs: float = (fs[iz * p_gw + xr] - fs[iz * p_gw + xl]) / (maxi(xr - xl, 1) * cell_dx)
-				var gzs: float = (fs[zr * p_gw + ix] - fs[zl * p_gw + ix]) / (maxi(zr - zl, 1) * cell_dz)
-				var flat: float = clampf(1.0 - sqrt(gxs * gxs + gzs * gzs) / 0.5, 0.0, 1.0)
-				var target: float = maxf(filled[i], blur[i])
-				dep[i] = dep_strength * flat * (target - hm[i])
-				hm[i] += dep[i]
+		for i in range(n):
+			if not is_finite(p_surface[i]):
+				continue
+			dep[i] = dep_strength * flat[i] * (target[i] - hm[i])
+			hm[i] += dep[i]
 
+	var pre_stream := hm.duplicate()
 	# ---- Stage 3: the stream-log oracle on the metric grid ----
 	if str_strength > 0.0:
 		var sl: Array = load("res://addons/pasture_3d/graph/pasture3d_graph_node_dev_hydraulic_stream_log.gd").solve_oracle(
@@ -1022,6 +1045,8 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 			for i in range(n):
 				if is_finite(sh[i]):
 					hm[i] = sh[i]
+
+	var post_stream := hm.duplicate()
 
 	# ---- Stage 4 ----
 	if enable_post_smooth or bank_smoothing > 0.0:
@@ -1034,6 +1059,15 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 				smoothed[idx] = (1.0 - blend) * hm[idx] + blend * avg
 		hm = smoothed
 
+	# The reported masks describe the FINAL surface (see the native composite): eroded_rock is Stage 1's valley
+	# depth plus Stage 3's cut, sediment is the final surface's settling depth.
+	var settle_depth := PackedFloat32Array()
+	settle_depth.resize(n)
+	if dep_strength > 0.0:
+		var sf: Array = _settle(hm, p_surface, p_gw, p_gh, settle_ir, cell_dx, cell_dz, flat_from_fill)
+		var t2: PackedFloat32Array = sf[0]
+		for i in range(n):
+			settle_depth[i] = dep_strength * maxf(0.0, t2[i] - hm[i])
 	var final_height := PackedFloat32Array()
 	final_height.resize(n)
 	var eroded_rock := PackedFloat32Array()
@@ -1046,10 +1080,9 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 			final_height[i] = orig_h
 			continue
 		var w: float = erosion_strength * (mask[i] if has_mask else 1.0)
-		var res_h: float = (1.0 - w) * orig_h + w * hm[i]
-		final_height[i] = res_h
-		eroded_rock[i] = maxf(0.0, orig_h - res_h)
-		sediment[i] = w * dep[i]
+		final_height[i] = (1.0 - w) * orig_h + w * hm[i]
+		eroded_rock[i] = w * (valley1[i] + maxf(0.0, pre_stream[i] - post_stream[i]))
+		sediment[i] = w * settle_depth[i]
 	return [final_height, eroded_rock, sediment]
 
 

@@ -12,6 +12,9 @@
 #   E  the rim cap: Stage 1 does not raise the outermost ring above the input; control: lower_only off does
 #   F  beyond the rim band Stage 1 equals the free solve; control: the old whole-grid cap does not
 #   G  deposition fills a V-valley without a ridge down its floor; control: flatness read off the fill does
+#   H  the reported masks lie in the FINAL height's trenches: sediment and eroded_rock are each at least
+#      twice as deep in the trenches as elsewhere; controls: the old readings (Stage 2's deposit, and input
+#      minus output) are less concentrated, so the criterion tells the two definitions apart
 #
 # Asserts on the solver's own debug_stages grids, not on anything this gate computes for it.
 
@@ -20,7 +23,7 @@ extends Node
 const GW := 128
 const GH := 128
 const RECT := Rect2(0, 0, 256, 256)
-const EXPECTED := 7
+const EXPECTED := 8
 
 var _fail := 0
 var _done := 0
@@ -35,6 +38,7 @@ func _ready() -> void:
 	_e_lower_only()
 	_f_masks()
 	_g_no_ridge()
+	_h_masks_follow_trenches()
 	var ok := _fail == 0 and _done == EXPECTED
 	print("\n=== %s (%d failures, %d/%d criteria completed) ===" % [
 		"SALEVE DEPOSITION PASS" if ok else "SALEVE DEPOSITION FAIL", _fail, _done, EXPECTED])
@@ -252,6 +256,75 @@ func _max_raise(p_res: Dictionary, p_src: PackedFloat32Array) -> float:
 	for i in range(p_src.size()):
 		m = maxf(m, pre[i] - dep[i] - p_src[i])
 	return m
+
+
+func _h_masks_follow_trenches() -> void:
+	print("
+[H] sediment and eroded_rock lie in the final height's trenches")
+	var noise := FastNoiseLite.new()
+	noise.seed = 3
+	noise.frequency = 0.04
+	var src := PackedFloat32Array()
+	src.resize(GW * GH)
+	for iz in range(GH):
+		for ix in range(GW):
+			var u := (ix + 0.5) / GW - 0.5
+			var v := (iz + 0.5) / GH - 0.5
+			src[iz * GW + ix] = 120.0 * maxf(0.0, 1.0 - sqrt(u * u + v * v) / 0.5) + 8.0 * noise.get_noise_2d(ix, iz)
+	var res := _solve(src, {})
+	var h: PackedFloat32Array = res.height
+	# Trenches: the 10% of cells sitting furthest below their 7x7 neighbourhood mean on the FINAL height.
+	var conc := PackedFloat32Array()
+	conc.resize(GW * GH)
+	conc.fill(-INF)
+	var vals: Array = []
+	for iz in range(3, GH - 3):
+		for ix in range(3, GW - 3):
+			var acc := 0.0
+			for a in range(-3, 4):
+				for b in range(-3, 4):
+					acc += h[(iz + a) * GW + ix + b]
+			conc[iz * GW + ix] = acc / 49.0 - h[iz * GW + ix]
+			vals.append(conc[iz * GW + ix])
+	vals.sort()
+	var thr: float = vals[int(vals.size() * 0.9)]
+	var old_ero := PackedFloat32Array()
+	old_ero.resize(GW * GH)
+	for i in range(GW * GH):
+		old_ero[i] = maxf(0.0, src[i] - h[i])
+	var r_sed := _trench_ratio(res.sediment, conc, thr)
+	var r_dep := _trench_ratio(res.deposition, conc, thr)
+	var r_ero := _trench_ratio(res.eroded_rock, conc, thr)
+	var r_old := _trench_ratio(old_ero, conc, thr)
+	print("    trench/elsewhere: sediment %.2f (want >= 2), control Stage 2 deposit %.2f; eroded_rock %.2f (want >= 2), control input minus output %.2f"
+			% [r_sed, r_dep, r_ero, r_old])
+	if r_dep >= r_sed or r_old >= r_ero:
+		_fail += 1
+		print("    !! the old readings are as concentrated as the new, so the criterion cannot tell them apart")
+		return
+	if r_sed < 2.0 or r_ero < 2.0:
+		_fail += 1
+		print("    !! a reported mask does not follow the final height's trenches")
+		return
+	_done += 1
+
+
+## Mean of `p_f` over trench cells (concavity >= p_thr) divided by its mean over the other interior cells.
+func _trench_ratio(p_f: PackedFloat32Array, p_conc: PackedFloat32Array, p_thr: float) -> float:
+	var a := 0.0
+	var na := 0
+	var b := 0.0
+	var nb := 0
+	for i in range(p_f.size()):
+		if p_conc[i] == -INF:
+			continue
+		if p_conc[i] >= p_thr:
+			a += p_f[i]
+			na += 1
+		else:
+			b += p_f[i]
+			nb += 1
+	return (a / maxi(na, 1)) / maxf(b / maxi(nb, 1), 1.0e-9)
 
 
 # ---- helpers ------------------------------------------------------------------------------------
