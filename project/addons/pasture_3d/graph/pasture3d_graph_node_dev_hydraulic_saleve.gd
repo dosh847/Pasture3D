@@ -137,6 +137,17 @@ enum Reconstruction { LINEAR, GRADIENT }
 		stream_exp = clampf(v, 0.01, 1.0)
 		_param_changed()
 
+@export_group("Output Masks")
+@export_range(0.0, 100.0, 0.1, "or_greater", "suffix:m") var eroded_mask_depth: float = 0.0:
+	set(v):
+		eroded_mask_depth = maxf(v, 0.0)
+		_param_changed()
+
+@export_range(0.0, 20.0, 0.05, "or_greater", "suffix:m") var sediment_mask_depth: float = 0.0:
+	set(v):
+		sediment_mask_depth = maxf(v, 0.0)
+		_param_changed()
+
 @export_group("Post-Processing (Stage 4)")
 @export var enable_post_smoothing: bool = false:
 	set(v):
@@ -255,14 +266,19 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 		"tolerance": tolerance,
 		"max_slope_center": max_slope_center,
 		"max_slope_border": max_slope_center if uniform_slope else max_slope_border,
+		"eroded_mask_depth": eroded_mask_depth,
+		"sediment_mask_depth": sediment_mask_depth,
 	}
 
 	# This node offered FROZEN, a Bake button and a stale flag over a cache that was never written:
 	# the solve ran on every evaluation whatever the setting said, and `_param_changed` set `_stale`
 	# on a freeze that did not exist. The freeze was UI. It is now the same one every other solver
 	# uses.
-	return solve_cached(solver_cache_key(p_gw, p_gh, [surface, dx_in, dy_in, mask_in]),
+	var r: Array = solve_cached(solver_cache_key(p_gw, p_gh, [surface, dx_in, dy_in, mask_in]),
 			func(): return solve_gd(surface, p_gw, p_gh, p_rect, p))
+	if r.size() < 5:
+		return r
+	return [r[0], r[3], r[4]]
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -447,6 +463,7 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 	var slope_center: float = maxf(0.0, float(p_params.get("max_slope_center", 6.0)))
 	var slope_border: float = maxf(0.0, float(p_params.get("max_slope_border", 0.0)))
 	var reroute: bool = bool(p_params.get("reroute_lakes", true))
+	var lower_only: bool = bool(p_params.get("lower_only", true))
 	var stable_noise: bool = bool(p_params.get("stable_noise", true))
 	var erosion_strength: float = clampf(float(p_params.get("erosion_strength", 0.7)), 0.0, 1.0)
 	var m_exp: float = clampf(float(p_params.get("drainage_exponent", 0.15)), 0.01, 0.8)
@@ -907,6 +924,8 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 	hm.resize(n)
 	for i in range(n):
 		hm[i] = zmin + zg[i] * relief_ref
+		if lower_only and is_finite(p_surface[i]):
+			hm[i] = minf(hm[i], p_surface[i])
 
 	# ---- Stage 2: priority-flood fill, raised to its odd-reflected blur where concave ----
 	var dep := PackedFloat32Array()
@@ -1014,7 +1033,19 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 		final_height[i] = res_h
 		eroded_rock[i] = maxf(0.0, orig_h - res_h)
 		sediment[i] = w * dep[i]
-	return [final_height, eroded_rock, sediment]
+	# The node's ports carry these as 0..1 masks (mirrors the native eroded_mask / sediment_mask).
+	var e_depth: float = maxf(float(p_params.get("eroded_mask_depth", 0.0)), 0.0)
+	var s_depth: float = maxf(float(p_params.get("sediment_mask_depth", 0.0)), 0.0)
+	e_depth = maxf(e_depth if e_depth > 0.0 else 0.1 * relief_ref, 1.0e-4)
+	s_depth = maxf(s_depth if s_depth > 0.0 else 0.01 * relief_ref, 1.0e-4)
+	var e_mask := PackedFloat32Array()
+	e_mask.resize(n)
+	var s_mask := PackedFloat32Array()
+	s_mask.resize(n)
+	for i in range(n):
+		e_mask[i] = clampf(eroded_rock[i] / e_depth, 0.0, 1.0)
+		s_mask[i] = clampf(sediment[i] / s_depth, 0.0, 1.0)
+	return [final_height, eroded_rock, sediment, e_mask, s_mask]
 
 
 func _param_changed() -> void:

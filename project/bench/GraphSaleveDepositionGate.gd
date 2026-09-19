@@ -9,6 +9,8 @@
 #      leaving it; control: the same call at another incision rate does not
 #   C  stream_strength 0 skips Stage 3 (pre == post); control: the default does not
 #   D  mass balance, reported: eroded vs deposited volume
+#   E  Stage 1 never raises the ground (a mound in a flat margin); control: lower_only off does, by metres
+#   F  the mask ports are the metre outputs over their depths, in 0..1; control: the metres exceed 1
 #
 # Asserts on the solver's own debug_stages grids, not on anything this gate computes for it.
 
@@ -17,7 +19,7 @@ extends Node
 const GW := 128
 const GH := 128
 const RECT := Rect2(0, 0, 256, 256)
-const EXPECTED := 4
+const EXPECTED := 6
 
 var _fail := 0
 var _done := 0
@@ -29,6 +31,8 @@ func _ready() -> void:
 	_b_stream_log()
 	_c_skip()
 	_d_mass()
+	_e_lower_only()
+	_f_masks()
 	var ok := _fail == 0 and _done == EXPECTED
 	print("\n=== %s (%d failures, %d/%d criteria completed) ===" % [
 		"SALEVE DEPOSITION PASS" if ok else "SALEVE DEPOSITION FAIL", _fail, _done, EXPECTED])
@@ -112,6 +116,66 @@ func _d_mass() -> void:
 		print("    !! nothing eroded")
 		return
 	_done += 1
+
+
+func _e_lower_only() -> void:
+	print("
+[E] Stage 1 never raises the ground")
+	var src := _field(func(u: float, v: float) -> float:
+		return 120.0 * maxf(0.0, 1.0 - (u * u + v * v) / 0.12) + 4.0 * u)
+	var on := _solve(src, {})
+	var off := _solve(src, {"lower_only": false})
+	var r_on := _max_raise(on, src)
+	var r_off := _max_raise(off, src)
+	print("    Stage 1 result above the input: lower_only %.6f m (want < 0.0001); control off %.3f m (want > 1)" % [r_on, r_off])
+	if r_off <= 1.0:
+		_fail += 1
+		print("    !! the free steady state raised nothing, so the clamp is unobservable")
+		return
+	if r_on > 1.0e-4: # float residue of pre - deposition - input
+		_fail += 1
+		print("    !! Stage 1 raised the ground")
+		return
+	_done += 1
+
+
+func _f_masks() -> void:
+	print("
+[F] mask ports are the metre outputs over their depths")
+	var res := _solve(_crater(), {"eroded_mask_depth": 4.0, "sediment_mask_depth": 0.2})
+	var e: PackedFloat32Array = res.eroded_rock
+	var sd: PackedFloat32Array = res.sediment
+	var em: PackedFloat32Array = res.eroded_mask
+	var sm: PackedFloat32Array = res.sediment_mask
+	var worst := 0.0
+	var lo := INF
+	var hi := -INF
+	for i in range(e.size()):
+		worst = maxf(worst, absf(em[i] - clampf(e[i] / 4.0, 0.0, 1.0)))
+		worst = maxf(worst, absf(sm[i] - clampf(sd[i] / 0.2, 0.0, 1.0)))
+		lo = minf(lo, minf(em[i], sm[i]))
+		hi = maxf(hi, maxf(em[i], sm[i]))
+	print("    mask vs metres/depth %.7f (want < 1e-6); mask range [%.3f, %.3f] (want within [0, 1]); control metre max %.2f m (want > 1)"
+			% [worst, lo, hi, _max(e)])
+	if _max(e) <= 1.0:
+		_fail += 1
+		print("    !! the metre output never exceeds 1, so it cannot tell a mask from metres")
+		return
+	if worst >= 1.0e-6 or lo < 0.0 or hi > 1.0:
+		_fail += 1
+		print("    !! the mask ports are not the normalised outputs")
+		return
+	_done += 1
+
+
+# Stage 1's grid in metres, before Stage 2 raised it: pre_stream minus the deposition.
+func _max_raise(p_res: Dictionary, p_src: PackedFloat32Array) -> float:
+	var pre: PackedFloat32Array = p_res.pre_stream
+	var dep: PackedFloat32Array = p_res.deposition
+	var m := 0.0
+	for i in range(p_src.size()):
+		m = maxf(m, pre[i] - dep[i] - p_src[i])
+	return m
 
 
 # ---- helpers ------------------------------------------------------------------------------------

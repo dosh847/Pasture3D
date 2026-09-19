@@ -76,6 +76,15 @@ HydraulicSaleveParams HydraulicSaleveParams::from_dict(const Dictionary &p_dict)
 	if (p_dict.has("max_slope_border")) {
 		p.max_slope_border = std::max(0.0f, (float)p_dict["max_slope_border"]);
 	}
+	if (p_dict.has("eroded_mask_depth")) {
+		p.eroded_mask_depth = std::max(0.0f, (float)p_dict["eroded_mask_depth"]);
+	}
+	if (p_dict.has("sediment_mask_depth")) {
+		p.sediment_mask_depth = std::max(0.0f, (float)p_dict["sediment_mask_depth"]);
+	}
+	if (p_dict.has("lower_only")) {
+		p.lower_only = (bool)p_dict["lower_only"];
+	}
 	if (p_dict.has("reroute_lakes")) {
 		p.reroute_lakes = (bool)p_dict["reroute_lakes"];
 	}
@@ -160,6 +169,8 @@ Dictionary HydraulicSaleveResult::to_dict() const {
 	d["height"] = height;
 	d["eroded_rock"] = eroded_rock;
 	d["sediment"] = sediment;
+	d["eroded_mask"] = eroded_mask;
+	d["sediment_mask"] = sediment_mask;
 	d["iterations"] = iterations;
 	d["cell_area"] = cell_area;
 	d["vertex_count"] = vertex_count;
@@ -486,6 +497,8 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 		res.eroded_rock.fill(0.0f);
 		res.sediment.resize(n);
 		res.sediment.fill(0.0f);
+		res.eroded_mask = res.eroded_rock;
+		res.sediment_mask = res.sediment;
 		return res;
 	}
 
@@ -883,6 +896,8 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 		res.eroded_rock.fill(0.0f);
 		res.sediment.resize(n);
 		res.sediment.fill(0.0f);
+		res.eroded_mask = res.eroded_rock;
+		res.sediment_mask = res.sediment;
 		for (int i = 0; i < n; i++) {
 			res.height.set(i, std::isfinite(src_height[i]) ? zmin + zg[i] * zptp : src_height[i]);
 		}
@@ -894,6 +909,9 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 	std::vector<float> hm(n);
 	for (int i = 0; i < n; i++) {
 		hm[i] = zmin + zg[i] * relief_ref;
+		if (p_params.lower_only && std::isfinite(src_height[i])) {
+			hm[i] = std::min(hm[i], src_height[i]);
+		}
 	}
 
 	// ================================================================================================
@@ -1063,6 +1081,14 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 			s_out[i] = w * dep[i];
 		}
 	});
+	const float e_depth = std::max(p_params.eroded_mask_depth > 0.0f ? p_params.eroded_mask_depth : 0.1f * relief_ref, 1.0e-4f);
+	const float s_depth = std::max(p_params.sediment_mask_depth > 0.0f ? p_params.sediment_mask_depth : 0.01f * relief_ref, 1.0e-4f);
+	res.eroded_mask.resize(n);
+	res.sediment_mask.resize(n);
+	for (int i = 0; i < n; i++) {
+		res.eroded_mask.set(i, std::clamp(r_out[i] / e_depth, 0.0f, 1.0f));
+		res.sediment_mask.set(i, std::clamp(s_out[i] / s_depth, 0.0f, 1.0f));
+	}
 	res.ok = true;
 	return res;
 }

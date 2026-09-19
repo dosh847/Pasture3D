@@ -16,8 +16,8 @@
 #
 # ---- Outputs ----
 #   port 0  "height"       HEIGHT  eroded surface elevation (metres)
-#   port 1  "eroded_rock"  MASK    net lowering, in metres
-#   port 2  "sediment"     MASK    Stage 2 deposition, in metres
+#   port 1  "eroded_rock"  MASK    net lowering over Eroded Mask Depth, 0..1
+#   port 2  "sediment"     MASK    Stage 2 deposition over Sediment Mask Depth, 0..1
 @tool
 class_name Pasture3DGraphNodeHydraulicSaleve
 extends Pasture3DGraphSolverNode
@@ -174,6 +174,19 @@ enum Reconstruction { LINEAR, GRADIENT }
 		stream_exp = clampf(v, 0.01, 1.0)
 		_param_changed()
 
+@export_group("Output Masks")
+## Lowering, in metres, at which the eroded_rock mask reads 1. 0 = 10% of the reference relief.
+@export_range(0.0, 100.0, 0.1, "or_greater", "suffix:m") var eroded_mask_depth: float = 0.0:
+	set(v):
+		eroded_mask_depth = maxf(v, 0.0)
+		_param_changed()
+
+## Deposition, in metres, at which the sediment mask reads 1. 0 = 1% of the reference relief.
+@export_range(0.0, 20.0, 0.05, "or_greater", "suffix:m") var sediment_mask_depth: float = 0.0:
+	set(v):
+		sediment_mask_depth = maxf(v, 0.0)
+		_param_changed()
+
 @export_group("Post-Processing")
 ## Channel bank smoothing, 0..0.5: a 4-neighbour blend at 0.4x this rate, once. Ignored when Post
 ## Smoothing is on.
@@ -226,7 +239,7 @@ func native_lower() -> Dictionary:
 	p[15] = reference_relief
 	# The 16 slots are full; the S2 settings ride the LUT (read by the native op in this order).
 	var ext := PackedFloat32Array([float(control_points), point_spacing, float(reconstruction),
-			1.0 if default_warp else 0.0, warp_amount, warp_size])
+			1.0 if default_warp else 0.0, warp_amount, warp_size, eroded_mask_depth, sediment_mask_depth])
 	return {"params": p, "lut": ext}
 
 
@@ -355,6 +368,8 @@ func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect:
 		"tolerance": tolerance,
 		"max_slope_center": max_slope_center,
 		"max_slope_border": max_slope_center if uniform_slope else max_slope_border,
+		"eroded_mask_depth": eroded_mask_depth,
+		"sediment_mask_depth": sediment_mask_depth,
 	}
 
 	if not ClassDB.class_has_method("Pasture3DUtil", "hydraulic_saleve_solve_grid"):
@@ -368,6 +383,6 @@ func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect:
 
 	return [
 		res["height"] as PackedFloat32Array,
-		res["eroded_rock"] as PackedFloat32Array,
-		res["sediment"] as PackedFloat32Array,
+		res["eroded_mask"] as PackedFloat32Array,
+		res["sediment_mask"] as PackedFloat32Array,
 	]

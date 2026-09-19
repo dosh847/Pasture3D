@@ -309,6 +309,24 @@ calling itself, assert against the solver called independently); sediment + erod
 - **Renders were not made.** They need the demo scenes opened in the editor, and those scenes currently
   carry unrelated uncommitted work.
 
+### Post-review fixes (2026-09-18)
+
+- **The margin step.** This was Stage 1, not the new stages. The free steady state sets
+  `z = z[root] + t` whatever the input height was, so a flat margin became a ramp rising from the border
+  outlets: up to 7 m within 8 cells of the edge, with Stages 2 and 3 on or off. `lower_only` (default on,
+  dictionary-only control) clamps the remapped steady state to the input, in metres, before Stage 2.
+  Interior erosion is unchanged (44.85 m peak). Next to the border, change on flat ground fell from
+  7.0 m to 1.7 m in the 3–8 cell band. The margin probe's worst drift fell to 18.4 / 16.1 m (auto /
+  pinned). Clamping inside the Stage 1 loop was tried first and rejected: it collapsed interior erosion
+  to 3–6 m.
+- **Mask ports carried metres.** `eroded_rock` and `sediment` are MASK ports, but they carried metres,
+  so a colour blend saturated or read black. The solver now returns `eroded_mask` and `sediment_mask`,
+  each clamped to 0..1 over a metre depth (`eroded_mask_depth`, `sediment_mask_depth`; 0 = 10% and 1% of
+  the reference relief). The ports, the native op (LUT [6], [7]) and the dev node all carry the masks.
+  The metre fields stay in the solver's dictionary.
+- Gates: `GraphSaleveDepositionGate` gains E (Stage 1 never raises; control off raises 29.5 m) and F (the
+  masks equal metres over depth; control metres reach 19.1).
+
 ## Out of scope
 
 - Hesiod's `strata_cells`, `strata_plates` and `strata_terrace` variants (candidates for later nodes).

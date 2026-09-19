@@ -1674,6 +1674,12 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 					p.warp_amount = std::max(0.0f, ext[4]);
 					p.warp_size = std::max(0.0f, ext[5]);
 				}
+				// ... then the output-mask depths, [6] eroded and [7] sediment (metres, 0 = auto).
+				if ((size_t)s < p_prog.luts.size() && p_prog.luts[(size_t)s].size() >= 8) {
+					const PackedFloat32Array &ext = p_prog.luts[(size_t)s];
+					p.eroded_mask_depth = std::max(0.0f, ext[6]);
+					p.sediment_mask_depth = std::max(0.0f, ext[7]);
+				}
 				if (in1 && in1[s] >= 0) {
 					p.dx = get_grid_packed(in1[s], c_in1);
 				}
@@ -1686,8 +1692,8 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				HydraulicSaleveResult res = hydraulic_saleve_solve(in_arr, p_gw, p_gh, p_rect, p);
 				if (res.ok && res.height.size() == n) {
 					std::copy_n(res.height.ptr(), n, g_ptr);
-					copy_aux(1, res.eroded_rock);
-					copy_aux(2, res.sediment);
+					copy_aux(1, res.eroded_mask);
+					copy_aux(2, res.sediment_mask);
 				}
 			} break;
 
