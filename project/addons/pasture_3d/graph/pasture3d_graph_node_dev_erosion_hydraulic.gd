@@ -78,6 +78,15 @@ extends Pasture3DGraphSolverNode
 		_param_changed()
 
 
+## Lay whatever sediment is still suspended when the last pass ends onto the ground, instead of deleting
+## it, so the solve moves no material off the terrain. Off by default: the original solver dropped it, and
+## settling raises channel floors and the basins where water pooled.
+@export var settle_at_end: bool = false:
+	set(v):
+		settle_at_end = v
+		_param_changed()
+
+
 @export_group("Evaluation")
 
 @export_tool_button("Bake Hydraulic Erosion") var _bake_btn = clear_cache
@@ -117,15 +126,15 @@ func input_port_types() -> PackedInt32Array:
 
 
 func output_count() -> int:
-	return 3
+	return 4
 
 
 func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "sediment", "flow"])
+	return PackedStringArray(["height", "eroded", "deposited", "flow"])
 
 
 func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.MASK])
+	return PackedInt32Array([PortType.HEIGHT, PortType.FIELD, PortType.FIELD, PortType.FIELD])
 
 
 func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> Array:
@@ -169,6 +178,7 @@ func _solve_gdscript(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 		"outlet_level": outlet_level,
 		"model": model,
 		"time_step": time_step,
+		"settle_at_end": settle_at_end,
 	}
 	return solve_oracle(p_surface, p_gw, p_gh, p_rect, params)
 
@@ -302,29 +312,45 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 		sediment = next_sediment
 		height = next_height
 
-	return _normalise(height, sediment, flow_accum)
+	return _finish(p_surface, height, sediment, flow_accum, p_gw, p_gh, p_rect, p_params)
 
 
-static func _normalise(height: PackedFloat32Array, sediment: PackedFloat32Array, flow_accum: PackedFloat32Array) -> Array:
+## The twin of erosion_hydraulic_finish in pasture_3d_erosion_hydraulic.cpp: settle the suspended load if
+## asked, take the net change against the input, and scale the flow accumulator into its physical unit.
+static func _finish(p_input: PackedFloat32Array, height: PackedFloat32Array, sediment: PackedFloat32Array,
+		flow_accum: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_params: Dictionary) -> Array:
 	var n := height.size()
-	var max_flow: float = 1e-6
-	var max_sed: float = 1e-6
-	for i in range(n):
-		if is_finite(height[i]):
-			max_flow = maxf(max_flow, flow_accum[i])
-			max_sed = maxf(max_sed, sediment[i])
+	if bool(p_params.get("settle_at_end", false)):
+		for i in range(n):
+			if is_finite(height[i]):
+				height[i] = height[i] + sediment[i]
 
-	var norm_sediment := PackedFloat32Array(); norm_sediment.resize(n)
-	var norm_flow := PackedFloat32Array(); norm_flow.resize(n)
+	var cell_dx: float = p_rect.size.x / float(maxi(p_gw, 1))
+	var cell_dz: float = p_rect.size.y / float(maxi(p_gh, 1))
+	var iters: int = maxi(int(p_params.get("iterations", 25)), 1)
+	var rain: float = maxf(float(p_params.get("rain_rate", 0.05)), 0.0)
+	var flow_scale: float = 1.0
+	if clampi(int(p_params.get("model", 0)), 0, 1) == 1:
+		var total_time: float = maxf(1e-9, float(iters) * maxf(float(p_params.get("time_step", 0.5)), 1e-3))
+		flow_scale = sqrt(cell_dx * cell_dz) / total_time
+	elif rain > 0.0:
+		flow_scale = cell_dx * cell_dz / (rain * float(iters))
+
+	var eroded := PackedFloat32Array(); eroded.resize(n)
+	var deposited := PackedFloat32Array(); deposited.resize(n)
+	var flow := PackedFloat32Array(); flow.resize(n)
 	for i in range(n):
-		if is_finite(height[i]):
-			norm_sediment[i] = clampf(sediment[i] / max_sed, 0.0, 1.0)
-			norm_flow[i] = clampf(flow_accum[i] / max_flow, 0.0, 1.0)
+		var change: float = height[i] - p_input[i]
+		if is_finite(change):
+			eroded[i] = maxf(0.0, -change)
+			deposited[i] = maxf(0.0, change)
+			flow[i] = flow_accum[i] * flow_scale
 		else:
-			norm_sediment[i] = 0.0
-			norm_flow[i] = 0.0
+			eroded[i] = 0.0
+			deposited[i] = 0.0
+			flow[i] = 0.0
 
-	return [height, norm_sediment, norm_flow]
+	return [height, eroded, deposited, flow]
 
 
 
@@ -508,4 +534,4 @@ static func _pipe_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 			if is_finite(height[i]):
 				water[i] = water[i] * (1.0 - p_evap)
 
-	return _normalise(height, sediment, flow)
+	return _finish(p_surface, height, sediment, flow, p_gw, p_gh, p_rect, p_params)

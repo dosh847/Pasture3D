@@ -306,7 +306,12 @@ func _j_hydraulic_matches_the_cpu() -> void:
 	# cell, so the amount lost depended on raster order and the GPU's gather could never reproduce it. Both
 	# reference paths now += the delta instead, which is what the GPU always did. This comparison is the
 	# thing that proves that fix: it fails on the assignment and passes on the accumulation.
-	for ch in ["height", "flow", "sediment"]:
+	#
+	# The suspended-load `sediment` channel is gone: the solver now reports `eroded` and `deposited`, net
+	# metres against the input, and the GPU derives them from its readback through the same
+	# erosion_hydraulic_finish the CPU uses. Divergence in the routing still lands here, because the net
+	# change is exactly what a mis-shared sediment pool would move.
+	for ch in ["height", "flow", "eroded", "deposited"]:
 		var d := _maxdiff(gpu.get(ch, PackedFloat32Array()), cpu.get(ch, PackedFloat32Array()))
 		print("    %-9s GPU vs CPU = %.7f (want < %.6f)" % [ch, d, HYD_TOL])
 		if d > HYD_TOL:

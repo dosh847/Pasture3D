@@ -63,11 +63,11 @@ func _test_a_native_parity() -> void:
 	var cpp_res1: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid(surf, gw, gh, rect, p1)
 
 	var diff_h1 := _max_abs_diff(gd_res1[0], cpp_res1["height"])
-	var diff_s1 := _max_abs_diff(gd_res1[1], cpp_res1["sediment"])
-	var diff_f1 := _max_abs_diff(gd_res1[2], cpp_res1["flow"])
+	var diff_s1 := maxf(_max_abs_diff(gd_res1[1], cpp_res1["eroded"]), _max_abs_diff(gd_res1[2], cpp_res1["deposited"]))
+	var diff_f1 := _max_abs_diff(gd_res1[3], cpp_res1["flow"])
 
 	print("    [1 pass] Height   max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_h1, EPS_SINGLE_PASS])
-	print("    [1 pass] Sediment max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_s1, EPS_SINGLE_PASS])
+	print("    [1 pass] Erosion  max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_s1, EPS_SINGLE_PASS])
 	print("    [1 pass] Flow     max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_f1, EPS_SINGLE_PASS])
 
 	if diff_h1 > EPS_SINGLE_PASS or diff_s1 > EPS_SINGLE_PASS or diff_f1 > EPS_SINGLE_PASS:
@@ -89,11 +89,11 @@ func _test_a_native_parity() -> void:
 	var cpp_res15: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid(surf, gw, gh, rect, p15)
 
 	var diff_h15 := _max_abs_diff(gd_res15[0], cpp_res15["height"])
-	var diff_s15 := _max_abs_diff(gd_res15[1], cpp_res15["sediment"])
-	var diff_f15 := _max_abs_diff(gd_res15[2], cpp_res15["flow"])
+	var diff_s15 := maxf(_max_abs_diff(gd_res15[1], cpp_res15["eroded"]), _max_abs_diff(gd_res15[2], cpp_res15["deposited"]))
+	var diff_f15 := _max_abs_diff(gd_res15[3], cpp_res15["flow"])
 
 	print("    [15 pass] Height   max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_h15, EPS_MULTI_PASS])
-	print("    [15 pass] Sediment max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_s15, EPS_MULTI_PASS])
+	print("    [15 pass] Erosion  max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_s15, EPS_MULTI_PASS])
 	print("    [15 pass] Flow     max |cpp - gdscript| = %.9f (want <= %.7f)" % [diff_f15, EPS_MULTI_PASS])
 
 	if diff_h15 > EPS_MULTI_PASS or diff_s15 > EPS_MULTI_PASS or diff_f15 > EPS_MULTI_PASS:
@@ -113,7 +113,7 @@ func _test_a_native_parity() -> void:
 	# Control checks: surface must have changed and channels must have values
 	var eroded_cut := _max_abs_diff(surf, cpp_res15["height"])
 	var max_flow := _max_val(cpp_res15["flow"])
-	var max_sed := _max_val(cpp_res15["sediment"])
+	var max_sed := _max_val(cpp_res15["deposited"])
 	print("    control: max height cut = %.4f m, max flow = %.4f, max sed = %.4f" % [eroded_cut, max_flow, max_sed])
 	if eroded_cut < 0.01 or max_flow < 0.01:
 		_fail += 1
@@ -176,11 +176,11 @@ func _test_c_gpu_parity() -> void:
 
 	var cpp_res: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid(surf, gw, gh, rect, params)
 	var diff_h := _max_abs_diff(cpp_res["height"], gpu_res["height"])
-	var diff_s := _max_abs_diff(cpp_res["sediment"], gpu_res["sediment"])
+	var diff_s := maxf(_max_abs_diff(cpp_res["eroded"], gpu_res["eroded"]), _max_abs_diff(cpp_res["deposited"], gpu_res["deposited"]))
 	var diff_f := _max_abs_diff(cpp_res["flow"], gpu_res["flow"])
 
 	print("    GPU vs C++ Height   max diff: %.6f (want < %.4f)" % [diff_h, GPU_TOL])
-	print("    GPU vs C++ Sediment max diff: %.6f (want < %.4f)" % [diff_s, GPU_TOL])
+	print("    GPU vs C++ Erosion  max diff: %.6f (want < %.4f)" % [diff_s, GPU_TOL])
 	print("    GPU vs C++ Flow     max diff: %.6f (want < %.4f)" % [diff_f, GPU_TOL])
 
 	if diff_h > GPU_TOL or diff_s > GPU_TOL or diff_f > GPU_TOL:

@@ -38,8 +38,8 @@ layout(push_constant, std430) uniform Params {
 	float erosion_speed;
 	float deposition_speed;
 	float min_slope;
-	float max_flow;
-	float max_sed;
+	float unused0; // was max_flow: the host no longer normalises on the GPU
+	float unused1; // was max_sed
 	float outlet_level;
 } p;
 
@@ -268,18 +268,7 @@ void main() {
 		flow_accum[i] += in_w;
 		return;
 	}
-
-	if (p.mode == 2) {
-		// Phase 2: Final Normalization
-		float h_c = height[i];
-		if (isnan(h_c) || isinf(h_c)) {
-			sediment[i] = 0.0;
-			flow_accum[i] = 0.0;
-		} else {
-			sediment[i] = clamp(sediment[i] / p.max_sed, 0.0, 1.0);
-			flow_accum[i] = clamp(flow_accum[i] / p.max_flow, 0.0, 1.0);
-		}
-		return;
-	}
+	// There is no mode 2. The channels (settle, net change, the flow unit) are derived host-side by
+	// erosion_hydraulic_finish, the same call the CPU solver makes, so the routes agree by construction.
 }
 )"

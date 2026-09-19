@@ -46,6 +46,9 @@ struct ErosionHydraulicParams {
 	enum { MODEL_MUSGRAVE = 0, MODEL_PIPE = 1 };
 	int model = MODEL_MUSGRAVE;
 	double time_step = 0.5;
+	// Lay whatever sediment is still suspended when the solve ends onto the ground, instead of deleting it.
+	// Off by default: the original solver dropped it, and settling it raises channel floors and basins.
+	bool settle_at_end = false;
 
 	static ErosionHydraulicParams from_dict(const Dictionary &p_dict);
 };
@@ -53,11 +56,23 @@ struct ErosionHydraulicParams {
 struct ErosionHydraulicResult {
 	bool ok = false;
 	PackedFloat32Array height;
-	PackedFloat32Array sediment;
+	// Net against the input, in metres, describing the FINAL surface: max(0, input - height) and
+	// max(0, height - input). The old `sediment` was the suspended load, normalised to its own max.
+	PackedFloat32Array eroded;
+	PackedFloat32Array deposited;
+	// MUSGRAVE: the contributing area draining through the cell, in m^2. PIPE: the mean discharge over the
+	// simulated time, in m^3/s. Neither is normalised -- put a Float to Mask after it for a mask.
 	PackedFloat32Array flow;
 
 	Dictionary to_dict() const;
 };
+
+// Turns a finished solve's raw state into the output channels: settles the suspended load if asked, takes
+// the net change against the input, and scales the flow accumulator into its physical unit. The GPU route
+// calls this on its readback, so both routes derive their channels the same way.
+ErosionHydraulicResult erosion_hydraulic_finish(const PackedFloat32Array &p_input,
+		PackedFloat32Array &r_height, const PackedFloat32Array &p_sediment, const PackedFloat32Array &p_flow_accum,
+		int p_gw, int p_gh, const Rect2 &p_rect, const ErosionHydraulicParams &p_params);
 
 // C++ native hydrodynamic shallow-water solver.
 // Matches the GDScript Tier 1 oracle bit-for-bit (<= 2e-6 m).

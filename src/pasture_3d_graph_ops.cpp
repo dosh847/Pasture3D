@@ -1571,11 +1571,13 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				p.outlet_level = PH[8] ? std::max(0.0, (double)P[8]) : 0.0;
 				p.model = PH[9] ? std::clamp((int)P[9], 0, 1) : ErosionHydraulicParams::MODEL_MUSGRAVE;
 				p.time_step = PH[10] ? std::max(1e-3, (double)P[10]) : 0.5;
+				p.settle_at_end = PH[11] && P[11] > 0.5f;
 				ErosionHydraulicResult res = erosion_hydraulic_solve_best(in_arr, p_gw, p_gh, p_rect, p);
 				if (res.ok && res.height.size() == n) {
 					std::copy_n(res.height.ptr(), n, g_ptr);
-					copy_aux(1, res.sediment);
-					copy_aux(2, res.flow);
+					copy_aux(1, res.eroded);
+					copy_aux(2, res.deposited);
+					copy_aux(3, res.flow);
 				}
 			} break;
 

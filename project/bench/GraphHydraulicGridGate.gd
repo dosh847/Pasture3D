@@ -14,6 +14,10 @@
 #   [P3] PIPE converges with resolution; grid-unit PIPE and MUSGRAVE are the controls that do not.
 #   [P4] PIPE and its time step survive the lowering.
 #   [P5] The GPU declines PIPE, and the best route then equals the CPU solve.
+#   [G1] The channels are net metres against the final surface, and flow carries a physical unit.
+#   [G2] settle_at_end conserves mass; the default is the control that loses it.
+#   [G3] Every channel, and settle_at_end, survive the lowering in order.
+#   [G4] The GPU derives the same channels as the CPU, through the shared finish.
 #
 # [O3] and [P5] need a RenderingDevice: run this gate WITHOUT --headless.
 extends Node
@@ -22,7 +26,7 @@ const DevErosionHydraulic = preload("res://addons/pasture_3d/graph/pasture3d_gra
 
 const EPS := 2.0e-6
 const HYD_TOL := 3.0e-3 # GraphGpuParityGate's hydraulic tolerance
-const WANT := 10
+const WANT := 14
 
 var _fail := 0
 var _done := 0
@@ -40,6 +44,10 @@ func _ready() -> void:
 	_p3_pipe_converges()
 	_p4_pipe_route()
 	_p5_pipe_declines_gpu()
+	_g1_net_channels()
+	_g2_settle_mass()
+	_g3_channel_route()
+	_g4_channel_gpu()
 	if _done != WANT:
 		_fail += 1
 		print("\n!! only %d of %d criteria reached their assertion" % [_done, WANT])
@@ -66,7 +74,7 @@ func _o1_outlet_parity() -> void:
 	var gd: Array = DevErosionHydraulic.solve_oracle(s, g, g, rect, p)
 	var cpp: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid(s, g, g, rect, p)
 	var worst := 0.0
-	var names := ["height", "sediment", "flow"]
+	var names := ["height", "eroded", "deposited", "flow"]
 	for c in names.size():
 		worst = maxf(worst, _max_abs_diff(gd[c], cpp[names[c]]))
 	var walls: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid(s, g, g, rect, {"iterations": 20})
@@ -124,7 +132,7 @@ func _o3_outlet_gpu() -> void:
 		return
 	var cpu: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid(s, g, g, rect, p)
 	var worst := 0.0
-	for ch in ["height", "sediment", "flow"]:
+	for ch in ["height", "eroded", "deposited", "flow"]:
 		worst = maxf(worst, _max_abs_diff(gpu[ch], cpu[ch]))
 	# Control: the GPU must see the mode -- its OUTLETS answer must differ from its own WALLS answer.
 	var gpu_walls: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid_gpu(s, g, g, rect, {"iterations": 5})
@@ -177,7 +185,7 @@ func _p1_pipe_parity() -> void:
 	for z in range(20, 24):
 		for x in range(30, 36):
 			s[z * g + x] = NAN
-	var names := ["height", "sediment", "flow"]
+	var names := ["height", "eroded", "deposited", "flow"]
 	var worst := 0.0
 	for em in [0, 1]:
 		var p := {"model": 1, "iterations": 10, "sediment_capacity": 0.2, "edge_mode": em, "outlet_level": 0.5}
@@ -213,7 +221,7 @@ func _p2_pipe_threads() -> void:
 	var d_threaded: int = Pasture3DUtil.parallel_dispatch_count() - d0
 	Pasture3DUtil.set_max_threads(cap_before)
 	var worst := 0.0
-	for ch in ["height", "sediment", "flow"]:
+	for ch in ["height", "eroded", "deposited", "flow"]:
 		worst = maxf(worst, _max_abs_diff(serial[ch], threaded[ch]))
 	print("    max |serial - threaded| = %.9f (want 0) | dispatches serial = %d (want 0), threaded = %d (want > 0)"
 		% [worst, d_serial, d_threaded])
@@ -291,6 +299,120 @@ func _p5_pipe_declines_gpu() -> void:
 	var d := _max_abs_diff(best, cpu)
 	print("    GPU MUSGRAVE ok = %s (want true) | GPU PIPE ok = %s (want false) | max |best - cpu| = %.9f (want 0)" % [musgrave_ok, pipe_ok, d])
 	_check(musgrave_ok and not pipe_ok and d == 0.0, "the GPU ran PIPE, or there was no GPU to decline it")
+
+
+## `eroded` and `deposited` are net metres against the FINAL surface, and `flow` carries a physical unit,
+## none of them normalised. Checked against the input and the returned height.
+func _g1_net_channels() -> void:
+	print("\n[G1] Grid channels are metres against the final surface, not normalised")
+	var g := 96
+	var rect := Rect2(0.0, 0.0, 384.0, 384.0)
+	var s := _terrain(g, rect)
+	var res: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid(s, g, g, rect, {"iterations": 25})
+	var h: PackedFloat32Array = res["height"]
+	var e: PackedFloat32Array = res["eroded"]
+	var d: PackedFloat32Array = res["deposited"]
+	var f: PackedFloat32Array = res["flow"]
+	var worst := 0.0
+	var both := 0
+	var peak_e := 0.0
+	var peak_f := 0.0
+	for i in s.size():
+		worst = maxf(worst, absf((d[i] - e[i]) - (h[i] - s[i])))
+		if e[i] > 0.0 and d[i] > 0.0:
+			both += 1
+		peak_e = maxf(peak_e, e[i])
+		peak_f = maxf(peak_f, f[i])
+	# A normalised channel peaks at exactly 1.0; an area over a 4 m cell cannot be that small.
+	print("    max |(dep - ero) - (h - in)| = %.9f (want <= %.7f) | both = %d (want 0) | peak eroded %.4f m, peak flow %.1f m2"
+		% [worst, EPS, both, peak_e, peak_f])
+	_check(worst <= EPS and both == 0 and peak_e > 0.01 and peak_f > 100.0 and not is_equal_approx(peak_f, 1.0),
+		"the grid channels are not net metres, or flow is still normalised")
+
+
+## settle_at_end lays the suspended load down instead of deleting it, so the solve conserves mass. The
+## default (off) is the control and must lose it.
+func _g2_settle_mass() -> void:
+	print("\n[G2] settle_at_end conserves mass; the default loses it")
+	var g := 96
+	var rect := Rect2(0.0, 0.0, 384.0, 384.0)
+	var s := _terrain(g, rect)
+	var rel := {}
+	for on in [true, false]:
+		var h: PackedFloat32Array = Pasture3DUtil.erosion_hydraulic_solve_grid(s, g, g, rect,
+				{"iterations": 25, "settle_at_end": on})["height"]
+		var net := 0.0
+		var gross := 0.0
+		for i in s.size():
+			net += h[i] - s[i]
+			gross += absf(h[i] - s[i])
+		rel[on] = [net / maxf(gross, 1e-9), net]
+	print("    net/gross: settled = %.5f (want |.| < 0.002) | default = %.5f (control, want < -0.02)" % [rel[true][0], rel[false][0]])
+	_check(absf(rel[true][0]) < 0.002 and rel[false][0] < -0.02, "settle_at_end did not conserve mass, or the default already did")
+
+
+## Every channel survives the lowering in the right ORDER, and settle_at_end reaches the native op.
+func _g3_channel_route() -> void:
+	print("\n[G3] every grid channel survives the lowering, in order")
+	var g := 64
+	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
+	var s := _terrain(g, rect)
+	var worst := 0.0
+	var seen := []
+	for port in 4:
+		var node: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"erosion_hydraulic")
+		node.set("iterations", 12)
+		node.set("settle_at_end", true)
+		var gr := Pasture3DTerrainGraph.new()
+		var i_in := gr.add_node(Pasture3DGraphNodeRegistry.create(&"input"))
+		var i_n := gr.add_node(node)
+		var i_out := gr.add_node(Pasture3DGraphNodeRegistry.create(&"output"))
+		gr.connect_ports(i_in, 0, i_n, 0)
+		gr.connect_ports(i_n, port, i_out, 0)
+		var rn := gr.evaluate(g, g, rect, null, s)
+		gr.force_gdscript_evaluation = true
+		seen.append(rn)
+		worst = maxf(worst, _max_abs_diff(rn, gr.evaluate(g, g, rect, null, s)))
+	# Control: settle_at_end must have reached the native op, and no two channels may be the same grid.
+	var plain: PackedFloat32Array = Pasture3DUtil.erosion_hydraulic_solve_grid(s, g, g, rect, {"iterations": 12})["height"]
+	var settle_effect := _max_abs_diff(seen[0], plain)
+	var spread := INF
+	for a in 4:
+		for b in range(a + 1, 4):
+			spread = minf(spread, _max_abs_diff(seen[a], seen[b]))
+	print("    max |native - gdscript| over 4 ports = %.7f (want < %.4f) | settle moves height %.4f | closest channels differ %.4f (both want > 1e-3)"
+		% [worst, HYD_TOL, settle_effect, spread])
+	_check(worst < HYD_TOL and settle_effect > 1.0e-3 and spread > 1.0e-3,
+		"a channel or settle_at_end did not survive the lowering, or two channels are alike")
+
+
+## The GPU derives its channels through the same finish as the CPU, so eroded, deposited and flow must
+## agree there too -- not just height. (The GPU used to normalise in a third pass of its own.)
+func _g4_channel_gpu() -> void:
+	print("\n[G4] GPU channels == CPU channels")
+	var g := 64
+	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
+	var s := _terrain(g, rect)
+	var p := {"iterations": 5, "settle_at_end": true}
+	var gpu: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid_gpu(s, g, g, rect, p)
+	if not bool(gpu.get("ok", false)):
+		_check(false, "the GPU hydraulic solver did not run, so this proves nothing")
+		return
+	var cpu: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid(s, g, g, rect, p)
+	var worst_h := _max_abs_diff(gpu["height"], cpu["height"])
+	var worst_aux := 0.0
+	for ch in ["eroded", "deposited"]:
+		worst_aux = maxf(worst_aux, _max_abs_diff(gpu[ch], cpu[ch]))
+	# flow is an area in m^2 here, so it is compared relative to its own peak. A normalised channel would
+	# peak at exactly 1; this grid's cells are 4 m x 4 m, so a handful of contributing cells clears 10 m^2.
+	var peak := 0.0
+	for v in cpu["flow"]:
+		peak = maxf(peak, v)
+	var worst_flow := _max_abs_diff(gpu["flow"], cpu["flow"]) / maxf(peak, 1e-9)
+	print("    height %.7f, eroded/deposited %.7f (want < %.4f) | flow %.5f of peak %.1f m2 (want < 0.01)"
+		% [worst_h, worst_aux, HYD_TOL, worst_flow, peak])
+	_check(worst_h < HYD_TOL and worst_aux < HYD_TOL and worst_flow < 0.01 and peak > 10.0,
+		"the GPU channels diverged from the CPU, or flow came back normalised")
 
 
 func _fp_surface(p_g: int) -> PackedFloat32Array:

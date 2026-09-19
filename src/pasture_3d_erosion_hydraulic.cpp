@@ -291,6 +291,9 @@ ErosionHydraulicParams ErosionHydraulicParams::from_dict(const Dictionary &p_dic
 	if (p_dict.has("model")) {
 		p.model = std::clamp((int)p_dict["model"], 0, 1);
 	}
+	if (p_dict.has("settle_at_end")) {
+		p.settle_at_end = (bool)p_dict["settle_at_end"];
+	}
 	if (p_dict.has("time_step")) {
 		p.time_step = std::max(1e-3, (double)p_dict["time_step"]);
 	}
@@ -301,45 +304,66 @@ Dictionary ErosionHydraulicResult::to_dict() const {
 	Dictionary d;
 	d["ok"] = ok;
 	d["height"] = height;
-	d["sediment"] = sediment;
+	d["eroded"] = eroded;
+	d["deposited"] = deposited;
 	d["flow"] = flow;
 	return d;
 }
 
-// 4. Normalisation for the mask channels, shared by both models.
-static ErosionHydraulicResult finish(const std::vector<float> &height, const std::vector<float> &sediment,
-		const std::vector<float> &flow_accum) {
+// 4. The output channels. See the header: settle, net change, and the flow accumulator in its unit.
+ErosionHydraulicResult godot::erosion_hydraulic_finish(const PackedFloat32Array &p_input,
+		PackedFloat32Array &r_height, const PackedFloat32Array &p_sediment, const PackedFloat32Array &p_flow_accum,
+		int p_gw, int p_gh, const Rect2 &p_rect, const ErosionHydraulicParams &p_params) {
 	ErosionHydraulicResult res;
-	const int n = (int)height.size();
-	double max_flow = 1e-6;
-	double max_sed = 1e-6;
-	for (int i = 0; i < n; i++) {
-		if (std::isfinite(height[i])) {
-			max_flow = std::max(max_flow, (double)flow_accum[i]);
-			max_sed = std::max(max_sed, (double)sediment[i]);
+	const int n = p_gw * p_gh;
+	if (p_input.size() != n || r_height.size() != n || p_sediment.size() != n || p_flow_accum.size() != n) {
+		return res;
+	}
+	const float *in_ptr = p_input.ptr();
+	float *h_ptr = r_height.ptrw();
+	const float *s_ptr = p_sediment.ptr();
+	const float *f_ptr = p_flow_accum.ptr();
+
+	if (p_params.settle_at_end) {
+		for (int i = 0; i < n; i++) {
+			if (std::isfinite(h_ptr[i])) {
+				h_ptr[i] = (float)((double)h_ptr[i] + (double)s_ptr[i]);
+			}
 		}
 	}
 
-	res.height.resize(n);
-	res.sediment.resize(n);
+	// MUSGRAVE's accumulator is metres of rain that passed through, summed over passes: divided by the rain
+	// per pass and the pass count that is a count of contributing cells, and times the cell area, m^2.
+	// PIPE's is speed * depth * dt summed, so over the simulated time and times the cell width it is m^3/s.
+	const double cell_dx = (double)p_rect.size.x / (double)std::max(p_gw, 1);
+	const double cell_dz = (double)p_rect.size.y / (double)std::max(p_gh, 1);
+	double flow_scale = 1.0;
+	if (p_params.model == ErosionHydraulicParams::MODEL_PIPE) {
+		const double total_time = std::max(1e-9, (double)p_params.iterations * p_params.time_step);
+		flow_scale = std::sqrt(cell_dx * cell_dz) / total_time;
+	} else if (p_params.rain_rate > 0.0) {
+		flow_scale = cell_dx * cell_dz / (p_params.rain_rate * (double)std::max(p_params.iterations, 1));
+	}
+
+	res.height = r_height;
+	res.eroded.resize(n);
+	res.deposited.resize(n);
 	res.flow.resize(n);
-
-	float *out_h = res.height.ptrw();
-	float *out_s = res.sediment.ptrw();
+	float *out_e = res.eroded.ptrw();
+	float *out_d = res.deposited.ptrw();
 	float *out_f = res.flow.ptrw();
-
 	for (int i = 0; i < n; i++) {
-		if (std::isfinite(height[i])) {
-			out_h[i] = height[i];
-			out_s[i] = (float)std::clamp((double)sediment[i] / max_sed, 0.0, 1.0);
-			out_f[i] = (float)std::clamp((double)flow_accum[i] / max_flow, 0.0, 1.0);
+		const double change = (double)h_ptr[i] - (double)in_ptr[i];
+		if (std::isfinite(change)) {
+			out_e[i] = (float)std::max(0.0, -change);
+			out_d[i] = (float)std::max(0.0, change);
+			out_f[i] = (float)((double)f_ptr[i] * flow_scale);
 		} else {
-			out_h[i] = height[i];
-			out_s[i] = 0.0f;
+			out_e[i] = 0.0f;
+			out_d[i] = 0.0f;
 			out_f[i] = 0.0f;
 		}
 	}
-
 	res.ok = true;
 	return res;
 }
@@ -360,9 +384,21 @@ ErosionHydraulicResult godot::erosion_hydraulic_solve(const PackedFloat32Array &
 	std::vector<float> sediment(n, 0.0f);
 	std::vector<float> water(n, 0.0f);
 	std::vector<float> flow_accum(n, 0.0f);
+	const auto to_channels = [&]() {
+		PackedFloat32Array h;
+		PackedFloat32Array s;
+		PackedFloat32Array f;
+		h.resize(n);
+		s.resize(n);
+		f.resize(n);
+		std::memcpy(h.ptrw(), height.data(), n * sizeof(float));
+		std::memcpy(s.ptrw(), sediment.data(), n * sizeof(float));
+		std::memcpy(f.ptrw(), flow_accum.data(), n * sizeof(float));
+		return erosion_hydraulic_finish(p_surface, h, s, f, p_gw, p_gh, p_rect, p_params);
+	};
 	if (p_params.model == ErosionHydraulicParams::MODEL_PIPE) {
 		pipe_solve(src_height, p_gw, p_gh, p_rect, p_params, height, sediment, flow_accum);
-		return finish(height, sediment, flow_accum);
+		return to_channels();
 	}
 	// The routing sweep writes every cell of these, so each pass swaps them with the state rather than
 	// copying the state into them first.
@@ -553,5 +589,5 @@ ErosionHydraulicResult godot::erosion_hydraulic_solve(const PackedFloat32Array &
 		flow_accum.swap(next_flow);
 	}
 
-	return finish(height, sediment, flow_accum);
+	return to_channels();
 }
