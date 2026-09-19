@@ -73,6 +73,24 @@ extends Pasture3DGraphSolverNode
 		outlet_level = maxf(v, 0.0)
 		_param_changed()
 
+## MUSGRAVE: the original model -- each pass routes water one cell downhill, in grid steps, so the same
+## world at another resolution erodes differently. PIPE: Mei et al. 2007's virtual-pipe shallow water, in
+## metres and seconds, which converges as the resolution rises. Under PIPE each iteration simulates Time
+## Step seconds, Erosion and Deposition Speed are per second, and Sediment Capacity is far smaller (try
+## 0.05-0.5): it scales tilt x speed x depth rather than the Musgrave capacity term.
+@export_enum("Musgrave", "Pipe") var model: int = 0:
+	set(v):
+		model = clampi(v, 0, 1)
+		_param_changed()
+		notify_property_list_changed()
+
+## PIPE: seconds of simulated time per iteration. Substepped internally for stability, so a large value is
+## safe, only slower.
+@export_range(0.01, 5.0, 0.01, "or_greater", "suffix:s") var time_step: float = 0.5:
+	set(v):
+		time_step = maxf(v, 1e-3)
+		_param_changed()
+
 
 @export_group("Evaluation")
 
@@ -102,6 +120,8 @@ func native_lower() -> Dictionary:
 	p[6] = min_slope
 	p[7] = float(edge_mode)
 	p[8] = outlet_level
+	p[9] = float(model)
+	p[10] = time_step
 	return {"params": p}
 
 
@@ -202,6 +222,11 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> 
 
 # ---- Internals -------------------------------------------------------------------------------------
 
+func _validate_property(p_property: Dictionary) -> void:
+	if p_property.name == "time_step" and model != 1:
+		p_property.usage = PROPERTY_USAGE_NO_EDITOR
+
+
 func _param_changed() -> void:
 	mark_dirty_since_bake()
 	emit_changed()
@@ -226,6 +251,8 @@ func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect:
 		"min_slope": _f32(min_slope),
 		"edge_mode": edge_mode,
 		"outlet_level": _f32(outlet_level),
+		"model": model,
+		"time_step": _f32(time_step),
 	}
 	if not ClassDB.class_has_method("Pasture3DUtil", "erosion_hydraulic_solve_grid_best"):
 		push_error("[Pasture3D] Pasture3DUtil.erosion_hydraulic_solve_grid_best is not bound. Rebuild GDExtension.")

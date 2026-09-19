@@ -31,6 +31,234 @@ constexpr uint8_t DEPOSIT = 4;
 
 } // namespace
 
+// ---- PIPE: the virtual-pipe shallow-water model of Mei, Decaudin & Hu, "Fast Hydraulic Erosion Simulation
+// and Visualization on GPU" (Pacific Graphics 2007), written from the paper. Every length is metres and
+// every rate is per second of simulated time, so the same world at a different resolution solves the same
+// water: that is the point of it (review item 8), and what the Musgrave model above cannot do.
+//
+// Each substep is three gathers, each reading only start-of-phase buffers and writing only its own cell,
+// so no split of the rows can change a bit (no scatter, no replay):
+//   A. flux     each cell's four outflow pipes accelerate with the surface difference, and are scaled
+//               down together so they cannot drain more than the cell holds;
+//   B. water    net inflow updates the depth; the net flux through the cell gives the velocity; the
+//               velocity and the ground tilt give a carrying capacity, and the cell erodes or deposits
+//               toward it;
+//   C. carry    sediment is advected semi-Lagrangian: each cell takes what sat upstream along -v*dt.
+// Rain and evaporation are per iteration, as in the Musgrave model, so rain_rate means the same thing.
+namespace {
+
+constexpr double PIPE_G = 9.81;
+// The pipes' cross-section is (the cell side they cross) x PIPE_DEPTH, so the flux per metre of cell side
+// is independent of the cell size -- the resolution-invariant choice. It also sets the wave speed that
+// bounds the substep.
+constexpr double PIPE_DEPTH = 1.0;
+constexpr double PIPE_MIN_DEPTH = 1e-4; // below this a cell has no velocity
+
+} // namespace
+
+static void pipe_solve(const float *p_src, int p_gw, int p_gh, const Rect2 &p_rect, const ErosionHydraulicParams &p_params,
+		std::vector<float> &r_height, std::vector<float> &r_sediment, std::vector<float> &r_flow) {
+	const int n = p_gw * p_gh;
+	std::vector<float> &height = r_height;
+	std::vector<float> &sediment = r_sediment;
+	std::vector<float> &flow = r_flow;
+	std::vector<float> water(n, 0.0f);
+	std::vector<float> flux[4];
+	for (int k = 0; k < 4; k++) {
+		flux[k].assign(n, 0.0f);
+	}
+	std::vector<float> vel_x(n, 0.0f);
+	std::vector<float> vel_z(n, 0.0f);
+	std::vector<float> sed_mid(n, 0.0f);
+	std::vector<float> next_height(n);
+	std::vector<float> next_water(n);
+
+	const double dx = (double)p_rect.size.x / (double)p_gw;
+	const double dz = (double)p_rect.size.y / (double)p_gh;
+	const double area = dx * dz;
+	const double len[4] = { dx, dx, dz, dz };
+	const double side[4] = { dz, dz, dx, dx };
+	const bool outlets = p_params.edge_mode == ErosionHydraulicParams::EDGE_OUTLETS;
+	const double p_outlet = p_params.outlet_level;
+	const double p_rain = p_params.rain_rate;
+	const double p_evap = p_params.evaporation_rate;
+	const double p_cap = p_params.sediment_capacity;
+	const double p_min_slope = p_params.min_slope;
+
+	const double dt_max = 0.25 * std::min(dx, dz) / std::sqrt(PIPE_G * PIPE_DEPTH);
+	const int substeps = std::max(1, (int)std::ceil(p_params.time_step / dt_max));
+	const double dt = p_params.time_step / (double)substeps;
+	const double k_ero = std::min(1.0, p_params.erosion_speed * dt);
+	const double k_dep = std::min(1.0, p_params.deposition_speed * dt);
+
+	const auto finite_at = [&](int x, int z) {
+		return x >= 0 && x < p_gw && z >= 0 && z < p_gh && std::isfinite(height[z * p_gw + x]);
+	};
+
+	for (int pass = 0; pass < p_params.iterations; pass++) {
+		for (int i = 0; i < n; i++) {
+			if (std::isfinite(height[i])) {
+				water[i] = (float)((double)water[i] + p_rain);
+			}
+		}
+
+		for (int sub = 0; sub < substeps; sub++) {
+			// A. flux
+			Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int p_z0, int p_z1) {
+				for (int iz = p_z0; iz < p_z1; iz++) {
+					for (int ix = 0; ix < p_gw; ix++) {
+						const int i = iz * p_gw + ix;
+						const double b = (double)height[i];
+						if (!std::isfinite(b)) {
+							for (int k = 0; k < 4; k++) {
+								flux[k][i] = 0.0f;
+							}
+							continue;
+						}
+						const double surf = b + (double)water[i];
+						double f[4];
+						double total = 0.0;
+						for (int k = 0; k < 4; k++) {
+							const int nx = ix + SCATTER_DX[k];
+							const int nz = iz + SCATTER_DZ[k];
+							double n_surf;
+							if (finite_at(nx, nz)) {
+								const int ni = nz * p_gw + nx;
+								n_surf = (double)height[ni] + (double)water[ni];
+							} else if (outlets) {
+								n_surf = (double)p_src[i] - p_outlet;
+							} else {
+								f[k] = 0.0;
+								continue;
+							}
+							f[k] = std::max(0.0, (double)flux[k][i] + dt * PIPE_G * side[k] * PIPE_DEPTH * (surf - n_surf) / len[k]);
+							total += f[k];
+						}
+						const double volume = (double)water[i] * area;
+						if (total * dt > volume && total > 0.0) {
+							const double scale = volume / (total * dt);
+							for (int k = 0; k < 4; k++) {
+								f[k] = f[k] * scale;
+							}
+						}
+						for (int k = 0; k < 4; k++) {
+							flux[k][i] = (float)f[k];
+						}
+					}
+				}
+			});
+
+			// B. water, velocity, erosion and deposition
+			Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int p_z0, int p_z1) {
+				for (int iz = p_z0; iz < p_z1; iz++) {
+					for (int ix = 0; ix < p_gw; ix++) {
+						const int i = iz * p_gw + ix;
+						const double b = (double)height[i];
+						if (!std::isfinite(b)) {
+							next_height[i] = height[i];
+							next_water[i] = water[i];
+							sed_mid[i] = sediment[i];
+							vel_x[i] = 0.0f;
+							vel_z[i] = 0.0f;
+							continue;
+						}
+						// What each neighbour sends this way: its pipe pointing back at this cell (k ^ 1).
+						double in[4] = { 0.0, 0.0, 0.0, 0.0 };
+						double b_n[4];
+						for (int k = 0; k < 4; k++) {
+							const int nx = ix + SCATTER_DX[k];
+							const int nz = iz + SCATTER_DZ[k];
+							if (finite_at(nx, nz)) {
+								const int ni = nz * p_gw + nx;
+								in[k] = (double)flux[k ^ 1][ni];
+								b_n[k] = (double)height[ni];
+							} else {
+								b_n[k] = b;
+							}
+						}
+						const double out[4] = { (double)flux[0][i], (double)flux[1][i], (double)flux[2][i], (double)flux[3][i] };
+						const double w0 = (double)water[i];
+						const double net = (in[0] + in[1] + in[2] + in[3]) - (out[0] + out[1] + out[2] + out[3]);
+						const double w1 = std::max(0.0, w0 + dt * net / area);
+						const double depth = 0.5 * (w0 + w1);
+						double u = 0.0;
+						double v = 0.0;
+						if (depth > PIPE_MIN_DEPTH) {
+							u = 0.5 * (in[0] - out[0] + out[1] - in[1]) / (dz * depth);
+							v = 0.5 * (in[2] - out[2] + out[3] - in[3]) / (dx * depth);
+						}
+						const double gx = (b_n[1] - b_n[0]) / (2.0 * dx);
+						const double gz = (b_n[3] - b_n[2]) / (2.0 * dz);
+						const double grad2 = gx * gx + gz * gz;
+						const double tilt = std::max(std::sqrt(grad2 / (1.0 + grad2)), p_min_slope);
+						const double speed = std::sqrt(u * u + v * v);
+						const double cap = p_cap * tilt * speed * w1;
+						double s = (double)sediment[i];
+						double b1 = b;
+						if (cap > s) {
+							const double amt = k_ero * (cap - s);
+							b1 = b - amt;
+							s = s + amt;
+						} else {
+							const double amt = k_dep * (s - cap);
+							b1 = b + amt;
+							s = s - amt;
+						}
+						// Neighbours read this cell's ground (the tilt) and water in this phase: write aside.
+						next_height[i] = (float)b1;
+						next_water[i] = (float)w1;
+						sed_mid[i] = (float)s;
+						vel_x[i] = (float)u;
+						vel_z[i] = (float)v;
+						flow[i] = (float)((double)flow[i] + speed * w1 * dt);
+					}
+				}
+			});
+			height.swap(next_height);
+			water.swap(next_water);
+
+			// C. carry: bilinear sample of sed_mid at the upstream point, in cell units, clamped to the grid.
+			// A tap on no-data would carry nothing real, so such a cell keeps its own sediment.
+			Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int p_z0, int p_z1) {
+				for (int iz = p_z0; iz < p_z1; iz++) {
+					for (int ix = 0; ix < p_gw; ix++) {
+						const int i = iz * p_gw + ix;
+						if (!std::isfinite(height[i])) {
+							sediment[i] = sed_mid[i];
+							continue;
+						}
+						const double x = std::clamp((double)ix - (double)vel_x[i] * dt / dx, 0.0, (double)(p_gw - 1));
+						const double z = std::clamp((double)iz - (double)vel_z[i] * dt / dz, 0.0, (double)(p_gh - 1));
+						const int x0 = (int)std::floor(x);
+						const int z0 = (int)std::floor(z);
+						const int x1 = std::min(x0 + 1, p_gw - 1);
+						const int z1 = std::min(z0 + 1, p_gh - 1);
+						const int t00 = z0 * p_gw + x0;
+						const int t10 = z0 * p_gw + x1;
+						const int t01 = z1 * p_gw + x0;
+						const int t11 = z1 * p_gw + x1;
+						if (!std::isfinite(height[t00]) || !std::isfinite(height[t10]) || !std::isfinite(height[t01]) || !std::isfinite(height[t11])) {
+							sediment[i] = sed_mid[i];
+							continue;
+						}
+						const double fx = x - (double)x0;
+						const double fz = z - (double)z0;
+						const double top = (double)sed_mid[t00] * (1.0 - fx) + (double)sed_mid[t10] * fx;
+						const double bot = (double)sed_mid[t01] * (1.0 - fx) + (double)sed_mid[t11] * fx;
+						sediment[i] = (float)(top * (1.0 - fz) + bot * fz);
+					}
+				}
+			});
+		}
+
+		for (int i = 0; i < n; i++) {
+			if (std::isfinite(height[i])) {
+				water[i] = (float)((double)water[i] * (1.0 - p_evap));
+			}
+		}
+	}
+}
+
 ErosionHydraulicParams ErosionHydraulicParams::from_dict(const Dictionary &p_dict) {
 	ErosionHydraulicParams p;
 	if (p_dict.has("iterations")) {
@@ -60,6 +288,12 @@ ErosionHydraulicParams ErosionHydraulicParams::from_dict(const Dictionary &p_dic
 	if (p_dict.has("outlet_level")) {
 		p.outlet_level = std::max(0.0, (double)p_dict["outlet_level"]);
 	}
+	if (p_dict.has("model")) {
+		p.model = std::clamp((int)p_dict["model"], 0, 1);
+	}
+	if (p_dict.has("time_step")) {
+		p.time_step = std::max(1e-3, (double)p_dict["time_step"]);
+	}
 	return p;
 }
 
@@ -70,6 +304,44 @@ Dictionary ErosionHydraulicResult::to_dict() const {
 	d["sediment"] = sediment;
 	d["flow"] = flow;
 	return d;
+}
+
+// 4. Normalisation for the mask channels, shared by both models.
+static ErosionHydraulicResult finish(const std::vector<float> &height, const std::vector<float> &sediment,
+		const std::vector<float> &flow_accum) {
+	ErosionHydraulicResult res;
+	const int n = (int)height.size();
+	double max_flow = 1e-6;
+	double max_sed = 1e-6;
+	for (int i = 0; i < n; i++) {
+		if (std::isfinite(height[i])) {
+			max_flow = std::max(max_flow, (double)flow_accum[i]);
+			max_sed = std::max(max_sed, (double)sediment[i]);
+		}
+	}
+
+	res.height.resize(n);
+	res.sediment.resize(n);
+	res.flow.resize(n);
+
+	float *out_h = res.height.ptrw();
+	float *out_s = res.sediment.ptrw();
+	float *out_f = res.flow.ptrw();
+
+	for (int i = 0; i < n; i++) {
+		if (std::isfinite(height[i])) {
+			out_h[i] = height[i];
+			out_s[i] = (float)std::clamp((double)sediment[i] / max_sed, 0.0, 1.0);
+			out_f[i] = (float)std::clamp((double)flow_accum[i] / max_flow, 0.0, 1.0);
+		} else {
+			out_h[i] = height[i];
+			out_s[i] = 0.0f;
+			out_f[i] = 0.0f;
+		}
+	}
+
+	res.ok = true;
+	return res;
 }
 
 ErosionHydraulicResult godot::erosion_hydraulic_solve(const PackedFloat32Array &p_surface,
@@ -88,6 +360,10 @@ ErosionHydraulicResult godot::erosion_hydraulic_solve(const PackedFloat32Array &
 	std::vector<float> sediment(n, 0.0f);
 	std::vector<float> water(n, 0.0f);
 	std::vector<float> flow_accum(n, 0.0f);
+	if (p_params.model == ErosionHydraulicParams::MODEL_PIPE) {
+		pipe_solve(src_height, p_gw, p_gh, p_rect, p_params, height, sediment, flow_accum);
+		return finish(height, sediment, flow_accum);
+	}
 	// The routing sweep writes every cell of these, so each pass swaps them with the state rather than
 	// copying the state into them first.
 	std::vector<float> next_height(n);
@@ -277,36 +553,5 @@ ErosionHydraulicResult godot::erosion_hydraulic_solve(const PackedFloat32Array &
 		flow_accum.swap(next_flow);
 	}
 
-	// 4. Normalization for mask channels
-	double max_flow = 1e-6;
-	double max_sed = 1e-6;
-	for (int i = 0; i < n; i++) {
-		if (std::isfinite(height[i])) {
-			max_flow = std::max(max_flow, (double)flow_accum[i]);
-			max_sed = std::max(max_sed, (double)sediment[i]);
-		}
-	}
-
-	res.height.resize(n);
-	res.sediment.resize(n);
-	res.flow.resize(n);
-
-	float *out_h = res.height.ptrw();
-	float *out_s = res.sediment.ptrw();
-	float *out_f = res.flow.ptrw();
-
-	for (int i = 0; i < n; i++) {
-		if (std::isfinite(height[i])) {
-			out_h[i] = height[i];
-			out_s[i] = (float)std::clamp((double)sediment[i] / max_sed, 0.0, 1.0);
-			out_f[i] = (float)std::clamp((double)flow_accum[i] / max_flow, 0.0, 1.0);
-		} else {
-			out_h[i] = height[i];
-			out_s[i] = 0.0f;
-			out_f[i] = 0.0f;
-		}
-	}
-
-	res.ok = true;
-	return res;
+	return finish(height, sediment, flow_accum);
 }

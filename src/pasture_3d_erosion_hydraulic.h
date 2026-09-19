@@ -39,6 +39,13 @@ struct ErosionHydraulicParams {
 	enum { EDGE_WALLS = 0, EDGE_OUTLETS = 1 };
 	int edge_mode = EDGE_WALLS;
 	double outlet_level = 0.0;
+	// MUSGRAVE (default): the per-pass routing model above, in grid steps. PIPE: Mei et al. 2007's
+	// virtual-pipe shallow water, in metres and seconds, so it holds across resolutions. Under PIPE,
+	// erosion_speed and deposition_speed are per second, sediment_capacity scales tilt x speed x depth,
+	// and each iteration simulates `time_step` seconds, substepped for stability.
+	enum { MODEL_MUSGRAVE = 0, MODEL_PIPE = 1 };
+	int model = MODEL_MUSGRAVE;
+	double time_step = 0.5;
 
 	static ErosionHydraulicParams from_dict(const Dictionary &p_dict);
 };

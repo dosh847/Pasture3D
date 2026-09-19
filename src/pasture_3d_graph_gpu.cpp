@@ -3114,6 +3114,11 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 
 bool Pasture3DGraphGPU::eval_hydraulic(const PackedFloat32Array &p_surface, int p_gw, int p_gh, const Rect2 &p_rect,
 		const ErosionHydraulicParams &p_params, ErosionHydraulicResult &r_out) {
+	// The GPU kernel is the Musgrave model only. Declining here sends PIPE to the CPU solver for this op
+	// alone (erosion_hydraulic_solve_best); nothing else in the graph changes route.
+	if (p_params.model != ErosionHydraulicParams::MODEL_MUSGRAVE) {
+		return false;
+	}
 	if (!_ensure_init_hydraulic()) {
 		return false;
 	}

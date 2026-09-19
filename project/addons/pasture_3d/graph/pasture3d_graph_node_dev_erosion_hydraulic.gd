@@ -59,6 +59,24 @@ extends Pasture3DGraphSolverNode
 		outlet_level = maxf(v, 0.0)
 		_param_changed()
 
+## MUSGRAVE: the original model -- each pass routes water one cell downhill, in grid steps, so the same
+## world at another resolution erodes differently. PIPE: Mei et al. 2007's virtual-pipe shallow water, in
+## metres and seconds, which converges as the resolution rises. Under PIPE each iteration simulates Time
+## Step seconds, Erosion and Deposition Speed are per second, and Sediment Capacity is far smaller (try
+## 0.05-0.5): it scales tilt x speed x depth rather than the Musgrave capacity term.
+@export_enum("Musgrave", "Pipe") var model: int = 0:
+	set(v):
+		model = clampi(v, 0, 1)
+		_param_changed()
+		notify_property_list_changed()
+
+## PIPE: seconds of simulated time per iteration. Substepped internally for stability, so a large value is
+## safe, only slower.
+@export_range(0.01, 5.0, 0.01, "or_greater", "suffix:s") var time_step: float = 0.5:
+	set(v):
+		time_step = maxf(v, 1e-3)
+		_param_changed()
+
 
 @export_group("Evaluation")
 
@@ -124,6 +142,11 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> 
 	return eval_grid_channels(p_inputs, p_gw, p_gh, p_mask, p_rect)[0]
 
 
+func _validate_property(p_property: Dictionary) -> void:
+	if p_property.name == "time_step" and model != 1:
+		p_property.usage = PROPERTY_USAGE_NO_EDITOR
+
+
 func _param_changed() -> void:
 	mark_dirty_since_bake()
 	emit_changed()
@@ -144,11 +167,15 @@ func _solve_gdscript(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 		"min_slope": min_slope,
 		"edge_mode": edge_mode,
 		"outlet_level": outlet_level,
+		"model": model,
+		"time_step": time_step,
 	}
 	return solve_oracle(p_surface, p_gw, p_gh, p_rect, params)
 
 
 static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_params: Dictionary) -> Array:
+	if clampi(int(p_params.get("model", 0)), 0, 1) == 1:
+		return _pipe_oracle(p_surface, p_gw, p_gh, p_rect, p_params)
 	var n := p_gw * p_gh
 	var height := p_surface.duplicate()
 	var sediment := PackedFloat32Array(); sediment.resize(n); sediment.fill(0.0)
@@ -275,6 +302,11 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 		sediment = next_sediment
 		height = next_height
 
+	return _normalise(height, sediment, flow_accum)
+
+
+static func _normalise(height: PackedFloat32Array, sediment: PackedFloat32Array, flow_accum: PackedFloat32Array) -> Array:
+	var n := height.size()
 	var max_flow: float = 1e-6
 	var max_sed: float = 1e-6
 	for i in range(n):
@@ -293,3 +325,187 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 			norm_flow[i] = 0.0
 
 	return [height, norm_sediment, norm_flow]
+
+
+
+## PIPE: Mei, Decaudin & Hu 2007's virtual-pipe model -- the twin of pipe_solve in
+## pasture_3d_erosion_hydraulic.cpp, operation for operation, so the two agree to the bit. Every grid is
+## float32 and every temporary a double, exactly as there.
+static func _pipe_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_params: Dictionary) -> Array:
+	const PIPE_G := 9.81
+	const PIPE_DEPTH := 1.0
+	const PIPE_MIN_DEPTH := 1e-4
+	var n := p_gw * p_gh
+	var height := p_surface.duplicate()
+	var sediment := PackedFloat32Array(); sediment.resize(n); sediment.fill(0.0)
+	var flow := PackedFloat32Array(); flow.resize(n); flow.fill(0.0)
+	var water := PackedFloat32Array(); water.resize(n); water.fill(0.0)
+	var flux: Array[PackedFloat32Array] = []
+	for k in 4:
+		var f := PackedFloat32Array(); f.resize(n); f.fill(0.0)
+		flux.append(f)
+	var vel_x := PackedFloat32Array(); vel_x.resize(n); vel_x.fill(0.0)
+	var vel_z := PackedFloat32Array(); vel_z.resize(n); vel_z.fill(0.0)
+	var sed_mid := PackedFloat32Array(); sed_mid.resize(n); sed_mid.fill(0.0)
+	var next_height := PackedFloat32Array(); next_height.resize(n)
+	var next_water := PackedFloat32Array(); next_water.resize(n)
+
+	var p_iterations: int = maxi(int(p_params.get("iterations", 25)), 1)
+	var p_rain: float = maxf(float(p_params.get("rain_rate", 0.05)), 0.0)
+	var p_evap: float = clampf(float(p_params.get("evaporation_rate", 0.02)), 0.0, 1.0)
+	var p_cap: float = maxf(float(p_params.get("sediment_capacity", 8.0)), 0.0)
+	var p_ero_spd: float = clampf(float(p_params.get("erosion_speed", 0.5)), 0.0, 1.0)
+	var p_dep_spd: float = clampf(float(p_params.get("deposition_speed", 0.4)), 0.0, 1.0)
+	var p_min_slope: float = maxf(float(p_params.get("min_slope", 0.01)), 0.0)
+	var outlets: bool = clampi(int(p_params.get("edge_mode", 0)), 0, 1) == 1
+	var p_outlet: float = maxf(float(p_params.get("outlet_level", 0.0)), 0.0)
+	var p_time_step: float = maxf(float(p_params.get("time_step", 0.5)), 1e-3)
+
+	var dx: float = p_rect.size.x / float(p_gw)
+	var dz: float = p_rect.size.y / float(p_gh)
+	var area: float = dx * dz
+	var n_dx: Array[int] = [-1, 1, 0, 0]
+	var n_dz: Array[int] = [0, 0, -1, 1]
+	var pipe_len: Array[float] = [dx, dx, dz, dz]
+	var side: Array[float] = [dz, dz, dx, dx]
+
+	var dt_max: float = 0.25 * minf(dx, dz) / sqrt(PIPE_G * PIPE_DEPTH)
+	var substeps: int = maxi(1, int(ceil(p_time_step / dt_max)))
+	var dt: float = p_time_step / float(substeps)
+	var k_ero: float = minf(1.0, p_ero_spd * dt)
+	var k_dep: float = minf(1.0, p_dep_spd * dt)
+
+	for pass_i in p_iterations:
+		for i in n:
+			if is_finite(height[i]):
+				water[i] = water[i] + p_rain
+
+		for sub in substeps:
+			# A. flux
+			for iz in p_gh:
+				for ix in p_gw:
+					var i := iz * p_gw + ix
+					var b: float = height[i]
+					if not is_finite(b):
+						for k in 4:
+							flux[k][i] = 0.0
+						continue
+					var surf: float = b + water[i]
+					var f: Array[float] = [0.0, 0.0, 0.0, 0.0]
+					var total := 0.0
+					for k in 4:
+						var nx: int = ix + n_dx[k]
+						var nz: int = iz + n_dz[k]
+						var n_surf: float
+						if nx >= 0 and nx < p_gw and nz >= 0 and nz < p_gh and is_finite(height[nz * p_gw + nx]):
+							var ni := nz * p_gw + nx
+							n_surf = height[ni] + water[ni]
+						elif outlets:
+							n_surf = p_surface[i] - p_outlet
+						else:
+							f[k] = 0.0
+							continue
+						f[k] = maxf(0.0, flux[k][i] + dt * PIPE_G * side[k] * PIPE_DEPTH * (surf - n_surf) / pipe_len[k])
+						total += f[k]
+					var volume: float = water[i] * area
+					if total * dt > volume and total > 0.0:
+						var scale: float = volume / (total * dt)
+						for k in 4:
+							f[k] = f[k] * scale
+					for k in 4:
+						flux[k][i] = f[k]
+
+			# B. water, velocity, erosion and deposition
+			for iz in p_gh:
+				for ix in p_gw:
+					var i := iz * p_gw + ix
+					var b: float = height[i]
+					if not is_finite(b):
+						next_height[i] = height[i]
+						next_water[i] = water[i]
+						sed_mid[i] = sediment[i]
+						vel_x[i] = 0.0
+						vel_z[i] = 0.0
+						continue
+					var inn: Array[float] = [0.0, 0.0, 0.0, 0.0]
+					var b_n: Array[float] = [b, b, b, b]
+					for k in 4:
+						var nx: int = ix + n_dx[k]
+						var nz: int = iz + n_dz[k]
+						if nx >= 0 and nx < p_gw and nz >= 0 and nz < p_gh and is_finite(height[nz * p_gw + nx]):
+							var ni := nz * p_gw + nx
+							inn[k] = flux[k ^ 1][ni]
+							b_n[k] = height[ni]
+					var o0: float = flux[0][i]
+					var o1: float = flux[1][i]
+					var o2: float = flux[2][i]
+					var o3: float = flux[3][i]
+					var w0: float = water[i]
+					var net: float = (inn[0] + inn[1] + inn[2] + inn[3]) - (o0 + o1 + o2 + o3)
+					var w1: float = maxf(0.0, w0 + dt * net / area)
+					var depth: float = 0.5 * (w0 + w1)
+					var u := 0.0
+					var v := 0.0
+					if depth > PIPE_MIN_DEPTH:
+						u = 0.5 * (inn[0] - o0 + o1 - inn[1]) / (dz * depth)
+						v = 0.5 * (inn[2] - o2 + o3 - inn[3]) / (dx * depth)
+					var gx: float = (b_n[1] - b_n[0]) / (2.0 * dx)
+					var gz: float = (b_n[3] - b_n[2]) / (2.0 * dz)
+					var grad2: float = gx * gx + gz * gz
+					var tilt: float = maxf(sqrt(grad2 / (1.0 + grad2)), p_min_slope)
+					var speed: float = sqrt(u * u + v * v)
+					var cap: float = p_cap * tilt * speed * w1
+					var s: float = sediment[i]
+					var b1: float = b
+					if cap > s:
+						var amt: float = k_ero * (cap - s)
+						b1 = b - amt
+						s = s + amt
+					else:
+						var amt: float = k_dep * (s - cap)
+						b1 = b + amt
+						s = s - amt
+					next_height[i] = b1
+					next_water[i] = w1
+					sed_mid[i] = s
+					vel_x[i] = u
+					vel_z[i] = v
+					flow[i] = flow[i] + speed * w1 * dt
+			var th := height
+			height = next_height
+			next_height = th
+			var tw := water
+			water = next_water
+			next_water = tw
+
+			# C. carry
+			for iz in p_gh:
+				for ix in p_gw:
+					var i := iz * p_gw + ix
+					if not is_finite(height[i]):
+						sediment[i] = sed_mid[i]
+						continue
+					var x: float = clampf(float(ix) - vel_x[i] * dt / dx, 0.0, float(p_gw - 1))
+					var z: float = clampf(float(iz) - vel_z[i] * dt / dz, 0.0, float(p_gh - 1))
+					var x0: int = int(floor(x))
+					var z0: int = int(floor(z))
+					var x1: int = mini(x0 + 1, p_gw - 1)
+					var z1: int = mini(z0 + 1, p_gh - 1)
+					var t00 := z0 * p_gw + x0
+					var t10 := z0 * p_gw + x1
+					var t01 := z1 * p_gw + x0
+					var t11 := z1 * p_gw + x1
+					if not (is_finite(height[t00]) and is_finite(height[t10]) and is_finite(height[t01]) and is_finite(height[t11])):
+						sediment[i] = sed_mid[i]
+						continue
+					var fx: float = x - float(x0)
+					var fz: float = z - float(z0)
+					var top: float = sed_mid[t00] * (1.0 - fx) + sed_mid[t10] * fx
+					var bot: float = sed_mid[t01] * (1.0 - fx) + sed_mid[t11] * fx
+					sediment[i] = top * (1.0 - fz) + bot * fz
+
+		for i in n:
+			if is_finite(height[i]):
+				water[i] = water[i] * (1.0 - p_evap)
+
+	return _normalise(height, sediment, flow)
