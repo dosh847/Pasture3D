@@ -1,0 +1,383 @@
+# Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
+#
+# GraphSaleveDepositionGate: phase S3 of PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md — Stage 2 deposition and
+# Stage 3 fine incision.
+#
+#   A  on the input itself (Stage 1 skipped), deposition never lowers a cell and does fill the crater;
+#      control: a plane gets none
+#   B  Stage 3 IS the stream-log solver: a direct call on the grid entering Stage 3 reproduces the grid
+#      leaving it; control: the same call at another incision rate does not
+#   C  stream_strength 0 skips Stage 3 (pre == post); control: the default does not
+#   D  mass balance, reported: eroded vs deposited volume
+#   E  the rim cap: Stage 1 does not raise the outermost ring above the input; control: lower_only off does
+#   F  beyond the rim band Stage 1 equals the free solve; control: the old whole-grid cap does not
+#   G  deposition fills a V-valley without a ridge down its floor; control: flatness read off the fill does
+#   H  the reported masks lie in the FINAL height's trenches: sediment and eroded_rock are each at least
+#      twice as deep in the trenches as elsewhere; controls: the old readings (Stage 2's deposit, and input
+#      minus output) are less concentrated, so the criterion tells the two definitions apart
+#
+# Asserts on the solver's own debug_stages grids, not on anything this gate computes for it.
+
+extends Node
+
+const GW := 128
+const GH := 128
+const RECT := Rect2(0, 0, 256, 256)
+const EXPECTED := 8
+
+var _fail := 0
+var _done := 0
+
+
+func _ready() -> void:
+	print("=== GraphSaleveDepositionGate: Salève S3 deposition and fine incision ===\n")
+	_a_deposition()
+	_b_stream_log()
+	_c_skip()
+	_d_mass()
+	_e_lower_only()
+	_f_masks()
+	_g_no_ridge()
+	_h_masks_follow_trenches()
+	var ok := _fail == 0 and _done == EXPECTED
+	print("\n=== %s (%d failures, %d/%d criteria completed) ===" % [
+		"SALEVE DEPOSITION PASS" if ok else "SALEVE DEPOSITION FAIL", _fail, _done, EXPECTED])
+	get_tree().quit(0 if ok else 1)
+
+
+func _a_deposition() -> void:
+	print("[A] deposition only raises, and only on concave ground")
+	# Stage 1 and the warp skipped: Stage 2 sees the fixtures themselves, so the plane really is a plane.
+	var crater := _solve(_crater(), {"skip_stage1": true, "default_warp": false})
+	var plane := _solve(_plane(), {"skip_stage1": true, "default_warp": false})
+	var full := _max(_solve(_crater(), {}).deposition)
+	var dmin := _min(crater.deposition)
+	var dmax := _max(crater.deposition)
+	var pmax := _max(plane.deposition)
+	print("    crater: min %.6f m (want >= 0), max %.4f m (want > 0.01); control plane: max %.6f m (want < 0.0001)"
+			% [dmin, dmax, pmax] + "; after Stage 1 max %.4f m (reported)" % full)
+	if dmax <= 0.01:
+		_fail += 1
+		print("    !! the crater deposited nothing, so 'never lowers' is vacuous")
+		return
+	if dmin < 0.0 or pmax >= 1.0e-4:
+		_fail += 1
+		print("    !! deposition lowered a cell, or filled ground that holds no water")
+		return
+	_done += 1
+
+
+func _b_stream_log() -> void:
+	print("\n[B] Stage 3 is the stream-log solver")
+	var res := _solve(_crater(), {})
+	var pre: PackedFloat32Array = res.pre_stream
+	var post: PackedFloat32Array = res.post_stream
+	var direct: PackedFloat32Array = Pasture3DUtil.hydraulic_stream_log_solve_grid(pre, GW, GH, RECT,
+			{"incision_rate": 0.15, "area_exponent": 0.5}).height
+	var other: PackedFloat32Array = Pasture3DUtil.hydraulic_stream_log_solve_grid(pre, GW, GH, RECT,
+			{"incision_rate": 0.3, "area_exponent": 0.5}).height
+	var d := _max_diff(post, direct)
+	var c := _max_diff(post, other)
+	var cut := _max_diff(pre, post)
+	print("    post vs direct %.7f m (want < 0.00001); control incision 0.3 %.4f m (want > 0.001); stage cut %.4f m"
+			% [d, c, cut])
+	if c <= 1.0e-3 or cut <= 1.0e-3:
+		_fail += 1
+		print("    !! the control matched or Stage 3 cut nothing, so agreement measures nothing")
+		return
+	if d >= 1.0e-5:
+		_fail += 1
+		print("    !! Stage 3 is not the stream-log solver")
+		return
+	_done += 1
+
+
+func _c_skip() -> void:
+	print("\n[C] stream_strength 0 skips Stage 3")
+	var off := _solve(_crater(), {"stream_strength": 0.0})
+	var on := _solve(_crater(), {})
+	var d_off := _max_diff(off.pre_stream, off.post_stream)
+	var d_on := _max_diff(on.pre_stream, on.post_stream)
+	print("    pre vs post: strength 0 %.7f m (want 0); control default %.4f m (want > 0.001)" % [d_off, d_on])
+	if d_on <= 1.0e-3:
+		_fail += 1
+		print("    !! the default cut nothing, so the skip is unobservable")
+		return
+	if d_off != 0.0:
+		_fail += 1
+		print("    !! strength 0 still ran Stage 3")
+		return
+	_done += 1
+
+
+func _d_mass() -> void:
+	print("\n[D] mass balance (reported)")
+	var res := _solve(_crater(), {})
+	var cell := (RECT.size.x / GW) * (RECT.size.y / GH)
+	var eroded := _sum(res.eroded_rock) * cell
+	var deposited := _sum(res.sediment) * cell
+	print("    eroded %.1f m3, deposited %.1f m3, ratio %.3f" % [eroded, deposited, deposited / maxf(eroded, 1.0e-6)])
+	if eroded <= 0.0:
+		_fail += 1
+		print("    !! nothing eroded")
+		return
+	_done += 1
+
+
+func _e_lower_only() -> void:
+	print("
+[E] the rim meets the input: Stage 1 does not raise the outermost ring")
+	var src := _mound()
+	# Border-only outlets in both arms: with the default low-ground outlets the free steady state no longer
+	# raises the rim at all, so there would be nothing for the cap to hold down.
+	var on := _solve(src, {"outlet_level": 0.0})
+	var off := _solve(src, {"lower_only": false, "outlet_level": 0.0})
+	var r_on := _ring_raise(on, src)
+	var r_off := _ring_raise(off, src)
+	print("    outer-ring raise: rim cap %.4f m; control free %.3f m (want > 1, and the cap under 5%% of it)" % [r_on, r_off])
+	if r_off <= 1.0:
+		_fail += 1
+		print("    !! the free steady state raised nothing at the rim, so the cap is unobservable")
+		return
+	if r_on > 0.05 * r_off:
+		_fail += 1
+		print("    !! the rim still steps up from the surrounding ground")
+		return
+	_done += 1
+
+
+func _f_masks() -> void:
+	print("
+[F] beyond the rim the solve is free (the cap no longer flattens the texture)")
+	var src := _mound()
+	# Border-only outlets in every arm, as in E: otherwise the steady state rises nowhere for a cap to act on.
+	var on := _stage1(_solve(src, {"outlet_level": 0.0}))
+	var free := _stage1(_solve(src, {"lower_only": false, "outlet_level": 0.0}))
+	var flat := _stage1(_solve(src, {"cap_everywhere": true, "outlet_level": 0.0}))
+	var rim := 0.1 * minf(RECT.size.x, RECT.size.y)
+	var d_on := 0.0
+	var d_flat := 0.0
+	for iz in range(GH):
+		for ix in range(GW):
+			if _edge_dist(ix, iz) <= rim:
+				continue
+			var i := iz * GW + ix
+			d_on = maxf(d_on, absf(on[i] - free[i]))
+			d_flat = maxf(d_flat, absf(flat[i] - free[i]))
+	print("    interior vs the free solve: rim cap %.6f m (want < 1e-4); control whole-grid cap %.3f m (want > 1)" % [d_on, d_flat])
+	if d_flat <= 1.0:
+		_fail += 1
+		print("    !! the whole-grid cap changed nothing inside, so the comparison is blind")
+		return
+	if d_on >= 1.0e-4:
+		_fail += 1
+		print("    !! the rim cap reaches into the interior")
+		return
+	_done += 1
+
+
+func _g_no_ridge() -> void:
+	print("
+[G] deposition fills a valley floor without building a ridge down it")
+	# Stage 1 and the warp skipped, so Stage 2 sees the valley itself. A ridge is a floor cell standing above
+	# BOTH its cross-valley neighbours; the valley's own floor is a minimum, so any prominence is built.
+	var src := _valley()
+	var on := _solve(src, {"skip_stage1": true, "default_warp": false})
+	var off := _solve(src, {"skip_stage1": true, "default_warp": false, "flat_from_fill": true})
+	var fill := _max(on.deposition)
+	var r_on := _ridge(on.pre_stream)
+	var r_off := _ridge(off.pre_stream)
+	print("    floor fill %.3f m (want > 0.5); ridge prominence %.4f m (want < 2%% of the fill); control flatness off the fill %.3f m (want > 20%% of it)"
+			% [fill, r_on, r_off])
+	if fill <= 0.5 or r_off <= 0.2 * fill:
+		_fail += 1
+		print("    !! the valley did not fill, or the old weighting built no ridge, so the check is blind")
+		return
+	if r_on >= 0.02 * fill:
+		_fail += 1
+		print("    !! the deposition stands above its own banks")
+		return
+	_done += 1
+
+
+## A straight V-valley down the grid, tilted along its axis so it drains; nothing is closed. The walls are
+## steep (0.78) because the old weighting only separates floor from wall where the walls are not flat.
+func _valley() -> PackedFloat32Array:
+	return _field(func(u: float, v: float) -> float: return 200.0 * absf(u) - 8.0 * v + 40.0)
+
+
+## Largest height of a cell above BOTH its across-valley (x) neighbours, rows away from the grid edge.
+func _ridge(p_h: PackedFloat32Array) -> float:
+	var worst := 0.0
+	for iz in range(8, GH - 8):
+		for ix in range(1, GW - 1):
+			var i := iz * GW + ix
+			worst = maxf(worst, p_h[i] - maxf(p_h[i - 1], p_h[i + 1]))
+	return worst
+
+
+func _mound() -> PackedFloat32Array:
+	return _field(func(u: float, v: float) -> float:
+		return 120.0 * maxf(0.0, 1.0 - (u * u + v * v) / 0.12) + 4.0 * u)
+
+
+## The Stage 1 grid as capped: what enters Stage 2, i.e. pre_stream minus the deposition.
+func _stage1(p_res: Dictionary) -> PackedFloat32Array:
+	var pre: PackedFloat32Array = p_res.pre_stream
+	var dep: PackedFloat32Array = p_res.deposition
+	var out := PackedFloat32Array()
+	out.resize(pre.size())
+	for i in range(pre.size()):
+		out[i] = pre[i] - dep[i]
+	return out
+
+
+func _edge_dist(p_ix: int, p_iz: int) -> float:
+	var cx := RECT.size.x / GW
+	var cz := RECT.size.y / GH
+	return minf(minf((p_ix + 0.5) * cx, (GW - 0.5 - p_ix) * cx), minf((p_iz + 0.5) * cz, (GH - 0.5 - p_iz) * cz))
+
+
+func _ring_raise(p_res: Dictionary, p_src: PackedFloat32Array) -> float:
+	var s1 := _stage1(p_res)
+	var m := 0.0
+	for iz in range(GH):
+		for ix in range(GW):
+			if ix == 0 or iz == 0 or ix == GW - 1 or iz == GH - 1:
+				var i := iz * GW + ix
+				m = maxf(m, s1[i] - p_src[i])
+	return m
+
+
+func _max_raise(p_res: Dictionary, p_src: PackedFloat32Array) -> float:
+	var pre: PackedFloat32Array = p_res.pre_stream
+	var dep: PackedFloat32Array = p_res.deposition
+	var m := 0.0
+	for i in range(p_src.size()):
+		m = maxf(m, pre[i] - dep[i] - p_src[i])
+	return m
+
+
+func _h_masks_follow_trenches() -> void:
+	print("
+[H] sediment and eroded_rock lie in the final height's trenches")
+	var noise := FastNoiseLite.new()
+	noise.seed = 3
+	noise.frequency = 0.04
+	var src := PackedFloat32Array()
+	src.resize(GW * GH)
+	for iz in range(GH):
+		for ix in range(GW):
+			var u := (ix + 0.5) / GW - 0.5
+			var v := (iz + 0.5) / GH - 0.5
+			src[iz * GW + ix] = 120.0 * maxf(0.0, 1.0 - sqrt(u * u + v * v) / 0.5) + 8.0 * noise.get_noise_2d(ix, iz)
+	var res := _solve(src, {})
+	var h: PackedFloat32Array = res.height
+	# Trenches: the 10% of cells sitting furthest below their 7x7 neighbourhood mean on the FINAL height.
+	var conc := PackedFloat32Array()
+	conc.resize(GW * GH)
+	conc.fill(-INF)
+	var vals: Array = []
+	for iz in range(3, GH - 3):
+		for ix in range(3, GW - 3):
+			var acc := 0.0
+			for a in range(-3, 4):
+				for b in range(-3, 4):
+					acc += h[(iz + a) * GW + ix + b]
+			conc[iz * GW + ix] = acc / 49.0 - h[iz * GW + ix]
+			vals.append(conc[iz * GW + ix])
+	vals.sort()
+	var thr: float = vals[int(vals.size() * 0.9)]
+	var old_ero := PackedFloat32Array()
+	old_ero.resize(GW * GH)
+	for i in range(GW * GH):
+		old_ero[i] = maxf(0.0, src[i] - h[i])
+	var r_sed := _trench_ratio(res.sediment, conc, thr)
+	var r_dep := _trench_ratio(res.deposition, conc, thr)
+	var r_ero := _trench_ratio(res.eroded_rock, conc, thr)
+	var r_old := _trench_ratio(old_ero, conc, thr)
+	print("    trench/elsewhere: sediment %.2f (want >= 2), control Stage 2 deposit %.2f; eroded_rock %.2f (want >= 2), control input minus output %.2f"
+			% [r_sed, r_dep, r_ero, r_old])
+	if r_dep >= r_sed or r_old >= r_ero:
+		_fail += 1
+		print("    !! the old readings are as concentrated as the new, so the criterion cannot tell them apart")
+		return
+	if r_sed < 2.0 or r_ero < 2.0:
+		_fail += 1
+		print("    !! a reported mask does not follow the final height's trenches")
+		return
+	_done += 1
+
+
+## Mean of `p_f` over trench cells (concavity >= p_thr) divided by its mean over the other interior cells.
+func _trench_ratio(p_f: PackedFloat32Array, p_conc: PackedFloat32Array, p_thr: float) -> float:
+	var a := 0.0
+	var na := 0
+	var b := 0.0
+	var nb := 0
+	for i in range(p_f.size()):
+		if p_conc[i] == -INF:
+			continue
+		if p_conc[i] >= p_thr:
+			a += p_f[i]
+			na += 1
+		else:
+			b += p_f[i]
+			nb += 1
+	return (a / maxi(na, 1)) / maxf(b / maxi(nb, 1), 1.0e-9)
+
+
+# ---- helpers ------------------------------------------------------------------------------------
+
+func _solve(p_surface: PackedFloat32Array, p_extra: Dictionary) -> Dictionary:
+	var params := {"seed": 7, "debug_stages": true, "control_points": 4000}
+	params.merge(p_extra, true)
+	return Pasture3DUtil.hydraulic_saleve_solve_grid(p_surface, GW, GH, RECT, params)
+
+
+func _field(p_f: Callable) -> PackedFloat32Array:
+	var a := PackedFloat32Array()
+	a.resize(GW * GH)
+	for iz in range(GH):
+		for ix in range(GW):
+			a[iz * GW + ix] = p_f.call((ix + 0.5) / GW - 0.5, (iz + 0.5) / GH - 0.5)
+	return a
+
+
+# A dome with a crater: the pit Stage 1 routes out of but the reconstruction still holds.
+func _crater() -> PackedFloat32Array:
+	return _field(func(u: float, v: float) -> float:
+		var r := sqrt(u * u + v * v)
+		return 60.0 * cos(minf(r / 0.5, 1.0) * PI * 0.5) - 40.0 * exp(-(r * r) / (0.08 * 0.08)))
+
+
+func _plane() -> PackedFloat32Array:
+	return _field(func(u: float, v: float) -> float: return 30.0 * u + 10.0 * v + 50.0)
+
+
+func _min(p_a: PackedFloat32Array) -> float:
+	var m := INF
+	for v in p_a:
+		m = minf(m, v)
+	return m
+
+
+func _max(p_a: PackedFloat32Array) -> float:
+	var m := -INF
+	for v in p_a:
+		m = maxf(m, v)
+	return m
+
+
+func _sum(p_a: PackedFloat32Array) -> float:
+	var s := 0.0
+	for v in p_a:
+		s += v
+	return s
+
+
+func _max_diff(p_a: PackedFloat32Array, p_b: PackedFloat32Array) -> float:
+	var m := 0.0
+	for i in range(p_a.size()):
+		m = maxf(m, absf(p_a[i] - p_b[i]))
+	return m

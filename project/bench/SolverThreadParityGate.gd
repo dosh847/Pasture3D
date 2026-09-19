@@ -56,7 +56,7 @@ const EROSION := {
 	"diffusion": 1.5, "fill_depressions": true, "fill_every": 1,
 }
 const SALEVE := {
-	"iterations": 12, "seed": 5, "drainage_noise": 0.25, "bank_smoothing": 0.2, "gain": 1.1,
+	"iterations": 12, "seed": 5, "drainage_noise": 0.25, "bank_smoothing": 0.2, "control_points": 20000,
 	"deposition_radius": 8.0, "deposition_strength": 0.4, "stream_strength": 0.05,
 }
 const HYDRAULIC := {"iterations": 12}
@@ -125,14 +125,15 @@ func _run() -> void:
 			_erosion.bind(_with(EROSION, "deposition", 0.5)), EROSION.iterations * 3)
 
 	# ---- Salève -----------------------------------------------------------------------------------
-	# Setup, receivers (>= 1 iteration before convergence), post-smooth, gain, composite.
-	var s := _check("S hydraulic_saleve_solve", _saleve.bind(SALEVE), 5)
+	# Receivers (>= 1 iteration before convergence), reconstruction, post-smooth, composite. 20000 control
+	# points, because the pool runs a vertex pass of under 16384 elements serial and the receivers would
+	# never split.
+	var s := _check("S hydraulic_saleve_solve", _saleve.bind(SALEVE), 4)
 	if not s.is_empty():
 		print("  [S-C] each threaded pass reaches height:")
 		var ok := true
 		ok = _control("bank smoothing off (post-smooth pass)", s.height,
 				_saleve(_with(SALEVE, "bank_smoothing", 0.0)).height) and ok
-		ok = _control("gain 1.0 (tonal pass)", s.height, _saleve(_with(SALEVE, "gain", 1.0)).height) and ok
 		ok = _control("drainage noise off (receiver pass)", s.height,
 				_saleve(_with(SALEVE, "drainage_noise", 0.0)).height) and ok
 		ok = _control("erosion strength 0.25 (composite pass)", s.height,

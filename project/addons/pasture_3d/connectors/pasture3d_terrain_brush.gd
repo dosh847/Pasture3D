@@ -101,6 +101,9 @@ const REFRESH_DELAY: float = 0.1
 
 @export_tool_button("Refresh") var _refresh_btn = _refresh_button
 @export_tool_button("Add Spline") var _add_spline_btn = add_spline
+## Reverse the point order of every child spline, so an open spline runs the other way. The gizmo
+## draws an open spline's FIRST point red and its LAST point green, so the direction is visible.
+@export_tool_button("Reverse Direction") var _reverse_btn = reverse_splines
 ## Fill this brush's closed spline(s) with a Pasture3DPool — the one-press path from "I carved a
 ## basin" to "there is water in it". Asks first if this brush RAISES terrain, because water authored
 ## inside a landform is water you cannot see. See PASTURE3D_WATER_BODIES_SPEC.md §7.8.
@@ -1741,6 +1744,7 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 				if st.has("zo"):
 					_file_solved(st["mod"], st["extent"], {"key": st["key"], "grid": st["zo"], "z": st["z"]},
 							bool(st.get("live", false)))
+				st["mod"].adopt_sink_taps(st)
 
 		# ---- Phase C: the erosion solve, against the surface phase A & B finished.
 		if not pending_erosion.is_empty():
@@ -1907,6 +1911,24 @@ func _graph_solve_one(p_state: Dictionary) -> bool:
 	if int(p_state.get("done", 0)) > 0:
 		return true
 	var prog: Dictionary = p_state["prog"]
+	if p_state.has("taps_prog"):
+		# One pass for the height AND every field the channel sinks read (see make_pending's tap program).
+		var tres: Dictionary = Pasture3DUtil.graph_eval_grid_taps(p_state["taps_prog"], p_state["gw"],
+				p_state["gh"], p_state["rect"], p_state["z"], p_state["tap_slots"], p_state["tap_chans"])
+		var fields: Array = tres.get("fields", [])
+		var unserved: PackedInt32Array = tres.get("unserved", PackedInt32Array())
+		if fields.size() == (p_state["tap_slots"] as PackedInt32Array).size() and not unserved.has(0):
+			p_state["zo"] = fields[0]
+			p_state["node_freeze"] = tres.get("frozen", [])
+			var sf := {}
+			var keys: Array = p_state["tap_keys"]
+			for k in range(keys.size()):
+				if not unserved.has(k + 1):
+					sf[keys[k]] = fields[k + 1]
+			p_state["sink_fields"] = sf
+			p_state["done"] = 1
+			return true
+		# The tap program could not serve the output; solve the height alone, and the sinks tap for themselves.
 	if Pasture3DTerrainGraph.program_has_freeze(prog):
 		# A FROZEN solver inside: served or solved here, adopted by the driver on the main thread.
 		var res: Dictionary = Pasture3DUtil.graph_eval_grid_frozen(prog, p_state["gw"], p_state["gh"],
@@ -3488,6 +3510,61 @@ func _set_curve_points_and_repaint(points: Array) -> void:
 	_suspend_auto = false
 	if Engine.is_editor_hint() and is_configured():
 		refresh()
+
+
+## Reverse every child spline's point order, as one undoable action. Reversal is its own inverse, so
+## the undo is the same call.
+func reverse_splines() -> void:
+	var ur := _editor_undo()
+	if ur:
+		ur.create_action("Pasture3D Reverse %s" % _spline_basename())
+		ur.add_do_method(self, "_reverse_splines_and_repaint")
+		ur.add_undo_method(self, "_reverse_splines_and_repaint")
+		ur.commit_action()
+	else:
+		_reverse_splines_and_repaint()
+
+
+func _reverse_splines_and_repaint() -> void:
+	_suspend_auto = true
+	for path: Path3D in _get_splines():
+		if path.curve != null and path.curve.point_count >= 2:
+			reverse_curve(path.curve)
+	_suspend_auto = false
+	# Re-seat every point on the ground under its NEW position. Without this the points keep heights
+	# that no bake refreshes, because a full refresh does not snap and nothing registers as moved.
+	if snap_to_surface and is_configured():
+		_apply_surface_snap()
+	_on_splines_reversed()
+	if Engine.is_editor_hint() and is_configured():
+		refresh()
+
+
+## Hook for brushes that store data measured ALONG the spline (a road's arc-length segments). Called
+## after the points are reversed; must itself be an involution, because undo calls it again.
+func _on_splines_reversed() -> void:
+	pass
+
+
+## Reverse a curve in place: positions and tilts in reverse order, and each point's in/out handles
+## swapped, so the shape is unchanged and only the direction flips. A closed curve reverses too.
+static func reverse_curve(p_curve: Curve3D) -> void:
+	var n := p_curve.point_count
+	var pos := PackedVector3Array()
+	var tin := PackedVector3Array()
+	var tout := PackedVector3Array()
+	var tilt := PackedFloat32Array()
+	for i in n:
+		pos.append(p_curve.get_point_position(i))
+		tin.append(p_curve.get_point_in(i))
+		tout.append(p_curve.get_point_out(i))
+		tilt.append(p_curve.get_point_tilt(i))
+	for i in n:
+		var k := n - 1 - i
+		p_curve.set_point_position(i, pos[k])
+		p_curve.set_point_in(i, tout[k])
+		p_curve.set_point_out(i, tin[k])
+		p_curve.set_point_tilt(i, tilt[k])
 
 
 ## ---- Surface snapping (PASTURE3D_SPLINE_SURFACE_SNAP_SPEC.md) ----
@@ -5590,6 +5667,7 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 			blk["graph_program"] = m.graph.compile_graph_program()
 			blk["strength"] = m.strength
 			blk["reads_input"] = m.graph.reads_input()
+			blk["reads_footprint"] = m.graph.reads_footprint()
 			blk["content_key"] = m.graph.content_key()
 			blk["feather_mode"] = int(m.feather_mode)
 			blk["custom_falloff_width"] = m.custom_falloff_width
@@ -5681,6 +5759,7 @@ func _prepare_staged_graph_modifiers(p_stack: Dictionary, p_min_x: float, p_min_
 				blk["graph_program"] = g.compile_graph_program()
 				blk["content_key"] = g.content_key()
 				blk["reads_input"] = g.reads_input()
+				blk["reads_footprint"] = g.reads_footprint()
 	return base_in
 
 
@@ -5706,6 +5785,11 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 			# loop a plain rescale between them would shear the ridges off their own crest lines.
 			reseeded = m.take_seed_surface({"surface": out["surface"], "gw": out.get("gw", 0),
 					"gh": out.get("gh", 0), "frame": p_frame}) or reseeded
+		# The Input node's footprint pin, as the native step composited it. Stamped on the graph so the
+		# deferred solve, the sink pass and the preview compile it in. Before `make_pending`, which compiles.
+		if out.has("sink_footprint") and m is Pasture3DNodeGraph and m.graph != null:
+			m.graph.set_host_footprint(out["sink_footprint"], int(out.get("sink_gw", 0)),
+					int(out.get("sink_gh", 0)), out.get("sink_rect", m.last_rect))
 		if out.has("pending"):
 			# §14 pass 1. Nothing was solved; the surface that WOULD have been is waiting here, with the
 			# key it will be stored under. Recorded rather than solved because this is still the bake.
@@ -5793,12 +5877,17 @@ func _run_stack_graph_sinks(p_stack: Dictionary) -> void:
 		var m = step.get("mod")
 		if m == null or not (m is Pasture3DNodeGraph) or m.graph == null:
 			continue
+		if (step.get("out", {}) as Dictionary).has("pending"):
+			# Deferred driver pass 1: the graph is queued for the worker, not solved. Tapping it now was a
+			# whole synchronous solve on the main thread for paint pass 2 overwrites a moment later.
+			continue
 		if m.last_gw <= 0 or m.last_gh <= 0 or m.last_input_surface.size() != m.last_gw * m.last_gh:
 			# No surface was recorded, so no graph step ran for this modifier this bake -- a road-complete
 			# stack, or a step the compiler dropped. Skipping is correct; writing from a stale surface
 			# would paint last bake's answer onto this bake's ground.
 			continue
-		_run_graph_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface)
+		_run_graph_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface,
+				m.sink_taps_for(m.last_input_surface, m.last_gw, m.last_gh))
 		_run_graph_runtime_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface)
 
 
@@ -6135,14 +6224,15 @@ func _apply_road_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 ## The owner base is THIS brush's layer owner, so a sink's reserved layer belongs to the brush and
 ## `bake_all_brushes()`'s per-layer-owner clearing keeps working unchanged (§9.1 rule 2). That is also
 ## what makes one undo restore a graph paint: it is one brush's layer, like every other brush layer.
-func _run_graph_sinks(p_graph, p_gw: int, p_gh: int, p_rect: Rect2, p_z: PackedFloat32Array) -> void:
+func _run_graph_sinks(p_graph, p_gw: int, p_gh: int, p_rect: Rect2, p_z: PackedFloat32Array,
+		p_pretapped: Dictionary = {}) -> void:
 	if p_graph == null or not terrain or not terrain.data:
 		return
 	if Pasture3DGraphChannelSinks.sinks_of(p_graph).is_empty():
 		return
 	var owner: String = _layer_owner if _layer_owner != "" else BRUSH_OWNER_PREFIX + str(name)
 	var report: Dictionary = Pasture3DGraphChannelSinks.run(p_graph, terrain, owner,
-			p_gw, p_gh, p_rect, p_z)
+			p_gw, p_gh, p_rect, p_z, p_pretapped)
 	# A refusal is NAMED. A sink that wrote nothing because its index was negative or its mask unwired
 	# looks identical, on the terrain, to a sink that was never there -- which is the failure mode §4.4
 	# is about, and the reason this is a warning rather than a silent zero.
@@ -6262,6 +6352,8 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	var mask := _graph_feather_mask(n, sdf, edge_off, _effective_modifier_margin(), fmode,
 			custom_fw if fmode == 1 else brush_fw, custom_curve if fmode == 1 else brush_curve,
 			mm, mf, profile)
+	# The Input node's footprint pin is this mask: stamped before anything below compiles or evaluates.
+	g.set_host_footprint(PackedFloat32Array(Array(mask)), gw, gh, rect)
 
 	# ---- FROZEN cache (mirrors _apply_erosion_step §6.3) ----
 	#
@@ -6275,6 +6367,8 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	var frozen: bool = live_async or m.evaluation == Pasture3DNode.Evaluation.FROZEN
 	var extent: String = p_ctx.get("extent", "")
 	var key: int = hash([g.content_key(), z]) if reads else g.content_key()
+	if g.reads_footprint():
+		key = hash([key, g._footprint_sig()]) # a feather or margin edit moves the footprint, not the surface
 	var entry: Dictionary = {}
 	if live_async:
 		entry = {"key": p_step.get("cache_key", 0), "grid": p_step.get("cache", PackedFloat32Array()),

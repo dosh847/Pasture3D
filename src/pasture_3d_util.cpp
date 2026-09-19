@@ -1285,6 +1285,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "value_ramp", GRAPH_OP_VALUE_RAMP },
 		{ "dla", GRAPH_OP_DLA },
 		{ "fractal", GRAPH_OP_FRACTAL },
+		{ "float_to_mask", GRAPH_OP_FLOAT_TO_MASK },
 	};
 	Dictionary d;
 	for (const auto &e : k_ops) {
@@ -2083,6 +2084,11 @@ Array Pasture3DUtil::road_mesh_build_terminus_apron(const PackedVector2Array &p_
 			p_rings_count, p_lift, p_align_s0, p_crown_mode, p_max_bank, p_roundness);
 }
 
+PackedFloat32Array Pasture3DUtil::float_to_mask_grid(const PackedFloat32Array &p_surface, const int p_gw,
+		const int p_gh, const PackedFloat32Array &p_params) {
+	return godot::float_to_mask_grid(p_surface, p_gw, p_gh, p_params);
+}
+
 PackedFloat32Array Pasture3DUtil::curvature_grid(const PackedFloat32Array &p_surface, const int p_gw, const int p_gh,
 		const int p_mode, const int p_radius, const double p_contrast) {
 	return godot::curvature_solve(p_surface, p_gw, p_gh, (godot::CurvatureMode)p_mode, p_radius, p_contrast);
@@ -2211,9 +2217,13 @@ PackedFloat32Array Pasture3DUtil::strata_grid(const PackedFloat32Array &p_surfac
 		const Rect2 &p_rect, const double p_band_height, const double p_hardness,
 		const double p_amount, const double p_dip, const double p_dip_direction_deg,
 		const double p_break_amount, const double p_break_size, const int p_seed,
-		const PackedFloat32Array &p_profile_lut) {
+		const PackedFloat32Array &p_profile_lut, const int p_profile_mode, const double p_hardness_variation,
+		const int p_octaves, const double p_lacunarity, const double p_mask_low, const double p_mask_high,
+		const double p_outcrop_strength, const double p_outcrop_size) {
 	return godot::strata_grid(p_surface, p_gw, p_gh, p_rect, p_band_height, p_hardness,
-			p_amount, p_dip, p_dip_direction_deg, p_break_amount, p_break_size, p_seed, p_profile_lut);
+			p_amount, p_dip, p_dip_direction_deg, p_break_amount, p_break_size, p_seed, p_profile_lut,
+			p_profile_mode, p_hardness_variation, p_octaves, p_lacunarity,
+			p_mask_low, p_mask_high, p_outcrop_strength, p_outcrop_size);
 }
 
 PackedFloat32Array Pasture3DUtil::curve_grid(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_lut,
@@ -2740,6 +2750,70 @@ PackedColorArray Pasture3DUtil::color_ramp_cells(const PackedFloat32Array &p_fie
 	return out;
 }
 
+PackedColorArray Pasture3DUtil::color_blend_cells(const Variant &p_a, const Variant &p_b,
+		const PackedFloat32Array &p_mask, const int p_n, const int p_mode, const double p_strength,
+		const Color &p_fallback_a, const Color &p_fallback_b) {
+	PackedColorArray out;
+	const int n = std::max(0, p_n);
+	out.resize(n);
+	if (n == 0) {
+		return out;
+	}
+	// Uniform inputs are read once; arrays are read per cell with the fallback past their end.
+	const bool a_arr = p_a.get_type() == Variant::PACKED_COLOR_ARRAY;
+	const bool b_arr = p_b.get_type() == Variant::PACKED_COLOR_ARRAY;
+	const PackedColorArray aa = a_arr ? (PackedColorArray)p_a : PackedColorArray();
+	const PackedColorArray ba = b_arr ? (PackedColorArray)p_b : PackedColorArray();
+	const Color au = p_a.get_type() == Variant::COLOR ? (Color)p_a : p_fallback_a;
+	const Color bu = p_b.get_type() == Variant::COLOR ? (Color)p_b : p_fallback_b;
+	const int an = (int)aa.size();
+	const int bn = (int)ba.size();
+	const Color *ap = an > 0 ? aa.ptr() : nullptr;
+	const Color *bp = bn > 0 ? ba.ptr() : nullptr;
+	const int mn = (int)p_mask.size();
+	const float *mp = mn > 0 ? p_mask.ptr() : nullptr;
+	const float strength = (float)std::clamp(p_strength, 0.0, 1.0);
+	Color *dst = out.ptrw();
+	auto c01 = [](float x) { return std::clamp(x, 0.0f, 1.0f); };
+	auto screen = [](float x, float y) { return 1.0f - (1.0f - x) * (1.0f - y); };
+	auto overlay = [](float x, float y) {
+		return x < 0.5f ? 2.0f * x * y : 1.0f - 2.0f * (1.0f - x) * (1.0f - y);
+	};
+	Pasture3DThreadPool::parallel_for_elements(n, 1024, [&](int i0, int i1) {
+		for (int i = i0; i < i1; i++) {
+			const Color ca = a_arr ? (i < an ? ap[i] : p_fallback_a) : au;
+			const Color cb = b_arr ? (i < bn ? bp[i] : p_fallback_b) : bu;
+			float m = 0.0f;
+			if (i < mn && std::isfinite(mp[i])) {
+				m = c01(mp[i]) * strength;
+			}
+			Color f;
+			switch (p_mode) {
+				case 1: // ADD
+					f = Color(c01(ca.r + cb.r), c01(ca.g + cb.g), c01(ca.b + cb.b), ca.a);
+					break;
+				case 2: // SUB
+					f = Color(c01(ca.r - cb.r), c01(ca.g - cb.g), c01(ca.b - cb.b), ca.a);
+					break;
+				case 3: // MUL
+					f = Color(c01(ca.r * cb.r), c01(ca.g * cb.g), c01(ca.b * cb.b), ca.a);
+					break;
+				case 4: // SCREEN
+					f = Color(c01(screen(ca.r, cb.r)), c01(screen(ca.g, cb.g)), c01(screen(ca.b, cb.b)), ca.a);
+					break;
+				case 5: // OVERLAY
+					f = Color(c01(overlay(ca.r, cb.r)), c01(overlay(ca.g, cb.g)), c01(overlay(ca.b, cb.b)), ca.a);
+					break;
+				default: // MIX is B outright, alpha included.
+					f = cb;
+					break;
+			}
+			dst[i] = ca.lerp(f, m);
+		}
+	});
+	return out;
+}
+
 void Pasture3DUtil::gd_set_max_threads(const int p_count) {
 	Pasture3DThreadPool::s_max_threads.store(MAX(p_count, 0), std::memory_order_relaxed);
 }
@@ -2758,6 +2832,9 @@ void Pasture3DUtil::_bind_methods() {
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("color_ramp_cells", "field", "stops", "n", "mode", "space", "in_min", "in_max", "repeat"),
 			&Pasture3DUtil::color_ramp_cells);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("color_blend_cells", "a", "b", "mask", "n", "mode", "strength", "fallback_a", "fallback_b"),
+			&Pasture3DUtil::color_blend_cells);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("set_max_threads", "count"), &gd_set_max_threads);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("get_max_threads"), &gd_get_max_threads);
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("parallel_dispatch_count"), &gd_parallel_dispatch_count);
@@ -3081,6 +3158,9 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("road_mesh_build_terminus_apron", "plan", "cum", "align_ds", "align_z", "align_bank", "s_end", "half", "shoulder", "crown", "is_start", "apron_length", "apron_drop", "rings_count", "lift", "align_s0", "crown_mode", "max_bank", "roundness"),
 			&Pasture3DUtil::road_mesh_build_terminus_apron, DEFVAL(false), DEFVAL(2.5), DEFVAL(0.08), DEFVAL(4), DEFVAL(0.0), DEFVAL(0.0), DEFVAL(0), DEFVAL(0.0), DEFVAL(0.5));
 	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("float_to_mask_grid", "surface", "gw", "gh", "params"),
+			&Pasture3DUtil::float_to_mask_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("curvature_grid", "surface", "gw", "gh", "mode", "radius", "contrast"),
 			&Pasture3DUtil::curvature_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
@@ -3125,8 +3205,10 @@ void Pasture3DUtil::_bind_methods() {
 			&Pasture3DUtil::scree_solve_grid);
 	// Terrain graph — Modifiers & Math Operations.
 	ClassDB::bind_static_method("Pasture3DUtil",
-			D_METHOD("strata_grid", "surface", "gw", "gh", "rect", "band_height", "hardness", "amount", "dip", "dip_direction_deg", "break_amount", "break_size", "seed", "profile_lut"),
-			&Pasture3DUtil::strata_grid, DEFVAL(PackedFloat32Array()));
+			D_METHOD("strata_grid", "surface", "gw", "gh", "rect", "band_height", "hardness", "amount", "dip", "dip_direction_deg", "break_amount", "break_size", "seed", "profile_lut", "profile_mode", "hardness_variation", "octaves", "lacunarity",
+					"mask_low", "mask_high", "outcrop_strength", "outcrop_size"),
+			&Pasture3DUtil::strata_grid, DEFVAL(PackedFloat32Array()), DEFVAL(0), DEFVAL(0.0), DEFVAL(1), DEFVAL(2.0),
+			DEFVAL(0.0), DEFVAL(0.0), DEFVAL(0.0), DEFVAL(180.0));
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("curve_grid", "surface", "lut", "in_min", "in_max", "out_min", "out_max", "amount"),
 			&Pasture3DUtil::curve_grid);

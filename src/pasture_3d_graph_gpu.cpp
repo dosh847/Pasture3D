@@ -3,6 +3,7 @@
 #include "pasture_3d_leveler.h"
 #include "pasture_3d_math_ops.h"
 #include "pasture_3d_path_carve.h"
+#include "pasture_3d_strata.h"
 
 #include <godot_cpp/classes/fast_noise_lite.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
@@ -1420,20 +1421,58 @@ static const char *GRAPH_GRID_GLSL_4 = R"(
 	}
 
 	// ---- STRATA (spec Phase 2b) ------------------------------------------------------------------------
-	// a = the input, b = the break noise already scaled by break_amount (the zero buffer when there is none),
-	// c = the terrace profile LUT (ip entries; fewer than 2 = the power law). f0 band height (floored at
-	// 1 mm on the host), f1 the power-law exponent, f2 amount, f3 dip, f4 / f5 cos / sin of the dip
-	// direction. src/pasture_3d_strata.cpp, in float32. A zero amount is a host-side COPY.
+	// a = the input, b = [raw break noise in [-1, 1] | outcrop factor | mask_low, mask_high], c = the
+	// terrace profile LUT (ip entries; fewer than 2 = the built-in profile). f0 band height (floored at
+	// 1 mm on the host), f1 the profile gamma, f2 amount, f3 dip, f4 / f5 cos / sin of the dip direction,
+	// f6 break_amount, f7 hardness variation, ip2 the StrataFlags (bit 0 SMOOTH, bit 1 elevation mask), f8 octaves, f9
+	// lacunarity. Octave k bands octave k-1's output at f0 / f9^k with the break wander shrunk to match.
+	// src/pasture_3d_strata.h strata_profile, in float32. A zero amount is a host-side COPY.
 	if (p.mode == GKM_STRATA) {
 		float x = a[i];
 		if (isnan(x)) { o[i] = x; return; }
 		float wx = p.ox + (float(ix) + 0.5) * p.dx;
 		float wz = p.oz + (float(iz) + 0.5) * p.dz;
-		float t = (x + p.f3 * (wx * p.f4 + wz * p.f5) * 0.01 + b[i]) / p.f0;
-		float q = floor(t);
-		float fr = t - q;
-		float pv = (p.ip >= 2) ? p3d_lut(p.ip, fr) : pow(clamp(fr, 0.0, 1.0), p.f1);
-		o[i] = x + ((q + pv) * p.f0 - x) * p.f2;
+		float nv = b[i];
+		float dip_tilt = p.f3 * (wx * p.f4 + wz * p.f5) * 0.01;
+		float g = clamp(pow(p.f1, 1.0 + p.f7 * nv), 0.05, 10.0);
+		float val = x;
+		float scale = 1.0;
+		int octaves = int(p.f8 + 0.5);
+		for (int k = 0; k < octaves; k++) {
+			float bh = p.f0 / scale;
+			float tilt = dip_tilt + nv * p.f6 / scale;
+			float t = (val + tilt) / bh;
+			float q = floor(t);
+			float fr = t - q;
+			float pv;
+			if (p.ip >= 2) {
+				pv = p3d_lut(p.ip, fr);
+			} else {
+				float u = clamp(fr, 0.0, 1.0);
+				if ((p.ip2 & 1) != 0) {
+					pv = pow(u, g) * (1.0 - exp(-(50.0 / g) * u));
+				} else if (abs(g - 1.0) < 1.0e-3) {
+					pv = u;
+				} else {
+					float ka = pow(1.0 / g, 1.0 / (g - 1.0));
+					float kb = pow(g, -g / (g - 1.0));
+					pv = (u < ka) ? u * kb / ka : kb + (1.0 - kb) * (u - ka) / (1.0 - ka);
+				}
+			}
+			val = (q + pv) * bh - tilt;
+			scale *= p.f9;
+		}
+		// Where the strata show: the elevation window on the input height (ip2 bit 1), then the host-filled
+		// outcrop factor. strata_elevation_mask / strata_outcrop in src/pasture_3d_strata.h.
+		int n_cells = p.gw * p.gh;
+		float amt = p.f2;
+		if ((p.ip2 & 2) != 0) {
+			float lo = b[2 * n_cells];
+			float hi = b[2 * n_cells + 1];
+			amt *= (hi <= lo) ? (x >= lo ? 1.0 : 0.0) : clamp((x - lo) / (hi - lo), 0.0, 1.0);
+		}
+		amt *= b[n_cells + i];
+		o[i] = x + (val - x) * amt;
 		return;
 	}
 
@@ -2212,9 +2251,10 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 			} break;
 			case GRAPH_OP_STRATA: {
 				// Spec Phase 2b. P: 0 band_height, 1 hardness, 2 amount, 3 dip, 4 dip direction deg,
-				// 5 break_amount, 6 break_size, 7 seed. The break noise is FastNoiseLite, which no shader
-				// runs, so it is filled here with strata_grid's exact configuration and scaled, in double,
-				// the way the kernel adds it to the tilt.
+				// 5 break_amount, 6 break_size, 7 seed, 8 profile mode, 9 hardness variation, 10 octaves, 11 lacunarity. The break noise is
+				// FastNoiseLite, which no shader runs, so it is filled here RAW with strata_grid's exact
+				// configuration: the kernel scales it by break_amount for the tilt and by the variation for
+				// the local gamma, so one field serves both.
 				const RID src = in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf;
 				const RID out = empty_buf();
 				if (std::abs(P[2]) <= 1e-7f) {
@@ -2222,24 +2262,50 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 					slot_buf[s] = out;
 					break;
 				}
-				RID brk = zero_buf;
-				if (P[5] > 0.0f) {
+				// b = [n raw break noise | n outcrop factor | mask_low, mask_high]. The noise is FastNoiseLite
+				// and the outcrop a Voronoi walk, neither of which a shader runs, and both depend only on
+				// position — so both are filled here with strata_grid's exact configuration. Always built,
+				// even with no noise: the kernel reads the outcrop half unconditionally.
+				const double variation = std::clamp((double)P[9], 0.0, 1.0);
+				const double dipdir_h = (double)P[4] * (Math_PI / 180.0);
+				const double cos_h = std::cos(dipdir_h);
+				const double sin_h = std::sin(dipdir_h);
+				std::vector<float> ext((size_t)(2 * n + 2), 0.0f);
+				{
 					Ref<FastNoiseLite> nz;
-					nz.instantiate();
-					nz->set_noise_type(FastNoiseLite::TYPE_SIMPLEX_SMOOTH);
-					nz->set_fractal_type(FastNoiseLite::FRACTAL_FBM);
-					nz->set_fractal_octaves(3);
-					nz->set_frequency((real_t)(1.0 / std::max((double)P[6], 0.01)));
-					nz->set_seed((int)P[7]);
+					if (P[5] > 0.0f || variation > 0.0) {
+						nz.instantiate();
+						nz->set_noise_type(FastNoiseLite::TYPE_SIMPLEX_SMOOTH);
+						nz->set_fractal_type(FastNoiseLite::FRACTAL_FBM);
+						nz->set_fractal_octaves(3);
+						nz->set_frequency((real_t)(1.0 / std::max((double)P[6], 0.01)));
+						nz->set_seed((int)P[7]);
+					}
 					for (int iz = 0; iz < p_gh; iz++) {
 						const int row = iz * p_gw;
 						for (int ix = 0; ix < p_gw; ix++) {
 							double wx, wz;
 							graph_cell_to_world(ix, iz, p_gw, p_gh, p_rect, wx, wz);
-							host[row + ix] = (float)((double)nz->get_noise_2d((real_t)wx, (real_t)wz) * (double)P[5]);
+							const double nv = nz.is_valid() ? (double)nz->get_noise_2d((real_t)wx, (real_t)wz) : 0.0;
+							ext[(size_t)(row + ix)] = (float)nv;
+							ext[(size_t)(n + row + ix)] = (float)strata_outcrop(wx, wz, cos_h, sin_h, nv,
+									(double)P[15], std::clamp((double)P[14], 0.0, 1.0), (int)P[7]);
 						}
 					}
-					brk = buf_from(host.data());
+					ext[(size_t)(2 * n)] = P[12];
+					ext[(size_t)(2 * n + 1)] = P[13];
+				}
+				RID brk;
+				{
+					const int ext_bytes = (2 * n + 2) * (int)sizeof(float);
+					PackedByteArray pb;
+					pb.resize(ext_bytes);
+					std::memcpy(pb.ptrw(), ext.data(), ext_bytes);
+					brk = _rd->storage_buffer_create(ext_bytes, pb);
+					if (!brk.is_valid()) {
+						return fail();
+					}
+					to_free.push_back(brk);
 				}
 				const int lut_n = (int)p_prog.luts[(size_t)s].size();
 				RID lut_buf = zero_buf;
@@ -2252,11 +2318,16 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				const double dipdir = (double)P[4] * (Math_PI / 180.0);
 				GraphDispatch d{ out, src, brk, lut_buf, GKM_STRATA, lut_n >= 2 ? lut_n : 0 };
 				d.f0 = (float)std::max((double)P[0], 0.001);
-				d.f1 = (float)(1.0 + std::clamp((double)P[1], 0.0, 1.0) * 15.0);
+				d.f1 = (float)strata_hardness_to_gamma((double)P[1]);
 				d.f2 = P[2];
 				d.f3 = P[3];
 				d.f4 = (float)std::cos(dipdir);
 				d.f5 = (float)std::sin(dipdir);
+				d.f6 = P[5]; // break_amount
+				d.f7 = (float)variation;
+				d.ip2 = (int)P[8]; // profile mode | StrataFlags
+				d.f8 = (float)std::clamp((int)P[10], 1, 8); // octaves
+				d.f9 = (float)std::max((double)P[11], 1.0); // lacunarity
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;

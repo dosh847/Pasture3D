@@ -811,7 +811,9 @@ func _b_the_range_is_reported_and_lockable() -> void:
 func _d_a_non_lowering_graph_says_so() -> void:
 	print("\n[D] a graph that does not lower marks its thumbnails stale and names the blocker (§5.5)")
 
-	# ---- the blocking graph. `dla` is the fixture on purpose: its op is genuinely absent from
+	# ---- the blocking graph. `dev_dla` (DLA's [Dev/GD] twin) is the fixture: it is the GDScript version BY
+	# DESIGN, so it never gains a native op. Plain `dla` was the fixture until DLA was lowered, and then [D]
+	# failed on a graph that was no longer blocked. The history is why DLA: its op was once absent from
 	# `graph_op_ids()`, which is the historical case `op-ids-omission-drops-graph-to-gdscript` records —
 	# DLA ran unlowered for as long as it did precisely because nothing said so. A fabricated blocker
 	# would test the report; this tests it against the failure it was written for.
@@ -823,7 +825,7 @@ func _d_a_non_lowering_graph_says_so() -> void:
 	# V1's scope, and changing lowering to fix it is exactly what standing constraint 1 warns against.
 	var g := Pasture3DTerrainGraph.new()
 	var src := Pasture3DGraphNodeRegistry.create(&"noise")
-	var blocker := Pasture3DGraphNodeRegistry.create(&"dla")
+	var blocker := Pasture3DGraphNodeRegistry.create(&"dev_dla")
 	if src == null or blocker == null:
 		_check(false, "the registry could not create the fixture nodes; nothing was measured")
 		return

@@ -1,0 +1,373 @@
+# Pasture3D Salève and Strata Fidelity Spec
+
+**Status: T1–T3 built 2026-09-18 (`GraphStrataProfileGate`; T3's mask port deferred, see T3); S1 built 2026-09-18 (`GraphSaleveNetworkGate`); S2 built 2026-09-18 (`GraphSaleveMeshGate`); S3 built 2026-09-18 (`GraphSaleveDepositionGate`); S4 built 2026-09-18 (renders not done, see S4).** Check the symbols named in each phase before planning from
+this header — spec status headers go stale.
+
+The graph's **Salève Hydraulic Erosion** (`Pasture3DGraphNodeHydraulicSaleve`, `src/pasture_3d_hydraulic_saleve.cpp`)
+and **Strata** (`Pasture3DGraphNodeStrata`, `src/pasture_3d_strata.cpp`) nodes do not reach the fidelity of
+their Hesiod counterparts. A line-by-line comparison against HighMap/Hesiod (`hmap::hydraulic_saleve`,
+`DrainageBasin`, `hmap::gpu::strata` / `strata.cl`) found the gap is structural, not a matter of defaults.
+This spec closes it in phases, Strata first (pointwise, cheap, high payoff), then Salève.
+
+## 0. Ground rules
+
+- **Licence.** HighMap and Hesiod are GPL; Pasture3D is MIT. Implement from the algorithm described here.
+  Do not copy, translate or paraphrase their source line by line.
+- **Units stay metric.** Everything in world metres or dimensionless slopes, as now. Hesiod works on a
+  [0,1] field over a unit bbox; where this spec quotes a Hesiod parameter, the metric equivalent is given.
+- **Every route changes together.** Strata has GDScript `eval_cell`, native `strata_grid` and a GPU twin
+  (`pasture_3d_graph_gpu.cpp`, ~L1426). No phase lands with one route behind — a missing op bails the whole
+  graph to CPU/GDScript (see `graph_op_ids`, `native_supported()`).
+- **Lowering.** Every new `@export` is added to `native_lower()` and checked by diffing exports against the
+  lowered params (Strata already lost `terrace_profile` once this way).
+- **Gates.** Each criterion has a control that must fail (feature disabled / reverted), and counts
+  completions, not just the absence of failures. Parse-check every edited GDScript before running.
+- **Baselines.** Salève phases S2 and S3 change output by design. Re-record `GraphHydraulicSaleveGate`
+  and `SaleveMarginInvarianceProbe` baselines at the end of the phase that moves them, never mid-debug.
+- **Perf.** Do not run benchmarks without asking the user first.
+
+---
+
+## Strata
+
+### Phase T1 — Profile and variable hardness
+
+Problem: `pow(f, 1 + 15·hardness)` is `f^12` at the default hardness 0.75 — a flat shelf ending in a
+one-pixel riser, which reads as a digital staircase. Hesiod's default (gamma 0.5) is the opposite shape:
+a steep rise at the base of each band and a gentle tread above it.
+
+1. Replace the power law with a **profile mode** enum:
+   - `SHARP` (default): two linear segments. For gamma `g` in (0,1)∪(1,∞):
+     knee `a = (1/g)^(1/(g-1))`, value at knee `b = g^(-g/(g-1))`;
+     `u < a ? u·b/a : b + (1-b)(u-a)/(1-a)`. `g → 1` is the identity (guard |g-1| < 1e-3).
+   - `SMOOTH`: `u^g · (1 - exp(-(50/g)·u))`.
+   - `CURVE`: the existing `terrace_profile` LUT (unchanged behaviour when a curve is assigned).
+2. `hardness` [0,1] remaps to gamma so existing scenes stay meaningful: `g = lerp(1.0, 0.15, hardness)`
+   (0 = no benching, 1 = strong ledge). Document the mapping; do not expose gamma separately.
+3. **Hardness variation**: new `hardness_variation` [0,1] (default 0.5).
+   `g_local = clamp(g ^ (1 + hardness_variation · n(x,z)), 0.05, 10)` with `n` the same break noise
+   field already sampled. Some beds ledge, others weather soft. A power rather than Hesiod's scale, so
+   hardness 0 (g = 1) stays the identity under any variation.
+4. **The tilt comes back off** (found while building T1): the output was `(q + profile)·bh`, which kept
+   the dip tilt and break noise in the height — the dip tilted the ground itself. It is now
+   `(q + profile)·bh − tilt`, as Hesiod does. Existing scenes with nonzero dip change height.
+5. A Terrace Profile curve, when assigned, still overrides the built-in profile (no CURVE enum value),
+   so saved scenes with a curve keep their look.
+
+Gate `GraphStrataProfileGate`: profile endpoints (u=0→0, u=1→1) and monotonicity for a sweep of g in
+both modes; the SHARP knee lands at `(a, b)` within 1e-5; CPU/native/GPU parity on a 128-row grid (the
+thread pool runs serial below that). Control: variation 0 must produce a spatially constant g (asserted by
+sampling the profile at two distant cells with identical in-band fraction).
+
+### Phase T2 — Multiscale octaves
+
+Problem: one pass gives one set of beds. Hesiod stacks the operation, which gives beds inside beds.
+
+1. New `octaves` (int, 1–8, default 3) and `lacunarity` (default 2.0). Octave k uses
+   `band_height_k = band_height / lacunarity^k`, applied to the **output of octave k-1**.
+2. The lateral wander scales with each octave: shift_k = `tilt + break_amount · n / lacunarity^k`, so
+   fine beds wander proportionally less than coarse ones. Dip tilt is shared by all octaves.
+3. `octaves = 1` must reproduce T1 exactly (regression control).
+
+Gate: octaves=1 bit-matches the T1 output; octaves=3 produces at least twice the risers of octaves=1 on
+a linear ramp input; control: forcing lacunarity = 1 must fail the riser-count criterion. Parity across
+routes as in T1. (Built: the original ≥ lacunarity² bound was wrong — a finer boundary that lands inside
+a coarser riser merges with it, so hardness 1 gives 2 risers per base bed at 3 octaves, not 4.)
+
+### Phase T3 — Where strata show: elevation and outcrop masks, mask port
+
+Problem: our strata cover the input evenly. Hesiod limits them to elongated outcrops and fades them in
+valleys.
+
+1. **Elevation mask** (`elevation_mask` bool, default on; `elevation_mask_gamma` default 1.0):
+   `t_e = pow(clamp((h - lo) / (hi - lo), 0, 1), gamma)`, with `lo/hi` from new `mask_low`/`mask_high`
+   in **metres** (default 0 / 0 = auto from the input grid's min/max). Auto is extent-dependent, the same
+   hazard as Salève's `reference_relief`; say so in the tooltip and let the user pin it.
+2. **Outcrop mask** (`outcrop_mask` bool, default on): a Voronoi F2−F1 field evaluated in a frame rotated
+   to the strike direction plus `outcrop_angle_shift` (default 45°), stretched by `outcrop_size`
+   (metres, along-strike and across-strike, default 180 × 60), with the break noise added to the
+   along-strike coordinate. `clamp(v, clamp_min, 1)` then reversed-remap to [remap_min, 1]
+   (defaults 0.5, 0.6). Voronoi must be the same hash on CPU and GPU; reuse the graph's existing cellular
+   implementation if one exists, else add a shared one.
+3. Final blend: `out = lerp(in, strata, amount · t_e · t_o · mask)`.
+4. New input port `mask` (MASK, unwired default 1.0) appended **last** so existing wiring keeps its port
+   indices; update `native_param_ports()`.
+
+Gate: with both masks off and mask unwired, output bit-matches T2 (control); with the elevation mask on,
+change at the input minimum is 0 and at the maximum equals the unmasked change; the outcrop mask produces
+cells with zero change and cells with full change on a 256² ramp. Route parity.
+
+**As built (2026-09-18), and where it departs from the above:**
+- **No auto range.** `mask_low` / `mask_high` are plain metres (defaults 0 / 100). An auto range needs
+  the grid's min/max, which the per-cell `eval_cell` cannot see, and it is the extent-dependent hazard
+  this repo already paid for once.
+- **The outcrop mask is smaller than Hesiod's.** Fixed 45° off the dip, fixed 3:1 stretch, break noise on
+  the long axis. `outcrop_strength` (default 0.4) and `outcrop_size` (180 m) replace
+  angle-shift / two sizes / clamp-min / remap-min — P[12..15] are the last four param slots, and the GPU
+  push constants were already full. Factor = `1 − strength · clamp(F2 − F1, 0, 1)`; at strength 1 it
+  does reach 0. The GPU fills it on the host with the same C++ function (`strata_outcrop`), in the
+  extended noise buffer `[noise | outcrop | lo, hi]`, so no Voronoi runs in GLSL.
+- **The elevation-mask flag rides P[8]** as bit 1 beside the profile mode (`StrataFlags`).
+- **The `mask` port is NOT built.** The native program carries four field inputs per op (`in0..in3`);
+  ports 4+ can drive scalar params but not grids. Strata's ports 1–5 are scalars, so a mask appended
+  last (port 6) cannot reach native or GPU, and moving it to port 1 breaks saved wiring. Open: either
+  widen the program to more field inputs, or add a port migration. Until then, mask a Strata node with a
+  downstream Blend.
+- Gate: `GraphStrataProfileGate` [G] (elevation window, control: mask off changes cells below Mask Low)
+  and [H] (outcrop factor spans [0, 1] at strength 1). [E] parity runs at the defaults, so both masks
+  are covered on all three routes.
+
+---
+
+## Salève Hydraulic Erosion
+
+### Phase S1 — Correct drainage network (same grid, same look class)
+
+Problems: pits are self-receivers that are not outlets, so the network fragments into inward basins;
+processing order is a height sort that becomes invalid once pits are rerouted; routing noise is re-hashed
+every iteration so the network never settles.
+
+1. **Lake rerouting.** After computing receivers, find each cell's terminal (outlet or pit). For pits,
+   run a shortest-path search (Dijkstra on 8-neighbour ground distance) outward from the border outlets;
+   when the search first touches a pit's basin, reverse the receiver chain from the touched cell back to
+   the pit so the basin drains to the neighbour the search came from. Every cell must reach a border
+   outlet afterwards.
+2. **Tree order.** Build children lists from receivers; produce a per-outlet traversal (outlet → leaves).
+   Accumulation walks it leaves → outlet; response times and the height update walk outlet → leaves.
+   Remove the per-iteration `std::sort`.
+3. **Height update.** `z_i = z_outlet + uplift · (t_i − t_outlet)`, then limit against the receiver.
+   Remove the unexplained `* 0.05f`; the slope scale is carried by the slope limit (S1.5) and the remap.
+4. **Stable noise.** Hash on `(seed, cell, neighbour)` only — not the iteration.
+5. **Radial slope limit.** New `max_slope_center` (default 6.0) and `max_slope_border` (default 0.0),
+   `uniform_slope` bool. `s(r) = lerp(border, center, pulse(r))`, `pulse(r) = 1 − r²(3 − 2r)` for r<1,
+   `r` = distance to the domain centre / the smaller domain side. Slopes are dimensionless (as now).
+6. **Iterations.** Default 200, add `tolerance` (default 1e-3, mean |Δz| in unit elevation). Report the
+   iteration count reached through the result dict for gates.
+7. Delete the dead `fine_erosion_strength` and `sediment_strength` params. Default `erosion_strength`
+   0.7, `bank_smoothing` 0.0.
+8. Break flats before solving: add 1e-3 × relief of seeded low-frequency noise to the working copy only.
+
+Gate `GraphSaleveNetworkGate`: every cell's receiver chain terminates at a border outlet (count cells
+checked == n); input with an interior pit — control: disabling rerouting leaves ≥1 non-border terminal;
+converges below tolerance before max iterations on the fixture (control: per-iteration noise re-enabled
+must not converge in the same budget); drainage area at outlets sums to the domain area. Re-record the
+Salève gate baselines at phase end.
+
+**As built (S1):**
+- Stage 1 walks an adjacency (neighbour lists + edge lengths), never the grid, so S2 swaps the graph only.
+  `order` is the BFS outlet → leaves; `root_of` names each vertex's terminal.
+- Rerouting: Dijkstra from every outlet, keyed (distance, index) so the result does not depend on heap
+  internals (the GDScript oracle has its own heap and matches to 6e-6 m). The first settled vertex of an
+  undrained basin has its chain to the pit reversed onto its Dijkstra predecessor.
+- Slope cap is `s(r)·vref/zptp` in unit elevation per unit length, i.e. `s` is a true m/m gradient.
+  `uniform_slope` is lowered as border = centre, so it needs no slot of its own.
+- Flat breaking: value noise on a fixed **50 m world lattice** (not a grid fraction, so a margin does not
+  move it), amplitude 1e-3 of the unit relief, working copy only.
+- Convergence: mean |Δz| per pass < `tolerance` × the current z range. The result dict carries
+  `iterations` and `cell_area`; `debug_network` adds `receivers` and `drainage_area`. `reroute_lakes`
+  and `stable_noise` are dictionary-only gate hooks.
+- **Beyond the spec:** `gain`, `gamma` and `mix_factor` were deleted too. All 16 lowered slots were in
+  use; slots 10–12 now carry `tolerance`, `max_slope_center`, `max_slope_border`. Gain/gamma is the
+  Contrast node's job and `mix_factor` duplicated `erosion_strength`. The node's cache key now includes
+  dx, dy and mask (it hashed the surface only, so rewiring them served a stale solve).
+- Baselines re-recorded: `GraphHydraulicSaleveGate` [C] now wants > 0.01 m (was 0.2 m; the one-line
+  incision runs on a different Stage 1 surface and S3 deletes it); [E] tests post-smoothing instead of
+  the deleted tonal pass. `SolverThreadParityGate` wants ≥ 4 splits (the gain pass is gone).
+  `SaleveMarginInvarianceProbe` worst drift at 60 m margin: auto 26.1 m, pinned 25.4 m. The radial slope
+  pulse is centred on the *solved* domain, so a margin moves it — S2's margin decision must cover it.
+
+### Phase S2 — Coarse irregular solve, smooth reconstruction
+
+Problem: full-resolution D8 gives thin pixel-scale zig-zag channels. Hesiod erodes ~15k jittered points
+and reconstructs, which is where the broad valleys and absence of 45° bias come from.
+
+1. New `control_points` (int, 500–100000, default 15000). Place one jittered point per cell of a
+   √N × √N lattice over the rect (seeded), snap the outer ring to the rect boundary; sample input height
+   bilinearly.
+2. Triangulate with `Geometry2D::triangulate_delaunay` (C++). Adjacency = triangle edges, with true 2D
+   edge lengths. Cell area per vertex = one third of adjacent triangle areas. S1's solver runs on this
+   graph unchanged apart from the neighbour source (write S1 against an adjacency abstraction so this is
+   a swap, not a rewrite).
+3. Outlets = boundary vertices.
+4. **Reconstruction** to the grid, `reconstruction` enum:
+   - `LINEAR`: barycentric within the containing triangle.
+   - `GRADIENT` (default): per-vertex gradients (area-weighted least squares over neighbours), then
+     cubic Hermite-style blend within the triangle so the surface is C¹-ish across edges.
+   Use a triangle walk or a coarse bucket grid for point location; never an O(n·triangles) scan.
+5. **dx/dy become reconstruction warps**: grid sample position += (dx, dy) in metres, multiplied by a
+   biquadratic edge fade so the domain hull is never left. When unwired and `default_warp` is on
+   (default on), use seeded fBm with `warp_amount` (metres, default 2% of the smaller rect side) and
+   `warp_size` (metres, default ¼ of the smaller side). Routing bias from dx/dy is removed.
+6. Mask, `eroded_rock` and `sediment` outputs keep their meaning on the grid.
+7. Margin invariance: control-point density must be defined per unit area (points per km²), with
+   `control_points` the count at the reference footprint, or the margin reintroduces the grid-fraction
+   bug (`saleve-measured-in-grid-fractions`). Decide and document in the phase; the Margin probe gates it.
+
+Gate: reconstruction reproduces an analytic plane exactly and a paraboloid within tolerance (control:
+nearest-vertex reconstruction must fail the paraboloid); no NaN; channel orientation histogram on a cone
+fixture has no peaks at multiples of 45° beyond a threshold (control: S1 grid solver must exceed it);
+`SaleveMarginInvarianceProbe` stays within its current bound. Re-record baselines.
+
+**As built (S2):**
+- **Margin decision (item 7):** new `point_spacing` (metres, 0 = auto from `control_points` over the
+  rect). The interior lattice is anchored to WORLD coordinates (cell `(i, j)` of pitch `s`, jitter hashed
+  on `(i, j)`), so with a pinned spacing a margin adds points without moving any — the same auto/pinned
+  pattern as `reference_relief`. `SaleveMarginInvarianceProbe`'s pinned arm now pins spacing and warp too;
+  worst drift at 60 m margin fell from 26.1/25.4 m (S1, auto/pinned) to 20.1/18.9 m.
+- Spacing is clamped to at least one grid cell. Boundary ring at pitch ≈ s along the rect edges, corners
+  included; interior points closer than 0.4 s to the edge are dropped. Zero-area slivers are discarded.
+- Input heights are sampled bilinearly, extrapolating across the half cell between the outermost cell
+  centres and the rect edge (clamping there bent a plane at the ring).
+- `GRADIENT`: per-vertex gradients by 1/len²-weighted least squares; each vertex's tangent plane blended
+  by squared barycentrics (exact on planes; on an edge only its two vertices take part, so neighbouring
+  triangles agree). Point location through a bucket grid of pitch ≈ 1.5 × spacing.
+- **dx/dy are ADDED to the default fBm when `default_warp` is on**, not replaced by it: the GDScript
+  evaluator hands an unwired port over as a zeros grid while the native program passes nothing, so
+  "unwired" could not be detected identically on both routes. Wire dx/dy and turn Default Warp off for
+  your warp alone. Fade is `16·u(1−u)·v(1−v)`, and the warped sample is clamped into the rect.
+- The 16 param slots were full, so the six S2 settings ride the op's LUT:
+  `[control_points, point_spacing, reconstruction, default_warp, warp_amount, warp_size]`.
+- Stage 3's one-line incision now runs on the mesh vertices (where the receivers live) before
+  reconstruction; Stage 2 runs on the reconstructed grid. S3 replaces both.
+- Gate hooks (dictionary only): `grid_solve` (the S1 grid solver, the orientation control),
+  `reconstruct_only`, and `reconstruction` 2 = NEAREST.
+- The receiver pass is `parallel_for_elements`, which the pool runs serial under 16384 vertices, so
+  `SolverThreadParityGate` solves on 20000 points to cover it.
+- `GraphSaleveMeshGate`: plane 8e-6 m; paraboloid GRADIENT 0.090 m vs LINEAR 0.133 m vs NEAREST 5.6 m
+  (tolerance 0.12); channel edges within 3° of a 45° multiple: mesh 0.16 vs grid 1.00; native program
+  == dictionary route bit for bit, control 1.12 m off.
+
+### Phase S3 — Deposition and fine incision
+
+1. **Deposition** (stage 2) becomes fill-then-blend: fill depressions (priority-flood, then a smoothing
+   of the filled field over `deposition_radius`), blend filled vs. eroded by gradient magnitude so flat
+   floors take the fill and slopes keep their shape, then `lerp` by `deposition_strength`. Radius stays in
+   metres; default raised to 10% of the smaller rect side when set to 0 (auto).
+2. **Fine incision** (stage 3) calls the existing native stream-log solver on the reconstructed grid
+   (fresh flow on the current surface — never the stale S1 receivers), with talus 0.1, deposition radius
+   and strength from stage 2, and the node mask. Delete the one-line approximation.
+3. `sediment` output = positive change from stage 2 + stream-log deposition; `eroded_rock` = negative
+   change across all stages.
+
+Gate: deposition only raises (never lowers) cells, and is zero on a fixture with no depressions
+(control); stage 3 output matches a direct stream-log call on the same input (route check — not the node
+calling itself, assert against the solver called independently); sediment + eroded mass balance reported.
+
+**As built (S3):**
+
+- Order is Stage 1 → reconstruction → Stage 2 → Stage 3 → Stage 4 → composite. From the reconstruction on,
+  the grid is in METRES (`zmin + z · reference_relief`), so Stage 3 and the Stage 2 slopes are metric and
+  the composite no longer rescales.
+- **Deposition is not "zero where nothing holds water".** Stage 1 ends with `z = z[root] + t`, which is
+  monotone along the receivers, so its output has no pits and a pure pit fill deposited exactly 0 m on
+  every fixture (measured). Stage 2 is now: priority-flood fill (deterministic `(value, idx)` heap, seeded
+  from the border and NaN cells), then `target = max(filled, blur(filled))`, which raises pits AND concave
+  valley floors and leaves ridges alone. The box blur reflects oddly past the edges (`a[-k] = 2a[0] - a[k]`),
+  so it reproduces a plane exactly. That is the gate's zero-deposition fixture instead of "no depressions".
+  Weight = `deposition_strength · clamp(1 - |∇filled| / 0.5, 0, 1)`, with the slope in m/m.
+  `deposition_radius` 0 (the new default) = 10% of the smaller rect side.
+- **Stage 3 is `hydraulic_stream_log_solve` itself**, with `incision_rate = stream_strength` and
+  `area_exponent = stream_exp`; the new defaults are 0.15 and 0.5, the stream-log node's own. The
+  stream-log solver has no talus or deposition parameters, so the spec's "talus 0.1, deposition from
+  stage 2" has nothing to bind to. Its mask is NOT passed: the composite already weights by the mask,
+  and passing it would square it. `sediment` is therefore the Stage 2 raise only, times the composite
+  weight; `eroded_rock` is the net lowering.
+- The dev oracle calls the stream-log dev oracle (`solve_oracle`). Parity with native is unchanged at
+  5.7e-6 m.
+- Gate hooks (dictionary only): `debug_stages` returns `pre_stream`, `post_stream` and `deposition`;
+  `skip_stage1` runs Stages 2–4 on the reconstructed input.
+- **Measured:**
+  - Criterion A runs with Stage 1 and the warp off: the crater fills 16.25 m; the plane control gets 1e-6 m.
+    With the fBm warp on, the plane control took 0.046 m, because the warp bends the plane.
+  - After a real Stage 1, deposition is thin: 0.63 m peak on the crater, and a deposited/eroded volume
+    ratio of 0.004.
+  - Stage 3 against a direct stream-log call: 0 m, with 5.33 m for the incision-0.3 control.
+  - `GraphHydraulicSaleveGate` [B] had passed a 0.15 m radius, a leftover from when the radius was a
+    fraction, and wanted more than 0.5 m. It now passes 10 m, wants more than 0.02 m (measures 0.31 m),
+    and has a strength-0 control that must leave exactly 0.
+  - The margin probe's worst drift rose from 20.1 / 18.9 m to 24.3 / 21.4 m (auto / pinned). Both the
+    auto deposition radius and the stream-log solve depend on the extent. This is open.
+
+### Phase S4 — Tidy, docs, defaults
+
+- Inspector groups rebuilt around the new parameters; tooltips carry units.
+- Update `PASTURE3D_NODE_VOCABULARY.md` and the erosion node docs.
+- Before/after renders of the fixture scenes for Strata and Salève attached to the PR.
+
+**As built (S4):**
+
+- **Salève inspector groups:** Erosion, Slope Limit (`suffix:m/m`), Convergence, Control Points, Warp,
+  Deposition, Fine Incision, Post-Processing. `bank_smoothing` moved into Post-Processing, the stage that
+  reads it. Every tooltip names its unit or range. The header comment describes the four stages, and the
+  outputs are documented as metres.
+- **Strata:** the first block gets a "Beds" group, and the missing units become suffixes (`band_height` m,
+  `dip` m/100m, `dip_direction_degrees` °, `break_amount` and `break_size` m).
+- The `[Dev/GD]` Salève node keeps its old grouping. It is the oracle, not an authoring surface.
+- **Docs:** the Salève entry in `PASTURE3D_EROSION_NODES_EXPANSION_SPEC.md` described ports that never
+  existed (`joint_azimuth`, `ridge_preservation`), and it now describes the node as built.
+  `PASTURE3D_NODE_VOCABULARY.md` records the Strata and Salève terms.
+- **Renders were not made.** They need the demo scenes opened in the editor, and those scenes currently
+  carry unrelated uncommitted work.
+
+### Post-review fixes (2026-09-18)
+
+- **The margin step.** This was Stage 1, not the new stages. The free steady state sets
+  `z = z[root] + t` whatever the input height was, so a flat margin became a ramp rising from the border
+  outlets: up to 7 m within 8 cells of the edge, with Stages 2 and 3 on or off. `lower_only` (default on,
+  dictionary-only control) clamps the remapped steady state to the input, in metres, before Stage 2.
+  Interior erosion is unchanged (44.85 m peak). Next to the border, change on flat ground fell from
+  7.0 m to 1.7 m in the 3–8 cell band. The margin probe's worst drift fell to 18.4 / 16.1 m (auto /
+  pinned). Clamping inside the Stage 1 loop was tried first and rejected: it collapsed interior erosion
+  to 3–6 m.
+- **Mask ports carried metres.** `eroded_rock` and `sediment` are MASK ports, but they carried metres,
+  so a colour blend saturated or read black. The solver now returns `eroded_mask` and `sediment_mask`,
+  each clamped to 0..1 over a metre depth (`eroded_mask_depth`, `sediment_mask_depth`; 0 = 10% and 1% of
+  the reference relief). The ports, the native op (LUT [6], [7]) and the dev node all carry the masks.
+  The metre fields stay in the solver's dictionary.
+- Gates: `GraphSaleveDepositionGate` gains E (Stage 1 never raises; control off raises 29.5 m) and F (the
+  masks equal metres over depth; control metres reach 19.1).
+
+### Second review (2026-09-19): metres out, and the cap moved to the rim
+
+- **The whole-grid cap flattened the texture.** Clamping every cell to the input stopped every rise the
+  solve made, so a smooth band showed where the Stage 1 texture used to be. The cap is now weighted by
+  distance to the grid edge: 1 at the edge, smoothstep to 0 at `rim_width` metres in (the node's "Rim"
+  group; 0 = 10% of the shorter side; native LUT [6]). Beyond the band Stage 1 is the free solve.
+  `cap_everywhere` (dictionary-only) is the old behaviour, kept as the gate control. The margin probe's
+  worst drift is back to 24.3 / 21.4 m (auto / pinned), the post-S3 figure, because the interior is
+  free again.
+- **Ports carry metres again.** The 0..1 depth masks were a hidden choice that saturated most of a
+  mountain. `eroded_mask_depth`, `sediment_mask_depth` and the solver's `eroded_mask` / `sediment_mask`
+  are deleted; the ports (FIELD) carry `eroded_rock` and `sediment` in metres. Turning them into a mask is
+  the new **Float to Mask** node's job (op 66, `Pasture3DUtil.float_to_mask_grid`, oracle
+  `[Dev/GD] Float to Mask`). It has a FIXED metre window (the default) or an AUTO percentile window, then
+  invert, gamma, smoothstep and blur. AUTO re-measures on every bake, so a rect bake over a different
+  extent shifts it; pin FIXED for anything painted.
+- Gates: `GraphSaleveDepositionGate` E is now the rim (outer-ring raise 0.005 m; control free 1.09 m) and
+  F the interior (equals the free solve to 1e-6 m; control whole-grid cap 29.5 m). New
+  `GraphFloatToMaskGate`.
+
+### Third review (2026-09-19): valley ridges, and the margin lifting the brush
+
+- **Deposition built ridges down valley floors.** Stage 2's flatness weight was read off the unblurred
+  fill: a valley floor weighted 1 sat beside walls weighted 0, so the floor was raised above its own banks,
+  leaving a ridge with a channel on each side. The weight is now read off the blurred surface. That
+  weight is near-uniform across a channel, so the fill keeps the valley's order. `flat_from_fill`
+  (dictionary-only) is the old reading, kept as the gate control.
+- **A wider Modifier Margin lifted the brush.** Stage 1 drained only to the grid border, so its steady
+  state was built up from however far away the border was. The margin probe's core moved up 4.4 m at 16 m
+  of margin and 12 m at 60 m. Stage 1 now also drains out of the low ground: every vertex within
+  `outlet_level` (default 0.1, a fraction of the grid's relief; the Rim group; native LUT [7]) of the
+  grid minimum is an outlet. The brush's level is set where it meets the ground. Worst mean offset is now
+  0.46 m, and worst drift fell from 24.3 / 21.4 m to 5.6 / 3.3 m (auto / pinned).
+  - A blurred "bulk raise" subtraction was tried first and removed. Inside a mound the erosion masked the
+    lift, and it only took 4.4 m down to 3.7 m.
+- Gates: `GraphSaleveDepositionGate` G (V-valley, walls 0.78: fill 4.59 m, floor prominence 0.058 m,
+  control 2.04 m). `SaleveMarginInvarianceProbe` now asserts the lift: offset under 1 m, with a
+  border-only control at 10.1 m. E, F and `GraphSaleveNetworkGate` pin `outlet_level = 0`, because they
+  test the cap and the routing to the border.
+
+## Out of scope
+
+- Hesiod's `strata_cells`, `strata_plates` and `strata_terrace` variants (candidates for later nodes).
+- A GPU route for Salève (the solver stays native CPU; tree traversals are sequential per outlet).

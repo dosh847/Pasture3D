@@ -286,6 +286,35 @@ void graph_resolve_op_params(const GraphProgram &p_prog, int p_slot, float r_P[1
 	}
 }
 
+void graph_footprint_fill(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect, float *r_out) {
+	const int n = p_gw * p_gh;
+	if (!p_prog.has_footprint()) {
+		std::fill_n(r_out, n, 1.f);
+		return;
+	}
+	const float *src = p_prog.footprint.ptr();
+	const double fx = (double)p_prog.fp_rect.position.x;
+	const double fz = (double)p_prog.fp_rect.position.y;
+	const double fdx = (double)p_prog.fp_rect.size.x / (double)p_prog.fp_gw;
+	const double fdz = (double)p_prog.fp_rect.size.y / (double)p_prog.fp_gh;
+	for (int iz = 0; iz < p_gh; iz++) {
+		for (int ix = 0; ix < p_gw; ix++) {
+			double wx, wz;
+			graph_cell_to_world(ix, iz, p_gw, p_gh, p_rect, wx, wz);
+			const double u = std::floor((wx - fx) / fdx);
+			const double v = std::floor((wz - fz) / fdz);
+			float val = 0.f;
+			if (u >= 0.0 && v >= 0.0 && u < (double)p_prog.fp_gw && v < (double)p_prog.fp_gh) {
+				val = src[(int)v * p_prog.fp_gw + (int)u];
+				if (!std::isfinite(val)) {
+					val = 0.f;
+				}
+			}
+			r_out[iz * p_gw + ix] = val;
+		}
+	}
+}
+
 bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 	r_out = GraphProgram();
 	if (!p_prog.has("ops") || !p_prog.has("params") || !p_prog.has("in0") ||
@@ -420,6 +449,7 @@ bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 				f.key = (int64_t)d.get("key", 0);
 				f.dirty = (bool)d.get("dirty", false);
 				f.key_ports = d.get("key_ports", PackedInt32Array());
+				f.key_defaults = d.get("key_defaults", PackedFloat32Array());
 				f.key_params = d.get("key_params", PackedInt32Array());
 				const Array ch = d.get("channels", Array());
 				for (int c = 0; c < (int)ch.size(); c++) {
@@ -428,6 +458,12 @@ bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 				r_out.has_frozen = true;
 			}
 		}
+	}
+	if (p_prog.has("footprint")) {
+		r_out.footprint = p_prog["footprint"];
+		r_out.fp_gw = (int)p_prog.get("footprint_gw", 0);
+		r_out.fp_gh = (int)p_prog.get("footprint_gh", 0);
+		r_out.fp_rect = p_prog.get("footprint_rect", Rect2());
 	}
 	r_out.count = n;
 	if (r_out.is_empty()) {
@@ -894,6 +930,14 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				const int port = fz->key_ports[ki];
 				const bool in_range = port >= 0 && port < 4;
 				const int src = (in_range && in_slot_arr[port] != nullptr) ? in_slot_arr[port][s] : -1;
+				const float dv = ki < (int)fz->key_defaults.size() ? fz->key_defaults[ki] : 0.f;
+				if (src < 0 && dv != 0.f) {
+					PackedFloat32Array filled;
+					filled.resize(n);
+					filled.fill(dv);
+					key_grids.push_back(filled);
+					continue;
+				}
 				key_grids.push_back(get_grid_packed(src, in_range ? chan_of(port, s) : 0));
 			}
 			if (fz->key_params.size() > 0) {
@@ -929,6 +973,10 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 					for (int i = 0; i < n; i++) g_ptr[i] = src[i];
 				} else {
 					std::fill_n(g_ptr, n, 0.f);
+				}
+				// Channel 1, the host brush's footprint -- only when something reads it.
+				if (float *fp = want_aux(1)) {
+					graph_footprint_fill(p_prog, p_gw, p_gh, p_rect, fp);
 				}
 			} break;
 
@@ -1127,7 +1175,8 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				// The terrace profile rides the LUT (spec Phase 2b). It used to be dropped at lowering, so a
 				// custom profile shaped the GDScript route and was silently ignored natively.
 				PackedFloat32Array res = strata_grid(in_arr, p_gw, p_gh, p_rect, P[0], P[1], P[2], P[3], P[4], P[5], P[6], (int)P[7],
-						p_prog.luts[(size_t)s]);
+						p_prog.luts[(size_t)s], (int)P[8], P[9], (int)P[10], P[11],
+						P[12], P[13], P[14], P[15]);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
 			} break;
 
@@ -1153,6 +1202,17 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				PackedFloat32Array res = falloff_grid(in_arr, nz_arr, p_gw, p_gh, p_rect, (int)P[0],
 						P[1], P[2], P[3], P[4], P[5],
 						P[6] > 0.5f, P[7]);
+				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
+			} break;
+
+			case GRAPH_OP_FLOAT_TO_MASK: {
+				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
+				PackedFloat32Array prm;
+				prm.resize(9);
+				for (int k = 0; k < 9; k++) {
+					prm.set(k, P[k]);
+				}
+				PackedFloat32Array res = float_to_mask_grid(in_arr, p_gw, p_gh, prm);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
 			} break;
 
@@ -1652,16 +1712,35 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				p.drainage_noise = P[3];
 				p.shape_preservation = P[4];
 				p.bank_smoothing = P[5];
-				p.deposition_radius = (PH[6] ? P[6] : 25.0f);
+				p.deposition_radius = (PH[6] ? P[6] : 0.0f);
 				p.reference_relief = params_p ? std::max(0.0f, P[15]) : 0.0f;
 				p.deposition_strength = (PH[7] ? P[7] : 0.5f);
-				p.stream_strength = (PH[8] ? P[8] : 0.02f);
-				p.stream_exp = (PH[9] ? P[9] : 0.8f);
-				p.gain = (PH[10] ? P[10] : 1.0f);
-				p.gamma = (PH[11] ? P[11] : 1.0f);
-				p.mix_factor = (PH[12] ? P[12] : 1.0f);
+				p.stream_strength = (PH[8] ? P[8] : 0.15f);
+				p.stream_exp = (PH[9] ? P[9] : 0.5f);
+				p.tolerance = (PH[10] ? std::max(0.0f, P[10]) : 1.0e-3f);
+				p.max_slope_center = (PH[11] ? std::max(0.0f, P[11]) : 6.0f);
+				p.max_slope_border = (PH[12] ? std::max(0.0f, P[12]) : 0.0f);
 				p.seed = params_n ? (int)P[13] : 0;
 				p.enable_post_smoothing = params_o ? (P[14] > 0.5f) : false;
+				// Every one of the 16 slots is taken, so the S2 control-point and reconstruction settings ride
+				// the op's LUT: [control_points, point_spacing, reconstruction, default_warp, warp_amount, warp_size].
+				if ((size_t)s < p_prog.luts.size() && p_prog.luts[(size_t)s].size() >= 6) {
+					const PackedFloat32Array &ext = p_prog.luts[(size_t)s];
+					p.control_points = std::clamp((int)ext[0], 16, 1000000);
+					p.point_spacing = std::max(0.0f, ext[1]);
+					p.reconstruction = std::clamp((int)ext[2], 0, 1);
+					p.default_warp = ext[3] > 0.5f;
+					p.warp_amount = std::max(0.0f, ext[4]);
+					p.warp_size = std::max(0.0f, ext[5]);
+				}
+				// ... then [6] the rim cap width (metres, 0 = auto).
+				if ((size_t)s < p_prog.luts.size() && p_prog.luts[(size_t)s].size() >= 7) {
+					p.rim_width = std::max(0.0f, p_prog.luts[(size_t)s][6]);
+				}
+				// ... and [7] the Stage 1 outlet level (fraction of the grid's relief).
+				if ((size_t)s < p_prog.luts.size() && p_prog.luts[(size_t)s].size() >= 8) {
+					p.outlet_level = std::clamp(p_prog.luts[(size_t)s][7], 0.0f, 1.0f);
+				}
 				if (in1 && in1[s] >= 0) {
 					p.dx = get_grid_packed(in1[s], c_in1);
 				}
@@ -2129,8 +2208,11 @@ Dictionary graph_eval_grid_taps(const GraphProgram &p_prog, int p_gw, int p_gh, 
 	std::vector<int> slot_buffer;
 	std::vector<std::vector<int>> slot_aux;
 	std::vector<int> aux_demanded;
+	// Freeze-aware, like graph_eval_grid_frozen: a FROZEN solver in the program is served from its cache, and
+	// what was served or solved comes back as "frozen" for the caller to adopt on the main thread.
+	Array frozen;
 	graph_eval_grid_core(p_prog, p_gw, p_gh, p_rect, p_input, protect, pool, slot_buffer, slot_aux,
-			&aux_demanded);
+			&aux_demanded, &frozen);
 	Array fields;
 	PackedInt32Array unserved;
 	PackedInt32Array reserved;
@@ -2176,6 +2258,7 @@ Dictionary graph_eval_grid_taps(const GraphProgram &p_prog, int p_gw, int p_gh, 
 	// built around (a tapped channel nobody allocated) shows up as reserved-but-never-written only if the
 	// two are reported separately.
 	result["reserved"] = reserved;
+	result["frozen"] = frozen;
 	return result;
 }
 

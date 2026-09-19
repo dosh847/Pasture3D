@@ -296,6 +296,9 @@ func _init() -> void:
 func _build_ui() -> void:
 	_title = Label.new()
 	_title.text = "(no node)"
+	# Every label wraps: an unwrapped Label's minimum width is its longest line, which pinned the dock
+	# as wide as the stats line and would not let it shrink.
+	_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(_title)
 
 	var row := HBoxContainer.new()
@@ -311,13 +314,18 @@ func _build_ui() -> void:
 	_channel_picker.tooltip_text = ("Which channel of this node to read. Drives the probe, the histogram "
 			+ "and the statistics together.")
 	_channel_picker.item_selected.connect(_on_channel_picked)
+	_channel_picker.fit_to_longest_item = false
+	_channel_picker.clip_text = true
+	_channel_picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(_channel_picker)
 
 	_value_label = Label.new()
 	_value_label.text = "probe: —"
+	_value_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(_value_label)
 	_stats_label = Label.new()
 	_stats_label.text = "min — max — mean —"
+	_stats_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(_stats_label)
 
 	_histogram = Control.new()

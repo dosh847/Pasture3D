@@ -515,6 +515,77 @@ func output_index() -> int:
 ## True when an Input node feeds the output — the graph is a FILTER whose result depends on the surface it
 ## is handed, not a pure generator. A host reads this to decide whether its frozen cache must key on that
 ## surface: an Input-reading graph re-evaluates when the surface changes, a generator does not.
+## The host brush's footprint, stamped by the host on every bake: the 0..1 mask its graph step composites
+## through (feather and Modifier Margin included), `{grid, gw, gh, rect}`. Runtime only, never saved. Every
+## compile carries it, so the native evaluator, the deferred worker, the sink pass and the editor preview all
+## read the Input node's footprint pin from the same mask. Empty = no host, which reads 1.0 everywhere.
+var host_footprint: Dictionary = {}
+
+
+func set_host_footprint(p_grid: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2) -> void:
+	if p_gw <= 0 or p_gh <= 0 or p_grid.size() != p_gw * p_gh:
+		host_footprint = {}
+		return
+	host_footprint = {"grid": p_grid, "gw": p_gw, "gh": p_gh, "rect": p_rect}
+
+
+## True when some node reads an Input node's footprint pin (channel 1).
+func reads_footprint() -> bool:
+	for c in connections:
+		if c.size() >= 4 and int(c[1]) == 1:
+			var from := int(c[0])
+			if from >= 0 and from < nodes.size() and nodes[from] != null and nodes[from].op() == &"input":
+				return true
+	return false
+
+
+## The footprint pin over `p_rect` at `p_gw` x `p_gh`: nearest footprint cell to each cell centre, 0 outside
+## the footprint's rect, 1.0 everywhere when there is none. The oracle for graph_footprint_fill.
+static func footprint_grid(p_fp: Dictionary, p_gw: int, p_gh: int, p_rect: Rect2) -> PackedFloat32Array:
+	var n := p_gw * p_gh
+	var fg: PackedFloat32Array = p_fp.get("grid", PackedFloat32Array())
+	var fgw: int = int(p_fp.get("gw", 0))
+	var fgh: int = int(p_fp.get("gh", 0))
+	if fgw <= 0 or fgh <= 0 or fg.size() != fgw * fgh:
+		return Pasture3DGraphOps.filled(n, 1.0)
+	var fr: Rect2 = p_fp["rect"]
+	var fdx: float = fr.size.x / float(fgw)
+	var fdz: float = fr.size.y / float(fgh)
+	var dx: float = p_rect.size.x / float(maxi(p_gw, 1))
+	var dz: float = p_rect.size.y / float(maxi(p_gh, 1))
+	var out := PackedFloat32Array()
+	out.resize(n)
+	for iz in range(p_gh):
+		var wz: float = p_rect.position.y + (float(iz) + 0.5) * dz
+		var v: float = floorf((wz - fr.position.y) / fdz)
+		for ix in range(p_gw):
+			var wx: float = p_rect.position.x + (float(ix) + 0.5) * dx
+			var u: float = floorf((wx - fr.position.x) / fdx)
+			var val := 0.0
+			if u >= 0.0 and v >= 0.0 and u < float(fgw) and v < float(fgh):
+				val = fg[int(v) * fgw + int(u)]
+				if not is_finite(val):
+					val = 0.0
+			out[iz * p_gw + ix] = val
+	return out
+
+
+func _footprint_sig() -> int:
+	if host_footprint.is_empty() or not reads_footprint():
+		return 0
+	return hash([_content_sig(host_footprint["grid"]), host_footprint["gw"], host_footprint["gh"], host_footprint["rect"]])
+
+
+## Stamp the footprint onto a compiled program. Both compilers call it, so no program leaves without it.
+func _with_footprint(p_prog: Dictionary) -> Dictionary:
+	if not host_footprint.is_empty():
+		p_prog["footprint"] = host_footprint["grid"]
+		p_prog["footprint_gw"] = host_footprint["gw"]
+		p_prog["footprint_gh"] = host_footprint["gh"]
+		p_prog["footprint_rect"] = host_footprint["rect"]
+	return p_prog
+
+
 func reads_input() -> bool:
 	for ni in _eval_order():
 		if nodes[ni] != null and nodes[ni].op() == &"input":
@@ -649,7 +720,7 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 
 	_global_access_tick += 1
 	# Once per evaluate, not once per node: every node's signature folds in the same two arrays.
-	var surf_sig := _content_sig(p_input)
+	var surf_sig := hash([_content_sig(p_input), _footprint_sig()])
 	var mask_sig := _content_sig(p_mask)
 
 	var dx := p_rect.size.x / float(maxi(p_gw, 1))
@@ -693,6 +764,8 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 				grids[ni] = g
 		elif node.op() == &"input":
 			grids[ni] = _surface_grid(p_input, n) # the surface handed in, or a flat 0 when none
+			if reads_footprint():
+				aux[ni] = {1: footprint_grid(host_footprint, p_gw, p_gh, p_rect)}
 		elif node.op() == &"output":
 			var s0: int = inputs_of[ni][0] if not inputs_of[ni].is_empty() else -1
 			var sp0: int = input_ports_of[ni][0] if not input_ports_of[ni].is_empty() else 0
@@ -1253,7 +1326,7 @@ func compile_graph_program(p_root_node: int = -1) -> Dictionary:
 
 	# The geometry operand, in the same slot order as everything above.
 	var _geo := _compile_geometry(order, inputs_of)
-	return {
+	return _with_footprint({
 		"ops": ops, "params": params, "params_b": params_b, "params_c": params_c, "params_d": params_d,
 		"params_e": params_e, "params_f": params_f, "params_g": params_g, "params_h": params_h,
 		"params_i": params_i, "params_j": params_j, "params_k": params_k, "params_l": params_l,
@@ -1266,7 +1339,7 @@ func compile_graph_program(p_root_node: int = -1) -> Dictionary:
 		"pdrv_node": pdrv_node, "pdrv_param": pdrv_param, "pdrv_src": pdrv_src,
 		"noise": noise_tab, "luts": luts_tab, "output": int(slot_of[out]),
 		"frozen": _freeze_table(order),
-	}
+	})
 
 
 ## The native freeze table, parallel to the compiled slots: each FROZEN solver's cache and key recipe, null
@@ -1391,6 +1464,18 @@ func _lower_node_op(node: Pasture3DGraphNode) -> Dictionary:
 ## roots at once. Same ancestor walk + Kahn sort as `_eval_order`, over the combined `needed` set; empty on a
 ## cycle. NOT memoized: the root SET varies with which previews are toggled on, so caching it would thrash;
 ## the single-root `_eval_order` stays the cached hot path the bake rides.
+## A wire into a COLOR port. Colours travel the sideband (graph_channel_sinks `_color_of`), never the
+## program, so the ancestry walks skip these: a Const Color or Color Blend upstream of a Color Sink used to
+## enter the sink's eval order and, having no native op, drop the whole graph to GDScript.
+func _is_color_wire(p_c) -> bool:
+	var to := int(p_c[2])
+	if to < 0 or to >= nodes.size() or nodes[to] == null:
+		return false
+	var types: PackedInt32Array = nodes[to].input_port_types()
+	var port := int(p_c[3])
+	return port >= 0 and port < types.size() and int(types[port]) == Pasture3DGraphNode.PortType.COLOR
+
+
 func _eval_order_multi(p_roots: Array) -> Array:
 	var needed := {}
 	var frontier: Array = []
@@ -1404,7 +1489,7 @@ func _eval_order_multi(p_roots: Array) -> Array:
 	while not frontier.is_empty():
 		var cur: int = frontier.pop_back()
 		for c in connections:
-			if c.size() >= 4 and int(c[2]) == cur:
+			if c.size() >= 4 and int(c[2]) == cur and not _is_color_wire(c):
 				var from := int(c[0])
 				# Null-skip for the same reason as `_eval_order` below.
 				if from >= 0 and from < nodes.size() and nodes[from] != null and not needed.has(from):
@@ -1582,7 +1667,7 @@ func compile_graph_program_multi(p_roots: Array) -> Dictionary:
 			out_slot = int(slot_of[ri])
 			break
 	return {
-		"program": {
+		"program": _with_footprint({
 			"ops": ops, "params": params, "params_b": params_b, "params_c": params_c, "params_d": params_d,
 			"params_e": params_e, "params_f": params_f, "params_g": params_g, "params_h": params_h,
 			"params_i": params_i, "params_j": params_j, "params_k": params_k, "params_l": params_l,
@@ -1594,7 +1679,11 @@ func compile_graph_program_multi(p_roots: Array) -> Dictionary:
 		"pmap0": pmap0, "pmap1": pmap1, "pmap2": pmap2, "pmap3": pmap3,
 		"pdrv_node": pdrv_node, "pdrv_param": pdrv_param, "pdrv_src": pdrv_src,
 			"noise": noise_tab, "luts": luts_tab, "output": out_slot,
-		},
+			# The same freeze table the single-root program carries. Without it a sink or preview tap pass
+			# re-solved every FROZEN solver from scratch -- a Salève solve on the main thread, per bake pass,
+			# right after the worker had solved and cached the identical grid.
+			"frozen": _freeze_table(order),
+		}),
 		"slot_of": slot_of,
 	}
 
@@ -2153,6 +2242,8 @@ func _eval_unfolded(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input 
 		var node: Pasture3DGraphNode = nodes[ni]
 		if node.op() == &"input":
 			grids[ni] = _surface_grid(p_input, n)
+			if reads_footprint():
+				aux[ni] = {1: footprint_grid(host_footprint, p_gw, p_gh, p_rect)}
 			continue
 		var in_grids := _input_grids(ni, grids, aux, n, p_input)
 		if node.muted:
@@ -2253,7 +2344,7 @@ func _eval_order(p_root: int = -1) -> Array:
 	while not frontier.is_empty():
 		var cur: int = frontier.pop_back()
 		for c in connections:
-			if c.size() >= 4 and int(c[2]) == cur:
+			if c.size() >= 4 and int(c[2]) == cur and not _is_color_wire(c):
 				var from := int(c[0])
 				# `nodes[from] != null` is not belt-and-braces: a .tres whose node script failed to load
 				# (renamed script, or a dev-flag script absent from a build) leaves a null in `nodes`, and

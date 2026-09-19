@@ -210,12 +210,16 @@ func native_freeze_entry() -> Variant:
 	var key_params := PackedInt32Array()
 	for port in freeze_key_scalar_ports():
 		key_params.append(pmap[port] if port < pmap.size() else -1)
+	# The GDScript evaluator fills an unwired port with its default, so the native key must hash the same grid.
+	var key_defaults := PackedFloat32Array()
+	for port in freeze_key_grid_ports():
+		key_defaults.append(input_unwired_default(port))
 	var channels: Array = []
 	if not _cache.is_empty():
 		var v: Variant = _cache[_cache_key]
 		channels = v if v is Array else [v]
 	return {"node_id": get_instance_id(), "key": _cache_key, "dirty": _dirty_since_bake,
-			"key_ports": freeze_key_grid_ports(), "key_params": key_params, "channels": channels}
+			"key_ports": freeze_key_grid_ports(), "key_defaults": key_defaults, "key_params": key_params, "channels": channels}
 
 
 ## File one native report: the same two outcomes `solve_cached` has. Main thread only (the graph checks).

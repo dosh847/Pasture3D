@@ -95,6 +95,7 @@ enum GraphCellOpType {
 	GRAPH_OP_GRADIENT = 62, // GENERATOR cell: metric gradient from start/end, in0 = warp (gradient spec §4)
 	GRAPH_OP_VALUE_RAMP = 63, // FILTER cell: in0 through a Godot Gradient to a scalar (gradient spec §6)
 	GRAPH_OP_DLA = 64, // SOLVER grid: a DLA massif, optionally seeded by in0's ridges (2 outputs: height, mask)
+	GRAPH_OP_FLOAT_TO_MASK = 66, // FILTER grid: a unit-ful field to a 0..1 mask over a fixed or percentile window
 	GRAPH_OP_FRACTAL = 65, // GENERATOR grid: the relief FRACTAL material — fBm / ridged / billow, optionally domain-warped
 };
 
@@ -223,6 +224,9 @@ struct GraphFrozenSlot {
 	int64_t key = 0; // the key the cached channels were solved for
 	bool dirty = false; // a parameter moved since the bake; served is then stale regardless of the key
 	PackedInt32Array key_ports; // input ports (0..3) whose GRIDS form the key, in order
+	// Each key port's unwired default. The GDScript evaluator fills an unwired port with it (Salève's mask is
+	// 1.0), so the key hashes that grid rather than the zero buffer the op itself reads.
+	PackedFloat32Array key_defaults;
 	PackedInt32Array key_params; // resolved P[] slots whose values form the key's trailing scalar array
 	std::vector<PackedFloat32Array> channels; // the cached solve, one per output channel; empty when cold
 };
@@ -316,6 +320,15 @@ struct GraphProgram {
 	// no FROZEN solver. `has_frozen` keeps such a program off the GPU, which has no freeze table.
 	std::vector<GraphFrozenSlot> frozen;
 	bool has_frozen = false;
+	// The host brush's footprint: the 0..1 mask its graph step composites through (feather and Modifier
+	// Margin included), over `fp_rect` at fp_gw x fp_gh. The Input node's channel 1 samples it by world
+	// position, so a preview over another domain reads the same mask the bake does. Absent (no host) reads
+	// 1.0 everywhere: the whole grid is in play.
+	PackedFloat32Array footprint;
+	int fp_gw = 0;
+	int fp_gh = 0;
+	Rect2 fp_rect;
+	bool has_footprint() const { return fp_gw > 0 && fp_gh > 0 && footprint.size() == fp_gw * fp_gh; }
 	int output = -1; // the slot whose grid is the graph output
 	int count = 0;
 	bool is_empty() const { return count == 0 || output < 0 || output >= count; }
@@ -323,6 +336,11 @@ struct GraphProgram {
 
 // Read a program dictionary from Pasture3DTerrainGraph.compile_graph_program.
 bool graph_build(const Dictionary &p_prog, GraphProgram &r_out);
+
+// The Input node's footprint channel: `p_prog.footprint` sampled at each cell centre of `p_rect`, nearest
+// cell, 0 outside its rect, 1 everywhere when the program carries none. A byte-for-byte port of
+// Pasture3DTerrainGraph.footprint_grid.
+void graph_footprint_fill(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect, float *r_out);
 
 // One slot's sixteen scalar parameters, with every DRIVEN parameter applied.
 //

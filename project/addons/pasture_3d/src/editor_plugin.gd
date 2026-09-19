@@ -812,6 +812,14 @@ func _apply_placement_defaults(node: Node3D) -> void:
 			# `_bind_modifiers` never ran and it never heard its own graph change. Every Plow placed from the
 			# toolbar was born deaf: editing its graph updated nothing until Bake was pressed.
 			BrushGraphRow.ensure_graph_modifier(plow)
+	# A road brush without a Road modifier grades nothing and never joins the network, so a placed road
+	# arrives with one. Assigned through the setter (a new array), for the same reason as the Plow above.
+	elif node is Pasture3DRoadBrush:
+		var road := node as Pasture3DRoadBrush
+		if road.road_modifier() == null:
+			var stack: Array[Pasture3DNode] = road.modifiers.duplicate()
+			stack.append(Pasture3DNodeRoad.new())
+			road.modifiers = stack
 
 
 ## Place a new landscape brush at `world_pos`, as ONE undoable action: do = add the node under the

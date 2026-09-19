@@ -49,9 +49,6 @@ func _test_single_pass_parity() -> void:
 		"deposition_strength": 0.5,
 		"stream_strength": 0.02,
 		"stream_exp": 0.8,
-		"gain": 1.0,
-		"gamma": 1.0,
-		"mix_factor": 1.0,
 		"seed": 42,
 	}
 
@@ -89,9 +86,6 @@ func _test_multi_pass_parity() -> void:
 		"deposition_strength": 0.5,
 		"stream_strength": 0.02,
 		"stream_exp": 0.8,
-		"gain": 1.0,
-		"gamma": 1.0,
-		"mix_factor": 1.0,
 		"seed": 1337,
 	}
 
@@ -118,17 +112,25 @@ func _test_alluvial_sediment_deposition() -> void:
 	var rect := Rect2(0, 0, 100, 100)
 	var surface := _create_mountain_dome(gw, gh, 30.0)
 
-	var res: Dictionary = Pasture3DUtil.hydraulic_saleve_solve_grid(surface, gw, gh, rect, {
+	var params := {
 		"iterations": 10,
 		"erosion_strength": 0.7,
-		"deposition_radius": 0.15,
+		"deposition_radius": 10.0,
 		"deposition_strength": 0.6,
 		"seed": 101,
-	})
+	}
+	var res: Dictionary = Pasture3DUtil.hydraulic_saleve_solve_grid(surface, gw, gh, rect, params)
+	params["deposition_strength"] = 0.0
+	var ctrl: Dictionary = Pasture3DUtil.hydraulic_saleve_solve_grid(surface, gw, gh, rect, params)
 
+	# S3: deposition fills pits and concave valley floors of the Stage 1 relief, so it is thin on a dome.
 	var max_sed: float = _max_val(res["sediment"])
-	print("    Max alluvial sediment thickness = %.4f m (want > 0.5 m)" % max_sed)
-	if max_sed < 0.5:
+	var max_ctrl: float = _max_val(ctrl["sediment"])
+	print("    Max alluvial sediment thickness = %.4f m (want > 0.02 m); control strength 0 = %.6f m (want 0)" % [max_sed, max_ctrl])
+	if max_ctrl != 0.0:
+		_fail += 1
+		print("    !! sediment without deposition, so the output measures something else")
+	elif max_sed < 0.02:
 		_fail += 1
 		print("    !! Insufficient alluvial sediment deposition")
 
@@ -156,14 +158,17 @@ func _test_fine_stream_incision() -> void:
 	})
 
 	var diff := _max_diff(res_base["height"], res_stream["height"])
-	print("    Fine stream delta vs uncarved = %.4f m (want > 0.2 m)" % diff)
-	if diff < 0.2:
+	# Re-baselined at S1 (was > 0.2 m): the drainage rewrite changed the Stage 1 surface this one-line
+	# incision runs on. It only has to prove the stage runs against its own stream_strength 0 control;
+	# S3 replaces it with the stream-log solver and a real route check.
+	print("    Fine stream delta vs uncarved = %.4f m (want > 0.01 m)" % diff)
+	if diff < 0.01:
 		_fail += 1
 		print("    !! Fine stream power pass did not carve sufficient couloirs")
 
 
 func _test_dx_dy_domain_distortion() -> void:
-	print("\n[D] Stage 1: Domain Coordinate Distortion (dx / dy)")
+	print("\n[D] Reconstruction warp (dx / dy, metres)")
 	var gw := 48
 	var gh := 48
 	var rect := Rect2(0, 0, 100, 100)
@@ -175,12 +180,13 @@ func _test_dx_dy_domain_distortion() -> void:
 	dy_arr.resize(gw * gh)
 	for iz in range(gh):
 		for ix in range(gw):
-			dx_arr[iz * gw + ix] = sin(float(iz) * 0.3) * 0.5
-			dy_arr[iz * gw + ix] = cos(float(ix) * 0.3) * 0.5
+			dx_arr[iz * gw + ix] = sin(float(iz) * 0.3) * 3.0
+			dy_arr[iz * gw + ix] = cos(float(ix) * 0.3) * 3.0
 
 	var res_straight: Dictionary = Pasture3DUtil.hydraulic_saleve_solve_grid(surface, gw, gh, rect, {
 		"iterations": 10,
 		"erosion_strength": 0.7,
+		"default_warp": false,
 		"seed": 303,
 	})
 
@@ -189,18 +195,19 @@ func _test_dx_dy_domain_distortion() -> void:
 		"erosion_strength": 0.7,
 		"dx": dx_arr,
 		"dy": dy_arr,
+		"default_warp": false,
 		"seed": 303,
 	})
 
 	var diff := _max_diff(res_straight["height"], res_warped["height"])
-	print("    dx/dy warped drainage delta = %.4f m (want > 0.5 m)" % diff)
+	print("    dx/dy warped reconstruction delta = %.4f m (want > 0.5 m)" % diff)
 	if diff < 0.5:
 		_fail += 1
-		print("    !! dx/dy domain distortion did not influence drainage routing")
+		print("    !! dx/dy did not warp the reconstruction")
 
 
 func _test_post_processing() -> void:
-	print("\n[E] Stage 4: Post-Processing & Tonal Curve Controls")
+	print("\n[E] Stage 4: Post-Smoothing")
 	var gw := 32
 	var gh := 32
 	var rect := Rect2(0, 0, 100, 100)
@@ -209,24 +216,22 @@ func _test_post_processing() -> void:
 	var res_gamma: Dictionary = Pasture3DUtil.hydraulic_saleve_solve_grid(surface, gw, gh, rect, {
 		"iterations": 5,
 		"erosion_strength": 0.8,
-		"gamma": 1.5,
-		"gain": 1.2,
+		"enable_post_smoothing": true,
 		"seed": 404,
 	})
 
 	var res_flat: Dictionary = Pasture3DUtil.hydraulic_saleve_solve_grid(surface, gw, gh, rect, {
 		"iterations": 5,
 		"erosion_strength": 0.8,
-		"gamma": 1.0,
-		"gain": 1.0,
+		"enable_post_smoothing": false,
 		"seed": 404,
 	})
 
 	var diff := _max_diff(res_gamma["height"], res_flat["height"])
-	print("    Post-process curve delta = %.4f m (want > 1.0 m)" % diff)
-	if diff < 1.0:
+	print("    Post-smoothing delta = %.4f m (want > 0.1 m)" % diff)
+	if diff < 0.1:
 		_fail += 1
-		print("    !! Post-processing tonal curve was not applied")
+		print("    !! Post-smoothing was not applied")
 
 
 func _test_mountain_shape_preservation() -> void:

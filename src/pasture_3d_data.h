@@ -285,6 +285,17 @@ public:
 	// Write an RGBA albedo + coverage weight into a color overlay layer, then dirty-scope composite it
 	// (alpha-over). Falls back to set_color when no stack/invalid layer.
 	void set_color_on_layer(const int p_layer_id, const Vector3 &p_global_position, const Color &p_color, const real_t p_weight = 1.f, const bool p_composite = true);
+	// Graph channel sinks, one grid per call: the GDScript loop these replace made one engine call per cell.
+	// Cell centres are rect.position + (i + 0.5) * size / g; a cell is written only where mask > eps.
+	// Colours: p_colors[i] where it has that cell, else p_fallback. Returns the cells written.
+	int set_colors_on_layer_grid(const int p_layer_id, const Rect2 &p_rect, const int p_gw, const int p_gh,
+			const PackedFloat32Array &p_mask, const float p_eps, const PackedColorArray &p_colors, const Color &p_fallback);
+	// Control words composed like Pasture3DGraphNodeControlSink.control_word: base (or the base beneath when
+	// p_preserve_base) | overlay | blend | every bit below 14 carried from the composited word beneath. A cell
+	// whose base or overlay is outside 0..31 is refused, never clamped. p_blend_field[i] overrides p_blend.
+	int set_controls_on_layer_grid(const int p_layer_id, const Rect2 &p_rect, const int p_gw, const int p_gh,
+			const PackedFloat32Array &p_mask, const float p_eps, const bool p_preserve_base, const int p_base,
+			const int p_overlay, const float p_blend, const PackedFloat32Array &p_blend_field);
 	void add_height_on_layer(const int p_layer_id, const Vector3 &p_global_position, const real_t p_delta, const real_t p_weight = 1.f, const bool p_composite = true);
 	real_t get_layer_height(const int p_layer_id, const Vector3 &p_global_position) const;
 	// Clear the layer's tiles in every region the area (world-space AABB, XZ used) overlaps, then

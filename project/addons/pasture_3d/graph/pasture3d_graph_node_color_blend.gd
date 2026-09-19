@@ -17,9 +17,8 @@
 #
 # ---- WHAT IT COSTS, SAID PLAINLY ----
 #
-# The mask is resolved by compiling and tapping its ancestry, which is a second evaluation pass over the
-# bake grid on top of the sink's own. That is the price of a per-cell colour in a scalar program, it is
-# paid once per Color Blend per bake, and it is paid only by graphs that contain one.
+# The mask is tapped in the sink's own evaluation pass (graph_channel_sinks `_collect_color_fields`), so
+# a Blend costs no extra evaluation of its ancestry, and the per-cell fold runs in C++.
 #
 # When the mask is unwired there is nothing to tap and no field to publish, so the node falls back to a
 # single uniform colour — the same answer Color Mix would give. That is stated rather than hidden: an
@@ -103,7 +102,17 @@ func graph_color(p_upstream: Dictionary = {}) -> Color:
 ## is A, so an unreadable cell has to agree with it. The scalar Blend makes the opposite call for the
 ## opposite reason — its unwired mask is a filled 1.0. The two are consistent with their own defaults,
 ## which is the property that matters; see PASTURE3D_NODE_VOCABULARY.md.
+##
+## The loop runs in C++ (Pasture3DUtil.color_blend_cells). Its GDScript twin is `_color_cells_gd`, which
+## the [Dev/GD] Color Blend node runs and GraphColorBlendGate measures the kernel against.
 func graph_color_cells(p_upstream: Dictionary, p_mask: PackedFloat32Array, p_n: int) -> PackedColorArray:
+	var a = p_upstream.get("a", color_a)
+	var b = p_upstream.get("b", color_b)
+	return Pasture3DUtil.color_blend_cells(a, b, p_mask, p_n, int(mode), strength, color_a, color_b)
+
+
+## The per-cell loop in GDScript: the oracle body [Dev/GD] Color Blend runs.
+func _color_cells_gd(p_upstream: Dictionary, p_mask: PackedFloat32Array, p_n: int) -> PackedColorArray:
 	var a = p_upstream.get("a", color_a)
 	var b = p_upstream.get("b", color_b)
 	var out := PackedColorArray()

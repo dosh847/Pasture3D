@@ -2133,6 +2133,74 @@ void Pasture3DData::set_color_on_layer(const int p_layer_id, const Vector3 &p_gl
 	region->set_modified(true);
 }
 
+int Pasture3DData::set_colors_on_layer_grid(const int p_layer_id, const Rect2 &p_rect, const int p_gw, const int p_gh,
+		const PackedFloat32Array &p_mask, const float p_eps, const PackedColorArray &p_colors, const Color &p_fallback) {
+	const int n = (p_gw > 0 ? p_gw : 0) * (p_gh > 0 ? p_gh : 0);
+	if (n == 0 || p_mask.size() != n) {
+		return 0;
+	}
+	const float *mask = p_mask.ptr();
+	const int nc = (int)p_colors.size();
+	const double sx = (double)p_rect.size.x / (double)p_gw;
+	const double sz = (double)p_rect.size.y / (double)p_gh;
+	int written = 0;
+	for (int iz = 0; iz < p_gh; iz++) {
+		const double wz = (double)p_rect.position.y + ((double)iz + 0.5) * sz;
+		for (int ix = 0; ix < p_gw; ix++) {
+			const int i = iz * p_gw + ix;
+			if (!(mask[i] > p_eps)) {
+				continue;
+			}
+			const double wx = (double)p_rect.position.x + ((double)ix + 0.5) * sx;
+			// The mask is the cell's COVERAGE: the compositor lerps a colour layer by its weight, so a feathered
+			// mask feathers the colour into what lies beneath. At or under eps the cell stays uncovered.
+			set_color_on_layer(p_layer_id, Vector3(wx, 0.0, wz), i < nc ? p_colors[i] : p_fallback, MIN(mask[i], 1.f), false);
+			written++;
+		}
+	}
+	return written;
+}
+
+int Pasture3DData::set_controls_on_layer_grid(const int p_layer_id, const Rect2 &p_rect, const int p_gw, const int p_gh,
+		const PackedFloat32Array &p_mask, const float p_eps, const bool p_preserve_base, const int p_base,
+		const int p_overlay, const float p_blend, const PackedFloat32Array &p_blend_field) {
+	const int n = (p_gw > 0 ? p_gw : 0) * (p_gh > 0 ? p_gh : 0);
+	if (n == 0 || p_mask.size() != n || p_overlay < 0 || p_overlay > 31) {
+		return 0;
+	}
+	const float *mask = p_mask.ptr();
+	const int nb = (int)p_blend_field.size();
+	const double sx = (double)p_rect.size.x / (double)p_gw;
+	const double sz = (double)p_rect.size.y / (double)p_gh;
+	int written = 0;
+	for (int iz = 0; iz < p_gh; iz++) {
+		const double wz = (double)p_rect.position.y + ((double)iz + 0.5) * sz;
+		for (int ix = 0; ix < p_gw; ix++) {
+			const int i = iz * p_gw + ix;
+			if (!(mask[i] > p_eps)) {
+				continue;
+			}
+			const double wx = (double)p_rect.position.x + ((double)ix + 0.5) * sx;
+			const Vector3 pos(wx, 0.0, wz);
+			uint32_t below = get_control(pos);
+			if (below == UINT32_MAX) {
+				below = 0;
+			}
+			const int base_id = p_preserve_base ? (int)get_base(below) : p_base;
+			if (base_id < 0 || base_id > 31) {
+				continue;
+			}
+			const double blend = CLAMP((double)(i < nb ? p_blend_field[i] : p_blend), 0.0, 1.0);
+			const int blend_int = CLAMP((int)Math::round(blend * 255.0), 0, 255);
+			const uint32_t word = enc_base((uint8_t)base_id) | enc_overlay((uint8_t)p_overlay) |
+					enc_blend((uint8_t)blend_int) | (below & 0x3FFF);
+			set_control_on_layer(p_layer_id, pos, (int)word, 1.f, false);
+			written++;
+		}
+	}
+	return written;
+}
+
 Rect2i Pasture3DData::_region_pixel_rect(const AABB &p_area, const Vector2i &p_region_loc) const {
 	Vector3 mn = p_area.position / _vertex_spacing;
 	Vector3 mx = (p_area.position + p_area.size) / _vertex_spacing;
@@ -3013,6 +3081,8 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_control_on_layer", "layer_id", "global_position", "control", "weight", "composite"), &Pasture3DData::set_control_on_layer, DEFVAL(1.f), DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("set_hole_on_layer", "layer_id", "global_position", "hole"), &Pasture3DData::set_hole_on_layer);
 	ClassDB::bind_method(D_METHOD("set_color_on_layer", "layer_id", "global_position", "color", "weight", "composite"), &Pasture3DData::set_color_on_layer, DEFVAL(1.f), DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("set_colors_on_layer_grid", "layer_id", "rect", "gw", "gh", "mask", "eps", "colors", "fallback"), &Pasture3DData::set_colors_on_layer_grid);
+	ClassDB::bind_method(D_METHOD("set_controls_on_layer_grid", "layer_id", "rect", "gw", "gh", "mask", "eps", "preserve_base", "base", "overlay", "blend", "blend_field"), &Pasture3DData::set_controls_on_layer_grid);
 	ClassDB::bind_method(D_METHOD("add_height_on_layer", "layer_id", "global_position", "delta", "weight", "composite"), &Pasture3DData::add_height_on_layer, DEFVAL(1.f), DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("get_layer_height", "layer_id", "global_position"), &Pasture3DData::get_layer_height);
 	ClassDB::bind_method(D_METHOD("clear_layer_in_area", "layer_id", "area", "composite"), &Pasture3DData::clear_layer_in_area, DEFVAL(true));

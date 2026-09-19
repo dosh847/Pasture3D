@@ -83,6 +83,11 @@ The GPU's answer was ratified rather than the CPU's: a mask says how much of an 
 where that question has no answer should not decide the terrain is missing. Propagating NaN is the
 correct behaviour for a HEIGHT grid (where NaN means "no data" and every op forwards it) and the wrong
 behaviour for a WEIGHT grid. All three Blend paths now implement the 1.0 reading.
+
+**Units to mask is a node, not a solver setting.** A solver's secondary outputs (eroded rock, sediment)
+are FIELDs in metres. Converting one to a 0..1 mask is the Float to Mask node's job, where the window is
+visible. Its input is a field, not a mask, so the rule above does not apply: a non-finite input cell has
+no value to place in the window and reads 0.
 - Prose "POINT / FIELD operator" → "cell / grid node".
 
 ---
@@ -115,6 +120,12 @@ structure.**
 The **shape family** genuinely produces relief (elevation variation): Crater, Strata, Dunes, Fractal, Scree,
 Terraces, Furrows, Fractal, DLA. These become **generator ops**, and **"Relief" stays their category
 label** (a node-palette group). `Pasture3DRelief{Crater,Strata,…}` keep their names.
+
+The graph's **Strata** node (`strata`) and the **Salève** solver (`hydraulic_saleve`) follow the Hesiod
+vocabulary where the concept is the same. Strata has a *profile* (the ledge shape), *hardness*, *octaves*
+("beds inside beds") and *elevation / outcrop masks*. Salève has *control points* (the coarse solve),
+*reconstruction*, *warp*, *deposition* and *fine incision*. A Salève "stage" (1–4) is a pipeline step,
+not a user-facing mode. See `PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md`.
 
 ### Renamed (DONE 2026-08-25) — the selector is not relief-specific
 `Pasture3DReliefSelector` gated by slope / altitude / curvature / flow / erosion / deposition /

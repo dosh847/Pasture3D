@@ -26,6 +26,8 @@ const DevSaleve = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_de
 const CELL := 2.0 ## metres per cell, identical in both solves — this is a footprint change, not a resize.
 const CORE := 64 ## cells across the brush's own footprint.
 const DOME_RELIEF := 90.0 ## metres, peak above the surrounding plain.
+## < 0 = the solver's default outlet level; the control sets 0 (grid border only).
+var OUTLET := -1.0
 
 
 func _ready() -> void:
@@ -62,9 +64,24 @@ func _ready() -> void:
 	print("\n    control (auto)  worst drift = %.3f m" % auto_worst)
 	print("    pinned          worst drift = %.3f m" % pinned_worst)
 	var ok := pinned_worst < auto_worst
-	print("\n=== %s ===\n" % [
-		"MARGIN INVARIANCE IMPROVED by pinning the reference" if ok
-		else "NO IMPROVEMENT — pinning the reference did not help, investigate"])
+
+	# The LIFT (2026-09-19): with outlets on the grid border only, the steady state is built up from however
+	# far away the border is, so a wider margin raised the whole core. Outlets on the low ground (the
+	# default outlet_level) must hold the mean offset near 0; border-only is the control and must lift.
+	var worst_offset := 0.0
+	for r in rows:
+		worst_offset = maxf(worst_offset, absf(r["offset"]))
+	OUTLET = 0.0
+	var ctl := _measure(30, DOME_RELIEF)
+	OUTLET = -1.0
+	var lift_ok := worst_offset < 1.0
+	var ctl_ok: bool = ctl["offset"] > 3.0
+	print("    lift: worst |offset| %.3f m with outlets on the low ground (want < 1.0) — %s" % [
+		worst_offset, "ok" if lift_ok else "FAIL"])
+	print("    control: border-only outlets lift the core %.3f m at 60 m of margin (want > 3.0) — %s" % [
+		ctl["offset"], "ok" if ctl_ok else "DEAD"])
+	ok = ok and lift_ok and ctl_ok
+	print("\n=== %s ===\n" % ["MARGIN INVARIANCE PASS" if ok else "MARGIN INVARIANCE FAIL"])
 	get_tree().quit(0 if ok else 1)
 
 
@@ -141,16 +158,20 @@ func _solve(p_core: int, p_margin_cells: int, p_reference_relief: float) -> Pack
 		"drainage_noise": 0.15,
 		"shape_preservation": 2.0,
 		"reference_relief": p_reference_relief,
+		# S2: the pinned arm pins every extent-derived length, not just the vertical one. The point
+		# lattice is world-anchored, so a pinned spacing keeps each interior point where it was.
+		"point_spacing": 2.0 if p_reference_relief > 0.0 else 0.0,
+		"warp_amount": 2.5 if p_reference_relief > 0.0 else 0.0,
+		"warp_size": 32.0 if p_reference_relief > 0.0 else 0.0,
 		"bank_smoothing": 0.1,
 		"deposition_radius": 25.0,
 		"deposition_strength": 0.5,
 		"stream_strength": 0.02,
 		"stream_exp": 0.8,
 		"enable_post_smoothing": false,
-		"gain": 1.0,
-		"gamma": 1.0,
-		"mix_factor": 1.0,
 		"seed": 0,
 	}
+	if OUTLET >= 0.0:
+		params["outlet_level"] = OUTLET
 	var res: Dictionary = Pasture3DUtil.hydraulic_saleve_solve_grid(surface, w, w, rect, params)
 	return res.get("height", surface)

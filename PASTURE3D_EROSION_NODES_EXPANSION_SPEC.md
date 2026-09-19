@@ -101,11 +101,16 @@ graph TD
   * **Outputs:** `0: height` (HEIGHT), `1: channel_mask` (MASK), `2: flow_accumulation` (MASK).
 
 #### 3. `Pasture3DGraphNodeHydraulicSaleve` (`op = &"hydraulic_saleve"`)
-* **Role:** `Role.SOLVER` (`needs_grid() = true`).
-* **Concept:** High-precision Salève structural model featuring bicubic sub-grid runoff advection, joint-aligned fracture bias, and crest curvature weighting to prevent rounding off mountain ridges during water carving.
+* **Role:** `Role.SOLVER` (`needs_grid() = true`). Native C++ op, no GPU route; GDScript oracle is the `[Dev/GD]` node.
+* **Concept (as built, `PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md` S1–S4):** four stages.
+  1. Steady-state stream-power incision over a drainage network with one tree per border outlet, lakes rerouted, iterated to a tolerance. It is solved on world-anchored jittered control points (Delaunay) and reconstructed onto the grid (gradient-blended), with an optional fBm warp.
+  2. Deposition: priority-flood fill raised to a blur of itself where concave, on flat ground only.
+  3. Fine incision: the `hydraulic_stream_log` solver itself.
+  4. Optional smoothing, then a composite over the input by `erosion_strength` × mask.
+* **Inspector groups:** Erosion, Slope Limit (m/m), Convergence, Control Points, Warp (m), Deposition (m), Fine Incision, Post-Processing. `reference_relief` / `point_spacing` pin the result across Modifier Margins.
 * **Ports:**
-  * **Inputs:** `in` (HEIGHT), `joint_azimuth` (FLOAT), `joint_strength` (FLOAT), `ridge_preservation` (FLOAT), `iterations` (INT).
-  * **Outputs:** `0: height` (HEIGHT), `1: eroded_rock` (MASK), `2: sediment` (MASK).
+  * **Inputs:** `in` (HEIGHT), `dx`/`dy` (SIGNED, reconstruction warp in metres), `mask` (MASK).
+  * **Outputs:** `0: height` (HEIGHT), `1: eroded_rock` (FIELD, net lowering in metres), `2: sediment` (FIELD, Stage 2 deposition in metres). Wire either through Float to Mask for a 0..1 mask.
 
 #### 4. `Pasture3DGraphNodeHydraulicProcedural` (`op = &"hydraulic_procedural"`)
 * **Role:** `Role.FILTER` (`needs_grid() = true`, fast/real-time `Evaluation.LIVE`).
