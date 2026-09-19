@@ -784,7 +784,7 @@ peak_vertical_curvature_sag = 1.7271694e-07
 peak_vertical_accel_crest = 1.8033588e-05
 peak_vertical_accel_sag = 0.000107948086
 cut_volume = 1.295064227574088e-06
-fill_volume = 6.013507807429737e-19
+fill_volume = 6.0135078074297365e-19
 input_digest = "2414918344"
 
 [sub_resource type="Resource" id="Resource_4owis"]
@@ -1313,6 +1313,7 @@ metadata/_custom_type_script = "uid://cmrjbbng0gxfi"
 script = ExtResource("3_sghyq")
 _layer_uid = "303ba8e3980b049"
 extent_mode = 2
+blend_mode = 1
 _base_key = "585a1345c4f15d3aaa750fe4b3093fe1"
 _base_box = AABB(-128, -100, -1152, 1280, 200, 2304)
 selected_regions = Array[Vector2i]([Vector2i(0, -1), Vector2i(0, 0)])
