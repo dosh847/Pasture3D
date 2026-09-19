@@ -985,6 +985,28 @@ func _clear() -> void:
 			c.queue_free()
 
 
+## The port type arriving at a Reroute node: the type of the output wired into it, followed back through
+## any chain of reroutes. HEIGHT when nothing is wired (and on a cycle, which the depth bound stops).
+func _reroute_type(p_index: int) -> int:
+	var idx := p_index
+	for _depth in graph.nodes.size():
+		var src := -1
+		var src_port := 0
+		for c in graph.connections:
+			if c.size() >= 4 and int(c[2]) == idx and int(c[3]) == 0:
+				src = int(c[0])
+				src_port = int(c[1])
+				break
+		if src < 0 or src >= graph.nodes.size() or graph.nodes[src] == null:
+			return Pasture3DGraphNode.PortType.HEIGHT
+		var n: Pasture3DGraphNode = graph.nodes[src]
+		if n.op() != &"reroute":
+			var types := n.output_port_types()
+			return types[src_port] if n.output_count() > 1 and src_port < types.size() else n.output_port_type()
+		idx = src
+	return Pasture3DGraphNode.PortType.HEIGHT
+
+
 func _make_graphnode(p_index: int, p_node: Pasture3DGraphNode) -> GraphNode:
 	var gn := GraphNode.new()
 	gn.name = "n%d" % p_index
@@ -999,7 +1021,10 @@ func _make_graphnode(p_index: int, p_node: Pasture3DGraphNode) -> GraphNode:
 		var row := Control.new()
 		row.custom_minimum_size = Vector2(0, 14)
 		gn.add_child(row)
-		gn.set_slot(0, true, Pasture3DGraphNode.PortType.HEIGHT, PORT_COLORS[0], true, Pasture3DGraphNode.PortType.HEIGHT, PORT_COLORS[0])
+		# Coloured by what flows through it, so a rerouted mask wire stays a mask colour end to end. Only the
+		# colour: the slot TYPE stays HEIGHT, the type the graph model checks a reroute's wires against.
+		var rc: Color = PORT_COLORS[_reroute_type(p_index) % PORT_COLORS.size()]
+		gn.set_slot(0, true, Pasture3DGraphNode.PortType.HEIGHT, rc, true, Pasture3DGraphNode.PortType.HEIGHT, rc)
 		return gn
 		
 	var is_out := p_index == graph.output_index()
