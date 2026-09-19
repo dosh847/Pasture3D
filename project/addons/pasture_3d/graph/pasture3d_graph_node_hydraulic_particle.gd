@@ -116,14 +116,27 @@ func native_lower() -> Dictionary:
 	p[6] = evaporation_rate
 	p[7] = min_slope
 	p[8] = gravity
-	p[9] = float(seed)
+	# Two 16-bit halves of the seed's low 32 bits: a float32 slot is exact only to 2^24, so one slot
+	# rounded large seeds and the graph solved a different seed than this node's own route.
+	p[9] = float(seed & 0xFFFF)
 	p[10] = bedrock_gap
 	p[11] = ridge_forcing
+	p[12] = float((seed >> 16) & 0xFFFF)
 	return {"params": p}
 
 
 func native_param_ports() -> PackedInt32Array:
 	return PackedInt32Array([-1, -1, 0, 4, 5])
+
+
+## The native freeze key: the surface and the mask grids (an unwired mask hashes as its 1.0 default, via
+## key_defaults), plus the three drivable scalars. A mask or a wired Const moving now stales the solve.
+func freeze_key_grid_ports() -> PackedInt32Array:
+	return PackedInt32Array([0, 1])
+
+
+func freeze_key_scalar_ports() -> PackedInt32Array:
+	return PackedInt32Array([2, 3, 4])
 
 
 func role() -> Role:
@@ -206,7 +219,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	if surface.size() != n:
 		surface = Pasture3DGraphOps.zeros(n)
 
-	return solve_cached(_surface_hash(surface, p_gw, p_gh), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, d_count, es, ds, mask_in))
+	return solve_cached(freeze_key(p_inputs, p_gw, p_gh), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, d_count, es, ds, mask_in))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -218,10 +231,6 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> 
 func _param_changed() -> void:
 	mark_dirty_since_bake()
 	emit_changed()
-
-
-func _surface_hash(p_surface: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
-	return solver_cache_key(p_gw, p_gh, [p_surface])
 
 
 static func _f32(p_value: float) -> float:

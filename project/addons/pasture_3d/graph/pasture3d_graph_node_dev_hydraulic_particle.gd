@@ -214,7 +214,10 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 	var mask: PackedFloat32Array = p_params.get("mask", PackedFloat32Array())
 	var has_mask: bool = (mask.size() == n)
 
-	var rng_state: int = rng_seed
+	# Low 32 bits, and a zero state is 1337 -- the native solver's rule, decided on the 32-bit value.
+	var rng_state: int = rng_seed & 0xFFFFFFFF
+	if rng_state == 0:
+		rng_state = 1337
 
 	for d in range(droplet_count):
 		var r_res := _next_rand(rng_state)

@@ -25,6 +25,8 @@ func _ready() -> void:
 	_test_a_native_parity()
 	_test_a3_default_lifetime_parity()
 	_test_a4_mask_spawn_parity()
+	_test_r_route_parity()
+	_test_s_seed_lowering()
 	_test_b_seed_determinism()
 	_test_c_nan_boundary_handling()
 	_test_d_channel_generation()
@@ -161,6 +163,72 @@ func _test_a4_mask_spawn_parity() -> void:
 		_fail += 1
 		print("    !! mask-spawn parity failed")
 	_completed += 1
+
+
+## The shipping node on both evaluators, LIVE, mask unwired. The solver keeps its params in double, so the
+## node's own route must round them through float32 as the graph program does; without that the two routes
+## solve ~1e-9-apart params and the droplets make it 2 m. (The unwired mask -- ones on one route, none on the
+## other -- was checked too: the bilinear weights of a uniform quad sum to exactly 1.0 here.)
+func _test_r_route_parity() -> void:
+	print("
+[R] Route parity: the node's GDScript route == its native route, mask unwired")
+	var node: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"hydraulic_particle")
+	node.set("droplet_count", 2000)
+	var g := _graph_with(node)
+	var gw := 64
+	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
+	var surf := _make_test_surface(gw, gw)
+	var native := g.native_supported()
+	var rn := g.evaluate(gw, gw, rect, null, surf)
+	g.force_gdscript_evaluation = true
+	var rg := g.evaluate(gw, gw, rect, null, surf)
+	var d := _max_abs_diff(rn, rg)
+	var cut := _max_abs_diff(rn, surf)
+	print("    native=%s  max |native - gdscript| = %.9f  cut = %.4f m (want > 0.1)" % [native, d, cut])
+	if not native or d > EPS_SINGLE_DROPLET or cut <= 0.1:
+		_fail += 1
+		print("    !! the two routes of the shipping node disagree")
+	_completed += 1
+
+
+## The seed is lowered as two 16-bit halves. One float32 slot rounded 16777217 to 16777216, so the graph
+## solved a different seed from the node's own route. Seed 0 is 1337 on both solvers.
+func _test_s_seed_lowering() -> void:
+	print("
+[S] Seed lowering: 2^24+1 survives the program; seed 0 agrees with the oracle")
+	var gw := 64
+	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
+	var surf := _make_test_surface(gw, gw)
+	var out := {}
+	for sd in [16777217, 16777216]:
+		var node: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"hydraulic_particle")
+		node.set("droplet_count", 500)
+		node.set("seed", sd)
+		var g := _graph_with(node)
+		out[sd] = g.evaluate(gw, gw, rect, null, surf)
+		g.force_gdscript_evaluation = true
+		out[-sd] = g.evaluate(gw, gw, rect, null, surf)
+	var route := _max_abs_diff(out[16777217], out[-16777217])
+	var distinct := _max_abs_diff(out[16777217], out[16777216])
+	var p0 := {"droplet_count": 500, "seed": 0}
+	var zero := _max_abs_diff(DevHydraulicParticle.solve_oracle(surf, gw, gw, rect, p0)[0],
+			Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, p0)["height"])
+	print("    2^24+1 native vs gdscript = %.9f | 2^24+1 vs 2^24 = %.4f (want > 0) | seed 0 oracle vs native = %.9f"
+		% [route, distinct, zero])
+	if route > EPS_SINGLE_DROPLET or distinct <= 1.0e-4 or zero > EPS_SINGLE_DROPLET:
+		_fail += 1
+		print("    !! seed lowering failed")
+	_completed += 1
+
+
+func _graph_with(p_node: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
+	var g := Pasture3DTerrainGraph.new()
+	var i_in := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"))
+	var i_n := g.add_node(p_node)
+	var i_out := g.add_node(Pasture3DGraphNodeRegistry.create(&"output"))
+	g.connect_ports(i_in, 0, i_n, 0)
+	g.connect_ports(i_n, 0, i_out, 0)
+	return g
 
 
 func _test_b_seed_determinism() -> void:

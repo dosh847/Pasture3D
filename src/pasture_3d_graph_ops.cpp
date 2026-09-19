@@ -1666,7 +1666,8 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				p.evaporation_rate = (PH[6] ? P[6] : 0.01f);
 				p.min_slope = (PH[7] ? P[7] : 0.01f);
 				p.gravity = (PH[8] ? P[8] : 4.0f);
-				p.seed = params_j ? (int64_t)P[9] : 1337;
+				// The seed rides as two 16-bit halves, since a float32 slot holds integers exactly only to 2^24.
+				p.seed = params_j ? (int64_t)((uint32_t)P[9] | ((PH[12] ? (uint32_t)P[12] : 0u) << 16)) : 1337;
 				p.bedrock_gap = (PH[10] ? P[10] : 2.0f);
 				p.ridge_forcing = (PH[11] ? P[11] : 0.0f);
 				if (in1 && in1[s] >= 0) {

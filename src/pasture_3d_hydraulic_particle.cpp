@@ -97,7 +97,12 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 	const bool has_mask = (p_params.mask.size() == n);
 	const float *mask_ptr = has_mask ? p_params.mask.ptr() : nullptr;
 
-	uint32_t rng_state = (uint32_t)(p_params.seed != 0 ? p_params.seed : 1337);
+	// The LCG runs on the seed's low 32 bits, and a zero state is 1337. Both are decided on the 32-bit value,
+	// so a seed whose low half is zero, and the lowered seed (which carries only the low half), agree.
+	uint32_t rng_state = (uint32_t)p_params.seed;
+	if (rng_state == 0) {
+		rng_state = 1337;
+	}
 
 	const int droplet_count = p_params.droplet_count;
 	const int max_lifetime = p_params.max_lifetime;
