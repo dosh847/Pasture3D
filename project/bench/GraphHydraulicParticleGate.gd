@@ -12,6 +12,9 @@ const EPS_MULTI_DROPLET := 0.05
 
 var _fail := 0
 var _completed := 0
+# Every criterion ends in `_completed += 1`. A criterion that throws before its assertion increments
+# nothing and adds no failure, so without this a green run could mean nothing ran.
+const WANT := 19
 
 
 func _ready() -> void:
@@ -39,16 +42,103 @@ func _ready() -> void:
 	_test_e2_mass_balance()
 	_test_e3_flow_invariance()
 	_test_e4_channel_route()
+	_test_e5_ridge_unbiased()
+	_test_e6_ridge_parity()
 
 	_finish()
 
 
 func _finish() -> void:
+	if _completed != WANT:
+		_fail += 1
+		print("
+!! only %d of %d criteria reached their assertion" % [_completed, WANT])
 	print("\n=== %s (%d failures) ===\n" % [
 		"GRAPH HYDRAULIC PARTICLE PASS" if _fail == 0 else "GRAPH HYDRAULIC PARTICLE FAIL",
 		_fail
 	])
 	get_tree().quit(0 if _fail == 0 else 1)
+
+
+## Ridge forcing deflects droplets off the fall line, but it must not prefer a SIDE. The perpendicular is a
+## fixed 90 degree rotation of the gradient, so one shared sign sends every droplet the same way; the sign
+## is drawn per droplet instead.
+##
+## The fixture is a plane tilted in +x with a symmetric bump on the fall line. The plane's gradient has no
+## z component, so the added perpendicular is purely lateral and the bias, if any, is maximal. A cone will
+## NOT do: it is radially symmetric, so a spiral leaves no mark on the averaged field at all -- that fixture
+## reported no bias with the biased code in place.
+##
+## Droplet noise swamps a single run, and the chiral part is the same for every seed while the noise is not,
+## so the field is averaged over seeds before the centroid is taken.
+##
+## CONTROL: the zero-forcing run is the noise floor, and the measured bias must stay inside it while the
+## forcing is strong enough to change the terrain.
+func _test_e5_ridge_unbiased() -> void:
+	print("\n[E5] ridge forcing deflects without preferring a side")
+	var g := 128
+	var rect := Rect2(0.0, 0.0, 512.0, 512.0)
+	var base := PackedFloat32Array()
+	base.resize(g * g)
+	for z in g:
+		for x in g:
+			var bx := float(x) - 32.0
+			var bz := float(z) - (g - 1) * 0.5
+			base[z * g + x] = 120.0 - 0.8 * float(x) + 25.0 * exp(-(bx * bx + bz * bz) / 200.0)
+	var centroid := {}
+	var fields := {}
+	for rf in [0.0, 1.2]:
+		var e := PackedFloat32Array()
+		e.resize(g * g)
+		for k in 4:
+			var r: PackedFloat32Array = Pasture3DUtil.hydraulic_particle_solve_grid(base, g, g, rect,
+					{"droplet_count": 30000, "seed": 7 + k * 101, "ridge_forcing": rf})["eroded"]
+			for i in e.size():
+				e[i] += r[i] * 0.25
+		var num := 0.0
+		var den := 0.0
+		for z in g:
+			for x in range(40, g - 4):
+				num += e[z * g + x] * (float(z) - (g - 1) * 0.5)
+				den += e[z * g + x]
+		centroid[rf] = num / maxf(den, 1e-9)
+		fields[rf] = e
+	var floor_bias: float = absf(centroid[0.0])
+	var bias: float = absf(centroid[1.2])
+	var effect := _max_abs_diff(fields[0.0], fields[1.2])
+	print("    scar z-centroid: forcing off %+.3f cells (noise floor) | forcing 1.2 %+.3f cells (want <= %.3f)"
+		% [centroid[0.0], centroid[1.2], maxf(floor_bias, 0.08)])
+	print("    control: the forcing changes the eroded field by %.4f m (want > 0.05)" % effect)
+	if bias > maxf(floor_bias, 0.08) or effect <= 0.05:
+		_fail += 1
+		print("    !! ridge forcing drifts to one side, or it did not deflect anything")
+	_completed += 1
+
+
+## The per-droplet ridge sign is a draw from the SAME rng stream as the spawn position, so the C++ solver
+## and the GDScript oracle have to draw it at the same point or every later droplet diverges. No other
+## criterion turns the forcing on, so the twin's copy of the draw is only tested here.
+##
+## CONTROL: the forcing must actually move the surface, or this compares two identical no-ops.
+func _test_e6_ridge_parity() -> void:
+	print("
+[E6] ridge forcing: C++ == the GDScript oracle, draw for draw")
+	var gw := 64
+	var rect := Rect2(-50.0, -50.0, 100.0, 100.0)
+	var surf := _make_test_surface(gw, gw)
+	var p := {"droplet_count": 500, "max_lifetime": 20, "seed": 42, "ridge_forcing": 0.9}
+	var gd: Array = DevHydraulicParticle.solve_oracle(surf, gw, gw, rect, p)
+	var cpp: Dictionary = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, p)
+	var diff := _max_abs_diff(gd[0], cpp["height"])
+	var off: PackedFloat32Array = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect,
+			{"droplet_count": 500, "max_lifetime": 20, "seed": 42})["height"]
+	var effect := _max_abs_diff(cpp["height"], off)
+	print("    max |cpp - gdscript| = %.9f (want <= %.7f) | control: forcing moves the surface %.4f m (want > 0.01)"
+		% [diff, EPS_MULTI_DROPLET, effect])
+	if diff > EPS_MULTI_DROPLET or effect <= 0.01:
+		_fail += 1
+		print("    !! the two routes draw the ridge sign at different points, or the forcing did nothing")
+	_completed += 1
 
 
 func _test_a_native_parity() -> void:
@@ -119,6 +209,7 @@ func _test_a_native_parity() -> void:
 ## [A2] stops at 10 steps and 500 droplets, which is short enough that the C++ float32 quad differences
 ## never amplified. At the default lifetime they did: 1.99 m max on this size of run. Every channel
 ## must now match the oracle to the bit-level tolerance.
+	_completed += 1
 func _test_a3_default_lifetime_parity() -> void:
 	print("
 [A3] Default-lifetime Parity (2000 droplets, 30 steps): every channel")
@@ -571,6 +662,7 @@ func _test_b_seed_determinism() -> void:
 	if diff_diff <= 1.0e-5:
 		_fail += 1
 		print("    !! Solver produced identical output across different seeds")
+	_completed += 1
 
 
 func _test_c_nan_boundary_handling() -> void:
@@ -604,6 +696,7 @@ func _test_c_nan_boundary_handling() -> void:
 	if not nan_ok:
 		_fail += 1
 		print("    !! Solver corrupted NaN boundaries")
+	_completed += 1
 
 
 func _test_d_channel_generation() -> void:
@@ -639,6 +732,7 @@ func _test_d_channel_generation() -> void:
 	if eroded_depth < 0.01 or max_sed < 0.001 or max_flow < 0.1:
 		_fail += 1
 		print("    !! Solver failed to carve meaningful channels or deposit sediment")
+	_completed += 1
 
 
 func _make_test_surface(p_gw: int, p_gh: int) -> PackedFloat32Array:

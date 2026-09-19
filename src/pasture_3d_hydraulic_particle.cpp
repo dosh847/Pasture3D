@@ -229,6 +229,13 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 		double water = 1.0;
 		double sed = 0.0;
 
+		// Which way this droplet's ridge forcing deflects. The perpendicular is a fixed 90 degree rotation
+		// of the gradient, so a single sign sends EVERY droplet the same way across the slope: measured on
+		// a plane tilted in +x, the scar behind a symmetric bump drifted +0.27 cells off the fall line at
+		// forcing 1.2 and -0.06 at 0. Drawing the sign per droplet keeps the deflection and removes the
+		// drift. The draw is skipped when the forcing is off, so the default RNG stream is unchanged.
+		const double ridge_sign = (ridge_forcing > 0.0 && next_rand(rng_state) < 0.5) ? -1.0 : 1.0;
+
 		// A droplet born on a no-data cell, or where the mask is off, never runs. Without this it walked
 		// out of the masked-off region and cut the unmasked one (GraphHydraulicParticleGate [A4]).
 		const int init_idx = std::clamp((int)px, 0, p_gw - 1) + std::clamp((int)pz, 0, p_gh - 1) * p_gw;
@@ -273,10 +280,11 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 				gz /= cell_dz;
 			}
 
-			// Hesiod Ridge Forcing perturbation: adds cross-gradient force
+			// Cross-gradient deflection: pushes flow off the fall line so channels wander instead of running
+			// straight down it. See ridge_sign above for why the direction is per droplet.
 			if (ridge_forcing > 0.0) {
-				double perp_x = -gz * ridge_forcing * 0.5;
-				double perp_z = gx * ridge_forcing * 0.5;
+				double perp_x = -gz * ridge_forcing * 0.5 * ridge_sign;
+				double perp_z = gx * ridge_forcing * 0.5 * ridge_sign;
 				gx += perp_x;
 				gz += perp_z;
 			}

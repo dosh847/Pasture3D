@@ -324,6 +324,16 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 		var water: float = 1.0
 		var sed: float = 0.0
 
+		# Which way this droplet's ridge forcing deflects. One shared sign sent every droplet the same way
+		# across the slope; drawing it per droplet keeps the deflection and removes the drift. Skipped when
+		# the forcing is off, so the default RNG stream is unchanged.
+		var ridge_sign: float = 1.0
+		if ridge_forcing > 0.0:
+			r_res = _next_rand(rng_state)
+			rng_state = r_res[0]
+			if float(r_res[1]) < 0.5:
+				ridge_sign = -1.0
+
 		var init_ix: int = clampi(int(px), 0, p_gw - 1)
 		var init_iz: int = clampi(int(pz), 0, p_gh - 1)
 		var init_idx: int = init_iz * p_gw + init_ix
@@ -363,10 +373,11 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 				gx /= cell_dx
 				gz /= cell_dz
 
-			# Hesiod Ridge Forcing perturbation: adds cross-gradient force
+			# Cross-gradient deflection: pushes flow off the fall line so channels wander instead of
+			# running straight down it. See ridge_sign above for why the direction is per droplet.
 			if ridge_forcing > 0.0:
-				var perp_x: float = -gz * ridge_forcing * 0.5
-				var perp_z: float = gx * ridge_forcing * 0.5
+				var perp_x: float = -gz * ridge_forcing * 0.5 * ridge_sign
+				var perp_z: float = gx * ridge_forcing * 0.5 * ridge_sign
 				gx += perp_x
 				gz += perp_z
 
