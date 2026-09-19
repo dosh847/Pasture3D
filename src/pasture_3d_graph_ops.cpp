@@ -420,6 +420,7 @@ bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 				f.key = (int64_t)d.get("key", 0);
 				f.dirty = (bool)d.get("dirty", false);
 				f.key_ports = d.get("key_ports", PackedInt32Array());
+				f.key_defaults = d.get("key_defaults", PackedFloat32Array());
 				f.key_params = d.get("key_params", PackedInt32Array());
 				const Array ch = d.get("channels", Array());
 				for (int c = 0; c < (int)ch.size(); c++) {
@@ -894,6 +895,14 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				const int port = fz->key_ports[ki];
 				const bool in_range = port >= 0 && port < 4;
 				const int src = (in_range && in_slot_arr[port] != nullptr) ? in_slot_arr[port][s] : -1;
+				const float dv = ki < (int)fz->key_defaults.size() ? fz->key_defaults[ki] : 0.f;
+				if (src < 0 && dv != 0.f) {
+					PackedFloat32Array filled;
+					filled.resize(n);
+					filled.fill(dv);
+					key_grids.push_back(filled);
+					continue;
+				}
 				key_grids.push_back(get_grid_packed(src, in_range ? chan_of(port, s) : 0));
 			}
 			if (fz->key_params.size() > 0) {

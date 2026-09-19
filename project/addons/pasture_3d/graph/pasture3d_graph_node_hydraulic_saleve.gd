@@ -246,6 +246,12 @@ func native_lower() -> Dictionary:
 	return {"params": p, "lut": ext}
 
 
+## The native freeze key: every grid the solve reads (surface, dx, dy, mask). No scalar port drives Salève,
+## so there are no key scalars; a property edit is caught by the dirty-since-bake flag, as for every solver.
+func freeze_key_grid_ports() -> PackedInt32Array:
+	return PackedInt32Array([0, 1, 2, 3])
+
+
 func role() -> Role:
 	return Role.SOLVER
 
@@ -329,7 +335,9 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	if surface.size() != n:
 		surface = Pasture3DGraphOps.zeros(n)
 
-	return solve_cached(solver_cache_key(p_gw, p_gh, [surface, dx_in, dy_in, mask_in]), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, dx_in, dy_in, mask_in))
+	# Keyed through freeze_key, the recipe the native evaluator rebuilds, so a solve on either route is a hit
+	# on the other. An unwired port is zeros in both keys.
+	return solve_cached(freeze_key(p_inputs, p_gw, p_gh), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, dx_in, dy_in, mask_in))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:

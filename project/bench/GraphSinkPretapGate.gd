@@ -167,8 +167,8 @@ func _served(p_res: Dictionary) -> int:
 func _c_frozen_served() -> void:
 	print("[C] a FROZEN solver is served in a tap pass")
 	var z := _dome()
-	# Erosion, not Salève: Salève declares no freeze key (native_freeze_supported is false), so it has no
-	# native freeze to serve. Its sink pass is covered by A and B instead.
+	# Erosion stands in for any solver with a native freeze key (Salève included; GraphNativeFreezeGate
+	# covers each one's key parity). A and B cover the LIVE case, which no freeze can serve.
 	var g := Pasture3DTerrainGraph.new()
 	var ero := Pasture3DGraphNodeErosion.new()
 	ero.evaluation = Pasture3DGraphSolverNode.Evaluation.FROZEN

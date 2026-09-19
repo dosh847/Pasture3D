@@ -224,6 +224,9 @@ struct GraphFrozenSlot {
 	int64_t key = 0; // the key the cached channels were solved for
 	bool dirty = false; // a parameter moved since the bake; served is then stale regardless of the key
 	PackedInt32Array key_ports; // input ports (0..3) whose GRIDS form the key, in order
+	// Each key port's unwired default. The GDScript evaluator fills an unwired port with it (Salève's mask is
+	// 1.0), so the key hashes that grid rather than the zero buffer the op itself reads.
+	PackedFloat32Array key_defaults;
 	PackedInt32Array key_params; // resolved P[] slots whose values form the key's trailing scalar array
 	std::vector<PackedFloat32Array> channels; // the cached solve, one per output channel; empty when cold
 };
