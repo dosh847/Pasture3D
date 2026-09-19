@@ -143,6 +143,11 @@ enum Reconstruction { LINEAR, GRADIENT }
 		rim_width = maxf(v, 0.0)
 		_param_changed()
 
+@export_range(0.0, 0.5, 0.005) var outlet_level: float = 0.1:
+	set(v):
+		outlet_level = clampf(v, 0.0, 1.0)
+		_param_changed()
+
 @export_group("Post-Processing (Stage 4)")
 @export var enable_post_smoothing: bool = false:
 	set(v):
@@ -262,6 +267,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 		"max_slope_center": max_slope_center,
 		"max_slope_border": max_slope_center if uniform_slope else max_slope_border,
 		"rim_width": rim_width,
+		"outlet_level": outlet_level,
 	}
 
 	# This node offered FROZEN, a Bake button and a stale flag over a cache that was never written:
@@ -459,6 +465,8 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 	var reroute: bool = bool(p_params.get("reroute_lakes", true))
 	var lower_only: bool = bool(p_params.get("lower_only", true))
 	var cap_everywhere: bool = bool(p_params.get("cap_everywhere", false))
+	var outlet_level_f: float = clampf(float(p_params.get("outlet_level", 0.1)), 0.0, 1.0)
+	var flat_from_fill: bool = bool(p_params.get("flat_from_fill", false))
 	var stable_noise: bool = bool(p_params.get("stable_noise", true))
 	var erosion_strength: float = clampf(float(p_params.get("erosion_strength", 0.7)), 0.0, 1.0)
 	var m_exp: float = clampf(float(p_params.get("drainage_exponent", 0.15)), 0.01, 0.8)
@@ -632,6 +640,8 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 			outlet[i] = 1
 			continue
 		z[i] = (h - zmin) / zptp
+		if outlet_level_f > 0.0 and z[i] <= outlet_level_f:
+			outlet[i] = 1
 		erodibility[i] = pow(clampf(1.0 - (h - zmin) / vref, 0.01, 1.0), shape_preservation)
 
 	var receivers := PackedInt32Array()
@@ -921,6 +931,7 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 	var rim: float = rim_w if rim_w > 0.0 else 0.1 * min_side
 	for i in range(n):
 		hm[i] = zmin + zg[i] * relief_ref
+	for i in range(n):
 		if lower_only and is_finite(p_surface[i]) and hm[i] > p_surface[i]:
 			var w := 1.0
 			if not cap_everywhere:
@@ -994,8 +1005,9 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 				var xr: int = mini(ix + 1, p_gw - 1)
 				var zl: int = maxi(iz - 1, 0)
 				var zr: int = mini(iz + 1, p_gh - 1)
-				var gxs: float = (filled[iz * p_gw + xr] - filled[iz * p_gw + xl]) / (maxi(xr - xl, 1) * cell_dx)
-				var gzs: float = (filled[zr * p_gw + ix] - filled[zl * p_gw + ix]) / (maxi(zr - zl, 1) * cell_dz)
+				var fs: PackedFloat32Array = filled if flat_from_fill else blur
+				var gxs: float = (fs[iz * p_gw + xr] - fs[iz * p_gw + xl]) / (maxi(xr - xl, 1) * cell_dx)
+				var gzs: float = (fs[zr * p_gw + ix] - fs[zl * p_gw + ix]) / (maxi(zr - zl, 1) * cell_dz)
 				var flat: float = clampf(1.0 - sqrt(gxs * gxs + gzs * gzs) / 0.5, 0.0, 1.0)
 				var target: float = maxf(filled[i], blur[i])
 				dep[i] = dep_strength * flat * (target - hm[i])
@@ -1044,3 +1056,4 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 func _param_changed() -> void:
 	mark_dirty_since_bake()
 	emit_changed()
+

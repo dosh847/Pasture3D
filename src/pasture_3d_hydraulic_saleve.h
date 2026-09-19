@@ -65,6 +65,12 @@ struct HydraulicSaleveParams {
 	// eased down to at most the input height, so the solve meets the surrounding ground; beyond it the solve
 	// is free, texture included.
 	float rim_width = 0.0f;
+	// Stage 1 outlets on the LOW GROUND, not only the grid border: every vertex within this fraction of the
+	// grid's relief above its minimum drains out. With border-only outlets the steady state is built up from
+	// however far away the border is, so a wider Modifier Margin lifted the whole brush (4.4 m at 16 m of
+	// margin, 12 m at 60 m); with the plain as the outlet the level is set where the brush meets the ground.
+	// 0 = border only (the pre-2026-09-19 behaviour, the gate control).
+	float outlet_level = 0.1f;
 
 	// Stage 4: Post-Processing
 	bool enable_post_smoothing = false;
@@ -79,6 +85,9 @@ struct HydraulicSaleveParams {
 	// is the old whole-grid cap, which flattened the texture on every rise; also a gate control only.
 	bool lower_only = true;
 	bool cap_everywhere = false;
+	// Stage 2's flatness weight read off the unblurred fill: the pre-2026-09-19 behaviour that built ridges
+	// down valley floors. Gate control only.
+	bool flat_from_fill = false;
 	bool stable_noise = true;
 	bool debug_network = false;
 	// Gate hooks: `grid_solve` runs Stage 1 on the 8-connected grid (the S1 solver, the orientation control);

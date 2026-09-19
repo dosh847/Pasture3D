@@ -120,8 +120,9 @@ func _e_lowering() -> void:
 	node.warp_amount = 2.25
 	node.warp_size = 40.0
 	node.rim_width = 7.5
+	node.outlet_level = 0.125
 	var ext: PackedFloat32Array = node.native_lower().get("lut", PackedFloat32Array())
-	var want := PackedFloat32Array([4321.0, 3.5, 0.0, 0.0, 2.25, 40.0, 7.5])
+	var want := PackedFloat32Array([4321.0, 3.5, 0.0, 0.0, 2.25, 40.0, 7.5, 0.125])
 	print("    lut %s (want %s)" % [ext, want])
 	node.warp_size = 41.0
 	var moved: PackedFloat32Array = node.native_lower().get("lut", PackedFloat32Array())

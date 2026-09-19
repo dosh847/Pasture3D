@@ -347,6 +347,26 @@ calling itself, assert against the solver called independently); sediment + erod
   F the interior (equals the free solve to 1e-6 m; control whole-grid cap 29.5 m). New
   `GraphFloatToMaskGate`.
 
+### Third review (2026-09-19): valley ridges, and the margin lifting the brush
+
+- **Deposition built ridges down valley floors.** Stage 2's flatness weight was read off the unblurred
+  fill: a valley floor weighted 1 sat beside walls weighted 0, so the floor was raised above its own banks,
+  leaving a ridge with a channel on each side. The weight is now read off the blurred surface. That
+  weight is near-uniform across a channel, so the fill keeps the valley's order. `flat_from_fill`
+  (dictionary-only) is the old reading, kept as the gate control.
+- **A wider Modifier Margin lifted the brush.** Stage 1 drained only to the grid border, so its steady
+  state was built up from however far away the border was. The margin probe's core moved up 4.4 m at 16 m
+  of margin and 12 m at 60 m. Stage 1 now also drains out of the low ground: every vertex within
+  `outlet_level` (default 0.1, a fraction of the grid's relief; the Rim group; native LUT [7]) of the
+  grid minimum is an outlet. The brush's level is set where it meets the ground. Worst mean offset is now
+  0.46 m, and worst drift fell from 24.3 / 21.4 m to 5.6 / 3.3 m (auto / pinned).
+  - A blurred "bulk raise" subtraction was tried first and removed. Inside a mound the erosion masked the
+    lift, and it only took 4.4 m down to 3.7 m.
+- Gates: `GraphSaleveDepositionGate` G (V-valley, walls 0.78: fill 4.59 m, floor prominence 0.058 m,
+  control 2.04 m). `SaleveMarginInvarianceProbe` now asserts the lift: offset under 1 m, with a
+  border-only control at 10.1 m. E, F and `GraphSaleveNetworkGate` pin `outlet_level = 0`, because they
+  test the cap and the routing to the border.
+
 ## Out of scope
 
 - Hesiod's `strata_cells`, `strata_plates` and `strata_terrace` variants (candidates for later nodes).

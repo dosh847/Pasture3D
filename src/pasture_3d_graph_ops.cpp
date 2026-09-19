@@ -1689,6 +1689,10 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				if ((size_t)s < p_prog.luts.size() && p_prog.luts[(size_t)s].size() >= 7) {
 					p.rim_width = std::max(0.0f, p_prog.luts[(size_t)s][6]);
 				}
+				// ... and [7] the Stage 1 outlet level (fraction of the grid's relief).
+				if ((size_t)s < p_prog.luts.size() && p_prog.luts[(size_t)s].size() >= 8) {
+					p.outlet_level = std::clamp(p_prog.luts[(size_t)s][7], 0.0f, 1.0f);
+				}
 				if (in1 && in1[s] >= 0) {
 					p.dx = get_grid_packed(in1[s], c_in1);
 				}

@@ -111,7 +111,9 @@ func _d_area_conserved() -> void:
 # ---- helpers ------------------------------------------------------------------------------------
 
 func _solve(p_surface: PackedFloat32Array, p_extra: Dictionary) -> Dictionary:
-	var params := {"seed": 7, "debug_network": true, "control_points": 3000}
+	# Border-only outlets (outlet_level 0): this gate is about routing TO the border. The default also drains
+	# the low ground, where the crater floor would itself be an outlet; SaleveMarginInvarianceProbe covers that.
+	var params := {"seed": 7, "debug_network": true, "control_points": 3000, "outlet_level": 0.0}
 	params.merge(p_extra, true)
 	var r: Dictionary = Pasture3DUtil.hydraulic_saleve_solve_grid(p_surface, GW, GH, RECT, params)
 	_verts = r.get("vertices", PackedVector2Array())

@@ -11,6 +11,7 @@
 #   D  mass balance, reported: eroded vs deposited volume
 #   E  the rim cap: Stage 1 does not raise the outermost ring above the input; control: lower_only off does
 #   F  beyond the rim band Stage 1 equals the free solve; control: the old whole-grid cap does not
+#   G  deposition fills a V-valley without a ridge down its floor; control: flatness read off the fill does
 #
 # Asserts on the solver's own debug_stages grids, not on anything this gate computes for it.
 
@@ -19,7 +20,7 @@ extends Node
 const GW := 128
 const GH := 128
 const RECT := Rect2(0, 0, 256, 256)
-const EXPECTED := 6
+const EXPECTED := 7
 
 var _fail := 0
 var _done := 0
@@ -33,6 +34,7 @@ func _ready() -> void:
 	_d_mass()
 	_e_lower_only()
 	_f_masks()
+	_g_no_ridge()
 	var ok := _fail == 0 and _done == EXPECTED
 	print("\n=== %s (%d failures, %d/%d criteria completed) ===" % [
 		"SALEVE DEPOSITION PASS" if ok else "SALEVE DEPOSITION FAIL", _fail, _done, EXPECTED])
@@ -122,8 +124,10 @@ func _e_lower_only() -> void:
 	print("
 [E] the rim meets the input: Stage 1 does not raise the outermost ring")
 	var src := _mound()
-	var on := _solve(src, {})
-	var off := _solve(src, {"lower_only": false})
+	# Border-only outlets in both arms: with the default low-ground outlets the free steady state no longer
+	# raises the rim at all, so there would be nothing for the cap to hold down.
+	var on := _solve(src, {"outlet_level": 0.0})
+	var off := _solve(src, {"lower_only": false, "outlet_level": 0.0})
 	var r_on := _ring_raise(on, src)
 	var r_off := _ring_raise(off, src)
 	print("    outer-ring raise: rim cap %.4f m; control free %.3f m (want > 1, and the cap under 5%% of it)" % [r_on, r_off])
@@ -142,9 +146,10 @@ func _f_masks() -> void:
 	print("
 [F] beyond the rim the solve is free (the cap no longer flattens the texture)")
 	var src := _mound()
-	var on := _stage1(_solve(src, {}))
-	var free := _stage1(_solve(src, {"lower_only": false}))
-	var flat := _stage1(_solve(src, {"cap_everywhere": true}))
+	# Border-only outlets in every arm, as in E: otherwise the steady state rises nowhere for a cap to act on.
+	var on := _stage1(_solve(src, {"outlet_level": 0.0}))
+	var free := _stage1(_solve(src, {"lower_only": false, "outlet_level": 0.0}))
+	var flat := _stage1(_solve(src, {"cap_everywhere": true, "outlet_level": 0.0}))
 	var rim := 0.1 * minf(RECT.size.x, RECT.size.y)
 	var d_on := 0.0
 	var d_flat := 0.0
@@ -165,6 +170,46 @@ func _f_masks() -> void:
 		print("    !! the rim cap reaches into the interior")
 		return
 	_done += 1
+
+
+func _g_no_ridge() -> void:
+	print("
+[G] deposition fills a valley floor without building a ridge down it")
+	# Stage 1 and the warp skipped, so Stage 2 sees the valley itself. A ridge is a floor cell standing above
+	# BOTH its cross-valley neighbours; the valley's own floor is a minimum, so any prominence is built.
+	var src := _valley()
+	var on := _solve(src, {"skip_stage1": true, "default_warp": false})
+	var off := _solve(src, {"skip_stage1": true, "default_warp": false, "flat_from_fill": true})
+	var fill := _max(on.deposition)
+	var r_on := _ridge(on.pre_stream)
+	var r_off := _ridge(off.pre_stream)
+	print("    floor fill %.3f m (want > 0.5); ridge prominence %.4f m (want < 2%% of the fill); control flatness off the fill %.3f m (want > 20%% of it)"
+			% [fill, r_on, r_off])
+	if fill <= 0.5 or r_off <= 0.2 * fill:
+		_fail += 1
+		print("    !! the valley did not fill, or the old weighting built no ridge, so the check is blind")
+		return
+	if r_on >= 0.02 * fill:
+		_fail += 1
+		print("    !! the deposition stands above its own banks")
+		return
+	_done += 1
+
+
+## A straight V-valley down the grid, tilted along its axis so it drains; nothing is closed. The walls are
+## steep (0.78) because the old weighting only separates floor from wall where the walls are not flat.
+func _valley() -> PackedFloat32Array:
+	return _field(func(u: float, v: float) -> float: return 200.0 * absf(u) - 8.0 * v + 40.0)
+
+
+## Largest height of a cell above BOTH its across-valley (x) neighbours, rows away from the grid edge.
+func _ridge(p_h: PackedFloat32Array) -> float:
+	var worst := 0.0
+	for iz in range(8, GH - 8):
+		for ix in range(1, GW - 1):
+			var i := iz * GW + ix
+			worst = maxf(worst, p_h[i] - maxf(p_h[i - 1], p_h[i + 1]))
+	return worst
 
 
 func _mound() -> PackedFloat32Array:

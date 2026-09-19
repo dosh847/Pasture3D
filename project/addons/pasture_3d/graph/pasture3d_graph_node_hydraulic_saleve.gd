@@ -182,6 +182,14 @@ enum Reconstruction { LINEAR, GRADIENT }
 		rim_width = maxf(v, 0.0)
 		_param_changed()
 
+## Where Stage 1's water leaves: every cell within this fraction of the grid's relief above its lowest
+## point is an outlet, as well as the grid border. It sets the brush's level where it meets the ground, so a
+## wider Modifier Margin does not lift it. 0 = the grid border only.
+@export_range(0.0, 0.5, 0.005) var outlet_level: float = 0.1:
+	set(v):
+		outlet_level = clampf(v, 0.0, 1.0)
+		_param_changed()
+
 @export_group("Post-Processing")
 ## Channel bank smoothing, 0..0.5: a 4-neighbour blend at 0.4x this rate, once. Ignored when Post
 ## Smoothing is on.
@@ -234,7 +242,7 @@ func native_lower() -> Dictionary:
 	p[15] = reference_relief
 	# The 16 slots are full; the S2 settings ride the LUT (read by the native op in this order).
 	var ext := PackedFloat32Array([float(control_points), point_spacing, float(reconstruction),
-			1.0 if default_warp else 0.0, warp_amount, warp_size, rim_width])
+			1.0 if default_warp else 0.0, warp_amount, warp_size, rim_width, outlet_level])
 	return {"params": p, "lut": ext}
 
 
@@ -364,6 +372,7 @@ func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect:
 		"max_slope_center": max_slope_center,
 		"max_slope_border": max_slope_center if uniform_slope else max_slope_border,
 		"rim_width": rim_width,
+		"outlet_level": outlet_level,
 	}
 
 	if not ClassDB.class_has_method("Pasture3DUtil", "hydraulic_saleve_solve_grid"):

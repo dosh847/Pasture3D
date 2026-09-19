@@ -79,6 +79,12 @@ HydraulicSaleveParams HydraulicSaleveParams::from_dict(const Dictionary &p_dict)
 	if (p_dict.has("rim_width")) {
 		p.rim_width = std::max(0.0f, (float)p_dict["rim_width"]);
 	}
+	if (p_dict.has("outlet_level")) {
+		p.outlet_level = std::max(0.0f, (float)p_dict["outlet_level"]);
+	}
+	if (p_dict.has("flat_from_fill")) {
+		p.flat_from_fill = (bool)p_dict["flat_from_fill"];
+	}
 	if (p_dict.has("cap_everywhere")) {
 		p.cap_everywhere = (bool)p_dict["cap_everywhere"];
 	}
@@ -461,6 +467,8 @@ void saleve_stage1(const SaleveGraph &g, std::vector<float> &z, const std::vecto
 
 } // namespace
 
+
+
 HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_surface,
 		int p_gw, int p_gh, const Rect2 &p_rect, const HydraulicSaleveParams &p_params) {
 	HydraulicSaleveResult res;
@@ -662,6 +670,9 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 			continue;
 		}
 		z[i] = (float)((h - zmin) / zptp);
+		if (p_params.outlet_level > 0.0f && z[i] <= p_params.outlet_level) {
+			g.outlet[i] = 1;
+		}
 		// Hesiod Shape Preservation: erodibility = (1 - z_ref)^shape_exp against the reference relief.
 		const float zr = (float)((h - zmin) / std::max(relief_ref, 1.0e-5f));
 		erodibility[i] = std::pow(std::clamp(1.0f - zr, 0.01f, 1.0f), p_params.shape_preservation);
@@ -901,9 +912,11 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 	// From here on the grid is in METRES: the Stage 1 field scaled by the reference relief, anchored at the
 	// input's low point. Stage 3 (the stream-log solver) is metric, and so are the Stage 2 slopes.
 	std::vector<float> hm(n);
-	const double rim = (p_params.rim_width > 0.0f) ? (double)p_params.rim_width : 0.1 * min_side;
 	for (int i = 0; i < n; i++) {
 		hm[i] = zmin + zg[i] * relief_ref;
+	}
+	const double rim = (p_params.rim_width > 0.0f) ? (double)p_params.rim_width : 0.1 * min_side;
+	for (int i = 0; i < n; i++) {
 		if (p_params.lower_only && std::isfinite(src_height[i]) && hm[i] > src_height[i]) {
 			// Rim weight: 1 at the grid edge, smoothstep to 0 at `rim` metres in.
 			float w = 1.0f;
@@ -1001,8 +1014,13 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 				}
 				const int xl = std::max(ix - 1, 0), xr = std::min(ix + 1, p_gw - 1);
 				const int zl = std::max(iz - 1, 0), zr = std::min(iz + 1, p_gh - 1);
-				const double gxs = (filled[iz * p_gw + xr] - filled[iz * p_gw + xl]) / (std::max(xr - xl, 1) * cell_dx);
-				const double gzs = (filled[zr * p_gw + ix] - filled[zl * p_gw + ix]) / (std::max(zr - zl, 1) * cell_dz);
+				// Flatness is read off the BLURRED surface, so it is near-uniform across a channel. Read off the
+				// fill, a floor weighted 1 beside walls weighted 0 was raised above its own banks: a ridge down
+				// the valley with a channel either side. With one weight across the section the fill keeps the
+				// valley's order. `flat_from_fill` is the old reading, kept as the gate control.
+				const std::vector<float> &fs = p_params.flat_from_fill ? filled : blur;
+				const double gxs = (fs[iz * p_gw + xr] - fs[iz * p_gw + xl]) / (std::max(xr - xl, 1) * cell_dx);
+				const double gzs = (fs[zr * p_gw + ix] - fs[zl * p_gw + ix]) / (std::max(zr - zl, 1) * cell_dz);
 				const float flat = (float)std::clamp(1.0 - std::sqrt(gxs * gxs + gzs * gzs) / 0.5, 0.0, 1.0);
 				const float target = std::max(filled[i], blur[i]);
 				dep[i] = p_params.deposition_strength * flat * (target - hm[i]);
