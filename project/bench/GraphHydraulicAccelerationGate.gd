@@ -183,15 +183,18 @@ func _test_c_gpu_parity() -> void:
 	var cpp_res: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid(surf, gw, gh, rect, params)
 	var diff_h := _max_abs_diff(cpp_res["height"], gpu_res["height"])
 	var diff_s := maxf(_max_abs_diff(cpp_res["eroded"], gpu_res["eroded"]), _max_abs_diff(cpp_res["deposited"], gpu_res["deposited"]))
-	var diff_f := _max_abs_diff(cpp_res["flow"], gpu_res["flow"])
+	# `flow` is a contributing AREA in m^2, not a 0..1 channel: its peak here is in the tens, so the
+	# absolute metre tolerance the height uses says nothing about it. Compared against its own peak.
+	var flow_peak := _max_val(cpp_res["flow"])
+	var diff_f := _max_abs_diff(cpp_res["flow"], gpu_res["flow"]) / maxf(flow_peak, 1e-9)
 
 	print("    GPU vs C++ Height   max diff: %.6f (want < %.4f)" % [diff_h, GPU_TOL])
 	print("    GPU vs C++ Erosion  max diff: %.6f (want < %.4f)" % [diff_s, GPU_TOL])
-	print("    GPU vs C++ Flow     max diff: %.6f (want < %.4f)" % [diff_f, GPU_TOL])
+	print("    GPU vs C++ Flow     max diff: %.6f of its %.2f m2 peak (want < %.4f)" % [diff_f, flow_peak, GPU_TOL])
 
-	if diff_h > GPU_TOL or diff_s > GPU_TOL or diff_f > GPU_TOL:
+	if diff_h > GPU_TOL or diff_s > GPU_TOL or diff_f > GPU_TOL or flow_peak <= 1.0:
 		_fail += 1
-		print("    !! GPU compute diverged from C++ native oracle beyond tolerance")
+		print("    !! GPU compute diverged from C++ native oracle beyond tolerance, or flow came back normalised")
 
 
 # ---- Helpers ----------------------------------------------------------------------------------------
