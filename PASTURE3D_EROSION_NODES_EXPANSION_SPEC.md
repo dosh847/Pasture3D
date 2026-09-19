@@ -110,7 +110,7 @@ graph TD
 * **Inspector groups:** Erosion, Slope Limit (m/m), Convergence, Control Points, Warp (m), Deposition (m), Fine Incision, Post-Processing. `reference_relief` / `point_spacing` pin the result across Modifier Margins.
 * **Ports:**
   * **Inputs:** `in` (HEIGHT), `dx`/`dy` (SIGNED, reconstruction warp in metres), `mask` (MASK).
-  * **Outputs:** `0: height` (HEIGHT), `1: eroded_rock` (MASK, net lowering in metres), `2: sediment` (MASK, Stage 2 deposition in metres).
+  * **Outputs:** `0: height` (HEIGHT), `1: eroded_rock` (FIELD, net lowering in metres), `2: sediment` (FIELD, Stage 2 deposition in metres). Wire either through Float to Mask for a 0..1 mask.
 
 #### 4. `Pasture3DGraphNodeHydraulicProcedural` (`op = &"hydraulic_procedural"`)
 * **Role:** `Role.FILTER` (`needs_grid() = true`, fast/real-time `Evaluation.LIVE`).

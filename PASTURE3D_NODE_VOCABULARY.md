@@ -83,6 +83,11 @@ The GPU's answer was ratified rather than the CPU's: a mask says how much of an 
 where that question has no answer should not decide the terrain is missing. Propagating NaN is the
 correct behaviour for a HEIGHT grid (where NaN means "no data" and every op forwards it) and the wrong
 behaviour for a WEIGHT grid. All three Blend paths now implement the 1.0 reading.
+
+**Units to mask is a node, not a solver setting.** A solver's secondary outputs (eroded rock, sediment)
+are FIELDs in metres. Converting one to a 0..1 mask is the Float to Mask node's job, where the window is
+visible. Its input is a field, not a mask, so the rule above does not apply: a non-finite input cell has
+no value to place in the window and reads 0.
 - Prose "POINT / FIELD operator" → "cell / grid node".
 
 ---

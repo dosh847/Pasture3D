@@ -1,6 +1,7 @@
 // Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 
 #include "pasture_3d_math_ops.h"
+#include "pasture_3d_graph_ops.h"
 #include "pasture_3d_ramp_eval.h"
 #include "pasture_3d_util.h"
 #include "pasture_3d_thread_pool.h"
@@ -8,8 +9,74 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 using namespace godot;
+
+PackedFloat32Array godot::float_to_mask_grid(const PackedFloat32Array &p_surface, int p_gw, int p_gh,
+		const PackedFloat32Array &p_params) {
+	const int n = p_gw * p_gh;
+	PackedFloat32Array out;
+	if (n <= 0 || p_surface.size() != n) {
+		return out;
+	}
+	auto P = [&](int i, float d) { return i < (int)p_params.size() ? p_params[i] : d; };
+	const int mode = (int)P(0, 0.0f);
+	double lo = P(1, 0.0f);
+	double hi = P(2, 1.0f);
+	const float *src = p_surface.ptr();
+	if (mode == 1) {
+		std::vector<float> fin;
+		fin.reserve(n);
+		for (int i = 0; i < n; i++) {
+			if (std::isfinite(src[i])) {
+				fin.push_back(src[i]);
+			}
+		}
+		if (fin.empty()) {
+			lo = hi = 0.0;
+		} else {
+			std::sort(fin.begin(), fin.end());
+			const int m = (int)fin.size();
+			auto rank = [&](double p_pct) {
+				const double r = std::floor(std::clamp(p_pct, 0.0, 100.0) / 100.0 * (double)(m - 1) + 0.5);
+				return fin[(size_t)std::clamp((int)r, 0, m - 1)];
+			};
+			lo = rank(P(3, 2.0f));
+			hi = rank(P(4, 98.0f));
+		}
+	}
+	const bool invert = P(5, 0.0f) > 0.5f;
+	const double gamma = std::max((double)P(6, 1.0f), 0.01);
+	const bool smooth = P(7, 0.0f) > 0.5f;
+	const int passes = std::max(0, (int)P(8, 0.0f));
+	const double span = hi - lo;
+	std::vector<float> v(n);
+	Pasture3DThreadPool::parallel_for_elements(n, 4096, [&](int i0, int i1) {
+		for (int i = i0; i < i1; i++) {
+			const float x = src[i];
+			double t = 0.0;
+			if (std::isfinite(x)) {
+				t = span > 1.0e-12 ? ((double)x - lo) / span : (x >= hi ? 1.0 : 0.0);
+				t = std::clamp(t, 0.0, 1.0);
+			}
+			if (invert) {
+				t = 1.0 - t;
+			}
+			if (gamma != 1.0) {
+				t = std::pow(t, gamma);
+			}
+			if (smooth) {
+				t = t * t * (3.0 - 2.0 * t);
+			}
+			v[i] = (float)t;
+		}
+	});
+	graph_nan_blur(v, p_gw, p_gh, passes);
+	out.resize(n);
+	std::copy_n(v.data(), n, out.ptrw());
+	return out;
+}
 
 namespace {
 

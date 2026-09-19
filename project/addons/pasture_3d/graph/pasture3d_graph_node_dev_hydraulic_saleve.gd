@@ -137,15 +137,10 @@ enum Reconstruction { LINEAR, GRADIENT }
 		stream_exp = clampf(v, 0.01, 1.0)
 		_param_changed()
 
-@export_group("Output Masks")
-@export_range(0.0, 100.0, 0.1, "or_greater", "suffix:m") var eroded_mask_depth: float = 0.0:
+@export_group("Rim")
+@export_range(0.0, 500.0, 0.5, "or_greater", "suffix:m") var rim_width: float = 0.0:
 	set(v):
-		eroded_mask_depth = maxf(v, 0.0)
-		_param_changed()
-
-@export_range(0.0, 20.0, 0.05, "or_greater", "suffix:m") var sediment_mask_depth: float = 0.0:
-	set(v):
-		sediment_mask_depth = maxf(v, 0.0)
+		rim_width = maxf(v, 0.0)
 		_param_changed()
 
 @export_group("Post-Processing (Stage 4)")
@@ -266,8 +261,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 		"tolerance": tolerance,
 		"max_slope_center": max_slope_center,
 		"max_slope_border": max_slope_center if uniform_slope else max_slope_border,
-		"eroded_mask_depth": eroded_mask_depth,
-		"sediment_mask_depth": sediment_mask_depth,
+		"rim_width": rim_width,
 	}
 
 	# This node offered FROZEN, a Bake button and a stale flag over a cache that was never written:
@@ -278,7 +272,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 			func(): return solve_gd(surface, p_gw, p_gh, p_rect, p))
 	if r.size() < 5:
 		return r
-	return [r[0], r[3], r[4]]
+	return [r[0], r[1], r[2]]
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -464,6 +458,7 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 	var slope_border: float = maxf(0.0, float(p_params.get("max_slope_border", 0.0)))
 	var reroute: bool = bool(p_params.get("reroute_lakes", true))
 	var lower_only: bool = bool(p_params.get("lower_only", true))
+	var cap_everywhere: bool = bool(p_params.get("cap_everywhere", false))
 	var stable_noise: bool = bool(p_params.get("stable_noise", true))
 	var erosion_strength: float = clampf(float(p_params.get("erosion_strength", 0.7)), 0.0, 1.0)
 	var m_exp: float = clampf(float(p_params.get("drainage_exponent", 0.15)), 0.01, 0.8)
@@ -922,10 +917,20 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 	# The grid in METRES from here on (mirrors the native solve).
 	var hm := PackedFloat32Array()
 	hm.resize(n)
+	var rim_w: float = maxf(float(p_params.get("rim_width", 0.0)), 0.0)
+	var rim: float = rim_w if rim_w > 0.0 else 0.1 * min_side
 	for i in range(n):
 		hm[i] = zmin + zg[i] * relief_ref
-		if lower_only and is_finite(p_surface[i]):
-			hm[i] = minf(hm[i], p_surface[i])
+		if lower_only and is_finite(p_surface[i]) and hm[i] > p_surface[i]:
+			var w := 1.0
+			if not cap_everywhere:
+				var ix := i % p_gw
+				var iz := i / p_gw
+				var d: float = minf(minf((ix + 0.5) * cell_dx, (p_gw - 0.5 - ix) * cell_dx),
+						minf((iz + 0.5) * cell_dz, (p_gh - 0.5 - iz) * cell_dz))
+				var t: float = clampf(d / maxf(rim, 1.0e-6), 0.0, 1.0)
+				w = 1.0 - t * t * (3.0 - 2.0 * t)
+			hm[i] = hm[i] + w * (p_surface[i] - hm[i])
 
 	# ---- Stage 2: priority-flood fill, raised to its odd-reflected blur where concave ----
 	var dep := PackedFloat32Array()
@@ -1033,19 +1038,7 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 		final_height[i] = res_h
 		eroded_rock[i] = maxf(0.0, orig_h - res_h)
 		sediment[i] = w * dep[i]
-	# The node's ports carry these as 0..1 masks (mirrors the native eroded_mask / sediment_mask).
-	var e_depth: float = maxf(float(p_params.get("eroded_mask_depth", 0.0)), 0.0)
-	var s_depth: float = maxf(float(p_params.get("sediment_mask_depth", 0.0)), 0.0)
-	e_depth = maxf(e_depth if e_depth > 0.0 else 0.1 * relief_ref, 1.0e-4)
-	s_depth = maxf(s_depth if s_depth > 0.0 else 0.01 * relief_ref, 1.0e-4)
-	var e_mask := PackedFloat32Array()
-	e_mask.resize(n)
-	var s_mask := PackedFloat32Array()
-	s_mask.resize(n)
-	for i in range(n):
-		e_mask[i] = clampf(eroded_rock[i] / e_depth, 0.0, 1.0)
-		s_mask[i] = clampf(sediment[i] / s_depth, 0.0, 1.0)
-	return [final_height, eroded_rock, sediment, e_mask, s_mask]
+	return [final_height, eroded_rock, sediment]
 
 
 func _param_changed() -> void:

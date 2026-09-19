@@ -327,6 +327,26 @@ calling itself, assert against the solver called independently); sediment + erod
 - Gates: `GraphSaleveDepositionGate` gains E (Stage 1 never raises; control off raises 29.5 m) and F (the
   masks equal metres over depth; control metres reach 19.1).
 
+### Second review (2026-09-19): metres out, and the cap moved to the rim
+
+- **The whole-grid cap flattened the texture.** Clamping every cell to the input stopped every rise the
+  solve made, so a smooth band showed where the Stage 1 texture used to be. The cap is now weighted by
+  distance to the grid edge: 1 at the edge, smoothstep to 0 at `rim_width` metres in (the node's "Rim"
+  group; 0 = 10% of the shorter side; native LUT [6]). Beyond the band Stage 1 is the free solve.
+  `cap_everywhere` (dictionary-only) is the old behaviour, kept as the gate control. The margin probe's
+  worst drift is back to 24.3 / 21.4 m (auto / pinned), the post-S3 figure, because the interior is
+  free again.
+- **Ports carry metres again.** The 0..1 depth masks were a hidden choice that saturated most of a
+  mountain. `eroded_mask_depth`, `sediment_mask_depth` and the solver's `eroded_mask` / `sediment_mask`
+  are deleted; the ports (FIELD) carry `eroded_rock` and `sediment` in metres. Turning them into a mask is
+  the new **Float to Mask** node's job (op 66, `Pasture3DUtil.float_to_mask_grid`, oracle
+  `[Dev/GD] Float to Mask`). It has a FIXED metre window (the default) or an AUTO percentile window, then
+  invert, gamma, smoothstep and blur. AUTO re-measures on every bake, so a rect bake over a different
+  extent shifts it; pin FIXED for anything painted.
+- Gates: `GraphSaleveDepositionGate` E is now the rim (outer-ring raise 0.005 m; control free 1.09 m) and
+  F the interior (equals the free solve to 1e-6 m; control whole-grid cap 29.5 m). New
+  `GraphFloatToMaskGate`.
+
 ## Out of scope
 
 - Hesiod's `strata_cells`, `strata_plates` and `strata_terrace` variants (candidates for later nodes).

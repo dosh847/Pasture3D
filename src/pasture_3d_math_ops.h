@@ -43,6 +43,13 @@ PackedFloat32Array contrast_grid(const PackedFloat32Array &p_surface, const Pack
 		int p_mode, double p_amount, double p_range_min, double p_range_max, double p_mask_amount,
 		bool p_explicit_window);
 
+// Float to Mask. `p_params` (Pasture3DGraphNodeFloatToMask.native_lower order): 0 range mode (0 fixed,
+// 1 auto percentile), 1-2 fixed window, 3-4 auto low/high percentile (0..100), 5 invert, 6 gamma,
+// 7 smoothstep, 8 blur passes. Non-finite input cells read 0. The percentile is the nearest rank over the
+// finite cells, computed in double so the GDScript oracle can agree with it exactly.
+PackedFloat32Array float_to_mask_grid(const PackedFloat32Array &p_surface, int p_gw, int p_gh,
+		const PackedFloat32Array &p_params);
+
 // Gradient (PASTURE3D_GRADIENT_AND_COLOR_RAMP_SPEC.md §4). `p_params` is the node's resolved 16-slot block:
 // 0 shape, 1-4 start/end in NODE space, 5-6 height min/max, 7 profile, 8 hardness, 9 repeat, 10 invert,
 // 11 output mode, 12 distance_noise, 13-15 host origin x/z and yaw. `p_warp` may be empty (no warp).

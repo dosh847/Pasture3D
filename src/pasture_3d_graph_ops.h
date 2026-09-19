@@ -95,6 +95,7 @@ enum GraphCellOpType {
 	GRAPH_OP_GRADIENT = 62, // GENERATOR cell: metric gradient from start/end, in0 = warp (gradient spec §4)
 	GRAPH_OP_VALUE_RAMP = 63, // FILTER cell: in0 through a Godot Gradient to a scalar (gradient spec §6)
 	GRAPH_OP_DLA = 64, // SOLVER grid: a DLA massif, optionally seeded by in0's ridges (2 outputs: height, mask)
+	GRAPH_OP_FLOAT_TO_MASK = 66, // FILTER grid: a unit-ful field to a 0..1 mask over a fixed or percentile window
 	GRAPH_OP_FRACTAL = 65, // GENERATOR grid: the relief FRACTAL material — fBm / ridged / billow, optionally domain-warped
 };
 

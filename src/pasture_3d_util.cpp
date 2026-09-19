@@ -1285,6 +1285,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "value_ramp", GRAPH_OP_VALUE_RAMP },
 		{ "dla", GRAPH_OP_DLA },
 		{ "fractal", GRAPH_OP_FRACTAL },
+		{ "float_to_mask", GRAPH_OP_FLOAT_TO_MASK },
 	};
 	Dictionary d;
 	for (const auto &e : k_ops) {
@@ -2081,6 +2082,11 @@ Array Pasture3DUtil::road_mesh_build_terminus_apron(const PackedVector2Array &p_
 	return godot::road_mesh_build_terminus_apron(p_plan, p_cum, p_align_ds, p_align_z, p_align_bank,
 			p_s_end, p_half, p_shoulder, p_crown, p_is_start, p_apron_length, p_apron_drop,
 			p_rings_count, p_lift, p_align_s0, p_crown_mode, p_max_bank, p_roundness);
+}
+
+PackedFloat32Array Pasture3DUtil::float_to_mask_grid(const PackedFloat32Array &p_surface, const int p_gw,
+		const int p_gh, const PackedFloat32Array &p_params) {
+	return godot::float_to_mask_grid(p_surface, p_gw, p_gh, p_params);
 }
 
 PackedFloat32Array Pasture3DUtil::curvature_grid(const PackedFloat32Array &p_surface, const int p_gw, const int p_gh,
@@ -3151,6 +3157,9 @@ void Pasture3DUtil::_bind_methods() {
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("road_mesh_build_terminus_apron", "plan", "cum", "align_ds", "align_z", "align_bank", "s_end", "half", "shoulder", "crown", "is_start", "apron_length", "apron_drop", "rings_count", "lift", "align_s0", "crown_mode", "max_bank", "roundness"),
 			&Pasture3DUtil::road_mesh_build_terminus_apron, DEFVAL(false), DEFVAL(2.5), DEFVAL(0.08), DEFVAL(4), DEFVAL(0.0), DEFVAL(0.0), DEFVAL(0), DEFVAL(0.0), DEFVAL(0.5));
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("float_to_mask_grid", "surface", "gw", "gh", "params"),
+			&Pasture3DUtil::float_to_mask_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("curvature_grid", "surface", "gw", "gh", "mode", "radius", "contrast"),
 			&Pasture3DUtil::curvature_grid);

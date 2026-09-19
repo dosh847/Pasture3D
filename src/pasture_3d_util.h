@@ -479,6 +479,10 @@ public:
 			const double p_roundness = 0.5);
 
 	// Native Curvature Discrete Laplacian filter.
+	// Float to Mask's kernel, bound so the node's GDScript eval and GraphFloatToMaskGate reach the same code
+	// the native op runs. `p_params` is the node's native_lower block.
+	static PackedFloat32Array float_to_mask_grid(const PackedFloat32Array &p_surface, const int p_gw, const int p_gh,
+			const PackedFloat32Array &p_params);
 	static PackedFloat32Array curvature_grid(const PackedFloat32Array &p_surface, const int p_gw, const int p_gh,
 			const int p_mode, const int p_radius, const double p_contrast);
 

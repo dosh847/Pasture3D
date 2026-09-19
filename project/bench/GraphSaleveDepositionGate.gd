@@ -9,8 +9,8 @@
 #      leaving it; control: the same call at another incision rate does not
 #   C  stream_strength 0 skips Stage 3 (pre == post); control: the default does not
 #   D  mass balance, reported: eroded vs deposited volume
-#   E  Stage 1 never raises the ground (a mound in a flat margin); control: lower_only off does, by metres
-#   F  the mask ports are the metre outputs over their depths, in 0..1; control: the metres exceed 1
+#   E  the rim cap: Stage 1 does not raise the outermost ring above the input; control: lower_only off does
+#   F  beyond the rim band Stage 1 equals the free solve; control: the old whole-grid cap does not
 #
 # Asserts on the solver's own debug_stages grids, not on anything this gate computes for it.
 
@@ -120,55 +120,86 @@ func _d_mass() -> void:
 
 func _e_lower_only() -> void:
 	print("
-[E] Stage 1 never raises the ground")
-	var src := _field(func(u: float, v: float) -> float:
-		return 120.0 * maxf(0.0, 1.0 - (u * u + v * v) / 0.12) + 4.0 * u)
+[E] the rim meets the input: Stage 1 does not raise the outermost ring")
+	var src := _mound()
 	var on := _solve(src, {})
 	var off := _solve(src, {"lower_only": false})
-	var r_on := _max_raise(on, src)
-	var r_off := _max_raise(off, src)
-	print("    Stage 1 result above the input: lower_only %.6f m (want < 0.0001); control off %.3f m (want > 1)" % [r_on, r_off])
+	var r_on := _ring_raise(on, src)
+	var r_off := _ring_raise(off, src)
+	print("    outer-ring raise: rim cap %.4f m; control free %.3f m (want > 1, and the cap under 5%% of it)" % [r_on, r_off])
 	if r_off <= 1.0:
 		_fail += 1
-		print("    !! the free steady state raised nothing, so the clamp is unobservable")
+		print("    !! the free steady state raised nothing at the rim, so the cap is unobservable")
 		return
-	if r_on > 1.0e-4: # float residue of pre - deposition - input
+	if r_on > 0.05 * r_off:
 		_fail += 1
-		print("    !! Stage 1 raised the ground")
+		print("    !! the rim still steps up from the surrounding ground")
 		return
 	_done += 1
 
 
 func _f_masks() -> void:
 	print("
-[F] mask ports are the metre outputs over their depths")
-	var res := _solve(_crater(), {"eroded_mask_depth": 4.0, "sediment_mask_depth": 0.2})
-	var e: PackedFloat32Array = res.eroded_rock
-	var sd: PackedFloat32Array = res.sediment
-	var em: PackedFloat32Array = res.eroded_mask
-	var sm: PackedFloat32Array = res.sediment_mask
-	var worst := 0.0
-	var lo := INF
-	var hi := -INF
-	for i in range(e.size()):
-		worst = maxf(worst, absf(em[i] - clampf(e[i] / 4.0, 0.0, 1.0)))
-		worst = maxf(worst, absf(sm[i] - clampf(sd[i] / 0.2, 0.0, 1.0)))
-		lo = minf(lo, minf(em[i], sm[i]))
-		hi = maxf(hi, maxf(em[i], sm[i]))
-	print("    mask vs metres/depth %.7f (want < 1e-6); mask range [%.3f, %.3f] (want within [0, 1]); control metre max %.2f m (want > 1)"
-			% [worst, lo, hi, _max(e)])
-	if _max(e) <= 1.0:
+[F] beyond the rim the solve is free (the cap no longer flattens the texture)")
+	var src := _mound()
+	var on := _stage1(_solve(src, {}))
+	var free := _stage1(_solve(src, {"lower_only": false}))
+	var flat := _stage1(_solve(src, {"cap_everywhere": true}))
+	var rim := 0.1 * minf(RECT.size.x, RECT.size.y)
+	var d_on := 0.0
+	var d_flat := 0.0
+	for iz in range(GH):
+		for ix in range(GW):
+			if _edge_dist(ix, iz) <= rim:
+				continue
+			var i := iz * GW + ix
+			d_on = maxf(d_on, absf(on[i] - free[i]))
+			d_flat = maxf(d_flat, absf(flat[i] - free[i]))
+	print("    interior vs the free solve: rim cap %.6f m (want < 1e-4); control whole-grid cap %.3f m (want > 1)" % [d_on, d_flat])
+	if d_flat <= 1.0:
 		_fail += 1
-		print("    !! the metre output never exceeds 1, so it cannot tell a mask from metres")
+		print("    !! the whole-grid cap changed nothing inside, so the comparison is blind")
 		return
-	if worst >= 1.0e-6 or lo < 0.0 or hi > 1.0:
+	if d_on >= 1.0e-4:
 		_fail += 1
-		print("    !! the mask ports are not the normalised outputs")
+		print("    !! the rim cap reaches into the interior")
 		return
 	_done += 1
 
 
-# Stage 1's grid in metres, before Stage 2 raised it: pre_stream minus the deposition.
+func _mound() -> PackedFloat32Array:
+	return _field(func(u: float, v: float) -> float:
+		return 120.0 * maxf(0.0, 1.0 - (u * u + v * v) / 0.12) + 4.0 * u)
+
+
+## The Stage 1 grid as capped: what enters Stage 2, i.e. pre_stream minus the deposition.
+func _stage1(p_res: Dictionary) -> PackedFloat32Array:
+	var pre: PackedFloat32Array = p_res.pre_stream
+	var dep: PackedFloat32Array = p_res.deposition
+	var out := PackedFloat32Array()
+	out.resize(pre.size())
+	for i in range(pre.size()):
+		out[i] = pre[i] - dep[i]
+	return out
+
+
+func _edge_dist(p_ix: int, p_iz: int) -> float:
+	var cx := RECT.size.x / GW
+	var cz := RECT.size.y / GH
+	return minf(minf((p_ix + 0.5) * cx, (GW - 0.5 - p_ix) * cx), minf((p_iz + 0.5) * cz, (GH - 0.5 - p_iz) * cz))
+
+
+func _ring_raise(p_res: Dictionary, p_src: PackedFloat32Array) -> float:
+	var s1 := _stage1(p_res)
+	var m := 0.0
+	for iz in range(GH):
+		for ix in range(GW):
+			if ix == 0 or iz == 0 or ix == GW - 1 or iz == GH - 1:
+				var i := iz * GW + ix
+				m = maxf(m, s1[i] - p_src[i])
+	return m
+
+
 func _max_raise(p_res: Dictionary, p_src: PackedFloat32Array) -> float:
 	var pre: PackedFloat32Array = p_res.pre_stream
 	var dep: PackedFloat32Array = p_res.deposition

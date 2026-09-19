@@ -61,10 +61,10 @@ struct HydraulicSaleveParams {
 	float stream_strength = 0.15f;
 	float stream_exp = 0.5f;
 
-	// Output masks: eroded_mask / sediment_mask are the metre outputs over these depths, clamped to 0..1.
-	// 0 = auto: 10% (eroded) and 1% (sediment) of the reference relief.
-	float eroded_mask_depth = 0.0f;
-	float sediment_mask_depth = 0.0f;
+	// Rim cap width, metres from the grid edge (0 = auto: 10% of the shorter side). Inside it the result is
+	// eased down to at most the input height, so the solve meets the surrounding ground; beyond it the solve
+	// is free, texture included.
+	float rim_width = 0.0f;
 
 	// Stage 4: Post-Processing
 	bool enable_post_smoothing = false;
@@ -73,10 +73,12 @@ struct HydraulicSaleveParams {
 	// the routing noise every pass (the old behaviour, which never settles); `debug_network` returns the
 	// final receivers and drainage areas.
 	bool reroute_lakes = true;
-	// The Stage 1 steady state (remapped to the reference relief) is held at or below the input, in metres,
-	// before Stages 2-4. Free, it rebuilds untouched flat ground as a ramp up from the border outlets, which
-	// on a brush is a step where the solve meets the ground around it. Off is the gate control only.
+	// The Stage 1 steady state (in metres) is held at or below the input across the rim band (rim_width),
+	// before Stages 2-4. Free, it rebuilds flat ground as a ramp up from the border outlets, which on a brush
+	// is a step where the solve meets the ground around it. Off is the gate control only. `cap_everywhere`
+	// is the old whole-grid cap, which flattened the texture on every rise; also a gate control only.
 	bool lower_only = true;
+	bool cap_everywhere = false;
 	bool stable_noise = true;
 	bool debug_network = false;
 	// Gate hooks: `grid_solve` runs Stage 1 on the 8-connected grid (the S1 solver, the orientation control);
@@ -96,8 +98,6 @@ struct HydraulicSaleveResult {
 	PackedFloat32Array height;
 	PackedFloat32Array eroded_rock;
 	PackedFloat32Array sediment;
-	PackedFloat32Array eroded_mask; // 0..1, what the node's eroded_rock port carries
-	PackedFloat32Array sediment_mask; // 0..1, what the node's sediment port carries
 	int iterations = 0; // Stage 1 passes actually run
 	PackedInt32Array receivers; // debug_network only
 	PackedFloat32Array drainage_area; // debug_network only, in (cell metres / reference relief)^2
