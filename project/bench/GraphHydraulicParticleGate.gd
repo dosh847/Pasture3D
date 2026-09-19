@@ -11,6 +11,7 @@ const EPS_SINGLE_DROPLET := 2.0e-6
 const EPS_MULTI_DROPLET := 0.05
 
 var _fail := 0
+var _completed := 0
 
 
 func _ready() -> void:
@@ -22,6 +23,8 @@ func _ready() -> void:
 		return
 
 	_test_a_native_parity()
+	_test_a3_default_lifetime_parity()
+	_test_a4_mask_spawn_parity()
 	_test_b_seed_determinism()
 	_test_c_nan_boundary_handling()
 	_test_d_channel_generation()
@@ -100,6 +103,64 @@ func _test_a_native_parity() -> void:
 	if diff_h > EPS_MULTI_DROPLET or diff_s > EPS_MULTI_DROPLET or diff_f > EPS_MULTI_DROPLET or diff_w > EPS_MULTI_DROPLET:
 		_fail += 1
 		print("    !! Multi-droplet solver diverged beyond iterative tolerance")
+
+
+## [A2] stops at 10 steps and 500 droplets, which is short enough that the C++ float32 quad differences
+## never amplified. At the default lifetime they did: 1.99 m max on this size of run. Every channel
+## must now match the oracle to the bit-level tolerance.
+func _test_a3_default_lifetime_parity() -> void:
+	print("
+[A3] Default-lifetime Parity (2000 droplets, 30 steps): every channel")
+	var gw := 64
+	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
+	var surf := _make_test_surface(gw, gw)
+	var p := {"droplet_count": 2000, "max_lifetime": 30, "seed": 7}
+	var gd: Array = DevHydraulicParticle.solve_oracle(surf, gw, gw, rect, p)
+	var cpp: Dictionary = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, p)
+	var worst := 0.0
+	var names := ["height", "sediment", "flow", "water_depth"]
+	for c in names.size():
+		var d := _max_abs_diff(gd[c], cpp[names[c]])
+		print("    %-11s max |cpp - gdscript| = %.9f" % [names[c], d])
+		worst = maxf(worst, d)
+	# Measured-something control: the run must actually have eroded.
+	var cut := _max_abs_diff(surf, cpp["height"])
+	print("    max |height - input| = %.4f m (want > 0.1, or the run measured nothing)" % cut)
+	if worst > EPS_SINGLE_DROPLET or cut <= 0.1:
+		_fail += 1
+		print("    !! default-lifetime parity failed")
+	_completed += 1
+
+
+## A droplet born where the mask is off (or on no data) never runs, on both routes. The native solver used
+## to run it anyway, so it walked out of the masked-off half and cut the unmasked half.
+func _test_a4_mask_spawn_parity() -> void:
+	print("
+[A4] Mask-spawn Parity: half-zero mask, and a no-data band")
+	var gw := 64
+	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
+	var surf := _make_test_surface(gw, gw)
+	for z in range(40, 44):
+		for x in gw:
+			surf[z * gw + x] = NAN
+	var mask := PackedFloat32Array()
+	mask.resize(gw * gw)
+	for i in mask.size():
+		mask[i] = 1.0 if (i % gw) >= gw / 2 else 0.0
+	var p := {"droplet_count": 2000, "max_lifetime": 30, "seed": 7, "mask": mask}
+	var gd: Array = DevHydraulicParticle.solve_oracle(surf, gw, gw, rect, p)
+	var cpp: Dictionary = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, p)
+	var d := _max_abs_diff(gd[0], cpp["height"])
+	print("    height max |cpp - gdscript| = %.9f (want <= %.7f)" % [d, EPS_SINGLE_DROPLET])
+	# Control: the mask must have changed the result, or this criterion never exercised the skip.
+	p.erase("mask")
+	var unmasked: Dictionary = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, p)
+	var effect := _max_abs_diff(unmasked["height"], cpp["height"])
+	print("    masked vs unmasked max |d| = %.4f m (want > 0.1)" % effect)
+	if d > EPS_SINGLE_DROPLET or effect <= 0.1:
+		_fail += 1
+		print("    !! mask-spawn parity failed")
+	_completed += 1
 
 
 func _test_b_seed_determinism() -> void:

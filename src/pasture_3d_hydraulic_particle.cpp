@@ -19,31 +19,31 @@ HydraulicParticleParams HydraulicParticleParams::from_dict(const Dictionary &p_d
 		p.max_lifetime = std::max(1, (int)p_dict["max_lifetime"]);
 	}
 	if (p_dict.has("inertia")) {
-		p.inertia = std::clamp((float)p_dict["inertia"], 0.0f, 1.0f);
+		p.inertia = std::clamp((double)p_dict["inertia"], 0.0, 1.0);
 	}
 	if (p_dict.has("sediment_capacity")) {
-		p.sediment_capacity = std::max(0.0f, (float)p_dict["sediment_capacity"]);
+		p.sediment_capacity = std::max(0.0, (double)p_dict["sediment_capacity"]);
 	}
 	if (p_dict.has("erosion_speed")) {
-		p.erosion_speed = std::clamp((float)p_dict["erosion_speed"], 0.0f, 1.0f);
+		p.erosion_speed = std::clamp((double)p_dict["erosion_speed"], 0.0, 1.0);
 	}
 	if (p_dict.has("deposition_speed")) {
-		p.deposition_speed = std::clamp((float)p_dict["deposition_speed"], 0.0f, 1.0f);
+		p.deposition_speed = std::clamp((double)p_dict["deposition_speed"], 0.0, 1.0);
 	}
 	if (p_dict.has("evaporation_rate")) {
-		p.evaporation_rate = std::clamp((float)p_dict["evaporation_rate"], 0.0f, 1.0f);
+		p.evaporation_rate = std::clamp((double)p_dict["evaporation_rate"], 0.0, 1.0);
 	}
 	if (p_dict.has("min_slope")) {
-		p.min_slope = std::max(0.0001f, (float)p_dict["min_slope"]);
+		p.min_slope = std::max(0.0001, (double)p_dict["min_slope"]);
 	}
 	if (p_dict.has("gravity")) {
-		p.gravity = std::max(0.1f, (float)p_dict["gravity"]);
+		p.gravity = std::max(0.1, (double)p_dict["gravity"]);
 	}
 	if (p_dict.has("bedrock_gap")) {
-		p.bedrock_gap = std::max(0.0f, (float)p_dict["bedrock_gap"]);
+		p.bedrock_gap = std::max(0.0, (double)p_dict["bedrock_gap"]);
 	}
 	if (p_dict.has("ridge_forcing")) {
-		p.ridge_forcing = std::max(0.0f, (float)p_dict["ridge_forcing"]);
+		p.ridge_forcing = std::max(0.0, (double)p_dict["ridge_forcing"]);
 	}
 	if (p_dict.has("seed")) {
 		p.seed = (int64_t)p_dict["seed"];
@@ -62,6 +62,13 @@ Dictionary HydraulicParticleResult::to_dict() const {
 	d["flow"] = flow;
 	d["water_depth"] = water_depth;
 	return d;
+}
+
+// Accumulate in double and round once on the store, as the GDScript oracle does when it adds a 64-bit
+// float to a PackedFloat32Array element. `float += (float)x` rounds twice, and the droplets amplify that
+// last-bit difference into metres (GraphHydraulicParticleGate [A3]).
+static inline void add_rounded(float &r_cell, double p_amount) {
+	r_cell = (float)((double)r_cell + p_amount);
 }
 
 static inline double next_rand(uint32_t &p_state) {
@@ -117,6 +124,13 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 		double water = 1.0;
 		double sed = 0.0;
 
+		// A droplet born on a no-data cell, or where the mask is off, never runs. Without this it walked
+		// out of the masked-off region and cut the unmasked one (GraphHydraulicParticleGate [A4]).
+		const int init_idx = std::clamp((int)px, 0, p_gw - 1) + std::clamp((int)pz, 0, p_gh - 1) * p_gw;
+		if (!std::isfinite(height[init_idx]) || (has_mask && mask_ptr[init_idx] <= 0.001f)) {
+			continue;
+		}
+
 		for (int step = 0; step < max_lifetime; step++) {
 			int ix = (int)std::floor(px);
 			int iz = (int)std::floor(pz);
@@ -145,8 +159,9 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 			double h_curr = (1.0 - u) * (1.0 - v) * (double)h00 + u * (1.0 - v) * (double)h10 +
 					(1.0 - u) * v * (double)h01 + u * v * (double)h11;
 
-			double gx = (1.0 - v) * (double)(h10 - h00) + v * (double)(h11 - h01);
-			double gz = (1.0 - u) * (double)(h01 - h00) + u * (double)(h11 - h10);
+			// Differences in double: a float32 subtraction here was the root of the oracle divergence.
+			double gx = (1.0 - v) * ((double)h10 - (double)h00) + v * ((double)h11 - (double)h01);
+			double gz = (1.0 - u) * ((double)h01 - (double)h00) + u * ((double)h11 - (double)h10);
 
 			// Hesiod Ridge Forcing perturbation: adds cross-gradient force
 			if (ridge_forcing > 0.0) {
@@ -215,14 +230,14 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 				// Moving uphill into pit — deposit sediment
 				double deposit_amt = std::min(sed, delta_h) * mask_val;
 				sed -= deposit_amt;
-				height[i00] += (float)(deposit_amt * w00);
-				height[i10] += (float)(deposit_amt * w10);
-				height[i01] += (float)(deposit_amt * w01);
-				height[i11] += (float)(deposit_amt * w11);
-				sediment[i00] += (float)(deposit_amt * w00);
-				sediment[i10] += (float)(deposit_amt * w10);
-				sediment[i01] += (float)(deposit_amt * w01);
-				sediment[i11] += (float)(deposit_amt * w11);
+				add_rounded(height[i00], (deposit_amt * w00));
+				add_rounded(height[i10], (deposit_amt * w10));
+				add_rounded(height[i01], (deposit_amt * w01));
+				add_rounded(height[i11], (deposit_amt * w11));
+				add_rounded(sediment[i00], (deposit_amt * w00));
+				add_rounded(sediment[i10], (deposit_amt * w10));
+				add_rounded(sediment[i01], (deposit_amt * w01));
+				add_rounded(sediment[i11], (deposit_amt * w11));
 				break;
 			} else {
 				// Moving downhill: compute sediment transport capacity
@@ -232,41 +247,41 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 					// Drop excess sediment
 					double drop = (sed - c) * deposition_speed * mask_val;
 					sed -= drop;
-					height[i00] += (float)(drop * w00);
-					height[i10] += (float)(drop * w10);
-					height[i01] += (float)(drop * w01);
-					height[i11] += (float)(drop * w11);
-					sediment[i00] += (float)(drop * w00);
-					sediment[i10] += (float)(drop * w10);
-					sediment[i01] += (float)(drop * w01);
-					sediment[i11] += (float)(drop * w11);
+					add_rounded(height[i00], (drop * w00));
+					add_rounded(height[i10], (drop * w10));
+					add_rounded(height[i01], (drop * w01));
+					add_rounded(height[i11], (drop * w11));
+					add_rounded(sediment[i00], (drop * w00));
+					add_rounded(sediment[i10], (drop * w10));
+					add_rounded(sediment[i01], (drop * w01));
+					add_rounded(sediment[i11], (drop * w11));
 				} else {
 					// Erode bedrock with Hesiod Bedrock Floor protection
 					double erode_amt = std::min((c - sed) * erosion_speed, -delta_h) * mask_val;
 
 					if (bedrock_gap > 0.0) {
-						double max_cut00 = std::max(0.0, (double)(height[i00] - (original_height[i00] - (float)bedrock_gap)));
-						double max_cut10 = std::max(0.0, (double)(height[i10] - (original_height[i10] - (float)bedrock_gap)));
-						double max_cut01 = std::max(0.0, (double)(height[i01] - (original_height[i01] - (float)bedrock_gap)));
-						double max_cut11 = std::max(0.0, (double)(height[i11] - (original_height[i11] - (float)bedrock_gap)));
+						double max_cut00 = std::max(0.0, (double)height[i00] - ((double)original_height[i00] - bedrock_gap));
+						double max_cut10 = std::max(0.0, (double)height[i10] - ((double)original_height[i10] - bedrock_gap));
+						double max_cut01 = std::max(0.0, (double)height[i01] - ((double)original_height[i01] - bedrock_gap));
+						double max_cut11 = std::max(0.0, (double)height[i11] - ((double)original_height[i11] - bedrock_gap));
 						double max_allowed = w00 * max_cut00 + w10 * max_cut10 + w01 * max_cut01 + w11 * max_cut11;
 						erode_amt = std::min(erode_amt, max_allowed);
 					}
 
 					sed += erode_amt;
-					height[i00] -= (float)(erode_amt * w00);
-					height[i10] -= (float)(erode_amt * w10);
-					height[i01] -= (float)(erode_amt * w01);
-					height[i11] -= (float)(erode_amt * w11);
+					add_rounded(height[i00], -(erode_amt * w00));
+					add_rounded(height[i10], -(erode_amt * w10));
+					add_rounded(height[i01], -(erode_amt * w01));
+					add_rounded(height[i11], -(erode_amt * w11));
 				}
 
 				speed = std::sqrt(std::max(0.0, speed * speed + delta_h * -gravity));
 				water *= (1.0 - evaporation_rate);
 
-				flow[i00] += (float)(water * w00);
-				flow[i10] += (float)(water * w10);
-				flow[i01] += (float)(water * w01);
-				flow[i11] += (float)(water * w11);
+				add_rounded(flow[i00], (water * w00));
+				add_rounded(flow[i10], (water * w10));
+				add_rounded(flow[i01], (water * w01));
+				add_rounded(flow[i11], (water * w11));
 
 				water_depth[i00] = std::max(water_depth[i00], (float)(water * 0.05 * w00));
 				water_depth[i10] = std::max(water_depth[i10], (float)(water * 0.05 * w10));

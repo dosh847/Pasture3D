@@ -16,17 +16,21 @@
 namespace godot {
 
 struct HydraulicParticleParams {
+	// DOUBLE, not float, for the reason ErosionHydraulicParams gives: the oracle's parameters are Variant
+	// doubles, and storing 0.05 or 0.3 as float made them arrive ~1e-9 off, which the droplets amplified
+	// into a metre by the default lifetime (GraphHydraulicParticleGate [A3]). The graph path's float32
+	// program params widen to the same number, so it is unaffected.
 	int droplet_count = 25000;
 	int max_lifetime = 30;
-	float inertia = 0.05f;
-	float sediment_capacity = 4.0f;
-	float erosion_speed = 0.3f;
-	float deposition_speed = 0.3f;
-	float evaporation_rate = 0.01f;
-	float min_slope = 0.01f;
-	float gravity = 4.0f;
-	float bedrock_gap = 2.0f;
-	float ridge_forcing = 0.0f;
+	double inertia = 0.05;
+	double sediment_capacity = 4.0;
+	double erosion_speed = 0.3;
+	double deposition_speed = 0.3;
+	double evaporation_rate = 0.01;
+	double min_slope = 0.01;
+	double gravity = 4.0;
+	double bedrock_gap = 2.0;
+	double ridge_forcing = 0.0;
 	int64_t seed = 1337;
 	PackedFloat32Array mask;
 

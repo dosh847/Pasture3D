@@ -224,20 +224,27 @@ func _surface_hash(p_surface: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
 	return solver_cache_key(p_gw, p_gh, [p_surface])
 
 
+static func _f32(p_value: float) -> float:
+	return PackedFloat32Array([p_value])[0]
+
+
 func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_droplets: int, p_es: float, p_ds: float, p_mask: PackedFloat32Array) -> Array:
 	var n := p_gw * p_gh
+	# Every real parameter goes through float32, because that is what the graph program carries and the
+	# solver now keeps doubles: without the round trip this route and the native route solve with values
+	# ~1e-9 apart, and the droplets amplify that into metres.
 	var params := {
 		"droplet_count": p_droplets,
 		"max_lifetime": max_lifetime,
-		"inertia": inertia,
-		"sediment_capacity": sediment_capacity,
-		"erosion_speed": p_es,
-		"deposition_speed": p_ds,
-		"evaporation_rate": evaporation_rate,
-		"min_slope": min_slope,
-		"gravity": gravity,
-		"bedrock_gap": bedrock_gap,
-		"ridge_forcing": ridge_forcing,
+		"inertia": _f32(inertia),
+		"sediment_capacity": _f32(sediment_capacity),
+		"erosion_speed": _f32(p_es),
+		"deposition_speed": _f32(p_ds),
+		"evaporation_rate": _f32(evaporation_rate),
+		"min_slope": _f32(min_slope),
+		"gravity": _f32(gravity),
+		"bedrock_gap": _f32(bedrock_gap),
+		"ridge_forcing": _f32(ridge_forcing),
 		"seed": seed,
 		"mask": p_mask,
 	}
