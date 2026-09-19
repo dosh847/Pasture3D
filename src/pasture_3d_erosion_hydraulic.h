@@ -31,6 +31,14 @@ struct ErosionHydraulicParams {
 	double erosion_speed = 0.5;
 	double deposition_speed = 0.4;
 	double min_slope = 0.01;
+	// WALLS (default): the grid edge and no-data cells are walls, so water and sediment pool along them.
+	// OUTLETS: each is a virtual neighbour whose surface is a fixed base level, `outlet_level` metres below
+	// the sending cell's INPUT ground; whatever is routed there leaves the domain. The base level is the
+	// input's, not the current ground's: an outlet that sank with the rim cut an ever-deeper trench (12 m
+	// in 20 passes), because the rim could never erode down to it.
+	enum { EDGE_WALLS = 0, EDGE_OUTLETS = 1 };
+	int edge_mode = EDGE_WALLS;
+	double outlet_level = 0.0;
 
 	static ErosionHydraulicParams from_dict(const Dictionary &p_dict);
 };

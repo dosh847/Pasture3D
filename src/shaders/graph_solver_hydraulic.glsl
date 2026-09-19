@@ -21,12 +21,14 @@ layout(set = 0, binding = 5, std430) restrict buffer FluxSBuf { vec4 flux_s[]; }
 layout(set = 0, binding = 6, std430) restrict buffer NextHeightBuf { float next_height[]; };
 layout(set = 0, binding = 7, std430) restrict buffer NextWaterBuf { float next_water[]; };
 layout(set = 0, binding = 8, std430) restrict buffer NextSedimentBuf { float next_sediment[]; };
+// The input surface, read only: an OUTLETS base level is fixed to it (ErosionHydraulicParams::edge_mode).
+layout(set = 0, binding = 9, std430) restrict readonly buffer InputHeightBuf { float input_height[]; };
 
 layout(push_constant, std430) uniform Params {
 	int mode; // 0: RAIN_AND_DISPERSE, 1: GATHER_AND_EVAPORATE, 2: NORMALIZE
 	int gw;
 	int gh;
-	int pad0;
+	int edge_mode; // 0: WALLS, 1: OUTLETS (ErosionHydraulicParams::edge_mode)
 	float dx;
 	float dz;
 	float cell_dist;
@@ -38,8 +40,28 @@ layout(push_constant, std430) uniform Params {
 	float min_slope;
 	float max_flow;
 	float max_sed;
-	float pad1;
+	float outlet_level;
 } p;
+
+// The water surface of the neighbour at `ni`: its ground plus its post-rain water, when it is on the grid
+// and has data. Otherwise, under OUTLETS only, a virtual outlet `outlet_level` below the sender's ground;
+// nobody gathers what is sent there, so it leaves the domain -- the CPU solver's rule. The base level is
+// the sender's INPUT ground, so the rim erodes down to it and stops.
+bool neighbour_surface(bool p_inside, int p_ni, int p_i, out float r_total) {
+	if (p_inside) {
+		float nh = height[p_ni];
+		if (!isnan(nh) && !isinf(nh)) {
+			r_total = nh + water[p_ni] + p.rain_rate;
+			return true;
+		}
+	}
+	if (p.edge_mode == 1) {
+		r_total = input_height[p_i] - p.outlet_level;
+		return true;
+	}
+	r_total = 0.0;
+	return false;
+}
 
 void main() {
 	int ix = int(gl_GlobalInvocationID.x);
@@ -90,11 +112,10 @@ void main() {
 		float min_downhill_diff = 1.0 / 0.0; // +INF
 
 		// 0: -X (left), 1: +X (right), 2: -Z (up), 3: +Z (down)
-		if (ix > 0) {
-			int ni = i - 1;
-			float nh = height[ni];
-			if (!isnan(nh) && !isinf(nh)) {
-				float diff = total_alt - (nh + water[ni] + p.rain_rate);
+		{
+			float n_total;
+			if (neighbour_surface(ix > 0, i - 1, i, n_total)) {
+				float diff = total_alt - n_total;
 				if (diff > 0.0) {
 					diffs[0] = diff;
 					total_diff += diff;
@@ -103,11 +124,10 @@ void main() {
 				}
 			}
 		}
-		if (ix < p.gw - 1) {
-			int ni = i + 1;
-			float nh = height[ni];
-			if (!isnan(nh) && !isinf(nh)) {
-				float diff = total_alt - (nh + water[ni] + p.rain_rate);
+		{
+			float n_total;
+			if (neighbour_surface(ix < p.gw - 1, i + 1, i, n_total)) {
+				float diff = total_alt - n_total;
 				if (diff > 0.0) {
 					diffs[1] = diff;
 					total_diff += diff;
@@ -116,11 +136,10 @@ void main() {
 				}
 			}
 		}
-		if (iz > 0) {
-			int ni = i - p.gw;
-			float nh = height[ni];
-			if (!isnan(nh) && !isinf(nh)) {
-				float diff = total_alt - (nh + water[ni] + p.rain_rate);
+		{
+			float n_total;
+			if (neighbour_surface(iz > 0, i - p.gw, i, n_total)) {
+				float diff = total_alt - n_total;
 				if (diff > 0.0) {
 					diffs[2] = diff;
 					total_diff += diff;
@@ -129,11 +148,10 @@ void main() {
 				}
 			}
 		}
-		if (iz < p.gh - 1) {
-			int ni = i + p.gw;
-			float nh = height[ni];
-			if (!isnan(nh) && !isinf(nh)) {
-				float diff = total_alt - (nh + water[ni] + p.rain_rate);
+		{
+			float n_total;
+			if (neighbour_surface(iz < p.gh - 1, i + p.gw, i, n_total)) {
+				float diff = total_alt - n_total;
 				if (diff > 0.0) {
 					diffs[3] = diff;
 					total_diff += diff;

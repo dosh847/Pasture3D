@@ -43,6 +43,23 @@ extends Pasture3DGraphSolverNode
 		min_slope = maxf(v, 0.0)
 		_param_changed()
 
+## WALLS: the grid edge and no-data cells hold water in, so it ponds and drops its sediment along them.
+## The original behaviour. OUTLETS: water reaching them drains away, as into terrain beyond the grid that
+## sits Outlet Level below the rim. Only the rim changes: the interior is identical to WALLS until the
+## drainage it feeds reaches it, one cell per iteration.
+@export_enum("Walls", "Outlets") var edge_mode: int = 0:
+	set(v):
+		edge_mode = clampi(v, 0, 1)
+		_param_changed()
+
+## OUTLETS: the base level, in metres below the rim cell's INPUT ground. Water drains to it and the rim can
+## erode down to it, no further. 0 lets water spill off at the rim's own level.
+@export_range(0.0, 10.0, 0.05, "or_greater", "suffix:m") var outlet_level: float = 0.0:
+	set(v):
+		outlet_level = maxf(v, 0.0)
+		_param_changed()
+
+
 @export_group("Evaluation")
 
 @export_tool_button("Bake Hydraulic Erosion") var _bake_btn = clear_cache
@@ -125,6 +142,8 @@ func _solve_gdscript(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 		"erosion_speed": erosion_speed,
 		"deposition_speed": deposition_speed,
 		"min_slope": min_slope,
+		"edge_mode": edge_mode,
+		"outlet_level": outlet_level,
 	}
 	return solve_oracle(p_surface, p_gw, p_gh, p_rect, params)
 
@@ -143,6 +162,8 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 	var p_ero_spd: float = clampf(float(p_params.get("erosion_speed", 0.5)), 0.0, 1.0)
 	var p_dep_spd: float = clampf(float(p_params.get("deposition_speed", 0.4)), 0.0, 1.0)
 	var p_min_slope: float = maxf(float(p_params.get("min_slope", 0.01)), 0.0)
+	var outlets: bool = clampi(int(p_params.get("edge_mode", 0)), 0, 1) == 1
+	var p_outlet: float = maxf(float(p_params.get("outlet_level", 0.0)), 0.0)
 
 	var dx: float = p_rect.size.x / float(maxi(p_gw, 1))
 	var dz: float = p_rect.size.y / float(maxi(p_gh, 1))
@@ -184,20 +205,25 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 				for k in range(4):
 					var nx: int = ix + n_dx[k]
 					var nz: int = iz + n_dz[k]
-					if nx >= 0 and nx < p_gw and nz >= 0 and nz < p_gh:
+					# The neighbour's water surface; an edge or no-data neighbour has one only under OUTLETS.
+					var n_total: float = 0.0
+					var has_surface: bool = false
+					if nx >= 0 and nx < p_gw and nz >= 0 and nz < p_gh and is_finite(height[nz * p_gw + nx]):
 						var ni: int = nz * p_gw + nx
-						var n_h: float = height[ni]
-						var n_w: float = water[ni]
-						if is_finite(n_h):
-							var n_total: float = n_h + n_w
-							var diff: float = total_alt - n_total
-							if diff > 0.0:
-								diffs[k] = diff
-								total_diff += diff
-								min_downhill_diff = minf(min_downhill_diff, diff)
-								var slope: float = diff / n_dist[k]
-								if slope > max_slope:
-									max_slope = slope
+						n_total = height[ni] + water[ni]
+						has_surface = true
+					elif outlets:
+						n_total = p_surface[i] - p_outlet
+						has_surface = true
+					if has_surface:
+						var diff: float = total_alt - n_total
+						if diff > 0.0:
+							diffs[k] = diff
+							total_diff += diff
+							min_downhill_diff = minf(min_downhill_diff, diff)
+							var slope: float = diff / n_dist[k]
+							if slope > max_slope:
+								max_slope = slope
 
 				if total_diff > 0.0:
 					var eff_slope: float = maxf(max_slope, p_min_slope)
@@ -226,10 +252,14 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 							var frac: float = diffs[k] / total_diff
 							var moved_w: float = flow_out * frac
 							var moved_s: float = sed_c * (moved_w / maxf(w_c, 1e-6))
-							var ni: int = (iz + n_dz[k]) * p_gw + (ix + n_dx[k])
-							next_water[ni] += moved_w
-							next_sediment[ni] += moved_s
-							flow_accum[ni] += moved_w
+							var tx: int = ix + n_dx[k]
+							var tz: int = iz + n_dz[k]
+							# An outlet off the grid has nobody to receive it: it leaves the domain.
+							if tx >= 0 and tx < p_gw and tz >= 0 and tz < p_gh:
+								var ni: int = tz * p_gw + tx
+								next_water[ni] += moved_w
+								next_sediment[ni] += moved_s
+								flow_accum[ni] += moved_w
 							sed_c = maxf(sed_c - moved_s, 0.0)
 
 					# += the DELTA, not = the retained amount -- see the note on the native kernel's twin of

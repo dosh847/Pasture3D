@@ -3189,11 +3189,16 @@ bool Pasture3DGraphGPU::eval_hydraulic(const PackedFloat32Array &p_surface, int 
 	if (!next_sediment_buf.is_valid()) return fail();
 	to_free.push_back(next_sediment_buf);
 
+	// The input surface, for the OUTLETS base level. Never written.
+	const RID input_height_buf = _rd->storage_buffer_create(bytes, pb_height);
+	if (!input_height_buf.is_valid()) return fail();
+	to_free.push_back(input_height_buf);
+
 	// Uniform set
 	TypedArray<RDUniform> uniforms;
-	const RID bufs[9] = { height_buf, water_buf, sediment_buf, flow_buf, flux_w_buf, flux_s_buf,
-		next_height_buf, next_water_buf, next_sediment_buf };
-	for (int i = 0; i < 9; i++) {
+	const RID bufs[10] = { height_buf, water_buf, sediment_buf, flow_buf, flux_w_buf, flux_s_buf,
+		next_height_buf, next_water_buf, next_sediment_buf, input_height_buf };
+	for (int i = 0; i < 10; i++) {
 		Ref<RDUniform> u;
 		u.instantiate();
 		u->set_uniform_type(RenderingDevice::UNIFORM_TYPE_STORAGE_BUFFER);
@@ -3216,7 +3221,7 @@ bool Pasture3DGraphGPU::eval_hydraulic(const PackedFloat32Array &p_surface, int 
 	push.resize(64);
 	push.encode_s32(4, p_gw);
 	push.encode_s32(8, p_gh);
-	push.encode_s32(12, 0); // pad0
+	push.encode_s32(12, p_params.edge_mode);
 	push.encode_float(16, dx);
 	push.encode_float(20, dz);
 	push.encode_float(24, cell_dist);
@@ -3228,7 +3233,7 @@ bool Pasture3DGraphGPU::eval_hydraulic(const PackedFloat32Array &p_surface, int 
 	push.encode_float(48, (float)p_params.min_slope);
 	push.encode_float(52, 1.0f); // max_flow (temp)
 	push.encode_float(56, 1.0f); // max_sed (temp)
-	push.encode_float(60, 0.0f); // pad1
+	push.encode_float(60, (float)p_params.outlet_level);
 
 	// Simulation passes
 	int64_t cl = _rd->compute_list_begin();

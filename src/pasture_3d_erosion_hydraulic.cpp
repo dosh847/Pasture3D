@@ -54,6 +54,12 @@ ErosionHydraulicParams ErosionHydraulicParams::from_dict(const Dictionary &p_dic
 	if (p_dict.has("min_slope")) {
 		p.min_slope = std::max(0.0, (double)p_dict["min_slope"]);
 	}
+	if (p_dict.has("edge_mode")) {
+		p.edge_mode = std::clamp((int)p_dict["edge_mode"], 0, 1);
+	}
+	if (p_dict.has("outlet_level")) {
+		p.outlet_level = std::max(0.0, (double)p_dict["outlet_level"]);
+	}
 	return p;
 }
 
@@ -102,6 +108,8 @@ ErosionHydraulicResult godot::erosion_hydraulic_solve(const PackedFloat32Array &
 	const double p_ero_spd = (double)p_params.erosion_speed;
 	const double p_dep_spd = (double)p_params.deposition_speed;
 	const double p_min_slope = (double)p_params.min_slope;
+	const bool outlets = p_params.edge_mode == ErosionHydraulicParams::EDGE_OUTLETS;
+	const double p_outlet = p_params.outlet_level;
 
 	// 2. Downhill flow routing & stream power incision, as a scatter: each cell pushes water, sediment and flow
 	// into its downhill neighbours, and each of those is a float sum whose bits depend on the order its terms
@@ -134,21 +142,26 @@ ErosionHydraulicResult godot::erosion_hydraulic_solve(const PackedFloat32Array &
 			for (int k = 0; k < 4; k++) {
 				const int nx = ix + SCATTER_DX[k];
 				const int nz = iz + SCATTER_DZ[k];
-				if (nx >= 0 && nx < p_gw && nz >= 0 && nz < p_gh) {
+				// The neighbour's water surface; an edge or no-data neighbour has one only under OUTLETS.
+				double n_total = 0.0;
+				bool has_surface = false;
+				if (nx >= 0 && nx < p_gw && nz >= 0 && nz < p_gh && std::isfinite(height[nz * p_gw + nx])) {
 					const int ni = nz * p_gw + nx;
-					const double n_h = (double)height[ni];
-					const double n_w = (double)water[ni];
-					if (std::isfinite(n_h)) {
-						const double n_total = n_h + n_w;
-						const double diff = total_alt - n_total;
-						if (diff > 0.0) {
-							diffs[k] = diff;
-							total_diff += diff;
-							min_downhill_diff = std::min(min_downhill_diff, diff);
-							const double slope = diff / n_dist[k];
-							if (slope > max_slope) {
-								max_slope = slope;
-							}
+					n_total = (double)height[ni] + (double)water[ni];
+					has_surface = true;
+				} else if (outlets) {
+					n_total = (double)src_height[i] - p_outlet;
+					has_surface = true;
+				}
+				if (has_surface) {
+					const double diff = total_alt - n_total;
+					if (diff > 0.0) {
+						diffs[k] = diff;
+						total_diff += diff;
+						min_downhill_diff = std::min(min_downhill_diff, diff);
+						const double slope = diff / n_dist[k];
+						if (slope > max_slope) {
+							max_slope = slope;
 						}
 					}
 				}

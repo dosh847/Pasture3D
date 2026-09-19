@@ -57,6 +57,23 @@ extends Pasture3DGraphSolverNode
 		_param_changed()
 
 
+## WALLS: the grid edge and no-data cells hold water in, so it ponds and drops its sediment along them.
+## The original behaviour. OUTLETS: water reaching them drains away, as into terrain beyond the grid that
+## sits Outlet Level below the rim. Only the rim changes: the interior is identical to WALLS until the
+## drainage it feeds reaches it, one cell per iteration.
+@export_enum("Walls", "Outlets") var edge_mode: int = 0:
+	set(v):
+		edge_mode = clampi(v, 0, 1)
+		_param_changed()
+
+## OUTLETS: the base level, in metres below the rim cell's INPUT ground. Water drains to it and the rim can
+## erode down to it, no further. 0 lets water spill off at the rim's own level.
+@export_range(0.0, 10.0, 0.05, "or_greater", "suffix:m") var outlet_level: float = 0.0:
+	set(v):
+		outlet_level = maxf(v, 0.0)
+		_param_changed()
+
+
 @export_group("Evaluation")
 
 @export_tool_button("Bake Hydraulic Erosion") var _bake_btn = clear_cache
@@ -83,6 +100,8 @@ func native_lower() -> Dictionary:
 	p[4] = erosion_speed
 	p[5] = deposition_speed
 	p[6] = min_slope
+	p[7] = float(edge_mode)
+	p[8] = outlet_level
 	return {"params": p}
 
 
@@ -188,16 +207,25 @@ func _param_changed() -> void:
 	emit_changed()
 
 
+static func _f32(p_value: float) -> float:
+	return PackedFloat32Array([p_value])[0]
+
+
 func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_iters: int, p_rr: float, p_es: float, p_ds: float) -> Array:
 	var n := p_gw * p_gh
+	# Every real parameter goes through float32, as the graph program carries it, so this route and the
+	# native route solve the same numbers. Before this they were ~1e-9 apart and the solver's
+	# erode-or-deposit branch made that 0.06 m by 25 iterations (GraphAuxChannelGate's measured gap).
 	var params := {
 		"iterations": p_iters,
-		"rain_rate": p_rr,
-		"evaporation_rate": evaporation_rate,
-		"sediment_capacity": sediment_capacity,
-		"erosion_speed": p_es,
-		"deposition_speed": p_ds,
-		"min_slope": min_slope,
+		"rain_rate": _f32(p_rr),
+		"evaporation_rate": _f32(evaporation_rate),
+		"sediment_capacity": _f32(sediment_capacity),
+		"erosion_speed": _f32(p_es),
+		"deposition_speed": _f32(p_ds),
+		"min_slope": _f32(min_slope),
+		"edge_mode": edge_mode,
+		"outlet_level": _f32(outlet_level),
 	}
 	if not ClassDB.class_has_method("Pasture3DUtil", "erosion_hydraulic_solve_grid_best"):
 		push_error("[Pasture3D] Pasture3DUtil.erosion_hydraulic_solve_grid_best is not bound. Rebuild GDExtension.")
