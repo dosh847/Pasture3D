@@ -38,3 +38,23 @@ func input_names() -> PackedStringArray:
 ## it would dispatch here. Kept defined (a flat 0) so a stray caller gets nothing rather than an error.
 func eval_grid(_p_inputs: Array, p_gw: int, p_gh: int, _p_mask, _p_rect: Rect2) -> PackedFloat32Array:
 	return Pasture3DGraphOps.zeros(p_gw * p_gh)
+
+
+## Two pins: the surface, and the host brush's FOOTPRINT -- the 0..1 mask the graph step composites through,
+## feathering and Modifier Margin included. Wire the footprint into a sink's mask to confine paint to the
+## brush rather than to the whole solved rectangle. With no host brush it is 1.0 everywhere.
+func output_count() -> int:
+	return 2
+
+
+func output_names() -> PackedStringArray:
+	return PackedStringArray(["height", "footprint"])
+
+
+func output_port_types() -> PackedInt32Array:
+	return PackedInt32Array([PortType.HEIGHT, PortType.MASK])
+
+
+## The native INPUT op writes the footprint as channel 1.
+func native_out_count() -> int:
+	return 2

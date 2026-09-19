@@ -286,6 +286,35 @@ void graph_resolve_op_params(const GraphProgram &p_prog, int p_slot, float r_P[1
 	}
 }
 
+void graph_footprint_fill(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect, float *r_out) {
+	const int n = p_gw * p_gh;
+	if (!p_prog.has_footprint()) {
+		std::fill_n(r_out, n, 1.f);
+		return;
+	}
+	const float *src = p_prog.footprint.ptr();
+	const double fx = (double)p_prog.fp_rect.position.x;
+	const double fz = (double)p_prog.fp_rect.position.y;
+	const double fdx = (double)p_prog.fp_rect.size.x / (double)p_prog.fp_gw;
+	const double fdz = (double)p_prog.fp_rect.size.y / (double)p_prog.fp_gh;
+	for (int iz = 0; iz < p_gh; iz++) {
+		for (int ix = 0; ix < p_gw; ix++) {
+			double wx, wz;
+			graph_cell_to_world(ix, iz, p_gw, p_gh, p_rect, wx, wz);
+			const double u = std::floor((wx - fx) / fdx);
+			const double v = std::floor((wz - fz) / fdz);
+			float val = 0.f;
+			if (u >= 0.0 && v >= 0.0 && u < (double)p_prog.fp_gw && v < (double)p_prog.fp_gh) {
+				val = src[(int)v * p_prog.fp_gw + (int)u];
+				if (!std::isfinite(val)) {
+					val = 0.f;
+				}
+			}
+			r_out[iz * p_gw + ix] = val;
+		}
+	}
+}
+
 bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 	r_out = GraphProgram();
 	if (!p_prog.has("ops") || !p_prog.has("params") || !p_prog.has("in0") ||
@@ -429,6 +458,12 @@ bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 				r_out.has_frozen = true;
 			}
 		}
+	}
+	if (p_prog.has("footprint")) {
+		r_out.footprint = p_prog["footprint"];
+		r_out.fp_gw = (int)p_prog.get("footprint_gw", 0);
+		r_out.fp_gh = (int)p_prog.get("footprint_gh", 0);
+		r_out.fp_rect = p_prog.get("footprint_rect", Rect2());
 	}
 	r_out.count = n;
 	if (r_out.is_empty()) {
@@ -938,6 +973,10 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 					for (int i = 0; i < n; i++) g_ptr[i] = src[i];
 				} else {
 					std::fill_n(g_ptr, n, 0.f);
+				}
+				// Channel 1, the host brush's footprint -- only when something reads it.
+				if (float *fp = want_aux(1)) {
+					graph_footprint_fill(p_prog, p_gw, p_gh, p_rect, fp);
 				}
 			} break;
 

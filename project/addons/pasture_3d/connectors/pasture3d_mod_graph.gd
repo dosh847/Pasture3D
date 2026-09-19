@@ -414,7 +414,7 @@ func _add_sink_taps(r_entry: Dictionary) -> void:
 	r_entry["tap_slots"] = slots
 	r_entry["tap_chans"] = chans
 	r_entry["tap_keys"] = keys
-	r_entry["tap_content"] = graph.content_key()
+	r_entry["tap_content"] = hash([graph.content_key(), graph._footprint_sig()])
 
 
 ## The worker's sink fields, filed on the main thread with the surface they were solved over.
@@ -431,7 +431,7 @@ func sink_taps_for(p_z: PackedFloat32Array, p_gw: int, p_gh: int) -> Dictionary:
 		return {}
 	if int(sink_taps["gw"]) != p_gw or int(sink_taps["gh"]) != p_gh:
 		return {}
-	if int(sink_taps["content"]) != graph.content_key() or int(sink_taps["z_hash"]) != hash(p_z):
+	if int(sink_taps["content"]) != hash([graph.content_key(), graph._footprint_sig()]) or int(sink_taps["z_hash"]) != hash(p_z):
 		return {}
 	return sink_taps["fields"]
 

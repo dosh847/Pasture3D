@@ -5667,6 +5667,7 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 			blk["graph_program"] = m.graph.compile_graph_program()
 			blk["strength"] = m.strength
 			blk["reads_input"] = m.graph.reads_input()
+			blk["reads_footprint"] = m.graph.reads_footprint()
 			blk["content_key"] = m.graph.content_key()
 			blk["feather_mode"] = int(m.feather_mode)
 			blk["custom_falloff_width"] = m.custom_falloff_width
@@ -5758,6 +5759,7 @@ func _prepare_staged_graph_modifiers(p_stack: Dictionary, p_min_x: float, p_min_
 				blk["graph_program"] = g.compile_graph_program()
 				blk["content_key"] = g.content_key()
 				blk["reads_input"] = g.reads_input()
+				blk["reads_footprint"] = g.reads_footprint()
 	return base_in
 
 
@@ -5783,6 +5785,11 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 			# loop a plain rescale between them would shear the ridges off their own crest lines.
 			reseeded = m.take_seed_surface({"surface": out["surface"], "gw": out.get("gw", 0),
 					"gh": out.get("gh", 0), "frame": p_frame}) or reseeded
+		# The Input node's footprint pin, as the native step composited it. Stamped on the graph so the
+		# deferred solve, the sink pass and the preview compile it in. Before `make_pending`, which compiles.
+		if out.has("sink_footprint") and m is Pasture3DNodeGraph and m.graph != null:
+			m.graph.set_host_footprint(out["sink_footprint"], int(out.get("sink_gw", 0)),
+					int(out.get("sink_gh", 0)), out.get("sink_rect", m.last_rect))
 		if out.has("pending"):
 			# §14 pass 1. Nothing was solved; the surface that WOULD have been is waiting here, with the
 			# key it will be stored under. Recorded rather than solved because this is still the bake.
@@ -6345,6 +6352,8 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	var mask := _graph_feather_mask(n, sdf, edge_off, _effective_modifier_margin(), fmode,
 			custom_fw if fmode == 1 else brush_fw, custom_curve if fmode == 1 else brush_curve,
 			mm, mf, profile)
+	# The Input node's footprint pin is this mask: stamped before anything below compiles or evaluates.
+	g.set_host_footprint(PackedFloat32Array(Array(mask)), gw, gh, rect)
 
 	# ---- FROZEN cache (mirrors _apply_erosion_step §6.3) ----
 	#
@@ -6358,6 +6367,8 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	var frozen: bool = live_async or m.evaluation == Pasture3DNode.Evaluation.FROZEN
 	var extent: String = p_ctx.get("extent", "")
 	var key: int = hash([g.content_key(), z]) if reads else g.content_key()
+	if g.reads_footprint():
+		key = hash([key, g._footprint_sig()]) # a feather or margin edit moves the footprint, not the surface
 	var entry: Dictionary = {}
 	if live_async:
 		entry = {"key": p_step.get("cache_key", 0), "grid": p_step.get("cache", PackedFloat32Array()),

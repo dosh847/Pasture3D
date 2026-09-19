@@ -444,6 +444,7 @@ struct BrushModStep {
 	GraphProgram graph_prog;
 	double graph_amount = 1.0;
 	bool graph_reads_input = false;
+	bool graph_reads_footprint = false; // the Input node's footprint channel is wired; key on the profile
 	int64_t graph_content_key = 0;
 	int graph_feather_mode = 0; // 0=USE_BRUSH_MASK, 1=CUSTOM, 2=OFF
 	double graph_custom_falloff_width = 15.0;
@@ -645,6 +646,7 @@ bool brush_mod_build(const Dictionary &p_params, std::vector<BrushModStep> &r_st
 				continue;
 			}
 			st.graph_reads_input = d.get("reads_input", false);
+			st.graph_reads_footprint = d.get("reads_footprint", false);
 			st.graph_content_key = d.get("content_key", (int64_t)0);
 			st.graph_feather_mode = d.get("feather_mode", 0);
 			st.graph_custom_falloff_width = d.get("custom_falloff_width", 15.0);
@@ -832,9 +834,19 @@ void brush_mod_erode(BrushModStep &p_step, std::vector<float> &r_vals,
 // what makes a drag re-key a filter but leave a world-fixed generator alone. The amount is NOT folded in —
 // it scales the composite, not the cached output, so a strength edit reuses the cache. This need not agree
 // with the GDScript key; each path compares only keys it wrote.
-int64_t brush_mod_graph_key(const BrushModStep &p_step, const std::vector<float> &p_z) {
+int64_t brush_mod_graph_key(const BrushModStep &p_step, const std::vector<float> &p_z,
+		const std::vector<float> &p_profile) {
 	uint64_t h = BRUSH_FNV_OFFSET;
 	h = brush_fnv(h, (uint64_t)p_step.graph_content_key);
+	if (p_step.graph_reads_footprint) {
+		// The footprint is the mask the graph composites through; a feather or margin edit moves it
+		// without moving the surface, and a graph that reads it must re-key.
+		for (size_t i = 0; i < p_profile.size(); i++) {
+			uint32_t b;
+			std::memcpy(&b, &p_profile[i], sizeof(b));
+			h = brush_fnv(h, (uint64_t)b);
+		}
+	}
 	if (p_step.graph_reads_input) {
 		for (size_t i = 0; i < p_z.size(); i++) {
 			uint32_t b;
@@ -895,7 +907,20 @@ void brush_mod_graph(BrushModStep &p_step, std::vector<float> &r_vals, const std
 	// It is emitted BEFORE the split below, so the two early returns cannot skip it. Without this the
 	// sinks fired only on the GDScript route, which means they fired only on graphs slow enough to be
 	// refused native support — silently inert on exactly the graphs that work.
+	// The footprint the Input node's channel 1 reads: exactly the mask this step composites through, over
+	// the rect the graph is evaluated on. Carried on the program so every evaluation below sees it, and
+	// handed back so the deferred solve, the sink pass and the editor preview see the same mask.
+	const Rect2 fp_rect((real_t)(p_min_x - 0.5 * p_vs), (real_t)(p_min_z - 0.5 * p_vs),
+			(real_t)((double)p_gw * p_vs), (real_t)((double)p_gh * p_vs));
+	PackedFloat32Array fp;
+	fp.resize((int)n);
+	std::memcpy(fp.ptrw(), p_profile.data(), n * sizeof(float));
+	p_step.graph_prog.footprint = fp;
+	p_step.graph_prog.fp_gw = p_gw;
+	p_step.graph_prog.fp_gh = p_gh;
+	p_step.graph_prog.fp_rect = fp_rect;
 	if (p_step.has_out) {
+		p_step.out["sink_footprint"] = fp;
 		PackedFloat32Array sink_in;
 		sink_in.resize((int)n);
 		std::memcpy(sink_in.ptrw(), z.data(), n * sizeof(float));
@@ -908,7 +933,7 @@ void brush_mod_graph(BrushModStep &p_step, std::vector<float> &r_vals, const std
 
 	// FROZEN (§6.3): a missing cache evaluates, a matching one is served, a stale one is served AND flagged.
 	const bool want_key = p_step.frozen && p_step.has_out;
-	const int64_t key = want_key ? brush_mod_graph_key(p_step, z) : 0;
+	const int64_t key = want_key ? brush_mod_graph_key(p_step, z, p_profile) : 0;
 	const bool have_cache = p_step.frozen && p_step.cache.size() == (int)n
 			&& (p_step.serve_stale || p_step.cache_key == key);
 	if (have_cache) {
