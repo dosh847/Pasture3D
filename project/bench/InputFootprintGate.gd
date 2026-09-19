@@ -13,6 +13,8 @@
 #      0 at the grid corner, fractional in the feather. The routes agree to within the loop rim.
 #   D  The reported bug: a Color Sink masked by the footprint paints inside the brush and NOT at a cell of
 #      the solved rectangle the footprint excludes. Control: the same sink unmasked paints that cell.
+#   F  Feather: a cell the footprint half covers composites to the lerp of ground and sink colour by the
+#      mask, not to the sink colour (the stencil writer wrote weight 1 wherever the mask was on).
 #   E  Every criterion completed.
 #
 #   Godot_v4.7-stable_win64_console.exe --path project bench/InputFootprintGate.tscn
@@ -20,7 +22,7 @@ extends Node
 
 const HALF := 20.0
 const MARGIN := 8.0
-const CRITERIA := ["A", "B", "C", "D"]
+const CRITERIA := ["A", "B", "C", "D", "F"]
 const RED := Color(1.0, 0.0, 0.0, 1.0)
 
 var _fail := 0
@@ -267,6 +269,23 @@ func _d_sink() -> void:
 	_check("D", found and c_in.is_equal_approx(RED) and not c_out.is_equal_approx(RED),
 			"inside %s at %s (want red); excluded cell %s at %s (want not red)"
 			% [str(c_in), str(in_cell), str(c_out), str(out_cell)])
+	# FEATHER: a cell the footprint half covers composites to the lerp of the ground and the sink colour, by
+	# the mask. The stencil writer this replaced wrote weight 1 at every covered cell, which reads pure red.
+	var half_cell := Vector3.INF
+	var half_v := 0.0
+	for iz in range(gh):
+		for ix in range(gw):
+			var v: float = grid[iz * gw + ix]
+			if v > 0.3 and v < 0.7 and half_cell == Vector3.INF:
+				half_cell = Vector3(rect.position.x + (ix + 0.5) * rect.size.x / gw, 0.0,
+						rect.position.y + (iz + 0.5) * rect.size.y / gh)
+				half_v = v
+	var c_half: Color = t.data.get_color(half_cell) if half_cell != Vector3.INF else RED
+	var want: Color = Color.WHITE.lerp(RED, half_v)
+	var err: float = maxf(absf(c_half.g - want.g), absf(c_half.b - want.b))
+	_check("F", half_cell != Vector3.INF and err < 3.0 / 255.0 and not c_half.is_equal_approx(RED),
+			"footprint %.3f cell composites to %s (want %s, error %.4f < %.4f)"
+			% [half_v, str(c_half), str(want), err, 3.0 / 255.0])
 	var t2 := _terrain()
 	var m2 := _mound(t2, _sink_graph(false), false)
 	await _bake(m2)

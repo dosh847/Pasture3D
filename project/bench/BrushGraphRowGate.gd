@@ -124,7 +124,8 @@ func _test_add_graph() -> void:
 	r[2].queue_free()
 	brush.queue_free()
 
-	# Plow brush: Add Graph must create a Mountain Cone -> Output generator graph
+	# Plow brush: Add Graph builds Input -> Blend(ADD).a, Mountain Cone -> Blend.b, Blend -> Output, so the
+	# cone adds to the ground below rather than replacing it (53e33f90).
 	var plow := Pasture3DPlow.new()
 	add_child(plow)
 	var r_plow := _row(plow)
@@ -133,9 +134,18 @@ func _test_add_graph() -> void:
 	_check("plow: a graph modifier was appended", plow_mods.size() == 1, "got %d" % plow_mods.size())
 	if plow_mods.size() == 1 and plow_mods[0].graph != null:
 		var pg: Pasture3DTerrainGraph = plow_mods[0].graph
-		var is_cone_to_output: bool = pg.nodes.size() == 2 and pg.nodes[0].op() == &"mountain_cone" \
-				and pg.nodes[1].op() == &"output" and pg.connections.size() == 1
-		_check("plow: graph is a Mountain Cone -> Output generator", is_cone_to_output)
+		var ops: Array = []
+		for nd in pg.nodes:
+			ops.append(nd.op())
+		var shape_ok: bool = ops == [&"input", &"mountain_cone", &"blend", &"output"] and pg.output_index() == 3 \
+				and int(pg.nodes[2].get("mode")) == 0
+		var want := [[0, 0, 2, 0], [1, 0, 2, 1], [2, 0, 3, 0]]
+		var wired := pg.connections.size() == want.size()
+		for w in want:
+			if not pg.connections.has(PackedInt32Array(w)): # connections are PackedInt32Array, not Array
+				wired = false
+		_check("plow: graph is Input + Mountain Cone -> Blend(ADD) -> Output", shape_ok and wired,
+				"ops %s, connections %s, output %d, mode %s" % [str(ops), str(pg.connections), pg.output_index(), str(pg.nodes[2].get("mode"))])
 	r_plow[2].queue_free()
 	plow.queue_free()
 	print("")

@@ -2152,7 +2152,9 @@ int Pasture3DData::set_colors_on_layer_grid(const int p_layer_id, const Rect2 &p
 				continue;
 			}
 			const double wx = (double)p_rect.position.x + ((double)ix + 0.5) * sx;
-			set_color_on_layer(p_layer_id, Vector3(wx, 0.0, wz), i < nc ? p_colors[i] : p_fallback, 1.f, false);
+			// The mask is the cell's COVERAGE: the compositor lerps a colour layer by its weight, so a feathered
+			// mask feathers the colour into what lies beneath. At or under eps the cell stays uncovered.
+			set_color_on_layer(p_layer_id, Vector3(wx, 0.0, wz), i < nc ? p_colors[i] : p_fallback, MIN(mask[i], 1.f), false);
 			written++;
 		}
 	}

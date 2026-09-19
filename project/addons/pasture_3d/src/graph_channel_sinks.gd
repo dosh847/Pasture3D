@@ -573,7 +573,9 @@ static func _write_one(p_sink, p_index: int, p_data, p_owner_base: String, p_gw:
 
 	# STEP 3 — write, and ONLY where the mask is on. Outside it nothing is authored, so the cell stays
 	# uncovered in this layer and the composite leaves whatever is beneath byte-identical. That is the
-	# write-stencil rule, and it is why this is an `if` and not a weight.
+	# write-stencil rule, and it is why the skip is an `if`. INSIDE the mask a Color Sink writes the mask as
+	# the cell's coverage weight, which the compositor lerps by, so a feathered mask feathers the colour. A
+	# Control Sink cannot: a control word is texture ids, and there is nothing between two ids to blend.
 	var written := _write_native(p_sink, p_data, layer_id, is_color, p_gw, p_gh, p_rect, p_mask, p_values)
 	if written >= 0:
 		native_writes += 1
@@ -592,7 +594,8 @@ static func _write_one(p_sink, p_index: int, p_data, p_owner_base: String, p_gw:
 			var wx: float = p_rect.position.x + (float(ix) + 0.5) * p_rect.size.x / float(p_gw)
 			var pos := Vector3(wx, 0.0, wz)
 			if is_color:
-				p_data.set_color_on_layer(layer_id, pos, p_sink.color_at(p_values, row + ix), 1.0, false)
+				# Weighted by the mask, as the native writer: the colour feathers into what lies beneath.
+				p_data.set_color_on_layer(layer_id, pos, p_sink.color_at(p_values, row + ix), minf(m, 1.0), false)
 			else:
 				# Read the COMPOSITED word beneath, so the bits this sink does not author survive. See
 				# Pasture3DGraphNodeControlSink's header: under topmost-covered-wins there is no
