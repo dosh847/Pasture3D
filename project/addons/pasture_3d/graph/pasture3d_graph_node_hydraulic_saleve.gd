@@ -1,11 +1,14 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
-# Pasture3DGraphNodeHydraulicSaleve — Salève Structural Large-Scale Hydraulic Erosion SOLVER.
-# Implements large-scale dendritic drainage routing with noise perturbation, secondary micro-rill flow,
-# mountain shape preservation, and transverse channel bank diffusion.
+# Pasture3DGraphNodeHydraulicSaleve — Salève large-scale hydraulic erosion SOLVER.
 #
-# The drainage network is solved on jittered control points (Delaunay-triangulated) and reconstructed onto
-# the grid, as Hesiod does; see PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md phases S1-S2.
+# Four stages (PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md, S1-S3):
+#   1  steady-state stream-power incision over a drainage network: one tree per border outlet, lakes
+#      rerouted, iterated to convergence. Solved on jittered control points (Delaunay-triangulated), then
+#      reconstructed onto the grid, as Hesiod does
+#   2  deposition: pits filled and concave valley floors raised toward a blur, on flat ground only
+#   3  fine incision: the Stream Log solver itself, run on the result
+#   4  optional smoothing, then composite over the input by Erosion Strength x mask
 #
 # ---- Inputs ----
 #   port 1/2 "dx"/"dy"  SIGNED  reconstruction warp in METRES (added to Default Warp's fBm, if on)
@@ -13,46 +16,37 @@
 #
 # ---- Outputs ----
 #   port 0  "height"       HEIGHT  eroded surface elevation (metres)
-#   port 1  "eroded_rock"  MASK    cumulative bedrock incision intensity
-#   port 2  "sediment"     MASK    alluvial sediment deposition thickness
+#   port 1  "eroded_rock"  MASK    net lowering, in metres
+#   port 2  "sediment"     MASK    Stage 2 deposition, in metres
 @tool
 class_name Pasture3DGraphNodeHydraulicSaleve
 extends Pasture3DGraphSolverNode
 
 
-@export_group("Simulation")
-## Upper bound on drainage passes. The solve stops as soon as it converges below Tolerance, so this is a
-## ceiling, not a cost.
-@export_range(1, 1000, 1, "or_greater") var iterations: int = 200:
-	set(v):
-		iterations = maxi(v, 1)
-		_param_changed()
-
-## Convergence threshold: mean height change per pass, as a fraction of the current relief.
-@export_range(0.0, 0.01, 0.0001) var tolerance: float = 1.0e-3:
-	set(v):
-		tolerance = maxf(v, 0.0)
-		_param_changed()
-
-## Large-scale drainage erosion strength.
+@export_group("Erosion")
+## How much of the eroded result replaces the input, 0..1 (times the mask, if wired). Every output is under
+## the same weight.
 @export_range(0.0, 1.0, 0.01) var erosion_strength: float = 0.7:
 	set(v):
 		erosion_strength = clampf(v, 0.0, 1.0)
 		_param_changed()
 
-## Catchment drainage exponent for stream power scaling.
+## The drainage-area exponent m in the stream power law (erosion ∝ A^m). Higher values cut the big trunk
+## valleys deeper relative to the small branches.
 @export_range(0.01, 0.8, 0.01) var drainage_exponent: float = 0.15:
 	set(v):
 		drainage_exponent = clampf(v, 0.01, 0.8)
 		_param_changed()
 
-## Coherent noise strength perturbing drainage flow routing to create natural dendritic branching.
+## How much seeded noise bends the flow routing, 0..1, so valleys branch dendritically instead of running
+## straight downhill. The noise is fixed across passes, so the network still converges.
 @export_range(0.0, 1.0, 0.01) var drainage_noise: float = 0.15:
 	set(v):
 		drainage_noise = maxf(v, 0.0)
 		_param_changed()
 
-## Mountain shape preservation strength; preserves macroscopic mountain silhouette.
+## How strongly high ground resists erosion (an exponent on the height below Reference Relief). Higher
+## keeps the summit silhouette; lower lets the valleys cut all the way up.
 @export_range(0.05, 4.0, 0.05) var shape_preservation: float = 2.0:
 	set(v):
 		shape_preservation = clampf(v, 0.05, 4.0)
@@ -69,21 +63,22 @@ extends Pasture3DGraphSolverNode
 		reference_relief = maxf(v, 0.0)
 		_param_changed()
 
-## Transverse river channel bank smoothing rate [0.0..0.5].
-@export_range(0.0, 0.5, 0.01) var bank_smoothing: float = 0.0:
+## Seed for the drainage noise, the flat-breaking noise, the control-point jitter and the default warp.
+@export var seed: int = 0:
 	set(v):
-		bank_smoothing = clampf(v, 0.0, 0.5)
+		seed = v
 		_param_changed()
 
-## Steepest slope (m/m) the drainage solve allows at the centre of the domain. It falls along a smooth
-## radial pulse to Max Slope Border at a distance of the smaller domain side.
-@export_range(0.0, 20.0, 0.1, "or_greater") var max_slope_center: float = 6.0:
+@export_group("Slope Limit")
+## Steepest slope the drainage solve allows at the centre of the solved area, in metres per metre. It falls
+## along a smooth radial pulse to Max Slope Border at a distance of the smaller side.
+@export_range(0.0, 20.0, 0.1, "or_greater", "suffix:m/m") var max_slope_center: float = 6.0:
 	set(v):
 		max_slope_center = maxf(v, 0.0)
 		_param_changed()
 
-## Steepest slope (m/m) allowed toward the domain border.
-@export_range(0.0, 20.0, 0.1, "or_greater") var max_slope_border: float = 0.0:
+## Steepest slope allowed toward the border of the solved area, in metres per metre.
+@export_range(0.0, 20.0, 0.1, "or_greater", "suffix:m/m") var max_slope_border: float = 0.0:
 	set(v):
 		max_slope_border = maxf(v, 0.0)
 		_param_changed()
@@ -94,10 +89,18 @@ extends Pasture3DGraphSolverNode
 		uniform_slope = v
 		_param_changed()
 
-## Noise seed for drainage branch perturbation.
-@export var seed: int = 0:
+@export_group("Convergence")
+## Upper bound on drainage passes. The solve stops as soon as it converges below Tolerance, so this is a
+## ceiling, not a cost.
+@export_range(1, 1000, 1, "or_greater") var iterations: int = 200:
 	set(v):
-		seed = v
+		iterations = maxi(v, 1)
+		_param_changed()
+
+## Convergence threshold: mean height change per pass, as a fraction of the current relief.
+@export_range(0.0, 0.01, 0.0001) var tolerance: float = 1.0e-3:
+	set(v):
+		tolerance = maxf(v, 0.0)
 		_param_changed()
 
 @export_group("Control Points")
@@ -143,7 +146,7 @@ enum Reconstruction { LINEAR, GRADIENT }
 		warp_size = maxf(v, 0.0)
 		_param_changed()
 
-@export_group("Sediment Deposition (Stage 2)")
+@export_group("Deposition")
 ## Blur radius, in METRES, of the alluvial flats: pits are filled and concave ground (valley floors) is
 ## raised toward a blur of itself this wide. 0 = 10% of the smaller side of the solved extent. Deposition
 ## only raises, never touches ridges, and is zero on a plane whatever this is.
@@ -158,7 +161,7 @@ enum Reconstruction { LINEAR, GRADIENT }
 		deposition_strength = clampf(v, 0.0, 1.0)
 		_param_changed()
 
-@export_group("Fine River Incision (Stage 3)")
+@export_group("Fine Incision")
 ## Fine incision is the Stream Log solver run on the result: this is its incision_rate. 0 skips it.
 @export_range(0.0, 1.0, 0.005) var stream_strength: float = 0.15:
 	set(v):
@@ -171,13 +174,19 @@ enum Reconstruction { LINEAR, GRADIENT }
 		stream_exp = clampf(v, 0.01, 1.0)
 		_param_changed()
 
-@export_group("Post-Processing (Stage 4)")
-## Enable spatial post-smoothing.
+@export_group("Post-Processing")
+## Channel bank smoothing, 0..0.5: a 4-neighbour blend at 0.4x this rate, once. Ignored when Post
+## Smoothing is on.
+@export_range(0.0, 0.5, 0.01) var bank_smoothing: float = 0.0:
+	set(v):
+		bank_smoothing = clampf(v, 0.0, 0.5)
+		_param_changed()
+
+## One fixed 4-neighbour smoothing pass at a 0.3 blend.
 @export var enable_post_smoothing: bool = false:
 	set(v):
 		enable_post_smoothing = v
 		_param_changed()
-
 
 
 @export_group("Evaluation")

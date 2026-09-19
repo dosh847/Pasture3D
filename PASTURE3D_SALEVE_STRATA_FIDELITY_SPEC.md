@@ -1,6 +1,6 @@
 # Pasture3D Salève and Strata Fidelity Spec
 
-**Status: T1–T3 built 2026-09-18 (`GraphStrataProfileGate`; T3's mask port deferred, see T3); S1 built 2026-09-18 (`GraphSaleveNetworkGate`); S2 built 2026-09-18 (`GraphSaleveMeshGate`); S3 built 2026-09-18 (`GraphSaleveDepositionGate`); S4 unbuilt.** Check the symbols named in each phase before planning from
+**Status: T1–T3 built 2026-09-18 (`GraphStrataProfileGate`; T3's mask port deferred, see T3); S1 built 2026-09-18 (`GraphSaleveNetworkGate`); S2 built 2026-09-18 (`GraphSaleveMeshGate`); S3 built 2026-09-18 (`GraphSaleveDepositionGate`); S4 built 2026-09-18 (renders not done, see S4).** Check the symbols named in each phase before planning from
 this header — spec status headers go stale.
 
 The graph's **Salève Hydraulic Erosion** (`Pasture3DGraphNodeHydraulicSaleve`, `src/pasture_3d_hydraulic_saleve.cpp`)
@@ -293,6 +293,21 @@ calling itself, assert against the solver called independently); sediment + erod
 - Inspector groups rebuilt around the new parameters; tooltips carry units.
 - Update `PASTURE3D_NODE_VOCABULARY.md` and the erosion node docs.
 - Before/after renders of the fixture scenes for Strata and Salève attached to the PR.
+
+**As built (S4):**
+
+- **Salève inspector groups:** Erosion, Slope Limit (`suffix:m/m`), Convergence, Control Points, Warp,
+  Deposition, Fine Incision, Post-Processing. `bank_smoothing` moved into Post-Processing, the stage that
+  reads it. Every tooltip names its unit or range. The header comment describes the four stages, and the
+  outputs are documented as metres.
+- **Strata:** the first block gets a "Beds" group, and the missing units become suffixes (`band_height` m,
+  `dip` m/100m, `dip_direction_degrees` °, `break_amount` and `break_size` m).
+- The `[Dev/GD]` Salève node keeps its old grouping. It is the oracle, not an authoring surface.
+- **Docs:** the Salève entry in `PASTURE3D_EROSION_NODES_EXPANSION_SPEC.md` described ports that never
+  existed (`joint_azimuth`, `ridge_preservation`), and it now describes the node as built.
+  `PASTURE3D_NODE_VOCABULARY.md` records the Strata and Salève terms.
+- **Renders were not made.** They need the demo scenes opened in the editor, and those scenes currently
+  carry unrelated uncommitted work.
 
 ## Out of scope
 

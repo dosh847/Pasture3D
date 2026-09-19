@@ -10,8 +10,9 @@
 class_name Pasture3DGraphNodeStrata
 extends Pasture3DGraphNode
 
+@export_group("Beds")
 ## Elevation between rock layers, in metres.
-@export_range(0.5, 200.0, 0.1, "or_greater") var band_height: float = 8.0:
+@export_range(0.5, 200.0, 0.1, "or_greater", "suffix:m") var band_height: float = 8.0:
 	set(v):
 		band_height = maxf(v, 0.001)
 		emit_changed()
@@ -85,7 +86,7 @@ var hardness_contrast: float:
 
 @export_group("Dip & Strike")
 ## Geological dip: how far the layers tilt across the ground, in METRES of rise per 100 m. 0 = horizontal bedding.
-@export_range(-45.0, 45.0, 0.1) var dip: float = 4.0:
+@export_range(-45.0, 45.0, 0.1, "suffix:m/100m") var dip: float = 4.0:
 	set(v):
 		dip = v
 		emit_changed()
@@ -98,7 +99,7 @@ var dip_angle: float:
 		dip = tan(deg_to_rad(v)) * 100.0
 
 ## Compass direction the layers dip towards, in degrees.
-@export_range(0.0, 360.0, 1.0) var dip_direction_degrees: float = 45.0:
+@export_range(0.0, 360.0, 1.0, "suffix:°") var dip_direction_degrees: float = 45.0:
 	set(v):
 		dip_direction_degrees = v
 		emit_changed()
@@ -112,14 +113,14 @@ var strike_direction: float:
 
 @export_group("Break Up")
 ## How far the layer boundaries wander, in metres, so beds break into local plates rather than running dead straight.
-@export_range(0.0, 32.0, 0.1, "or_greater") var break_amount: float = 3.0:
+@export_range(0.0, 32.0, 0.1, "or_greater", "suffix:m") var break_amount: float = 3.0:
 	set(v):
 		break_amount = maxf(v, 0.0)
 		_dirty = true
 		emit_changed()
 
 ## Size of those plates, in metres.
-@export_range(4.0, 512.0, 1.0, "or_greater") var break_size: float = 45.0:
+@export_range(4.0, 512.0, 1.0, "or_greater", "suffix:m") var break_size: float = 45.0:
 	set(v):
 		break_size = maxf(v, 0.01)
 		_dirty = true

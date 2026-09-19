@@ -116,6 +116,12 @@ The **shape family** genuinely produces relief (elevation variation): Crater, St
 Terraces, Furrows, Fractal, DLA. These become **generator ops**, and **"Relief" stays their category
 label** (a node-palette group). `Pasture3DRelief{Crater,Strata,…}` keep their names.
 
+The graph's **Strata** node (`strata`) and the **Salève** solver (`hydraulic_saleve`) follow the Hesiod
+vocabulary where the concept is the same. Strata has a *profile* (the ledge shape), *hardness*, *octaves*
+("beds inside beds") and *elevation / outcrop masks*. Salève has *control points* (the coarse solve),
+*reconstruction*, *warp*, *deposition* and *fine incision*. A Salève "stage" (1–4) is a pipeline step,
+not a user-facing mode. See `PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md`.
+
 ### Renamed (DONE 2026-08-25) — the selector is not relief-specific
 `Pasture3DReliefSelector` gated by slope / altitude / curvature / flow / erosion / deposition /
 wetness — a **general terrain mask** every node can use, not something about relief. In the graph it
