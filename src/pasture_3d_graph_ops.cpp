@@ -2160,8 +2160,11 @@ Dictionary graph_eval_grid_taps(const GraphProgram &p_prog, int p_gw, int p_gh, 
 	std::vector<int> slot_buffer;
 	std::vector<std::vector<int>> slot_aux;
 	std::vector<int> aux_demanded;
+	// Freeze-aware, like graph_eval_grid_frozen: a FROZEN solver in the program is served from its cache, and
+	// what was served or solved comes back as "frozen" for the caller to adopt on the main thread.
+	Array frozen;
 	graph_eval_grid_core(p_prog, p_gw, p_gh, p_rect, p_input, protect, pool, slot_buffer, slot_aux,
-			&aux_demanded);
+			&aux_demanded, &frozen);
 	Array fields;
 	PackedInt32Array unserved;
 	PackedInt32Array reserved;
@@ -2207,6 +2210,7 @@ Dictionary graph_eval_grid_taps(const GraphProgram &p_prog, int p_gw, int p_gh, 
 	// built around (a tapped channel nobody allocated) shows up as reserved-but-never-written only if the
 	// two are reported separately.
 	result["reserved"] = reserved;
+	result["frozen"] = frozen;
 	return result;
 }
 

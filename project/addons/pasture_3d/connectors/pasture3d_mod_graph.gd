@@ -106,6 +106,10 @@ var last_input_surface: PackedFloat32Array = PackedFloat32Array()
 var last_rect: Rect2 = Rect2(-50.0, -50.0, 100.0, 100.0)
 var last_gw: int = 0
 var last_gh: int = 0
+## The channel-sink fields the worker's height solve tapped in the same pass, keyed by
+## Pasture3DGraphChannelSinks._field_key, plus the surface and graph revision they answer for. The sink
+## pass uses them instead of evaluating the graph again (which re-ran every solver on the main thread).
+var sink_taps: Dictionary = {}
 
 @export_tool_button("Bake Graph") var _bake_btn = bake_graph
 
@@ -364,7 +368,7 @@ func forces_gdscript(_p_host) -> bool:
 func make_pending(p_out: Dictionary, p_extent: String) -> Dictionary:
 	if not p_out.has("pending") or graph == null:
 		return {}
-	return {
+	var entry := {
 		"mod": self,
 		"prog": graph.compile_graph_program(),
 		"gw": int(p_out["pending_gw"]),
@@ -375,6 +379,61 @@ func make_pending(p_out: Dictionary, p_extent: String) -> Dictionary:
 		"extent": p_extent,
 		"done": 0,
 	}
+	_add_sink_taps(entry)
+	return entry
+
+
+## When the graph has channel sinks, compile ONE program over the output and every field they read, so the
+## worker's solve answers both. Without it the sink pass evaluated the graph a second time, synchronously
+## on the main thread -- a Salève in the graph was solved twice per bake, once where nobody could see it.
+func _add_sink_taps(r_entry: Dictionary) -> void:
+	var reqs: Array = Pasture3DGraphChannelSinks.tap_requests(graph)
+	var out_idx: int = graph.output_index()
+	if reqs.is_empty() or out_idx < 0:
+		return
+	var roots: Array = [out_idx]
+	for r in reqs:
+		if not roots.has(int(r["node"])):
+			roots.append(int(r["node"]))
+	var compiled: Dictionary = graph.compile_graph_program_multi(roots)
+	if compiled.is_empty():
+		return
+	var slot_of: Dictionary = compiled["slot_of"]
+	if not slot_of.has(out_idx):
+		return
+	var slots := PackedInt32Array([int(slot_of[out_idx])])
+	var chans := PackedInt32Array([0])
+	var keys: Array = []
+	for r in reqs:
+		if not slot_of.has(int(r["node"])):
+			continue
+		keys.append(Pasture3DGraphChannelSinks._field_key(int(r["node"]), int(r["port"])))
+		slots.append(int(slot_of[int(r["node"])]))
+		chans.append(int(r["port"]))
+	r_entry["taps_prog"] = compiled["program"]
+	r_entry["tap_slots"] = slots
+	r_entry["tap_chans"] = chans
+	r_entry["tap_keys"] = keys
+	r_entry["tap_content"] = graph.content_key()
+
+
+## The worker's sink fields, filed on the main thread with the surface they were solved over.
+func adopt_sink_taps(p_state: Dictionary) -> void:
+	if not p_state.has("sink_fields"):
+		return
+	sink_taps = {"fields": p_state["sink_fields"], "z_hash": hash(p_state["z"]),
+			"gw": int(p_state["gw"]), "gh": int(p_state["gh"]), "content": int(p_state["tap_content"])}
+
+
+## The pre-tapped fields for a sink pass over `p_z`, or {} when they answer a different surface or graph.
+func sink_taps_for(p_z: PackedFloat32Array, p_gw: int, p_gh: int) -> Dictionary:
+	if sink_taps.is_empty() or graph == null:
+		return {}
+	if int(sink_taps["gw"]) != p_gw or int(sink_taps["gh"]) != p_gh:
+		return {}
+	if int(sink_taps["content"]) != graph.content_key() or int(sink_taps["z_hash"]) != hash(p_z):
+		return {}
+	return sink_taps["fields"]
 
 
 func pending_queue() -> StringName:

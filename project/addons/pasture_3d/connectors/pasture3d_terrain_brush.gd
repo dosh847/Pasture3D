@@ -1744,6 +1744,7 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 				if st.has("zo"):
 					_file_solved(st["mod"], st["extent"], {"key": st["key"], "grid": st["zo"], "z": st["z"]},
 							bool(st.get("live", false)))
+				st["mod"].adopt_sink_taps(st)
 
 		# ---- Phase C: the erosion solve, against the surface phase A & B finished.
 		if not pending_erosion.is_empty():
@@ -1910,6 +1911,24 @@ func _graph_solve_one(p_state: Dictionary) -> bool:
 	if int(p_state.get("done", 0)) > 0:
 		return true
 	var prog: Dictionary = p_state["prog"]
+	if p_state.has("taps_prog"):
+		# One pass for the height AND every field the channel sinks read (see make_pending's tap program).
+		var tres: Dictionary = Pasture3DUtil.graph_eval_grid_taps(p_state["taps_prog"], p_state["gw"],
+				p_state["gh"], p_state["rect"], p_state["z"], p_state["tap_slots"], p_state["tap_chans"])
+		var fields: Array = tres.get("fields", [])
+		var unserved: PackedInt32Array = tres.get("unserved", PackedInt32Array())
+		if fields.size() == (p_state["tap_slots"] as PackedInt32Array).size() and not unserved.has(0):
+			p_state["zo"] = fields[0]
+			p_state["node_freeze"] = tres.get("frozen", [])
+			var sf := {}
+			var keys: Array = p_state["tap_keys"]
+			for k in range(keys.size()):
+				if not unserved.has(k + 1):
+					sf[keys[k]] = fields[k + 1]
+			p_state["sink_fields"] = sf
+			p_state["done"] = 1
+			return true
+		# The tap program could not serve the output; solve the height alone, and the sinks tap for themselves.
 	if Pasture3DTerrainGraph.program_has_freeze(prog):
 		# A FROZEN solver inside: served or solved here, adopted by the driver on the main thread.
 		var res: Dictionary = Pasture3DUtil.graph_eval_grid_frozen(prog, p_state["gw"], p_state["gh"],
@@ -5851,12 +5870,17 @@ func _run_stack_graph_sinks(p_stack: Dictionary) -> void:
 		var m = step.get("mod")
 		if m == null or not (m is Pasture3DNodeGraph) or m.graph == null:
 			continue
+		if (step.get("out", {}) as Dictionary).has("pending"):
+			# Deferred driver pass 1: the graph is queued for the worker, not solved. Tapping it now was a
+			# whole synchronous solve on the main thread for paint pass 2 overwrites a moment later.
+			continue
 		if m.last_gw <= 0 or m.last_gh <= 0 or m.last_input_surface.size() != m.last_gw * m.last_gh:
 			# No surface was recorded, so no graph step ran for this modifier this bake -- a road-complete
 			# stack, or a step the compiler dropped. Skipping is correct; writing from a stale surface
 			# would paint last bake's answer onto this bake's ground.
 			continue
-		_run_graph_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface)
+		_run_graph_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface,
+				m.sink_taps_for(m.last_input_surface, m.last_gw, m.last_gh))
 		_run_graph_runtime_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface)
 
 
@@ -6193,14 +6217,15 @@ func _apply_road_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 ## The owner base is THIS brush's layer owner, so a sink's reserved layer belongs to the brush and
 ## `bake_all_brushes()`'s per-layer-owner clearing keeps working unchanged (§9.1 rule 2). That is also
 ## what makes one undo restore a graph paint: it is one brush's layer, like every other brush layer.
-func _run_graph_sinks(p_graph, p_gw: int, p_gh: int, p_rect: Rect2, p_z: PackedFloat32Array) -> void:
+func _run_graph_sinks(p_graph, p_gw: int, p_gh: int, p_rect: Rect2, p_z: PackedFloat32Array,
+		p_pretapped: Dictionary = {}) -> void:
 	if p_graph == null or not terrain or not terrain.data:
 		return
 	if Pasture3DGraphChannelSinks.sinks_of(p_graph).is_empty():
 		return
 	var owner: String = _layer_owner if _layer_owner != "" else BRUSH_OWNER_PREFIX + str(name)
 	var report: Dictionary = Pasture3DGraphChannelSinks.run(p_graph, terrain, owner,
-			p_gw, p_gh, p_rect, p_z)
+			p_gw, p_gh, p_rect, p_z, p_pretapped)
 	# A refusal is NAMED. A sink that wrote nothing because its index was negative or its mask unwired
 	# looks identical, on the terrain, to a sink that was never there -- which is the failure mode §4.4
 	# is about, and the reason this is a warning rather than a silent zero.

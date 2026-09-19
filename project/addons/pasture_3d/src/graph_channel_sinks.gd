@@ -69,7 +69,7 @@ static func source_of(p_graph, p_to: int, p_port: int) -> Dictionary:
 ##
 ## Returns a report: {"written": int, "sinks": int, "skipped": Array[String], "layers": PackedInt32Array}.
 static func run(p_graph, p_terrain, p_owner_base: String, p_gw: int, p_gh: int, p_rect: Rect2,
-		p_input: PackedFloat32Array) -> Dictionary:
+		p_input: PackedFloat32Array, p_pretapped: Dictionary = {}) -> Dictionary:
 	var report := {"written": 0, "sinks": 0, "skipped": [], "layers": PackedInt32Array()}
 	var idx := sinks_of(p_graph)
 	if idx.is_empty():
@@ -108,7 +108,7 @@ static func run(p_graph, p_terrain, p_owner_base: String, p_gw: int, p_gh: int, 
 			for w in warn:
 				report["skipped"].append("%s: %s" % [_label_of(sink, ni), w])
 			continue
-		var resolved := _resolve_ports(p_graph, sink, ni, p_gw, p_gh, p_rect, p_input)
+		var resolved := _resolve_ports(p_graph, sink, ni, p_gw, p_gh, p_rect, p_input, p_pretapped)
 		if resolved.has("error"):
 			report["skipped"].append("%s: %s" % [_label_of(sink, ni), resolved["error"]])
 			continue
@@ -133,7 +133,7 @@ static func _label_of(p_sink, p_index: int) -> String:
 ## port, so a wire cannot mean one thing to the sink and another to the kernel. The COLOR port is the one
 ## exception and the Color Sink's header says why.
 static func _resolve_ports(p_graph, p_sink, p_index: int, p_gw: int, p_gh: int, p_rect: Rect2,
-		p_input: PackedFloat32Array) -> Dictionary:
+		p_input: PackedFloat32Array, p_pretapped: Dictionary = {}) -> Dictionary:
 	var mask_port: int = p_sink.mask_port()
 	var names: PackedStringArray = p_sink.input_names()
 	var types: PackedInt32Array = p_sink.input_port_types()
@@ -186,33 +186,63 @@ static func _resolve_ports(p_graph, p_sink, p_index: int, p_gw: int, p_gh: int, 
 			return {"error": err}
 		return {"mask": _whole_footprint(p_gw, p_gh, p_input), "values": values}
 
-	var compiled: Dictionary = p_graph.compile_graph_program_multi(roots)
-	if compiled.is_empty():
-		return {"error": "the graph does not lower, so its slots cannot be tapped"}
-	var slot_of: Dictionary = compiled["slot_of"]
-	var slots := PackedInt32Array()
-	var chans := PackedInt32Array()
 	var order: Array = [] # request index -> port
-	for port in port_of_root.keys():
-		var src: Dictionary = port_of_root[port]
-		if not slot_of.has(int(src["node"])):
-			continue
-		order.append(port)
-		slots.append(int(slot_of[int(src["node"])]))
-		chans.append(int(src["port"]))
-	var cf_first := slots.size()
 	var cf_keys: Array = []
-	for cf in color_fields:
-		if not slot_of.has(int(cf["node"])):
-			continue
-		cf_keys.append(_field_key(int(cf["node"]), int(cf["port"])))
-		slots.append(int(slot_of[int(cf["node"])]))
-		chans.append(int(cf["port"]))
-	if order.is_empty() and cf_keys.is_empty():
-		return {"error": "no wired port compiled to a slot"}
-
-	var result: Dictionary = Pasture3DUtil.graph_eval_grid_taps(compiled["program"], p_gw, p_gh, p_rect,
-			p_input, slots, chans)
+	var cf_first := 0
+	var result: Dictionary = {}
+	# PRE-TAPPED: the worker's height solve already tapped every field this sink reads, in the same pass
+	# (see `tap_requests`). Used only when it covers the WHOLE sink, so a sink is never half one solve and
+	# half another.
+	var pre_ok := not p_pretapped.is_empty()
+	if pre_ok:
+		for port in port_of_root.keys():
+			var src: Dictionary = port_of_root[port]
+			if not p_pretapped.has(_field_key(int(src["node"]), int(src["port"]))):
+				pre_ok = false
+		for cf in color_fields:
+			if not p_pretapped.has(_field_key(int(cf["node"]), int(cf["port"]))):
+				pre_ok = false
+	if pre_ok:
+		var pre_fields: Array = []
+		for port in port_of_root.keys():
+			var src: Dictionary = port_of_root[port]
+			order.append(port)
+			pre_fields.append(p_pretapped[_field_key(int(src["node"]), int(src["port"]))])
+		cf_first = pre_fields.size()
+		for cf in color_fields:
+			var key := _field_key(int(cf["node"]), int(cf["port"]))
+			cf_keys.append(key)
+			pre_fields.append(p_pretapped[key])
+		result = {"fields": pre_fields, "unserved": PackedInt32Array()}
+		pretapped_count += 1
+	else:
+		var compiled: Dictionary = p_graph.compile_graph_program_multi(roots)
+		if compiled.is_empty():
+			return {"error": "the graph does not lower, so its slots cannot be tapped"}
+		var slot_of: Dictionary = compiled["slot_of"]
+		var slots := PackedInt32Array()
+		var chans := PackedInt32Array()
+		for port in port_of_root.keys():
+			var src: Dictionary = port_of_root[port]
+			if not slot_of.has(int(src["node"])):
+				continue
+			order.append(port)
+			slots.append(int(slot_of[int(src["node"])]))
+			chans.append(int(src["port"]))
+		cf_first = slots.size()
+		for cf in color_fields:
+			if not slot_of.has(int(cf["node"])):
+				continue
+			cf_keys.append(_field_key(int(cf["node"]), int(cf["port"])))
+			slots.append(int(slot_of[int(cf["node"])]))
+			chans.append(int(cf["port"]))
+		if order.is_empty() and cf_keys.is_empty():
+			return {"error": "no wired port compiled to a slot"}
+		result = Pasture3DUtil.graph_eval_grid_taps(compiled["program"], p_gw, p_gh, p_rect,
+				p_input, slots, chans)
+		# A FROZEN solver was served from the cache the height solve filled, or solved and must be filed.
+		p_graph.adopt_native_freeze(result.get("frozen", []))
+		own_eval_count += 1
 	var unserved: PackedInt32Array = result.get("unserved", PackedInt32Array())
 	var fields: Array = result.get("fields", [])
 	var tapped := {}
@@ -295,6 +325,35 @@ static func _whole_footprint(p_gw: int, p_gh: int, p_input: PackedFloat32Array) 
 ## Count of `_tap_field` calls that missed the sink's pass and compiled their own. A bake should add
 ## none; GraphColorBlendGate reads it to prove the colour fields rode the sink's single evaluation.
 static var fallback_taps := 0
+## Sink passes served from the height solve's own taps, and passes that ran their own evaluation. Gates.
+static var pretapped_count := 0
+static var own_eval_count := 0
+
+
+## Every (node, port) the channel sinks in `p_graph` tap, as {"node", "port"}: what a height solve must
+## also tap for the sink pass to need no evaluation of its own. The same walk `_resolve_ports` makes.
+static func tap_requests(p_graph) -> Array:
+	var out: Array = []
+	var seen := {}
+	for ni in sinks_of(p_graph):
+		var sink = p_graph.nodes[ni]
+		if not sink.sink_warnings().is_empty():
+			continue
+		var types: PackedInt32Array = sink.input_port_types()
+		var reqs: Array = []
+		for port in range(sink.input_count()):
+			if port < types.size() and int(types[port]) == Pasture3DGraphNode.PortType.COLOR:
+				continue
+			var src := source_of(p_graph, ni, port)
+			if not src.is_empty():
+				reqs.append(src)
+		_collect_color_fields(p_graph, ni, reqs, 0)
+		for r in reqs:
+			var key := _field_key(int(r["node"]), int(r["port"]))
+			if not seen.has(key):
+				seen[key] = true
+				out.append({"node": int(r["node"]), "port": int(r["port"])})
+	return out
 
 ## Evaluate the field wired into `p_port` of the node at `p_to`, over the bake grid in `p_ctx`.
 ##
@@ -325,6 +384,7 @@ static func _tap_field(p_graph, p_to: int, p_port: int, p_ctx: Dictionary) -> Pa
 	var res: Dictionary = Pasture3DUtil.graph_eval_grid_taps(compiled["program"],
 			int(p_ctx["gw"]), int(p_ctx["gh"]), p_ctx["rect"], p_ctx.get("input", PackedFloat32Array()),
 			PackedInt32Array([int(slot_of[int(src["node"])])]), PackedInt32Array([int(src["port"])]))
+	p_graph.adopt_native_freeze(res.get("frozen", []))
 	var unserved: PackedInt32Array = res.get("unserved", PackedInt32Array())
 	if unserved.has(0):
 		return PackedFloat32Array()

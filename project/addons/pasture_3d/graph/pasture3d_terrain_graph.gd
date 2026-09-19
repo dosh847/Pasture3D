@@ -1606,6 +1606,10 @@ func compile_graph_program_multi(p_roots: Array) -> Dictionary:
 		"pmap0": pmap0, "pmap1": pmap1, "pmap2": pmap2, "pmap3": pmap3,
 		"pdrv_node": pdrv_node, "pdrv_param": pdrv_param, "pdrv_src": pdrv_src,
 			"noise": noise_tab, "luts": luts_tab, "output": out_slot,
+			# The same freeze table the single-root program carries. Without it a sink or preview tap pass
+			# re-solved every FROZEN solver from scratch -- a Salève solve on the main thread, per bake pass,
+			# right after the worker had solved and cached the identical grid.
+			"frozen": _freeze_table(order),
 		},
 		"slot_of": slot_of,
 	}
