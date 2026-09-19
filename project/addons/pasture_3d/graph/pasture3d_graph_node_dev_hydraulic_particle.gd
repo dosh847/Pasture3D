@@ -1,7 +1,8 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
 # Pasture3DGraphNodeDevHydraulicParticle — pure GDScript reference oracle for particle-based hydraulic erosion.
-# Eulerian-Lagrangian droplet simulation tracking momentum, velocity, sediment pickup, transport, and deposition.
+# A Lagrangian droplet simulation tracking momentum, velocity, sediment pickup, transport, and deposition.
+# Nothing here is Eulerian: the droplets carry the state and the grid only records what they leave behind.
 # Used for algorithm prototyping, A/B testing, and automated headless CI parity verification.
 @tool
 class_name Pasture3DGraphNodeDevHydraulicParticle

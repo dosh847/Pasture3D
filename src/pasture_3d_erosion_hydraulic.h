@@ -74,7 +74,7 @@ ErosionHydraulicResult erosion_hydraulic_finish(const PackedFloat32Array &p_inpu
 		PackedFloat32Array &r_height, const PackedFloat32Array &p_sediment, const PackedFloat32Array &p_flow_accum,
 		int p_gw, int p_gh, const Rect2 &p_rect, const ErosionHydraulicParams &p_params);
 
-// C++ native hydrodynamic shallow-water solver.
+// C++ native grid hydraulic erosion solver: MUSGRAVE 4-neighbour sharing, or the PIPE shallow-water model.
 // Matches the GDScript Tier 1 oracle bit-for-bit (<= 2e-6 m).
 ErosionHydraulicResult erosion_hydraulic_solve(const PackedFloat32Array &p_surface,
 		int p_gw, int p_gh, const Rect2 &p_rect, const ErosionHydraulicParams &p_params);

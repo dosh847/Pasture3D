@@ -1,6 +1,6 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
-# Pasture3DGraphNodeHydraulicParticle — Eulerian-Lagrangian droplet hydraulic erosion SOLVER.
+# Pasture3DGraphNodeHydraulicParticle — a LAGRANGIAN droplet hydraulic erosion SOLVER.
 # Casts thousands of virtual water droplets across the terrain that gather momentum, carve channels along
 # gradients, transport sediment, and deposit alluvial fans.
 #

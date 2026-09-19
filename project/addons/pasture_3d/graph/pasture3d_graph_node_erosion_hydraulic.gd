@@ -1,11 +1,18 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
-# Pasture3DGraphNodeErosionHydraulic — a hydrodynamic hydraulic erosion SOLVER/filter.
-# Simulates continuous rainfall, downhill water routing, slope-limited sediment capacity, erosion pickup,
-# sediment transport, deposition, and evaporation over an elevation heightfield.
+# Pasture3DGraphNodeErosionHydraulic — a GRID hydraulic erosion SOLVER/filter, in two models.
+# Both simulate continuous rainfall, slope-limited sediment capacity, erosion pickup, transport, deposition
+# and evaporation over an elevation heightfield. They differ in how the water moves:
+#
+#   MUSGRAVE  each pass shares a cell's water and load among its lower 4-neighbours in proportion to the
+#             drop. Cheap, and the only model the GPU runs. Its behaviour depends on the grid: the same
+#             world at another resolution erodes differently.
+#   PIPE      a virtual-pipe shallow-water model (Mei, Decaudin & Hu 2007) with momentum and substepping,
+#             in metres and seconds, so it holds across resolutions. CPU only; its sediment capacity is on
+#             a different scale to MUSGRAVE's, so a Kc tuned for one is wrong for the other.
 #
 # ---- Outputs ----
-#   port 0  "height"    HEIGHT  eroded surface elevation (metres)
+#   port 0  "height"     HEIGHT  eroded surface elevation (metres)
 #   port 1  "eroded"     FIELD   metres cut from the input surface, net (max(0, input - height))
 #   port 2  "deposited"  FIELD   metres laid on the input surface, net (max(0, height - input))
 #   port 3  "flow"       FIELD   MUSGRAVE: contributing area (m^2). PIPE: mean discharge (m^3/s).
