@@ -53,6 +53,10 @@ static var enabled: bool = false
 ## `get_stack()` per arm, so it is separable, but tracing without it usually cannot answer the question
 ## that made someone turn tracing on.
 static var capture_stacks: bool = true
+## Re-run every rect bake down the FULL path and record where the two disagree (see
+## Pasture3DTerrainBrush._verify_rect_against_full). A full layer bake per edit, so it is for diagnosis
+## only -- and it repairs as it measures, since the full bake's result is the correct one.
+static var verify_rect: bool = false
 
 ## Ring capacity. Oldest events are dropped first (see the header: a feedback loop must be catchable).
 static var max_events: int = 4096

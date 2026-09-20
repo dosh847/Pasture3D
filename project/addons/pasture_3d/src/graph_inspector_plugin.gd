@@ -85,6 +85,17 @@ func _bake_trace_row() -> Control:
 		var path := Pasture3DBakeTrace.set_session(p_on)
 		if path != "":
 			open.disabled = false)
+	# Answers the question the trace alone cannot: did the dirty-rect bake land where a FULL bake would
+	# have? A real drag changes the ground legitimately, so "this bake moved the ground a lot" is not a
+	# defect; "this bake disagrees with a full bake" is. Costs a full layer bake per edit, and leaves the
+	# full bake's (correct) result behind, so it repairs the terrain while it measures.
+	var ver := CheckButton.new()
+	ver.text = "Verify Rect"
+	ver.tooltip_text = "Re-bake every dirty-rect edit down the full path and record where they disagree. " 			+ "Needs Bake Trace on. SLOW — a whole-layer bake per edit."
+	ver.button_pressed = Pasture3DBakeTrace.verify_rect
+	ver.toggled.connect(func(p_on: bool) -> void:
+		Pasture3DBakeTrace.verify_rect = p_on)
+	row.add_child(ver)
 	return row
 
 

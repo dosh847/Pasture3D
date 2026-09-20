@@ -2335,6 +2335,7 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 	# area mask — so the overlay has to follow the handle rather than waiting for the next full bake.
 	_queue_mask_preview()
 	Pasture3DBakeTrace.bake_end(_trace_tok, painted_tools.size())
+	_verify_rect_against_full(owner, clips)
 
 
 ## ---- ONE BOUNDING BOX PAINTS THE GROUND BETWEEN ----
@@ -3145,6 +3146,60 @@ func _all_layers_for_owner(owner: String) -> PackedInt32Array:
 
 ## The owner's rows a member bake may clear. A Layer brush's base row is not the members' output: it is
 ## stage 1's, and clearing it under a member's footprint would erase the ground that member stands on.
+## Re-run the SAME edit down the full-refresh path and report where the two disagree (opt-in: the Verify
+## Rect toggle beside Bake Trace). The full path clears the whole layer and repaints every tool, so it is
+## the definition of the right answer; the rect path is an optimisation that must agree with it.
+##
+## This is the reading the before/after probe cannot give. That one measures how much a bake CHANGED the
+## ground, which a real drag changes legitimately, so a large number there does not by itself mean a bug.
+## This one measures whether the bake landed where a full bake would have put it, which a drag does not
+## affect. Non-zero here is the build-up; zero here says the rect path is faithful and the climb is coming
+## from the bake itself producing a different answer each run.
+##
+## The full bake's result is the correct one, so it is left in place rather than rolled back — the verify
+## run repairs as it measures. Slow by construction: a full layer bake per edit.
+func _verify_rect_against_full(p_owner: String, p_clips: Array) -> void:
+	if not Pasture3DBakeTrace.verify_rect or not Pasture3DBakeTrace.enabled or _in_rect_verify or p_clips.is_empty():
+		return
+	var box: AABB = p_clips[0]
+	for i in range(1, p_clips.size()):
+		box = box.merge(p_clips[i])
+	# GROWN past the clip on purpose. A rect bake is wrong in two ways: it can put the wrong thing inside
+	# its box, and it can leave a neighbour stale OUTSIDE it — the "far-away cut" the clip comment warns
+	# about. Sampling only the box can see the first and is blind to the second, which is the half the
+	# report sounds like. Half a box-width of margin each side covers a mate that straddles the edge.
+	box = AABB(Vector3(box.position.x - 0.5 * box.size.x, box.position.y, box.position.z - 0.5 * box.size.z),
+			Vector3(box.size.x * 2.0, box.size.y, box.size.z * 2.0))
+	var before := _box_probe_samples(box)
+	_in_rect_verify = true
+	_refresh_owner(p_owner, false, [])
+	_in_rect_verify = false
+	if before.size() != PROBE_N * PROBE_N:
+		return
+	var worst := 0.0
+	var worst_w := Vector3.ZERO
+	var moved := 0
+	for iz in PROBE_N:
+		for ix in PROBE_N:
+			var w := Vector3(box.position.x + box.size.x * (float(ix) + 0.5) / PROBE_N, 0.0,
+					box.position.z + box.size.z * (float(iz) + 0.5) / PROBE_N)
+			var b: float = before[iz * PROBE_N + ix]
+			var a: float = terrain.data.get_height(w)
+			if is_nan(a) or is_nan(b):
+				continue
+			if absf(a - b) > 0.001:
+				moved += 1
+			if absf(a - b) > absf(worst):
+				worst = a - b
+				worst_w = w
+	Pasture3DBakeTrace.mark("%s rect vs full: %s — worst %+.4f m at (%.1f, %.1f), %d of %d sample(s) disagree" % [
+			name, "AGREE" if moved == 0 else "DISAGREE", worst, worst_w.x, worst_w.z, moved, PROBE_N * PROBE_N])
+
+
+## True while `_verify_rect_against_full` is running the oracle bake, so that bake does not verify itself.
+var _in_rect_verify: bool = false
+
+
 ## Heights on a coarse lattice over `p_box`, for the before/after reading in `_refresh_owner_rect`. Capped
 ## at PROBE_N per side so a kilometre-wide box costs the same as a small one; the lattice is anchored to the
 ## box, so the two readings of one bake land on exactly the same cells. Empty unless the trace is recording.
