@@ -2122,12 +2122,26 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 	if owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
 		var lb_host := _layer_brush_for_owner(owner)
 		if lb_host != null:
-			if lb_host.base_is_stale():
+			var was_stale: bool = lb_host.base_is_stale()
+			if was_stale:
 				lb_host.bake_base()
 			if not rect_ignores_base_change:
 				base_change = lb_host.base_change()
 			if not _erosion_running:
 				lb_host.clear_base_change()
+			# The rect the bake ends up clearing is the union of the moved splines and THIS box, so a box
+			# that grows between two passes of one drag grows the clear with it. Nothing else in the trace
+			# says where that box came from, so record it before it is merged: whether the base re-solved
+			# on this pass, and whether the box was carried over from an earlier one (`_erosion_running`
+			# holds it across the driver's passes instead of clearing it).
+			if Pasture3DBakeTrace.enabled:
+				Pasture3DBakeTrace.mark("%s rect base_change: %s (stage 1 %s, %s, repass=%s, ignored=%s)" % [
+					name,
+					("x[%.1f..%.1f] z[%.1f..%.1f]" % [base_change.position.x, base_change.end.x,
+						base_change.position.z, base_change.end.z]) if base_change.size.x > 0.0 or base_change.size.z > 0.0 else "none",
+					"re-solved" if was_stale else "skipped",
+					"held (erosion running)" if _erosion_running else "cleared",
+					_deferred_repass, rect_ignores_base_change])
 
 	# Union the previous (cached) and current footprint of changed sections into one world box.
 	#
