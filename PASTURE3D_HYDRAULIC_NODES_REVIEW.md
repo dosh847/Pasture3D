@@ -67,18 +67,36 @@ deprecated.
 
 ### Gate state at the end
 
-Green, non-headless: GraphHydraulicGridGate, GraphHydraulicParticleGate,
+All green, non-headless: GraphHydraulicGridGate, GraphHydraulicParticleGate,
 GraphHydraulicAccelerationGate, GraphGpuParityGate, SolverThreadParityGate,
-GraphPaletteAndConstantsGate, GraphAuxChannelGate except the DLA rows.
+GraphPaletteAndConstantsGate, GraphAuxChannelGate, GraphNativeFreezeGate.
 
-Still red, unchanged from `main` and untouched by this work: GraphAuxChannelGate `[E]` (two DLA
-messages) and GraphNativeFreezeGate `[K] dla`.
+*(Corrected. This section first said GraphAuxChannelGate `[E]` and GraphNativeFreezeGate `[K] dla` were
+still red "and untouched by this work". They were fixed shortly afterwards, on a branch that is now
+merged — both were defects in the criteria, not in DLA. Three further gate repairs followed and are
+also on `main`: [K] holds output-caching solvers to the frozen output again, keyed on the node's own
+`serve_time_properties()`; [E]'s control moved to `mountain_range_radial`, whose `angle` port no kernel
+writes; and `[gap]` measures the float32 param truncation again — see below.)*
 
 New: `GraphHydraulicBenchmark.tscn` holds the timing that used to live in the acceleration gate. It
 asserts nothing and is run deliberately.
 
 Every criterion added in Phase 2 was proved by breaking the mechanism it measures and watching it fail.
 The breaks are named in each commit message.
+
+### The float32 param gap is still open, and nearly went unnoticed
+
+`native_lower()` returns a `PackedFloat32Array`, so a lowered node's params reach the kernel as float32
+while `ErosionHydraulicParams` keeps doubles on purpose. That is unchanged by this work and remains a
+real defect; widening the program's param storage touches every lowered node.
+
+What Phase 2 did change is that the hydraulic nodes now round their own params through `_f32()` so their
+two routes agree. That made GraphAuxChannelGate's `[gap]` criterion — which compared the node against
+the program — read 0.000000, and a passing session read that zero as the defect being fixed. It was not:
+both sides of the comparison had simply become float32. `[gap]` now takes its reference from a solve
+called directly with the authored doubles, reads **0.060323 m** (the same figure first measured on
+2026-09-07), and is bounded **below** as well as above, because zero is the signal that the program was
+widened and must fail loudly rather than pass quietly.
 
 ---
 
