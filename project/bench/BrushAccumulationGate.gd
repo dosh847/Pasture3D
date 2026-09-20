@@ -14,11 +14,14 @@
 #       the ground below the brush's real row; control: `seat_trusts_cached_layer_id` climbs onto its own height
 #   [R] after a reload (`_layer_id` = -1) the snap reads below the brush's row, not the full composite; same control
 #   [F] `_terrain_fields` with `_layer_id` = -1 describes the ground below, not the brush's own top; same control
+#   [O] repeated RECT bakes of one of two OVERLAPPING layer-mates leave the shared cells where they were.
+#       The rect path clears its box and repaints every mate intersecting it, so a mate that is repainted
+#       without that cell having been cleared adds its stamp again on every bake.
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/BrushAccumulationGate.tscn
 extends Node
 
-const CRITERIA := 6
+const CRITERIA := 7
 const GROUND_OWNER := "gate:ground"
 const RISE := 4.0
 var RS := 64
@@ -40,7 +43,7 @@ func _ready() -> void:
 	RS = _terrain.region_size
 	# The movable ground: an ADD layer created first, so every brush row lands above it.
 	_terrain.data.create_owned_layer_typed(GROUND_OWNER, "Ground", 1, Pasture3DTerrainBrush.PASTURE_3D_MAPTYPE_HEIGHT)
-	for f in [_s, _e, _g, _l, _r, _f]:
+	for f in [_s, _e, _g, _l, _r, _f, _o]:
 		await f.call()
 	if _ran != CRITERIA:
 		_check("completed", false, "%d of %d criteria ran" % [_ran, CRITERIA])
@@ -117,6 +120,77 @@ func _follow(m: Pasture3DTerrainBrush, c: Vector3, p_clear: Callable) -> Array:
 	_bake(m)
 	var r1: float = _terrain.data.get_height(c) - RISE
 	return [r0, r1]
+
+
+## [O] Overlap idempotence on the RECT path. Two mates on one layer, footprints crossing; re-bake ONE of
+## them repeatedly with nothing moved. The shared cells must sit where the first bake put them.
+##
+## Every other criterion here moves the ground and asks whether a brush follows it. This one holds
+## everything still and asks whether a bake is a function of the scene rather than of how many times it
+## has run. The rect path clears its box and then repaints every mate whose footprint intersects that box,
+## so the two sets have to agree: a cell repainted without having been cleared takes a second copy of the
+## stamp, and the overlap climbs once per bake while each mound alone stays put.
+##
+## The single-mound arm is the control. If it climbs too, the fault is the clear box, not the overlap, and
+## this criterion is measuring the wrong thing.
+func _o() -> void:
+	# A Layer brush with a Stage 1 modifier, the configuration the report came from: the rect clear skips
+	# the `#base` row by design, and the base solve contributes a `base_change` box of its own.
+	var lb := Pasture3DLayerBrush.new()
+	lb.name = "OverlapLayer"
+	lb.terrain = _terrain
+	lb.auto_refresh = false
+	var fn := FastNoiseLite.new()
+	fn.seed = 7
+	fn.frequency = 0.08
+	var nz := Pasture3DNodeNoise.new()
+	nz.noise = fn
+	nz.strength = 4.0
+	var mods: Array[Pasture3DNode] = [nz]
+	lb.modifiers = mods
+	_terrain.add_child(lb)
+	var a := _mound("OverlapA", 24.0, 32.0, 8.0)
+	var b := _mound("OverlapB", 36.0, 32.0, 8.0)
+	for m in [a, b]:
+		_terrain.remove_child(m)
+		lb.add_child(m)
+	lb.adopt_members()
+	_set_ground(0.0)
+	lb.bake_base()
+	_bake(a)
+	_bake(b)
+	await _settle()
+	var shared := Vector3(30.0, 0.0, 32.0)   # inside both footprints
+	var solo := Vector3(20.0, 0.0, 32.0)     # inside A only
+	var h_shared0: float = _terrain.data.get_height(shared)
+	var h_solo0: float = _terrain.data.get_height(solo)
+	var sid: int = a._get_splines()[0].get_instance_id()
+	var trail := PackedStringArray()
+	# Drag A across B and back to exactly where it started, the way the report's trace does (a gizmo
+	# drag, then a commit). A bake is a function of the scene, so a round trip must leave no trace.
+	var pa: Path3D = a._get_splines()[0]
+	var home := pa.position
+	for i in range(4):
+		for step in [Vector3(6.0, 0.0, 0.0), home]:
+			pa.position = step
+			a._update_curve_cache_dirty(pa) if a.has_method("_update_curve_cache_dirty") else null
+			a._dirty_splines = {sid: true}
+			a._refresh_owner_rect(a._layer_owner, {sid: true}, true)
+			await _settle()
+		trail.append("%.3f" % (_terrain.data.get_height(shared) - h_shared0))
+	var d_shared: float = _terrain.data.get_height(shared) - h_shared0
+	var d_solo: float = _terrain.data.get_height(solo) - h_solo0
+	_check("O overlap idempotence", absf(d_shared) < 0.01,
+			"4 rect bakes, nothing moved: shared cell moved %.4f m (want 0) [%s], first bake %.3f m"
+			% [d_shared, ", ".join(trail), h_shared0])
+	_check("O control (no overlap)", absf(d_solo) < 0.01,
+			"the same bakes moved A's own cell %.4f m — if this climbs too the clear box is at fault, not the overlap" % d_solo)
+	_ran += 1
+	_drop([a, b])
+	var br := _row(lb.layer_owner_id())
+	if br > 0:
+		_terrain.data.layer_remove(br)
+	lb.free()
 
 
 func _s() -> void:

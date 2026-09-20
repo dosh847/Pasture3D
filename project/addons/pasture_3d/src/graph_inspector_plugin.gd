@@ -5,8 +5,8 @@
 #
 #   * a Pasture3DTerrainGraph, or a Pasture3DNodeGraph (the brush modifier that hosts one), gets a single
 #     "Edit in Graph Editor" button — neither object has a modifier stack to describe.
-#   * a Pasture3DTerrainBrush that runs a modifier stack gets a Pasture3DBrushGraphRow: Add/Open Graph and
-#     the stack's Evaluation. A brush that does NOT run a stack (`_supports_modifiers()` false — Ridge,
+#   * a Pasture3DTerrainBrush that runs a modifier stack gets a Pasture3DBrushGraphRow: Add/Open Graph,
+#     Bake Graph (shown only once a graph modifier exists) and the stack's Evaluation. A brush that does NOT run a stack (`_supports_modifiers()` false — Ridge,
 #     Trough, Splat, Sim) gets nothing, the same rule Pasture3DTerrainBrush._get_property_list applies to
 #     the Modifiers group. Shipping a control that silently does nothing is worse than not shipping it.
 #

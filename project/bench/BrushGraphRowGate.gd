@@ -1,6 +1,6 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
-# BrushGraphRowGate — the two context-aware buttons at the top of a brush Inspector.
+# BrushGraphRowGate — the three context-aware buttons at the top of a brush Inspector.
 #
 # Phase 1 of PASTURE3D_BRUSH_GRAPH_SHORTCUTS_SPEC.md. The row is a Pasture3DBrushGraphRow, which exists as
 # its own class precisely so this gate can drive it: `EditorInspectorPlugin` can only be instantiated by
@@ -35,6 +35,7 @@ func _ready() -> void:
 	_test_add_graph()
 	_test_mixed_stack()
 	_test_all_live()
+	_test_bake_button()
 	_test_unsupported_brush_is_the_control()
 	print("\n=== %s (%d failures) ===\n" % [
 		"BRUSH GRAPH ROW PASS" if _fail == 0 else "BRUSH GRAPH ROW FAIL", _fail])
@@ -48,9 +49,10 @@ func _preflight() -> bool:
 	var brush := Pasture3DMound.new()
 	add_child(brush)
 	var row = BrushGraphRow.new().setup(brush)
-	var ok: bool = row != null and row.get_child_count() == 2 \
-			and row.graph_button() is Button and row.evaluation_button() is Button
-	print("    %s harness can build a row with two buttons\n" % ("PASS" if ok else "FAIL"))
+	var ok: bool = row != null and row.get_child_count() == 3 \
+			and row.graph_button() is Button and row.bake_button() is Button \
+			and row.evaluation_button() is Button
+	print("    %s harness can build a row with three buttons\n" % ("PASS" if ok else "FAIL"))
 	if row != null:
 		row.queue_free()
 	brush.queue_free()
@@ -78,6 +80,7 @@ func _graph_mod(p_evaluation: int) -> Pasture3DNodeGraph:
 
 
 ## [graph button, evaluation button, the row itself so the caller can free it]
+## (the Bake button is reached through `row.bake_button()`; [F] is its only caller)
 func _row(p_brush: Pasture3DTerrainBrush) -> Array:
 	var row = BrushGraphRow.new().setup(p_brush)
 	add_child(row)
@@ -187,6 +190,54 @@ func _test_all_live() -> void:
 	_check("press froze both", _all_are(brush, Pasture3DNode.Evaluation.FROZEN))
 	r[2].queue_free()
 	brush.queue_free()
+	print("")
+
+
+## [F] "Bake Graph" is context-aware, and one press costs one bake however many graphs are on the stack.
+##
+## The cache drop is the assertable half: `force_bake_modifiers` is editor-only and does nothing headless,
+## so a criterion that only pressed the button would pass with the whole action deleted. `bake_graphs`
+## returns how many modifiers it dropped, and a cache primed beforehand must come back empty.
+func _test_bake_button() -> void:
+	print("[F] Bake Graph button")
+	var brush := _mound()
+	var r := _row(brush)
+	var row = r[2]
+	_check("hidden while the brush has no graph modifier", not row.bake_button().visible)
+	_check("nothing to bake reports 0", row.bake_graphs() == 0)
+
+	var mods: Array[Pasture3DNode] = [_graph_mod(Pasture3DNode.Evaluation.FROZEN),
+			_graph_mod(Pasture3DNode.Evaluation.FROZEN)]
+	brush.modifiers = mods
+	row.sync()
+	_check("shown once a graph modifier exists", row.bake_button().visible)
+	_check("reads 'Bake Graph'", row.bake_button().text == "Bake Graph", row.bake_button().text)
+	_check("tooltip names both graphs", row.bake_button().tooltip_text.contains("all 2 graph modifiers"),
+			row.bake_button().tooltip_text)
+
+	# Prime real state and require the press to have cleared it. Calling `bake_graph` to prime it does
+	# NOT work and silently guts this criterion: `force_bake_modifiers` is editor-only, so headless it
+	# solves nothing, the cache stays empty, and "0 bytes left" then holds with the drop deleted. Checked
+	# by deleting it -- the criterion still passed. `store_cache` and `set_stale` seed it for real.
+	var grid := PackedFloat32Array()
+	grid.resize(64)
+	for m in mods:
+		var gm := m as Pasture3DNodeGraph
+		gm.store_cache("0,0,8,8", {"grid": grid})
+		gm.set_stale(true)
+	var primed := 0
+	for m in mods:
+		primed += (m as Pasture3DNodeGraph).cache_bytes()
+	_check("the cache was actually primed, so the drop below is measurable", primed > 0,
+			"%d bytes" % primed)
+	var dropped: int = row.bake_graphs()
+	var left := 0
+	for m in mods:
+		left += (m as Pasture3DNodeGraph).cache_bytes()
+	_check("one press drops every graph's cache", dropped == 2 and left == 0,
+			"dropped %d, %d cache bytes left" % [dropped, left])
+	r[2].free()
+	brush.free()
 	print("")
 
 

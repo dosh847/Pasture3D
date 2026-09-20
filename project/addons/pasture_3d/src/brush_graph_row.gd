@@ -2,7 +2,10 @@
 #
 # Pasture3DBrushGraphRow — the row of two context-aware buttons at the top of a brush Inspector:
 #
-#   [ Add Graph | Open Graph ]   [ None | Frozen | Live | Mixed ]
+#   [ Add Graph | Open Graph ]   [ Bake Graph ]   [ None | Frozen | Live | Mixed ]
+#
+# "Bake Graph" is context-aware: it exists only while the brush actually has a graph modifier, so a brush
+# with none shows the two-button row exactly as before.
 #
 # It lives in its own class, apart from Pasture3DGraphInspectorPlugin, for a reason that is not tidiness:
 # `EditorInspectorPlugin` can only be instantiated by the editor, so anything built inside one cannot be
@@ -24,6 +27,7 @@ var brush: Pasture3DTerrainBrush
 var open_graph: Callable = Callable()
 
 var _graph_btn: Button
+var _bake_btn: Button
 var _eval_btn: Button
 
 
@@ -44,6 +48,11 @@ func _build() -> void:
 	_graph_btn.pressed.connect(_on_graph_pressed)
 	add_child(_graph_btn)
 
+	_bake_btn = Button.new()
+	_bake_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_bake_btn.pressed.connect(_on_bake_pressed)
+	add_child(_bake_btn)
+
 	_eval_btn = Button.new()
 	_eval_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_eval_btn.pressed.connect(_on_evaluation_pressed)
@@ -54,6 +63,10 @@ func _build() -> void:
 
 func graph_button() -> Button:
 	return _graph_btn
+
+
+func bake_button() -> Button:
+	return _bake_btn
 
 
 func evaluation_button() -> Button:
@@ -80,6 +93,11 @@ func sync() -> void:
 	var mods := graph_mods()
 	var count := mods.size()
 
+	_bake_btn.text = "Bake Graph"
+	# Context-aware: there is nothing to bake until a graph modifier exists, and a disabled button that
+	# never enables is just clutter on every brush that does not use graphs.
+	_bake_btn.visible = count > 0
+
 	if count == 0:
 		_graph_btn.text = "Add Graph"
 		_graph_btn.tooltip_text = "Add a Terrain Graph modifier to this brush and open it in the bottom panel"
@@ -94,13 +112,18 @@ func sync() -> void:
 		"" if count == 1 else " (the first of %d graph modifiers)" % count,
 	]
 
+	_bake_btn.tooltip_text = ("Re-solve %s now at full resolution and store the result.
+Frozen graphs "
+			+ "serve a cache, so this is how a Frozen graph picks up an edit; on a Live graph it forces "
+			+ "the re-solve a debounce would otherwise delay.") % plural_for(count)
+
 	_eval_btn.disabled = false
 	var frozen := 0
 	for m in mods:
 		if m.evaluation == Pasture3DNode.Evaluation.FROZEN:
 			frozen += 1
 
-	var plural: String = "the graph modifier" if count == 1 else "all %d graph modifiers" % count
+	var plural := plural_for(count)
 	if frozen == count:
 		_eval_btn.text = "Frozen"
 		_eval_btn.tooltip_text = ("Frozen: cached output, re-solved only on an explicit Bake.\nPress to "
@@ -115,6 +138,32 @@ func sync() -> void:
 		_eval_btn.tooltip_text = ("%d of %d graph modifiers are Frozen.\nPress to set all of them to "
 				+ "Frozen — the safe direction, since thawing graphs you have not seen can start a solve "
 				+ "per drag. Press again for Live.") % [frozen, count]
+
+
+## "the graph modifier" / "all N graph modifiers", so the two tooltips that need the phrase agree.
+func plural_for(p_count: int) -> String:
+	return "the graph modifier" if p_count == 1 else "all %d graph modifiers" % p_count
+
+
+## Drop every graph modifier's cache and bake the host ONCE. Separate from the press handler so a headless
+## gate can call it: the bake itself is `force_bake_modifiers`, which is editor-only, but dropping the
+## caches is the part that decides whether the next solve reads the graph or a stale answer. Returns how
+## many modifiers were dropped, so a caller (and the gate) can tell "baked nothing" from "baked".
+func bake_graphs() -> int:
+	var mods := graph_mods()
+	if mods.is_empty() or brush == null:
+		return 0
+	# Every cache first, then one bake. Baking per modifier would re-rasterise the whole brush once per
+	# graph on the stack for a single press.
+	for m in mods:
+		m.drop_cache_for_bake()
+	brush.force_bake_modifiers()
+	return mods.size()
+
+
+func _on_bake_pressed() -> void:
+	bake_graphs()
+	sync()
 
 
 ## The modifier's own label, else "Terrain Graph <i>" by its index in the stack — the same number the

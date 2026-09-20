@@ -125,8 +125,7 @@ func _supports_freezing() -> bool:
 
 ## Trigger a full evaluation of the graph on the host brush and store the result in the cache.
 func bake_graph(p_host: Pasture3DTerrainBrush = null) -> void:
-	_cache.clear()
-	_stale = false
+	drop_cache_for_bake()
 	var brush: Pasture3DTerrainBrush = p_host
 	if brush == null and Engine.is_editor_hint():
 		var tree: SceneTree = Engine.get_main_loop() as SceneTree
@@ -145,6 +144,14 @@ func bake_graph(p_host: Pasture3DTerrainBrush = null) -> void:
 		brush.force_bake_modifiers()
 	else:
 		_touch()
+
+
+## Drop the cache WITHOUT notifying, for a caller that is about to bake the host itself. `clear_cache`
+## touches the resource, which arms the brush's debounced re-bake -- fine on its own, but a caller baking
+## several graph modifiers on one brush would arm one refresh per modifier and then bake again on top.
+func drop_cache_for_bake() -> void:
+	_cache.clear()
+	_stale = false
 
 
 ## Drop every cached evaluation, so the next refresh recomputes.
