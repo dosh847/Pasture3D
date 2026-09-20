@@ -53,6 +53,17 @@ static var enabled: bool = false
 ## `get_stack()` per arm, so it is separable, but tracing without it usually cannot answer the question
 ## that made someone turn tracing on.
 static var capture_stacks: bool = true
+## Sample the ground across each rect bake's box, before the clear and again after the composite, and
+## record what the bake moved. A real edit moves the ground legitimately, so this does NOT show a defect on
+## its own -- it says how much a bake changed and where the worst cell was. Cheap (48x48 taps per box).
+static var probe_ground: bool = true
+
+## Record any ground a rect bake moves OUTSIDE the box it cleared. Unlike the one above this IS a defect
+## whenever it prints: a rect bake clears a box and repaints it, so anything it moves outside was added to
+## ground nothing cleared. Silent in the good case, so it costs a line in the report only when it has
+## something to say. This is what caught the batched write ignoring its clip (2026-09-20).
+static var probe_ring: bool = true
+
 ## Re-run every rect bake down the FULL path and record where the two disagree (see
 ## Pasture3DTerrainBrush._verify_rect_against_full). A full layer bake per edit, so it is for diagnosis
 ## only -- and it repairs as it measures, since the full bake's result is the correct one.

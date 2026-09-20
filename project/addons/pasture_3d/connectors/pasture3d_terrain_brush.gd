@@ -3221,7 +3221,7 @@ var _in_rect_verify: bool = false
 ## every edit, which is the reported symptom. A full bake cannot show this because it clears everything.
 func _ring_probe_points(p_box: AABB) -> PackedVector3Array:
 	var out := PackedVector3Array()
-	if not Pasture3DBakeTrace.enabled or not is_configured() or p_box.size.x <= 0.0 or p_box.size.z <= 0.0:
+	if not Pasture3DBakeTrace.enabled or not Pasture3DBakeTrace.probe_ring or not is_configured() 			or p_box.size.x <= 0.0 or p_box.size.z <= 0.0:
 		return out
 	var grown := AABB(Vector3(p_box.position.x - 0.5 * p_box.size.x, p_box.position.y, p_box.position.z - 0.5 * p_box.size.z),
 			Vector3(p_box.size.x * 2.0, p_box.size.y, p_box.size.z * 2.0))
@@ -3279,7 +3279,7 @@ func _report_ring_probe(p_pts: PackedVector3Array, p_before: PackedFloat32Array,
 const PROBE_N := 48
 func _box_probe_samples(p_box: AABB) -> PackedFloat32Array:
 	var out := PackedFloat32Array()
-	if not Pasture3DBakeTrace.enabled or not is_configured():
+	if not Pasture3DBakeTrace.enabled or not Pasture3DBakeTrace.probe_ground or not is_configured():
 		return out
 	out.resize(PROBE_N * PROBE_N)
 	for iz in PROBE_N:
