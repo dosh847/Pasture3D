@@ -128,11 +128,21 @@ func _k_key_parity(p_op: StringName) -> void:
 	g.force_gdscript_evaluation = true
 	var r3_gd := g.evaluate(GW, GH, RECT, null, moved)
 	g.force_gdscript_evaluation = false
+	# ...and for a solver whose cache IS its output, the stronger claim the criterion used to make: the
+	# served answer reproduces the frozen one exactly, moved input or not. `serve_time_properties()` is the
+	# node's own declaration of whether anything is applied after the cache, so the rule reads off the
+	# node rather than off a list here that would go stale the first time an op gained one. DLA declares
+	# `amplitude` and is held to the cross-route claim alone; everything else is held to both.
+	var output_is_cache: bool = node.serve_time_properties().is_empty()
+	var frozen_reproduced := _max_abs_diff(r1, r3)
 	var relief := _max_abs_diff(r1, surf)
 	print("    native=%s solve moved the surface by %.4f | served diff=%.6f not stale=%s | moved: route diff=%.6f stale=%s cache kept=%s"
 		% [native, relief, _max_abs_diff(r1, r2), not stale_same, _max_abs_diff(r3, r3_gd), stale_moved, cache_kept])
+	print("    cache is the output=%s | frozen output reproduced: diff=%.6f (%s)"
+		% [output_is_cache, frozen_reproduced, "want < EPS" if output_is_cache else "not required, serve-time %s" % str(node.serve_time_properties())])
 	_check(native and relief > EPS and _max_abs_diff(r1, r2) < EPS and not stale_same
-			and _max_abs_diff(r3, r3_gd) < EPS and stale_moved and cache_kept,
+			and _max_abs_diff(r3, r3_gd) < EPS and stale_moved and cache_kept
+			and (not output_is_cache or frozen_reproduced < EPS),
 		"%s: key parity across routes failed" % p_op)
 
 
