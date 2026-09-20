@@ -2228,6 +2228,8 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 		# fixture that does not. The worst cell's position says whether it sits in the overlap, in a
 		# mate's own area, or out at the box rim.
 		var probe_before := _box_probe_samples(clip_box)
+		var ring_pts := _ring_probe_points(clip_box)
+		var ring_before := _ring_probe_heights(ring_pts)
 		# Clear the dropped tiles across all affiliated layers and composite the (tile-bounded) box back to base.
 		# This composite is required before painting: the rasterisers read get_height per cell for
 		# relative_to_terrain / follow_spline_height, so they must see the cleared base (not this tool's
@@ -2310,6 +2312,7 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 		# Composite the whole footprint ONCE instead of per painted pixel — the big win for large edits.
 		terrain.data.composite_area(clip_box, false)
 		_report_box_probe(clip_box, probe_before)
+		_report_ring_probe(ring_pts, ring_before)
 		var t_composite := Time.get_ticks_usec()
 		if log_bake_timing:
 			_log_bake_timing(clip_box, box_tools.size(), t_start, t_clear, t_snap, t_paint, t_composite, Time.get_ticks_usec())
@@ -3201,6 +3204,69 @@ var _in_rect_verify: bool = false
 
 
 ## Heights on a coarse lattice over `p_box`, for the before/after reading in `_refresh_owner_rect`. Capped
+## Sample a RING just outside `p_box` — the cells the bake cleared nothing in. Points are laid on a lattice
+## over the box grown by half a box-width each side, and every point that falls INSIDE the box is dropped,
+## so what is left is exactly the ground this bake has no licence to touch.
+##
+## This is the accumulation claim stated as an invariant, and it needs no oracle to read: a dirty-rect bake
+## clears a box and repaints it, so anything it changes outside that box was added to ground that was never
+## cleared. Under an ADD-blended layer that addition lands on top of the last one and the feature climbs on
+## every edit, which is the reported symptom. A full bake cannot show this because it clears everything.
+func _ring_probe_points(p_box: AABB) -> PackedVector3Array:
+	var out := PackedVector3Array()
+	if not Pasture3DBakeTrace.enabled or not is_configured() or p_box.size.x <= 0.0 or p_box.size.z <= 0.0:
+		return out
+	var grown := AABB(Vector3(p_box.position.x - 0.5 * p_box.size.x, p_box.position.y, p_box.position.z - 0.5 * p_box.size.z),
+			Vector3(p_box.size.x * 2.0, p_box.size.y, p_box.size.z * 2.0))
+	for iz in PROBE_N:
+		for ix in PROBE_N:
+			var w := Vector3(grown.position.x + grown.size.x * (float(ix) + 0.5) / PROBE_N, 0.0,
+					grown.position.z + grown.size.z * (float(iz) + 0.5) / PROBE_N)
+			# A cell ON the boundary belongs to the box: the clear rounds out to whole tiles, so a sample a
+			# hair outside the box can still sit in a tile the clear dropped and would read as a false hit.
+			if w.x >= p_box.position.x and w.x <= p_box.end.x and w.z >= p_box.position.z and w.z <= p_box.end.z:
+				continue
+			out.append(w)
+	return out
+
+
+func _ring_probe_heights(p_pts: PackedVector3Array) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	out.resize(p_pts.size())
+	for i in p_pts.size():
+		out[i] = terrain.data.get_height(p_pts[i])
+	return out
+
+
+## Report any ground the bake moved OUTSIDE the box it cleared. Silent when there is none, so a trace that
+## never prints this line is a trace in which every bake stayed inside its box.
+func _report_ring_probe(p_pts: PackedVector3Array, p_before: PackedFloat32Array) -> void:
+	if p_pts.is_empty() or p_before.size() != p_pts.size():
+		return
+	var worst := 0.0
+	var worst_w := Vector3.ZERO
+	var moved := 0
+	var total := 0.0
+	var counted := 0
+	for i in p_pts.size():
+		var b: float = p_before[i]
+		var a: float = terrain.data.get_height(p_pts[i])
+		if is_nan(a) or is_nan(b):
+			continue
+		counted += 1
+		var d: float = a - b
+		total += d
+		if absf(d) > 0.001:
+			moved += 1
+		if absf(d) > absf(worst):
+			worst = d
+			worst_w = p_pts[i]
+	if moved == 0:
+		return
+	Pasture3DBakeTrace.mark("%s rect bake WROTE OUTSIDE ITS BOX: worst %+.4f m at (%.1f, %.1f); %d of %d ring sample(s) moved, net %+.4f m" % [
+			name, worst, worst_w.x, worst_w.z, moved, counted, total])
+
+
 ## at PROBE_N per side so a kilometre-wide box costs the same as a small one; the lattice is anchored to the
 ## box, so the two readings of one bake land on exactly the same cells. Empty unless the trace is recording.
 const PROBE_N := 48
