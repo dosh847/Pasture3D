@@ -1181,6 +1181,43 @@ static inline int _floordiv(const int a, const int b) {
 	return q;
 }
 
+// Blank every cell of a stamp buffer that falls outside the dirty-rect clip, so the BATCHED write honours
+// the same box the per-cell write does.
+//
+// ---- WHY THE BATCHED PATH NEEDED THIS AND THE PER-CELL PATH DID NOT ----
+//
+// `batched` is `!composite`, and the only caller that defers compositing is the dirty-rect bake -- which is
+// also the only caller that sets a clip at all. So the one bake that HAS a box was the one bake whose writes
+// ignored it: the per-cell branch below tests `has_clip` on both axes, the tile-at-a-time branch never saw it.
+// A brush wrote its whole grid while `_refresh_owner_rect` had cleared only the box, and the surplus landed on
+// ground nothing had cleared. On an ADD-blended layer that surplus adds to the last one and the feature climbs
+// on every edit, which is the reported "neighbours keep adding height without clearing it". Measured on
+// Mound5/Layer2: +98.44 m outside the box per bake, the exact amount a full bake then took back off.
+//
+// NaN and not a narrowed block, because NaN is already this buffer's "writes nothing" sentinel -- both the
+// tile pre-scan and the write loop in `_apply_stamp_block` skip it -- so the clip costs one pass and no change
+// to the apply. The comparison is `>= hi`, matching the per-cell test exactly: a half-open box, so a cell
+// exactly on the far edge belongs to the next box and must not be written twice.
+static void _blank_outside_clip(std::vector<float> &r_vals, const int p_gw, const int p_gh, const double p_min_x,
+		const double p_min_z, const double p_vs, const double p_cx0, const double p_cx1, const double p_cz0,
+		const double p_cz1) {
+	for (int iz = 0; iz < p_gh; iz++) {
+		const double z = p_min_z + (double)iz * p_vs;
+		const bool row_out = (z < p_cz0 || z >= p_cz1);
+		const size_t row = (size_t)iz * (size_t)p_gw;
+		for (int ix = 0; ix < p_gw; ix++) {
+			if (row_out) {
+				r_vals[row + ix] = (float)NAN;
+				continue;
+			}
+			const double x = p_min_x + (double)ix * p_vs;
+			if (x < p_cx0 || x >= p_cx1) {
+				r_vals[row + ix] = (float)NAN;
+			}
+		}
+	}
+}
+
 void Pasture3DData::_apply_stamp_block(Pasture3DLayer *p_layer, const int p_min_px, const int p_min_pz,
 		const int p_gw, const int p_gh, const float *p_vals, const int p_blend) {
 	if (!p_layer) {
@@ -2078,6 +2115,9 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 	graph_nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
 
 	if (batched) {
+		if (has_clip) {
+			_blank_outside_clip(vals, gw, gh, min_x, min_z, vs, cx0, cx1, cz0, cz1);
+		}
 		const int min_px = (int)std::lround(min_x / vs);
 		const int min_pz = (int)std::lround(min_z / vs);
 		_apply_stamp_block(wlayer, min_px, min_pz, gw, gh, vals.data(), blend);
@@ -2317,6 +2357,9 @@ void Pasture3DData::stamp_road_line(const int p_layer_id, const PackedVector2Arr
 
 	// Write back
 	if (batched) {
+		if (has_clip) {
+			_blank_outside_clip(vals, gw, gh, min_x, min_z, vs, cx0, cx1, cz0, cz1);
+		}
 		_apply_stamp_block(wlayer, (int)std::lround(min_x / vs), (int)std::lround(min_z / vs), gw, gh, vals.data(), blend);
 	} else {
 		Vector2i wloc(0x7fffffff, 0x7fffffff);
@@ -2584,6 +2627,9 @@ void Pasture3DData::stamp_plow_loop(const int p_layer_id, const PackedVector2Arr
 	graph_nan_blur(vals, gw, gh, (int)p_params.get("smooth_passes", 0));
 
 	if (batched) {
+		if (has_clip) {
+			_blank_outside_clip(vals, gw, gh, min_x, min_z, vs, cx0, cx1, cz0, cz1);
+		}
 		_apply_stamp_block(wlayer, (int)std::lround(min_x / vs), (int)std::lround(min_z / vs), gw, gh, vals.data(), blend);
 	} else {
 		for (int iz = 0; iz < gh; iz++) {
