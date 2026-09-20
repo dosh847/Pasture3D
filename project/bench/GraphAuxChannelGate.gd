@@ -172,21 +172,50 @@ func _round_params_to_program_precision(p_node) -> void:
 			p_node.set(name, PackedFloat32Array([v])[0])
 
 
-## The size of the float32 param truncation on the node it bites hardest, printed and BOUNDED.
+## The size of the float32 param truncation, printed and BOUNDED ON BOTH SIDES.
 ##
 ## Not a failure: the kernel is right about the numbers it was handed, and widening the program's param
-## storage is a change with a blast radius far beyond this phase. Bounded so that if it ever stops being
-## a rounding artefact and becomes a divergence, this says so -- and so that if the program is one day
-## widened to doubles, the gap goes to zero and the `_round_params_to_program_precision` call above can
-## be deleted rather than left as folklore.
+## storage is a change with a blast radius far beyond this phase.
+##
+## The reference is a solve called DIRECTLY with the node's authored doubles. It used to be the node's own
+## `eval_grid_channels`, and that stopped measuring anything the moment the node began rounding its own
+## params through `_f32()` to match the program (which it does on purpose, so its two routes agree). Both
+## sides of the comparison were then float32 and the gap read 0.000000 -- not because the program had been
+## widened, but because the question had been asked of two copies of the same answer. One session read
+## that zero as the defect being fixed. It is not fixed: `native_lower()` still returns a
+## PackedFloat32Array.
+##
+## Hence the LOWER bound. The gap going to zero is the signal that the program was widened to doubles, at
+## which point `_round_params_to_program_precision` above and the node's own `_f32()` calls can be deleted
+## rather than left as folklore -- so zero must FAIL here and say so, not pass quietly. The upper bound is
+## the original one: if this stops being a rounding artefact and becomes a divergence, that fails too.
 func _authored_vs_program_gap(p_surf: PackedFloat32Array) -> void:
 	print("[gap] the float32 param truncation, measured (KNOWN, older than this phase, NOT fixed here)")
-	var authored = Pasture3DGraphNodeRegistry.create(&"erosion_hydraulic")
-	var oracle: Array = authored.eval_grid_channels([p_surf], GW, GH, null, RECT)
+	var node = Pasture3DGraphNodeRegistry.create(&"erosion_hydraulic")
+	# The node's parameters as AUTHORED -- GDScript doubles, no rounding anywhere on this path.
+	var authored := {
+		"iterations": node.iterations,
+		"rain_rate": node.rain_rate,
+		"evaporation_rate": node.evaporation_rate,
+		"sediment_capacity": node.sediment_capacity,
+		"erosion_speed": node.erosion_speed,
+		"deposition_speed": node.deposition_speed,
+		"min_slope": node.min_slope,
+		"edge_mode": node.edge_mode,
+		"outlet_level": node.outlet_level,
+		"model": node.model,
+		"time_step": node.time_step,
+		"settle_at_end": node.settle_at_end,
+	}
+	var ref: Dictionary = Pasture3DUtil.erosion_hydraulic_solve_grid(p_surf, GW, GH, RECT, authored)
+	if not bool(ref.get("ok", false)):
+		_ok(false, "the double-precision reference solve did not run, so the gap was not measured")
+		return
 	var served := _tap(_graph_of(Pasture3DGraphNodeRegistry.create(&"erosion_hydraulic")), 0)
-	var d := _max_abs_diff(served, oracle[0]) if not served.is_empty() else INF
+	var d := _max_abs_diff(served, ref["height"]) if not served.is_empty() else INF
 	print("    erosion_hydraulic height, authored doubles vs float32 program = %s m" % String.num(d, 6))
 	_ok(d < 1.0, "the authored-vs-program gap is %s m — that is no longer a rounding artefact" % String.num(d, 6))
+	_ok(d > 0.0, "the gap is exactly zero: either the program now carries doubles — check what native_lower() returns, and if so delete the rounding here and the node's _f32() calls — or this criterion has stopped measuring")
 
 
 # --- E. An undeclared channel is still refused ---------------------------------------------------------
