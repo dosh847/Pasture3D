@@ -14,7 +14,7 @@ var _fail := 0
 var _completed := 0
 # Every criterion ends in `_completed += 1`. A criterion that throws before its assertion increments
 # nothing and adds no failure, so without this a green run could mean nothing ran.
-const WANT := 20
+const WANT := 21
 
 
 func _ready() -> void:
@@ -35,6 +35,7 @@ func _ready() -> void:
 	_test_w_bedrock_floor()
 	_test_l_radius_smooths()
 	_test_u_resolution_invariance()
+	_test_m_margin_invariance()
 	_test_n_metric_route()
 	_test_b_seed_determinism()
 	_test_c_nan_boundary_handling()
@@ -503,6 +504,66 @@ func _test_u_resolution_invariance() -> void:
 	if rel["metric"] >= 0.07 or rel["cells"] < 0.07:
 		_fail += 1
 		print("    !! METRIC is not resolution-invariant, or the CELLS control could not tell")
+	_completed += 1
+
+
+## [M] `modifier_margin` must not change the brush. It widens the working grid so the stack has ground off
+## the loop to erode onto -- it is not a strength control, and the dome is supposed to come out the same.
+##
+## S3, measured 2026-09-19. It does not come out the same in CELLS: the same dome with the same
+## `droplet_count`, on grids widened by a 0 m / 60 m / 150 m band, was cut 21.712 m, 12.733 m and 7.271 m.
+## An absolute droplet count is spread over the whole working grid, so widening the band starves the dome
+## -- a setting documented as "room to work" silently rescales erosion threefold.
+##
+## A footprint mask does NOT fix it, which is worth recording because it is the obvious first idea: a
+## droplet whose spawn cell is masked off is DISCARDED, not redrawn (pasture_3d_hydraulic_particle.cpp,
+## "never runs"), so masking the band spends the droplets rather than concentrating them. Masked CELLS
+## measured 21.853 / 12.546 / 7.326 -- the same curve.
+##
+## METRIC is invariant by construction, because a density per unit area is what "the margin must not
+## matter" means. So METRIC is the criterion and CELLS is the control that must fail.
+func _test_m_margin_invariance() -> void:
+	print("
+[M] modifier_margin does not change the dome (METRIC; CELLS is the control)")
+	var vs := 2.0
+	var r_loop := 150.0
+	var cut := func(p_metric: bool, p_margin: float) -> float:
+		var half: float = r_loop + 10.0 + p_margin
+		var g := int(round(2.0 * half / vs))
+		var world: float = g * vs
+		var surf := PackedFloat32Array()
+		surf.resize(g * g)
+		for z in g:
+			for x in g:
+				var d := Vector2((x + 0.5) * vs - world * 0.5, (z + 0.5) * vs - world * 0.5).length()
+				surf[z * g + x] = 120.0 * maxf(0.0, 1.0 - d / r_loop)
+		var p := {"seed": 7}
+		if p_metric:
+			p["units"] = 1
+			p["droplet_density"] = 2.0
+			p["step_length_m"] = 2.0
+		else:
+			p["droplet_count"] = 200000
+		var h: PackedFloat32Array = Pasture3DUtil.hydraulic_particle_solve_grid(surf, g, g,
+				Rect2(0.0, 0.0, world, world), p)["height"]
+		var tot := 0.0
+		var cells := 0
+		for z in g:
+			for x in g:
+				var d := Vector2((x + 0.5) * vs - world * 0.5, (z + 0.5) * vs - world * 0.5).length()
+				if d < 0.8 * r_loop:
+					tot += surf[z * g + x] - h[z * g + x]
+					cells += 1
+		return tot / float(cells)
+	var rel := {}
+	for label in ["metric", "cells"]:
+		var a: float = cut.call(label == "metric", 0.0)
+		var b: float = cut.call(label == "metric", 150.0)
+		rel[label] = absf(a - b) / maxf(a, 1e-9)
+		print("    %-6s dome cut: no margin %.3f m, 150 m margin %.3f m, relative %.3f" % [label, a, b, rel[label]])
+	if rel["metric"] >= 0.15 or rel["cells"] < 0.15:
+		_fail += 1
+		print("    !! METRIC is not margin-invariant, or the CELLS control could not tell")
 	_completed += 1
 
 

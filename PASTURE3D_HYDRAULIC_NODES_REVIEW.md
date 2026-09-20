@@ -237,8 +237,28 @@ What we have and they may not: a bitwise thread-invariant CPU path, and a GPU tw
   to 0.013 and could no longer fail. With the default off it reads 0.405 against METRIC's 0.003. New
   criterion `[W]` holds the floor exactly, with the restored weighted mean as its break control (3.813 m
   and 9991 cells past the floor on that fixture). See [[erosion-should-run-on-brush-output]].
-- **S3:** particle droplets spawn over the modifier-margin skirt too, and on steep skirt walls they deposit
-  at the rim. Not measured against `modifier_margin`.
+- **S3: MEASURED 2026-09-19, and the smaller half of a bigger defect.**
+
+  The rim deposit is real but minor: on a 120 m dome ending in a step at its loop, the first 10 m outside
+  the rim gained **+0.16 m**, of which **0.12 m** came from droplets spawned on the band (restricting the
+  spawn to the loop leaves +0.04 m, with the interior unchanged). That much is arguably the skirt working
+  as intended — the margin exists so sediment has somewhere to land.
+
+  The defect underneath it is not: **`modifier_margin` rescales the erosion.** Same dome, same
+  `droplet_count`, grids widened by a 0 / 60 / 150 m band → dome cut **21.712 m, 12.733 m, 7.271 m**. An
+  absolute droplet count is spread over the whole working grid, so widening the band starves the dome. A
+  setting documented as "room for the stack to work" is silently a threefold strength control.
+
+  **A footprint mask does not fix it**, which is worth recording because it is the obvious first idea: a
+  droplet whose spawn cell is masked off is *discarded, not redrawn*
+  (`pasture_3d_hydraulic_particle.cpp`, "never runs"), so masking the band spends those droplets instead
+  of concentrating them. Masked CELLS measured 21.853 / 12.546 / 7.326 — the same curve.
+
+  So CELLS cannot be made margin-invariant without becoming METRIC: a density per unit area is precisely
+  what "the margin must not matter" means. METRIC already holds (0.983 → 0.936 m, 4.8%). Gate `[M]` pins
+  METRIC with CELLS as the control that must fail. **The remaining decision is whether `units` should
+  default to METRIC** — it currently defaults to CELLS, and changing it rescales existing brushes, so it
+  is a look call, not a correctness one. Same shape as S2: a default that does not scale.
 - **S4:** the grid GPU twin likely keeps the normalised outputs too. D10 therefore needs a GPU change,
   and gates [I], [J] and [K] in GraphGpuParityGate need re-baselining for the new channel meaning.
 - **S5:** thread parity for the grid is claimed on a fixture I did not check for 128 or more rows with
