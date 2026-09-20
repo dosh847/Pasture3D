@@ -2222,6 +2222,12 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 	for ci in clips.size():
 		var clip_box: AABB = clips[ci]
 		var t_start := Time.get_ticks_usec()
+		# What this bake CHANGES, sampled before the clear and again after the composite. A bake is a
+		# function of the scene, so re-baking an unmoved edit must leave the ground where it was: any
+		# non-zero reading here IS the build-up, measured in the scene that has it rather than in a
+		# fixture that does not. The worst cell's position says whether it sits in the overlap, in a
+		# mate's own area, or out at the box rim.
+		var probe_before := _box_probe_samples(clip_box)
 		# Clear the dropped tiles across all affiliated layers and composite the (tile-bounded) box back to base.
 		# This composite is required before painting: the rasterisers read get_height per cell for
 		# relative_to_terrain / follow_spline_height, so they must see the cleared base (not this tool's
@@ -2303,6 +2309,7 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 		var t_paint := Time.get_ticks_usec()
 		# Composite the whole footprint ONCE instead of per painted pixel — the big win for large edits.
 		terrain.data.composite_area(clip_box, false)
+		_report_box_probe(clip_box, probe_before)
 		var t_composite := Time.get_ticks_usec()
 		if log_bake_timing:
 			_log_bake_timing(clip_box, box_tools.size(), t_start, t_clear, t_snap, t_paint, t_composite, Time.get_ticks_usec())
@@ -3138,6 +3145,54 @@ func _all_layers_for_owner(owner: String) -> PackedInt32Array:
 
 ## The owner's rows a member bake may clear. A Layer brush's base row is not the members' output: it is
 ## stage 1's, and clearing it under a member's footprint would erase the ground that member stands on.
+## Heights on a coarse lattice over `p_box`, for the before/after reading in `_refresh_owner_rect`. Capped
+## at PROBE_N per side so a kilometre-wide box costs the same as a small one; the lattice is anchored to the
+## box, so the two readings of one bake land on exactly the same cells. Empty unless the trace is recording.
+const PROBE_N := 48
+func _box_probe_samples(p_box: AABB) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	if not Pasture3DBakeTrace.enabled or not is_configured():
+		return out
+	out.resize(PROBE_N * PROBE_N)
+	for iz in PROBE_N:
+		for ix in PROBE_N:
+			var w := Vector3(p_box.position.x + p_box.size.x * (float(ix) + 0.5) / PROBE_N, 0.0,
+					p_box.position.z + p_box.size.z * (float(iz) + 0.5) / PROBE_N)
+			out[iz * PROBE_N + ix] = terrain.data.get_height(w)
+	return out
+
+
+## The second half of the reading above: how far this bake moved the ground, and where the worst cell is.
+## NaN on either side is "no data here", not a change, so those cells are counted separately rather than
+## being allowed to dominate the maximum.
+func _report_box_probe(p_box: AABB, p_before: PackedFloat32Array) -> void:
+	if p_before.size() != PROBE_N * PROBE_N:
+		return
+	var worst := 0.0
+	var worst_w := Vector3.ZERO
+	var moved := 0
+	var nodata := 0
+	var total := 0.0
+	for iz in PROBE_N:
+		for ix in PROBE_N:
+			var w := Vector3(p_box.position.x + p_box.size.x * (float(ix) + 0.5) / PROBE_N, 0.0,
+					p_box.position.z + p_box.size.z * (float(iz) + 0.5) / PROBE_N)
+			var b: float = p_before[iz * PROBE_N + ix]
+			var a: float = terrain.data.get_height(w)
+			if is_nan(a) or is_nan(b):
+				nodata += 1
+				continue
+			var d: float = absf(a - b)
+			total += d
+			if d > 0.001:
+				moved += 1
+			if d > worst:
+				worst = d
+				worst_w = w
+	Pasture3DBakeTrace.mark("%s rect bake moved the ground: worst %+.4f m at (%.1f, %.1f); %d of %d sample(s) moved, mean %.4f m, %d no-data" % [
+			name, worst, worst_w.x, worst_w.z, moved, PROBE_N * PROBE_N - nodata, total / maxf(1.0, float(PROBE_N * PROBE_N - nodata)), nodata])
+
+
 func _clearable_layers_for_owner(owner: String) -> PackedInt32Array:
 	var all := _all_layers_for_owner(owner)
 	if not owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
