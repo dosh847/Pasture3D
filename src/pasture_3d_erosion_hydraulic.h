@@ -31,6 +31,24 @@ struct ErosionHydraulicParams {
 	double erosion_speed = 0.5;
 	double deposition_speed = 0.4;
 	double min_slope = 0.01;
+	// WALLS (default): the grid edge and no-data cells are walls, so water and sediment pool along them.
+	// OUTLETS: each is a virtual neighbour whose surface is a fixed base level, `outlet_level` metres below
+	// the sending cell's INPUT ground; whatever is routed there leaves the domain. The base level is the
+	// input's, not the current ground's: an outlet that sank with the rim cut an ever-deeper trench (12 m
+	// in 20 passes), because the rim could never erode down to it.
+	enum { EDGE_WALLS = 0, EDGE_OUTLETS = 1 };
+	int edge_mode = EDGE_WALLS;
+	double outlet_level = 0.0;
+	// MUSGRAVE (default): the per-pass routing model above, in grid steps. PIPE: Mei et al. 2007's
+	// virtual-pipe shallow water, in metres and seconds, so it holds across resolutions. Under PIPE,
+	// erosion_speed and deposition_speed are per second, sediment_capacity scales tilt x speed x depth,
+	// and each iteration simulates `time_step` seconds, substepped for stability.
+	enum { MODEL_MUSGRAVE = 0, MODEL_PIPE = 1 };
+	int model = MODEL_MUSGRAVE;
+	double time_step = 0.5;
+	// Lay whatever sediment is still suspended when the solve ends onto the ground, instead of deleting it.
+	// Off by default: the original solver dropped it, and settling it raises channel floors and basins.
+	bool settle_at_end = false;
 
 	static ErosionHydraulicParams from_dict(const Dictionary &p_dict);
 };
@@ -38,13 +56,25 @@ struct ErosionHydraulicParams {
 struct ErosionHydraulicResult {
 	bool ok = false;
 	PackedFloat32Array height;
-	PackedFloat32Array sediment;
+	// Net against the input, in metres, describing the FINAL surface: max(0, input - height) and
+	// max(0, height - input). The old `sediment` was the suspended load, normalised to its own max.
+	PackedFloat32Array eroded;
+	PackedFloat32Array deposited;
+	// MUSGRAVE: the contributing area draining through the cell, in m^2. PIPE: the mean discharge over the
+	// simulated time, in m^3/s. Neither is normalised -- put a Float to Mask after it for a mask.
 	PackedFloat32Array flow;
 
 	Dictionary to_dict() const;
 };
 
-// C++ native hydrodynamic shallow-water solver.
+// Turns a finished solve's raw state into the output channels: settles the suspended load if asked, takes
+// the net change against the input, and scales the flow accumulator into its physical unit. The GPU route
+// calls this on its readback, so both routes derive their channels the same way.
+ErosionHydraulicResult erosion_hydraulic_finish(const PackedFloat32Array &p_input,
+		PackedFloat32Array &r_height, const PackedFloat32Array &p_sediment, const PackedFloat32Array &p_flow_accum,
+		int p_gw, int p_gh, const Rect2 &p_rect, const ErosionHydraulicParams &p_params);
+
+// C++ native grid hydraulic erosion solver: MUSGRAVE 4-neighbour sharing, or the PIPE shallow-water model.
 // Matches the GDScript Tier 1 oracle bit-for-bit (<= 2e-6 m).
 ErosionHydraulicResult erosion_hydraulic_solve(const PackedFloat32Array &p_surface,
 		int p_gw, int p_gh, const Rect2 &p_rect, const ErosionHydraulicParams &p_params);

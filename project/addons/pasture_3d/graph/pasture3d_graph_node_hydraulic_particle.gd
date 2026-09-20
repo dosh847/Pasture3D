@@ -1,21 +1,37 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
-# Pasture3DGraphNodeHydraulicParticle — Eulerian-Lagrangian droplet hydraulic erosion SOLVER.
+# Pasture3DGraphNodeHydraulicParticle — a LAGRANGIAN droplet hydraulic erosion SOLVER.
 # Casts thousands of virtual water droplets across the terrain that gather momentum, carve channels along
 # gradients, transport sediment, and deposit alluvial fans.
 #
 # ---- Outputs ----
 #   port 0  "height"       HEIGHT  eroded surface elevation (metres)
-#   port 1  "sediment"     MASK    accumulated sediment deposition concentration
-#   port 2  "flow"         MASK    droplet path flow density
-#   port 3  "water_depth"  MASK    droplet water depth
+#   port 1  "eroded"       FIELD   metres cut from the input surface, net (max(0, input - height))
+#   port 2  "deposited"    FIELD   metres laid on the input surface, net (max(0, height - input))
+#   port 3  "flow"         FIELD   droplet path length per unit area at unit droplet density (metres)
+#
+# `eroded` and `deposited` describe the FINAL surface, not what passed through: a deposit later cut away
+# shows in neither. They are metres, not 0..1 -- put a Float to Mask after them for a mask.
 @tool
 class_name Pasture3DGraphNodeHydraulicParticle
 extends Pasture3DGraphSolverNode
 
 
+enum Units { CELLS, METRIC }
+
 @export_group("Simulation")
-## Total number of raindrops / particles simulated across the terrain footprint.
+## CELLS: a droplet step, its slope and its lifetime are measured in grid cells, so the same terrain at
+## another resolution (or with a wider brush margin) erodes differently. The original behaviour.
+## METRIC: steps are Step Length metres, slopes are metres per metre, and droplets are placed per area
+## (Droplet Density), so the result holds across resolutions once a cell is at most half a step.
+@export var units: Units = Units.CELLS:
+	set(v):
+		units = v
+		_param_changed()
+		notify_property_list_changed()
+
+## Total number of raindrops / particles simulated across the terrain footprint. CELLS only; METRIC uses
+## Droplet Density.
 @export_range(1000, 200000, 1000, "or_greater") var droplet_count: int = 25000:
 	set(v):
 		droplet_count = maxi(v, 1)
@@ -81,10 +97,41 @@ extends Pasture3DGraphSolverNode
 		ridge_forcing = maxf(v, 0.0)
 		_param_changed()
 
+## Erosion brush radius in metres (Beyer): the cut is spread over every cell within it, weighted toward
+## the droplet, instead of the four cells around it. 0 keeps the four-corner cut, which pits. METRIC never
+## uses less than one Step Length.
+@export_range(0.0, 20.0, 0.1, "or_greater", "suffix:m") var radius_m: float = 0.0:
+	set(v):
+		radius_m = maxf(v, 0.0)
+		_param_changed()
+
+## METRIC: the length of one droplet step. Lifetime is in steps, so a droplet travels up to
+## Max Lifetime x Step Length metres.
+@export_range(0.1, 20.0, 0.1, "or_greater", "suffix:m") var step_length_m: float = 1.0:
+	set(v):
+		step_length_m = maxf(v, 0.01)
+		_param_changed()
+
+## METRIC: droplets per 100 m² of the footprint.
+@export_range(0.1, 200.0, 0.1, "or_greater") var droplet_density: float = 40.0:
+	set(v):
+		droplet_density = maxf(v, 0.0)
+		_param_changed()
+
 ## Deterministic random seed for particle distribution.
 @export var seed: int = 1337:
 	set(v):
 		seed = v
+		_param_changed()
+
+
+## A droplet that dies still carrying sediment -- out of lifetime, an edge ahead, or stuck in a pit --
+## drops it where it stands instead of losing it, so the solve moves no mass off the terrain (except
+## where the mask scales it down). Off by default: the original solver discarded it, and turning this on
+## raises the ends of channels and the floors of pits.
+@export var deposit_at_death: bool = false:
+	set(v):
+		deposit_at_death = v
 		_param_changed()
 
 
@@ -116,14 +163,31 @@ func native_lower() -> Dictionary:
 	p[6] = evaporation_rate
 	p[7] = min_slope
 	p[8] = gravity
-	p[9] = float(seed)
+	# Two 16-bit halves of the seed's low 32 bits: a float32 slot is exact only to 2^24, so one slot
+	# rounded large seeds and the graph solved a different seed than this node's own route.
+	p[9] = float(seed & 0xFFFF)
 	p[10] = bedrock_gap
 	p[11] = ridge_forcing
-	return {"params": p}
+	p[12] = float((seed >> 16) & 0xFFFF)
+	p[13] = float(units)
+	p[14] = radius_m
+	p[15] = step_length_m
+	# The 16 slots are full; droplet_density rides the LUT.
+	return {"params": p, "lut": PackedFloat32Array([droplet_density, 1.0 if deposit_at_death else 0.0])}
 
 
 func native_param_ports() -> PackedInt32Array:
 	return PackedInt32Array([-1, -1, 0, 4, 5])
+
+
+## The native freeze key: the surface and the mask grids (an unwired mask hashes as its 1.0 default, via
+## key_defaults), plus the three drivable scalars. A mask or a wired Const moving now stales the solve.
+func freeze_key_grid_ports() -> PackedInt32Array:
+	return PackedInt32Array([0, 1])
+
+
+func freeze_key_scalar_ports() -> PackedInt32Array:
+	return PackedInt32Array([2, 3, 4])
 
 
 func role() -> Role:
@@ -177,15 +241,23 @@ func output_count() -> int:
 ## refusal is graph-wide: reading `sediment` off this node dropped the whole graph, erosion and all, onto
 ## the GDScript evaluator. The solver had already computed the field and the op was discarding it.
 func native_out_count() -> int:
-	return 4 # height, sediment, flow, water_depth
+	return 4 # height, eroded, deposited, flow
 
 
 func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "sediment", "flow", "water_depth"])
+	return PackedStringArray(["height", "eroded", "deposited", "flow"])
 
 
 func output_port_types() -> PackedInt32Array:
 	return PackedInt32Array([PortType.HEIGHT, PortType.FIELD, PortType.FIELD, PortType.FIELD])
+
+
+func _validate_property(p_property: Dictionary) -> void:
+	var metric_only := [&"step_length_m", &"droplet_density"]
+	if p_property.name in metric_only and units != Units.METRIC:
+		p_property.usage = PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_STORAGE
+	elif p_property.name == &"droplet_count" and units == Units.METRIC:
+		p_property.usage = PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_STORAGE
 
 
 func node_warnings() -> PackedStringArray:
@@ -206,7 +278,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	if surface.size() != n:
 		surface = Pasture3DGraphOps.zeros(n)
 
-	return solve_cached(_surface_hash(surface, p_gw, p_gh), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, d_count, es, ds, mask_in))
+	return solve_cached(freeze_key(p_inputs, p_gw, p_gh), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, d_count, es, ds, mask_in))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -220,25 +292,33 @@ func _param_changed() -> void:
 	emit_changed()
 
 
-func _surface_hash(p_surface: PackedFloat32Array, p_gw: int, p_gh: int) -> int:
-	return solver_cache_key(p_gw, p_gh, [p_surface])
+static func _f32(p_value: float) -> float:
+	return PackedFloat32Array([p_value])[0]
 
 
 func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_droplets: int, p_es: float, p_ds: float, p_mask: PackedFloat32Array) -> Array:
 	var n := p_gw * p_gh
+	# Every real parameter goes through float32, because that is what the graph program carries and the
+	# solver now keeps doubles: without the round trip this route and the native route solve with values
+	# ~1e-9 apart, and the droplets amplify that into metres.
 	var params := {
 		"droplet_count": p_droplets,
 		"max_lifetime": max_lifetime,
-		"inertia": inertia,
-		"sediment_capacity": sediment_capacity,
-		"erosion_speed": p_es,
-		"deposition_speed": p_ds,
-		"evaporation_rate": evaporation_rate,
-		"min_slope": min_slope,
-		"gravity": gravity,
-		"bedrock_gap": bedrock_gap,
-		"ridge_forcing": ridge_forcing,
+		"inertia": _f32(inertia),
+		"sediment_capacity": _f32(sediment_capacity),
+		"erosion_speed": _f32(p_es),
+		"deposition_speed": _f32(p_ds),
+		"evaporation_rate": _f32(evaporation_rate),
+		"min_slope": _f32(min_slope),
+		"gravity": _f32(gravity),
+		"bedrock_gap": _f32(bedrock_gap),
+		"ridge_forcing": _f32(ridge_forcing),
 		"seed": seed,
+		"units": int(units),
+		"radius_m": _f32(radius_m),
+		"step_length_m": _f32(step_length_m),
+		"deposit_at_death": deposit_at_death,
+		"droplet_density": _f32(droplet_density),
 		"mask": p_mask,
 	}
 
@@ -253,7 +333,7 @@ func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect:
 
 	return [
 		res["height"] as PackedFloat32Array,
-		res["sediment"] as PackedFloat32Array,
+		res["eroded"] as PackedFloat32Array,
+		res["deposited"] as PackedFloat32Array,
 		res["flow"] as PackedFloat32Array,
-		res["water_depth"] as PackedFloat32Array,
 	]

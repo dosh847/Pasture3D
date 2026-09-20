@@ -168,7 +168,7 @@ func _run() -> void:
 		ok = _control("routing vs the input it eroded", h.height, _surface) and ok
 		ok = _control("evaporation 1.0 (scattered water never reaches the next pass)", h.height,
 				_hydraulic(_main, _with(HYDRAULIC, "evaporation_rate", 1.0)).height) and ok
-		ok = _positive("sediment carried into neighbours", h.sediment) and ok
+		ok = _positive("material laid down by the scatter", h.deposited) and ok
 		if ok:
 			_done += 1
 
@@ -342,7 +342,7 @@ func _hydraulic(p_fixture: Dictionary, p_params: Dictionary) -> Dictionary:
 			p_fixture.gh, p_fixture.rect, p_params)
 	if not r.get("ok", false):
 		return {}
-	return {"height": r.height, "sediment": r.sediment, "flow": r.flow}
+	return {"height": r.height, "eroded": r.eroded, "deposited": r.deposited, "flow": r.flow}
 
 
 func _thermal(p_fixture: Dictionary, p_hardness: PackedFloat32Array, p_params: Dictionary) -> Dictionary:

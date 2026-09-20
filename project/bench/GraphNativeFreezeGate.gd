@@ -9,6 +9,7 @@
 #   [K] key parity: a GDScript solve is SERVED and not stale on the native route; one moved cell is stale.
 #   [C] a native cold solve is adopted, then is a hit on the GDScript route; the node starts empty (control).
 #   [W] a wired Const on a scalar port stales the freeze on both routes; LIVE moves with it (control).
+#   [M] a wired mask grid moving stales Particle Hydraulic's freeze on both routes; LIVE moves (control).
 #   [S] Erosion's cell on a non-square grid matches across routes; the old size.x/gw cell does not (control).
 extends Node
 
@@ -18,8 +19,8 @@ const RECT := Rect2(-64.0, -64.0, 128.0, 128.0)
 const RECT_WIDE := Rect2(-64.0, -32.0, 128.0, 64.0) # dx = 4, dz = 2
 const EPS := 1.0e-5
 # Criteria that must reach their assertion on a full run: five sections, [K] and [C] once per opted-in op.
-const FREEZE_OPS := [&"erosion", &"erosion_hydraulic", &"erosion_thermal", &"dla", &"hydraulic_saleve"]
-const WANT := 1 + 5 * 2 + 1 + 1 # 5 == FREEZE_OPS.size(), which is not a constant expression
+const FREEZE_OPS := [&"erosion", &"erosion_hydraulic", &"erosion_thermal", &"dla", &"hydraulic_saleve", &"hydraulic_particle"]
+const WANT := 1 + 6 * 2 + 1 + 1 + 1 # 6 == FREEZE_OPS.size(), which is not a constant expression
 
 var _fail := 0
 var _done := 0
@@ -32,7 +33,7 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 	# `-- --only=PKCWS` runs a subset, for isolating a section; the completion count only binds a full run.
-	var only := "PKCWS"
+	var only := "PKCWMS"
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--only="):
 			only = a.trim_prefix("--only=")
@@ -45,9 +46,11 @@ func _ready() -> void:
 			_c_cold_native_adopted(op)
 	if only.contains("W"):
 		_w_wired_scalar()
+	if only.contains("M"):
+		_m_wired_mask()
 	if only.contains("S"):
 		_s_cell_size()
-	if only == "PKCWS" and _done != WANT:
+	if only == "PKCWMS" and _done != WANT:
 		_fail += 1
 		print("\n!! only %d of %d criteria reached their assertion" % [_done, WANT])
 	print("\n=== %s (%d failures) ===\n" % ["GRAPH NATIVE FREEZE PASS" if _fail == 0 else "GRAPH NATIVE FREEZE FAIL", _fail])
@@ -187,6 +190,35 @@ func _w_wired_scalar() -> void:
 	for route in ["gdscript", "native"]:
 		ok = ok and out[route + "_true"]["stale"] and out[route + "_true"]["diff"] < EPS and out[route + "_false"]["diff"] > 1.0e-3
 	_check(ok, "a wired scalar did not stale the freeze on some route, or LIVE ignored the Const")
+
+
+# ---- [M] ---------------------------------------------------------------------------------------------
+
+## Particle's key used to be the surface alone, so a mask edit never staled a frozen solve.
+func _m_wired_mask() -> void:
+	print("
+[M] a wired mask moving stales Particle Hydraulic's freeze on both routes")
+	var surf := _mound()
+	var out := {}
+	for route in ["gdscript", "native"]:
+		for frozen in [true, false]:
+			var node := _make(&"hydraulic_particle", frozen)
+			node.set("droplet_count", 2000)
+			var built := _graph_with_const(node, 1, 1.0)
+			var g: Pasture3DTerrainGraph = built[0]
+			var c: Pasture3DGraphNode = built[1]
+			g.force_gdscript_evaluation = route == "gdscript"
+			var ra := g.evaluate(GW, GH, RECT, null, surf)
+			c.set("value", 0.25)
+			var rb := g.evaluate(GW, GH, RECT, null, surf)
+			out["%s_%s" % [route, frozen]] = {"stale": node._stale, "diff": _max_abs_diff(ra, rb)}
+	for route in ["gdscript", "native"]:
+		print("    %-8s FROZEN stale=%s served diff=%.6f | LIVE diff=%.4f (control)"
+			% [route, out[route + "_true"]["stale"], out[route + "_true"]["diff"], out[route + "_false"]["diff"]])
+	var ok := true
+	for route in ["gdscript", "native"]:
+		ok = ok and out[route + "_true"]["stale"] and out[route + "_true"]["diff"] < EPS and out[route + "_false"]["diff"] > 1.0e-3
+	_check(ok, "a wired mask did not stale Particle's freeze on some route, or LIVE ignored the mask")
 
 
 # ---- [S] ---------------------------------------------------------------------------------------------

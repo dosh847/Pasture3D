@@ -1567,11 +1567,17 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				p.erosion_speed = P[4];
 				p.deposition_speed = P[5];
 				p.min_slope = (PH[6] ? P[6] : 0.01f);
+				p.edge_mode = PH[7] ? std::clamp((int)P[7], 0, 1) : ErosionHydraulicParams::EDGE_WALLS;
+				p.outlet_level = PH[8] ? std::max(0.0, (double)P[8]) : 0.0;
+				p.model = PH[9] ? std::clamp((int)P[9], 0, 1) : ErosionHydraulicParams::MODEL_MUSGRAVE;
+				p.time_step = PH[10] ? std::max(1e-3, (double)P[10]) : 0.5;
+				p.settle_at_end = PH[11] && P[11] > 0.5f;
 				ErosionHydraulicResult res = erosion_hydraulic_solve_best(in_arr, p_gw, p_gh, p_rect, p);
 				if (res.ok && res.height.size() == n) {
 					std::copy_n(res.height.ptr(), n, g_ptr);
-					copy_aux(1, res.sediment);
-					copy_aux(2, res.flow);
+					copy_aux(1, res.eroded);
+					copy_aux(2, res.deposited);
+					copy_aux(3, res.flow);
 				}
 			} break;
 
@@ -1666,17 +1672,30 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				p.evaporation_rate = (PH[6] ? P[6] : 0.01f);
 				p.min_slope = (PH[7] ? P[7] : 0.01f);
 				p.gravity = (PH[8] ? P[8] : 4.0f);
-				p.seed = params_j ? (int64_t)P[9] : 1337;
+				// The seed rides as two 16-bit halves, since a float32 slot holds integers exactly only to 2^24.
+				p.seed = params_j ? (int64_t)((uint32_t)P[9] | ((PH[12] ? (uint32_t)P[12] : 0u) << 16)) : 1337;
 				p.bedrock_gap = (PH[10] ? P[10] : 2.0f);
 				p.ridge_forcing = (PH[11] ? P[11] : 0.0f);
+				p.units = PH[13] ? std::clamp((int)P[13], 0, 1) : HydraulicParticleParams::UNITS_CELLS;
+				p.radius_m = PH[14] ? std::max(0.0, (double)P[14]) : 0.0;
+				p.step_length_m = PH[15] ? std::max(0.01, (double)P[15]) : 1.0;
+				{
+					const PackedFloat32Array &lut = (size_t)s < p_prog.luts.size() ? p_prog.luts[(size_t)s] : PackedFloat32Array();
+					if (lut.size() > 0) {
+						p.droplet_density = std::max(0.0, (double)lut[0]);
+					}
+					if (lut.size() > 1) {
+						p.deposit_at_death = lut[1] > 0.5f;
+					}
+				}
 				if (in1 && in1[s] >= 0) {
 					p.mask = get_grid_packed(in1[s], c_in1);
 				}
 				HydraulicParticleResult res = hydraulic_particle_solve(in_arr, p_gw, p_gh, p_rect, p);
 				if (res.ok && res.height.size() == n) {
-					copy_aux(1, res.sediment);
-					copy_aux(2, res.flow);
-					copy_aux(3, res.water_depth);
+					copy_aux(1, res.eroded);
+					copy_aux(2, res.deposited);
+					copy_aux(3, res.flow);
 					std::copy_n(res.height.ptr(), n, g_ptr);
 				}
 			} break;
