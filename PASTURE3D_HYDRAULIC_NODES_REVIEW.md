@@ -256,9 +256,16 @@ What we have and they may not: a bitwise thread-invariant CPU path, and a GPU tw
 
   So CELLS cannot be made margin-invariant without becoming METRIC: a density per unit area is precisely
   what "the margin must not matter" means. METRIC already holds (0.983 → 0.936 m, 4.8%). Gate `[M]` pins
-  METRIC with CELLS as the control that must fail. **The remaining decision is whether `units` should
-  default to METRIC** — it currently defaults to CELLS, and changing it rescales existing brushes, so it
-  is a look call, not a correctness one. Same shape as S2: a default that does not scale.
+  METRIC with CELLS as the control that must fail.
+
+  **`units` now defaults to METRIC** (the user's call, 2026-09-19), on the same reasoning as S2: a default
+  that does not scale is not a default. CELLS remains, because several criteria need it as the control.
+
+  Switching it exposed that **five criteria were relying on CELLS being the default** rather than saying
+  so — `[F]`, `[U]`, `[M]` and `[E3]`'s control arms silently became METRIC-vs-METRIC and stopped being
+  able to fail. Every CELLS arm in the gate is now explicit, after which `[F]`'s frozen hash returned to
+  its existing baseline unchanged, which is the evidence that the criteria were restored rather than
+  re-fitted.
 - **S4:** the grid GPU twin likely keeps the normalised outputs too. D10 therefore needs a GPU change,
   and gates [I], [J] and [K] in GraphGpuParityGate need re-baselining for the new channel meaning.
 - **S5:** thread parity for the grid is claimed on a fixture I did not check for 128 or more rows with

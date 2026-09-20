@@ -20,11 +20,18 @@ extends Pasture3DGraphSolverNode
 enum Units { CELLS, METRIC }
 
 @export_group("Simulation")
-## CELLS: a droplet step, its slope and its lifetime are measured in grid cells, so the same terrain at
-## another resolution (or with a wider brush margin) erodes differently. The original behaviour.
-## METRIC: steps are Step Length metres, slopes are metres per metre, and droplets are placed per area
-## (Droplet Density), so the result holds across resolutions once a cell is at most half a step.
-@export var units: Units = Units.CELLS:
+## METRIC (the default): steps are Step Length metres, slopes are metres per metre, and droplets are
+## placed per area (Droplet Density), so the result holds across resolutions once a cell is at most half
+## a step -- and across brush margins, which is why it is the default.
+##
+## CELLS: a droplet step, its slope and its lifetime are measured in grid cells. The original behaviour,
+## kept because it is the control several gate criteria need, but it is NOT invariant: an absolute
+## droplet count is spread over the whole working grid, so `modifier_margin` rescales it. Measured on one
+## dome with 0 / 60 / 150 m of margin, the cut was 21.712 m, 12.733 m and 7.271 m -- a setting meant to
+## give the stack room to work, acting as a threefold strength control. A footprint mask does not fix it:
+## a droplet spawned on a masked cell is discarded, not redrawn, so masking spends droplets rather than
+## concentrating them. See gate [M].
+@export var units: Units = Units.METRIC:
 	set(v):
 		units = v
 		_param_changed()

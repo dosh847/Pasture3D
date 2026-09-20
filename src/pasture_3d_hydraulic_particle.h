@@ -34,7 +34,7 @@ struct HydraulicParticleParams {
 	int64_t seed = 1337;
 	// CELLS: every length is a grid cell (the original solver). METRIC: world metres, resolution-invariant.
 	enum { UNITS_CELLS = 0, UNITS_METRIC = 1 };
-	int units = UNITS_CELLS;
+	int units = UNITS_METRIC; // see the node's doc comment: CELLS is not margin-invariant
 	// Erosion brush radius in metres (Beyer). 0 = the four bilinear corners. METRIC widens it to one step.
 	double radius_m = 0.0;
 	// METRIC only: the length of one droplet step, and droplets per 100 m^2 of the rect.

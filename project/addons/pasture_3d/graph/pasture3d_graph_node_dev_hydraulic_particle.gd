@@ -89,7 +89,7 @@ enum { UNITS_CELLS = 0, UNITS_METRIC = 1 }
 
 ## Deterministic random seed for particle distribution.
 ## CELLS or METRIC -- see Pasture3DGraphNodeHydraulicParticle.units.
-@export_enum("Cells", "Metric") var units: int = UNITS_CELLS:
+@export_enum("Cells", "Metric") var units: int = UNITS_METRIC:
 	set(v):
 		units = clampi(v, 0, 1)
 		_param_changed()
@@ -287,7 +287,7 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 	var bedrock_gap: float = maxf(0.0, float(p_params.get("bedrock_gap", 0.0)))
 	var ridge_forcing: float = maxf(0.0, float(p_params.get("ridge_forcing", 0.0)))
 	var rng_seed: int = int(p_params.get("seed", 1337))
-	var metric: bool = clampi(int(p_params.get("units", UNITS_CELLS)), 0, 1) == UNITS_METRIC
+	var metric: bool = clampi(int(p_params.get("units", UNITS_METRIC)), 0, 1) == UNITS_METRIC
 	var radius_param: float = maxf(0.0, float(p_params.get("radius_m", 0.0)))
 	var step_param: float = maxf(0.01, float(p_params.get("step_length_m", 1.0)))
 	var density: float = maxf(0.0, float(p_params.get("droplet_density", 40.0)))

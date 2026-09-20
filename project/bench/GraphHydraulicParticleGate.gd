@@ -94,7 +94,7 @@ func _test_e5_ridge_unbiased() -> void:
 		e.resize(g * g)
 		for k in 4:
 			var r: PackedFloat32Array = Pasture3DUtil.hydraulic_particle_solve_grid(base, g, g, rect,
-					{"droplet_count": 30000, "seed": 7 + k * 101, "ridge_forcing": rf})["eroded"]
+					{"units": 0, "droplet_count": 30000, "seed": 7 + k * 101, "ridge_forcing": rf})["eroded"]
 			for i in e.size():
 				e[i] += r[i] * 0.25
 		var num := 0.0
@@ -128,12 +128,12 @@ func _test_e6_ridge_parity() -> void:
 	var gw := 64
 	var rect := Rect2(-50.0, -50.0, 100.0, 100.0)
 	var surf := _make_test_surface(gw, gw)
-	var p := {"droplet_count": 500, "max_lifetime": 20, "seed": 42, "ridge_forcing": 0.9}
+	var p := {"units": 0, "droplet_count": 500, "max_lifetime": 20, "seed": 42, "ridge_forcing": 0.9}
 	var gd: Array = DevHydraulicParticle.solve_oracle(surf, gw, gw, rect, p)
 	var cpp: Dictionary = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, p)
 	var diff := _max_abs_diff(gd[0], cpp["height"])
 	var off: PackedFloat32Array = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect,
-			{"droplet_count": 500, "max_lifetime": 20, "seed": 42})["height"]
+			{"units": 0, "droplet_count": 500, "max_lifetime": 20, "seed": 42})["height"]
 	var effect := _max_abs_diff(cpp["height"], off)
 	print("    max |cpp - gdscript| = %.9f (want <= %.7f) | control: forcing moves the surface %.4f m (want > 0.01)"
 		% [diff, EPS_MULTI_DROPLET, effect])
@@ -151,6 +151,7 @@ func _test_a_native_parity() -> void:
 	var surf := _make_test_surface(gw, gh)
 
 	var p1 := {
+		"units": 0,
 		"droplet_count": 1,
 		"max_lifetime": 1,
 		"seed": 42,
@@ -164,6 +165,7 @@ func _test_a_native_parity() -> void:
 		print("    !! Single droplet diverged beyond bit-level tolerance")
 
 	var p10 := {
+		"units": 0,
 		"droplet_count": 10,
 		"max_lifetime": 5,
 		"seed": 42,
@@ -178,6 +180,7 @@ func _test_a_native_parity() -> void:
 
 	print("\n[A2] Multi-droplet Iterative Parity (500 droplets, 10 steps): C++ Native vs GDScript Tier 1 Oracle")
 	var p := {
+		"units": 0,
 		"droplet_count": 500,
 		"max_lifetime": 10,
 		"inertia": 0.05,
@@ -218,7 +221,7 @@ func _test_a3_default_lifetime_parity() -> void:
 	var gw := 64
 	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
 	var surf := _make_test_surface(gw, gw)
-	var p := {"droplet_count": 2000, "max_lifetime": 30, "seed": 7}
+	var p := {"units": 0, "droplet_count": 2000, "max_lifetime": 30, "seed": 7}
 	var gd: Array = DevHydraulicParticle.solve_oracle(surf, gw, gw, rect, p)
 	var cpp: Dictionary = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, p)
 	var worst := 0.0
@@ -251,7 +254,7 @@ func _test_a4_mask_spawn_parity() -> void:
 	mask.resize(gw * gw)
 	for i in mask.size():
 		mask[i] = 1.0 if (i % gw) >= gw / 2 else 0.0
-	var p := {"droplet_count": 2000, "max_lifetime": 30, "seed": 7, "mask": mask}
+	var p := {"units": 0, "droplet_count": 2000, "max_lifetime": 30, "seed": 7, "mask": mask}
 	var gd: Array = DevHydraulicParticle.solve_oracle(surf, gw, gw, rect, p)
 	var cpp: Dictionary = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, p)
 	var d := _max_abs_diff(gd[0], cpp["height"])
@@ -275,6 +278,7 @@ func _test_r_route_parity() -> void:
 	print("
 [R] Route parity: the node's GDScript route == its native route, mask unwired")
 	var node: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"hydraulic_particle")
+	node.set("units", 0)
 	node.set("droplet_count", 2000)
 	var g := _graph_with(node)
 	var gw := 64
@@ -304,6 +308,7 @@ func _test_s_seed_lowering() -> void:
 	var out := {}
 	for sd in [16777217, 16777216]:
 		var node: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"hydraulic_particle")
+		node.set("units", 0)
 		node.set("droplet_count", 500)
 		node.set("seed", sd)
 		var g := _graph_with(node)
@@ -312,7 +317,7 @@ func _test_s_seed_lowering() -> void:
 		out[-sd] = g.evaluate(gw, gw, rect, null, surf)
 	var route := _max_abs_diff(out[16777217], out[-16777217])
 	var distinct := _max_abs_diff(out[16777217], out[16777216])
-	var p0 := {"droplet_count": 500, "seed": 0}
+	var p0 := {"units": 0, "droplet_count": 500, "seed": 0}
 	var zero := _max_abs_diff(DevHydraulicParticle.solve_oracle(surf, gw, gw, rect, p0)[0],
 			Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, p0)["height"])
 	print("    2^24+1 native vs gdscript = %.9f | 2^24+1 vs 2^24 = %.4f (want > 0) | seed 0 oracle vs native = %.9f"
@@ -332,7 +337,7 @@ func _test_a5_metric_and_radius_parity() -> void:
 	var surf := _make_test_surface(gw, gw)
 	var cases := {
 		"metric": {"units": 1, "droplet_density": 3.0, "step_length_m": 2.0, "max_lifetime": 30, "seed": 7},
-		"cells r6": {"droplet_count": 2000, "radius_m": 6.0, "seed": 7},
+		"cells r6": {"units": 0, "droplet_count": 2000, "radius_m": 6.0, "seed": 7},
 		"metric r9": {"units": 1, "droplet_density": 3.0, "step_length_m": 2.0, "radius_m": 9.0, "seed": 7},
 	}
 	var names := ["height", "eroded", "deposited", "flow"]
@@ -369,9 +374,9 @@ func _test_f_cells_fingerprint() -> void:
 	var gw := 64
 	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
 	var surf := _make_test_surface(gw, gw)
-	var h0: int = hash(Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, {"droplet_count": 2000, "seed": 7})["height"])
+	var h0: int = hash(Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, {"units": 0, "droplet_count": 2000, "seed": 7})["height"])
 	# Control: the same run with a radius must NOT hash the same, or the hash is not looking at the cut.
-	var h1: int = hash(Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, {"droplet_count": 2000, "seed": 7, "radius_m": 6.0})["height"])
+	var h1: int = hash(Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, {"units": 0, "droplet_count": 2000, "seed": 7, "radius_m": 6.0})["height"])
 	print("    radius 0 hash = %d (want %d) | radius 6 hash = %d (control, want different)" % [h0, CELLS_R0_HEIGHT_HASH, h1])
 	if h0 != CELLS_R0_HEIGHT_HASH or h1 == CELLS_R0_HEIGHT_HASH:
 		_fail += 1
@@ -401,7 +406,7 @@ func _test_w_bedrock_floor() -> void:
 	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
 	var surf := _world_mound(gw, rect)
 	var gap := 2.0
-	var base := {"droplet_count": 60000, "seed": 7}
+	var base := {"units": 0, "droplet_count": 60000, "seed": 7}
 	var deepest := func(p_h: PackedFloat32Array) -> float:
 		var d := 0.0
 		for i in p_h.size():
@@ -457,7 +462,7 @@ func _test_l_radius_smooths() -> void:
 	var amount := []
 	for r in [0.0, 6.0]:
 		var h: PackedFloat32Array = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect,
-				{"droplet_count": 8000, "seed": 7, "radius_m": r})["height"]
+				{"units": 0, "droplet_count": 8000, "seed": 7, "radius_m": r})["height"]
 		var lap := 0.0
 		var tot := 0.0
 		for z in range(1, gw - 1):
@@ -487,7 +492,7 @@ func _test_u_resolution_invariance() -> void:
 	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
 	var modes := {
 		"metric": {"units": 1, "droplet_density": 30.0, "step_length_m": 4.0, "max_lifetime": 30, "seed": 7},
-		"cells": {"droplet_count": 80000, "seed": 7},
+		"cells": {"units": 0, "droplet_count": 80000, "seed": 7},
 	}
 	var rel := {}
 	for label in modes:
@@ -543,6 +548,7 @@ func _test_m_margin_invariance() -> void:
 			p["droplet_density"] = 2.0
 			p["step_length_m"] = 2.0
 		else:
+			p["units"] = 0
 			p["droplet_count"] = 200000
 		var h: PackedFloat32Array = Pasture3DUtil.hydraulic_particle_solve_grid(surf, g, g,
 				Rect2(0.0, 0.0, world, world), p)["height"]
@@ -601,7 +607,7 @@ func _test_e1_net_channels() -> void:
 	var rect := Rect2(0.0, 0.0, 384.0, 384.0)
 	var surf := _make_test_surface(gw, gw)
 	var res: Dictionary = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect,
-			{"droplet_count": 12000, "seed": 7})
+			{"units": 0, "droplet_count": 12000, "seed": 7})
 	var h: PackedFloat32Array = res["height"]
 	var e: PackedFloat32Array = res["eroded"]
 	var d: PackedFloat32Array = res["deposited"]
@@ -634,7 +640,7 @@ func _test_e2_mass_balance() -> void:
 	var cut := {}
 	for on in [true, false]:
 		var res: Dictionary = Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect,
-				{"droplet_count": 12000, "seed": 7, "deposit_at_death": on})
+				{"units": 0, "droplet_count": 12000, "seed": 7, "deposit_at_death": on})
 		var h: PackedFloat32Array = res["height"]
 		var net := 0.0
 		var gross := 0.0
@@ -661,7 +667,7 @@ func _test_e3_flow_invariance() -> void:
 	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
 	var modes := {
 		"metric": {"units": 1, "droplet_density": 30.0, "step_length_m": 4.0},
-		"cells": {"droplet_count": 80000},
+		"cells": {"units": 0, "droplet_count": 80000},
 	}
 	var rel := {}
 	for label in modes:
@@ -701,6 +707,7 @@ func _test_e4_channel_route() -> void:
 	var seen := []
 	for port in 4:
 		var node: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"hydraulic_particle")
+		node.set("units", 0)
 		node.set("droplet_count", 4000)
 		node.set("seed", 7)
 		# deposit_at_death rides the LUT beside droplet_density, so this run proves that slot too.
@@ -842,6 +849,7 @@ func _test_d_channel_generation() -> void:
 	var surf := _make_test_surface(gw, gh)
 
 	var p := {
+		"units": 0,
 		"droplet_count": 10000,
 		"max_lifetime": 40,
 		"inertia": 0.1,
