@@ -213,8 +213,30 @@ What we have and they may not: a bitwise thread-invariant CPU path, and a GPU tw
 - **S1: ridge forcing is a biased rotation, not dendritic organisation.** Every droplet turns the same way, so
   it should skew valleys sideways instead of branching them. To measure it: the mean flow-direction
   handedness on a symmetric cone, at rf = 0 vs 1.
-- **S2:** the particle's `bedrock_gap` default of 2 m makes erosion on km-scale brushes cosmetic
-  (see [[erosion-should-run-on-brush-output]]).
+- **S2: CONFIRMED and fixed, 2026-09-19.** The suspicion was right but understated, and the honest measure
+  is not the depth of the cut -- it is the fraction of eroding cells *pinned at the cap*: **49.8%** on a
+  400 m world, **80.6%** at 2 km, **92.1%** at 8 km. At that point the constant, not the physics, is
+  setting the shape. Released, the same solver cut 122.96 m where the cap allowed 12.12 m.
+
+  Two further defects fell out of measuring it:
+
+  - **The clamp leaked.** The CELLS branch bounded the droplet's take by the *weighted mean* of its
+    corners' remaining room, while `lay_at` moves cell i by `amt * scale * w_i`. A mean is not a bound: a
+    corner with no room left and half the weight still received half of it. An 8 km world with a 2 m gap
+    cut 3.186 m. Both unit modes now use the exact per-cell minimum.
+  - **It could not be set by hand.** The export was `@export_range(0.1, 50.0, 0.5)` with no `or_greater`,
+    so an 800 m mountain could not be given a sensible gap at all.
+
+  `bedrock_gap` now defaults to **0 (off)** rather than 2 m. A relief-relative default was considered and
+  rejected: relief is a whole-grid reduction, so the same terrain would get a different cap per tile and
+  the solve would stop being local -- a real hazard next to `modifier_margin` skirts and per-brush baking.
+  A floor is a deliberate, per-brush choice, so it is opt-in and now unbounded above.
+
+  **It was also corrupting a gate.** `[U]` resolution invariance uses CELLS as its control, and a solver
+  saturated against a constant reads as resolution-invariant for the wrong reason: the control had fallen
+  to 0.013 and could no longer fail. With the default off it reads 0.405 against METRIC's 0.003. New
+  criterion `[W]` holds the floor exactly, with the restored weighted mean as its break control (3.813 m
+  and 9991 cells past the floor on that fixture). See [[erosion-should-run-on-brush-output]].
 - **S3:** particle droplets spawn over the modifier-margin skirt too, and on steep skirt walls they deposit
   at the rim. Not measured against `modifier_margin`.
 - **S4:** the grid GPU twin likely keeps the normalised outputs too. D10 therefore needs a GPU change,

@@ -85,8 +85,16 @@ enum Units { CELLS, METRIC }
 		gravity = maxf(v, 0.1)
 		_param_changed()
 
-## Bedrock elevation resistance gap (metres) preventing runaway hole gouging into flat terrain.
-@export_range(0.1, 50.0, 0.5) var bedrock_gap: float = 2.0:
+## Absolute floor on the cut, in metres below the **input** surface: no cell may finish more than
+## `bedrock_gap` below where it started. **0 disables it**, which is the default.
+##
+## It defaults off because it does not scale. A fixed 2 m was 5% of a 40 m mound and 0.25% of an 800 m
+## one, so on anything large it stopped being a safety rail and became the shape: measured at the old
+## default, 49.8% of eroding cells on a 400 m world were pinned at the cap, 80.6% at 2 km and 92.1% at
+## 8 km. A solver saturated against a constant is not eroding, and it reads as resolution-invariant
+## because the constant, not the physics, is setting the depth. Set it per-brush against that brush's
+## relief when you actually want a floor.
+@export_range(0.0, 200.0, 0.5, "or_greater") var bedrock_gap: float = 0.0:
 	set(v):
 		bedrock_gap = maxf(v, 0.0)
 		_param_changed()

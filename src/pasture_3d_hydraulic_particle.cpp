@@ -370,44 +370,36 @@ HydraulicParticleResult godot::hydraulic_particle_solve(const PackedFloat32Array
 					double erode_amt = std::min((c - sed) * erosion_speed, -delta_h) * mask_val;
 
 					if (bedrock_gap > 0.0) {
-						// The most the footprint can give, as an amount at the droplet. CELLS keeps its original
-						// rule, the weighted mean of the cells' room above the floor. METRIC takes the exact floor:
-						// cell i moves by amt * scale * w_i, so amt may not exceed room_i / (scale * w_i) anywhere.
-						// The weighted mean divided by `scale` tightened with resolution squared and made the
-						// fine grid erode half as much (GraphHydraulicParticleGate [U]).
+						// The most the droplet may take, as an amount AT THE DROPLET. Cell i moves by
+						// `amt * scale * w_i`, so the amount may not exceed `room_i / (scale * w_i)` at any cell
+						// the footprint touches -- the tightest cell binds.
+						//
+						// CELLS used to bound by the WEIGHTED MEAN of the rooms instead. A mean is not a bound:
+						// a corner with no room left and half the weight still received half of it, so the floor
+						// leaked. Measured on an 8 km world with a 2 m gap, the deepest cut was 3.186 m against
+						// a 2.000 m floor; on gate [W]'s 256 m fixture, 3.813 m and 9991 cells past it. The earlier attempt to share METRIC's rule divided the MEAN by
+						// `scale`, which tightened as resolution squared and halved the fine grid's erosion
+						// ([U]); the per-cell minimum below is the exact constraint and has no such term.
 						const auto room = [&](int p_i) {
 							return std::max(0.0, (double)height[p_i] - ((double)original_height[p_i] - bedrock_gap));
 						};
-						double max_allowed = 0.0;
-						if (metric) {
-							double lim = std::numeric_limits<double>::infinity();
-							if (disc_erode && disc_footprint(height, p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m, fp)) {
-								for (size_t k = 0; k < fp.idx.size(); k++) {
+						double lim = std::numeric_limits<double>::infinity();
+						if (disc_erode && disc_footprint(height, p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m, fp)) {
+							for (size_t k = 0; k < fp.idx.size(); k++) {
+								if (fp.w[k] > 0.0) {
 									lim = std::min(lim, room(fp.idx[k]) / (scale * fp.w[k]));
 								}
-							} else {
-								const int ci[4] = { i00, i10, i01, i11 };
-								const double cw[4] = { w00, w10, w01, w11 };
-								for (int k = 0; k < 4; k++) {
-									if (cw[k] > 0.0) {
-										lim = std::min(lim, room(ci[k]) / (scale * cw[k]));
-									}
+							}
+						} else {
+							const int ci[4] = { i00, i10, i01, i11 };
+							const double cw[4] = { w00, w10, w01, w11 };
+							for (int k = 0; k < 4; k++) {
+								if (cw[k] > 0.0) {
+									lim = std::min(lim, room(ci[k]) / (scale * cw[k]));
 								}
 							}
-							erode_amt = std::min(erode_amt, lim);
-						} else if (disc_erode && disc_footprint(height, p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m, fp)) {
-							for (size_t k = 0; k < fp.idx.size(); k++) {
-								max_allowed += fp.w[k] * room(fp.idx[k]);
-							}
-							erode_amt = std::min(erode_amt, max_allowed);
-						} else {
-							double max_cut00 = std::max(0.0, (double)height[i00] - ((double)original_height[i00] - bedrock_gap));
-							double max_cut10 = std::max(0.0, (double)height[i10] - ((double)original_height[i10] - bedrock_gap));
-							double max_cut01 = std::max(0.0, (double)height[i01] - ((double)original_height[i01] - bedrock_gap));
-							double max_cut11 = std::max(0.0, (double)height[i11] - ((double)original_height[i11] - bedrock_gap));
-							max_allowed = w00 * max_cut00 + w10 * max_cut10 + w01 * max_cut01 + w11 * max_cut11;
-							erode_amt = std::min(erode_amt, max_allowed);
 						}
+						erode_amt = std::min(erode_amt, lim);
 					}
 
 					sed += erode_amt;

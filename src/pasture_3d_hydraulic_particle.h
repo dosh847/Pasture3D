@@ -29,7 +29,7 @@ struct HydraulicParticleParams {
 	double evaporation_rate = 0.01;
 	double min_slope = 0.01;
 	double gravity = 4.0;
-	double bedrock_gap = 2.0;
+	double bedrock_gap = 0.0; // 0 = no floor (default); see the node's doc comment for why it is not 2 m
 	double ridge_forcing = 0.0;
 	int64_t seed = 1337;
 	// CELLS: every length is a grid cell (the original solver). METRIC: world metres, resolution-invariant.

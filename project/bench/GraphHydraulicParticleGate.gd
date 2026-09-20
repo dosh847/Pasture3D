@@ -14,7 +14,7 @@ var _fail := 0
 var _completed := 0
 # Every criterion ends in `_completed += 1`. A criterion that throws before its assertion increments
 # nothing and adds no failure, so without this a green run could mean nothing ran.
-const WANT := 19
+const WANT := 20
 
 
 func _ready() -> void:
@@ -32,6 +32,7 @@ func _ready() -> void:
 	_test_s_seed_lowering()
 	_test_a5_metric_and_radius_parity()
 	_test_f_cells_fingerprint()
+	_test_w_bedrock_floor()
 	_test_l_radius_smooths()
 	_test_u_resolution_invariance()
 	_test_n_metric_route()
@@ -351,9 +352,16 @@ func _test_a5_metric_and_radius_parity() -> void:
 	_completed += 1
 
 
-## CELLS with radius 0 is the solver as it was before METRIC and the radius existed, bit for bit. The hash
-## was taken from the build before either change, on this fixture.
-const CELLS_R0_HEIGHT_HASH := 2608144882
+## CELLS with radius 0 must not drift without someone deciding it should. The hash is a tripwire, not a
+## claim of correctness: when it moves, either say why here or the change was not intended.
+##
+## It has been re-baselined deliberately twice, both on 2026-09-19 with the S2 fix:
+##  - 2608144882 -> the CELLS bedrock clamp stopped bounding by the weighted mean of its corners' room
+##    and became the exact per-cell minimum, so cuts that used to leak past the floor no longer do.
+##  - -> 2869371279 once `bedrock_gap` defaulted to 0 (off). This criterion passes no gap key, so it
+##    tracks the default, and that is the point -- this is the criterion that caught the default change
+##    reaching the solver at all.
+const CELLS_R0_HEIGHT_HASH := 2869371279
 
 func _test_f_cells_fingerprint() -> void:
 	print("\n[F] CELLS, radius 0: unchanged since before METRIC/radius (height hash)")
@@ -367,6 +375,72 @@ func _test_f_cells_fingerprint() -> void:
 	if h0 != CELLS_R0_HEIGHT_HASH or h1 == CELLS_R0_HEIGHT_HASH:
 		_fail += 1
 		print("    !! CELLS radius-0 output moved, or the control could not tell")
+	_completed += 1
+
+
+## `bedrock_gap` is an ABSOLUTE floor against the INPUT surface: no cell may finish more than the gap
+## below where it started. Two things are asserted, because the clamp has failed in both directions.
+##
+## Too loose: the CELLS branch used to bound the droplet's take by the WEIGHTED MEAN of its corners'
+## remaining room, while `lay_at` moves cell i by `amt * scale * w_i`. A mean is not a bound -- a corner
+## with no room left and half the weight still received half of it. On an 8 km world with a 2 m gap the
+## deepest cut was 3.186 m. Restore the mean and this fixture reports 3.813 m and 9991 cells past.
+##
+## Too tight: the first attempt to share METRIC's rule divided that mean by `scale`, which tightens as
+## resolution squared and halved the fine grid's erosion. So a gap far larger than any cut must be
+## EXACTLY a no-op -- byte-identical to no gap at all. That arm runs under METRIC as well as CELLS on
+## purpose: CELLS has `scale == 1`, so a `/ scale` term is invisible there and only METRIC can see it.
+##
+## The fixture's own control is the released run: if it does not itself cut past the floor, the clamped
+## run proves nothing, so `deepest released` is asserted to exceed the gap.
+func _test_w_bedrock_floor() -> void:
+	print("
+[W] bedrock_gap is an exact floor, and a slack one is a no-op")
+	var gw := 128
+	var rect := Rect2(0.0, 0.0, 256.0, 256.0)
+	var surf := _world_mound(gw, rect)
+	var gap := 2.0
+	var base := {"droplet_count": 60000, "seed": 7}
+	var deepest := func(p_h: PackedFloat32Array) -> float:
+		var d := 0.0
+		for i in p_h.size():
+			d = maxf(d, surf[i] - p_h[i])
+		return d
+	var solve := func(p_gap: float) -> PackedFloat32Array:
+		var p: Dictionary = base.duplicate()
+		if p_gap > 0.0:
+			p["bedrock_gap"] = p_gap
+		return Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, p)["height"]
+	var free: PackedFloat32Array = solve.call(0.0)
+	var held: PackedFloat32Array = solve.call(gap)
+	var slack: PackedFloat32Array = solve.call(400.0)
+	# METRIC is where `scale != 1`, so this is the arm that can see a resolution-dependent clamp term.
+	var m_base := {"units": 1, "droplet_density": 30.0, "step_length_m": 4.0, "max_lifetime": 30, "seed": 7}
+	var m_solve := func(p_gap: float) -> PackedFloat32Array:
+		var p: Dictionary = m_base.duplicate()
+		if p_gap > 0.0:
+			p["bedrock_gap"] = p_gap
+		return Pasture3DUtil.hydraulic_particle_solve_grid(surf, gw, gw, rect, p)["height"]
+	var m_free: PackedFloat32Array = m_solve.call(0.0)
+	var m_slack_diff := _max_abs_diff(m_solve.call(400.0), m_free)
+	var past := 0
+	for i in held.size():
+		if surf[i] - held[i] > gap + 1e-4:
+			past += 1
+	var d_free: float = deepest.call(free)
+	var d_held: float = deepest.call(held)
+	print("    deepest: released %.3f m (control, want > %.2f), held %.3f m | cells past the floor = %d" % [d_free, gap, d_held, past])
+	print("    a 400 m gap vs no gap: CELLS %.9f m, METRIC %.9f m (want exactly 0; METRIC cut %.3f m)"
+			% [_max_abs_diff(slack, free), m_slack_diff, deepest.call(m_free)])
+	if d_free <= gap:
+		_fail += 1
+		print("    !! the fixture never reached the floor, so the clamp was not tested")
+	if past > 0 or d_held > gap + 1e-4:
+		_fail += 1
+		print("    !! the floor leaked: a cell finished below input - bedrock_gap")
+	if _max_abs_diff(slack, free) != 0.0 or m_slack_diff != 0.0:
+		_fail += 1
+		print("    !! a non-binding gap changed the result -- the clamp carries a resolution-dependent term")
 	_completed += 1
 
 

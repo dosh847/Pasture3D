@@ -67,8 +67,16 @@ enum { UNITS_CELLS = 0, UNITS_METRIC = 1 }
 		gravity = maxf(v, 0.1)
 		_param_changed()
 
-## Bedrock elevation resistance gap (metres) preventing runaway hole gouging into flat terrain.
-@export_range(0.1, 50.0, 0.5) var bedrock_gap: float = 2.0:
+## Absolute floor on the cut, in metres below the **input** surface: no cell may finish more than
+## `bedrock_gap` below where it started. **0 disables it**, which is the default.
+##
+## It defaults off because it does not scale. A fixed 2 m was 5% of a 40 m mound and 0.25% of an 800 m
+## one, so on anything large it stopped being a safety rail and became the shape: measured at the old
+## default, 49.8% of eroding cells on a 400 m world were pinned at the cap, 80.6% at 2 km and 92.1% at
+## 8 km. A solver saturated against a constant is not eroding, and it reads as resolution-invariant
+## because the constant, not the physics, is setting the depth. Set it per-brush against that brush's
+## relief when you actually want a floor.
+@export_range(0.0, 200.0, 0.5, "or_greater") var bedrock_gap: float = 0.0:
 	set(v):
 		bedrock_gap = maxf(v, 0.0)
 		_param_changed()
@@ -276,7 +284,7 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 	var evaporation_rate: float = clampf(float(p_params.get("evaporation_rate", 0.01)), 0.0, 1.0)
 	var min_slope: float = maxf(0.0001, float(p_params.get("min_slope", 0.01)))
 	var gravity: float = maxf(0.1, float(p_params.get("gravity", 4.0)))
-	var bedrock_gap: float = maxf(0.0, float(p_params.get("bedrock_gap", 2.0)))
+	var bedrock_gap: float = maxf(0.0, float(p_params.get("bedrock_gap", 0.0)))
 	var ridge_forcing: float = maxf(0.0, float(p_params.get("ridge_forcing", 0.0)))
 	var rng_seed: int = int(p_params.get("seed", 1337))
 	var metric: bool = clampi(int(p_params.get("units", UNITS_CELLS)), 0, 1) == UNITS_METRIC
@@ -459,25 +467,20 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 					var ero: float = minf((cap - sed) * erosion_speed, -delta_h) * mask_val
 
 					if bedrock_gap > 0.0:
-						# CELLS: the weighted mean of the room above the floor. METRIC: the exact floor --
-						# see the native solver's twin of this block.
+						# The tightest cell binds: cell i moves by `ero * scale * w_i`, so `ero` may not
+						# exceed `room_i / (scale * w_i)` anywhere. See the native solver's twin of this
+						# block for why CELLS' old weighted mean was not a bound.
 						var fp: Array = []
 						if disc_erode:
 							fp = _disc_footprint(height, p_gw, p_gh, px, pz, cell_dx, cell_dz, radius_m)
 						var fi: PackedInt32Array = fp[0] if not fp.is_empty() else quad_i
 						var fw: PackedFloat64Array = fp[1] if not fp.is_empty() else quad_w
-						if metric:
-							var lim: float = INF
-							for k in fi.size():
-								if fw[k] > 0.0:
-									var room: float = maxf(0.0, height[fi[k]] - (p_surface[fi[k]] - bedrock_gap))
-									lim = minf(lim, room / (scale * fw[k]))
-							ero = minf(ero, lim)
-						else:
-							var max_allowed: float = 0.0
-							for k in fi.size():
-								max_allowed += fw[k] * maxf(0.0, height[fi[k]] - (p_surface[fi[k]] - bedrock_gap))
-							ero = minf(ero, max_allowed)
+						var lim: float = INF
+						for k in fi.size():
+							if fw[k] > 0.0:
+								var room: float = maxf(0.0, height[fi[k]] - (p_surface[fi[k]] - bedrock_gap))
+								lim = minf(lim, room / (scale * fw[k]))
+						ero = minf(ero, lim)
 
 					sed += ero
 					_lay(height, -ero * scale, disc_erode, quad_i, quad_w,
