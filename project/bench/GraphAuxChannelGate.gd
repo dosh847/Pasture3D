@@ -23,7 +23,8 @@
 #   [D] The channels are DISTINCT — a kernel that copied height into every aux buffer would satisfy
 #       [A]–[C] for every node whose channel 1 happens to correlate with its height.
 #   [E] An undeclared channel is still refused. `native_out_count()` is a promise about the kernel, and
-#       the value of the refusal is that it is still there for a channel nobody implemented.
+#       the value of the refusal is that it is still there for a channel nobody implemented — Mountain
+#       Range (Radial)'s `angle`.
 #
 # ---- WHAT THIS GATE CANNOT SAY ----
 #
@@ -191,18 +192,32 @@ func _authored_vs_program_gap(p_surf: PackedFloat32Array) -> void:
 # --- E. An undeclared channel is still refused ---------------------------------------------------------
 func _e_an_undeclared_channel_is_still_refused(p_surf: PackedFloat32Array) -> void:
 	print("[E] a channel above native_out_count() is refused, not served as zeros")
-	# DLA offers two output ports and has NO kernel op at all, so it declares 1 and must keep declaring
-	# it. This is the control for the whole gate: if the tap served any channel of anything, every
-	# comparison above would be measuring a machine that cannot say no.
-	var node := Pasture3DGraphNodeRegistry.create(&"dla")
+	# Mountain Range (Radial) offers two output ports — `height` and `angle` — and GRAPH_OP_MOUNTAIN_RANGE_
+	# RADIAL writes only the height, so it declares 1 and must keep declaring it. This is the control for
+	# the whole gate: if the tap served any channel of anything, every comparison above would be measuring
+	# a machine that cannot say no.
+	#
+	# This used to be DLA, on the grounds that it had "no kernel op at all". It has one now (e1a742f7), it
+	# writes both of its channels, and it correctly declares 2 — so the control was asserting a fact about
+	# the graph that had stopped being true, and failed the op for gaining the kernel the gate wants ops to
+	# have. The control has to be a channel NOBODY implemented, which `angle` still is.
+	var node := Pasture3DGraphNodeRegistry.create(&"mountain_range_radial")
 	if node == null:
-		_ok(false, "the registry does not know `dla`")
+		_ok(false, "the registry does not know `mountain_range_radial`")
 		return
-	print("    dla native_out_count = %d (want 1 — it has no kernel op)" % node.native_out_count())
-	_ok(node.native_out_count() == 1, "dla claims native channels it has no kernel to write")
+	print("    mountain_range_radial native_out_count = %d (want 1 — the kernel writes no `angle`)"
+			% node.native_out_count())
+	_ok(node.native_out_count() == 1, "mountain_range_radial claims native channels it has no kernel to write")
 	var g := _graph_of(node)
+	# The refusal must be a refusal, not a graph that failed to lower: an unlowered graph taps empty for
+	# EVERY channel, including the one the kernel does write, and would satisfy the assertion below for
+	# the wrong reason.
+	var base := _tap(g, 0)
+	print("    mountain_range_radial channel 0 served = %s (want true — the graph lowers)"
+			% str(not base.is_empty()))
+	_ok(not base.is_empty(), "mountain_range_radial did not lower at all, so its refusal of channel 1 says nothing")
 	var served := _tap(g, 1)
-	print("    dla channel 1 served = %s (want false)" % str(not served.is_empty()))
+	print("    mountain_range_radial channel 1 served = %s (want false)" % str(not served.is_empty()))
 	_ok(served.is_empty(), "an undeclared channel came back served — that field is zeros wearing a hat")
 
 

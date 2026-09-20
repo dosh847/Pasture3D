@@ -107,16 +107,44 @@ func _k_key_parity(p_op: StringName) -> void:
 	var native := g.native_supported()
 	var r2 := g.evaluate(GW, GH, RECT, null, surf)
 	var stale_same: bool = node._stale
+	var cached := _cache_channel_0(node)
 	var moved := surf.duplicate()
 	moved[GW * (GH / 2) + GW / 2] += 5.0
 	var r3 := g.evaluate(GW, GH, RECT, null, moved)
 	var stale_moved: bool = node._stale
+	# EVIDENCE OF SERVING, for a moved input that no longer matches the key.
+	#
+	# It used to be `r3 == r1`: a served solve was assumed to reproduce the frozen OUTPUT. That holds only
+	# for a solver whose output is its cache. DLA's is not — its cache is the unit massif and amplitude and
+	# the wired surface are applied after it (`serve_time_properties`), so a served DLA answers
+	# `moved + amplitude * massif` and the moved cell shows up in the output by design. The criterion read
+	# that as a re-solve and failed the op for doing exactly what its freeze promises.
+	#
+	# What "served" actually means is stated directly instead: the stored cache was neither re-solved nor
+	# re-adopted (same key, same channel bytes), and the two routes answer the moved input identically —
+	# which is the cross-route claim [K] owns, and is still `r3 == r1` for every solver that caches its
+	# whole output.
+	var cache_kept: bool = node._cache_key == key_gd and _max_abs_diff(cached, _cache_channel_0(node)) < EPS
+	g.force_gdscript_evaluation = true
+	var r3_gd := g.evaluate(GW, GH, RECT, null, moved)
+	g.force_gdscript_evaluation = false
 	var relief := _max_abs_diff(r1, surf)
-	print("    native=%s solve moved the surface by %.4f | served diff=%.6f not stale=%s | moved: diff=%.6f stale=%s key kept=%s"
-		% [native, relief, _max_abs_diff(r1, r2), not stale_same, _max_abs_diff(r1, r3), stale_moved, node._cache_key == key_gd])
+	print("    native=%s solve moved the surface by %.4f | served diff=%.6f not stale=%s | moved: route diff=%.6f stale=%s cache kept=%s"
+		% [native, relief, _max_abs_diff(r1, r2), not stale_same, _max_abs_diff(r3, r3_gd), stale_moved, cache_kept])
 	_check(native and relief > EPS and _max_abs_diff(r1, r2) < EPS and not stale_same
-			and _max_abs_diff(r1, r3) < EPS and stale_moved and node._cache_key == key_gd,
+			and _max_abs_diff(r3, r3_gd) < EPS and stale_moved and cache_kept,
 		"%s: key parity across routes failed" % p_op)
+
+
+## Channel 0 of whatever the freeze is currently holding, empty when it holds nothing. A solver caches an
+## Array of channel grids; the single-output ones cache the grid itself.
+func _cache_channel_0(p_node) -> PackedFloat32Array:
+	if p_node._cache.is_empty():
+		return PackedFloat32Array()
+	var v = p_node._cache[p_node._cache_key]
+	if v is Array:
+		return v[0] if (v.size() > 0 and v[0] is PackedFloat32Array) else PackedFloat32Array()
+	return v if v is PackedFloat32Array else PackedFloat32Array()
 
 
 # ---- [C] ---------------------------------------------------------------------------------------------
