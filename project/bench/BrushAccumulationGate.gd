@@ -14,6 +14,12 @@
 #       the ground below the brush's real row; control: `seat_trusts_cached_layer_id` climbs onto its own height
 #   [R] after a reload (`_layer_id` = -1) the snap reads below the brush's row, not the full composite; same control
 #   [F] `_terrain_fields` with `_layer_id` = -1 describes the ground below, not the brush's own top; same control
+#   [C] a CLIPPED bake writes nothing outside its clip (2026-09-20). The batched tile-at-a-time write is
+#       selected by `!composite`, which is exactly the dirty-rect bake -- the only caller that sets a clip
+#       at all -- and it used to ignore it, so a brush stamped its whole grid while the rect path had
+#       cleared only the box. NEEDS A FIELD STEP: without one `pre_clip` keeps the pre-pass inside the box
+#       and the buffer is still NaN outside, so the write has nothing to leak. Controls: the same bake must
+#       move the ground INSIDE the clip, and an unclipped bake must move BOTH probes.
 #   [O] repeated RECT bakes of one of two OVERLAPPING layer-mates leave the shared cells where they were.
 #       The rect path clears its box and repaints every mate intersecting it, so a mate that is repainted
 #       without that cell having been cleared adds its stamp again on every bake.
@@ -21,7 +27,7 @@
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/BrushAccumulationGate.tscn
 extends Node
 
-const CRITERIA := 7
+const CRITERIA := 10
 const GROUND_OWNER := "gate:ground"
 const RISE := 4.0
 var RS := 64
@@ -43,7 +49,7 @@ func _ready() -> void:
 	RS = _terrain.region_size
 	# The movable ground: an ADD layer created first, so every brush row lands above it.
 	_terrain.data.create_owned_layer_typed(GROUND_OWNER, "Ground", 1, Pasture3DTerrainBrush.PASTURE_3D_MAPTYPE_HEIGHT)
-	for f in [_s, _e, _g, _l, _r, _f, _o]:
+	for f in [_s, _e, _g, _l, _r, _f, _o, _c]:
 		await f.call()
 	if _ran != CRITERIA:
 		_check("completed", false, "%d of %d criteria ran" % [_ran, CRITERIA])
@@ -191,6 +197,71 @@ func _o() -> void:
 	if br > 0:
 		_terrain.data.layer_remove(br)
 	lb.free()
+
+
+## A clip says WHERE, so a bake that honours it inside the box and not outside has not honoured it.
+##
+## Driven by `slope_angle`, not `height`: this mound's flanks are slope-driven and `height` moves nothing,
+## so a fixture that varies it compares a shape with itself and passes on any build.
+##
+## The SMOOTH modifier is load-bearing. It is a field step, and a field step is what turns `pre_clip` off so
+## the pre-pass computes cells outside the clip at all. Without it the buffer is still NaN out there and the
+## unclipped write leaks nothing -- the criterion then passes on a deliberately broken build, which is how
+## the first four versions of it fooled me.
+func _c() -> void:
+	var m := _mound("Clipped", 32, 32, 14)
+	m.snap_to_surface = false
+	m.slope_angle = 30.0
+	var sm := Pasture3DNodeSmooth.new()
+	sm.passes = 2
+	var mods: Array[Pasture3DNode] = [sm]
+	m.modifiers = mods
+	_set_ground(0.0)
+	var p_in := Vector3(26, 0, 32)
+	var p_out := Vector3(40, 0, 32)
+	var all := AABB(Vector3(-4, -1000, -4), Vector3(RS + 8, 2000, RS + 8))
+	_bake(m)
+	await _settle()
+	_terrain.data.composite_area(all, false)
+	var a_in: float = _terrain.data.get_height(p_in)
+	var a_out: float = _terrain.data.get_height(p_out)
+	# The shape the second bake writes, measured UNCLIPPED first. Both probes must move, or the clipped bake
+	# below has nothing to leak and the criterion is vacuous whichever way it reads.
+	m.slope_angle = 55.0
+	m.clear_stamp_cache()
+	m._dirty_splines = {}
+	_bake(m)
+	await _settle()
+	_terrain.data.composite_area(all, false)
+	var b_in: float = _terrain.data.get_height(p_in)
+	var b_out: float = _terrain.data.get_height(p_out)
+	# Back to the first shape, then repaint the second one through a clip that covers p_in and not p_out.
+	m.slope_angle = 30.0
+	m.clear_stamp_cache()
+	_bake(m)
+	await _settle()
+	var lid := _row(m._layer_owner)
+	m.slope_angle = 55.0
+	m.clear_stamp_cache()
+	m._layer_id = lid
+	m._clip_aabb = AABB(Vector3(10, -1000, 10), Vector3(22, 2000, 44)) # x[10..32]: p_in inside, p_out outside
+	m._defer_composite = true # `!composite` is what selects the batched write
+	m._paint_into(lid, m._get_blend_mode())
+	m._defer_composite = false
+	m._clip_aabb = AABB()
+	_terrain.data.composite_area(all, false)
+	await _settle()
+	var c_in: float = _terrain.data.get_height(p_in)
+	var c_out: float = _terrain.data.get_height(p_out)
+	_check("C clipped bake stays in its box", absf(c_out - a_out) < 0.01,
+			"outside the clip: %.4f m, was %.4f m before the bake and %.4f m when the same bake ran unclipped" % [c_out, a_out, b_out])
+	_check("C control (inside the clip)", absf(c_in - b_in) < 0.01 and absf(b_in - a_in) > 0.01,
+			"inside the clip: %.4f m, and the unclipped bake put it at %.4f m (from %.4f m) -- if these disagree the clipped bake painted nothing" % [c_in, b_in, a_in])
+	_check("C control (the shape really changes)", absf(b_out - a_out) > 0.01,
+			"unclipped, the second shape moved the outside probe %.4f m -- if this is 0 nothing could leak and the criterion above is vacuous" % (b_out - a_out))
+	_ran += 3
+	_drop([m])
+	await _settle()
 
 
 func _s() -> void:
