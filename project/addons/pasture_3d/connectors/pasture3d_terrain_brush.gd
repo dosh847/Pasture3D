@@ -2237,6 +2237,12 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 		for lyr_idx in _clearable_layers_for_owner(owner):
 			terrain.data.clear_layer_in_area(lyr_idx, clip_box, false)
 		terrain.data.composite_area(clip_box, false)
+		# Split the ring reading in two. The clear drops WHOLE TILES, so it can reach past the box on its
+		# own; the paint is clipped to the box and should not reach past it at all. One number for the pair
+		# cannot say which of them left the ring moved, and they call for opposite fixes -- grow the box to
+		# the tiles the clear actually drops, versus stop a write escaping its clip.
+		var ring_after_clear := _ring_probe_heights(ring_pts)
+		_report_ring_probe(ring_pts, ring_before, " (the CLEAR alone)")
 		var t_clear := Time.get_ticks_usec()
 		# Re-seat ONLY the points the user actually moved, against the freshly-cleared base inside the box.
 		# Snapping every point here is the snap-to-self regression: an unmoved point elsewhere reads terrain
@@ -2312,7 +2318,8 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 		# Composite the whole footprint ONCE instead of per painted pixel — the big win for large edits.
 		terrain.data.composite_area(clip_box, false)
 		_report_box_probe(clip_box, probe_before)
-		_report_ring_probe(ring_pts, ring_before)
+		_report_ring_probe(ring_pts, ring_before, " (clear and paint together)")
+		_report_ring_probe(ring_pts, ring_after_clear, " (the PAINT alone)")
 		var t_composite := Time.get_ticks_usec()
 		if log_bake_timing:
 			_log_bake_timing(clip_box, box_tools.size(), t_start, t_clear, t_snap, t_paint, t_composite, Time.get_ticks_usec())
@@ -3240,7 +3247,7 @@ func _ring_probe_heights(p_pts: PackedVector3Array) -> PackedFloat32Array:
 
 ## Report any ground the bake moved OUTSIDE the box it cleared. Silent when there is none, so a trace that
 ## never prints this line is a trace in which every bake stayed inside its box.
-func _report_ring_probe(p_pts: PackedVector3Array, p_before: PackedFloat32Array) -> void:
+func _report_ring_probe(p_pts: PackedVector3Array, p_before: PackedFloat32Array, p_phase: String = "") -> void:
 	if p_pts.is_empty() or p_before.size() != p_pts.size():
 		return
 	var worst := 0.0
@@ -3263,8 +3270,8 @@ func _report_ring_probe(p_pts: PackedVector3Array, p_before: PackedFloat32Array)
 			worst_w = p_pts[i]
 	if moved == 0:
 		return
-	Pasture3DBakeTrace.mark("%s rect bake WROTE OUTSIDE ITS BOX: worst %+.4f m at (%.1f, %.1f); %d of %d ring sample(s) moved, net %+.4f m" % [
-			name, worst, worst_w.x, worst_w.z, moved, counted, total])
+	Pasture3DBakeTrace.mark("%s rect bake WROTE OUTSIDE ITS BOX%s: worst %+.4f m at (%.1f, %.1f); %d of %d ring sample(s) moved, net %+.4f m" % [
+			name, p_phase, worst, worst_w.x, worst_w.z, moved, counted, total])
 
 
 ## at PROBE_N per side so a kilometre-wide box costs the same as a small one; the lattice is anchored to the
