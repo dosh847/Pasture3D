@@ -127,6 +127,21 @@ func _max_bake_scale_index() -> int:
 	return 4
 
 
+## ---- Bake All Brushes (§9) ------------------------------------------------------------------------------
+
+## Re-solve this Layer and every brush under it, from scratch, as one undo action.
+##
+## The difference from Refresh is the CACHE DROP. Refresh re-runs the bake, but a frozen erosion solve and a
+## grown relief field are both served from cache, so on exactly the brushes this button exists for Refresh
+## does visibly nothing. This drops those caches first, which is the same reason the SimManager's Bake All
+## Brushes does (see `_bake_all_step` there); that one works per layer owner, and a Layer brush IS one owner,
+## so this is that button scoped to this Layer.
+@export_tool_button("Bake All Brushes") var _bake_all_btn = bake_all_brushes
+
+## The last Bake All Brushes run's report. Not stored in the scene: it describes a run, not a setting. Set by
+## both entry points, so the editor button and a script see the same thing.
+var last_bake_report: Dictionary = {}
+
 ## ---- Stage 1: the base (§6.1, phase 3) ------------------------------------------------------------------
 
 ## Append only: the int is stored.
@@ -564,6 +579,81 @@ func bake_layer_run(p_record_undo: bool = false, p_lead: Node = null, p_member_b
 	# Every pass of the member stage has repainted what the base moved; the next edit starts from nothing.
 	_base_change = AABB()
 	_commit_deferred_undo(owner, before, can_undo)
+
+
+## Bake All Brushes, the editor front end: drops the caches, then runs the Layer deferred so the editor keeps
+## drawing and Cancel can reach the brush that is actually solving.
+func bake_all_brushes() -> void:
+	var ctx := _bake_all_begin()
+	if not bool(ctx["ok"]):
+		last_bake_report = ctx["report"]
+		return
+	if _wants_deferred_bake():
+		await bake_layer_run(true)
+	else:
+		bake_layer(true)
+	var rep: Dictionary = ctx["report"]
+	rep["cancelled"] = _cancel
+	last_bake_report = rep
+	print(("%s: Bake All Brushes %s — the base and %d member brush(es), %d frozen solve(s) and %d grown "
+		+ "relief field(s) cleared.")
+		% [name, "CANCELLED" if bool(rep["cancelled"]) else "done", int(rep["members"]),
+			int(rep["cleared"]), int(rep["grown"])])
+
+
+## The scripted entry point, so gates and tools get a report back and no frames are yielded.
+##
+## `{ok, reason, members, cleared, grown, cancelled}`. Separate from the button for the same reason the
+## SimManager's `bake_all_brushes_now` is: a coroutine that finishes some frames later cannot be asserted on,
+## and `EditorUndoRedoManager` does not exist headless, so the undo has to be reachable without it.
+func bake_all_brushes_now(p_record_undo: bool = false) -> Dictionary:
+	var ctx := _bake_all_begin()
+	if not bool(ctx["ok"]):
+		last_bake_report = ctx["report"]
+		return ctx["report"]
+	bake_layer(p_record_undo)
+	var rep: Dictionary = ctx["report"]
+	rep["cancelled"] = _cancel
+	last_bake_report = rep
+	return rep
+
+
+## Validate, then drop every cache that would let the bake serve an old answer. `ok` false means nothing was
+## touched and `report.reason` says why.
+##
+## Unlike the SimManager's loop there is nothing to clear incrementally: a Layer brush is ONE layer owner, so
+## there is no second owner that a cancel could leave half-cleared. Everything under this Layer is dropped up
+## front, and a cancel then leaves this Layer showing its un-eroded shape -- which it reports.
+func _bake_all_begin() -> Dictionary:
+	var report := {"ok": false, "reason": "", "members": 0, "cleared": 0, "grown": 0, "cancelled": false}
+	if not is_configured():
+		report["reason"] = "no Pasture3D terrain assigned"
+		push_warning("%s: %s." % [name, report["reason"]])
+		return {"ok": false, "report": report}
+	if _layer_run_active or _erosion_running:
+		report["reason"] = "a solve is already running"
+		push_warning("%s: %s." % [name, report["reason"]])
+		return {"ok": false, "report": report}
+	ensure_rows()
+	_cancel = false
+	var mem := members()
+	report["members"] = mem.size()
+	# The Layer itself first: its own stack is the base stage, so its frozen solves are the base's.
+	for b in ([self] as Array) + mem:
+		if not is_instance_valid(b):
+			continue
+		report["cleared"] = int(report["cleared"]) + b.clear_erosion_caches()
+		# A grown DLA mountain is frozen for the same reason a solve is, so it needs the same clear: without
+		# it Bake All serves the field it already had.
+		report["grown"] = int(report["grown"]) + b.clear_relief_growth()
+		# Bake All is never a preview: full resolution until the brush is next edited.
+		b._preview_full_res = true
+		b._stamp_cache.clear()
+	# Stage 1 skips on a matching key, so the key has to go or the base does not re-solve at all.
+	_base_key = ""
+	work_log.append("clear")
+	report["ok"] = true
+	return {"ok": true, "report": report}
 
 
 func cancel_erosion() -> void:
