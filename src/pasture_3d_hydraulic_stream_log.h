@@ -25,6 +25,9 @@ struct HydraulicStreamLogParams {
 	float bank_smoothing = 0.1f;
 	float peak_preservation = 0.5f;
 	float gradient_power = 0.8f;
+	// Fill interior depressions on the routing surface before flow accumulates. Default true, and the
+	// GDScript oracle defaults the same way -- a gate that omits the key must exercise the same path.
+	bool fill_depressions = true;
 	PackedFloat32Array mask;
 
 	static HydraulicStreamLogParams from_dict(const Dictionary &p_dict);
@@ -35,6 +38,9 @@ struct HydraulicStreamLogResult {
 	PackedFloat32Array height;
 	PackedFloat32Array channel_mask;
 	PackedFloat32Array flow_accumulation;
+	// Metres of material removed, summed over passes. channel_mask is the same cut divided by a PARAMETER
+	// and clamped to 1, so it saturates; this is the depth downstream masks should be derived from.
+	PackedFloat32Array erosion_depth;
 
 	Dictionary to_dict() const;
 };

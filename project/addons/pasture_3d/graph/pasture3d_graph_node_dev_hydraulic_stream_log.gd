@@ -57,6 +57,13 @@ extends Pasture3DGraphSolverNode
 		gradient_power = clampf(v, 0.1, 2.0)
 		_param_changed()
 
+## Fill interior depressions on the ROUTING surface before flow accumulates, so drainage crosses basins
+## instead of dying in them. Off reproduces the pre-fill behaviour, where every pit is a sink.
+@export var fill_depressions: bool = true:
+	set(v):
+		fill_depressions = v
+		_param_changed()
+
 @export_group("Evaluation")
 
 @export_tool_button("Bake Stream-Log Erosion") var _bake_btn = clear_cache
@@ -96,15 +103,15 @@ func input_port_types() -> PackedInt32Array:
 
 
 func output_count() -> int:
-	return 3
+	return 4
 
 
 func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "channel_mask", "flow_accumulation"])
+	return PackedStringArray(["height", "channel_mask", "flow_accumulation", "erosion_depth"])
 
 
 func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.FIELD])
+	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.FIELD, PortType.FIELD])
 
 
 ## The oracle is what this node IS, so it has to be what this node RUNS. Without these two, the class
@@ -137,6 +144,7 @@ func _params_for_oracle(p_mask: PackedFloat32Array) -> Dictionary:
 		"bank_smoothing": bank_smoothing,
 		"peak_preservation": peak_preservation,
 		"gradient_power": gradient_power,
+		"fill_depressions": fill_depressions,
 		"mask": p_mask,
 	}
 
@@ -149,16 +157,19 @@ func _param_changed() -> void:
 ## Pure GDScript reference oracle for logarithmic stream power erosion.
 static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_params: Dictionary) -> Array:
 	if p_gw < 2 or p_gh < 2 or p_surface.size() != p_gw * p_gh:
-		return [PackedFloat32Array(), PackedFloat32Array(), PackedFloat32Array()]
+		return [PackedFloat32Array(), PackedFloat32Array(), PackedFloat32Array(), PackedFloat32Array()]
 
 	var n: int = p_gw * p_gh
 	var height := p_surface.duplicate()
 	var channel_mask := PackedFloat32Array()
 	var flow_accum := PackedFloat32Array()
+	var erosion_depth := PackedFloat32Array()
 	channel_mask.resize(n)
 	channel_mask.fill(0.0)
 	flow_accum.resize(n)
 	flow_accum.fill(0.0)
+	erosion_depth.resize(n)
+	erosion_depth.fill(0.0)
 
 	var iterations: int = maxi(1, int(p_params.get("iterations", 15)))
 	var incision_rate: float = maxf(0.0, float(p_params.get("incision_rate", 0.15)))
@@ -168,6 +179,7 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 	var bank_smoothing: float = clampf(float(p_params.get("bank_smoothing", 0.1)), 0.0, 0.5)
 	var peak_preservation: float = clampf(float(p_params.get("peak_preservation", 0.5)), 0.0, 1.0)
 	var gradient_power: float = clampf(float(p_params.get("gradient_power", 0.8)), 0.1, 2.0)
+	var fill_depressions: bool = bool(p_params.get("fill_depressions", true))
 
 	var mask: PackedFloat32Array = p_params.get("mask", PackedFloat32Array())
 	var has_mask: bool = (mask.size() == n)
@@ -196,13 +208,20 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 			return ha > hb
 		)
 
+		# 1b. Depression-filled ROUTING surface. Flow accumulation reads this; every other stage still
+		# reads `height`, so filling changes which way water goes without lifting the terrain. Without it a
+		# cell whose eight neighbours are all higher has sum_drop == 0 and absorbs its whole upstream
+		# catchment, so the drainage network breaks at every pit instead of reaching the border the way
+		# Hesiod's stream-power nodes do.
+		var route: PackedFloat32Array = _fill_depressions(height, p_gw, p_gh, maxf(dx, dz)) if fill_depressions else height
+
 		# 2. Accumulate drainage flow using MD8 multi-direction routing
 		var current_flow := PackedFloat32Array()
 		current_flow.resize(n)
 		current_flow.fill(1.0)
 
 		for idx in order:
-			var h_c: float = height[idx]
+			var h_c: float = route[idx]
 			if not is_finite(h_c):
 				continue
 			var cx: int = idx % p_gw
@@ -216,7 +235,7 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 				var nz: int = cz + n_dz[k]
 				if nx >= 0 and nx < p_gw and nz >= 0 and nz < p_gh:
 					var n_idx: int = nz * p_gw + nx
-					var h_n: float = height[n_idx]
+					var h_n: float = route[n_idx]
 					if is_finite(h_n) and h_n < h_c:
 						var drop: float = (h_c - h_n) / n_dist[k]
 						var weighted_drop: float = pow(drop, 1.3)
@@ -242,6 +261,10 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 			var row: int = iz * p_gw
 			for ix in range(p_gw):
 				var idx: int = row + ix
+				# Discharge is a hydrological fact about the cell, not a product of the erosion it was
+				# allowed to do, so it is published before the finite and mask early-outs reject the cell.
+				flow_accum[idx] = current_flow[idx]
+
 				var h_c: float = height[idx]
 				if not is_finite(h_c):
 					continue
@@ -294,8 +317,6 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 					if iz > 0: incision_map[(iz - 1) * p_gw + ix] += incision * neighbor_weight
 					if iz < p_gh - 1: incision_map[(iz + 1) * p_gw + ix] += incision * neighbor_weight
 
-				flow_accum[idx] = current_flow[idx]
-
 		# 4. Apply incision with base-level descent clamping
 		var next_height := height.duplicate()
 		for iz in range(p_gh):
@@ -322,8 +343,138 @@ static func solve_oracle(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_
 					var max_cut: float = maxf(0.0, (h_c - min_downhill) + 0.05 * cut)
 					cut = minf(cut, max_cut)
 					next_height[idx] = h_c - cut
+					# Metres of rock removed, summed over passes. channel_mask below is the same cut divided
+					# by a PARAMETER and clamped, so it saturates and cannot be converted back to a depth.
+					erosion_depth[idx] += cut
 					channel_mask[idx] = maxf(channel_mask[idx], clampf(cut / (incision_rate * 2.0 + 1.0e-5), 0.0, 1.0))
 
 		height = next_height
 
-	return [height, channel_mask, flow_accum]
+	return [height, channel_mask, flow_accum, erosion_depth]
+
+
+## Priority-Flood + epsilon depression filling, returning a ROUTING surface: every finite cell gets a
+## strictly descending path to a drain, so MD8 accumulation never stalls in a pit.
+##
+## The order cells are popped in is a STRICT TOTAL order — (level ascending, then cell index ascending) —
+## which is what makes this reproducible in the native twin. A heap keyed on level alone leaves ties to the
+## heap's internal layout, and the two implementations would then disagree on plateaus.
+##
+## `p_eps` lifts each filled cell above the one that flooded it. It has to be large enough that the lift
+## survives stage 2's `sum_drop > 1e-6` cutoff after drop^1.3 — hence a fraction of the CELL SIZE rather
+## than an absolute metre value, so it holds at every terrain scale. The lift lands only on this surface;
+## nothing downstream of here reads it.
+static func _fill_depressions(p_height: PackedFloat32Array, p_gw: int, p_gh: int, p_cell: float) -> PackedFloat32Array:
+	var n: int = p_gw * p_gh
+	var filled := p_height.duplicate()
+	var eps: float = 1.0e-3 * p_cell
+
+	var closed := PackedByteArray()
+	closed.resize(n)
+	closed.fill(0)
+
+	# Heap of (level, idx), parallel arrays. Plain `Array`, not Packed — the push/pop helpers mutate these
+	# in place, and a Packed array is a VALUE type in GDScript, so they would only ever reorder a copy.
+	# Levels always come from `filled`, a PackedFloat32Array, so every level pushed is already rounded to
+	# float32 and the native twin rounds at the same point.
+	var h_lvl: Array[float] = []
+	var h_idx: Array[int] = []
+
+	# Seeds: the border, plus any finite cell touching a non-finite one. Stage 2 treats a non-finite cell as
+	# absorbing, so it is a drain here too — otherwise a basin walled in by NaN would never be reached.
+	for i in range(n):
+		var hv: float = p_height[i]
+		if not is_finite(hv):
+			continue
+		var ix: int = i % p_gw
+		var iz: int = i / p_gw
+		var is_seed: bool = (ix == 0 or iz == 0 or ix == p_gw - 1 or iz == p_gh - 1)
+		if not is_seed:
+			for k in range(8):
+				var nx: int = ix + _FILL_DX[k]
+				var nz: int = iz + _FILL_DZ[k]
+				if nx >= 0 and nx < p_gw and nz >= 0 and nz < p_gh:
+					if not is_finite(p_height[nz * p_gw + nx]):
+						is_seed = true
+						break
+		if is_seed:
+			closed[i] = 1
+			_heap_push(h_lvl, h_idx, filled[i], i)
+
+	while h_idx.size() > 0:
+		var lvl: float = h_lvl[0]
+		var idx: int = h_idx[0]
+		_heap_pop(h_lvl, h_idx)
+		var cx: int = idx % p_gw
+		var cz: int = idx / p_gw
+		for k in range(8):
+			var nx: int = cx + _FILL_DX[k]
+			var nz: int = cz + _FILL_DZ[k]
+			if nx < 0 or nx >= p_gw or nz < 0 or nz >= p_gh:
+				continue
+			var n_idx: int = nz * p_gw + nx
+			if closed[n_idx] != 0:
+				continue
+			if not is_finite(p_height[n_idx]):
+				continue
+			closed[n_idx] = 1
+			filled[n_idx] = maxf(p_height[n_idx], lvl + eps)
+			_heap_push(h_lvl, h_idx, filled[n_idx], n_idx)
+
+	return filled
+
+
+const _FILL_DX: Array[int] = [-1, 1, 0, 0, -1, 1, -1, 1]
+const _FILL_DZ: Array[int] = [0, 0, -1, 1, -1, -1, 1, 1]
+
+
+## True when (a_lvl, a_idx) orders before (b_lvl, b_idx). The index tie-break is what makes the fill order
+## unique; see _fill_depressions.
+static func _heap_less(p_a_lvl: float, p_a_idx: int, p_b_lvl: float, p_b_idx: int) -> bool:
+	if p_a_lvl != p_b_lvl:
+		return p_a_lvl < p_b_lvl
+	return p_a_idx < p_b_idx
+
+
+static func _heap_push(p_lvl: Array[float], p_idx: Array[int], p_level: float, p_cell: int) -> void:
+	p_lvl.push_back(p_level)
+	p_idx.push_back(p_cell)
+	var i: int = p_idx.size() - 1
+	while i > 0:
+		var parent: int = (i - 1) / 2
+		if not _heap_less(p_lvl[i], p_idx[i], p_lvl[parent], p_idx[parent]):
+			break
+		var tl: float = p_lvl[i]
+		var ti: int = p_idx[i]
+		p_lvl[i] = p_lvl[parent]
+		p_idx[i] = p_idx[parent]
+		p_lvl[parent] = tl
+		p_idx[parent] = ti
+		i = parent
+
+
+static func _heap_pop(p_lvl: Array[float], p_idx: Array[int]) -> void:
+	var last: int = p_idx.size() - 1
+	p_lvl[0] = p_lvl[last]
+	p_idx[0] = p_idx[last]
+	p_lvl.resize(last)
+	p_idx.resize(last)
+	var size: int = p_idx.size()
+	var i: int = 0
+	while true:
+		var l: int = 2 * i + 1
+		var r: int = l + 1
+		var best: int = i
+		if l < size and _heap_less(p_lvl[l], p_idx[l], p_lvl[best], p_idx[best]):
+			best = l
+		if r < size and _heap_less(p_lvl[r], p_idx[r], p_lvl[best], p_idx[best]):
+			best = r
+		if best == i:
+			break
+		var tl: float = p_lvl[i]
+		var ti: int = p_idx[i]
+		p_lvl[i] = p_lvl[best]
+		p_idx[i] = p_idx[best]
+		p_lvl[best] = tl
+		p_idx[best] = ti
+		i = best
