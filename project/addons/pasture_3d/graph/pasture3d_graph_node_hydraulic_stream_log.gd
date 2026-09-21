@@ -6,8 +6,9 @@
 #
 # ---- Outputs ----
 #   port 0  "height"             HEIGHT  eroded surface elevation (metres)
-#   port 1  "channel_mask"       MASK    carved stream channel presence
-#   port 2  "flow_accumulation"  MASK    drainage catchment flow discharge
+#   port 1  "channel_mask"       MASK    carved stream channel presence, 0..1
+#   port 2  "flow_accumulation"  FIELD   drainage catchment flow discharge, in cells
+#   port 3  "erosion_depth"      FIELD   material removed by incision (metres, summed over passes)
 @tool
 class_name Pasture3DGraphNodeHydraulicStreamLog
 extends Pasture3DGraphSolverNode
@@ -63,6 +64,13 @@ extends Pasture3DGraphSolverNode
 		_param_changed()
 
 
+## Fill interior depressions on the ROUTING surface before flow accumulates, so drainage crosses basins
+## instead of dying in them. Off reproduces the pre-fill behaviour, where every pit is a sink.
+@export var fill_depressions: bool = true:
+	set(v):
+		fill_depressions = v
+		_param_changed()
+
 @export_group("Evaluation")
 
 @export_tool_button("Bake Stream-Log Erosion") var _bake_btn = clear_cache
@@ -90,6 +98,7 @@ func native_lower() -> Dictionary:
 	p[5] = bank_smoothing
 	p[6] = peak_preservation
 	p[7] = gradient_power
+	p[8] = 1.0 if fill_depressions else 0.0
 	return {"params": p}
 
 
@@ -136,7 +145,7 @@ func input_unwired_default(p_port: int) -> float:
 
 
 func output_count() -> int:
-	return 3
+	return 4
 
 
 ## The channels the NATIVE op writes, which is now every channel this node offers.
@@ -146,15 +155,15 @@ func output_count() -> int:
 ## refusal is graph-wide: reading `channel_mask` off this node dropped the whole graph, erosion and all, onto
 ## the GDScript evaluator. The solver had already computed the field and the op was discarding it.
 func native_out_count() -> int:
-	return 3 # height, channel_mask, flow_accumulation
+	return 4 # height, channel_mask, flow_accumulation, erosion_depth
 
 
 func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "channel_mask", "flow_accumulation"])
+	return PackedStringArray(["height", "channel_mask", "flow_accumulation", "erosion_depth"])
 
 
 func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.FIELD])
+	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.FIELD, PortType.FIELD])
 
 
 func node_warnings() -> PackedStringArray:
@@ -203,20 +212,22 @@ func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect:
 		"bank_smoothing": bank_smoothing,
 		"peak_preservation": peak_preservation,
 		"gradient_power": gradient_power,
+		"fill_depressions": fill_depressions,
 		"mask": p_mask,
 	}
 
 	if not ClassDB.class_has_method("Pasture3DUtil", "hydraulic_stream_log_solve_grid"):
 		push_error("[Pasture3D] Pasture3DUtil.hydraulic_stream_log_solve_grid is not bound. Rebuild GDExtension.")
-		return [p_surface.duplicate(), Pasture3DGraphOps.zeros(n), Pasture3DGraphOps.zeros(n)]
+		return [p_surface.duplicate(), Pasture3DGraphOps.zeros(n), Pasture3DGraphOps.zeros(n), Pasture3DGraphOps.zeros(n)]
 
 	var res: Dictionary = Pasture3DUtil.hydraulic_stream_log_solve_grid(p_surface, p_gw, p_gh, p_rect, params)
 	if not bool(res.get("ok", false)):
 		push_error("[Pasture3D] Hydraulic stream log native solve failed.")
-		return [p_surface.duplicate(), Pasture3DGraphOps.zeros(n), Pasture3DGraphOps.zeros(n)]
+		return [p_surface.duplicate(), Pasture3DGraphOps.zeros(n), Pasture3DGraphOps.zeros(n), Pasture3DGraphOps.zeros(n)]
 
 	return [
 		res["height"] as PackedFloat32Array,
 		res["channel_mask"] as PackedFloat32Array,
 		res["flow_accumulation"] as PackedFloat32Array,
+		res["erosion_depth"] as PackedFloat32Array,
 	]

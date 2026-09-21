@@ -10,6 +10,7 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <queue>
 #include <vector>
 
 using namespace godot;
@@ -40,6 +41,9 @@ HydraulicStreamLogParams HydraulicStreamLogParams::from_dict(const Dictionary &p
 	if (p_dict.has("gradient_power")) {
 		p.gradient_power = std::clamp((float)p_dict["gradient_power"], 0.1f, 2.0f);
 	}
+	if (p_dict.has("fill_depressions")) {
+		p.fill_depressions = (bool)p_dict["fill_depressions"];
+	}
 	if (p_dict.has("mask")) {
 		p.mask = p_dict["mask"];
 	}
@@ -52,6 +56,7 @@ Dictionary HydraulicStreamLogResult::to_dict() const {
 	d["height"] = height;
 	d["channel_mask"] = channel_mask;
 	d["flow_accumulation"] = flow_accumulation;
+	d["erosion_depth"] = erosion_depth;
 	return d;
 }
 
@@ -136,6 +141,101 @@ static inline double pow_fast(double p_x, double p_e) {
 	return std::pow(p_x, p_e);
 }
 
+// Priority-Flood + epsilon depression filling, producing a ROUTING surface on which every finite cell has
+// a strictly descending path to a drain.
+//
+// Pop order is a STRICT TOTAL order -- level ascending, then cell index ascending -- so the filled surface
+// does not depend on the heap's internal layout. That is what lets a std::priority_queue here and the
+// hand-rolled binary heap in the GDScript oracle produce the same bytes: the SEQUENCE of pops is unique, so
+// how each container reaches it does not matter. A heap keyed on level alone would leave plateau ties to
+// whichever container is asked, and the parity gate would then fail on flat ground only.
+//
+// The arithmetic deliberately mirrors the oracle line for line: the new level is computed in DOUBLE and
+// rounded to float32 exactly once, on the store into `r_filled`, and it is the ROUNDED value that goes back
+// on the heap. Rounding before the max instead of after moves 1-ulp cases.
+static void fill_depressions(const std::vector<float> &p_height, int p_gw, int p_gh, double p_cell,
+		std::vector<float> &r_filled) {
+	const int n = p_gw * p_gh;
+	r_filled.assign(p_height.begin(), p_height.end());
+
+	// A fraction of the CELL SIZE, not an absolute metre value: the lift has to survive stage 2's
+	// `sum_drop > 1e-6` cutoff after drop^1.3, and a drop is a lift divided by a distance. Tying it to the
+	// cell keeps that drop near 1e-3 at every terrain scale. Nothing outside this function reads the lift.
+	const double eps = 1.0e-3 * p_cell;
+
+	const int f_dx[8] = { -1, 1, 0, 0, -1, 1, -1, 1 };
+	const int f_dz[8] = { 0, 0, -1, 1, -1, -1, 1, 1 };
+
+	struct Entry {
+		float level;
+		int idx;
+	};
+	struct Greater {
+		bool operator()(const Entry &a, const Entry &b) const {
+			// Inverted: std::priority_queue pops the LARGEST, so "greater" here gives a min-heap.
+			if (a.level != b.level) {
+				return a.level > b.level;
+			}
+			return a.idx > b.idx;
+		}
+	};
+	std::priority_queue<Entry, std::vector<Entry>, Greater> heap;
+
+	std::vector<uint8_t> closed((size_t)n, 0);
+
+	// Seeds: the border, plus any finite cell touching a non-finite one. Stage 2 treats a non-finite cell as
+	// absorbing, so it drains here too -- otherwise a basin walled in by NaN would never be reached and would
+	// stay a sink.
+	for (int i = 0; i < n; i++) {
+		if (!std::isfinite(p_height[i])) {
+			continue;
+		}
+		const int ix = i % p_gw;
+		const int iz = i / p_gw;
+		bool is_seed = (ix == 0 || iz == 0 || ix == p_gw - 1 || iz == p_gh - 1);
+		if (!is_seed) {
+			for (int k = 0; k < 8; k++) {
+				const int nx = ix + f_dx[k];
+				const int nz = iz + f_dz[k];
+				if (nx >= 0 && nx < p_gw && nz >= 0 && nz < p_gh) {
+					if (!std::isfinite(p_height[nz * p_gw + nx])) {
+						is_seed = true;
+						break;
+					}
+				}
+			}
+		}
+		if (is_seed) {
+			closed[(size_t)i] = 1;
+			heap.push({ r_filled[i], i });
+		}
+	}
+
+	while (!heap.empty()) {
+		const Entry e = heap.top();
+		heap.pop();
+		const int cx = e.idx % p_gw;
+		const int cz = e.idx / p_gw;
+		for (int k = 0; k < 8; k++) {
+			const int nx = cx + f_dx[k];
+			const int nz = cz + f_dz[k];
+			if (nx < 0 || nx >= p_gw || nz < 0 || nz >= p_gh) {
+				continue;
+			}
+			const int n_idx = nz * p_gw + nx;
+			if (closed[(size_t)n_idx]) {
+				continue;
+			}
+			if (!std::isfinite(p_height[n_idx])) {
+				continue;
+			}
+			closed[(size_t)n_idx] = 1;
+			r_filled[n_idx] = (float)std::max((double)p_height[n_idx], (double)e.level + eps);
+			heap.push({ r_filled[n_idx], n_idx });
+		}
+	}
+}
+
 } // namespace
 
 HydraulicStreamLogResult godot::hydraulic_stream_log_solve(const PackedFloat32Array &p_surface,
@@ -153,6 +253,7 @@ HydraulicStreamLogResult godot::hydraulic_stream_log_solve(const PackedFloat32Ar
 	std::vector<float> height(src_height, src_height + n);
 	std::vector<float> channel_mask(n, 0.0f);
 	std::vector<float> flow_accum(n, 0.0f);
+	std::vector<float> erosion_depth(n, 0.0f);
 
 	const bool has_mask = (p_params.mask.size() == n);
 	const float *mask_ptr = has_mask ? p_params.mask.ptr() : nullptr;
@@ -165,6 +266,7 @@ HydraulicStreamLogResult godot::hydraulic_stream_log_solve(const PackedFloat32Ar
 	const double bank_smoothing = (double)p_params.bank_smoothing;
 	const double peak_preservation = (double)p_params.peak_preservation;
 	const double gradient_power = (double)p_params.gradient_power;
+	const bool do_fill = p_params.fill_depressions;
 
 	const double dx = (double)p_rect.size.x / (double)std::max(p_gw, 1);
 	const double dz = (double)p_rect.size.y / (double)std::max(p_gh, 1);
@@ -187,10 +289,23 @@ HydraulicStreamLogResult godot::hydraulic_stream_log_solve(const PackedFloat32Ar
 	std::vector<double> cell_incision(n);
 	std::vector<double> incision_map(n);
 	std::vector<float> next_height(n);
+	std::vector<float> routing(n);
 
 	for (int pass = 0; pass < iterations; pass++) {
 		// 1. Order cells descending by elevation.
 		sort_by_elevation_desc(height, keys, order, order_scratch);
+
+		// 1b. Depression-filled ROUTING surface. Only stage 2 reads it; the slope, the peak-preservation
+		// window and the descent clamp all still read `height`, so filling changes which way water goes
+		// without lifting the terrain. Without it a cell whose eight neighbours are all higher has
+		// sum_drop == 0 and absorbs its whole upstream catchment, so the network breaks at every pit
+		// instead of reaching a drain the way Hesiod's stream-power nodes do.
+		const std::vector<float> *route = &height;
+		if (do_fill) {
+			fill_depressions(height, p_gw, p_gh, std::max(dx, dz), routing);
+			route = &routing;
+		}
+		const std::vector<float> &rt = *route;
 
 		// 2. Accumulate drainage flow using MD8 multi-direction routing.
 		//
@@ -200,7 +315,7 @@ HydraulicStreamLogResult godot::hydraulic_stream_log_solve(const PackedFloat32Ar
 		std::fill(current_flow.begin(), current_flow.end(), 1.0f);
 
 		for (int idx : order) {
-			float h_c = height[idx];
+			float h_c = rt[idx];
 			if (!std::isfinite(h_c)) {
 				continue;
 			}
@@ -215,7 +330,7 @@ HydraulicStreamLogResult godot::hydraulic_stream_log_solve(const PackedFloat32Ar
 				int nz = cz + n_dz[k];
 				if (nx >= 0 && nx < p_gw && nz >= 0 && nz < p_gh) {
 					int n_idx = nz * p_gw + nx;
-					float h_n = height[n_idx];
+					float h_n = rt[n_idx];
 					if (std::isfinite(h_n) && h_n < h_c) {
 						double drop = (double)(h_c - h_n) / n_dist[k];
 						double weighted_drop = drop_weight(drop);
@@ -247,6 +362,11 @@ HydraulicStreamLogResult godot::hydraulic_stream_log_solve(const PackedFloat32Ar
 				for (int ix = 0; ix < p_gw; ix++) {
 					int idx = row + ix;
 					cell_incision[idx] = 0.0;
+					// Discharge is a hydrological fact about the cell, not a product of the erosion the cell
+					// was allowed to do, so it is published before the finite and mask early-outs reject it.
+					// Written under the mask, the field used to read 0 across exactly the trunk valleys that
+					// carry the largest catchments.
+					flow_accum[idx] = current_flow[idx];
 
 					float h_c = height[idx];
 					if (!std::isfinite(h_c)) {
@@ -300,8 +420,6 @@ HydraulicStreamLogResult godot::hydraulic_stream_log_solve(const PackedFloat32Ar
 						double power = pow_fast(a_accum, area_exponent) * pow_fast(shaped_slope, slope_exponent);
 						cell_incision[idx] = incision_rate * std::log(1.0 + power) * peak_weight * m_val;
 					}
-
-					flow_accum[idx] = current_flow[idx];
 				}
 			}
 		});
@@ -368,6 +486,8 @@ HydraulicStreamLogResult godot::hydraulic_stream_log_solve(const PackedFloat32Ar
 						double max_cut = std::max(0.0, (double)(h_c - min_downhill) + 0.05 * cut);
 						cut = std::min(cut, max_cut);
 						next_height[idx] = (float)((double)h_c - cut);
+						// Metres removed, summed over passes. Own cell only, so this threads with the rest.
+						erosion_depth[idx] = (float)((double)erosion_depth[idx] + cut);
 						float normalized_cut = std::clamp((float)(cut / (incision_rate * 2.0 + 1.0e-5)), 0.0f, 1.0f);
 						channel_mask[idx] = std::max(channel_mask[idx], normalized_cut);
 					}
@@ -389,6 +509,9 @@ HydraulicStreamLogResult godot::hydraulic_stream_log_solve(const PackedFloat32Ar
 
 	res.flow_accumulation.resize(n);
 	std::memcpy(res.flow_accumulation.ptrw(), flow_accum.data(), (size_t)n * sizeof(float));
+
+	res.erosion_depth.resize(n);
+	std::memcpy(res.erosion_depth.ptrw(), erosion_depth.data(), (size_t)n * sizeof(float));
 
 	return res;
 }

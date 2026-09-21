@@ -6,11 +6,14 @@
 #       children baked after it, in that order (work-order log). Control: children before the base commit
 #   [S] A deferred run with a Live erosion on the Layer and on a child: the child's result equals the
 #       synchronous bake over the NEW base, bitwise. Control: children collect their solves first
+#   [T] Bake All Brushes on the Layer re-solves a FROZEN base whose own slider moved. Control: Refresh,
+#       which honours the freeze and must leave the height untouched
+#   [U] It clears the MEMBERS' frozen solves too, not only the Layer's. Control: Refresh again
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/LayerBrushDriverGate.tscn
 extends Node
 
-const CRITERIA := 2
+const CRITERIA := 4
 
 var _fail := 0
 var _ran := 0
@@ -25,7 +28,7 @@ func _ready() -> void:
 	add_child(_terrain)
 	_terrain.data.add_region_blank(Vector2i(0, 0), true)
 	_terrain.data.ensure_layer_stack()
-	for f in [_l, _s]:
+	for f in [_l, _s, _t, _u]:
 		await f.call()
 	if _ran != CRITERIA:
 		_check("completed", false, "%d of %d criteria ran" % [_ran, CRITERIA])
@@ -190,6 +193,75 @@ func _s() -> void:
 	lb.children_before_base = false
 	var ctl := _heights()
 	_check("S control", ctl != ref, "children solving before the base commit differ from the sync bake: %s" % (ctl != ref))
+	lb.free()
+	await _settle()
+	_ran += 1
+
+
+## [T] The Layer's own Bake All Brushes button. A FROZEN modifier deliberately ignores every later edit,
+## including its own sliders, until an explicit Bake -- so the CONTROL here is Refresh, which must leave the
+## height exactly as it was. Without the cache drop in `_bake_all_begin` the button would be Refresh, and
+## both arms would read unchanged.
+func _t() -> void:
+	var ero := _erosion(Pasture3DNode.Evaluation.FROZEN)
+	var lb := _layer("FrozenBase", [_noise(7), ero])
+	var kid := _mound(lb, "Kid", [])
+	await _settle()
+	lb.extent_mode = Pasture3DLayerBrush.ExtentMode.CHILDREN_FOOTPRINTS
+	await lb.bake_layer_run()
+	var before := _heights()
+
+	# Move the frozen modifier's OWN slider. The cached solve is now for a shape nobody asked for.
+	ero.erosion_rate = ero.erosion_rate * 4.0 + 0.5
+	ero.iterations = 24
+
+	# CONTROL: Refresh honours the freeze, so the terrain must still show the old solve.
+	await lb.bake_layer_run()
+	var after_refresh := _heights()
+	_check("T control", after_refresh == before,
+			"Refresh left the frozen solve in place: %s" % (after_refresh == before))
+
+	lb.work_log.clear()
+	await lb.bake_all_brushes()
+	var after_bake := _heights()
+	var rep: Dictionary = lb.last_bake_report
+	var o := _ordered(lb.work_log)
+	_check("T bake all", after_bake != before and bool(rep.get("ok", false))
+				and int(rep.get("cleared", 0)) >= 1 and int(rep.get("members", -1)) == 1
+				and not bool(rep.get("cancelled", true)) and int(o["clear"]) == 0 and bool(o["ok"]),
+			"height moved %s; report cleared %d, members %d; log %s" % [
+				after_bake != before, int(rep.get("cleared", 0)), int(rep.get("members", -1)), lb.work_log])
+	lb.free()
+	await _settle()
+	_ran += 1
+
+
+## [U] The clear has to reach the MEMBERS, not just the Layer. Nothing is frozen on the Layer here, so a
+## `_bake_all_begin` that cleared only `self` would leave the child serving its old solve and this would read
+## exactly like the control.
+func _u() -> void:
+	var lb := _layer("PlainBase", [_noise(9)])
+	var kid_ero := _erosion(Pasture3DNode.Evaluation.FROZEN)
+	var kid := _mound(lb, "FrozenKid", [kid_ero])
+	await _settle()
+	lb.extent_mode = Pasture3DLayerBrush.ExtentMode.CHILDREN_FOOTPRINTS
+	await lb.bake_layer_run()
+	var before := _heights()
+
+	kid_ero.erosion_rate = kid_ero.erosion_rate * 4.0 + 0.5
+	kid_ero.iterations = 24
+
+	await lb.bake_layer_run()
+	var after_refresh := _heights()
+	_check("U control", after_refresh == before,
+			"Refresh left the child's frozen solve in place: %s" % (after_refresh == before))
+
+	await lb.bake_all_brushes()
+	var after_bake := _heights()
+	var rep: Dictionary = lb.last_bake_report
+	_check("U members cleared", after_bake != before and int(rep.get("cleared", 0)) >= 1,
+			"height moved %s with %d cache(s) cleared and no frozen modifier on the Layer" % [
+				after_bake != before, int(rep.get("cleared", 0))])
 	lb.free()
 	await _settle()
 	_ran += 1

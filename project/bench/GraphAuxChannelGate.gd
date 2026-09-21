@@ -50,7 +50,7 @@ const EXPECTED := {
 	"stream_extraction": 3,
 	"lake_flooding": 3,
 	"flooding_uniform_level": 3,
-	"hydraulic_stream_log": 3,
+	"hydraulic_stream_log": 4,
 	"hydraulic_saleve": 3,
 	"hydraulic_particle": 4,
 	"erosion_hydraulic": 4,

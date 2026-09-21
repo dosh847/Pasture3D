@@ -1711,6 +1711,9 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				p.bank_smoothing = P[5];
 				p.peak_preservation = (PH[6] ? P[6] : 0.5f);
 				p.gradient_power = (PH[7] ? P[7] : 0.8f);
+				// Slot 8 is the depression-fill flag. A program compiled before the slot existed has PH[8]
+				// false, and the default has to match the node's and the oracle's, which is ON.
+				p.fill_depressions = (PH[8] ? P[8] > 0.5f : true);
 				if (in1 && in1[s] >= 0) {
 					p.mask = get_grid_packed(in1[s], c_in1);
 				}
@@ -1719,6 +1722,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 					std::copy_n(res.height.ptr(), n, g_ptr);
 					copy_aux(1, res.channel_mask);
 					copy_aux(2, res.flow_accumulation);
+					copy_aux(3, res.erosion_depth);
 				}
 			} break;
 

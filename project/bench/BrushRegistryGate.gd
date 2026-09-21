@@ -107,6 +107,7 @@ func _gate_cf_bakes_exactly_the_registered_set() -> void:
 	for m in [reg_a, reg_b, unreg]:
 		m._refresh_owner(m._layer_owner, false, [])
 	var fresh_a := _snapshot(pa)
+	var key_fresh := _ero_key(reg_a)
 
 	# Now move the ground under all three, and bake again.
 	#
@@ -115,8 +116,17 @@ func _gate_cf_bakes_exactly_the_registered_set() -> void:
 	# key no longer matches the surface it was handed. In the editor `auto_refresh` supplies that bake on
 	# the very edit that invalidates it, which is why the warning appears immediately; headless nothing
 	# does, and the first draft of this gate asserted staleness that nothing had yet had a chance to
-	# notice. So the fixture supplies the bake — and the heights must NOT move when it does, which is the
-	# whole claim of a frozen modifier and is checked here rather than assumed.
+	# notice. So the fixture supplies the bake.
+	#
+	# WHAT THAT BAKE MUST NOT DO IS RE-SOLVE — and that, not the heights, is what is checked below.
+	# This guard used to require the heights to come back bitwise identical, on the reasoning that a frozen
+	# modifier does not follow its input. That stopped being true on purpose: a stale entry is now served
+	# as its cached CHANGE carried onto today's ground, so the relief edit DOES show through while the cut
+	# rides along on top of it. `BrushAccumulationGate` [E] exists to require exactly that, with
+	# `stale_cache_pins_absolute` as its control, because pinning the old absolute heights is what made
+	# mounds appear to accumulate height when the ground moved under them. Two gates asserting opposite
+	# things is how this one came to fail for a year of commits while the behaviour was right, so: the
+	# witness here is the cache ENTRY. A serve leaves its key alone; a re-solve stores a new one.
 	for m in [reg_a, reg_b, unreg]:
 		_shape_of(m).strength = 24.0
 	for m in [reg_a, reg_b, unreg]:
@@ -124,14 +134,18 @@ func _gate_cf_bakes_exactly_the_registered_set() -> void:
 	var a0 := _snapshot(pa)
 	var b0 := _snapshot(pb)
 	var c0 := _snapshot(pc)
-	var held := _first_difference(fresh_a, a0)
+	var key_held := _ero_key(reg_a)
 	var stale_before := [_is_stale(reg_a), _is_stale(reg_b), _is_stale(unreg)]
-	print("    after changing every shape, a bake serves the frozen solves unchanged: %s"
-		% ["bitwise identical" if held < 0 else "MOVED at probe %d" % held])
-	if held >= 0:
+	# Ungated context: how far the re-projected change moved the ground. A number, not a criterion — the
+	# design permits it to move and says nothing about how much.
+	print("    after changing every shape, the bake re-projects the cached change: ground moved %.3f m"
+		% _max_abs_diff(fresh_a, a0))
+	print("    and the frozen entry was SERVED, not re-solved: cache key %s"
+		% ["unchanged" if key_held == key_fresh and key_held != 0 else "MOVED (%d -> %d)" % [key_fresh, key_held]])
+	if key_held != key_fresh or key_held == 0:
 		_fail += 1
-		print("    !! a Frozen modifier followed its input without being asked, so there is nothing here "
-			+ "for Bake All to do and the rest of this gate is about nothing")
+		print("    !! the Frozen erosion re-solved without being asked, so there is nothing here for "
+			+ "Bake All to do and the rest of this gate is about nothing")
 
 	var listed: Array[NodePath] = [_mgr.get_path_to(reg_a), _mgr.get_path_to(reg_b)]
 	_mgr.eroding_brushes = listed
@@ -169,6 +183,15 @@ func _gate_cf_bakes_exactly_the_registered_set() -> void:
 		_fail += 1
 		print("    !! a registered brush is still marked stale after Bake All, so the run did not reach "
 			+ "its cache")
+
+	# CONTROL for the witness above: Bake All DID re-solve RegA, so its key must have moved. Without this,
+	# "unchanged" would also be what a key that never changes at all reads like.
+	var key_baked := _ero_key(reg_a)
+	print("    control: Bake All re-solved it, and the cache key moved: %s" % str(key_baked != key_held))
+	if key_baked == key_held:
+		_fail += 1
+		print("    !! the cache key did not move across a known re-solve, so it cannot witness one and "
+			+ "the serve check above proves nothing")
 
 	# --- CONTROL: site C is reachable by a repaint of that layer ---
 	# Without this, "bitwise identical at C" could equally mean the probe is looking somewhere a bake
@@ -531,6 +554,19 @@ func _none() -> Array[NodePath]:
 
 func _shape_of(p_mound) -> Pasture3DNodeRelief:
 	return p_mound.modifiers[0] as Pasture3DNodeRelief
+
+
+## The key of this brush's frozen erosion solve, or 0 when it holds none. A SERVE leaves this alone; a
+## re-solve stores the key of the surface it solved for, which is what makes it a witness.
+##
+## Read through `cache_for`, the accessor the host uses, rather than off `_cache` directly: the extent string
+## is the host's business, and there is exactly one entry per baked grid.
+func _ero_key(p_mound) -> int:
+	for m in p_mound.modifiers:
+		if m is Pasture3DNodeErosion:
+			for extent in (m as Pasture3DNodeErosion)._cache:
+				return int((m as Pasture3DNodeErosion).cache_for(extent).get("key", 0))
+	return 0
 
 
 ## Does this brush's erosion modifier consider itself stale — i.e. is it showing a solve for a shape that
