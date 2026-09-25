@@ -57,6 +57,13 @@ void Pasture3DLayer::clear() {
 	_modified = false;
 }
 
+String Pasture3DLayer::ensure_layer_uid() {
+	if (_uid.is_empty()) {
+		_uid = vformat("%08x%08x", uint32_t(UtilityFunctions::randi()), uint32_t(UtilityFunctions::randi()));
+	}
+	return _uid;
+}
+
 void Pasture3DLayer::set_base(const bool p_is_base) {
 	SET_IF_DIFF(_is_base, p_is_base);
 	_modified = true;
@@ -247,7 +254,9 @@ Ref<Pasture3DLayer> Pasture3DLayer::clone() const {
 	c.instantiate();
 	Dictionary d = get_data();
 	d.erase("tiles"); // Copy pixels separately as deep duplicates.
+	d.erase("uid"); // A duplicate is a different layer; sharing a uid would merge their slices.
 	c->set_data(d);
+	c->ensure_layer_uid();
 	Array locations = _tiles.keys();
 	for (const Vector2i &loc : locations) {
 		c->restore_region_tiles(loc, duplicate_region_tiles(loc));
@@ -397,6 +406,7 @@ void Pasture3DLayer::set_data(const Dictionary &p_data) {
 	SET_IF_HAS(_locked, "locked");
 	SET_IF_HAS(_reserved, "reserved");
 	SET_IF_HAS(_owner_id, "owner_id");
+	SET_IF_HAS(_uid, "uid");
 	SET_IF_HAS(_tile_size, "tile_size");
 	SET_IF_HAS(_is_base, "is_base");
 	SET_IF_HAS(_tiles, "tiles");
@@ -418,6 +428,7 @@ Dictionary Pasture3DLayer::get_data() const {
 	dict["locked"] = _locked;
 	dict["reserved"] = _reserved;
 	dict["owner_id"] = _owner_id;
+	dict["uid"] = _uid;
 	dict["map_type"] = _map_type;
 	dict["tile_size"] = _tile_size;
 	dict["is_base"] = _is_base;
@@ -452,6 +463,9 @@ void Pasture3DLayer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_reserved"), &Pasture3DLayer::is_reserved);
 	ClassDB::bind_method(D_METHOD("set_owner_id", "owner_id"), &Pasture3DLayer::set_owner_id);
 	ClassDB::bind_method(D_METHOD("get_owner_id"), &Pasture3DLayer::get_owner_id);
+	ClassDB::bind_method(D_METHOD("set_layer_uid", "layer_uid"), &Pasture3DLayer::set_layer_uid);
+	ClassDB::bind_method(D_METHOD("get_layer_uid"), &Pasture3DLayer::get_layer_uid);
+	ClassDB::bind_method(D_METHOD("ensure_layer_uid"), &Pasture3DLayer::ensure_layer_uid);
 	ClassDB::bind_method(D_METHOD("set_map_type", "map_type"), &Pasture3DLayer::set_map_type);
 	ClassDB::bind_method(D_METHOD("get_map_type"), &Pasture3DLayer::get_map_type);
 	ClassDB::bind_method(D_METHOD("set_tile_size", "tile_size"), &Pasture3DLayer::set_tile_size);
@@ -489,6 +503,7 @@ void Pasture3DLayer::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "locked", PROPERTY_HINT_NONE, "", meta_flags), "set_locked", "is_locked");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "reserved", PROPERTY_HINT_NONE, "", meta_flags), "set_reserved", "is_reserved");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "owner_id", PROPERTY_HINT_NONE, "", meta_flags), "set_owner_id", "get_owner_id");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "layer_uid", PROPERTY_HINT_NONE, "", ro_flags), "set_layer_uid", "get_layer_uid");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "map_type", PROPERTY_HINT_ENUM, "Height,Control,Color", ro_flags), "set_map_type", "get_map_type");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "tile_size", PROPERTY_HINT_NONE, "", ro_flags), "set_tile_size", "get_tile_size");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "is_base", PROPERTY_HINT_NONE, "", ro_flags), "set_base", "is_base");

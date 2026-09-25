@@ -26,6 +26,7 @@ int Pasture3DLayerStack::add_layer_ref(const Ref<Pasture3DLayer> &p_layer) {
 		LOG(ERROR, "Cannot add a null layer");
 		return -1;
 	}
+	p_layer->ensure_layer_uid();
 	_layers.push_back(p_layer);
 	LOG(INFO, "Added layer '", p_layer->get_layer_name(), "' at index ", _layers.size() - 1);
 	return _layers.size() - 1;

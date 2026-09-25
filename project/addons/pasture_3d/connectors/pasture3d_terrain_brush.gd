@@ -25,6 +25,8 @@ const PASTURE_3D_MAPTYPE_HEIGHT: int = 0  # Pasture3DData.MapType.TYPE_HEIGHT
 const PASTURE_3D_MAPTYPE_CONTROL: int = 1 # Pasture3DData.MapType.TYPE_CONTROL
 const PASTURE_3D_MAPTYPE_COLOR: int = 2   # Pasture3DData.MapType.TYPE_COLOR
 const BLEND_REPLACE: int = 0 # Pasture3DLayer.BlendMode.REPLACE
+## Reserved _snapshot_owner key holding the region generations the snapshot was taken at.
+const SNAPSHOT_GENERATIONS_KEY := "@generations"
 const BLEND_ADD: int = 1     # Pasture3DLayer.BlendMode.ADD
 const BLEND_MAX: int = 2     # Pasture3DLayer.BlendMode.MAX
 const BLEND_MIN: int = 3     # Pasture3DLayer.BlendMode.MIN
@@ -3549,6 +3551,9 @@ func _snapshot_owner(owner: String) -> Dictionary:
 		var l = stack.get_layer(idx)
 		if l != null:
 			out[l.get_owner_id()] = _copy_tiles(l.get_tiles())
+	# Reserved key (owner ids never start with '@'): the region generations this snapshot belongs to, so a
+	# restore skips a region unloaded or reloaded in between.
+	out[SNAPSHOT_GENERATIONS_KEY] = terrain.data.get_region_generations()
 	return out
 
 
@@ -3561,6 +3566,7 @@ func _restore_owner(owner: String, snapshot: Dictionary) -> void:
 	if not is_instance_valid(terrain) or not terrain.data or not terrain.data.has_method("composite_region"):
 		return
 	var stack = terrain.data.get_layer_stack() if terrain.data.has_method("get_layer_stack") else null
+	var generations = snapshot.get(SNAPSHOT_GENERATIONS_KEY)
 	var is_legacy := false
 	if not snapshot.is_empty():
 		var first_key = snapshot.keys()[0]
@@ -3587,6 +3593,10 @@ func _restore_owner(owner: String, snapshot: Dictionary) -> void:
 				if l == null:
 					continue
 				var oid: String = l.get_owner_id()
+				if generations is Dictionary:
+					for loc in terrain.data.restore_layer_tiles(idx, snapshot.get(oid, {}), generations):
+						regions[loc] = true
+					continue
 				for loc in l.get_tiles():
 					regions[loc] = true
 				if snapshot.has(oid):

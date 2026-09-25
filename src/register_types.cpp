@@ -12,6 +12,7 @@
 #include "pasture_3d_editor.h"
 #include "pasture_3d_layer.h"
 #include "pasture_3d_layer_stack.h"
+#include "pasture_3d_region_index.h"
 #include "pasture_3d_buoy.h"
 #include "pasture_3d_ocean.h"
 #include "pasture_3d_wave_profile.h"
@@ -34,6 +35,7 @@ void initialize_pasture_3d_module(ModuleInitializationLevel p_level) {
 	ClassDB::register_class<Pasture3DMaterial>();
 	ClassDB::register_class<Pasture3DMeshAsset>();
 	ClassDB::register_class<Pasture3DRegion>();
+	ClassDB::register_class<Pasture3DRegionIndex>();
 	ClassDB::register_class<Pasture3DTextureAsset>();
 	ClassDB::register_class<Pasture3DUtil>();
 	// Water bodies (PASTURE3D_WATER_BODIES_SPEC.md). The profile must be registered

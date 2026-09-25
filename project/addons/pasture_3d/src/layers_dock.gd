@@ -883,9 +883,12 @@ func _on_clear() -> void:
 	# next bake into the layer would quietly rewrite the undo entry. _restore_tiles copies on the way in
 	# for the same reason; the pair keeps the snapshot immutable for the life of the action.
 	var before := _copy_tiles(layer.get_tiles())
+	# The generation of every loaded region: a region unloaded or reloaded before the undo is not the one
+	# this snapshot saw, and restore_layer_tiles leaves it alone.
+	var generations: Dictionary = _data().get_region_generations()
 	ur.create_action("Clear Pasture3D Layer '%s'" % layer.get_layer_name(), UndoRedo.MERGE_DISABLE, terrain)
 	ur.add_do_method(self, "_apply_clear", idx)
-	ur.add_undo_method(self, "_restore_tiles", idx, before)
+	ur.add_undo_method(self, "_restore_tiles", idx, before, generations)
 	ur.commit_action() # runs the do
 
 
@@ -915,22 +918,16 @@ func _apply_clear(p_idx: int) -> void:
 ## Undo of _apply_clear: put the tiles back and recomposite. Covers the UNION of what the layer holds now
 ## (a tool layer has re-baked itself since) and what the snapshot restores — recompositing only the
 ## restored regions would leave a region the clear EMPTIED still showing the post-clear composite.
-func _restore_tiles(p_idx: int, p_tiles: Dictionary) -> void:
+func _restore_tiles(p_idx: int, p_tiles: Dictionary, p_generations: Dictionary) -> void:
 	var d := _data()
 	var stack := _stack()
 	if not d or not stack:
 		return
-	var layer: Pasture3DLayer = stack.get_layer(p_idx)
-	if layer == null:
+	if stack.get_layer(p_idx) == null:
 		return
-	var regions := {}
-	for loc in layer.get_region_locations():
-		regions[loc] = true
-	# Copy on the way in too, so the undo entry stays intact for a second undo after a redo.
-	layer.set_tiles(_copy_tiles(p_tiles))
-	for loc in layer.get_region_locations():
-		regions[loc] = true
-	for loc in regions:
+	# Per region over the union of both sides, skipping a region whose generation moved on. It copies on
+	# the way in too, so the undo entry stays intact for a second undo after a redo.
+	for loc in d.restore_layer_tiles(p_idx, p_tiles, p_generations):
 		d.composite_region(loc, Rect2i(), false)
 	d.update_maps()
 	refresh()

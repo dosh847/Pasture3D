@@ -72,6 +72,8 @@ public:
 
 	void initialize(Pasture3D *p_terrain);
 	void destroy();
+	// Frees a region's MMIs for every mesh without touching its instance data (the region is unloading).
+	void destroy_by_location(const Vector2i &p_region_loc);
 
 	void clear_by_mesh(const int p_mesh_id);
 	void clear_by_location(const Vector2i &p_region_loc, const int p_mesh_id);

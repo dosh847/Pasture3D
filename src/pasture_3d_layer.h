@@ -51,6 +51,12 @@ private:
 	bool _locked = false;
 	bool _reserved = false; // Owned by a tool/node; user edits disabled
 	String _owner_id; // Optional: node path / generator id that owns it
+	// Stable identity across saves, reorders and removals. A region's layer slice is written when the
+	// region unloads and read back when it loads, and the stack can be reordered or lose layers in
+	// between, so the slice matches its layers by uid, not by index. Empty on layers saved before uids
+	// existed; ensure_layer_uid() assigns one lazily so a legacy slice (whose layers have none) is still
+	// recognisable as legacy and falls back to index matching.
+	String _uid;
 	MapType _map_type = TYPE_HEIGHT; // height (RGF value+weight), control (RGF bits+weight), color (RGBA8 rgb+weight-alpha)
 	int _tile_size = 64; // Sub-region tile edge in vertices (power of two, <= region_size)
 	// Dense, always-covered base of its map type (Phase 7). The bottom of each map type's sub-stack:
@@ -98,6 +104,9 @@ public:
 	bool is_reserved() const { return _reserved; }
 	void set_owner_id(const String &p_owner_id);
 	String get_owner_id() const { return _owner_id; }
+	void set_layer_uid(const String &p_uid) { _uid = p_uid; }
+	String get_layer_uid() const { return _uid; }
+	String ensure_layer_uid(); // Assigns a fresh uid if empty; returns it.
 	void set_map_type(const MapType p_map_type);
 	MapType get_map_type() const { return _map_type; }
 	void set_tile_size(const int p_tile_size);

@@ -7,6 +7,7 @@
 #include "generated_texture.h"
 #include "pasture_3d_layer_stack.h"
 #include "pasture_3d_region.h"
+#include "pasture_3d_region_index.h"
 
 class Pasture3D;
 
@@ -98,6 +99,14 @@ private:
 	// above remain the composited source of truth either way, so the runtime path is unchanged.
 	Ref<Pasture3DLayerStack> _layer_stack;
 
+	// Every region on disk, loaded or not (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md §A). _regions holds
+	// only what is loaded, so once regions can unload this is the only record that an unloaded one exists.
+	Ref<Pasture3DRegionIndex> _region_index;
+	// region_location -> number of times it has been loaded or unloaded this session (0 when never). Undo
+	// snapshots record it, and an undo whose recorded generation no longer matches skips that region: the
+	// region it captured was unloaded, and what is there now (if anything) is a different load of it.
+	Dictionary _region_generation;
+
 	// GPU analytic rasteriser (PASTURE3D_BRUSH_GPU_RASTER_SPEC.md). Lazily created on the first large
 	// stamp; owns a local RenderingDevice. Null until used; freed in _clear(). Plain pointer (not an
 	// Object/Ref) — it is internal infrastructure, not exposed to the engine.
@@ -158,8 +167,33 @@ private:
 	Error _save_export_image(const Ref<Image> &p_img, const String &p_path, const String &p_ext, const MapType p_map_type) const;
 	Rect2i _region_bounds_px() const;
 
+	// Region load/unload (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md phase 0).
+	// A hash of what a region's composite depends on besides its own tiles: every layer's uid, order,
+	// blend, opacity, visibility and map type. Recorded in the index when a region is written; a region
+	// that loads under a different signature was composited against a stack that has since changed.
+	int64_t _stack_signature() const;
+	String _data_dir() const;
+	void _bump_generation(const Vector2i &p_region_loc);
+	// Record a loaded region's height range and the current stack signature in the index.
+	void _index_region(const Vector2i &p_region_loc);
+	void _load_region_index(const String &p_dir);
+	void _save_region_index(const String &p_dir);
+	void _save_layer_manifest(const String &p_dir);
+	// Write (or remove, when it has no tiles) one region's layer slice. Layers are matched on reload by
+	// uid, so each slice layer carries its stack layer's uid.
+	void _save_layer_slice(const String &p_dir, const Vector2i &p_region_loc, const bool p_base_aliased);
+	// Merge one region's saved slice into the live stack, matching layers by uid (legacy slices, whose
+	// layers carry none, fall back to index). A slice layer whose uid is no longer in the stack belonged
+	// to a layer removed while the region was unloaded, and is dropped. Returns whether a slice existed.
+	bool _merge_layer_slice(const String &p_dir, const Vector2i &p_region_loc);
+	// Drop every layer's tiles for one region (the region is leaving memory, or is about to be re-read).
+	void _evict_region_tiles(const Vector2i &p_region_loc);
+	// Recomposite a just-loaded region when the index says it was written under a different stack.
+	// Returns whether it recomposited.
+	bool _recomposite_if_stale(const Vector2i &p_region_loc);
+
 public:
-	Pasture3DData() {}
+	Pasture3DData() { _region_index.instantiate(); }
 	void initialize(Pasture3D *p_terrain);
 	~Pasture3DData() { _clear(); }
 
@@ -199,6 +233,24 @@ public:
 	void remove_regionp(const Vector3 &p_global_position, const bool p_update = true);
 	void remove_regionl(const Vector2i &p_region_loc, const bool p_update = true);
 	void remove_region(const Ref<Pasture3DRegion> &p_region, const bool p_update = true);
+
+	// Region load/unload (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md phase 0). remove_region above means
+	// DELETE (the file goes on the next save); unload_region takes a region out of memory and keeps it on
+	// disk. The region is saved first, together with its layer slice, the layer manifest and the region
+	// index, so what comes back on load is exactly what left. Its undo history is dropped: an undo recorded
+	// against it is skipped from now on (see _region_generation).
+	Error unload_region(const Vector2i &p_region_loc, const bool p_update = true);
+	bool is_region_loaded(const Vector2i &p_region_loc) const;
+	Ref<Pasture3DRegionIndex> get_region_index() const { return _region_index; }
+	int get_region_generation(const Vector2i &p_region_loc) const { return _region_generation.get(p_region_loc, 0); }
+	// The generation of every LOADED region, including those still at 0. An undo snapshot records this;
+	// a location missing from it was not loaded when the snapshot was taken.
+	Dictionary get_region_generations() const;
+	// Generation-aware restore of one layer's tiles from an undo snapshot. Only LOADED regions whose
+	// generation still equals the one recorded in p_generations are touched: set to the snapshot's tiles,
+	// or erased when the snapshot has none. Anything loaded or unloaded since is left as it is now.
+	// Returns the regions it changed, for the caller to recomposite.
+	TypedArray<Vector2i> restore_layer_tiles(const int p_layer_id, const Dictionary &p_tiles, const Dictionary &p_generations);
 
 	// Layer stack (editor-only, optional)
 	bool has_layer_stack() const { return _layer_stack.is_valid(); }
@@ -414,7 +466,7 @@ public:
 	void save_directory(const String &p_dir);
 	void save_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_16_bit = false);
 	void load_directory(const String &p_dir);
-	void load_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_update = true);
+	Error load_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_update = true);
 
 	// Editor-only layer persistence (PASTURE3D_LAYERS_GUIDE.md §7). Save/load the layer stack as
 	// pasture3d_layers*.res alongside the runtime region files, which are never touched. Called by

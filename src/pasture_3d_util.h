@@ -45,6 +45,8 @@ public:
 	// ordered layer metadata; per-region slices hold each upper layer's sparse pixel tiles.
 	static inline const char *LAYER_MANIFEST_FILENAME = "pasture3d_layers.res";
 	static inline const char *LAYER_FILE_PREFIX = "pasture3d_layers";
+	// Every region on disk, loaded or not (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md §A).
+	static inline const char *REGION_INDEX_FILENAME = "pasture3d_region_index.res";
 
 	// Image operations
 	static Ref<Image> black_to_alpha(const Ref<Image> &p_image);

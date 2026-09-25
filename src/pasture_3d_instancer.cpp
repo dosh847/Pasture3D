@@ -577,6 +577,18 @@ void Pasture3DInstancer::destroy() {
 	}
 }
 
+void Pasture3DInstancer::destroy_by_location(const Vector2i &p_region_loc) {
+	IS_DATA_INIT(VOID);
+	LOG(INFO, "Destroying MMIs in region: ", p_region_loc);
+	for (auto it = _queued_updates.begin(); it != _queued_updates.end();) {
+		it = it->first == p_region_loc ? _queued_updates.erase(it) : std::next(it);
+	}
+	int mesh_count = _terrain->get_assets()->get_mesh_count();
+	for (int m = 0; m < mesh_count; m++) {
+		_destroy_mmi_by_location(p_region_loc, m);
+	}
+}
+
 void Pasture3DInstancer::clear_by_mesh(const int p_mesh_id) {
 	LOG(INFO, "Deleting Multimeshes in all regions with mesh_id: ", p_mesh_id);
 	TypedArray<Vector2i> region_locations = _terrain->get_data()->get_region_locations();

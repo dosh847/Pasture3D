@@ -748,6 +748,31 @@ void Pasture3DEditor::_store_undo() {
 		redo_data["layer_tiles"] = redo_snap;
 	}
 
+	// Region generations at commit time, shared by both directions. A region unloaded (or reloaded) since
+	// then is a different object on disk: applying this snapshot to it would resurrect or overwrite data the
+	// unload already saved, so _apply_undo skips every location whose generation has moved on.
+	{
+		const Pasture3DData *data = _terrain->get_data();
+		Dictionary generations;
+		auto note = [&](const Array &p_locs) {
+			for (const Vector2i &loc : p_locs) {
+				generations[loc] = data->get_region_generation(loc);
+			}
+		};
+		note(_undo_data.get("region_locations", Array()));
+		note(redo_data["region_locations"]);
+		note(_added_removed_locations);
+		for (const Ref<Pasture3DRegion> &region : _original_regions) {
+			if (region.is_valid()) {
+				generations[region->get_location()] = data->get_region_generation(region->get_location());
+			}
+		}
+		note(_layer_undo_tiles.keys());
+		note(_layer_redo_tiles.keys());
+		_undo_data["generations"] = generations;
+		redo_data["generations"] = generations.duplicate();
+	}
+
 	// Request the plugin store the undo/redo data.
 	if (_terrain->get_plugin()->has_method("create_undo_action")) {
 		LOG(INFO, "Storing undo snapshot");
@@ -774,6 +799,21 @@ void Pasture3DEditor::_apply_undo(const Dictionary &p_data) {
 
 	Pasture3DData *data = _terrain->get_data();
 
+	// A snapshot only applies to the region generations it was taken from (see _store_undo).
+	const bool guarded = p_data.has("generations");
+	const Dictionary generations = p_data.get("generations", Dictionary());
+	auto valid = [&](const Vector2i &p_loc) -> bool {
+		if (!guarded) {
+			return true;
+		}
+		if (generations.has(p_loc) && int(generations[p_loc]) == data->get_region_generation(p_loc)) {
+			return true;
+		}
+		LOG(WARN, "Undo/redo skips region ", p_loc, ": it was unloaded or reloaded since this action");
+		return false;
+	};
+	bool skipped = false;
+
 	// Restore the active layer's source tiles. The composited region images are restored by the
 	// edited_regions path below; restoring the layer source keeps a later recomposite consistent.
 	if (p_data.has("layer_tiles")) {
@@ -783,7 +823,11 @@ void Pasture3DEditor::_apply_undo(const Dictionary &p_data) {
 		if (layer.is_valid()) {
 			Array locs = tiles.keys();
 			for (const Vector2i &loc : locs) {
-				layer->restore_region_tiles(loc, tiles[loc]);
+				if (valid(loc)) {
+					layer->restore_region_tiles(loc, tiles[loc]);
+				} else {
+					skipped = true;
+				}
 			}
 		}
 	}
@@ -795,6 +839,10 @@ void Pasture3DEditor::_apply_undo(const Dictionary &p_data) {
 		for (Ref<Pasture3DRegion> region : undo_regions) {
 			if (region.is_null()) {
 				LOG(ERROR, "Null region saved in undo data. Please report this error.");
+				continue;
+			}
+			if (!valid(region->get_location())) {
+				skipped = true;
 				continue;
 			}
 			region->sanitize_maps(); // Live data may not have some maps so must be sanitized
@@ -820,7 +868,7 @@ void Pasture3DEditor::_apply_undo(const Dictionary &p_data) {
 		TypedArray<Vector2i> region_locs = p_data["added_regions"];
 		for (const Vector2i region_loc : region_locs) {
 			Ref<Pasture3DRegion> region = data->get_region(region_loc);
-			if (region.is_valid()) {
+			if (region.is_valid() && valid(region_loc)) {
 				LOG(DEBUG, "Marking region: ", region_loc, " +deleted, +modified, ", ptr_to_str(*region));
 				region->set_deleted(true);
 				region->set_modified(true);
@@ -832,7 +880,7 @@ void Pasture3DEditor::_apply_undo(const Dictionary &p_data) {
 		TypedArray<Vector2i> region_locs = p_data["removed_regions"];
 		for (const Vector2i region_loc : region_locs) {
 			Ref<Pasture3DRegion> region = data->get_region(region_loc);
-			if (region.is_valid()) {
+			if (region.is_valid() && valid(region_loc)) {
 				LOG(DEBUG, "Marking region: ", region_loc, " -deleted, +modified, ", ptr_to_str(*region));
 				region->set_deleted(false);
 				region->set_modified(true);
@@ -845,11 +893,31 @@ void Pasture3DEditor::_apply_undo(const Dictionary &p_data) {
 	if (p_data.has("region_locations")) {
 		// Load w/ duplicate or it gets a bit wonky undoing removed regions w/ saves
 		TypedArray<Vector2i> locations = p_data["region_locations"];
+		if (guarded) {
+			// The snapshot's order for the locations it still owns, then whatever it does not own as it is now:
+			// an unloaded region leaves the list, a reloaded one stays.
+			TypedArray<Vector2i> reconciled;
+			for (const Vector2i &loc : locations) {
+				if (valid(loc)) {
+					reconciled.push_back(loc);
+				} else {
+					skipped = true;
+				}
+			}
+			for (const Vector2i &loc : data->get_region_locations()) {
+				if (!generations.has(loc) || int(generations[loc]) != data->get_region_generation(loc)) {
+					if (!reconciled.has(loc)) {
+						reconciled.push_back(loc);
+					}
+				}
+			}
+			locations = reconciled;
+		}
 		_terrain->get_data()->set_region_locations(locations.duplicate());
 		LOG(DEBUG, "Locations(", locations.size(), "): ", locations);
 	}
 	// If this undo set modifies the region qty, we must rebuild the arrays. Otherwise we can update individual layers
-	if (p_data.has("added_regions") || p_data.has("removed_regions")) {
+	if (p_data.has("added_regions") || p_data.has("removed_regions") || skipped) {
 		data->update_maps(TYPE_MAX, true, false);
 	} else {
 		data->update_maps(TYPE_MAX, false, false);

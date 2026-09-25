@@ -26,6 +26,8 @@ void Pasture3DData::_clear() {
 	_region_map.resize(REGION_MAP_SIZE * REGION_MAP_SIZE);
 	_regions.clear();
 	_region_locations.clear();
+	_region_index.instantiate();
+	_region_generation.clear();
 	_master_height_range = V2_ZERO;
 	_generated_height_maps.clear();
 	_generated_control_maps.clear();
@@ -639,6 +641,11 @@ void Pasture3DData::save_directory(const String &p_dir) {
 	// Persist the editor-side layer stack as pasture3d_layers*.res. The runtime region files written
 	// above are the authoritative composited data and are not touched by this (see §7.2).
 	save_layers(p_dir);
+	// After save_layers: a region's index entry records the stack signature it was written under.
+	for (const Vector2i &region_loc : _regions.keys()) {
+		_index_region(region_loc);
+	}
+	_save_region_index(p_dir);
 	if (IS_EDITOR && !EditorInterface::get_singleton()->get_resource_filesystem()->is_scanning()) {
 		EditorInterface::get_singleton()->get_resource_filesystem()->scan();
 	}
@@ -657,6 +664,7 @@ void Pasture3DData::save_region(const Vector2i &p_region_loc, const String &p_di
 	if (region->is_deleted()) {
 		LOG(DEBUG, "Removing ", p_region_loc, " from _regions");
 		_regions.erase(p_region_loc);
+		_region_index->erase_entry(p_region_loc);
 		LOG(DEBUG, "File to be deleted: ", path);
 		if (!FileAccess::file_exists(path)) {
 			LOG(INFO, "File to delete ", path, " doesn't exist. (Maybe from add, undo, save)");
@@ -672,6 +680,13 @@ void Pasture3DData::save_region(const Vector2i &p_region_loc, const String &p_di
 			LOG(ERROR, "Could not remove file: ", fname, ", error code: ", err);
 		}
 		LOG(INFO, "File ", path, " deleted");
+		// Its layer slice goes too. save_layers only visits regions still in _regions, so the slice used
+		// to outlive the region, and a region later created at the same location loaded the dead one's
+		// layer pixels.
+		const String slice_fname = Util::location_to_layer_filename(p_region_loc);
+		if (da->file_exists(slice_fname)) {
+			da->remove(slice_fname);
+		}
 		return;
 	}
 	Error err = region->save(path, p_16_bit);
@@ -722,9 +737,27 @@ void Pasture3DData::save_layers(const String &p_dir) {
 	}
 
 	const int layer_count = _layer_stack->get_layer_count();
+	_save_layer_manifest(p_dir);
 
-	// Manifest: a metadata-only copy of the stack. Each layer is cloned with its tiles dropped so the
-	// file stays small and never carries the aliased Base pixels.
+	// While the Base still aliases the region maps its pixels ARE the runtime data, so they are never
+	// serialized (re-aliased on load). Once un-aliased (the moment a real layer exists) the Base owns
+	// true base heights that the flattened region map no longer holds, so those must be persisted too
+	// — otherwise live re-compositing after load would read the flattened map as the base (§5.1).
+	const bool base_aliased = _is_base_aliased();
+	for (const Vector2i &region_loc : _regions.keys()) {
+		_save_layer_slice(p_dir, region_loc, base_aliased);
+	}
+	LOG(INFO, "Saved layer stack (", layer_count, " layers) to ", p_dir);
+}
+
+// Manifest: a metadata-only copy of the stack. Each layer is cloned with its tiles dropped so the file
+// stays small and never carries the aliased Base pixels. The clone keeps the layer's uid, which is what
+// a slice written now, or written by an unload an hour ago, matches its layers against.
+void Pasture3DData::_save_layer_manifest(const String &p_dir) {
+	if (_layer_stack.is_null()) {
+		return;
+	}
+	const int layer_count = _layer_stack->get_layer_count();
 	Ref<Pasture3DLayerStack> manifest;
 	manifest.instantiate();
 	manifest->set_version(_layer_stack->get_version());
@@ -734,6 +767,7 @@ void Pasture3DData::save_layers(const String &p_dir) {
 		Ref<Pasture3DLayer> meta;
 		meta.instantiate();
 		if (layer) {
+			layer->ensure_layer_uid();
 			Dictionary d = layer->get_data();
 			d.erase("tiles"); // Metadata only.
 			meta->set_data(d);
@@ -748,53 +782,55 @@ void Pasture3DData::save_layers(const String &p_dir) {
 		return;
 	}
 	manifest->take_over_path(manifest_path);
+}
 
-	// While the Base still aliases the region maps its pixels ARE the runtime data, so they are never
-	// serialized (re-aliased on load). Once un-aliased (the moment a real layer exists) the Base owns
-	// true base heights that the flattened region map no longer holds, so those must be persisted too
-	// — otherwise live re-compositing after load would read the flattened map as the base (§5.1).
-	const bool base_aliased = _is_base_aliased();
-
-	// Per-region slices: for each region, an index-aligned stack whose layer i carries only that
-	// region's tiles for stack layer i. Regions with no tiles to save are skipped, and any stale slice
-	// file removed, to keep the layout sparse.
-	for (const Vector2i &region_loc : _regions.keys()) {
-		const String slice_fname = Util::location_to_layer_filename(region_loc);
-		const String slice_path = p_dir + String("/") + slice_fname;
-		bool has_pixels = false;
-		Ref<Pasture3DLayerStack> slice;
-		slice.instantiate();
-		slice->set_version(_layer_stack->get_version());
-		TypedArray<Pasture3DLayer> slice_layers;
-		for (int i = 0; i < layer_count; i++) {
-			Ref<Pasture3DLayer> slice_layer;
-			slice_layer.instantiate();
-			if (i > 0 || !base_aliased) { // Serialize upper layers always; Base only once un-aliased.
-				Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
-				if (layer && layer->has_region(region_loc)) {
-					Dictionary tiles;
-					tiles[region_loc] = layer->get_tiles()[region_loc];
-					slice_layer->set_tiles(tiles);
-					has_pixels = true;
-				}
-			}
-			slice_layers.push_back(slice_layer);
-		}
-		if (!has_pixels) {
-			if (da->file_exists(slice_fname)) {
-				da->remove(slice_fname);
-			}
-			continue;
-		}
-		slice->set_layers(slice_layers);
-		Error serr = ResourceSaver::get_singleton()->save(slice, slice_path, ResourceSaver::FLAG_COMPRESS);
-		if (serr != OK) {
-			LOG(ERROR, "Could not save layer slice: ", slice_path, ", error: ", serr);
-		} else {
-			slice->take_over_path(slice_path);
-		}
+// Per-region slice: an index-aligned stack whose layer i carries only this region's tiles for stack layer
+// i, stamped with that layer's uid. Index-aligned so a build that predates uids still reads it; the uid is
+// what a reload trusts, because the stack may have been reordered or lost layers while this region was
+// unloaded. A region with no tiles to save gets no slice, and a stale one is removed.
+void Pasture3DData::_save_layer_slice(const String &p_dir, const Vector2i &p_region_loc, const bool p_base_aliased) {
+	Ref<DirAccess> da = DirAccess::open(p_dir);
+	if (da.is_null() || _layer_stack.is_null()) {
+		return;
 	}
-	LOG(INFO, "Saved layer stack (", layer_count, " layers) to ", p_dir);
+	const int layer_count = _layer_stack->get_layer_count();
+	const String slice_fname = Util::location_to_layer_filename(p_region_loc);
+	const String slice_path = p_dir + String("/") + slice_fname;
+	bool has_pixels = false;
+	Ref<Pasture3DLayerStack> slice;
+	slice.instantiate();
+	slice->set_version(_layer_stack->get_version());
+	TypedArray<Pasture3DLayer> slice_layers;
+	for (int i = 0; i < layer_count; i++) {
+		Ref<Pasture3DLayer> slice_layer;
+		slice_layer.instantiate();
+		Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+		if (layer) {
+			slice_layer->set_layer_uid(layer->ensure_layer_uid());
+		}
+		if (i > 0 || !p_base_aliased) { // Serialize upper layers always; Base only once un-aliased.
+			if (layer && layer->has_region(p_region_loc)) {
+				Dictionary tiles;
+				tiles[p_region_loc] = layer->get_tiles()[p_region_loc];
+				slice_layer->set_tiles(tiles);
+				has_pixels = true;
+			}
+		}
+		slice_layers.push_back(slice_layer);
+	}
+	if (!has_pixels) {
+		if (da->file_exists(slice_fname)) {
+			da->remove(slice_fname);
+		}
+		return;
+	}
+	slice->set_layers(slice_layers);
+	Error serr = ResourceSaver::get_singleton()->save(slice, slice_path, ResourceSaver::FLAG_COMPRESS);
+	if (serr != OK) {
+		LOG(ERROR, "Could not save layer slice: ", slice_path, ", error: ", serr);
+	} else {
+		slice->take_over_path(slice_path);
+	}
 }
 
 // Loads a previously saved layer stack (manifest + per-region slices) into _layer_stack and re-aliases
@@ -819,32 +855,19 @@ bool Pasture3DData::load_layers(const String &p_dir) {
 		return false;
 	}
 
-	// Merge each region's saved pixel slice back into the matching (index-aligned) layers.
+	// Layers from a manifest written before uids existed get one now; their slices carry none and are
+	// matched by index, which is still right because nothing could reorder a stack behind a slice then.
+	for (int i = 0; i < layer_count; i++) {
+		Pasture3DLayer *layer = manifest->get_layer_ptr(i);
+		if (layer) {
+			layer->ensure_layer_uid();
+		}
+	}
+	_layer_stack = manifest;
+
+	// Merge each region's saved pixel slice back into the matching layers.
 	for (const Vector2i &region_loc : _regions.keys()) {
-		const String slice_path = p_dir + String("/") + Util::location_to_layer_filename(region_loc);
-		if (!FileAccess::file_exists(slice_path)) {
-			continue;
-		}
-		Ref<Pasture3DLayerStack> slice = ResourceLoader::get_singleton()->load(slice_path, "Pasture3DLayerStack", ResourceLoader::CACHE_MODE_IGNORE);
-		if (slice.is_null()) {
-			LOG(ERROR, "Cannot load layer slice at ", slice_path);
-			continue;
-		}
-		const int slice_count = MIN(slice->get_layer_count(), layer_count);
-		// i==0 (Base) carries pixels only when it was un-aliased at save time; if absent it is re-aliased below.
-		for (int i = 0; i < slice_count; i++) {
-			Pasture3DLayer *slice_layer = slice->get_layer_ptr(i);
-			Pasture3DLayer *layer = manifest->get_layer_ptr(i);
-			if (!slice_layer || !layer) {
-				continue;
-			}
-			Dictionary slice_tiles = slice_layer->get_tiles();
-			if (slice_tiles.has(region_loc)) {
-				Dictionary tiles = layer->get_tiles();
-				tiles[region_loc] = slice_tiles[region_loc];
-				layer->set_tiles(tiles);
-			}
-		}
+		_merge_layer_slice(p_dir, region_loc);
 	}
 
 	// Re-alias the Base layer (index 0) onto the loaded region maps ONLY for regions whose own base
@@ -864,7 +887,6 @@ bool Pasture3DData::load_layers(const String &p_dir) {
 		}
 		base->set_modified(false);
 	}
-	_layer_stack = manifest;
 	for (const Vector2i &region_loc : _regions.keys()) {
 
 		Pasture3DRegion *region = get_region_ptr(region_loc);
@@ -897,7 +919,7 @@ void Pasture3DData::load_directory(const String &p_dir) {
 	for (const String &fname : files) {
 		// Skip layer manifest/slice files (pasture3d_layers*.res); they are handled by load_layers,
 		// not parsed as regions. The "pasture3d*.res" glob above otherwise sweeps them up.
-		if (fname.begins_with(Util::LAYER_FILE_PREFIX)) {
+		if (fname.begins_with(Util::LAYER_FILE_PREFIX) || fname == Util::REGION_INDEX_FILENAME) {
 			continue;
 		}
 		String path = p_dir + String("/") + fname;
@@ -950,11 +972,36 @@ void Pasture3DData::load_directory(const String &p_dir) {
 	if (!load_layers(p_dir)) {
 		_synthesize_base_layer();
 	}
+	// The index says, per region, which stack its file was composited under. A region unloaded while the
+	// stack changed (a layer removed, reordered, re-weighted) was saved before the change and the manifest
+	// after it, so its file is stale against the stack that just loaded. Rebuild those composites now.
+	_load_region_index(p_dir);
+	bool recomposited = false;
+	for (const Vector2i &region_loc : _regions.keys()) {
+		recomposited = _recomposite_if_stale(region_loc) || recomposited;
+		_index_region(region_loc);
+	}
+	if (recomposited) {
+		update_maps(TYPE_MAX, false, false);
+	}
 }
 
 //TODO have load_directory call load_region, or make a load_file that loads a specific path
-void Pasture3DData::load_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_update) {
+// Loads one region from disk into memory (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md phase 0). Its layer
+// slice is merged BEFORE add_region so a base that persisted its own pixels wins over base adoption, which
+// only fills a base that has nothing for this location.
+Error Pasture3DData::load_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_update) {
 	LOG(INFO, "Loading region from location ", p_region_loc);
+	if (_regions.has(p_region_loc)) {
+		Pasture3DRegion *existing = get_region_ptr(p_region_loc);
+		if (existing && existing->is_deleted()) {
+			// Deleted but not yet saved: reading the file back would silently undo the delete.
+			LOG(ERROR, "Region ", p_region_loc, " is marked for deletion; save or undo before loading it");
+			return ERR_BUSY;
+		}
+		LOG(DEBUG, "Region ", p_region_loc, " is already loaded");
+		return OK;
+	}
 	String path = p_dir + String("/") + Util::location_to_filename(p_region_loc);
 	bool legacy = false;
 	if (!FileAccess::file_exists(path)) {
@@ -965,13 +1012,13 @@ void Pasture3DData::load_region(const Vector2i &p_region_loc, const String &p_di
 			legacy = true;
 		} else {
 			LOG(ERROR, "File ", path, " doesn't exist");
-			return;
+			return ERR_FILE_NOT_FOUND;
 		}
 	}
 	Ref<Pasture3DRegion> region = ResourceLoader::get_singleton()->load(path, "Pasture3DRegion", ResourceLoader::CACHE_MODE_IGNORE);
 	if (region.is_null()) {
 		LOG(ERROR, "Cannot load region at ", path);
-		return;
+		return ERR_FILE_CORRUPT;
 	}
 	if (legacy) {
 		// Re-class to Pasture3DRegion and mark modified so the next save migrates the file name.
@@ -981,21 +1028,301 @@ void Pasture3DData::load_region(const Vector2i &p_region_loc, const String &p_di
 		region = migrated;
 		region->set_modified(true);
 	}
-	if (_regions.is_empty()) {
+	if (_regions.is_empty() && _terrain) {
 		_terrain->set_region_size((Pasture3D::RegionSize)region->get_region_size());
-	} else {
-		if (_terrain->get_region_size() != (Pasture3D::RegionSize)region->get_region_size()) {
-			LOG(ERROR, "Region size mismatch. First loaded: ", _terrain->get_region_size(), " next: ",
-					region->get_region_size(), " in file: ", path);
-			return;
-		}
+	} else if (_region_size > 0 && _region_size != region->get_region_size()) {
+		LOG(ERROR, "Region size mismatch. Terrain: ", _region_size, " region: ",
+				region->get_region_size(), " in file: ", path);
+		return ERR_INVALID_DATA;
 	}
 	if (!legacy) {
 		region->take_over_path(path);
+		// Deserialisation runs the map and range setters, which flag the region modified. It is exactly its
+		// file right now, and the index and unload both read modified as "memory is ahead of the file".
+		region->set_modified(false);
 	}
 	region->set_location(p_region_loc);
 	region->set_version(CURRENT_DATA_VERSION); // Sends upgrade warning if old version
-	add_region(region, p_update);
+
+	// Anything a layer still holds for this location is a leftover (an undo restored tiles for a region that
+	// was unloaded at the time); the slice on disk is what the region left with.
+	_evict_region_tiles(p_region_loc);
+	_merge_layer_slice(p_dir, p_region_loc);
+	Error err = add_region(region, false);
+	if (err != OK) {
+		_evict_region_tiles(p_region_loc);
+		return err;
+	}
+	_recomposite_if_stale(p_region_loc);
+	_index_region(p_region_loc);
+	_bump_generation(p_region_loc);
+	if (p_update) {
+		update_maps(TYPE_MAX, true, false);
+		if (_terrain) {
+			_terrain->get_instancer()->update_mmis(-1, p_region_loc);
+		}
+	}
+	emit_signal("region_loaded", p_region_loc);
+	return OK;
+}
+
+// Takes a region out of memory and keeps it on disk (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md phase 0).
+// Auto-saves first: the region file, its layer slice, the layer manifest (the slice's uids must resolve
+// against a manifest that knows them) and the region index. Refuses rather than lose data when it cannot
+// save, and refuses a region marked for deletion (that is remove_region's job, finished by the next save).
+Error Pasture3DData::unload_region(const Vector2i &p_region_loc, const bool p_update) {
+	Ref<Pasture3DRegion> region = get_region(p_region_loc);
+	if (region.is_null()) {
+		LOG(ERROR, "No loaded region at ", p_region_loc);
+		return ERR_DOES_NOT_EXIST;
+	}
+	if (region->is_deleted()) {
+		LOG(ERROR, "Region ", p_region_loc, " is marked for deletion; save or undo before unloading it");
+		return ERR_BUSY;
+	}
+	const String dir = _data_dir();
+	if (dir.is_empty()) {
+		// Nowhere to write it, so unloading would destroy it.
+		LOG(ERROR, "Cannot unload region ", p_region_loc, ": the terrain has no data directory to save it to");
+		return ERR_UNCONFIGURED;
+	}
+	const String path = dir + String("/") + Util::location_to_filename(p_region_loc);
+	if (!region->is_modified() && !FileAccess::file_exists(path)) {
+		// Never saved and unmodified (e.g. a blank region added and left alone): it still has to be written,
+		// or it would stop existing.
+		region->set_modified(true);
+	}
+	save_region(p_region_loc, dir, _terrain ? _terrain->get_save_16_bit() : false);
+	if (region->is_modified() || !FileAccess::file_exists(path)) {
+		LOG(ERROR, "Region ", p_region_loc, " could not be saved; not unloading it");
+		return ERR_FILE_CANT_WRITE;
+	}
+	if (_layer_stack.is_valid() && _layer_stack->get_layer_count() > 1) {
+		_save_layer_manifest(dir);
+		_save_layer_slice(dir, p_region_loc, _is_base_aliased());
+	}
+	_index_region(p_region_loc);
+	_save_region_index(dir);
+
+	_evict_region_tiles(p_region_loc);
+	if (_terrain) {
+		_terrain->get_instancer()->destroy_by_location(p_region_loc);
+	}
+	_regions.erase(p_region_loc);
+	int region_id = _region_locations.find(p_region_loc);
+	if (region_id >= 0) {
+		_region_locations.remove_at(region_id);
+	}
+	_region_map_dirty = true;
+	_bump_generation(p_region_loc);
+	LOG(INFO, "Unloaded region ", p_region_loc);
+	if (p_update) {
+		update_maps(TYPE_MAX, true, false);
+	}
+	emit_signal("region_unloaded", p_region_loc);
+	return OK;
+}
+
+bool Pasture3DData::is_region_loaded(const Vector2i &p_region_loc) const {
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	return region && !region->is_deleted();
+}
+
+TypedArray<Vector2i> Pasture3DData::restore_layer_tiles(const int p_layer_id, const Dictionary &p_tiles, const Dictionary &p_generations) {
+	TypedArray<Vector2i> changed;
+	if (_layer_stack.is_null()) {
+		return changed;
+	}
+	Pasture3DLayer *layer = _layer_stack->get_layer_ptr(p_layer_id);
+	if (!layer) {
+		return changed;
+	}
+	// Every location either side might name: what the layer holds now and what the snapshot holds.
+	Dictionary locations;
+	for (const Vector2i &loc : layer->get_region_locations()) {
+		locations[loc] = true;
+	}
+	for (const Vector2i &loc : p_tiles.keys()) {
+		locations[loc] = true;
+	}
+	for (const Vector2i &loc : locations.keys()) {
+		if (!is_region_loaded(loc)) {
+			continue; // Nothing operates on an unloaded region; its tiles are on disk.
+		}
+		if (!p_generations.has(loc) || int(p_generations[loc]) != get_region_generation(loc)) {
+			LOG(WARN, "Undo skipped region ", loc, " on layer ", p_layer_id, ": it was unloaded or loaded since this edit");
+			continue;
+		}
+		layer->restore_region_tiles(loc, p_tiles.get(loc, Dictionary()));
+		changed.push_back(loc);
+	}
+	return changed;
+}
+
+Dictionary Pasture3DData::get_region_generations() const {
+	Dictionary gens;
+	for (const Vector2i &loc : _regions.keys()) {
+		if (is_region_loaded(loc)) {
+			gens[loc] = get_region_generation(loc);
+		}
+	}
+	return gens;
+}
+
+void Pasture3DData::_bump_generation(const Vector2i &p_region_loc) {
+	_region_generation[p_region_loc] = get_region_generation(p_region_loc) + 1;
+}
+
+String Pasture3DData::_data_dir() const {
+	return _terrain ? _terrain->get_data_directory() : String();
+}
+
+int64_t Pasture3DData::_stack_signature() const {
+	if (_layer_stack.is_null()) {
+		return 0;
+	}
+	String sig;
+	const int count = _layer_stack->get_layer_count();
+	for (int i = 0; i < count; i++) {
+		const Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+		if (!layer) {
+			continue;
+		}
+		sig += layer->get_layer_uid() + ":" + itos(layer->get_blend_mode()) + ":" + String::num(layer->get_opacity(), 6) +
+				":" + (layer->is_visible() ? "1" : "0") + ":" + itos(layer->get_map_type()) + ":" +
+				(layer->is_base() ? "1" : "0") + ";";
+	}
+	return int64_t(sig.hash());
+}
+
+// The entry describes the FILE, so a region whose memory is ahead of its file (modified, or never saved)
+// is left as it was: recording the current signature for it would tell the next load that a stale file is
+// current. Called after every write, where modified has just been cleared.
+void Pasture3DData::_index_region(const Vector2i &p_region_loc) {
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	if (!region || region->is_deleted() || region->is_modified()) {
+		return;
+	}
+	Dictionary entry = _region_index->get_entry(p_region_loc).duplicate();
+	entry["height_range"] = region->get_height_range();
+	entry["stack_signature"] = _stack_signature();
+	_region_index->set_entry(p_region_loc, entry);
+}
+
+void Pasture3DData::_load_region_index(const String &p_dir) {
+	const String path = p_dir + String("/") + Util::REGION_INDEX_FILENAME;
+	Ref<Pasture3DRegionIndex> index;
+	if (FileAccess::file_exists(path)) {
+		index = ResourceLoader::get_singleton()->load(path, "Pasture3DRegionIndex", ResourceLoader::CACHE_MODE_IGNORE);
+		if (index.is_null()) {
+			LOG(ERROR, "Cannot load region index at ", path, "; rebuilding it from the region files");
+		}
+	}
+	if (index.is_null()) {
+		index.instantiate();
+	}
+	// Entries whose file is gone (deleted outside the editor) describe nothing.
+	for (const Vector2i &loc : index->get_locations()) {
+		const String fname = Util::location_to_filename(loc);
+		if (!FileAccess::file_exists(p_dir + String("/") + fname) &&
+				!FileAccess::file_exists(p_dir + String("/") + fname.replace("pasture3d", "terrain3d"))) {
+			index->erase_entry(loc);
+		}
+	}
+	_region_index = index;
+}
+
+void Pasture3DData::_save_region_index(const String &p_dir) {
+	const String path = p_dir + String("/") + Util::REGION_INDEX_FILENAME;
+	Error err = ResourceSaver::get_singleton()->save(_region_index, path, ResourceSaver::FLAG_COMPRESS);
+	if (err != OK) {
+		LOG(ERROR, "Could not save region index: ", path, ", error: ", err);
+	}
+}
+
+bool Pasture3DData::_merge_layer_slice(const String &p_dir, const Vector2i &p_region_loc) {
+	if (_layer_stack.is_null()) {
+		return false;
+	}
+	const String slice_path = p_dir + String("/") + Util::location_to_layer_filename(p_region_loc);
+	if (!FileAccess::file_exists(slice_path)) {
+		return false;
+	}
+	Ref<Pasture3DLayerStack> slice = ResourceLoader::get_singleton()->load(slice_path, "Pasture3DLayerStack", ResourceLoader::CACHE_MODE_IGNORE);
+	if (slice.is_null()) {
+		LOG(ERROR, "Cannot load layer slice at ", slice_path);
+		return false;
+	}
+	const int layer_count = _layer_stack->get_layer_count();
+	Dictionary index_by_uid;
+	for (int i = 0; i < layer_count; i++) {
+		const Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+		if (layer && !layer->get_layer_uid().is_empty()) {
+			index_by_uid[layer->get_layer_uid()] = i;
+		}
+	}
+	const int slice_count = slice->get_layer_count();
+	for (int i = 0; i < slice_count; i++) {
+		Pasture3DLayer *slice_layer = slice->get_layer_ptr(i);
+		if (!slice_layer) {
+			continue;
+		}
+		Dictionary slice_tiles = slice_layer->get_tiles();
+		if (!slice_tiles.has(p_region_loc)) {
+			continue;
+		}
+		const String uid = slice_layer->get_layer_uid();
+		int target = -1;
+		if (uid.is_empty()) {
+			target = i < layer_count ? i : -1; // Legacy slice: index-aligned by construction.
+		} else if (index_by_uid.has(uid)) {
+			target = index_by_uid[uid];
+		}
+		if (target < 0) {
+			LOG(INFO, "Region ", p_region_loc, ": dropping tiles of a layer removed while it was unloaded");
+			continue;
+		}
+		Pasture3DLayer *layer = _layer_stack->get_layer_ptr(target);
+		Dictionary tiles = layer->get_tiles();
+		tiles[p_region_loc] = slice_tiles[p_region_loc];
+		layer->set_tiles(tiles);
+	}
+	return true;
+}
+
+void Pasture3DData::_evict_region_tiles(const Vector2i &p_region_loc) {
+	if (_layer_stack.is_null()) {
+		return;
+	}
+	const int layer_count = _layer_stack->get_layer_count();
+	for (int i = 0; i < layer_count; i++) {
+		Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+		if (layer && layer->has_region(p_region_loc)) {
+			layer->restore_region_tiles(p_region_loc, Dictionary()); // Empty = erase.
+		}
+	}
+}
+
+bool Pasture3DData::_recomposite_if_stale(const Vector2i &p_region_loc) {
+	if (_layer_stack.is_null()) {
+		return false;
+	}
+	Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	const Dictionary entry = _region_index->get_entry(p_region_loc);
+	if (!region || !entry.has("stack_signature") || int64_t(entry["stack_signature"]) == _stack_signature()) {
+		return false;
+	}
+	// A Base aliasing the region map IS the composite; there is no separate source to rebuild it from.
+	const Pasture3DLayer *base = _layer_stack->get_layer_ptr(0);
+	if (base) {
+		Ref<Image> tile = base->get_tile(p_region_loc, V2I_ZERO);
+		if (tile.is_valid() && tile == region->get_height_map()) {
+			return false;
+		}
+	}
+	LOG(INFO, "Region ", p_region_loc, " was written under a different layer stack; recompositing");
+	composite_region(p_region_loc, Rect2i(), false);
+	return true;
 }
 
 TypedArray<Image> Pasture3DData::get_maps(const MapType p_map_type) const {
@@ -1218,6 +1545,11 @@ void Pasture3DData::composite_region(const Vector2i &p_region_loc, const Rect2i 
 		_composite_color_region(region, p_region_loc, rect);
 	}
 	region->set_edited(true);
+	// The composited runtime image changed, so it has to reach disk. Per-sample layer writes already mark
+	// their region, but a whole-layer recomposite (layer remove/move/opacity, an undo restore) came only
+	// through here and did not: the next save skipped the region and its file kept the old composite. A
+	// reload then compares index signatures and trusts the file, so the file must be what was composited.
+	region->set_modified(true);
 	if (p_update) {
 		// Reuse the is_edited() fast path: only edited regions are pushed to the GPU.
 		update_maps(TYPE_HEIGHT, false, false);
@@ -3116,6 +3448,12 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("save_region", "region_location", "directory", "save_16_bit"), &Pasture3DData::save_region, DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("load_directory", "directory"), &Pasture3DData::load_directory);
 	ClassDB::bind_method(D_METHOD("load_region", "region_location", "directory", "update"), &Pasture3DData::load_region, DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("unload_region", "region_location", "update"), &Pasture3DData::unload_region, DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("is_region_loaded", "region_location"), &Pasture3DData::is_region_loaded);
+	ClassDB::bind_method(D_METHOD("get_region_index"), &Pasture3DData::get_region_index);
+	ClassDB::bind_method(D_METHOD("get_region_generation", "region_location"), &Pasture3DData::get_region_generation);
+	ClassDB::bind_method(D_METHOD("get_region_generations"), &Pasture3DData::get_region_generations);
+	ClassDB::bind_method(D_METHOD("restore_layer_tiles", "layer_id", "tiles", "generations"), &Pasture3DData::restore_layer_tiles);
 	ClassDB::bind_method(D_METHOD("save_layers", "directory"), &Pasture3DData::save_layers);
 	ClassDB::bind_method(D_METHOD("load_layers", "directory"), &Pasture3DData::load_layers);
 
@@ -3182,4 +3520,6 @@ void Pasture3DData::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("color_maps_changed"));
 	ADD_SIGNAL(MethodInfo("maps_edited", PropertyInfo(Variant::AABB, "edited_area")));
 	ADD_SIGNAL(MethodInfo("layers_changed"));
+	ADD_SIGNAL(MethodInfo("region_loaded", PropertyInfo(Variant::VECTOR2I, "region_location")));
+	ADD_SIGNAL(MethodInfo("region_unloaded", PropertyInfo(Variant::VECTOR2I, "region_location")));
 }
