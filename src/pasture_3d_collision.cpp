@@ -31,7 +31,7 @@ Dictionary Pasture3DCollision::_get_shape_data(const Vector2i &p_position, const
 	const bool is_bg_flat_or_noise = bg_mode == Pasture3DMaterial::WorldBackground::FLAT || bg_mode == Pasture3DMaterial::WorldBackground::NOISE;
 	const real_t ground_level = material->get("ground_level");
 	const real_t region_blend = material->get("region_blend");
-	const int region_map_size = Pasture3DData::REGION_MAP_SIZE;
+	const int region_map_size = Pasture3DData::get_region_map_size();
 	const PackedInt32Array region_map = data->get_region_map();
 	const int region_size = _terrain->get_region_size();
 	const real_t region_texel_size = 1.f / real_t(region_size);
@@ -40,8 +40,8 @@ Dictionary Pasture3DCollision::_get_shape_data(const Vector2i &p_position, const
 		Vector2i pos = Vector2i(Math::floor(uv2.x), Math::floor(uv2.y)) + Vector2i(region_map_size / 2, region_map_size / 2);
 		int layer_index = 0;
 		if ((uint32_t)(pos.x | pos.y) < (uint32_t)region_map_size) {
-			int v = region_map[pos.y * region_map_size + pos.x];
-			layer_index = Math::clamp(v - 1, -1, 0) + 1;
+			const int slot = Pasture3DData::region_map_decode(region_map[pos.y * region_map_size + pos.x]);
+			layer_index = slot >= 0 ? 1 : 0;
 		}
 		return real_t(layer_index);
 	};

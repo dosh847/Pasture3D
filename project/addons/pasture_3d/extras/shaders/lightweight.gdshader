@@ -43,8 +43,18 @@ uniform float _vertex_density = 1.0; // = 1./_vertex_spacing
 uniform float _subdiv = 1.0;
 uniform float _region_size = 1024.0;
 uniform float _region_texel_size = 0.0009765625; // = 1./region_size
-uniform int _region_map_size = 32;
-uniform int _region_map[1024];
+// Region map: an RF texture of exact integers, 0 = no region, else texture-array slot + 1
+// (Pasture3DData.region_map_encode). Set by Pasture3DMaterial.
+uniform highp sampler2D _region_map : filter_nearest, repeat_disable;
+uniform int _region_map_size = 256;
+
+// Slot of the region at map position `pos` (location + _region_map_size / 2), or -1 if none.
+int region_map_slot(ivec2 pos) {
+	if (uint(pos.x | pos.y) >= uint(_region_map_size)) {
+		return -1;
+	}
+	return int(texelFetch(_region_map, pos, 0).r + 0.5) - 1;
+}
 uniform vec2 _region_locations[1024];
 uniform float _texture_normal_depth_array[32];
 uniform float _texture_ao_strength_array[32];
@@ -105,8 +115,7 @@ varying mat3 TBN;
 ivec3 get_index_coord(const vec2 uv) {
 	vec2 r_uv = round(uv);
 	ivec2 pos = ivec2(floor(r_uv * _region_texel_size)) + (_region_map_size / 2);
-	int bounds = int(uint(pos.x | pos.y) < uint(_region_map_size));
-	int layer_index = _region_map[pos.y * _region_map_size + pos.x] * bounds - 1;
+	int layer_index = region_map_slot(pos);
 	return ivec3(ivec2(mod(r_uv, _region_size)), layer_index);
 }
 
@@ -115,9 +124,8 @@ ivec3 get_index_coord(const vec2 uv) {
 // Z: layer index used for texturearrays, -1 if not in a region
 vec3 get_index_uv(const vec2 uv2) {
 	ivec2 pos = ivec2(floor(uv2)) + (_region_map_size / 2);
-	int bounds = int(uint(pos.x | pos.y) < uint(_region_map_size));
-	int layer_index = _region_map[ pos.y * _region_map_size + pos.x ] * bounds - 1;
-	return vec3(uv2 - _region_locations[layer_index], float(layer_index));
+	int layer_index = region_map_slot(pos);
+	return vec3(uv2 - _region_locations[max(layer_index, 0)], float(layer_index));
 }
 
 // Takes in world space XZ (UV) and returns if the coordinate should be part of the NONE background.
@@ -135,7 +143,7 @@ float check_region(const vec2 uv2) {
 	ivec2 pos = ivec2(floor(uv2)) + (_region_map_size / 2);
 	int layer_index = 0;
 	if (uint(pos.x | pos.y) < uint(_region_map_size)) {
-		layer_index = clamp(_region_map[ pos.y * _region_map_size + pos.x ] - 1, -1, 0) + 1;
+		layer_index = int(region_map_slot(pos) >= 0);
 	}
 	return float(layer_index);
 }

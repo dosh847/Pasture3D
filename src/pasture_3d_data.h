@@ -24,14 +24,20 @@ class Pasture3DData : public Object {
 
 public: // Constants
 	static inline const real_t CURRENT_DATA_VERSION = 0.93f; // Current Data format version
-	static inline const int REGION_MAP_SIZE = 32;
+	// The region map's edge in region locations, from the project setting REGION_MAP_SIZE_SETTING (read
+	// once per process: the map is sized when the first terrain initialises). Locations run from
+	// -size/2 to size/2 - 1 on each axis.
+	static inline const int REGION_MAP_SIZE_DEFAULT = 256;
+	static inline const char *REGION_MAP_SIZE_SETTING = "pasture_3d/regions/region_map_size";
+	// Texture-array slots are allocated in chunks of this many, so a load rarely has to grow (recreate) the
+	// arrays. Growing re-uploads every slot; filling a free slot uploads one layer.
+	static inline const int SLOT_CHUNK = 16;
 	// The GPU crossover defaults, in cells. Public and named so the READER (_gpu_raster_threshold,
 	// graph_gpu_threshold) and the Project Settings REGISTRATION cannot disagree — they did, by 16x,
 	// for the whole life of the GPU rasteriser, and every stamp between 256^2 and 1024^2 quietly took
 	// the CPU path as a result.
 	static inline const int GPU_RASTER_THRESHOLD_DEFAULT = 65536;  // 256^2
 	static inline const int GRAPH_GPU_THRESHOLD_DEFAULT = 65536;   // 256^2
-	static inline const Vector2i REGION_MAP_VSIZE = V2I(REGION_MAP_SIZE);
 
 	enum HeightFilter {
 		HEIGHT_FILTER_NEAREST,
@@ -62,8 +68,9 @@ private:
 	// Regions are dual indexed:
 	// 1) By `region_location:Vector2i` as the primary key. This is the only stable index
 	// so should be the main index for users.
-	// 2) By `region_id:int`. This index changes on every add/remove, depends on load order,
-	// and is not stable. It should not be relied on by users and is primarily for internal use.
+	// 2) By `region_id:int`, which is the region's SLOT in the texture arrays. A region keeps its slot
+	// for as long as it is loaded; unloading or deleting it frees the slot for the next region to load.
+	// Slots are internal: users should index by location.
 
 	// Private functions should be indexed by region_id or region_location
 	// Public functions by region_location or global_position
@@ -73,27 +80,40 @@ private:
 	// by the Undo system.
 	Dictionary _regions; // Dict[region_location:Vector2i] -> Pasture3DRegion
 
-	// All _active_ region maps are maintained in these secondary indices.
-	// Regions are considered active if and only if they exist in `_region_locations`. The other
-	// arrays are built off of this index; its order defines region_id.
-	// The image arrays are converted to TextureArrays for the shader.
-
+	// Active regions are the loaded, non-deleted ones. `_region_locations` lists them (in slot order after
+	// update_maps); it no longer defines the slot.
 	TypedArray<Vector2i> _region_locations;
+
+	// Slot pool (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md §B). _slot_locations[slot] is the location in
+	// that slot, or V2I_MAX when free; _slot_region_ids[slot] is the ObjectID of the region uploaded there, so
+	// a region object replaced at the same location (undo, reload) is re-uploaded. Its size is the array
+	// capacity, a multiple of SLOT_CHUNK. Allocation takes the LOWEST free slot so slots stay below the
+	// material's max_regions for as long as the loaded count does.
+	TypedArray<Vector2i> _slot_locations;
+	PackedInt64Array _slot_region_ids;
+	Dictionary _region_slots; // Dict[region_location:Vector2i] -> slot:int
+
+	// Slot-indexed images backing the texture arrays; a free slot holds a placeholder of the same shape.
 	TypedArray<Image> _height_maps;
 	TypedArray<Image> _control_maps;
 	TypedArray<Image> _color_maps;
+	Ref<Image> _placeholders[TYPE_MAX]; // One blank per map type, shaped like the array it pads
 
-	// Editing occurs on the Image arrays above, which are converted to Texture arrays
-	// below for the shader.
-
-	// 32x32 grid with region_id:int at its location, no region = 0, region_ids >= 1
+	// get_region_map_size()^2 encoded texels (region_map_encode): 0 = no region, else slot + 1. The CPU copy
+	// for C++ readers; _generated_region_map is the same values as an RF texture for the shaders.
 	PackedInt32Array _region_map;
 	bool _region_map_dirty = true;
+	GeneratedTexture _generated_region_map;
 
 	// These contain the TextureArray RIDs from the RenderingServer
 	GeneratedTexture _generated_height_maps;
 	GeneratedTexture _generated_control_maps;
 	GeneratedTexture _generated_color_maps;
+
+	// Upload accounting, so a gate can prove that loading one region uploads one layer per map type.
+	int64_t _stat_layer_uploads = 0;
+	int64_t _stat_array_creates = 0;
+	int64_t _stat_region_map_uploads = 0;
 
 	// Optional editor-only non-destructive layer stack. Null on plain terrains; the region images
 	// above remain the composited source of truth either way, so the runtime path is unchanged.
@@ -122,6 +142,15 @@ private:
 
 	// Functions
 	void _clear();
+	// Slot pool. _sync_slots frees slots whose region went away and gives every active region without one
+	// the lowest free slot; r_fresh gets each slot whose contents must be uploaded. Returns true if the
+	// capacity grew (the arrays must be recreated).
+	bool _sync_slots(PackedInt32Array &r_fresh);
+	void _release_slot(const Vector2i &p_region_loc);
+	void _rebuild_region_map();
+	// A blank shaped like p_like (size, format, mipmaps), cached per map type.
+	Ref<Image> _placeholder(const MapType p_type, const Ref<Image> &p_like);
+	void _build_array(const MapType p_type);
 	void _synthesize_base_layer();
 	// Whether the dense Base layer (index 0) still aliases the region height maps (same Ref<Image>).
 	// Aliasing is the zero-copy load state; it is correct for a single flatten but double-applies
@@ -205,7 +234,18 @@ public:
 	TypedArray<Pasture3DRegion> get_regions_active(const bool p_copy = false, const bool p_deep = false) const;
 	Dictionary get_regions_all() const { return _regions; }
 	PackedInt32Array get_region_map() const { return _region_map; }
+	RID get_region_map_rid() const { return _generated_region_map.get_rid(); }
+	static int get_region_map_size();
+	static inline int s_region_map_size = 0; // Cached project setting; 0 until first read
+	static int _read_region_map_size();
 	static int get_region_map_index(const Vector2i &p_region_loc);
+	// The region map encoding, defined here and in shaders/region_map.glsl ONLY.
+	static int region_map_encode(const int p_slot) { return p_slot + 1; }
+	static int region_map_decode(const int p_value) { return p_value - 1; } // -1 = no region
+	TypedArray<Vector2i> get_slot_locations() const;
+	int get_slot_capacity() const { return _slot_locations.size(); }
+	Dictionary get_upload_stats() const;
+	void reset_upload_stats();
 
 	void do_for_regions(const Rect2i &p_area, const Callable &p_callback);
 	void change_region_size(int region_size);
@@ -555,14 +595,21 @@ VARIANT_ENUM_CAST(Pasture3DData::ExportMode);
 // the world, returning the _region_map index, which contains the region_id.
 // Valid region locations are -16, -16 to 15, 15, or when offset: 0, 0 to 31, 31
 // If any bits other than 0x1F are set, it's out of bounds and returns -1
+inline int Pasture3DData::get_region_map_size() {
+	if (s_region_map_size == 0) {
+		s_region_map_size = _read_region_map_size();
+	}
+	return s_region_map_size;
+}
+
 inline int Pasture3DData::get_region_map_index(const Vector2i &p_region_loc) {
-	// Offset world to positive values only
-	Vector2i loc = p_region_loc + (REGION_MAP_VSIZE / 2);
-	// Catch values > 31
-	if ((uint32_t(loc.x | loc.y) & uint32_t(~0x1F)) > 0) {
+	const int size = get_region_map_size();
+	// Offset world to positive values only; the size is a power of two.
+	Vector2i loc = p_region_loc + V2I(size / 2);
+	if ((uint32_t(loc.x | loc.y) & uint32_t(~(size - 1))) > 0) {
 		return -1;
 	}
-	return loc.y * REGION_MAP_SIZE + loc.x;
+	return loc.y * size + loc.x;
 }
 
 // Returns a region location given a global position. No bounds checking nor data access.
@@ -575,8 +622,8 @@ inline Vector2i Pasture3DData::get_region_location(const Vector3 &p_global_posit
 inline int Pasture3DData::get_region_id(const Vector2i &p_region_loc) const {
 	int map_index = get_region_map_index(p_region_loc);
 	if (map_index >= 0) {
-		int region_id = _region_map[map_index] - 1; // 0 = no region
-		if (region_id >= 0 && region_id < _region_locations.size()) {
+		int region_id = region_map_decode(_region_map[map_index]);
+		if (region_id >= 0 && region_id < _slot_locations.size()) {
 			return region_id;
 		}
 	}

@@ -47,6 +47,12 @@ void GeneratedTexture::update(const Ref<Image> &p_image, const int p_layer) {
 	RS->texture_2d_update(_rid, p_image, p_layer);
 }
 
+void GeneratedTexture::update_2d(const Ref<Image> &p_image) {
+	LOG(EXTREME, "RenderingServer updating Texture2D");
+	_image = p_image;
+	RS->texture_2d_update(_rid, _image, 0);
+}
+
 RID GeneratedTexture::create(const Ref<Image> &p_image) {
 	LOG(EXTREME, "RenderingServer creating Texture2D");
 	_image = p_image;

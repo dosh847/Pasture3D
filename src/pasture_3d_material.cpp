@@ -45,6 +45,9 @@ void Pasture3DMaterial::_preload_shaders() {
 #include "shaders/max_regions.glsl"
 			, "max_regions");
 	_parse_shader(
+#include "shaders/region_map.glsl"
+			, "region_map");
+	_parse_shader(
 #include "shaders/projection.glsl"
 			, "projection");
 	_parse_shader(
@@ -667,37 +670,30 @@ void Pasture3DMaterial::_update_uniforms(const RID &p_material, const uint32_t p
 	LOG(EXTREME, "Updating uniforms in shader");
 
 	Pasture3DData *data = _terrain->get_data();
-	PackedInt32Array region_map = data->get_region_map();
-	LOG(EXTREME, "region_map.size(): ", region_map.size());
-	if (region_map.size() != Pasture3DData::REGION_MAP_SIZE * Pasture3DData::REGION_MAP_SIZE) {
-		LOG(ERROR, "Expected region_map.size() of ", Pasture3DData::REGION_MAP_SIZE * Pasture3DData::REGION_MAP_SIZE);
-		return;
-	}
-	RS->material_set_param(p_material, "_region_map", region_map);
-	RS->material_set_param(p_material, "_region_map_size", Pasture3DData::REGION_MAP_SIZE);
-	if (Pasture3D::debug_level >= EXTREME) {
-		LOG(EXTREME, "Region map");
-		for (int i = 0; i < region_map.size(); i++) {
-			if (region_map[i]) {
-				LOG(EXTREME, "Region id: ", region_map[i], " array index: ", i);
-			}
+	// The region map is an RF texture of encoded slots (shaders/region_map.glsl); its RID survives updates.
+	RS->material_set_param(p_material, "_region_map", data->get_region_map_rid());
+	RS->material_set_param(p_material, "_region_map_size", Pasture3DData::get_region_map_size());
+
+	// _region_locations is indexed by SLOT, so it is the slot table, not the active-region list.
+	TypedArray<Vector2i> slot_locations = data->get_slot_locations();
+	LOG(EXTREME, "Slot locations: ", slot_locations.size(), " ", slot_locations);
+	// Padded to exactly the length the shader compiled: a short upload would leave the tail of the uniform
+	// undefined, a long one would overrun it. Slots are allocated lowest-first, so a slot at or past the
+	// ceiling means more regions are loaded than max_regions; the shader reads those as "no region".
+	int highest_used = -1;
+	for (int i = 0; i < slot_locations.size(); i++) {
+		if (data->get_region_id(slot_locations[i]) == i) {
+			highest_used = i;
 		}
 	}
-
-	TypedArray<Vector2i> region_locations = data->get_region_locations();
-	LOG(EXTREME, "Region_locations size: ", region_locations.size(), " ", region_locations);
-	// Padded to exactly the length the shader compiled. The array is no longer always 1024
-	// (see RegionMaximum), and a short upload would leave the tail of the uniform undefined
-	// while a long one would overrun it. Regions past the ceiling are dropped here and read as
-	// "no region" in the shader, which is what the MAX_REGIONS bounds check exists for.
-	if (region_locations.size() > (int)_max_regions) {
-		LOG(WARN, "Scene has ", region_locations.size(), " regions but max_regions is ",
+	if (highest_used >= (int)_max_regions) {
+		LOG(WARN, "Scene has ", data->get_region_count(), " loaded regions but max_regions is ",
 				(int)_max_regions, "; the excess will not render. Raise Pasture3DMaterial.max_regions.");
 	}
 	TypedArray<Vector2i> padded_locations;
 	padded_locations.resize((int)_max_regions);
-	for (int i = 0; i < MIN(region_locations.size(), (int)_max_regions); ++i) {
-		padded_locations[i] = region_locations[i];
+	for (int i = 0; i < MIN(slot_locations.size(), (int)_max_regions); ++i) {
+		padded_locations[i] = slot_locations[i];
 	}
 	RS->material_set_param(p_material, "_region_locations", padded_locations);
 

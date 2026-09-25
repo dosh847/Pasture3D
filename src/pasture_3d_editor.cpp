@@ -42,7 +42,7 @@ Ref<Pasture3DRegion> Pasture3DEditor::_operate_region(const Vector2i &p_region_l
 	if (data->get_region_map_index(p_region_loc) < 0) {
 		if (can_print) {
 			LOG(INFO, "Location ", p_region_loc, " out of bounds. Max: ",
-					-Pasture3DData::REGION_MAP_SIZE / 2, " to ", Pasture3DData::REGION_MAP_SIZE / 2 - 1);
+					-Pasture3DData::get_region_map_size() / 2, " to ", Pasture3DData::get_region_map_size() / 2 - 1);
 		}
 		return Ref<Pasture3DRegion>();
 	}

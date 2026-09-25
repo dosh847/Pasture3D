@@ -1,8 +1,29 @@
 # Pasture3D Region Streaming and Region Types
 
-**Status (2026-09-25): phase 0 built and gated (`bench/RegionUnloadGate`, uncommitted on
-`feat/region-streaming-phase0`); phases 1–6 not started.** Check the symbols named here before trusting
+**Status (2026-09-25): phase 0 built and gated (`bench/RegionUnloadGate`, commit c2388feb); phase 1
+built and gated (`bench/RegionSlotGate` 8/8, `bench/RegionSlotRenderProbe` windowed, uncommitted on
+`feat/region-streaming-phase0`); phases 2–6 not started.** Check the symbols named here before trusting
 this header: specs in this repo go stale.
+
+Phase 1 as built (deviations from §B marked):
+
+- Slots: `_slot_locations` / `_region_slots`, lowest free slot first, capacity grows by 16 and only growth
+  recreates the arrays. `get_region_id` now returns the SLOT, not the index in `region_locations`, and
+  `set_region_locations` (reorder, undo) never moves a slot. A region object replaced at the same location
+  is re-uploaded (slots remember the uploaded ObjectID).
+- **Deviation: the map is `RF`, not `R32I`.** Godot's `Image` has no integer format. Texels are exact small
+  integers, 0 = none, else slot + 1. The encoding is defined in `Pasture3DData::region_map_encode/decode` and
+  `shaders/region_map.glsl` (`region_map_slot()`), nowhere else. There is no type-array index yet; that
+  arrives with phase 2.
+- **Deviation: the whole map is re-uploaded** on a change (`texture_2d_update`; 256² floats), not only the
+  changed texels. `get_upload_stats()` counts it as one `region_map_uploads`.
+- `pasture_3d/regions/region_map_size` (default 256, power of two in [32, 1024], restart required).
+  `Pasture3DData.get_region_map_size()` replaces the removed `REGION_MAP_SIZE` constant: a breaking change
+  for GDScript users of the constant. The extras shaders and the particle example moved to the texture.
+- Adding or removing a region still rebuilds every MMI (`update_mmis(-1, V2I_MAX, true)`), unchanged from
+  before; left for phase 6 streaming.
+- ui.gd's NONE-background region-tool preview wrote negative values into the map and was already inert
+  (the shader's slot bound rejected them). It was removed.
 
 Phase 0 as built:
 

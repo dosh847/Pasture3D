@@ -282,7 +282,7 @@ void Pasture3DRegion::set_location(const Vector2i &p_location) {
 	// We have a limitation of 32x32.
 	if (Pasture3DData::get_region_map_index(p_location) < 0) {
 		LOG(ERROR, "Location ", p_location, " out of bounds. Max: ",
-				-Pasture3DData::REGION_MAP_SIZE / 2, " to ", Pasture3DData::REGION_MAP_SIZE / 2 - 1);
+				-Pasture3DData::get_region_map_size() / 2, " to ", Pasture3DData::get_region_map_size() / 2 - 1);
 		return;
 	}
 	// Marked modified if setting after initialized

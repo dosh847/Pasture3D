@@ -23,8 +23,18 @@ void Pasture3DData::_clear() {
 	LOG(INFO, "Clearing data");
 	_region_map_dirty = true;
 	_region_map.clear();
-	_region_map.resize(REGION_MAP_SIZE * REGION_MAP_SIZE);
+	_region_map.resize(get_region_map_size() * get_region_map_size());
 	_regions.clear();
+	_slot_locations.clear();
+	_slot_region_ids.clear();
+	_region_slots.clear();
+	_height_maps.clear();
+	_control_maps.clear();
+	_color_maps.clear();
+	for (int i = 0; i < TYPE_MAX; i++) {
+		_placeholders[i].unref();
+	}
+	_generated_region_map.clear();
 	_region_locations.clear();
 	_region_index.instantiate();
 	_region_generation.clear();
@@ -317,7 +327,7 @@ void Pasture3DData::initialize(Pasture3D *p_terrain) {
 	LOG(INFO, "Initializing data");
 	bool prev_initialized = _terrain != nullptr;
 	_terrain = p_terrain;
-	_region_map.resize(REGION_MAP_SIZE * REGION_MAP_SIZE);
+	_region_map.resize(get_region_map_size() * get_region_map_size());
 	_vertex_spacing = _terrain->get_vertex_spacing();
 	if (!prev_initialized && !_terrain->get_data_directory().is_empty()) {
 		load_directory(_terrain->get_data_directory());
@@ -570,7 +580,7 @@ Error Pasture3DData::add_region(const Ref<Pasture3DRegion> &p_region, const bool
 	// Check bounds and slow report errors
 	if (get_region_map_index(region_loc) < 0) {
 		LOG(ERROR, "Location ", region_loc, " out of bounds. Max: ",
-				-REGION_MAP_SIZE / 2, " to ", REGION_MAP_SIZE / 2 - 1);
+				-get_region_map_size() / 2, " to ", get_region_map_size() / 2 - 1);
 		return FAILED;
 	}
 	p_region->sanitize_maps();
@@ -590,7 +600,7 @@ Error Pasture3DData::add_region(const Ref<Pasture3DRegion> &p_region, const bool
 	_region_map_dirty = true;
 	LOG(DEBUG, "Storing region ", region_loc, " version ", vformat("%.3f", p_region->get_version()), " id: ", _region_locations.size());
 	if (p_update) {
-		update_maps(TYPE_MAX, true, false);
+		update_maps(TYPE_MAX, false, false); // The new region takes one slot; nothing else re-uploads
 		_terrain->get_instancer()->update_mmis(-1, V2I_MAX, true);
 	}
 	return OK;
@@ -627,7 +637,7 @@ void Pasture3DData::remove_region(const Ref<Pasture3DRegion> &p_region, const bo
 	LOG(DEBUG, "Removing from region_locations, new size: ", _region_locations.size());
 	if (p_update) {
 		LOG(DEBUG, "Updating generated maps");
-		update_maps(TYPE_MAX, true, false);
+		update_maps(TYPE_MAX, false, false); // Frees the slot
 		_terrain->get_instancer()->update_mmis(-1, V2I_MAX, true);
 	}
 }
@@ -1057,7 +1067,7 @@ Error Pasture3DData::load_region(const Vector2i &p_region_loc, const String &p_d
 	_index_region(p_region_loc);
 	_bump_generation(p_region_loc);
 	if (p_update) {
-		update_maps(TYPE_MAX, true, false);
+		update_maps(TYPE_MAX, false, false); // One slot, one layer per map type
 		if (_terrain) {
 			_terrain->get_instancer()->update_mmis(-1, p_region_loc);
 		}
@@ -1117,7 +1127,7 @@ Error Pasture3DData::unload_region(const Vector2i &p_region_loc, const bool p_up
 	_bump_generation(p_region_loc);
 	LOG(INFO, "Unloaded region ", p_region_loc);
 	if (p_update) {
-		update_maps(TYPE_MAX, true, false);
+		update_maps(TYPE_MAX, false, false); // Frees the slot; nothing re-uploads
 	}
 	emit_signal("region_unloaded", p_region_loc);
 	return OK;
@@ -1346,6 +1356,203 @@ TypedArray<Image> Pasture3DData::get_maps(const MapType p_map_type) const {
 	return TypedArray<Image>();
 }
 
+int Pasture3DData::_read_region_map_size() {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	int size = REGION_MAP_SIZE_DEFAULT;
+	if (ps) {
+		if (!ps->has_setting(REGION_MAP_SIZE_SETTING)) {
+			ps->set_setting(REGION_MAP_SIZE_SETTING, REGION_MAP_SIZE_DEFAULT);
+			ps->set_initial_value(REGION_MAP_SIZE_SETTING, REGION_MAP_SIZE_DEFAULT);
+			ps->set_restart_if_changed(REGION_MAP_SIZE_SETTING, true);
+			Dictionary info;
+			info["name"] = REGION_MAP_SIZE_SETTING;
+			info["type"] = Variant::INT;
+			info["hint"] = PROPERTY_HINT_ENUM;
+			info["hint_string"] = "32,64,128,256,512,1024";
+			ps->add_property_info(info);
+		}
+		size = int(ps->get_setting_with_override(REGION_MAP_SIZE_SETTING));
+	}
+	// A power of two: get_region_map_index bounds-checks with a mask.
+	const int clamped = CLAMP(int(closest_power_of_2(uint32_t(MAX(size, 1)))), 32, 1024);
+	if (clamped != size) {
+		UtilityFunctions::push_warning(vformat("Pasture3D: %s = %d is not a power of two in [32, 1024]; using %d",
+				REGION_MAP_SIZE_SETTING, size, clamped));
+	}
+	return clamped;
+}
+
+TypedArray<Vector2i> Pasture3DData::get_slot_locations() const {
+	// Free slots read as V2I_ZERO: the shader only indexes slots the region map points at.
+	TypedArray<Vector2i> out;
+	out.resize(_slot_locations.size());
+	for (int i = 0; i < _slot_locations.size(); i++) {
+		const Vector2i loc = _slot_locations[i];
+		out[i] = loc == V2I_MAX ? V2I_ZERO : loc;
+	}
+	return out;
+}
+
+Dictionary Pasture3DData::get_upload_stats() const {
+	Dictionary stats;
+	stats["layer_uploads"] = _stat_layer_uploads;
+	stats["array_creates"] = _stat_array_creates;
+	stats["region_map_uploads"] = _stat_region_map_uploads;
+	stats["slot_capacity"] = _slot_locations.size();
+	return stats;
+}
+
+void Pasture3DData::reset_upload_stats() {
+	_stat_layer_uploads = 0;
+	_stat_array_creates = 0;
+	_stat_region_map_uploads = 0;
+}
+
+void Pasture3DData::_release_slot(const Vector2i &p_region_loc) {
+	if (!_region_slots.has(p_region_loc)) {
+		return;
+	}
+	const int slot = _region_slots[p_region_loc];
+	_region_slots.erase(p_region_loc);
+	_slot_locations[slot] = V2I_MAX;
+	_slot_region_ids[slot] = 0;
+	// Drop the slot's references so an unloaded region's images can be freed. The GPU layer keeps stale
+	// texels, which nothing reads because the region map no longer points at the slot.
+	TypedArray<Image> *arrays[TYPE_MAX] = { &_height_maps, &_control_maps, &_color_maps };
+	for (int t = 0; t < TYPE_MAX; t++) {
+		if (slot < arrays[t]->size()) {
+			(*arrays[t])[slot] = _placeholders[t];
+		}
+	}
+}
+
+bool Pasture3DData::_sync_slots(PackedInt32Array &r_fresh) {
+	const int old_capacity = _slot_locations.size();
+	// Free the slot of every location that is no longer active.
+	for (int slot = 0; slot < _slot_locations.size(); slot++) {
+		const Vector2i loc = _slot_locations[slot];
+		if (loc == V2I_MAX) {
+			continue;
+		}
+		const Pasture3DRegion *region = get_region_ptr(loc);
+		if (!region || region->is_deleted()) {
+			_release_slot(loc);
+		}
+	}
+	// Give every active region without a slot the lowest free one, and re-upload a slot whose region object
+	// was replaced at the same location (undo, or an unload and load inside one batch).
+	for (const Vector2i &loc : _regions.keys()) {
+		const Pasture3DRegion *region = get_region_ptr(loc);
+		if (!region || region->is_deleted() || get_region_map_index(loc) < 0) {
+			continue;
+		}
+		const int64_t id = int64_t(region->get_instance_id());
+		if (_region_slots.has(loc)) {
+			const int slot = _region_slots[loc];
+			if (_slot_region_ids[slot] != id) {
+				_slot_region_ids[slot] = id;
+				r_fresh.push_back(slot);
+			}
+			continue;
+		}
+		int slot = -1;
+		for (int i = 0; i < _slot_locations.size(); i++) {
+			if (Vector2i(_slot_locations[i]) == V2I_MAX) {
+				slot = i;
+				break;
+			}
+		}
+		if (slot < 0) {
+			slot = _slot_locations.size();
+			const int capacity = ((slot / SLOT_CHUNK) + 1) * SLOT_CHUNK;
+			_slot_locations.resize(capacity);
+			_slot_region_ids.resize(capacity);
+			for (int i = slot; i < capacity; i++) {
+				_slot_locations[i] = V2I_MAX;
+				_slot_region_ids[i] = 0;
+			}
+		}
+		_slot_locations[slot] = loc;
+		_slot_region_ids[slot] = id;
+		_region_slots[loc] = slot;
+		r_fresh.push_back(slot);
+	}
+	return _slot_locations.size() != old_capacity;
+}
+
+void Pasture3DData::_rebuild_region_map() {
+	const int size = get_region_map_size();
+	_region_map.resize(size * size);
+	_region_map.fill(0);
+	_region_locations = TypedArray<Vector2i>(); // enforce new pointer
+	PackedFloat32Array texels;
+	texels.resize(size * size);
+	texels.fill(0.f);
+	for (int slot = 0; slot < _slot_locations.size(); slot++) {
+		const Vector2i loc = _slot_locations[slot];
+		if (loc == V2I_MAX) {
+			continue;
+		}
+		const int map_index = get_region_map_index(loc);
+		if (map_index >= 0) {
+			_region_map[map_index] = region_map_encode(slot);
+			// Exact: the encoded values are small integers, far below float32's 2^24.
+			texels[map_index] = float(_region_map[map_index]);
+			_region_locations.push_back(loc);
+		}
+	}
+	Ref<Image> img = Image::create_from_data(size, size, false, Image::FORMAT_RF, texels.to_byte_array());
+	const Ref<Image> old = _generated_region_map.get_image();
+	if (_generated_region_map.get_rid().is_valid() && old.is_valid() && old->get_size() == img->get_size()) {
+		_generated_region_map.update_2d(img);
+	} else {
+		_generated_region_map.clear();
+		_generated_region_map.create(img);
+	}
+	_stat_region_map_uploads++;
+}
+
+Ref<Image> Pasture3DData::_placeholder(const MapType p_type, const Ref<Image> &p_like) {
+	Ref<Image> &ph = _placeholders[p_type];
+	if (ph.is_null() || ph->get_size() != p_like->get_size() || ph->get_format() != p_like->get_format() ||
+			ph->has_mipmaps() != p_like->has_mipmaps()) {
+		ph = Image::create_empty(p_like->get_width(), p_like->get_height(), p_like->has_mipmaps(), p_like->get_format());
+	}
+	return ph;
+}
+
+void Pasture3DData::_build_array(const MapType p_type) {
+	TypedArray<Image> *arrays[TYPE_MAX] = { &_height_maps, &_control_maps, &_color_maps };
+	GeneratedTexture *gens[TYPE_MAX] = { &_generated_height_maps, &_generated_control_maps, &_generated_color_maps };
+	TypedArray<Image> &arr = *arrays[p_type];
+	GeneratedTexture &gen = *gens[p_type];
+	const int capacity = _slot_locations.size();
+	auto slot_region = [&](const int p_slot) -> const Pasture3DRegion * {
+		const Vector2i loc = _slot_locations[p_slot];
+		return loc == V2I_MAX ? nullptr : get_region_ptr(loc);
+	};
+	Ref<Image> like;
+	for (int slot = 0; slot < capacity && like.is_null(); slot++) {
+		const Pasture3DRegion *region = slot_region(slot);
+		if (region) {
+			like = region->get_map(p_type);
+		}
+	}
+	arr.clear();
+	gen.clear();
+	if (like.is_null()) {
+		return; // No regions: cleared, as an empty create always did.
+	}
+	const Ref<Image> ph = _placeholder(p_type, like);
+	arr.resize(capacity);
+	for (int slot = 0; slot < capacity; slot++) {
+		const Pasture3DRegion *region = slot_region(slot);
+		arr[slot] = region ? region->get_map(p_type) : ph;
+	}
+	gen.create(arr);
+	_stat_array_creates++;
+}
+
 void Pasture3DData::update_maps(const MapType p_map_type, const bool p_all_regions, const bool p_generate_mipmaps) {
 	// Generate region color mipmaps
 	if (p_generate_mipmaps && (p_map_type == TYPE_COLOR || p_map_type == TYPE_MAX)) {
@@ -1359,145 +1566,134 @@ void Pasture3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 		}
 	}
 
+	GeneratedTexture *gens[TYPE_MAX] = { &_generated_height_maps, &_generated_control_maps, &_generated_color_maps };
+	TypedArray<Image> *arrays[TYPE_MAX] = { &_height_maps, &_control_maps, &_color_maps };
+	static const char *SIGNALS[TYPE_MAX] = { "height_maps_changed", "control_maps_changed", "color_maps_changed" };
+
 	// Mark texture arrays dirty for rebuilding
 	if (p_all_regions) {
 		LOG(EXTREME, "Marking dirty maps of type: ", p_map_type);
-		switch (p_map_type) {
-			case TYPE_HEIGHT:
-				_generated_height_maps.clear();
-				break;
-			case TYPE_CONTROL:
-				_generated_control_maps.clear();
-				break;
-			case TYPE_COLOR:
-				_generated_color_maps.clear();
-				break;
-			default:
-				_generated_height_maps.clear();
-				_generated_control_maps.clear();
-				_generated_color_maps.clear();
-				_region_map_dirty = true;
-				break;
+		if (p_map_type < TYPE_MAX) {
+			gens[p_map_type]->clear();
+		} else {
+			for (int t = 0; t < TYPE_MAX; t++) {
+				gens[t]->clear();
+			}
+			_region_map_dirty = true;
 		}
 	}
 
 	bool any_changed = false;
 
-	// Rebuild region map if dirty
+	// Slots and the region map. A region that gained a slot needs one layer per map type uploaded; only a
+	// capacity change recreates the arrays.
+	PackedInt32Array fresh;
 	if (_region_map_dirty) {
-		LOG(EXTREME, "Regenerating ", REGION_MAP_VSIZE, " region map array from active regions");
-		_region_map.clear();
-		_region_map.resize(REGION_MAP_SIZE * REGION_MAP_SIZE);
 		_region_map_dirty = false;
-		_region_locations = TypedArray<Vector2i>(); // enforce new pointer
-		int region_id = 0;
-		for (const Vector2i &region_loc : _regions.keys()) {
-			const Pasture3DRegion *region = get_region_ptr(region_loc);
-			if (region && !region->is_deleted()) {
-				region_id += 1; // Begin at 1 since 0 = no region
-				int map_index = get_region_map_index(region_loc);
-				if (map_index >= 0) {
-					_region_map[map_index] = region_id;
-					_region_locations.push_back(region_loc);
-				}
+		if (_sync_slots(fresh)) {
+			LOG(DEBUG, "Slot capacity grew to ", _slot_locations.size(), "; recreating texture arrays");
+			for (int t = 0; t < TYPE_MAX; t++) {
+				gens[t]->clear();
 			}
 		}
+		_rebuild_region_map();
 		any_changed = true;
 		LOG(DEBUG, "Emitting region_map_changed");
 		emit_signal("region_map_changed");
 	}
 
-	// Rebuild height maps if dirty
-	if (_generated_height_maps.is_dirty()) {
-		LOG(EXTREME, "Regenerating height texture array from regions");
-		_height_maps.clear();
-		for (const Vector2i &region_loc : _region_locations) {
-			const Pasture3DRegion *region = get_region_ptr(region_loc);
-			if (region) {
-				_height_maps.push_back(region->get_height_map());
-			} else {
-				LOG(ERROR, "Can't find region ", region_loc, ", _regions: ", _regions,
-						", locations: ", _region_locations, ". Please report this error.");
-				return;
+	// An image that no longer matches its array's shape (region size, format, mipmaps) cannot go up as a
+	// single layer, so that array is recreated instead.
+	auto shape_ok = [&](const int t, const Ref<Image> &p_img) -> bool {
+		const Ref<Image> &ph = _placeholders[t];
+		return ph.is_valid() && p_img.is_valid() && p_img->get_size() == ph->get_size() &&
+				p_img->get_format() == ph->get_format() && p_img->has_mipmaps() == ph->has_mipmaps();
+	};
+	for (int t = 0; t < TYPE_MAX; t++) {
+		if (gens[t]->is_dirty()) {
+			continue;
+		}
+		for (const Vector2i &loc : _region_locations) {
+			const Pasture3DRegion *region = get_region_ptr(loc);
+			const int slot = _region_slots.get(loc, -1);
+			if (region && (region->is_edited() || fresh.has(slot)) && !shape_ok(t, region->get_map(MapType(t)))) {
+				LOG(DEBUG, "Region ", loc, " map ", t, " changed shape; recreating its texture array");
+				gens[t]->clear();
+				break;
 			}
 		}
-		_generated_height_maps.create(_height_maps);
-		calc_height_range();
-		any_changed = true;
-		LOG(DEBUG, "Emitting height_maps_changed");
-		emit_signal("height_maps_changed");
 	}
 
-	// Rebulid control maps if dirty
-	if (_generated_control_maps.is_dirty()) {
-		LOG(EXTREME, "Regenerating control texture array from regions");
-		_control_maps.clear();
-		for (const Vector2i &region_loc : _region_locations) {
-			const Pasture3DRegion *region = get_region_ptr(region_loc);
-			if (region) {
-				_control_maps.push_back(region->get_control_map());
+	// Recreate dirty arrays in full
+	bool rebuilt[TYPE_MAX] = { false, false, false };
+	for (int t = 0; t < TYPE_MAX; t++) {
+		if (gens[t]->is_dirty()) {
+			LOG(EXTREME, "Regenerating texture array ", t, " from regions");
+			_build_array(MapType(t));
+			rebuilt[t] = true;
+			any_changed = true;
+			if (t == TYPE_HEIGHT) {
+				calc_height_range();
 			}
+			LOG(DEBUG, "Emitting ", SIGNALS[t]);
+			emit_signal(SIGNALS[t]);
 		}
-		_generated_control_maps.create(_control_maps);
-		any_changed = true;
-		LOG(DEBUG, "Emitting control_maps_changed");
-		emit_signal("control_maps_changed");
 	}
 
-	// Rebulid color maps if dirty
-	if (_generated_color_maps.is_dirty()) {
-		LOG(EXTREME, "Regenerating color texture array from regions");
-		_color_maps.clear();
-		for (const Vector2i &region_loc : _region_locations) {
-			const Pasture3DRegion *region = get_region_ptr(region_loc);
-			if (region) {
-				_color_maps.push_back(region->get_color_map());
+	// Fresh slots: exactly one layer per map type
+	if (!fresh.is_empty()) {
+		bool uploaded[TYPE_MAX] = { false, false, false };
+		for (const int slot : fresh) {
+			const Pasture3DRegion *region = get_region_ptr(Vector2i(_slot_locations[slot]));
+			if (!region) {
+				continue;
 			}
-		}
-		_generated_color_maps.create(_color_maps);
-		any_changed = true;
-		LOG(DEBUG, "Emitting color_maps_changed");
-		emit_signal("color_maps_changed");
-	}
-
-	// If no maps have been rebuilt, update only individual regions in the array.
-	// Regions marked Edited have been changed by Pasture3DEditor::_operate_map or undo / redo processing.
-	if (!any_changed) {
-		for (const Vector2i &region_loc : _region_locations) {
-			const Pasture3DRegion *region = get_region_ptr(region_loc);
-			if (region && region->is_edited()) {
-				int region_id = get_region_id(region_loc);
-				switch (p_map_type) {
-					case TYPE_HEIGHT:
-						_generated_height_maps.update(region->get_height_map(), region_id);
-						LOG(DEBUG, "Emitting height_maps_changed");
-						emit_signal("height_maps_changed");
-						break;
-					case TYPE_CONTROL:
-						_generated_control_maps.update(region->get_control_map(), region_id);
-						LOG(DEBUG, "Emitting control_maps_changed");
-						emit_signal("control_maps_changed");
-						break;
-					case TYPE_COLOR:
-						_generated_color_maps.update(region->get_color_map(), region_id);
-						LOG(DEBUG, "Emitting color_maps_changed");
-						emit_signal("color_maps_changed");
-						break;
-					default:
-						_generated_height_maps.update(region->get_height_map(), region_id);
-						_generated_control_maps.update(region->get_control_map(), region_id);
-						_generated_color_maps.update(region->get_color_map(), region_id);
-						LOG(DEBUG, "Emitting height_maps_changed");
-						emit_signal("height_maps_changed");
-						LOG(DEBUG, "Emitting control_maps_changed");
-						emit_signal("control_maps_changed");
-						LOG(DEBUG, "Emitting color_maps_changed");
-						emit_signal("color_maps_changed");
-						break;
+			for (int t = 0; t < TYPE_MAX; t++) {
+				if (rebuilt[t]) {
+					continue;
 				}
+				const Ref<Image> img = region->get_map(MapType(t));
+				(*arrays[t])[slot] = img;
+				gens[t]->update(img, slot);
+				_stat_layer_uploads++;
+				uploaded[t] = true;
+			}
+		}
+		if (!rebuilt[TYPE_HEIGHT]) {
+			calc_height_range();
+		}
+		for (int t = 0; t < TYPE_MAX; t++) {
+			if (uploaded[t]) {
+				LOG(DEBUG, "Emitting ", SIGNALS[t]);
+				emit_signal(SIGNALS[t]);
 			}
 		}
 	}
+
+	// Regions marked Edited have been changed by Pasture3DEditor::_operate_map or undo / redo processing:
+	// re-upload their layer of each requested map type that was not recreated above.
+	for (const Vector2i &region_loc : _region_locations) {
+		const Pasture3DRegion *region = get_region_ptr(region_loc);
+		if (!region || !region->is_edited()) {
+			continue;
+		}
+		const int slot = _region_slots.get(region_loc, -1);
+		if (slot < 0 || fresh.has(slot)) {
+			continue;
+		}
+		for (int t = 0; t < TYPE_MAX; t++) {
+			if (rebuilt[t] || (p_map_type != TYPE_MAX && p_map_type != t)) {
+				continue;
+			}
+			const Ref<Image> img = region->get_map(MapType(t));
+			(*arrays[t])[slot] = img;
+			gens[t]->update(img, slot);
+			_stat_layer_uploads++;
+			LOG(DEBUG, "Emitting ", SIGNALS[t]);
+			emit_signal(SIGNALS[t]);
+		}
+	}
+
 	if (any_changed) {
 		LOG(DEBUG, "Emitting maps_changed");
 		emit_signal("maps_changed");
@@ -2901,7 +3097,7 @@ void Pasture3DData::import_images(const TypedArray<Image> &p_images, const Vecto
 	}
 
 	Vector3 descaled_position = p_global_position / _vertex_spacing;
-	int max_dimension = _region_size * REGION_MAP_SIZE / 2;
+	int max_dimension = _region_size * get_region_map_size() / 2;
 	if ((std::abs(descaled_position.x) > max_dimension) || (std::abs(descaled_position.z) > max_dimension)) {
 		LOG(ERROR, "Specify a position within +/-", Vector3(max_dimension, 0.f, max_dimension) * _vertex_spacing);
 		return;
@@ -2954,7 +3150,7 @@ void Pasture3DData::import_images(const TypedArray<Image> &p_images, const Vecto
 	int end_region_z = (int)Math::floor(real_t(img_end_z) / real_t(_region_size));
 
 	// Clamp region indices to valid range
-	int half_region_map = REGION_MAP_SIZE / 2;
+	int half_region_map = get_region_map_size() / 2;
 	start_region_x = CLAMP(start_region_x, -half_region_map, half_region_map - 1);
 	start_region_z = CLAMP(start_region_z, -half_region_map, half_region_map - 1);
 	end_region_x = CLAMP(end_region_x, -half_region_map, half_region_map - 1);
@@ -3328,7 +3524,7 @@ void Pasture3DData::dump(const bool verbose) const {
 	if (verbose) {
 		for (int i = 0; i < _region_map.size(); i++) {
 			if (_region_map[i]) {
-				LOG(MESG, "Region map array index: ", i, " / ", _region_map.size() - 1, ", Region id: ", _region_map[i]);
+				LOG(MESG, "Region map array index: ", i, " / ", _region_map.size() - 1, ", Slot: ", region_map_decode(_region_map[i]));
 			}
 		}
 		Util::dump_maps(_height_maps, "Height maps");
@@ -3351,7 +3547,6 @@ void Pasture3DData::_bind_methods() {
 	BIND_ENUM_CONSTANT(EXPORT_SLICED);
 	BIND_ENUM_CONSTANT(EXPORT_PER_REGION);
 
-	BIND_CONSTANT(REGION_MAP_SIZE);
 
 	ClassDB::bind_method(D_METHOD("get_region_count"), &Pasture3DData::get_region_count);
 	ClassDB::bind_method(D_METHOD("set_region_locations", "region_locations"), &Pasture3DData::set_region_locations);
@@ -3359,6 +3554,14 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_regions_active", "copy", "deep"), &Pasture3DData::get_regions_active, DEFVAL(false), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("get_regions_all"), &Pasture3DData::get_regions_all);
 	ClassDB::bind_method(D_METHOD("get_region_map"), &Pasture3DData::get_region_map);
+	ClassDB::bind_method(D_METHOD("get_region_map_rid"), &Pasture3DData::get_region_map_rid);
+	ClassDB::bind_static_method("Pasture3DData", D_METHOD("get_region_map_size"), &Pasture3DData::get_region_map_size);
+	ClassDB::bind_static_method("Pasture3DData", D_METHOD("region_map_encode", "slot"), &Pasture3DData::region_map_encode);
+	ClassDB::bind_static_method("Pasture3DData", D_METHOD("region_map_decode", "value"), &Pasture3DData::region_map_decode);
+	ClassDB::bind_method(D_METHOD("get_slot_locations"), &Pasture3DData::get_slot_locations);
+	ClassDB::bind_method(D_METHOD("get_slot_capacity"), &Pasture3DData::get_slot_capacity);
+	ClassDB::bind_method(D_METHOD("get_upload_stats"), &Pasture3DData::get_upload_stats);
+	ClassDB::bind_method(D_METHOD("reset_upload_stats"), &Pasture3DData::reset_upload_stats);
 	ClassDB::bind_static_method("Pasture3DData", D_METHOD("get_region_map_index", "region_location"), &Pasture3DData::get_region_map_index);
 
 	ClassDB::bind_method(D_METHOD("do_for_regions", "area", "callback"), &Pasture3DData::do_for_regions);

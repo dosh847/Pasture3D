@@ -43,13 +43,12 @@ uniform float _vertex_spacing = 1.0;
 uniform float _vertex_density = 1.0; // = 1./_vertex_spacing
 uniform float _region_size = 1024.0;
 uniform float _region_texel_size = 0.0009765625; // = 1./region_size
-uniform int _region_map_size = 32;
-uniform int _region_map[1024];
 //INSERT: MAX_REGIONS_64
 //INSERT: MAX_REGIONS_128
 //INSERT: MAX_REGIONS_256
 //INSERT: MAX_REGIONS_512
 //INSERT: MAX_REGIONS_1024
+//INSERT: REGION_MAP
 uniform float _texture_uv_scale_array[32];
 uniform vec2 _texture_detile_array[32];
 uniform vec2 _texture_displacement_array[32];
@@ -97,11 +96,8 @@ struct material {
 // Z: layer index used for texturearrays, -1 if not in a region
 ivec3 get_index_coord(const vec2 uv) {
 	vec2 r_uv = round(uv);
-	ivec2 pos = ivec2(floor(r_uv * _region_texel_size)) + (_region_map_size / 2);
-	int bounds = int(uint(pos.x | pos.y) < uint(_region_map_size));
-	int raw_index = _region_map[pos.y * _region_map_size + pos.x] - 1;
-	int is_region = bounds * int(raw_index >= 0) * int(raw_index < MAX_REGIONS);
-	int layer_index = (raw_index * is_region) - (1 - is_region);
+	// region_map_slot bounds-checks against the map and MAX_REGIONS, returning -1 (no region).
+	int layer_index = region_map_slot(ivec2(floor(r_uv * _region_texel_size)) + (_region_map_size / 2));
 	return ivec3(ivec2(mod(r_uv, _region_size)), layer_index);
 }
 
@@ -109,12 +105,9 @@ ivec3 get_index_coord(const vec2 uv) {
 // XY: (0. to 1.) coordinates within a region
 // Z: layer index used for texturearrays, -1 if not in a region
 vec3 get_index_uv(const vec2 uv2) {
-	ivec2 pos = ivec2(floor(uv2)) + (_region_map_size / 2);
-	int bounds = int(uint(pos.x | pos.y) < uint(_region_map_size));
-	int raw_index = _region_map[pos.y * _region_map_size + pos.x] - 1;
-	int is_region = bounds * int(raw_index >= 0) * int(raw_index < MAX_REGIONS);
-	int layer_index = (raw_index * is_region) - (1 - is_region);
-	return vec3(uv2 - _region_locations[layer_index], float(layer_index));
+	int layer_index = region_map_slot(ivec2(floor(uv2)) + (_region_map_size / 2));
+	// Clamped index: _region_locations[-1] is out of bounds, and the caller ignores xy when z is -1.
+	return vec3(uv2 - _region_locations[max(layer_index, 0)], float(layer_index));
 }
 
 ////////////////////////
