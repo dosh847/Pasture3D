@@ -7,6 +7,9 @@ extends EditorPlugin
 # Includes
 const Pasture3DUI: Script = preload("res://addons/pasture_3d/src/ui.gd")
 const Pasture3DLayersDock: Script = preload("res://addons/pasture_3d/src/layers_dock.gd")
+const RegionSelection: Script = preload("res://addons/pasture_3d/src/region_selection.gd")
+const RegionGizmo: Script = preload("res://addons/pasture_3d/src/region_gizmo.gd")
+const RegionsDock: Script = preload("res://addons/pasture_3d/src/regions_dock.gd")
 const Pasture3DBrushGizmo: Script = preload("res://addons/pasture_3d/src/brush_gizmo.gd")
 const Pasture3DPoolGizmo: Script = preload("res://addons/pasture_3d/src/pool_gizmo.gd")
 const Pasture3DJunctionGizmo: Script = preload("res://addons/pasture_3d/src/junction_gizmo.gd")
@@ -22,6 +25,13 @@ var editor_settings: EditorSettings
 var ui: Node # Pasture3DUI see Godot #75388
 var asset_dock: PanelContainer
 var layers_dock: PanelContainer
+## The region selection (§G) behind the Regions dock, the region gizmo and the Region tool's clicks.
+var region_model: RefCounted
+var region_gizmo: RefCounted
+var regions_dock: PanelContainer
+# A select gesture in the Region tool: the press location, and where a box drag has reached.
+var _region_press: Variant = null
+var _region_drag_to: Variant = null
 var graph_editor: Pasture3DGraphEditor # bottom-panel visual node-graph editor
 var graph_inspect_dock: Pasture3DGraphInspector # §7's probe/histogram/profile dock (V4)
 var graph_inspector: Pasture3DGraphInspectorPlugin # "Edit in Graph Editor" button
@@ -102,6 +112,11 @@ func _enter_tree() -> void:
 	add_to_group("pasture3d_editor_plugin")
 	layers_dock = Pasture3DLayersDock.new()
 	layers_dock.initialize(self)
+	region_model = RegionSelection.new()
+	region_gizmo = RegionGizmo.new()
+	regions_dock = RegionsDock.new()
+	regions_dock.initialize(self, region_model)
+	region_model.changed.connect(update_region_gizmo)
 
 	# Visual node-graph editor (PASTURE3D_TERRAIN_GRAPH_SPEC.md) — a bottom panel, opened from the
 	# "Edit in Graph Editor" button the inspector plugin adds to a graph / graph modifier / plow brush.
@@ -193,6 +208,11 @@ func _exit_tree() -> void:
 	asset_dock.queue_free()
 	layers_dock.remove_dock()
 	layers_dock.queue_free()
+	if regions_dock:
+		regions_dock.remove_dock()
+		regions_dock.queue_free()
+	if region_gizmo:
+		region_gizmo.detach()
 	if graph_inspector:
 		remove_inspector_plugin(graph_inspector)
 	if graph_inspect_dock:
@@ -305,6 +325,9 @@ func _edit(p_object: Object) -> void:
 		asset_dock.update_assets()
 		if layers_dock:
 			layers_dock.set_terrain(terrain)
+		if regions_dock:
+			regions_dock.set_terrain(terrain)
+		update_region_gizmo()
 	else:
 		_clear()
 
@@ -337,6 +360,17 @@ func _clear() -> void:
 		ui.clear_picking()
 	if layers_dock:
 		layers_dock.set_terrain(null)
+	_region_press = null
+	_region_drag_to = null
+	update_region_gizmo()
+
+
+## Redraw the region gizmo: shown while the Region tool is active on a terrain being edited.
+func update_region_gizmo() -> void:
+	if region_gizmo == null or region_model == null:
+		return
+	var box: Variant = [_region_press, _region_drag_to] if _region_press != null and _region_drag_to != null else null
+	region_gizmo.show(region_model, is_terrain_valid() and editor.get_tool() == Pasture3DEditor.REGION, box)
 
 
 ## Forwarded from Pasture3DEditor when a stroke hits a locked/reserved/hidden active layer (§6).
@@ -412,6 +446,11 @@ func _forward_3d_gui_input(p_viewport_camera: Camera3D, p_event: InputEvent) -> 
 			return AFTER_GUI_INPUT_PASS
 		mouse_global_position = intersection_point
 	
+	if editor.get_tool() == Pasture3DEditor.REGION:
+		var sel_result: int = _forward_region_selection(p_event)
+		if sel_result != -1:
+			return sel_result
+
 	## Handle mouse movement
 	if p_event is InputEventMouseMotion:
 
@@ -486,6 +525,43 @@ func _forward_3d_gui_input(p_viewport_camera: Camera3D, p_event: InputEvent) -> 
 			return AFTER_GUI_INPUT_STOP
 
 	return AFTER_GUI_INPUT_PASS
+
+
+## ---- REGION SELECTION (§G) ----
+##
+## A left press the gesture rule calls a selection (region_selection.gd `gesture`) starts one; the release
+## applies it, as a click if it ended on the region it started on, else as a box. -1 means "not a selection
+## event, carry on"; otherwise the AfterGUIInput to return.
+func _forward_region_selection(p_event: InputEvent) -> int:
+	var loc: Vector2i = region_model.location_of(mouse_global_position)
+	if p_event is InputEventMouseMotion:
+		if _region_press == null:
+			return -1
+		if loc != _region_press or _region_drag_to != null:
+			_region_drag_to = loc
+			update_region_gizmo()
+		return AFTER_GUI_INPUT_STOP
+	if not (p_event is InputEventMouseButton) or p_event.button_index != MOUSE_BUTTON_LEFT:
+		return -1
+	if p_event.is_pressed():
+		var g: int = RegionSelection.gesture(region_model.state(loc), modifier_shift, editor.get_operation())
+		if g != RegionSelection.GESTURE_SELECT:
+			return -1
+		_region_press = loc
+		_region_drag_to = null
+		return AFTER_GUI_INPUT_STOP
+	if _region_press == null:
+		return -1
+	var drag: bool = _region_drag_to != null
+	var mode: int = RegionSelection.select_mode(modifier_shift, modifier_ctrl, drag)
+	if drag:
+		region_model.box(_region_press, _region_drag_to, mode)
+	else:
+		region_model.click(_region_press, mode)
+	_region_press = null
+	_region_drag_to = null
+	update_region_gizmo()
+	return AFTER_GUI_INPUT_STOP
 
 
 ## ---- THE TRANSFORM GIZMO GETS THE CLICK FIRST ----

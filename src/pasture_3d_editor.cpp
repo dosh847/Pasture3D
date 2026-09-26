@@ -57,6 +57,13 @@ Ref<Pasture3DRegion> Pasture3DEditor::_operate_region(const Vector2i &p_region_l
 	if (region.is_null() || (region.is_valid() && region->is_deleted())) {
 		// And tool is Add Region, or Height + auto_regions
 		if ((_tool == REGION && _operation == ADD) || ((_tool == SCULPT || _tool == HEIGHT) && _brush_data["auto_regions"])) {
+			// An indexed region that is not loaded has a file: a blank added over it would be saved on top of it
+			// (spec §F, nothing operates on an unloaded region). A deleted one is still in _regions, not unloaded.
+			const Ref<Pasture3DRegionIndex> index = data->get_region_index();
+			if (region.is_null() && index.is_valid() && index->has_entry(p_region_loc)) {
+				_refuse_region(p_region_loc, "not loaded; load it from the Regions dock first");
+				return region;
+			}
 			LOG(DEBUG, "Adding blank region at: ", p_region_loc, ", ptr: ", ptr_to_str(*region));
 			region = data->add_region_blank(p_region_loc);
 			if (region.is_null()) {

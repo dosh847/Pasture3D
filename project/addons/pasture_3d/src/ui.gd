@@ -420,6 +420,9 @@ func set_active_operation() -> void:
 	if plugin.editor:
 		plugin.editor.set_tool(active_tool)
 		plugin.editor.set_operation(active_operation)
+		# The region gizmo is drawn only in the Region tool (§G).
+		if plugin.has_method("update_region_gizmo"):
+			plugin.update_region_gizmo()
 
 
 func update_decal() -> void:

@@ -4,8 +4,56 @@
 built and gated (`bench/RegionSlotGate` 8/8, `bench/RegionSlotRenderProbe` windowed, commit 2015f72c);
 phase 2 split into 2a and 2b, both built and gated (`bench/RegionTypeGate` 8/8, `bench/RegionLayerGate`
 9/9, commit decc3889); phase 3 built and gated (`bench/RegionSeamGate` 5/5, `bench/RegionSeamRenderProbe`
-windowed 4/4, commit 3cc36c2e); phase 4 built and gated (`bench/RegionBakeScopeGate` 10/10, commit 1422e15a; see "Phase 4 as built"); phase 4b built and gated (`bench/RegionWaterGate` 6/6, `bench/RegionLakeTileGate` 5/5, `bench/RegionWaterRenderProbe` windowed 4/4, uncommitted; see "Phase 4b as built"); phases 5–6 not started.** Check the symbols named here before trusting this
+windowed 4/4, commit 3cc36c2e); phase 4 built and gated (`bench/RegionBakeScopeGate` 10/10, commit 1422e15a; see "Phase 4 as built"); phase 4b built and gated (`bench/RegionWaterGate` 6/6, `bench/RegionLakeTileGate` 5/5, `bench/RegionWaterRenderProbe` windowed 4/4, commit d9f03e9d; see "Phase 4b as built"); phase 5 built and gated (`bench/RegionPanelGate` 6/6; see "Phase 5 as built"); phase 6 not started.** Check the symbols named here before trusting this
 header: specs in this repo go stale.
+
+Phase 5 as built (region gizmo and panel, §G; deviations marked):
+
+- **Selection model.** `src/region_selection.gd` (RefCounted, preloaded, no class_name) owns the selection
+  and every action; the dock and the viewport only call it, and the gate measures it. `known()` is loaded
+  regions plus index entries, **minus regions deleted this session**. The index still names those until
+  the next save, and a naive union would draw and select a region that is gone.
+- **Modifiers. Changed:** Ctrl already inverts Add/Subtract in the Region tool, so selection uses Shift:
+  click replaces, Shift-click toggles, drag box-replaces, Shift-drag box-adds, Shift+Ctrl-drag box-removes.
+  A plain click selects wherever add/remove would do nothing: Add over any known region, Subtract over an
+  unloaded one or empty ground (`RegionSelection.gesture`). Add on empty ground and Subtract on a loaded
+  region still stroke as before.
+- **Only Load loads. Changed:** Lock, Set Type and Delete act on loaded regions and report the unloaded ones
+  as skipped ("not loaded"), rather than loading them to act. Only Load and Bake Selected bring regions in.
+  Every action returns `{done, skipped{loc: reason}}`, and the dock prints the reasons.
+- **Delete** runs the editor's own Region Subtract stroke at each region's centre, so it is one undo action
+  and goes through the same lock refusal; the tool and operation are restored after. Locked regions are
+  skipped.
+- **Set Type** asks with a ConfirmationDialog when `downsampled_by(type)` is non-empty (a loaded, unlocked
+  region whose texel ratio would increase), naming the count and the ratio.
+- **Bake Selected. Changed:** the dock calls `Pasture3DScopedBake.bake(SELECTED, selection)` synchronously:
+  no progress and no Cancel. The registry's `bake_regions` is still typed by hand; the dock does not
+  write it.
+- **Inspector:** location, state, type and ratio, resolution, lock, unsaved changes, memory. Memory is the
+  bytes the maps hold (height and control RF, colour RGBA8 with mipmaps); for an unloaded region it is the
+  same sum at the index's ratio, marked "~".
+- **Gizmo.** `src/region_gizmo.gd`: `lines()` is pure, and `show()` puts a PRIMITIVE_LINES mesh on an
+  INTERNAL child of the terrain, so it is never saved into the scene. Outlines sit 1 m above the top of the
+  height range, drawn without depth test. Loaded regions are solid, unloaded dashed (alpha ×0.75), locked
+  hatched, selected with a white inner outline, and the drag box is yellow.
+- **New guard (C++).** Region Add or `auto_regions` sculpting over an indexed location that is not loaded
+  used to create a blank region there, and its save would overwrite the file on disk. `_operate_region` now
+  refuses it: "not loaded; load it from the Regions dock first".
+- **Fix:** `box()` built its array with a ternary, which yields an untyped Array; a typed `Array[Vector2i]`
+  refuses that at runtime. Only a box that was not a replace could hit it.
+- **Deferred:** editor streaming (keeping regions near the camera loaded) is not built; it belongs with
+  phase 6's streamer.
+- Gate `bench/RegionPanelGate` (headless, user:// data), 6/6:
+  - RP1 known/state/info. Control: the index still names the deleted E.
+  - RP2 click/toggle/box and the gesture and modifier tables. Control: the box's 12 locations hold 4
+    regions.
+  - RP3 actions, with the skip reasons. D's unsaved edit is written by Unload. Controls: a second unload is
+    skipped; adding D changes Bake Selected's targets.
+  - RP4 `downsampled_by` names only the loaded Standard region. Control: Standard names none.
+  - RP5 gizmo segment counts and tints per state, plus the box, with each outline inside its region.
+  - RP6 the Add guard. Control: an unindexed location still gets a region; once loaded, D keeps its edit.
+- Not gated: the dock's widgets and the viewport input routing (`_forward_region_selection`) need the
+  editor. Check them by hand.
 
 Phase 4b as built (water terrain check and tiled shore SDF, §I; deviations marked):
 
