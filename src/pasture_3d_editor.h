@@ -100,6 +100,7 @@ private:
 	Dictionary _layer_undo_tiles; // region_loc -> deep tile snapshot taken before the stroke
 	Dictionary _layer_redo_tiles; // region_loc -> deep tile snapshot taken after the stroke
 	Dictionary _stroke_dirty; // region_loc -> Rect2i of region-local pixels this stroke touched
+	Dictionary _stroke_refused; // region_loc -> reason, for regions this stroke refused to write
 
 	void _send_region_aabb(const Vector2i &p_region_loc, const Vector2 &p_height_range = V2_ZERO);
 	Ref<Pasture3DRegion> _operate_region(const Vector2i &p_region_loc);
@@ -110,6 +111,10 @@ private:
 	enum BlockReason { BLOCK_LOCKED, BLOCK_HIDDEN };
 	// Best-effort UE-style warning flash when a stroke hits a locked/reserved/hidden active layer.
 	void _notify_layer_blocked(const Ref<Pasture3DLayer> &p_layer, BlockReason p_reason = BLOCK_LOCKED) const;
+	// Why a region refuses a hand stroke (its lock or its type), or "" if it
+	// accepts it. Refusals are reported once per region per stroke.
+	String _region_refusal(const Pasture3DRegion *p_region, const MapType p_map_type, const bool p_to_layer) const;
+	void _refuse_region(const Vector2i &p_region_loc, const String &p_reason);
 	MapType _get_map_type() const;
 	bool _is_in_bounds(const Point2i &p_pixel, const Point2i &p_size) const;
 	Vector2 _get_uv_position(const Vector3 &p_global_position, const int p_region_size, const real_t p_vertex_spacing) const;
@@ -123,6 +128,8 @@ public:
 	Pasture3DEditor() {}
 	~Pasture3DEditor() {}
 
+	// What the last stroke refused: region_loc -> reason. For gates and the UI.
+	Dictionary get_stroke_refusals() const { return _stroke_refused.duplicate(); }
 	void set_terrain(Pasture3D *p_terrain) { _terrain = p_terrain; }
 	Pasture3D *get_terrain() const { return _terrain; }
 

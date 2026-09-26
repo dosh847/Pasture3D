@@ -985,6 +985,13 @@ void Pasture3DInstancer::append_region(const Ref<Pasture3DRegion> &p_region, con
 		LOG(ERROR, "No transforms to add. Doing nothing.");
 		return;
 	}
+	// Every instance add funnels through here, so this is where a DROP-type region refuses them.
+	if (!_terrain->get_data()->region_keeps_instances(p_region.ptr())) {
+		LOG(WARN, "Region ", p_region->get_location(), " is of type '",
+				_terrain->get_data()->get_region_type_of(p_region.ptr())->get_type_name(), "', which drops instances; ",
+				p_xforms.size(), " refused");
+		return;
+	}
 
 	_backup_region(p_region);
 

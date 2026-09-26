@@ -27,6 +27,7 @@ int Pasture3DLayerStack::add_layer_ref(const Ref<Pasture3DLayer> &p_layer) {
 		return -1;
 	}
 	p_layer->ensure_layer_uid();
+	p_layer->set_region_map_sizes(_region_map_sizes);
 	_layers.push_back(p_layer);
 	LOG(INFO, "Added layer '", p_layer->get_layer_name(), "' at index ", _layers.size() - 1);
 	return _layers.size() - 1;
@@ -127,6 +128,16 @@ void Pasture3DLayerStack::set_data(const Dictionary &p_data) {
 		// Cast Variant -> Array explicitly: assigning a Variant straight into a TypedArray is an
 		// ambiguous operator= overload on GCC/Clang (MSVC accepts it).
 		_layers = (Array)p_data["layers"];
+		_share_sizes();
+	}
+}
+
+void Pasture3DLayerStack::_share_sizes() const {
+	for (int i = 0; i < _layers.size(); i++) {
+		Ref<Pasture3DLayer> layer = _layers[i];
+		if (layer.is_valid()) {
+			layer->set_region_map_sizes(_region_map_sizes);
+		}
 	}
 }
 

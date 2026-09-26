@@ -1,9 +1,93 @@
 # Pasture3D Region Streaming and Region Types
 
 **Status (2026-09-25): phase 0 built and gated (`bench/RegionUnloadGate`, commit c2388feb); phase 1
-built and gated (`bench/RegionSlotGate` 8/8, `bench/RegionSlotRenderProbe` windowed, uncommitted on
-`feat/region-streaming-phase0`); phases 2–6 not started.** Check the symbols named here before trusting
-this header: specs in this repo go stale.
+built and gated (`bench/RegionSlotGate` 8/8, `bench/RegionSlotRenderProbe` windowed, commit 2015f72c);
+phase 2 split into 2a and 2b, both built and gated (`bench/RegionTypeGate` 8/8, `bench/RegionLayerGate`
+9/9, uncommitted on `feat/region-streaming-phase0`); phases 3–6 not started.** Check the symbols named here before
+trusting this header: specs in this repo go stale.
+
+Phase 2a as built (types, CPU data paths, toggles, lock):
+
+- `Pasture3DRegionType` (C++ `Resource`). The built-ins ship as `addons/pasture_3d/region_types/standard.tres`
+  and `background.tres` (ratio 4, collision off, instances DROP, colour-only material, load 8 km, unload 9 km).
+- A region stores its type by path (`type_path`), plus a cached `texel_ratio` and `locked`. An empty or
+  missing path means Standard. A type must be a saved resource (res:// or user://): `set_region_type`
+  refuses an unsaved one with `ERR_FILE_BAD_PATH`. It's a mismatch (`is_region_type_mismatched`) when the
+  cached ratio differs from the type's. The region index entry records the path, ratio and lock.
+- `region_size` is still the world footprint; the map is `region_size / texel_ratio`. Coarse texel i sits
+  on fine vertex i·r. `world_to_pixel` returns the texel at or before the position.
+- **Heights:** `get_height` bilerps fine vertices through `get_height_at_vertex`. On a coarse region a
+  vertex is bilinear on the lattice, and a lattice corner past the far edge is the neighbour's vertex (the
+  edge texel if there's no neighbour). The last fine cell meets the neighbour's own vertices, so the
+  surface has no crack at the seam. Fixed in passing: within 0.01 of a vertex, `get_height` snapped to the
+  vertex at or before the position, not the nearest one.
+- **Resampling on a type change:**
+  - Coarsening: height is a width-r box centred on the lattice vertex, with half weight at the ends,
+    clamped to the region. Control is the lattice texel. Colour is the cell mean.
+  - Refining: height is point-sampled from the current surface. Control and colour use floor lookup.
+  - `import_images` refuses coarse regions. `change_region_size` refuses while any region is coarse.
+- **GPU (temporary shim until phase 3):** a coarse region uploads a full-size copy, upsampled exactly as
+  the CPU samples it, into its normal slot.
+- **Collision:** a region whose type has collision off contributes holes. A coarse region with collision
+  on is read through `get_height_at_vertex`.
+- **Instances:** a DROP type clears the region's instances on conversion, and `append_region` refuses new
+  ones.
+- **Lock and toggles in the editor:**
+  - A locked region refuses hand strokes, instancer strokes, Region-tool delete and `set_region_type`
+    (`ERR_LOCKED`).
+  - `sculptable` and `paintable` are checked per region per stroke.
+  - Refusals are reported once per region per stroke, via `Pasture3DEditor.get_stroke_refusals()` and the
+    plugin's `flash_region_warning`.
+- **Coarse strokes** write only at lattice vertices, so each texel gets the brush once (not r²).
+
+Phase 2b as built (the layer stack on coarse regions, §E):
+
+- Over a coarse region, layer pixels are the region's MAP pixels, and a tile's edge is
+  `min(tile_size, map size)` (`Pasture3DLayer.get_region_tile_size`). The stack owns a region → map size
+  Dictionary that every layer shares. Pasture3DData keeps it current from `_adopt_region_into_bases`
+  (every region joining the stack), `set_region_type`, `load_layers` and `set_layer_stack`. A layer joins
+  the stack before it gets tiles, so a Base or typed Base is built at the right size.
+- **Batched writes** (`_apply_stamp_block`: brushes, graph sinks, `stamp_grid`) evaluate at full
+  resolution. Each texel takes the region-coarsening box over the cells the block wrote, with NaN cells
+  left out and the weights renormalised. A texel is written only when its own lattice vertex is non-NaN,
+  so the footprint and a dirty-rect clip are decided as on a Standard region. **Control blocks** take the
+  word at the lattice vertex.
+- **Point writers:**
+  - Height (`set_height_on_layer`, `add_height_on_layer`, `_stamp_write`) writes only at lattice
+    vertices, so a writer walking fine vertices reaches each texel once.
+  - Control and colour points take the texel under the point.
+  - Hand strokes through a layer are lattice-gated, like direct strokes.
+- **Clearing** (`clear_layer_in_area`) on a coarse region zeroes coverage for exactly the texels in the box
+  (`clear_samples_in_rect`), not whole tiles. A coarse tile covers more ground than the caller's
+  tile-aligned dirty box, so dropping it would lose other brushes' writes.
+- **Below-sampling** (`composite_height_below`, `get_height_below_point`) is bilinear on the lattice, with
+  the far edge held.
+- **Conversion resamples every layer's tiles** for the region, then recomposites. Nothing is discarded.
+  - Height: coverage-premultiplied bilinear on the old lattice, then the region box when coarsening.
+  - Control: the word at the lattice vertex.
+  - Colour: an alpha-weighted cell mean when coarsening, floor lookup when refining.
+  - A single-layer Base that aliases the region map is re-aliased instead.
+- Fixed in passing: `layered_to_image` blitted a coarse region's small map into a full-size rect. It now
+  exports what the GPU samples.
+
+Phase 2 limitations (later phases):
+
+- **A dirty-rect bake is not texel-identical to a full bake near the clip edge.** The clip blanks cells
+  outside the box, so an edge texel's box renormalises over fewer taps. Phase 4's byte-identical criteria
+  must account for this: pass the block unclipped to the filter and clip only the texel decision.
+- Below-sampling holds a coarse region's far edge instead of reading the neighbour's layers, so the last
+  lattice cell differs slightly from `get_height`.
+- Refining an overlay interpolates its coverage bilinearly, which feathers its hard edges by one old texel.
+- A sculpt stroke into an ADD user layer authors the absolute height, counting the ground twice. The Layers
+  dock creates REPLACE layers, so only the scripting API reaches it. This predates phase 2.
+- The GPU shim's far edge follows the neighbours at upload time. It isn't refreshed when only a neighbour
+  changes (phase 3 replaces the shim).
+- The Average tool is weaker on a coarse region: it averages texels, not vertices.
+- The lock covers hand strokes and type changes, not the scripting API (`set_pixel`, the `*_on_layer`
+  writers, `import_images` on a Standard region).
+- Converting a region has no undo yet; the phase 5 Set Type dialog confirms it.
+- `material_mode`, `vertex_collapse`, `priority` and the load/unload radii are stored but unused until
+  phases 3 and 6.
 
 Phase 1 as built (deviations from §B marked):
 

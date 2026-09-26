@@ -70,6 +70,10 @@ Ref<Pasture3DRegion> Pasture3DEditor::_operate_region(const Vector2i &p_region_l
 
 	// If removing region
 	else if (region.is_valid() && _tool == REGION && _operation == SUBTRACT) {
+		if (region->is_locked()) {
+			_refuse_region(p_region_loc, "locked");
+			return region;
+		}
 		LOG(DEBUG, "Removing region at: ", p_region_loc, ", ptr: ", ptr_to_str(*region));
 		_original_regions.push_back(region);
 		height_range = region->get_height_range();
@@ -189,6 +193,11 @@ void Pasture3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 	edited_area.size = Vector3(brush_size, 0.f, brush_size);
 
 	if (_tool == INSTANCER) {
+		const Pasture3DRegion *inst_region = data->get_region_ptr(data->get_region_location(p_global_position));
+		if (inst_region && inst_region->is_locked()) {
+			_refuse_region(inst_region->get_location(), "locked");
+			return;
+		}
 		if (modifier_ctrl) {
 			_terrain->get_instancer()->remove_instances(p_global_position, _brush_data);
 		} else {
@@ -204,6 +213,8 @@ void Pasture3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 	// rebuild at the end of the last _operate() call, but until painting is finished we only
 	// need to track if _added_removed_locations has changed between now and the end of the loop
 	int regions_added_removed = _added_removed_locations.size();
+	const Pasture3DRegion *checked_region = nullptr;
+	String refusal;
 
 	for (real_t x = 0.f; x < brush_size; x += vertex_spacing) {
 		for (real_t y = 0.f; y < brush_size; y += vertex_spacing) {
@@ -220,6 +231,15 @@ void Pasture3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 				continue;
 			}
 
+			if (region.ptr() != checked_region) { // Brush pixels run in region order; ask once per run
+				checked_region = region.ptr();
+				refusal = _region_refusal(checked_region, map_type, route_to_layer);
+			}
+			if (!refusal.is_empty()) {
+				_refuse_region(region_loc, refusal);
+				continue;
+			}
+
 			// Get map for this region and tool
 			Image *map = region->get_map_ptr(map_type);
 			if (!map) {
@@ -231,6 +251,15 @@ void Pasture3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 			Vector2i map_pixel_position = Vector2i(uv_position * region_size);
 			if (!_is_in_bounds(map_pixel_position, region_vsize)) {
 				continue;
+			}
+			// A coarse region is written only where a lattice vertex falls, once per texel: the brush walks
+			// fine vertices, and applying it at every one would apply it texel_ratio^2 times.
+			if (region->is_coarse()) {
+				const int r = region->get_texel_ratio();
+				if (map_pixel_position.x % r != 0 || map_pixel_position.y % r != 0) {
+					continue;
+				}
+				map_pixel_position /= r;
 			}
 
 			Vector2 brush_uv = Vector2(x, y) / brush_size;
@@ -675,6 +704,32 @@ void Pasture3DEditor::_backup_layer_tile(const Vector2i &p_region_loc) {
 	_layer_undo_tiles[p_region_loc] = _stroke_layer->duplicate_region_tiles(p_region_loc);
 }
 
+String Pasture3DEditor::_region_refusal(const Pasture3DRegion *p_region, const MapType p_map_type, const bool p_to_layer) const {
+	if (p_region->is_locked()) {
+		return "locked";
+	}
+	const Ref<Pasture3DRegionType> type = _terrain->get_data()->get_region_type_of(p_region);
+	if (p_map_type == TYPE_HEIGHT && !type->get_sculptable()) {
+		return "type '" + type->get_type_name() + "' is not sculptable";
+	}
+	if (p_map_type != TYPE_HEIGHT && !type->get_paintable()) {
+		return "type '" + type->get_type_name() + "' is not paintable";
+	}
+	return "";
+}
+
+void Pasture3DEditor::_refuse_region(const Vector2i &p_region_loc, const String &p_reason) {
+	if (_stroke_refused.has(p_region_loc)) {
+		return;
+	}
+	_stroke_refused[p_region_loc] = p_reason;
+	LOG(WARN, "Region ", p_region_loc, " refused the stroke: ", p_reason);
+	Object *plugin = _terrain ? _terrain->get_plugin() : nullptr;
+	if (plugin && plugin->has_method("flash_region_warning")) {
+		plugin->call("flash_region_warning", p_region_loc, p_reason);
+	}
+}
+
 void Pasture3DEditor::_notify_layer_blocked(const Ref<Pasture3DLayer> &p_layer, BlockReason p_reason) const {
 	const bool hidden = (p_reason == BLOCK_HIDDEN);
 	LOG(WARN, "Active layer '", p_layer->get_layer_name(), "' is ", hidden ? "hidden" : "locked or reserved", "; stroke blocked");
@@ -1115,6 +1170,7 @@ void Pasture3DEditor::start_operation(const Vector3 &p_global_position) {
 	// Terrain3D e0108aa. stop_operation() is idempotent and already clears the layer-stroke state
 	// below, which is why the per-field resets that used to be here are gone.
 	stop_operation();
+	_stroke_refused.clear();
 	LOG(INFO, "Setting up undo snapshot");
 	_undo_data.clear();
 	_undo_data["region_locations"] = _terrain->get_data()->get_region_locations().duplicate();
@@ -1280,6 +1336,7 @@ void Pasture3DEditor::_bind_methods() {
 	BIND_ENUM_CONSTANT(TOOL_MAX);
 
 	ClassDB::bind_method(D_METHOD("set_terrain", "terrain"), &Pasture3DEditor::set_terrain);
+	ClassDB::bind_method(D_METHOD("get_stroke_refusals"), &Pasture3DEditor::get_stroke_refusals);
 	ClassDB::bind_method(D_METHOD("get_terrain"), &Pasture3DEditor::get_terrain);
 
 	ClassDB::bind_method(D_METHOD("set_brush_data", "data"), &Pasture3DEditor::set_brush_data);

@@ -339,6 +339,12 @@ func flash_layer_warning(p_name: String, p_hidden: bool = false) -> void:
 		layers_dock.flash_warning(p_name, p_hidden)
 
 
+## Forwarded from Pasture3DEditor when a region refuses a stroke: it is locked, or its type cannot be sculpted
+## or painted. Once per region per stroke.
+func flash_region_warning(p_region_loc: Vector2i, p_reason: String) -> void:
+	push_warning("Pasture3D: region %s refused the stroke: %s" % [p_region_loc, p_reason])
+
+
 func _forward_3d_gui_input(p_viewport_camera: Camera3D, p_event: InputEvent) -> AfterGUIInput:
 	mouse_in_main = true
 

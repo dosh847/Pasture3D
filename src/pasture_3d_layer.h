@@ -72,10 +72,14 @@ private:
 
 	// Working data, not saved
 	bool _modified = false;
+	// region_location -> map size, for coarse regions only (streaming phase 2b). Shared with the stack and
+	// every layer in it (a Dictionary copy shares storage), and kept by Pasture3DData. Over a coarse region
+	// pixels are that region's MAP pixels, and a tile's edge is min(_tile_size, map size).
+	Dictionary _region_map_sizes;
 
 	// Helpers
-	Vector2i _tile_coord(const Vector2i &p_px) const { return V2I_DIVIDE_FLOOR(p_px, _tile_size); }
-	Vector2i _tile_local(const Vector2i &p_px, const Vector2i &p_tile_coord) const { return p_px - p_tile_coord * _tile_size; }
+	Vector2i _tile_coord(const Vector2i &p_px, const int p_ts) const { return V2I_DIVIDE_FLOOR(p_px, p_ts); }
+	Vector2i _tile_local(const Vector2i &p_px, const Vector2i &p_tile_coord, const int p_ts) const { return p_px - p_tile_coord * p_ts; }
 	Image *_get_tile_ptr(const Vector2i &p_region_loc, const Vector2i &p_tile_coord) const;
 	Ref<Image> _get_or_create_tile(const Vector2i &p_region_loc, const Vector2i &p_tile_coord);
 	Image::Format _overlay_format() const; // RGBA8 for color, RGF for height/control overlays
@@ -113,6 +117,18 @@ public:
 	int get_tile_size() const { return _tile_size; }
 	void set_base(const bool p_is_base);
 	bool is_base() const { return _is_base; }
+	// The tile edge over one region: _tile_size, or a coarse region's map size if that is smaller.
+	int get_region_tile_size(const Vector2i &p_region_loc) const {
+		if (_region_map_sizes.is_empty()) {
+			return _tile_size;
+		}
+		const int m = int(_region_map_sizes.get(p_region_loc, 0));
+		return (m > 0 && m < _tile_size) ? m : _tile_size; // (MIN here is the blend mode)
+	}
+	void set_region_map_sizes(const Dictionary &p_sizes) { _region_map_sizes = p_sizes; }
+	// Zero coverage for the region pixels in p_px_rect, keeping the tiles. A coarse tile covers more ground
+	// than a brush's tile-aligned dirty box, so dropping it whole would lose what other brushes wrote there.
+	bool clear_samples_in_rect(const Vector2i &p_region_loc, const Rect2i &p_px_rect);
 
 	// Pixel access. p_px is a vertex offset within the region [0, region_size).
 	// set_sample writes a scalar value + weight (height / control overlays, FORMAT_RGF tiles).

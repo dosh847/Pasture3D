@@ -24,6 +24,9 @@ private:
 	// Saved data
 	real_t _version = CURRENT_STACK_VERSION;
 	TypedArray<Pasture3DLayer> _layers; // index 0 = Base (bottom), saved in order
+	// region_location -> map size for coarse regions, shared with every layer in the stack (not saved).
+	Dictionary _region_map_sizes;
+	void _share_sizes() const;
 
 	// Working data, not saved
 	int _active_layer = 0; // Editor target
@@ -51,7 +54,19 @@ public:
 	// compositing skips control/color passes entirely on height-only terrains).
 	bool has_overlay_of_type(const MapType p_map_type) const;
 
-	void set_layers(const TypedArray<Pasture3DLayer> &p_layers) { _layers = p_layers; }
+	void set_layers(const TypedArray<Pasture3DLayer> &p_layers) {
+		_layers = p_layers;
+		_share_sizes();
+	}
+	// A coarse region's map size; 0 (or a Standard region) erases it. Every layer sees the change.
+	void set_region_map_size(const Vector2i &p_region_loc, const int p_map_size) {
+		if (p_map_size > 0) {
+			_region_map_sizes[p_region_loc] = p_map_size;
+		} else {
+			_region_map_sizes.erase(p_region_loc);
+		}
+	}
+	Dictionary get_region_map_sizes() const { return _region_map_sizes; }
 	TypedArray<Pasture3DLayer> get_layers() const { return _layers; }
 
 	// Active layer (editor target; not persisted as pixel data)

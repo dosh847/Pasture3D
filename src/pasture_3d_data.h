@@ -8,6 +8,7 @@
 #include "pasture_3d_layer_stack.h"
 #include "pasture_3d_region.h"
 #include "pasture_3d_region_index.h"
+#include "pasture_3d_region_type.h"
 
 class Pasture3D;
 
@@ -98,6 +99,9 @@ private:
 	TypedArray<Image> _control_maps;
 	TypedArray<Image> _color_maps;
 	Ref<Image> _placeholders[TYPE_MAX]; // One blank per map type, shaped like the array it pads
+	// Region types by path. "" and a missing file both resolve to Standard (see load_region_type).
+	mutable Dictionary _type_cache;
+	mutable Ref<Pasture3DRegionType> _fallback_standard;
 
 	// get_region_map_size()^2 encoded texels (region_map_encode): 0 = no region, else slot + 1. The CPU copy
 	// for C++ readers; _generated_region_map is the same values as an RF texture for the shaders.
@@ -151,6 +155,13 @@ private:
 	// A blank shaped like p_like (size, format, mipmaps), cached per map type.
 	Ref<Image> _placeholder(const MapType p_type, const Ref<Image> &p_like);
 	void _build_array(const MapType p_type);
+	// The image a region uploads for a map type. A coarse region has no arrays of its own until phase 3, so
+	// it rides the full-size arrays as an upsampled copy, sampled the way the CPU reads it.
+	Ref<Image> _gpu_map(const Pasture3DRegion *p_region, const MapType p_type) const;
+	// Height at a fine vertex (region-local) of a coarse region: bilinear on its lattice, whose far corners
+	// are the neighbours' vertices.
+	real_t _coarse_height(const Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Vector2i &p_fine) const;
+	void _resample_region(Pasture3DRegion *p_region, const Vector2i &p_region_loc, const int p_ratio);
 	void _synthesize_base_layer();
 	// Whether the dense Base layer (index 0) still aliases the region height maps (same Ref<Image>).
 	// Aliasing is the zero-copy load state; it is correct for a single flatten but double-applies
@@ -166,6 +177,20 @@ private:
 	// Region-local vertex rect (clamped to [0, region_size]) covered by a world-space AABB's XZ extent,
 	// for one region location. Used to scope a sub-tile clear to the footprint of a tool re-render.
 	Rect2i _region_pixel_rect(const AABB &p_area, const Vector2i &p_region_loc) const;
+	// _region_pixel_rect in the region's MAP pixels: on a coarse region, the texels whose lattice vertex lies
+	// in the fine rect (texel j sits on fine vertex j * texel_ratio).
+	Rect2i _region_map_rect(const AABB &p_area, const Pasture3DRegion *p_region) const;
+	// A region-local fine vertex to the pixel layers store it at. On a coarse region that is its texel; with
+	// p_lattice_only a vertex off the lattice has no texel of its own and returns false, so a writer walking
+	// fine vertices writes each texel once.
+	bool _layer_pixel(const Pasture3DRegion *p_region, const Vector2i &p_fine, const bool p_lattice_only, Vector2i &r_px) const;
+	// Keep the stack's region -> map size table (which every layer shares) in step with the regions.
+	void _sync_region_map_size(const Vector2i &p_region_loc);
+	void _sync_region_map_sizes();
+	// A layer's tiles over one region, taken to a new texel ratio (streaming phase 2b).
+	Dictionary _resample_layer_tiles(const Pasture3DLayer *p_layer, const Dictionary &p_tiles, const int p_ts0, const int p_r0, const int p_r1, const int p_ts1) const;
+	// get_height_below_point in layer pixels (a coarse region's texels).
+	real_t _height_below_px(const int p_below_layer_id, const Vector2i &p_region_loc, const Vector2i &p_px);
 	// Per-map-type compositing passes (Phase 7), each writing one region map over the given rect:
 	//   height  — REPLACE/ADD/MAX/MIN blend (unchanged; byte-identical to pre-Phase-7).
 	//   control — topmost-covered-wins; a covered overlay fully replaces the value below (no float blend).
@@ -292,10 +317,33 @@ public:
 	// Returns the regions it changed, for the caller to recomposite.
 	TypedArray<Vector2i> restore_layer_tiles(const int p_layer_id, const Dictionary &p_tiles, const Dictionary &p_generations);
 
+	// Region types and lock (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md §C, phase 2)
+	Ref<Pasture3DRegionType> load_region_type(const String &p_path) const;
+	Ref<Pasture3DRegionType> get_region_type(const Vector2i &p_region_loc) const;
+	Ref<Pasture3DRegionType> get_region_type_of(const Pasture3DRegion *p_region) const;
+	// Retypes a region. A different texel_ratio resamples its maps (downsampling DISCARDS detail, and
+	// going coarse discards the region's layer tiles: a coarse region has no layers until phase 2b).
+	// A DROP type clears its instances. Refused on a locked region. The type must be a saved resource:
+	// a region stores it by path.
+	Error set_region_type(const Vector2i &p_region_loc, const Ref<Pasture3DRegionType> &p_type, const bool p_update = true);
+	// The region's cached texel_ratio differs from its type's: the type changed or went missing. Only
+	// set_region_type converts it.
+	bool is_region_type_mismatched(const Vector2i &p_region_loc) const;
+	Error set_region_locked(const Vector2i &p_region_loc, const bool p_locked);
+	bool is_region_locked(const Vector2i &p_region_loc) const;
+	bool region_has_collision(const Pasture3DRegion *p_region) const;
+	bool region_keeps_instances(const Pasture3DRegion *p_region) const;
+	// Height at a fine vertex (global vertex coordinates), whatever the region's resolution. NaN outside
+	// every region. The one place a coarse region's lattice is interpolated.
+	real_t get_height_at_vertex(const Vector2i &p_vertex) const;
+
 	// Layer stack (editor-only, optional)
 	bool has_layer_stack() const { return _layer_stack.is_valid(); }
 	Ref<Pasture3DLayerStack> get_layer_stack() const { return _layer_stack; }
-	void set_layer_stack(const Ref<Pasture3DLayerStack> &p_stack) { _layer_stack = p_stack; }
+	void set_layer_stack(const Ref<Pasture3DLayerStack> &p_stack) {
+		_layer_stack = p_stack;
+		_sync_region_map_sizes();
+	}
 
 	// True when sculpt strokes should route into the active layer instead of writing the region image
 	// directly: a real layer exists above the Base (count > 1). A Base-only stack (plain terrain, or a

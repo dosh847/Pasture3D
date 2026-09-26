@@ -1150,13 +1150,17 @@ void Pasture3DData::_stamp_write(Pasture3DLayer *p_layer, const int p_layer_id, 
 	if (!r_region || r_region->is_deleted()) {
 		return;
 	}
+	Vector2i px;
+	if (!_layer_pixel(r_region, img_pos, true, px)) {
+		return; // Off a coarse region's lattice: its texel is written at its own vertex
+	}
 	// Combine with any same-layer value already written THIS bake, by the brush's blend mode, so two
 	// overlapping tools on one layer stack correctly (MAX keeps the taller, MIN the deeper, ADD sums)
 	// instead of the later tool overwriting the earlier one — the "cut" two mounds carved in each other.
 	// The bake clears the layer in the box first, so the first tool finds it uncovered and just writes.
 	real_t v = p_value;
-	if (p_layer->get_weight(region_loc, img_pos) > 0.f) {
-		const real_t cur = p_layer->get_value(region_loc, img_pos);
+	if (p_layer->get_weight(region_loc, px) > 0.f) {
+		const real_t cur = p_layer->get_value(region_loc, px);
 		switch (p_blend) {
 			case 1: v = cur + p_value; break;   // ADD
 			case 2: v = MAX(cur, p_value); break; // MAX
@@ -1164,11 +1168,11 @@ void Pasture3DData::_stamp_write(Pasture3DLayer *p_layer, const int p_layer_id, 
 			default: break;                       // REPLACE: last write wins
 		}
 	}
-	p_layer->set_sample(region_loc, img_pos, v, 1.0);
+	p_layer->set_sample(region_loc, px, v, 1.0);
 	r_region->set_modified(true);
 	if (p_composite) {
 		// Full-refresh path: keep the public API's per-pixel composite (layer-vs-below) up to date.
-		composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
+		composite_region(region_loc, Rect2i(px, V2I(1)), false);
 	}
 }
 
@@ -1218,6 +1222,113 @@ static void _blank_outside_clip(std::vector<float> &r_vals, const int p_gw, cons
 	}
 }
 
+// A coarse region takes one value per texel, at its lattice vertex (texel j on fine vertex j * r). The value is
+// the box a region is coarsened with -- width r centred on the vertex, half weight on the two end vertices,
+// clamped to the region -- over the cells the block wrote: NaN cells and cells off the block are left out and
+// the weights renormalised. A texel whose own vertex the block left NaN is not written, so the footprint (and
+// a dirty-rect clip) is decided exactly as on a Standard region.
+static bool _apply_stamp_coarse(Pasture3DLayer *p_layer, const Pasture3DRegion *p_region, const Vector2i &p_loc,
+		const int p_rs, const int p_min_px, const int p_min_pz, const int p_gw, const int p_gh, const float *p_vals,
+		const int p_blend) {
+	const int r = p_region->get_texel_ratio();
+	const int half = r / 2;
+	const int gx = p_loc.x * p_rs;
+	const int gz = p_loc.y * p_rs;
+	const int lx0 = MAX(0, p_min_px - gx);
+	const int lx1 = MIN(p_rs, p_min_px + p_gw - gx);
+	const int lz0 = MAX(0, p_min_pz - gz);
+	const int lz1 = MIN(p_rs, p_min_pz + p_gh - gz);
+	auto val = [&](const int p_lx, const int p_lz) -> float {
+		const int ix = gx + p_lx - p_min_px;
+		const int iz = gz + p_lz - p_min_pz;
+		if (ix < 0 || ix >= p_gw || iz < 0 || iz >= p_gh) {
+			return NAN;
+		}
+		return p_vals[(size_t)iz * p_gw + ix];
+	};
+	const int ts = p_layer->get_region_tile_size(p_loc);
+	bool touched = false;
+	for (int jz = (lz0 + r - 1) / r; jz * r < lz1; jz++) {
+		for (int jx = (lx0 + r - 1) / r; jx * r < lx1; jx++) {
+			const int fx = jx * r;
+			const int fz = jz * r;
+			if (std::isnan(val(fx, fz))) {
+				continue;
+			}
+			double sum = 0.0;
+			double wsum = 0.0;
+			for (int dz = -half; dz <= half; dz++) {
+				const double wz = (dz == -half || dz == half) ? 0.5 : 1.0;
+				const int z = CLAMP(fz + dz, 0, p_rs - 1);
+				for (int dx = -half; dx <= half; dx++) {
+					const double wx = (dx == -half || dx == half) ? 0.5 : 1.0;
+					const float v = val(CLAMP(fx + dx, 0, p_rs - 1), z);
+					if (!std::isnan(v)) {
+						sum += wx * wz * v;
+						wsum += wx * wz;
+					}
+				}
+			}
+			const float v = float(sum / wsum);
+			const Vector2i tc(jx / ts, jz / ts);
+			Ref<Image> tile = p_layer->get_or_create_tile(p_loc, tc);
+			if (tile.is_null() || tile->get_format() != Image::FORMAT_RGF) {
+				continue;
+			}
+			float *f = reinterpret_cast<float *>(tile->ptrw());
+			const int li = ((jz - tc.y * ts) * ts + (jx - tc.x * ts)) * 2;
+			float out = v;
+			if (f[li + 1] > 0.f) { // already written THIS bake (same-layer blend)
+				const float cur = f[li];
+				switch (p_blend) {
+					case 1: out = cur + v; break; // ADD
+					case 2: out = MAX(cur, v); break; // MAX
+					case 3: out = MIN(cur, v); break; // MIN
+					default: break; // REPLACE
+				}
+			}
+			f[li] = out;
+			f[li + 1] = 1.f;
+			touched = true;
+		}
+	}
+	return touched;
+}
+
+// Control is bit-packed and cannot be filtered: a coarse texel takes the word at its lattice vertex.
+static bool _apply_control_coarse(Pasture3DLayer *p_layer, const Pasture3DRegion *p_region, const Vector2i &p_loc,
+		const int p_rs, const int p_min_px, const int p_min_pz, const int p_gw, const int p_gh, const uint32_t *p_ctrl,
+		const uint8_t *p_mask) {
+	const int r = p_region->get_texel_ratio();
+	const int gx = p_loc.x * p_rs;
+	const int gz = p_loc.y * p_rs;
+	const int lx0 = MAX(0, p_min_px - gx);
+	const int lx1 = MIN(p_rs, p_min_px + p_gw - gx);
+	const int lz0 = MAX(0, p_min_pz - gz);
+	const int lz1 = MIN(p_rs, p_min_pz + p_gh - gz);
+	const int ts = p_layer->get_region_tile_size(p_loc);
+	bool touched = false;
+	for (int jz = (lz0 + r - 1) / r; jz * r < lz1; jz++) {
+		for (int jx = (lx0 + r - 1) / r; jx * r < lx1; jx++) {
+			const size_t idx = (size_t)(gz + jz * r - p_min_pz) * p_gw + (gx + jx * r - p_min_px);
+			if (!p_mask[idx]) {
+				continue;
+			}
+			const Vector2i tc(jx / ts, jz / ts);
+			Ref<Image> tile = p_layer->get_or_create_tile(p_loc, tc);
+			if (tile.is_null() || tile->get_format() != Image::FORMAT_RGF) {
+				continue;
+			}
+			float *f = reinterpret_cast<float *>(tile->ptrw());
+			const int li = ((jz - tc.y * ts) * ts + (jx - tc.x * ts)) * 2;
+			f[li] = as_float(p_ctrl[idx]);
+			f[li + 1] = 1.f;
+			touched = true;
+		}
+	}
+	return touched;
+}
+
 void Pasture3DData::_apply_stamp_block(Pasture3DLayer *p_layer, const int p_min_px, const int p_min_pz,
 		const int p_gw, const int p_gh, const float *p_vals, const int p_blend) {
 	if (!p_layer) {
@@ -1239,6 +1350,12 @@ void Pasture3DData::_apply_stamp_block(Pasture3DLayer *p_layer, const int p_min_
 			Pasture3DRegion *region = get_region_ptr(region_loc);
 			if (!region || region->is_deleted()) {
 				continue; // only write where a region exists (matches _stamp_write)
+			}
+			if (region->is_coarse()) {
+				if (_apply_stamp_coarse(p_layer, region, region_loc, rs, p_min_px, p_min_pz, p_gw, p_gh, p_vals, p_blend)) {
+					region->set_modified(true);
+				}
+				continue;
 			}
 			const int gx = rx * rs, gz = rz * rs; // region's global pixel origin
 			// Region-local pixel rect covered by the box.
@@ -1341,6 +1458,12 @@ void Pasture3DData::_apply_control_block(Pasture3DLayer *p_layer, const int p_mi
 			const Vector2i region_loc(rx, rz);
 			Pasture3DRegion *region = get_region_ptr(region_loc);
 			if (!region || region->is_deleted()) {
+				continue;
+			}
+			if (region->is_coarse()) {
+				if (_apply_control_coarse(p_layer, region, region_loc, rs, p_min_px, p_min_pz, p_gw, p_gh, p_ctrl, p_mask)) {
+					region->set_modified(true);
+				}
 				continue;
 			}
 			const int gx = rx * rs, gz = rz * rs;

@@ -30,7 +30,7 @@ Ref<Image> Pasture3DLayer::_get_or_create_tile(const Vector2i &p_region_loc, con
 	Ref<Image> tile = region_tiles.get(p_tile_coord, Ref<Image>());
 	if (tile.is_null()) {
 		// New tiles start fully uncovered: all channels 0 (value 0, weight 0).
-		tile = Util::get_filled_image(V2I(_tile_size), Color(0.f, 0.f, 0.f, 0.f), false, _overlay_format());
+		tile = Util::get_filled_image(V2I(get_region_tile_size(p_region_loc)), Color(0.f, 0.f, 0.f, 0.f), false, _overlay_format());
 		region_tiles[p_tile_coord] = tile;
 		_tiles[p_region_loc] = region_tiles;
 		_modified = true;
@@ -136,8 +136,9 @@ void Pasture3DLayer::set_tile_size(const int p_tile_size) {
 }
 
 void Pasture3DLayer::set_sample(const Vector2i &p_region_loc, const Vector2i &p_px, const real_t p_value, const real_t p_weight) {
-	Vector2i tile_coord = _tile_coord(p_px);
-	Vector2i local = _tile_local(p_px, tile_coord);
+	const int ts = get_region_tile_size(p_region_loc);
+	Vector2i tile_coord = _tile_coord(p_px, ts);
+	Vector2i local = _tile_local(p_px, tile_coord, ts);
 	Ref<Image> tile = _get_or_create_tile(p_region_loc, tile_coord);
 	if (tile.is_null()) {
 		return;
@@ -148,8 +149,9 @@ void Pasture3DLayer::set_sample(const Vector2i &p_region_loc, const Vector2i &p_
 }
 
 void Pasture3DLayer::set_sample_color(const Vector2i &p_region_loc, const Vector2i &p_px, const Color &p_color, const real_t p_weight) {
-	Vector2i tile_coord = _tile_coord(p_px);
-	Vector2i local = _tile_local(p_px, tile_coord);
+	const int ts = get_region_tile_size(p_region_loc);
+	Vector2i tile_coord = _tile_coord(p_px, ts);
+	Vector2i local = _tile_local(p_px, tile_coord, ts);
 	Ref<Image> tile = _get_or_create_tile(p_region_loc, tile_coord);
 	if (tile.is_null()) {
 		return;
@@ -160,25 +162,28 @@ void Pasture3DLayer::set_sample_color(const Vector2i &p_region_loc, const Vector
 }
 
 real_t Pasture3DLayer::get_value(const Vector2i &p_region_loc, const Vector2i &p_px) const {
-	Vector2i tile_coord = _tile_coord(p_px);
+	const int ts = get_region_tile_size(p_region_loc);
+	Vector2i tile_coord = _tile_coord(p_px, ts);
 	Image *tile = _get_tile_ptr(p_region_loc, tile_coord);
 	if (!tile) {
 		return NAN;
 	}
-	return tile->get_pixelv(_tile_local(p_px, tile_coord)).r;
+	return tile->get_pixelv(_tile_local(p_px, tile_coord, ts)).r;
 }
 
 Color Pasture3DLayer::get_sample(const Vector2i &p_region_loc, const Vector2i &p_px) const {
-	Vector2i tile_coord = _tile_coord(p_px);
+	const int ts = get_region_tile_size(p_region_loc);
+	Vector2i tile_coord = _tile_coord(p_px, ts);
 	Image *tile = _get_tile_ptr(p_region_loc, tile_coord);
 	if (!tile) {
 		return Color(0.f, 0.f, 0.f, 0.f);
 	}
-	return tile->get_pixelv(_tile_local(p_px, tile_coord));
+	return tile->get_pixelv(_tile_local(p_px, tile_coord, ts));
 }
 
 real_t Pasture3DLayer::get_weight(const Vector2i &p_region_loc, const Vector2i &p_px) const {
-	Vector2i tile_coord = _tile_coord(p_px);
+	const int ts = get_region_tile_size(p_region_loc);
+	Vector2i tile_coord = _tile_coord(p_px, ts);
 	Image *tile = _get_tile_ptr(p_region_loc, tile_coord);
 	if (!tile) {
 		return 0.f;
@@ -190,9 +195,9 @@ real_t Pasture3DLayer::get_weight(const Vector2i &p_region_loc, const Vector2i &
 	}
 	// Color overlays carry coverage in the alpha channel; height/control overlays carry it in green.
 	if (tile->get_format() == Image::FORMAT_RGBA8) {
-		return tile->get_pixelv(_tile_local(p_px, tile_coord)).a;
+		return tile->get_pixelv(_tile_local(p_px, tile_coord, ts)).a;
 	}
-	return tile->get_pixelv(_tile_local(p_px, tile_coord)).g;
+	return tile->get_pixelv(_tile_local(p_px, tile_coord, ts)).g;
 }
 
 // Deep-copies an image's pixel data so a snapshot never aliases the live tile.
@@ -277,8 +282,9 @@ void Pasture3DLayer::set_region_image(const Vector2i &p_region_loc, const Ref<Im
 		LOG(ERROR, "Null image for region ", p_region_loc);
 		return;
 	}
-	if (p_image->get_width() != _tile_size || p_image->get_height() != _tile_size) {
-		LOG(ERROR, "Image size ", p_image->get_size(), " must match tile size ", _tile_size);
+	const int ts = get_region_tile_size(p_region_loc);
+	if (p_image->get_width() != ts || p_image->get_height() != ts) {
+		LOG(ERROR, "Image size ", p_image->get_size(), " must match tile size ", ts, " over region ", p_region_loc);
 		return;
 	}
 	Dictionary region_tiles;
@@ -300,9 +306,10 @@ bool Pasture3DLayer::clear_tiles_in_rect(const Vector2i &p_region_loc, const Rec
 	Dictionary region_tiles = _tiles[p_region_loc];
 	Array coords = region_tiles.keys();
 	bool any = false;
+	const int ts = get_region_tile_size(p_region_loc);
 	for (const Vector2i &coord : coords) {
-		// A tile covers vertices [coord*tile_size, coord*tile_size + tile_size).
-		Rect2i tile_rect(coord * _tile_size, V2I(_tile_size));
+		// A tile covers pixels [coord*ts, coord*ts + ts).
+		Rect2i tile_rect(coord * ts, V2I(ts));
 		if (tile_rect.intersects(p_px_rect)) {
 			region_tiles.erase(coord);
 			any = true;
@@ -315,6 +322,45 @@ bool Pasture3DLayer::clear_tiles_in_rect(const Vector2i &p_region_loc, const Rec
 			_tiles[p_region_loc] = region_tiles;
 		}
 		_modified = true;
+	}
+	return any;
+}
+
+bool Pasture3DLayer::clear_samples_in_rect(const Vector2i &p_region_loc, const Rect2i &p_px_rect) {
+	if (_is_base || !_tiles.has(p_region_loc) || !p_px_rect.has_area()) {
+		return false;
+	}
+	const Dictionary region_tiles = _tiles[p_region_loc];
+	const Array coords = region_tiles.keys();
+	const int ts = get_region_tile_size(p_region_loc);
+	bool any = false;
+	for (const Vector2i &coord : coords) {
+		const Rect2i hit = Rect2i(coord * ts, V2I(ts)).intersection(p_px_rect);
+		if (!hit.has_area()) {
+			continue;
+		}
+		Ref<Image> tile = region_tiles[coord];
+		if (tile.is_null()) {
+			continue;
+		}
+		const bool rgba = tile->get_format() == Image::FORMAT_RGBA8;
+		for (int y = hit.position.y; y < hit.get_end().y; y++) {
+			for (int x = hit.position.x; x < hit.get_end().x; x++) {
+				const Vector2i local(x - coord.x * ts, y - coord.y * ts);
+				Color c = tile->get_pixelv(local);
+				if (rgba) {
+					c.a = 0.f;
+				} else {
+					c.g = 0.f;
+				}
+				tile->set_pixelv(local, c);
+			}
+		}
+		any = true;
+	}
+	if (any) {
+		_modified = true;
+		gc_region(p_region_loc);
 	}
 	return any;
 }
@@ -482,6 +528,8 @@ void Pasture3DLayer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_region_image", "region_location", "image"), &Pasture3DLayer::set_region_image);
 	ClassDB::bind_method(D_METHOD("clear_region", "region_location"), &Pasture3DLayer::clear_region);
 	ClassDB::bind_method(D_METHOD("clear_tiles_in_rect", "region_location", "pixel_rect"), &Pasture3DLayer::clear_tiles_in_rect);
+	ClassDB::bind_method(D_METHOD("clear_samples_in_rect", "region_location", "pixel_rect"), &Pasture3DLayer::clear_samples_in_rect);
+	ClassDB::bind_method(D_METHOD("get_region_tile_size", "region_location"), &Pasture3DLayer::get_region_tile_size);
 	ClassDB::bind_method(D_METHOD("gc_region", "region_location"), &Pasture3DLayer::gc_region);
 	ClassDB::bind_method(D_METHOD("gc"), &Pasture3DLayer::gc);
 	ClassDB::bind_method(D_METHOD("has_region", "region_location"), &Pasture3DLayer::has_region);

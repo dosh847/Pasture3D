@@ -72,9 +72,6 @@ Dictionary Pasture3DCollision::_get_shape_data(const Vector2i &p_position, const
 	real_t min_height = FLT_MAX;
 	real_t max_height = -FLT_MAX;
 
-	Ref<Image> map, map_x, map_z, map_xz; // height maps
-	Ref<Image> cmap, cmap_x, cmap_z, cmap_xz; // control maps w/ holes
-
 	// Get region_loc of top left corner of descaled and grid snapped collision shape position
 	Vector2i region_loc = V2I_DIVIDE_FLOOR(p_position, region_size);
 	const Pasture3DRegion *region = data->get_region_ptr(region_loc);
@@ -82,24 +79,26 @@ Dictionary Pasture3DCollision::_get_shape_data(const Vector2i &p_position, const
 		LOG(EXTREME, "Region not found at: ", region_loc, ". Returning blank");
 		return Dictionary();
 	}
-	map = region->get_map(TYPE_HEIGHT);
-	cmap = region->get_map(TYPE_CONTROL);
 
-	// Get +X, +Z adjacent regions in case we run over
-	region = data->get_region_ptr(region_loc + Vector2i(1, 0));
-	if (region && !region->is_deleted()) {
-		map_x = region->get_map(TYPE_HEIGHT);
-		cmap_x = region->get_map(TYPE_CONTROL);
-	}
-	region = data->get_region_ptr(region_loc + Vector2i(0, 1));
-	if (region && !region->is_deleted()) {
-		map_z = region->get_map(TYPE_HEIGHT);
-		cmap_z = region->get_map(TYPE_CONTROL);
-	}
-	region = data->get_region_ptr(region_loc + Vector2i(1, 1));
-	if (region && !region->is_deleted()) {
-		map_xz = region->get_map(TYPE_HEIGHT);
-		cmap_xz = region->get_map(TYPE_CONTROL);
+	// This region and the +X, +Z, +XZ neighbours the last row/col runs over, indexed x + 2z. A region whose
+	// type has collision off contributes holes (NaN). A coarse one is read through get_height_at_vertex, which
+	// interpolates its lattice; a Standard one is read straight from its maps.
+	struct Source {
+		const Image *map = nullptr;
+		const Image *cmap = nullptr;
+		int ratio = 1;
+		bool active = false;
+	};
+	Source src[4];
+	for (int q = 0; q < 4; q++) {
+		const Pasture3DRegion *r = data->get_region_ptr(region_loc + Vector2i(q & 1, q >> 1));
+		if (!r || r->is_deleted() || !data->region_has_collision(r)) {
+			continue;
+		}
+		src[q].map = r->get_map_ptr(TYPE_HEIGHT);
+		src[q].cmap = r->get_map_ptr(TYPE_CONTROL);
+		src[q].ratio = r->get_texel_ratio();
+		src[q].active = src[q].map && src[q].cmap;
 	}
 
 	for (int z = 0; z < hshape_size; z++) {
@@ -120,14 +119,13 @@ Dictionary Pasture3DCollision::_get_shape_data(const Vector2i &p_position, const
 
 			// Set heights on local map, or adjacent maps if on the last row/col
 			real_t height = NAN;
-			if (!next_x && !next_z && map.is_valid()) {
-				height = is_hole(cmap->get_pixel(img_x, img_y).r) ? NAN : map->get_pixel(img_x, img_y).r;
-			} else if (next_x && !next_z && map_x.is_valid()) {
-				height = is_hole(cmap_x->get_pixel(img_x, img_y).r) ? NAN : map_x->get_pixel(img_x, img_y).r;
-			} else if (!next_x && next_z && map_z.is_valid()) {
-				height = is_hole(cmap_z->get_pixel(img_x, img_y).r) ? NAN : map_z->get_pixel(img_x, img_y).r;
-			} else if (next_x && next_z && map_xz.is_valid()) {
-				height = is_hole(cmap_xz->get_pixel(img_x, img_y).r) ? NAN : map_xz->get_pixel(img_x, img_y).r;
+			const Source &s = src[(next_x ? 1 : 0) + (next_z ? 2 : 0)];
+			if (s.active) {
+				if (s.ratio > 1) {
+					height = is_hole(s.cmap->get_pixel(img_x / s.ratio, img_y / s.ratio).r) ? NAN : data->get_height_at_vertex(shape_pos);
+				} else {
+					height = is_hole(s.cmap->get_pixel(img_x, img_y).r) ? NAN : s.map->get_pixel(img_x, img_y).r;
+				}
 			}
 			if (!std::isnan(height) && is_bg_flat_or_noise) {
 				Vector2 uv2 = Vector2(shape_pos) * region_texel_size;
@@ -150,8 +148,9 @@ Dictionary Pasture3DCollision::_get_shape_data(const Vector2i &p_position, const
 	shape_data["depth"] = hshape_size;
 	shape_data["heights"] = map_data;
 	shape_data["xform"] = xform;
-	shape_data["min_height"] = min_height;
-	shape_data["max_height"] = max_height;
+	// All holes (a collision-off region): an empty range, not FLT_MAX..-FLT_MAX.
+	shape_data["min_height"] = min_height <= max_height ? min_height : 0.f;
+	shape_data["max_height"] = min_height <= max_height ? max_height : 0.f;
 	return shape_data;
 }
 

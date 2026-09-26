@@ -5,6 +5,7 @@
 #include "logger.h"
 #include "pasture_3d_data.h"
 #include "pasture_3d_region.h"
+#include "pasture_3d_region_type.h"
 #include "pasture_3d_util.h"
 
 /////////////////////
@@ -14,6 +15,9 @@
 void Pasture3DRegion::clear() {
 	_version = 0.8f;
 	_region_size = 0;
+	_texel_ratio = 1;
+	_type_path = "";
+	_locked = false;
 	_height_range = V2_ZERO;
 	_height_map.unref();
 	_control_map.unref();
@@ -54,6 +58,59 @@ void Pasture3DRegion::set_region_size(const int p_region_size) {
 	}
 	SET_IF_DIFF(_region_size, p_region_size);
 	LOG(INFO, "Setting region ", _location, " size: ", p_region_size);
+}
+
+void Pasture3DRegion::set_texel_ratio(const int p_ratio) {
+	if (!Pasture3DRegionType::is_valid_texel_ratio(p_ratio)) {
+		LOG(ERROR, "Invalid texel ratio: ", p_ratio, ". Must be 1, 2, 4, 8 or 16");
+		return;
+	}
+	if (_region_size > 0 && _region_size / p_ratio < Pasture3DRegionType::MIN_MAP_SIZE) {
+		LOG(ERROR, "Texel ratio ", p_ratio, " leaves region size ", _region_size, " under ",
+				Pasture3DRegionType::MIN_MAP_SIZE, " texels");
+		return;
+	}
+	if (_texel_ratio == p_ratio) {
+		return;
+	}
+	// Only the ratio: resampling the maps to it is Pasture3DData::set_region_type's job, which needs the
+	// neighbours. Maps set after this are validated against the new size.
+	if (_region_size > 0) {
+		_modified = true;
+	}
+	_texel_ratio = p_ratio;
+}
+
+void Pasture3DRegion::set_type_path(const String &p_path) {
+	if (_type_path == p_path) {
+		return;
+	}
+	if (_region_size > 0) {
+		_modified = true;
+	}
+	_type_path = p_path;
+}
+
+void Pasture3DRegion::set_locked(const bool p_locked) {
+	if (_locked == p_locked) {
+		return;
+	}
+	if (_region_size > 0) {
+		_modified = true;
+	}
+	_locked = p_locked;
+}
+
+Vector2i Pasture3DRegion::world_to_pixel(const Vector3 &p_global_position, const real_t p_vertex_spacing) const {
+	const Vector3 descaled = p_global_position / p_vertex_spacing;
+	const Vector2i offset = _location * _region_size;
+	const Vector2i fine(int(Math::floor(descaled.x)) - offset.x, int(Math::floor(descaled.z)) - offset.y);
+	if (_texel_ratio <= 1) {
+		return fine.clamp(V2I_ZERO, V2I(_region_size - 1));
+	}
+	// Floor division; a position before the region clamps to texel 0 like the fine path.
+	const Vector2i px(fine.x >= 0 ? fine.x / _texel_ratio : 0, fine.y >= 0 ? fine.y / _texel_ratio : 0);
+	return px.clamp(V2I_ZERO, V2I(get_map_size() - 1));
 }
 
 void Pasture3DRegion::set_map(const MapType p_map_type, const Ref<Image> &p_image) {
@@ -125,7 +182,7 @@ void Pasture3DRegion::set_height_map(const Ref<Image> &p_map) {
 	SET_IF_DIFF(_height_map, p_map);
 	LOG(INFO, "Setting height map for region: ", (_location.x != INT32_MAX) ? String(_location) : "(new)");
 	if (_region_size == 0 && p_map.is_valid()) {
-		set_region_size(p_map->get_width());
+		set_region_size(p_map->get_width() * _texel_ratio);
 	}
 	Ref<Image> map = sanitize_map(TYPE_HEIGHT, p_map);
 	// If already initialized and receiving a new map, or the map was sanitized
@@ -140,7 +197,7 @@ void Pasture3DRegion::set_control_map(const Ref<Image> &p_map) {
 	SET_IF_DIFF(_control_map, p_map);
 	LOG(INFO, "Setting control map for region: ", (_location.x != INT32_MAX) ? String(_location) : "(new)");
 	if (_region_size == 0 && p_map.is_valid()) {
-		set_region_size(p_map->get_width());
+		set_region_size(p_map->get_width() * _texel_ratio);
 	}
 	Ref<Image> map = sanitize_map(TYPE_CONTROL, p_map);
 	// If already initialized and receiving a new map, or the map was sanitized
@@ -154,7 +211,7 @@ void Pasture3DRegion::set_color_map(const Ref<Image> &p_map) {
 	SET_IF_DIFF(_color_map, p_map);
 	LOG(INFO, "Setting color map for region: ", (_location.x != INT32_MAX) ? String(_location) : "(new)");
 	if (_region_size == 0 && p_map.is_valid()) {
-		set_region_size(p_map->get_width());
+		set_region_size(p_map->get_width() * _texel_ratio);
 	}
 	Ref<Image> map = sanitize_map(TYPE_COLOR, p_map);
 	// If already initialized and receiving a new map, or the map was sanitized
@@ -220,7 +277,7 @@ Ref<Image> Pasture3DRegion::sanitize_map(const MapType p_map_type, const Ref<Ima
 	}
 	if (map.is_null()) {
 		LOG(DEBUG, "Making new image of type: ", type_str, " and generating mipmaps: ", p_map_type == TYPE_COLOR);
-		return Util::get_filled_image(V2I(_region_size), color, p_map_type == TYPE_COLOR, format);
+		return Util::get_filled_image(V2I(get_map_size()), color, p_map_type == TYPE_COLOR, format);
 	} else {
 		if (p_map_type == TYPE_COLOR && !map->has_mipmaps()) {
 			LOG(DEBUG, "Color map does not have mipmaps. Generating");
@@ -236,11 +293,12 @@ bool Pasture3DRegion::validate_map_size(const Ref<Image> &p_map) const {
 		LOG(ERROR, "Image width doesn't match height: ", region_sizev);
 		return false;
 	}
-	if (!is_valid_region_size(region_sizev.x) || !is_valid_region_size(region_sizev.y)) {
+	if (_texel_ratio == 1 && (!is_valid_region_size(region_sizev.x) || !is_valid_region_size(region_sizev.y))) {
 		LOG(ERROR, "Invalid image size: ", region_sizev, ". Must be power of 2, 64-2048 and square");
 		return false;
 	}
-	if (_region_size != region_sizev.x || _region_size != region_sizev.y) {
+	// A coarse region's maps are region_size / texel_ratio wide.
+	if (get_map_size() != region_sizev.x || get_map_size() != region_sizev.y) {
 		LOG(ERROR, "Image size doesn't match existing images in this region", region_sizev);
 		return false;
 	}
@@ -345,6 +403,9 @@ void Pasture3DRegion::set_data(const Dictionary &p_data) {
 	SET_IF_HAS(_modified, "modified");
 	SET_IF_HAS(_version, "version");
 	SET_IF_HAS(_region_size, "region_size");
+	SET_IF_HAS(_texel_ratio, "texel_ratio");
+	SET_IF_HAS(_type_path, "type_path");
+	SET_IF_HAS(_locked, "locked");
 	SET_IF_HAS(_vertex_spacing, "vertex_spacing");
 	SET_IF_HAS(_height_range, "height_range");
 	SET_IF_HAS(_height_map, "height_map");
@@ -361,6 +422,9 @@ Dictionary Pasture3DRegion::get_data() const {
 	dict["modified"] = _modified;
 	dict["version"] = _version;
 	dict["region_size"] = _region_size;
+	dict["texel_ratio"] = _texel_ratio;
+	dict["type_path"] = _type_path;
+	dict["locked"] = _locked;
 	dict["vertex_spacing"] = _vertex_spacing;
 	dict["height_range"] = _height_range;
 	dict["height_map"] = _height_map;
@@ -380,6 +444,9 @@ Ref<Pasture3DRegion> Pasture3DRegion::duplicate(const bool p_deep) {
 		// Native type copies
 		dict["version"] = _version;
 		dict["region_size"] = _region_size;
+		dict["texel_ratio"] = _texel_ratio;
+		dict["type_path"] = _type_path;
+		dict["locked"] = _locked;
 		dict["vertex_spacing"] = _vertex_spacing;
 		dict["height_range"] = _height_range;
 		dict["modified"] = _modified;
@@ -397,6 +464,7 @@ Ref<Pasture3DRegion> Pasture3DRegion::duplicate(const bool p_deep) {
 
 void Pasture3DRegion::dump(const bool verbose) const {
 	LOG(MESG, "Region: ", _location, ", version: ", vformat("%.2f", _version), ", size: ", _region_size,
+			", ratio: ", _texel_ratio, ", type: ", _type_path.is_empty() ? String("Standard") : _type_path, _locked ? ", locked" : "",
 			", spacing: ", vformat("%.1f", _vertex_spacing), ", range: ", vformat("%.2v", _height_range),
 			", flags (", _edited ? "ed," : "", _modified ? "mod," : "", _deleted ? "del" : "", "), ",
 			ptr_to_str(this));
@@ -443,6 +511,15 @@ void Pasture3DRegion::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_version"), &Pasture3DRegion::get_version);
 	ClassDB::bind_method(D_METHOD("set_region_size", "region_size"), &Pasture3DRegion::set_region_size);
 	ClassDB::bind_method(D_METHOD("get_region_size"), &Pasture3DRegion::get_region_size);
+	ClassDB::bind_method(D_METHOD("set_texel_ratio", "texel_ratio"), &Pasture3DRegion::set_texel_ratio);
+	ClassDB::bind_method(D_METHOD("get_texel_ratio"), &Pasture3DRegion::get_texel_ratio);
+	ClassDB::bind_method(D_METHOD("is_coarse"), &Pasture3DRegion::is_coarse);
+	ClassDB::bind_method(D_METHOD("get_map_size"), &Pasture3DRegion::get_map_size);
+	ClassDB::bind_method(D_METHOD("set_type_path", "type_path"), &Pasture3DRegion::set_type_path);
+	ClassDB::bind_method(D_METHOD("get_type_path"), &Pasture3DRegion::get_type_path);
+	ClassDB::bind_method(D_METHOD("set_locked", "locked"), &Pasture3DRegion::set_locked);
+	ClassDB::bind_method(D_METHOD("is_locked"), &Pasture3DRegion::is_locked);
+	ClassDB::bind_method(D_METHOD("world_to_pixel", "global_position", "vertex_spacing"), &Pasture3DRegion::world_to_pixel);
 	ClassDB::bind_method(D_METHOD("set_vertex_spacing", "vertex_spacing"), &Pasture3DRegion::set_vertex_spacing);
 	ClassDB::bind_method(D_METHOD("get_vertex_spacing"), &Pasture3DRegion::get_vertex_spacing);
 
@@ -488,6 +565,11 @@ void Pasture3DRegion::_bind_methods() {
 	int ro_flags = PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY;
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "version", PROPERTY_HINT_NONE, "", ro_flags), "set_version", "get_version");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "region_size", PROPERTY_HINT_NONE, "", ro_flags), "set_region_size", "get_region_size");
+	// Before the maps: deserialisation sets properties in this order, and a map validates against
+	// region_size / texel_ratio.
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "texel_ratio", PROPERTY_HINT_NONE, "", ro_flags), "set_texel_ratio", "get_texel_ratio");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "type_path", PROPERTY_HINT_NONE, "", ro_flags), "set_type_path", "get_type_path");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "locked", PROPERTY_HINT_NONE, "", ro_flags), "set_locked", "is_locked");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "vertex_spacing", PROPERTY_HINT_NONE, "", ro_flags), "set_vertex_spacing", "get_vertex_spacing");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2, "height_range", PROPERTY_HINT_NONE, "", ro_flags), "set_height_range", "get_height_range");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "height_map", PROPERTY_HINT_RESOURCE_TYPE, "Image", ro_flags), "set_height_map", "get_height_map");

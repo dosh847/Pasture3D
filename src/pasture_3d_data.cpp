@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <godot_cpp/classes/project_settings.hpp>
+#include <godot_cpp/classes/resource_loader.hpp>
 
 #include "logger.h"
 #include "pasture_3d_data.h"
@@ -38,6 +39,8 @@ void Pasture3DData::_clear() {
 	_region_locations.clear();
 	_region_index.instantiate();
 	_region_generation.clear();
+	_type_cache.clear();
+	_fallback_standard.unref();
 	_master_height_range = V2_ZERO;
 	_generated_height_maps.clear();
 	_generated_control_maps.clear();
@@ -75,6 +78,11 @@ bool Pasture3DData::gpu_raster_available() {
 	return gpu && gpu->available();
 }
 
+// Lerp that holds p_a at t == 0, so a NaN neighbour the weight never reaches cannot poison the result.
+static inline real_t _lerp_hold(const real_t p_a, const real_t p_b, const real_t p_t) {
+	return p_t == 0.f ? p_a : p_a + (p_b - p_a) * p_t;
+}
+
 // Builds a one-layer stack whose dense "Base" layer aliases the loaded region height maps, so an
 // existing terrain opens as a single-layer stack with no pixel copy. Called when no layer files are
 // present (phase 1 has no layer persistence yet, so this always runs after load). The stack is not
@@ -85,6 +93,7 @@ void Pasture3DData::_synthesize_base_layer() {
 		return;
 	}
 	_layer_stack.instantiate();
+	_sync_region_map_sizes();
 	Ref<Pasture3DLayer> base;
 	base.instantiate();
 	base->set_layer_name("Base");
@@ -92,6 +101,8 @@ void Pasture3DData::_synthesize_base_layer() {
 	base->set_tile_size(_region_size); // Phase 1: one tile per region == the region image
 	base->set_blend_mode(Pasture3DLayer::REPLACE);
 	base->set_base(true);
+	// Into the stack before its tiles: that is where it learns a coarse region's tile edge.
+	_layer_stack->add_layer_ref(base);
 	Array locations = _regions.keys();
 	for (const Vector2i &region_loc : locations) {
 		Pasture3DRegion *region = get_region_ptr(region_loc);
@@ -100,7 +111,6 @@ void Pasture3DData::_synthesize_base_layer() {
 		}
 	}
 	base->set_modified(false);
-	_layer_stack->add_layer_ref(base);
 	LOG(INFO, "Synthesized Base layer over ", locations.size(), " region(s)");
 }
 
@@ -417,6 +427,13 @@ void Pasture3DData::change_region_size(int p_new_size) {
 	if (!is_valid_region_size(p_new_size)) {
 		LOG(ERROR, "Invalid region size: ", p_new_size, ". Must be power of 2, 64-2048");
 		return;
+	}
+	for (const Vector2i &loc : _regions.keys()) {
+		const Pasture3DRegion *region = get_region_ptr(loc);
+		if (region && !region->is_deleted() && region->is_coarse()) {
+			LOG(ERROR, "Region ", loc, " is coarse; set every region Standard before changing region size");
+			return;
+		}
 	}
 	if (p_new_size == _region_size) {
 		return;
@@ -874,6 +891,7 @@ bool Pasture3DData::load_layers(const String &p_dir) {
 		}
 	}
 	_layer_stack = manifest;
+	_sync_region_map_sizes();
 
 	// Merge each region's saved pixel slice back into the matching layers.
 	for (const Vector2i &region_loc : _regions.keys()) {
@@ -1216,6 +1234,9 @@ void Pasture3DData::_index_region(const Vector2i &p_region_loc) {
 	Dictionary entry = _region_index->get_entry(p_region_loc).duplicate();
 	entry["height_range"] = region->get_height_range();
 	entry["stack_signature"] = _stack_signature();
+	entry["type_path"] = region->get_type_path();
+	entry["texel_ratio"] = region->get_texel_ratio();
+	entry["locked"] = region->is_locked();
 	_region_index->set_entry(p_region_loc, entry);
 }
 
@@ -1535,7 +1556,7 @@ void Pasture3DData::_build_array(const MapType p_type) {
 	for (int slot = 0; slot < capacity && like.is_null(); slot++) {
 		const Pasture3DRegion *region = slot_region(slot);
 		if (region) {
-			like = region->get_map(p_type);
+			like = _gpu_map(region, p_type);
 		}
 	}
 	arr.clear();
@@ -1547,7 +1568,7 @@ void Pasture3DData::_build_array(const MapType p_type) {
 	arr.resize(capacity);
 	for (int slot = 0; slot < capacity; slot++) {
 		const Pasture3DRegion *region = slot_region(slot);
-		arr[slot] = region ? region->get_map(p_type) : ph;
+		arr[slot] = region ? _gpu_map(region, p_type) : ph;
 	}
 	gen.create(arr);
 	_stat_array_creates++;
@@ -1604,8 +1625,13 @@ void Pasture3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 
 	// An image that no longer matches its array's shape (region size, format, mipmaps) cannot go up as a
 	// single layer, so that array is recreated instead.
-	auto shape_ok = [&](const int t, const Ref<Image> &p_img) -> bool {
+	auto shape_ok = [&](const int t, const Pasture3DRegion *p_region) -> bool {
 		const Ref<Image> &ph = _placeholders[t];
+		if (p_region->is_coarse()) {
+			// Its upload is built to the array's region size and format (_gpu_map).
+			return ph.is_valid() && ph->get_size() == V2I(_region_size);
+		}
+		const Ref<Image> p_img = p_region->get_map(MapType(t));
 		return ph.is_valid() && p_img.is_valid() && p_img->get_size() == ph->get_size() &&
 				p_img->get_format() == ph->get_format() && p_img->has_mipmaps() == ph->has_mipmaps();
 	};
@@ -1616,7 +1642,7 @@ void Pasture3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 		for (const Vector2i &loc : _region_locations) {
 			const Pasture3DRegion *region = get_region_ptr(loc);
 			const int slot = _region_slots.get(loc, -1);
-			if (region && (region->is_edited() || fresh.has(slot)) && !shape_ok(t, region->get_map(MapType(t)))) {
+			if (region && (region->is_edited() || fresh.has(slot)) && !shape_ok(t, region)) {
 				LOG(DEBUG, "Region ", loc, " map ", t, " changed shape; recreating its texture array");
 				gens[t]->clear();
 				break;
@@ -1652,7 +1678,7 @@ void Pasture3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 				if (rebuilt[t]) {
 					continue;
 				}
-				const Ref<Image> img = region->get_map(MapType(t));
+				const Ref<Image> img = _gpu_map(region, MapType(t));
 				(*arrays[t])[slot] = img;
 				gens[t]->update(img, slot);
 				_stat_layer_uploads++;
@@ -1685,7 +1711,7 @@ void Pasture3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 			if (rebuilt[t] || (p_map_type != TYPE_MAX && p_map_type != t)) {
 				continue;
 			}
-			const Ref<Image> img = region->get_map(MapType(t));
+			const Ref<Image> img = _gpu_map(region, MapType(t));
 			(*arrays[t])[slot] = img;
 			gens[t]->update(img, slot);
 			_stat_layer_uploads++;
@@ -1774,7 +1800,7 @@ void Pasture3DData::_accumulate_height(real_t *p_acc, const Vector2i &p_region_l
 		if (!layer->has_region(p_region_loc)) {
 			continue; // (C) per-region cull.
 		}
-		const int ts = layer->get_tile_size();
+		const int ts = layer->get_region_tile_size(p_region_loc);
 		const real_t op = layer->get_opacity();
 		const int bm = (int)layer->get_blend_mode();
 		const int tx0 = rect_x / ts;
@@ -1882,6 +1908,40 @@ PackedFloat32Array Pasture3DData::composite_height_below(const int p_below_layer
 			if (ix0 >= ix1 || iz0 >= iz1) {
 				continue;
 			}
+			const int r = region->get_texel_ratio();
+			if (r > 1) {
+				// Coarse: composite the texels under these vertices, then read each vertex bilinearly on the
+				// lattice, the far edge held (as get_height_below_point does).
+				const int m = region->get_map_size();
+				const int fx0 = ox + ix0 - rx * rsz;
+				const int fz0 = oz + iz0 - ry * rsz;
+				const int fx1 = ox + ix1 - rx * rsz;
+				const int fz1 = oz + iz1 - ry * rsz;
+				const int cx0 = fx0 / r;
+				const int cz0 = fz0 / r;
+				const int cx1 = MIN(m, (fx1 - 1) / r + 2);
+				const int cz1 = MIN(m, (fz1 - 1) / r + 2);
+				const int cw = cx1 - cx0;
+				acc.assign((size_t)cw * (cz1 - cz0), NAN);
+				_accumulate_height(acc.data(), loc, Rect2i(cx0, cz0, cw, cz1 - cz0), p_below_layer_id);
+				auto at = [&](const int p_cx, const int p_cz) -> real_t {
+					return acc[(size_t)(MIN(p_cz, m - 1) - cz0) * cw + (MIN(p_cx, m - 1) - cx0)];
+				};
+				for (int iz = iz0; iz < iz1; iz++) {
+					const int fz = oz + iz - ry * rsz;
+					const int jz = fz / r;
+					const real_t tz = real_t(fz - jz * r) / real_t(r);
+					for (int ix = ix0; ix < ix1; ix++) {
+						const int fx = ox + ix - rx * rsz;
+						const int jx = fx / r;
+						const real_t tx = real_t(fx - jx * r) / real_t(r);
+						const real_t top = _lerp_hold(at(jx, jz), at(jx + 1, jz), tx);
+						const real_t bot = _lerp_hold(at(jx, jz + 1), at(jx + 1, jz + 1), tx);
+						optr[iz * p_gw + ix] = _lerp_hold(top, bot, tz);
+					}
+				}
+				continue;
+			}
 			const int rw = ix1 - ix0;
 			const int rh = iz1 - iz0;
 			const Rect2i rect(ox + ix0 - rx * rsz, oz + iz0 - ry * rsz, rw, rh);
@@ -1919,6 +1979,29 @@ real_t Pasture3DData::get_height_below_point(const int p_below_layer_id, const V
 	if (p_img_pos.x < 0 || p_img_pos.x >= _region_size || p_img_pos.y < 0 || p_img_pos.y >= _region_size) {
 		return NAN;
 	}
+	const int r = region->get_texel_ratio();
+	if (r == 1) {
+		return _height_below_px(p_below_layer_id, p_region_loc, p_img_pos);
+	}
+	// Coarse: bilinear on the lattice, the far edge held (a neighbour's layers are not read here).
+	const int m = region->get_map_size();
+	const Vector2i i0(p_img_pos.x / r, p_img_pos.y / r);
+	const real_t tx = real_t(p_img_pos.x - i0.x * r) / real_t(r);
+	const real_t ty = real_t(p_img_pos.y - i0.y * r) / real_t(r);
+	const Vector2i i1(MIN(i0.x + 1, m - 1), MIN(i0.y + 1, m - 1));
+	const real_t h00 = _height_below_px(p_below_layer_id, p_region_loc, i0);
+	const real_t h10 = tx > 0.f ? _height_below_px(p_below_layer_id, p_region_loc, Vector2i(i1.x, i0.y)) : h00;
+	const real_t h01 = ty > 0.f ? _height_below_px(p_below_layer_id, p_region_loc, Vector2i(i0.x, i1.y)) : h00;
+	const real_t h11 = (tx > 0.f && ty > 0.f) ? _height_below_px(p_below_layer_id, p_region_loc, i1) : (tx > 0.f ? h10 : h01);
+	return _lerp_hold(_lerp_hold(h00, h10, tx), _lerp_hold(h01, h11, tx), ty);
+}
+
+real_t Pasture3DData::_height_below_px(const int p_below_layer_id, const Vector2i &p_region_loc, const Vector2i &p_img_pos) {
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	const int map_size = region ? region->get_map_size() : 0;
+	if (p_img_pos.x < 0 || p_img_pos.x >= map_size || p_img_pos.y < 0 || p_img_pos.y >= map_size) {
+		return NAN;
+	}
 	real_t dst = NAN;
 	const int end = MIN(p_below_layer_id, _layer_stack->get_layer_count());
 	for (int i = 0; i < end; i++) {
@@ -1926,7 +2009,7 @@ real_t Pasture3DData::get_height_below_point(const int p_below_layer_id, const V
 		if (!layer || !layer->is_visible() || layer->get_map_type() != TYPE_HEIGHT || !layer->has_region(p_region_loc)) {
 			continue;
 		}
-		const int ts = layer->get_tile_size();
+		const int ts = layer->get_region_tile_size(p_region_loc);
 		const Vector2i tile_coord(p_img_pos.x / ts, p_img_pos.y / ts);
 		Ref<Image> tile = layer->get_tile(p_region_loc, tile_coord);
 		if (tile.is_null()) {
@@ -2042,10 +2125,10 @@ void Pasture3DData::_composite_control_region(Pasture3DRegion *p_region, const V
 
 	// Seed accumulator from base layer (if present and has region) or fallback to current control_map
 	const float *ctrl_ptr = reinterpret_cast<const float *>(control_map->ptr());
-	const int rsz = _region_size;
+	const int rsz = control_map->get_width(); // The region's map size, smaller on a coarse region
 
 	if (base && base->has_region(p_region_loc)) {
-		const int ts = base->get_tile_size();
+		const int ts = base->get_region_tile_size(p_region_loc);
 		const int tx0 = rect_x / ts;
 		const int tx1 = (rect_x + rect_w - 1) / ts;
 		const int ty0 = rect_y / ts;
@@ -2097,7 +2180,7 @@ void Pasture3DData::_composite_control_region(Pasture3DRegion *p_region, const V
 		if (!layer || layer->is_base() || !layer->is_visible() || layer->get_map_type() != TYPE_CONTROL || !layer->has_region(p_region_loc)) {
 			continue;
 		}
-		const int ts = layer->get_tile_size();
+		const int ts = layer->get_region_tile_size(p_region_loc);
 		const int tx0 = rect_x / ts;
 		const int tx1 = (rect_x + rect_w - 1) / ts;
 		const int ty0 = rect_y / ts;
@@ -2172,7 +2255,7 @@ void Pasture3DData::_composite_color_region(Pasture3DRegion *p_region, const Vec
 	}
 	const int base_idx = _layer_stack->find_base_layer(TYPE_COLOR);
 	const Pasture3DLayer *base = base_idx >= 0 ? _layer_stack->get_layer_ptr(base_idx) : nullptr;
-	const int rsz = _region_size;
+	const int rsz = color_map->get_width(); // The region's map size, smaller on a coarse region
 
 	struct AccumColor {
 		float r = 0.f;
@@ -2186,7 +2269,7 @@ void Pasture3DData::_composite_color_region(Pasture3DRegion *p_region, const Vec
 
 	// Seed accumulator from base layer (if present and has region) or fallback to current color_map
 	if (base && base->has_region(p_region_loc)) {
-		const int ts = base->get_tile_size();
+		const int ts = base->get_region_tile_size(p_region_loc);
 		const int tx0 = rect_x / ts;
 		const int tx1 = (rect_x + rect_w - 1) / ts;
 		const int ty0 = rect_y / ts;
@@ -2247,7 +2330,7 @@ void Pasture3DData::_composite_color_region(Pasture3DRegion *p_region, const Vec
 			continue;
 		}
 		const real_t op = layer->get_opacity();
-		const int ts = layer->get_tile_size();
+		const int ts = layer->get_region_tile_size(p_region_loc);
 		const int tx0 = rect_x / ts;
 		const int tx1 = (rect_x + rect_w - 1) / ts;
 		const int ty0 = rect_y / ts;
@@ -2338,7 +2421,7 @@ void Pasture3DData::composite_area(const AABB &p_area, const bool p_update) {
 			}
 			// composite_region clamps the rect to the region; an empty rect would mean the whole region, so
 			// skip a region the area only grazes to a zero-width pixel rect (nothing to composite there).
-			const Rect2i px_rect = _region_pixel_rect(p_area, loc);
+			const Rect2i px_rect = _region_map_rect(p_area, region);
 			if (px_rect.has_area()) {
 				composite_region(loc, px_rect, p_update);
 			}
@@ -2364,18 +2447,20 @@ int Pasture3DData::_ensure_typed_base(const MapType p_map_type) {
 	base->set_blend_mode(Pasture3DLayer::REPLACE);
 	base->set_base(true);
 	base->set_reserved(true); // Internal; not a user-editable layer.
+	// Into the stack before its tiles: that is where it learns a coarse region's tile edge.
+	idx = _layer_stack->add_layer_ref(base);
 	for (const Vector2i &region_loc : _regions.keys()) {
 		Pasture3DRegion *region = get_region_ptr(region_loc);
 		if (!region || region->is_deleted()) {
 			continue;
 		}
 		Ref<Image> src = region->get_map_ptr(p_map_type);
-		if (src.is_valid() && src->get_width() == _region_size && src->get_height() == _region_size) {
+		const int m = region->get_map_size();
+		if (src.is_valid() && src->get_width() == m && src->get_height() == m) {
 			base->set_region_image(region_loc, Image::create_from_data(src->get_width(), src->get_height(), src->has_mipmaps(), src->get_format(), src->get_data()));
 		}
 	}
 	base->set_modified(true);
-	idx = _layer_stack->add_layer_ref(base);
 	// A non-Base layer now exists, so the height Base must own its buffer too (live-recomposite safety).
 	_unalias_base_layer();
 	return idx;
@@ -2386,6 +2471,7 @@ void Pasture3DData::_adopt_region_into_bases(Pasture3DRegion *p_region) {
 		return;
 	}
 	const Vector2i loc = p_region->get_location();
+	_sync_region_map_size(loc); // Every region joining the stack passes through here
 	const int layer_count = _layer_stack->get_layer_count();
 	for (int i = 0; i < layer_count; i++) {
 		Pasture3DLayer *base = _layer_stack->get_layer_ptr(i);
@@ -2396,12 +2482,13 @@ void Pasture3DData::_adopt_region_into_bases(Pasture3DRegion *p_region) {
 		if (src.is_null()) {
 			continue;
 		}
-		if (src->get_width() != base->get_tile_size() || src->get_height() != base->get_tile_size()) {
+		const int base_ts = base->get_region_tile_size(loc);
+		if (src->get_width() != base_ts || src->get_height() != base_ts) {
 			// A base synthesized before a region-size change carries a stale tile size (e.g. a stack
 			// saved by an older build). An empty base can simply be re-sized to match; one with pixel
 			// data can't be fixed here, and silently skipping would leave the region uncovered forever —
 			// warn so the mismatch is visible.
-			if (base->get_region_locations().is_empty()) {
+			if (base->get_region_locations().is_empty() && !p_region->is_coarse()) {
 				base->set_tile_size(src->get_width());
 			} else {
 				LOG(WARN, "Base layer '", base->get_layer_name(), "' tile size ", base->get_tile_size(),
@@ -2505,6 +2592,47 @@ Vector2i Pasture3DData::_global_to_region_pixel(const Vector3 &p_global_position
 	return img_pos.clamp(V2I_ZERO, V2I(_region_size - 1));
 }
 
+bool Pasture3DData::_layer_pixel(const Pasture3DRegion *p_region, const Vector2i &p_fine, const bool p_lattice_only, Vector2i &r_px) const {
+	const int r = p_region->get_texel_ratio();
+	if (r == 1) {
+		r_px = p_fine;
+		return true;
+	}
+	if (p_lattice_only && (p_fine.x % r != 0 || p_fine.y % r != 0)) {
+		return false;
+	}
+	r_px = Vector2i(p_fine.x / r, p_fine.y / r); // p_fine is region-local, so non-negative
+	return true;
+}
+
+Rect2i Pasture3DData::_region_map_rect(const AABB &p_area, const Pasture3DRegion *p_region) const {
+	const Rect2i fine = _region_pixel_rect(p_area, p_region->get_location());
+	const int r = p_region->get_texel_ratio();
+	if (r == 1 || !fine.has_area()) {
+		return fine;
+	}
+	const Vector2i lo((fine.position.x + r - 1) / r, (fine.position.y + r - 1) / r);
+	const Vector2i hi((fine.get_end().x + r - 1) / r, (fine.get_end().y + r - 1) / r);
+	return Rect2i(lo, hi - lo);
+}
+
+void Pasture3DData::_sync_region_map_size(const Vector2i &p_region_loc) {
+	if (_layer_stack.is_null()) {
+		return;
+	}
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	_layer_stack->set_region_map_size(p_region_loc, region && region->is_coarse() ? region->get_map_size() : 0);
+}
+
+void Pasture3DData::_sync_region_map_sizes() {
+	if (_layer_stack.is_null()) {
+		return;
+	}
+	for (const Vector2i &loc : _regions.keys()) {
+		_sync_region_map_size(loc);
+	}
+}
+
 int Pasture3DData::find_layer_by_owner(const String &p_owner_id) const {
 	return _layer_stack.is_valid() ? _layer_stack->find_layer_by_owner(p_owner_id) : -1;
 }
@@ -2566,6 +2694,9 @@ void Pasture3DData::set_height_on_layer(const int p_layer_id, const Vector3 &p_g
 	if (!region || region->is_deleted()) {
 		return; // No region here; skip silently (the tool may sweep beyond the terrain bounds).
 	}
+	if (!_layer_pixel(region, img_pos, true, img_pos)) {
+		return; // Off a coarse region's lattice: its texel is written at its own vertex
+	}
 	layer->set_sample(region_loc, img_pos, p_height, p_weight);
 	if (p_composite) {
 		composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
@@ -2585,6 +2716,9 @@ void Pasture3DData::add_height_on_layer(const int p_layer_id, const Vector3 &p_g
 	if (!region || region->is_deleted()) {
 		return;
 	}
+	if (!_layer_pixel(region, img_pos, true, img_pos)) {
+		return; // A delta applied at every fine vertex would reach a coarse texel r^2 times
+	}
 	// Accumulate within this layer (uncovered reads as 0); the blend mode decides how it stacks below.
 	real_t current = layer->get_weight(region_loc, img_pos) > 0.f ? layer->get_value(region_loc, img_pos) : 0.f;
 	layer->set_sample(region_loc, img_pos, current + p_delta, p_weight);
@@ -2601,6 +2735,10 @@ real_t Pasture3DData::get_layer_height(const int p_layer_id, const Vector3 &p_gl
 	}
 	Vector2i region_loc;
 	Vector2i img_pos = _global_to_region_pixel(p_global_position, region_loc);
+	const Pasture3DRegion *region = get_region_ptr(region_loc);
+	if (region) {
+		_layer_pixel(region, img_pos, false, img_pos);
+	}
 	return layer->get_value(region_loc, img_pos);
 }
 
@@ -2617,6 +2755,7 @@ void Pasture3DData::set_control_on_layer(const int p_layer_id, const Vector3 &p_
 	if (!region || region->is_deleted()) {
 		return;
 	}
+	_layer_pixel(region, img_pos, false, img_pos); // Control and colour take the texel under the point
 	// Control is a packed uint32 stored as float bits in the R channel (same encoding as the region map).
 	layer->set_sample(region_loc, img_pos, as_float(uint32_t(p_control)), p_weight);
 	if (p_composite) {
@@ -2654,6 +2793,7 @@ void Pasture3DData::set_color_on_layer(const int p_layer_id, const Vector3 &p_gl
 	if (!region || region->is_deleted()) {
 		return;
 	}
+	_layer_pixel(region, img_pos, false, img_pos);
 	layer->set_sample_color(region_loc, img_pos, p_color, p_weight);
 	if (p_composite) {
 		composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
@@ -2747,9 +2887,9 @@ void Pasture3DData::clear_layer_in_area(const int p_layer_id, const AABB &p_area
 		return; // No stack / invalid layer: nothing to clear (plain-terrain writes go to the Base image).
 	}
 	// A layer tiled at region granularity has one tile per region; sub-tile clearing then degrades to
-	// clearing that whole tile. Sub-tiled layers (the default) drop only the tiles the AABB overlaps.
-	const bool region_granular = layer->get_tile_size() >= _region_size;
-	const int ts = layer->get_tile_size();
+	// clearing that whole tile. Sub-tiled layers (the default) drop only the tiles the AABB overlaps. A coarse
+	// region's tile covers more ground than the caller's tile-aligned box, so there only the texels in the
+	// box lose their coverage.
 	Vector3 mn = p_area.position;
 	Vector3 mx = p_area.position + p_area.size;
 	Vector2i loc_min = get_region_location(mn);
@@ -2766,10 +2906,15 @@ void Pasture3DData::clear_layer_in_area(const int p_layer_id, const AABB &p_area
 				continue;
 			}
 			bool cleared = false;
-			const Rect2i px_rect = region_granular ? Rect2i() : _region_pixel_rect(p_area, loc);
+			const bool coarse = region->is_coarse();
+			const int ts = layer->get_region_tile_size(loc);
+			const bool region_granular = !coarse && ts >= _region_size;
+			const Rect2i px_rect = region_granular ? Rect2i() : _region_map_rect(p_area, region);
 			if (region_granular) {
 				layer->clear_region(loc);
 				cleared = true;
+			} else if (coarse) {
+				cleared = layer->clear_samples_in_rect(loc, px_rect);
 			} else {
 				cleared = layer->clear_tiles_in_rect(loc, px_rect);
 			}
@@ -2780,7 +2925,9 @@ void Pasture3DData::clear_layer_in_area(const int p_layer_id, const AABB &p_area
 					// Tiles NOT overlapping the AABB (e.g. a co-located feature in another sub-tile) keep
 					// their existing composite. An empty rect (region-granular) means the whole region.
 					Rect2i comp_rect; // empty => whole region
-					if (!region_granular && px_rect.has_area()) {
+					if (coarse) {
+						comp_rect = px_rect;
+					} else if (!region_granular && px_rect.has_area()) {
 						const int x0 = (px_rect.position.x / ts) * ts;
 						const int y0 = (px_rect.position.y / ts) * ts;
 						const int x1 = ((px_rect.position.x + px_rect.size.x + ts - 1) / ts) * ts;
@@ -2827,10 +2974,8 @@ void Pasture3DData::set_pixel(const MapType p_map_type, const Vector3 &p_global_
 		LOG(ERROR, "No active region found at: ", p_global_position);
 		return;
 	}
-	Vector2i global_offset = region_loc * _region_size;
-	Vector3 descaled_pos = p_global_position / _vertex_spacing;
-	Vector2i img_pos = Vector2i(descaled_pos.x - global_offset.x, descaled_pos.z - global_offset.y);
-	img_pos = img_pos.clamp(V2I_ZERO, V2I(_region_size - 1));
+	// On a coarse region this writes the lattice texel at or before the position.
+	const Vector2i img_pos = region->world_to_pixel(p_global_position, _vertex_spacing);
 	Image *map = region->get_map_ptr(p_map_type);
 	if (map) {
 		map->set_pixelv(img_pos, p_pixel);
@@ -2851,10 +2996,8 @@ Color Pasture3DData::get_pixel(const MapType p_map_type, const Vector3 &p_global
 	if (region->is_deleted()) {
 		return COLOR_NAN;
 	}
-	Vector2i global_offset = region_loc * _region_size;
-	Vector3 descaled_pos = p_global_position / _vertex_spacing;
-	Vector2i img_pos = Vector2i(descaled_pos.x - global_offset.x, descaled_pos.z - global_offset.y);
-	img_pos = img_pos.clamp(V2I_ZERO, V2I(_region_size - 1));
+	// Nearest-below lattice texel. Heights on a coarse region are interpolated by get_height instead.
+	const Vector2i img_pos = region->world_to_pixel(p_global_position, _vertex_spacing);
 	Image *map = region->get_map_ptr(p_map_type);
 	if (map) {
 		return map->get_pixelv(img_pos);
@@ -2870,23 +3013,434 @@ real_t Pasture3DData::get_height(const Vector3 &p_global_position) const {
 	Vector3 pos = p_global_position;
 	const real_t &step = _vertex_spacing;
 	pos.y = 0.f;
+	// The vertex at or before the position, as get_pixel always chose it.
+	const Vector2i v00(int(Math::floor(pos.x / step)), int(Math::floor(pos.z / step)));
 	// Round to nearest vertex
 	Vector3 pos_round = pos.snapped(Vector3(step, 0.f, step));
 	// If requested position is close to a vertex, return its height
 	if ((pos - pos_round).length_squared() < 0.0001f) {
-		return get_pixel(TYPE_HEIGHT, pos).r;
+		return get_height_at_vertex(Vector2i(int(Math::round(pos.x / step)), int(Math::round(pos.z / step))));
 	} else {
-		// Otherwise, bilinearly interpolate 4 surrounding vertices
-		Vector3 pos00 = Vector3(floor(pos.x / step) * step, 0.f, floor(pos.z / step) * step);
-		real_t ht00 = get_pixel(TYPE_HEIGHT, pos00).r;
-		Vector3 pos01 = pos00 + Vector3(0.f, 0.f, step);
-		real_t ht01 = get_pixel(TYPE_HEIGHT, pos01).r;
-		Vector3 pos10 = pos00 + Vector3(step, 0.f, 0.f);
-		real_t ht10 = get_pixel(TYPE_HEIGHT, pos10).r;
+		// Otherwise, bilinearly interpolate 4 surrounding vertices. On a coarse region each vertex is itself
+		// bilinear on the coarse lattice, and a fine cell lies inside one coarse cell, so this is exactly the
+		// coarse bilinear surface.
+		Vector3 pos00 = Vector3(v00.x * step, 0.f, v00.y * step);
+		real_t ht00 = get_height_at_vertex(v00);
+		real_t ht01 = get_height_at_vertex(v00 + Vector2i(0, 1));
+		real_t ht10 = get_height_at_vertex(v00 + Vector2i(1, 0));
+		real_t ht11 = get_height_at_vertex(v00 + Vector2i(1, 1));
 		Vector3 pos11 = pos00 + Vector3(step, 0.f, step);
-		real_t ht11 = get_pixel(TYPE_HEIGHT, pos11).r;
 		return bilerp(ht00, ht01, ht10, ht11, pos00, pos11, pos);
 	}
+}
+
+real_t Pasture3DData::get_height_at_vertex(const Vector2i &p_vertex) const {
+	const Vector2i loc = V2I_DIVIDE_FLOOR(p_vertex, _region_size);
+	const Pasture3DRegion *region = get_region_ptr(loc);
+	if (!region || region->is_deleted()) {
+		return NAN;
+	}
+	const Vector2i fine = p_vertex - loc * _region_size;
+	if (region->is_coarse()) {
+		return _coarse_height(region, loc, fine);
+	}
+	const Image *map = region->get_map_ptr(TYPE_HEIGHT);
+	return map ? map->get_pixelv(fine).r : NAN;
+}
+
+real_t Pasture3DData::_coarse_height(const Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Vector2i &p_fine) const {
+	const Image *map = p_region->get_map_ptr(TYPE_HEIGHT);
+	if (!map) {
+		return NAN;
+	}
+	const int r = p_region->get_texel_ratio();
+	const int m = p_region->get_map_size();
+	const Vector2i i0(p_fine.x / r, p_fine.y / r);
+	const Vector2i rem = p_fine - i0 * r;
+	// A lattice corner past the far edge is the neighbour's vertex. With no neighbour there, hold the edge.
+	auto corner = [&](const int ix, const int iy) -> real_t {
+		if (ix < m && iy < m) {
+			return map->get_pixel(ix, iy).r;
+		}
+		const real_t h = get_height_at_vertex(p_region_loc * _region_size + Vector2i(ix * r, iy * r));
+		return std::isnan(h) ? map->get_pixel(MIN(ix, m - 1), MIN(iy, m - 1)).r : h;
+	};
+	if (rem == V2I_ZERO) {
+		return corner(i0.x, i0.y);
+	}
+	const real_t tx = real_t(rem.x) / real_t(r);
+	const real_t ty = real_t(rem.y) / real_t(r);
+	const real_t h00 = corner(i0.x, i0.y);
+	const real_t h10 = rem.x ? corner(i0.x + 1, i0.y) : h00;
+	const real_t h01 = rem.y ? corner(i0.x, i0.y + 1) : h00;
+	const real_t h11 = (rem.x && rem.y) ? corner(i0.x + 1, i0.y + 1) : (rem.x ? h10 : h01);
+	return Math::lerp(Math::lerp(h00, h10, tx), Math::lerp(h01, h11, tx), ty);
+}
+
+Ref<Image> Pasture3DData::_gpu_map(const Pasture3DRegion *p_region, const MapType p_type) const {
+	const Ref<Image> map = p_region->get_map(p_type);
+	if (!p_region->is_coarse() || map.is_null()) {
+		return map;
+	}
+	// Temporary until phase 3's per-ratio arrays: upsample to the array's size, sampled as the CPU samples,
+	// so what renders is what get_height and get_pixel answer. The far edge follows the neighbours at
+	// upload time and is not refreshed when only a neighbour changes.
+	const int rs = _region_size;
+	const int r = p_region->get_texel_ratio();
+	const Vector2i loc = p_region->get_location();
+	Ref<Image> up = Image::create_empty(rs, rs, false, map->get_format());
+	for (int y = 0; y < rs; y++) {
+		for (int x = 0; x < rs; x++) {
+			if (p_type == TYPE_HEIGHT) {
+				up->set_pixel(x, y, Color(_coarse_height(p_region, loc, Vector2i(x, y)), 0.f, 0.f, 1.f));
+			} else {
+				up->set_pixel(x, y, map->get_pixel(x / r, y / r));
+			}
+		}
+	}
+	if (p_type == TYPE_COLOR) {
+		up->generate_mipmaps();
+	}
+	return up;
+}
+
+void Pasture3DData::_resample_region(Pasture3DRegion *p_region, const Vector2i &p_region_loc, const int p_ratio) {
+	const int rs = _region_size;
+	const int r0 = p_region->get_texel_ratio();
+	const int r1 = p_ratio;
+	const int m1 = rs / r1;
+	const Image *old_h = p_region->get_map_ptr(TYPE_HEIGHT);
+	const Image *old_c = p_region->get_map_ptr(TYPE_CONTROL);
+	const Image *old_col = p_region->get_map_ptr(TYPE_COLOR);
+	if (!old_h || !old_c || !old_col) {
+		LOG(ERROR, "Region ", p_region_loc, " is missing a map; cannot resample");
+		return;
+	}
+	// Height: the surface the CPU answers today at each fine vertex (neighbours included on a coarse
+	// region), clamped to the region.
+	auto H = [&](int fx, int fy) -> real_t {
+		fx = CLAMP(fx, 0, rs - 1);
+		fy = CLAMP(fy, 0, rs - 1);
+		return r0 > 1 ? _coarse_height(p_region, p_region_loc, Vector2i(fx, fy)) : old_h->get_pixel(fx, fy).r;
+	};
+	Ref<Image> h = Image::create_empty(m1, m1, false, FORMAT[TYPE_HEIGHT]);
+	Ref<Image> c = Image::create_empty(m1, m1, false, FORMAT[TYPE_CONTROL]);
+	Ref<Image> col = Image::create_empty(m1, m1, false, FORMAT[TYPE_COLOR]);
+	const int half = r1 / 2;
+	for (int jy = 0; jy < m1; jy++) {
+		for (int jx = 0; jx < m1; jx++) {
+			const int fx = jx * r1;
+			const int fy = jy * r1;
+			// Height. Coarsening: a box of width r1 centred on the lattice vertex, half weight on its two end
+			// vertices so the weights sum to r1 per axis. Refining: the surface at the vertex.
+			real_t hv;
+			if (r1 > r0) {
+				double sum = 0.0;
+				for (int dy = -half; dy <= half; dy++) {
+					const double wy = (dy == -half || dy == half) ? 0.5 : 1.0;
+					for (int dx = -half; dx <= half; dx++) {
+						const double wx = (dx == -half || dx == half) ? 0.5 : 1.0;
+						sum += wx * wy * double(H(fx + dx, fy + dy));
+					}
+				}
+				hv = real_t(sum / double(r1 * r1));
+			} else {
+				hv = H(fx, fy);
+			}
+			h->set_pixel(jx, jy, Color(hv, 0.f, 0.f, 1.f));
+			// Control is bit-packed and cannot be averaged: the texel at the lattice vertex.
+			c->set_pixel(jx, jy, old_c->get_pixel(fx / r0, fy / r0));
+			// Colour covers a cell, [j * r1, (j + 1) * r1): the mean of the old texels in it when coarsening.
+			if (r1 > r0) {
+				const int a = fx / r0;
+				const int b = (fx + r1 - 1) / r0;
+				const int ay = fy / r0;
+				const int by = (fy + r1 - 1) / r0;
+				Color acc(0.f, 0.f, 0.f, 0.f);
+				for (int y = ay; y <= by; y++) {
+					for (int x = a; x <= b; x++) {
+						acc += old_col->get_pixel(x, y);
+					}
+				}
+				col->set_pixel(jx, jy, acc / real_t((b - a + 1) * (by - ay + 1)));
+			} else {
+				col->set_pixel(jx, jy, old_col->get_pixel(fx / r0, fy / r0));
+			}
+		}
+	}
+	col->generate_mipmaps();
+	p_region->set_texel_ratio(r1);
+	p_region->set_height_map(h);
+	p_region->set_control_map(c);
+	p_region->set_color_map(col);
+}
+
+Ref<Pasture3DRegionType> Pasture3DData::load_region_type(const String &p_path) const {
+	const String path = p_path.is_empty() ? String(Pasture3DRegionType::STANDARD_PATH) : p_path;
+	if (_type_cache.has(path)) {
+		return _type_cache[path];
+	}
+	Ref<Pasture3DRegionType> type;
+	if (ResourceLoader::get_singleton()->exists(path)) {
+		type = ResourceLoader::get_singleton()->load(path);
+	}
+	if (type.is_null()) {
+		// A missing type is Standard. A coarse region of it then reads as mismatched, not converted.
+		if (path != String(Pasture3DRegionType::STANDARD_PATH)) {
+			LOG(WARN, "Region type ", path, " not found; its regions are treated as Standard");
+		}
+		if (_fallback_standard.is_null()) {
+			_fallback_standard.instantiate();
+		}
+		type = _fallback_standard;
+	}
+	_type_cache[path] = type;
+	return type;
+}
+
+Ref<Pasture3DRegionType> Pasture3DData::get_region_type_of(const Pasture3DRegion *p_region) const {
+	return p_region ? load_region_type(p_region->get_type_path()) : Ref<Pasture3DRegionType>();
+}
+
+Ref<Pasture3DRegionType> Pasture3DData::get_region_type(const Vector2i &p_region_loc) const {
+	return get_region_type_of(get_region_ptr(p_region_loc));
+}
+
+bool Pasture3DData::is_region_type_mismatched(const Vector2i &p_region_loc) const {
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	return region && region->get_texel_ratio() != get_region_type_of(region)->get_texel_ratio();
+}
+
+bool Pasture3DData::region_has_collision(const Pasture3DRegion *p_region) const {
+	return p_region && get_region_type_of(p_region)->get_collision();
+}
+
+bool Pasture3DData::region_keeps_instances(const Pasture3DRegion *p_region) const {
+	return p_region && get_region_type_of(p_region)->get_instancer_mode() == Pasture3DRegionType::INSTANCER_KEEP;
+}
+
+Error Pasture3DData::set_region_locked(const Vector2i &p_region_loc, const bool p_locked) {
+	Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	if (!region || region->is_deleted()) {
+		LOG(ERROR, "No region at ", p_region_loc);
+		return ERR_DOES_NOT_EXIST;
+	}
+	region->set_locked(p_locked);
+	return OK;
+}
+
+bool Pasture3DData::is_region_locked(const Vector2i &p_region_loc) const {
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	return region && region->is_locked();
+}
+
+Dictionary Pasture3DData::_resample_layer_tiles(const Pasture3DLayer *p_layer, const Dictionary &p_tiles, const int p_ts0,
+		const int p_r0, const int p_r1, const int p_ts1) const {
+	Dictionary out;
+	if (p_tiles.is_empty()) {
+		return out;
+	}
+	const int rs = _region_size;
+	const int m0 = rs / p_r0;
+	const int m1 = rs / p_r1;
+	const MapType type = p_layer->get_map_type();
+	Image::Format fmt = Image::FORMAT_MAX;
+	for (const Vector2i &coord : Array(p_tiles.keys())) {
+		const Ref<Image> t = p_tiles[coord];
+		if (t.is_valid()) {
+			fmt = t->get_format();
+			break;
+		}
+	}
+	if (fmt == Image::FORMAT_MAX) {
+		return out;
+	}
+	const bool rgba = fmt == Image::FORMAT_RGBA8;
+	const bool rf = fmt == Image::FORMAT_RF;
+	// The overlay's coverage, or none: a Base (and any RF tile) is always covered, and a colour Base's alpha
+	// is roughness, not coverage.
+	const bool has_cov = !p_layer->is_base() && !rf;
+	// An old texel; an absent tile reads uncovered.
+	auto old_px = [&](int x, int y) -> Color {
+		x = CLAMP(x, 0, m0 - 1);
+		y = CLAMP(y, 0, m0 - 1);
+		const Vector2i coord(x / p_ts0, y / p_ts0);
+		const Ref<Image> t = p_tiles.get(coord, Ref<Image>());
+		return t.is_valid() ? t->get_pixel(x - coord.x * p_ts0, y - coord.y * p_ts0) : Color(0.f, 0.f, 0.f, 0.f);
+	};
+	// Height, continuous: at a fine vertex, bilinear on the old lattice (held at the far edge), coverage-
+	// premultiplied so an uncovered texel's value never bleeds in. Returns (value * w, w).
+	auto fine = [&](const int fx, const int fy) -> Vector2 {
+		const int ix = fx / p_r0;
+		const int iy = fy / p_r0;
+		const real_t tx = real_t(fx - ix * p_r0) / real_t(p_r0);
+		const real_t ty = real_t(fy - iy * p_r0) / real_t(p_r0);
+		Vector2 acc;
+		for (int k = 0; k < 4; k++) {
+			const real_t w = (k & 1 ? tx : 1.f - tx) * (k & 2 ? ty : 1.f - ty);
+			if (w == 0.f) {
+				continue;
+			}
+			const Color c = old_px(ix + (k & 1), iy + (k >> 1));
+			const real_t cov = has_cov ? c.g : 1.f;
+			acc += Vector2(c.r * cov, cov) * w;
+		}
+		return acc;
+	};
+	Ref<Image> img = Image::create_empty(m1, m1, false, fmt);
+	const int half = p_r1 / 2;
+	for (int jy = 0; jy < m1; jy++) {
+		for (int jx = 0; jx < m1; jx++) {
+			const int fx = jx * p_r1;
+			const int fy = jy * p_r1;
+			Color c;
+			if (type == TYPE_CONTROL) {
+				// Bit-packed: the old texel at the lattice vertex, coverage and all.
+				c = old_px(fx / p_r0, fy / p_r0);
+			} else if (rgba) {
+				// Colour covers a cell, [j * r1, (j + 1) * r1): coarsening takes the mean of the old texels in it,
+				// alpha-weighted on an overlay; refining takes the texel under the cell.
+				if (p_r1 > p_r0) {
+					const int a = fx / p_r0;
+					const int b = (fx + p_r1 - 1) / p_r0;
+					const int ay = fy / p_r0;
+					const int by = (fy + p_r1 - 1) / p_r0;
+					Color sum(0.f, 0.f, 0.f, 0.f);
+					real_t wsum = 0.f;
+					for (int y = ay; y <= by; y++) {
+						for (int x = a; x <= b; x++) {
+							const Color o = old_px(x, y);
+							const real_t w = has_cov ? o.a : 1.f;
+							sum += Color(o.r * w, o.g * w, o.b * w, o.a);
+							wsum += w;
+						}
+					}
+					const real_t n = real_t((b - a + 1) * (by - ay + 1));
+					c = wsum > 0.f ? Color(sum.r / wsum, sum.g / wsum, sum.b / wsum, sum.a / n) : Color(0.f, 0.f, 0.f, 0.f);
+				} else {
+					c = old_px(fx / p_r0, fy / p_r0);
+				}
+			} else {
+				// Height: coarsening is the box a region coarsens with (width r1 centred on the lattice vertex,
+				// half weight on the ends, clamped to the region); refining is the surface at the vertex.
+				Vector2 acc;
+				if (p_r1 > p_r0) {
+					for (int dy = -half; dy <= half; dy++) {
+						const real_t wy = (dy == -half || dy == half) ? 0.5f : 1.f;
+						for (int dx = -half; dx <= half; dx++) {
+							const real_t wx = (dx == -half || dx == half) ? 0.5f : 1.f;
+							acc += fine(CLAMP(fx + dx, 0, rs - 1), CLAMP(fy + dy, 0, rs - 1)) * (wx * wy);
+						}
+					}
+					acc /= real_t(p_r1 * p_r1);
+				} else {
+					acc = fine(fx, fy);
+				}
+				const real_t v = acc.y > 0.f ? acc.x / acc.y : 0.f;
+				c = Color(v, has_cov ? acc.y : 0.f, 0.f, 1.f);
+			}
+			img->set_pixel(jx, jy, c);
+		}
+	}
+	// Split into the new tile edge; an overlay tile left with no coverage is not kept.
+	for (int ty = 0; ty * p_ts1 < m1; ty++) {
+		for (int tx = 0; tx * p_ts1 < m1; tx++) {
+			const Ref<Image> t = img->get_region(Rect2i(tx * p_ts1, ty * p_ts1, p_ts1, p_ts1));
+			bool covered = !has_cov;
+			for (int y = 0; y < p_ts1 && !covered; y++) {
+				for (int x = 0; x < p_ts1 && !covered; x++) {
+					const Color o = t->get_pixel(x, y);
+					covered = (rgba ? o.a : o.g) > 0.f;
+				}
+			}
+			if (covered) {
+				out[Vector2i(tx, ty)] = t;
+			}
+		}
+	}
+	return out;
+}
+
+Error Pasture3DData::set_region_type(const Vector2i &p_region_loc, const Ref<Pasture3DRegionType> &p_type, const bool p_update) {
+	Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	if (!region || region->is_deleted()) {
+		LOG(ERROR, "No region at ", p_region_loc);
+		return ERR_DOES_NOT_EXIST;
+	}
+	if (p_type.is_null()) {
+		LOG(ERROR, "No region type given");
+		return ERR_INVALID_PARAMETER;
+	}
+	if (region->is_locked()) {
+		LOG(WARN, "Region ", p_region_loc, " is locked; its type was not changed");
+		return ERR_LOCKED;
+	}
+	const String path = p_type->get_path();
+	if (path.is_empty() || !path.begins_with("res://") && !path.begins_with("user://")) {
+		LOG(ERROR, "Region type '", p_type->get_type_name(), "' is not a saved resource. A region stores its type by path: save it first");
+		return ERR_FILE_BAD_PATH;
+	}
+	const int ratio = p_type->get_texel_ratio();
+	if (_region_size / ratio < Pasture3DRegionType::MIN_MAP_SIZE) {
+		LOG(ERROR, "Texel ratio ", ratio, " leaves region size ", _region_size, " under ", Pasture3DRegionType::MIN_MAP_SIZE, " texels");
+		return ERR_INVALID_PARAMETER;
+	}
+	const int old_ratio = region->get_texel_ratio();
+	if (ratio != old_ratio) {
+		// Every layer's tiles over the region follow it to the new resolution, and the stack then recomposites
+		// the region from them. The region maps are resampled too, for the maps no layer of that type covers.
+		// A Base aliasing the region height map is dropped instead and re-aliased to the resampled map.
+		std::vector<Pasture3DLayer *> layers;
+		std::vector<Dictionary> old_tiles;
+		std::vector<int> old_ts;
+		const int layer_count = _layer_stack.is_valid() ? _layer_stack->get_layer_count() : 0;
+		for (int i = 0; i < layer_count; i++) {
+			Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+			if (!layer || !layer->has_region(p_region_loc)) {
+				continue;
+			}
+			const Ref<Image> tile0 = layer->get_tile(p_region_loc, V2I_ZERO);
+			if (!(layer->is_base() && tile0.is_valid() && tile0 == region->get_height_map())) {
+				layers.push_back(layer);
+				old_tiles.push_back(Dictionary(layer->get_tiles()[p_region_loc]));
+				old_ts.push_back(layer->get_region_tile_size(p_region_loc));
+			}
+			layer->clear_region(p_region_loc);
+			layer->set_modified(true);
+		}
+		_resample_region(region, p_region_loc, ratio);
+		_sync_region_map_size(p_region_loc);
+		for (size_t i = 0; i < layers.size(); i++) {
+			const Dictionary tiles = _resample_layer_tiles(layers[i], old_tiles[i], old_ts[i], old_ratio, ratio,
+					layers[i]->get_region_tile_size(p_region_loc));
+			if (!tiles.is_empty()) {
+				layers[i]->restore_region_tiles(p_region_loc, tiles);
+			}
+		}
+		_adopt_region_into_bases(region); // Re-aliases a single-layer Base; a no-op for the others
+		_bump_generation(p_region_loc); // Undo recorded against the old resolution no longer applies
+		if (layer_count > 1) {
+			composite_region(p_region_loc, Rect2i(), false);
+		}
+	}
+	region->set_type_path(path);
+	if (!region_keeps_instances(region) && !region->get_instances().is_empty()) {
+		region->set_instances(Dictionary());
+		if (_terrain) {
+			_terrain->get_instancer()->destroy_by_location(p_region_loc);
+		}
+	}
+	region->set_modified(true);
+	region->set_edited(true);
+	calc_height_range();
+	if (p_update) {
+		update_maps(TYPE_MAX, false, false);
+		region->set_edited(false);
+		if (_terrain) {
+			_terrain->get_collision()->update(V2I_MAX, true);
+		}
+	}
+	return OK;
 }
 
 Vector3 Pasture3DData::get_normal(const Vector3 &p_global_position) const {
@@ -3190,6 +3744,11 @@ void Pasture3DData::import_images(const TypedArray<Image> &p_images, const Vecto
 					" from img(", src_x, ",", src_z, ") to region(", dst_x, ",", dst_z, ")");
 
 			Ref<Pasture3DRegion> region = get_region(region_loc);
+			if (region.is_valid() && !region->is_deleted() && region->is_coarse()) {
+				LOG(ERROR, "Region ", region_loc, " is coarse (texel ratio ", region->get_texel_ratio(),
+						"); import into it is refused. Set it Standard first");
+				continue;
+			}
 			if (region.is_null()) {
 				region.instantiate();
 				region->set_location(region_loc);
@@ -3504,7 +4063,7 @@ Ref<Image> Pasture3DData::layered_to_image(const MapType p_map_type, const Rect2
 		Rect2i src_rect(overlap.position - region_rect.position, overlap.size);
 		Vector2i dst_pos = overlap.position - export_rect.position;
 		LOG(DEBUG, "Region ", region_loc, ": src=", src_rect, " dst=", dst_pos);
-		img->blit_rect(region->get_map(map_type), src_rect, dst_pos);
+		img->blit_rect(_gpu_map(region, map_type), src_rect, dst_pos); // Full size on a coarse region too
 	}
 	return img;
 }
@@ -3574,6 +4133,13 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("has_region", "region_location"), &Pasture3DData::has_region);
 	ClassDB::bind_method(D_METHOD("has_regionp", "global_position"), &Pasture3DData::has_regionp);
 	ClassDB::bind_method(D_METHOD("get_region", "region_location"), &Pasture3DData::get_region);
+	ClassDB::bind_method(D_METHOD("load_region_type", "path"), &Pasture3DData::load_region_type);
+	ClassDB::bind_method(D_METHOD("get_region_type", "region_location"), &Pasture3DData::get_region_type);
+	ClassDB::bind_method(D_METHOD("set_region_type", "region_location", "type", "update"), &Pasture3DData::set_region_type, DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("is_region_type_mismatched", "region_location"), &Pasture3DData::is_region_type_mismatched);
+	ClassDB::bind_method(D_METHOD("set_region_locked", "region_location", "locked"), &Pasture3DData::set_region_locked);
+	ClassDB::bind_method(D_METHOD("is_region_locked", "region_location"), &Pasture3DData::is_region_locked);
+	ClassDB::bind_method(D_METHOD("get_height_at_vertex", "vertex"), &Pasture3DData::get_height_at_vertex);
 	ClassDB::bind_method(D_METHOD("get_regionp", "global_position"), &Pasture3DData::get_regionp);
 
 	ClassDB::bind_method(D_METHOD("set_region_modified", "region_location", "modified"), &Pasture3DData::set_region_modified);
