@@ -3583,11 +3583,16 @@ func _editor_undo() -> EditorUndoRedoManager:
 
 
 ## Deep snapshot of all tool layers' tiles for owner and affiliated channels (empty Dictionary if no layer yet = the initial state).
-func _snapshot_owner(owner: String) -> Dictionary:
+##
+## `p_exclude` ({Vector2i: true}) leaves regions out entirely: no tiles copied and no generation recorded,
+## which is what a restore reads as "not part of this snapshot" and skips. Bake All passes the regions it
+## loaded for the bake (PASTURE3D_BAKE_MEMORY_SPEC.md M1): it releases them before anyone can undo, the
+## release bumps their generation, and a restore would skip them anyway, so copying them bought nothing.
+func _snapshot_owner(owner: String, p_exclude: Dictionary = {}) -> Dictionary:
 	var out := {}
 	if not is_instance_valid(terrain) or not terrain.data or not terrain.data.has_method("get_layer_stack"):
 		var layer := _resolve_layer_for(owner)
-		return _copy_tiles(layer.get_tiles()) if layer else {}
+		return _copy_tiles(layer.get_tiles(), p_exclude) if layer else {}
 	var stack = terrain.data.get_layer_stack()
 	if stack == null:
 		return out
@@ -3595,10 +3600,13 @@ func _snapshot_owner(owner: String) -> Dictionary:
 	for idx in aff_indices:
 		var l = stack.get_layer(idx)
 		if l != null:
-			out[l.get_owner_id()] = _copy_tiles(l.get_tiles())
+			out[l.get_owner_id()] = _copy_tiles(l.get_tiles(), p_exclude)
 	# Reserved key (owner ids never start with '@'): the region generations this snapshot belongs to, so a
 	# restore skips a region unloaded or reloaded in between.
-	out[SNAPSHOT_GENERATIONS_KEY] = terrain.data.get_region_generations()
+	var gens: Dictionary = terrain.data.get_region_generations()
+	for loc in p_exclude:
+		gens.erase(loc)
+	out[SNAPSHOT_GENERATIONS_KEY] = gens
 	return out
 
 
@@ -3728,10 +3736,13 @@ func detach_placement() -> bool:
 
 
 ## Deep copy of the {region_loc -> {tile_coord -> Image}} tile structure. get_tiles/set_tiles share
-## the live Images by reference, so we copy each one (copy_from) to keep snapshots immutable.
-func _copy_tiles(tiles: Dictionary) -> Dictionary:
+## the live Images by reference, so we copy each one (copy_from) to keep snapshots immutable. Regions in
+## `p_exclude` are left out.
+func _copy_tiles(tiles: Dictionary, p_exclude: Dictionary = {}) -> Dictionary:
 	var out := {}
 	for loc in tiles:
+		if p_exclude.has(loc):
+			continue
 		var inner: Dictionary = tiles[loc]
 		var inner_copy := {}
 		for coord in inner:

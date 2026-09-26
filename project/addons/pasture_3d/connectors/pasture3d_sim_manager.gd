@@ -128,9 +128,16 @@ const RESULT_MAX_CELLS: int = 4194304
 ## registered brush is baked when its footprint touches one of them, over its WHOLE footprint: neighbours
 ## it reaches are loaded for the bake, saved, and released again, so the loaded set is unchanged after.
 ## Selected Regions bakes `bake_regions`, loaded or not; All Regions bakes every region in the index.
+##
+## Undo covers only the regions that were loaded when the bake started. A region the bake had to load is
+## saved and released before anyone can press Ctrl+Z, so its bake cannot be undone; the report lists those
+## regions under `not_undoable`, and the manager warns about them until the next bake.
 @export_enum("Selected Regions", "All Loaded Regions", "All Regions") var bake_scope: int = 1
 ## The regions Selected Regions targets. Typed by hand until the region gizmo can select them.
 @export var bake_regions: Array[Vector2i] = []
+## The scoped bake's per-owner region budget: an owner touching more regions than this is skipped and
+## reported, 0 means no limit. Not exported yet; PASTURE3D_BAKE_MEMORY_SPEC.md M7 replaces it with bytes.
+var bake_budget_regions: int = 64
 ## Re-solve every registered brush's erosion and re-bake its layer, as ONE undo action. A loop, not a
 ## chain: each brush erodes its own surface independently.
 @export_tool_button("Bake All Brushes") var _bake_all_btn = bake_all_brushes
@@ -192,6 +199,9 @@ var last_chain: Array = []
 ## configuration. Read by the configuration warning, so a CANCELLED run says so on the node rather than
 ## only in the Output log, which is where a partial bake would otherwise be forgotten.
 var last_bake_report: Dictionary = {}
+## Gate control only (PASTURE3D_BAKE_MEMORY_SPEC.md U1): snapshot the regions loaded for the bake as well,
+## as Bake All did before M1. Those bytes can never be restored.
+var debug_unfiltered_undo: bool = false
 
 
 # ---- Pasture3DSimBase hooks -----------------------------------------------------------------------
@@ -1536,6 +1546,10 @@ func bake_all_brushes() -> void:
 	var ctx := _bake_all_begin(true)
 	if not bool(ctx["ok"]):
 		return
+	if bake_scope != 1:
+		# Said BEFORE the bake, where it can still be cancelled: the regions this scope loads are not undoable.
+		print(("%s: this scope loads regions that are not loaded now; they are saved and released as the bake "
+			+ "goes, and Undo will not restore them.") % _sim_label())
 	_running = true
 	_cancel = false
 	# §14. Only the EDITOR front end defers: `bake_all_brushes_now` is the scripted entry point and must
@@ -1566,6 +1580,10 @@ func bake_all_brushes() -> void:
 		+ "%d grown relief field(s) cleared.")
 		% [_sim_label(), "CANCELLED" if bool(report["cancelled"]) else "done", int(report["baked"]),
 			int(report["total"]), int(report["owners"]), int(report["cleared"]), int(report["grown"])])
+	var nu: Array = report.get("not_undoable", [])
+	if not nu.is_empty():
+		print("%s: %d region(s) were loaded for this bake and released after it; Undo cannot restore them."
+			% [_sim_label(), nu.size()])
 
 
 ## The scripted entry point, so gates and tools get a report back and no frames are yielded.
@@ -1609,6 +1627,7 @@ func _bake_all_begin(p_record_undo: bool) -> Dictionary:
 	# ones, plus the closure their solves read) and the regions to load. Registered brushes are what get
 	# their caches cleared; a closure owner is baked as it stands, to feed them.
 	var sb = _ScopedBake.new(terrain)
+	sb.budget_regions = bake_budget_regions
 	var registered := {}
 	for entry: Dictionary in _eroding_owner_plan(brushes):
 		registered[entry["owner"]] = entry["brushes"]
@@ -1655,7 +1674,7 @@ func _bake_all_owner(p_ctx: Dictionary, entry: Dictionary) -> void:
 	var brushes: Array = entry["brushes"]
 	var registered: Array = entry.get("clear", brushes)
 	if not p_ctx["before"].has(owner):
-		p_ctx["before"][owner] = _snapshot_owner(owner)
+		p_ctx["before"][owner] = _snapshot_owner(owner, _not_undoable(p_ctx))
 	for b in registered:
 		p_ctx["cleared"] = int(p_ctx["cleared"]) + b.clear_erosion_caches()
 		# §9.9. A DLA's grown mountain is FROZEN for the same reason a solve is, so it needs the same
@@ -1679,7 +1698,7 @@ func _bake_all_owner(p_ctx: Dictionary, entry: Dictionary) -> void:
 			_bake_all_brush = null
 		else:
 			host.bake_layer(false)
-		p_ctx["after"][owner] = _snapshot_owner(owner)
+		p_ctx["after"][owner] = _snapshot_owner(owner, _not_undoable(p_ctx))
 		p_ctx["baked"] = int(p_ctx["baked"]) + registered.size()
 		return
 	# `_refresh_owner` is the brush's own layer bake — clear the layer, repaint every tool bound to it,
@@ -1694,8 +1713,19 @@ func _bake_all_owner(p_ctx: Dictionary, entry: Dictionary) -> void:
 		_bake_all_brush = null
 	else:
 		lead._refresh_owner(owner, false, [])
-	p_ctx["after"][owner] = _snapshot_owner(owner)
+	p_ctx["after"][owner] = _snapshot_owner(owner, _not_undoable(p_ctx))
 	p_ctx["baked"] = int(p_ctx["baked"]) + registered.size()
+
+
+## The regions this run loaded for the bake so far, as a set: the ones it will release before an undo could
+## reach them (M1). Every snapshot leaves them out. Empty when the scope loads nothing, or for the control.
+func _not_undoable(p_ctx: Dictionary) -> Dictionary:
+	var out := {}
+	if debug_unfiltered_undo or not p_ctx.has("scoped"):
+		return out
+	for r in p_ctx["scoped"]["report"]["loaded_for_bake"]:
+		out[r] = true
+	return out
 
 
 ## Commit the undo action over every layer actually baked, and fill in the report.
@@ -1708,7 +1738,7 @@ func _bake_all_finish(p_ctx: Dictionary) -> Dictionary:
 		if not bool(p_ctx["cancelled"]):
 			sb.settle_roads(p_ctx["scoped"], func(od: Dictionary) -> void:
 				sb.bake_owner(od)
-				p_ctx["after"][od["owner"]] = _snapshot_owner(od["owner"]))
+				p_ctx["after"][od["owner"]] = _snapshot_owner(od["owner"], _not_undoable(p_ctx)))
 		var sreport: Dictionary = sb.finish(p_ctx["scoped"])
 		for k in ["loaded_for_bake", "released", "regions_written", "road_turns", "roads_unsettled", "events"]:
 			report[k] = sreport[k]
@@ -1719,6 +1749,7 @@ func _bake_all_finish(p_ctx: Dictionary) -> Dictionary:
 	report["grown"] = p_ctx.get("grown", 0)
 	report["cancelled"] = p_ctx["cancelled"]
 	report["undo"] = {"before": p_ctx["before"], "after": p_ctx["after"]}
+	report["not_undoable"] = report.get("loaded_for_bake", [])
 	last_bake_report = report
 
 	# ONE action over N layers. `_restore_owner` re-resolves its layer by owner name on each call, so a
@@ -1883,6 +1914,11 @@ func _collect_brushes(p_from: Node, r_out: Array) -> void:
 func _registry_warnings() -> PackedStringArray:
 	var w := PackedStringArray()
 	var reg := resolved_eroding_brushes()
+	var nu: Array = last_bake_report.get("not_undoable", [])
+	if not nu.is_empty():
+		w.append(("The last Bake All Brushes loaded %d region(s) that were not loaded, baked them, and released "
+			+ "them again. Undo restores only the regions that were already loaded; those %d cannot be "
+			+ "undone.") % [nu.size(), nu.size()])
 	if bool(last_bake_report.get("cancelled", false)):
 		w.append(("Bake All Brushes was CANCELLED after %d of %d brush(es) — the ones it reached are "
 			+ "baked and the rest still hold their previous erosion. Press it again to finish.")

@@ -2,7 +2,7 @@
 
 **Document Version:** 1.0
 **Target Engine:** Godot 4.7+ / GDExtension (C++ / GDScript)
-**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phase 1 in progress.
+**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phase 1 built, not yet committed.
 **Evidence:** `project/bench/RegionBakeMemoryProbe.gd`, runs of 2026-09-26: a small world (6 × 6 regions of
 256 m) and a large one (16 × 16 regions of 1024 m, 256 km²).
 **Builds on:** `PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md`, whose last item this is ("investigate memory
@@ -21,7 +21,7 @@ at 5.65 GB of RAM, and 3 GB of GPU arrays stay allocated after it has released e
 
 | ID | Finding | Status |
 |----|---------|--------|
-| M1 | Bake All's undo snapshots copy every baked tile, and none of it can be restored | **Fix — Phase 1** |
+| M1 | Bake All's undo snapshots copy every baked tile, and none of it can be restored | **Built — Phase 1** |
 | M2 | GPU slot capacity never shrinks | **Fix — Phase 2** |
 | M3 | Each unload rewrites the region index and layer manifest | **Fix — Phase 3** |
 | M4 | Owners bake in global layer order, so regions are held across the whole run | **Fix — Phase 4** |
@@ -144,13 +144,13 @@ So **undoing an All-regions bake restores nothing in any region the bake loaded*
 that silently does nothing for most of the world. Only regions that were already loaded, and so stay
 loaded, are restored.
 
-### 3.3 Decision needed
+### 3.3 Decision (resolved: option (a))
 
 Undo of a bake over regions that are no longer loaded. Options:
 
 - **(a) No undo for released regions (recommended as the first step).** Don't snapshot a region the bake
   loads. Undo covers what was loaded before the bake and says so: the report lists the regions whose
-  bake cannot be undone, and the dock shows it before an All-regions bake starts.
+  bake cannot be undone, and the manager says so before and after the bake.
 - **(b) Disk-backed undo.** Before the bake first saves a region, copy its region file and layer slice into
   a per-action backup directory. Undo copies the files back and reloads any that are loaded. It costs disk
   and I/O, not RAM, and it makes undo real. It needs a policy for pruning backups when the undo history
@@ -159,13 +159,21 @@ Undo of a bake over regions that are no longer loaded. Options:
 Recommendation: build (a) now, because it is the memory fix and it makes the current behaviour honest. Add
 (b) as a later phase if undo over unloaded regions is wanted.
 
-### 3.4 Fix, option (a)
+### 3.4 Fix, option (a) — built
 
-- `_bake_all_owner` snapshots only the regions in the pre-bake loaded set. `_snapshot_owner` gains a region
-  filter; the scoped context already knows `loaded_for_bake`.
-- Alternatively, when `release_after` unloads a region, delete its entries from every snapshot in the
-  context. The filter is simpler and never copies the bytes at all; prefer it.
-- The report gains `not_undoable: Array[Vector2i]`.
+- `_snapshot_owner(owner, p_exclude)` and `_copy_tiles(tiles, p_exclude)` leave excluded regions out
+  entirely: no tiles, and no generation. A restore reads a region with no generation as "not in this
+  snapshot" and skips it (`restore_layer_tiles`), so the filter needs no change on the restore side.
+- Every Bake All snapshot (before, after, and the road-settle rebakes) excludes
+  `_not_undoable(ctx)`: the scoped report's `loaded_for_bake` so far. The before snapshot is taken after
+  `load_for`, so an owner's own loaded neighbours are already in it.
+- The report gains `not_undoable` (the regions loaded for the bake).
+- There is no dock for Bake All; the Sim Manager is its UI. So: the `bake_scope` tooltip says undo covers
+  only regions that were loaded; the editor bake prints a notice before it starts when the scope is not
+  All Loaded Regions; and the manager's configuration warnings name the count after a bake that had any.
+- `debug_unfiltered_undo` restores the pre-M1 snapshots, for the controls.
+- Also added: `bake_budget_regions` on the manager (default 64, passed to the scoped bake), so a probe can
+  bake a world-sized owner through Bake All. It is a plain var; M7 replaces it.
 
 ### 3.5 Gate
 
@@ -175,6 +183,21 @@ Recommendation: build (a) now, because it is the memory fix and it makes the cur
   region that was loaded for the bake is not, and is listed in `not_undoable`.
 - **[U3]** RAM after the bake is within 10% of RAM before it (large fixture). Control: the unfiltered run
   exceeds it.
+
+### 3.6 Results (2026-09-26)
+
+`bench/RegionBakeUndoGate.tscn`: PASS, 3/3 criteria (U1, U2, and the warning with its control). The probe
+now bakes through `bake_all_brushes_now` and measures U3 (`--unfiltered` is the control):
+
+| Large F1 (16 × 16 × 1024 m) | Filtered (M1) | Unfiltered (control) |
+|---|---|---|
+| Undo snapshots | 0 MB | 1024 MB |
+| RAM: start → peak → after | 151 MB → 5.13 GB → 160 MB (+6.0%) | 151 MB → 5.65 GB → 1.20 GB (+699%) |
+| Peak working set | 5.3 GB | 5.8 GB |
+
+Small world, all three fixtures: after the bake +0.1% to +0.4% filtered, +9% to +16% unfiltered. The peak
+falls too, because the snapshots used to accumulate during the bake. Regression gates BrushRegistry,
+RegionBakeScope, RegionUnload and TestBrushSinkFootprint pass.
 
 ---
 
@@ -386,7 +409,7 @@ regions plus whatever the owner being baked allocates.
 | Phase | Finding | Done when |
 |-------|---------|-----------|
 | 0 | Probe committed as the measuring harness; large-world baseline recorded in §2.2 | Baseline recorded 2026-09-26; the probe is not yet committed |
-| 1 | M1 undo snapshots, option (a) | U1–U3 pass; large F1 RAM after bake within 10% of start |
+| 1 | M1 undo snapshots, option (a) | Built 2026-09-26: U1–U3 pass; large F1 RAM after the bake +6.0% |
 | 2 | M2 slot compaction | S1–S3 pass; large F1 capacity after bake is 16 or less |
 | 3 | M3 batched index and manifest | I1–I2 pass; release time reported |
 | 4 | M4 dependency-ordered schedule | O1–O3 pass |
