@@ -1635,6 +1635,52 @@ bool Pasture3DData::_sync_slots(const PoolId p_pool, PackedInt32Array &r_fresh) 
 		pool.slots[loc] = slot;
 		r_fresh.push_back(slot);
 	}
+	// Compaction (PASTURE3D_BAKE_MEMORY_SPEC.md M2). Without it the arrays keep their peak capacity, every
+	// free slot a full-size placeholder, for the rest of the session: an All-regions bake left 3 GB of arrays
+	// with nothing loaded, and a streamer keeps the capacity of the densest place it has been. It fires when
+	// less than half the capacity is used by half a chunk or more: under half, so a bake releasing n regions
+	// recreates the arrays about log2(n) times rather than once per chunk; the half-chunk margin, so one
+	// region coming and going near a boundary never recreates anything (16 of 32 used stays at 32). A move
+	// changes a region's slot, and the region map is rebuilt from the slots right after this in update_maps,
+	// so it follows.
+	const int capacity = pool.locations.size();
+	const int used = pool.slots.size();
+	const int target = ((used + SLOT_CHUNK - 1) / SLOT_CHUNK) * SLOT_CHUNK;
+	if (used * 2 + SLOT_CHUNK <= capacity) {
+		LOG(DEBUG, "Pool ", p_pool, " compacts from ", capacity, " slots to ", target, " (", used, " used)");
+		TypedArray<Vector2i> locations;
+		PackedInt64Array region_ids;
+		locations.resize(target);
+		region_ids.resize(target);
+		for (int i = 0; i < target; i++) {
+			locations[i] = V2I_MAX;
+			region_ids[i] = 0;
+		}
+		PackedInt32Array moved_to;
+		moved_to.resize(capacity);
+		int next = 0;
+		for (int slot = 0; slot < capacity; slot++) {
+			moved_to[slot] = -1;
+			const Vector2i loc = pool.locations[slot];
+			if (loc == V2I_MAX) {
+				continue;
+			}
+			locations[next] = loc;
+			region_ids[next] = pool.region_ids[slot];
+			pool.slots[loc] = next;
+			moved_to[slot] = next;
+			next++;
+		}
+		pool.locations = locations;
+		pool.region_ids = region_ids;
+		for (int t = 0; t < TYPE_MAX; t++) {
+			pool.maps[t].clear(); // _build_array refills them at the new capacity
+		}
+		// Slots handed out above were numbered before the move.
+		for (int i = 0; i < r_fresh.size(); i++) {
+			r_fresh[i] = moved_to[r_fresh[i]];
+		}
+	}
 	return pool.locations.size() != old_capacity;
 }
 
@@ -1902,7 +1948,7 @@ void Pasture3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 		_region_map_dirty = false;
 		for (int p = 0; p < POOL_MAX; p++) {
 			if (_sync_slots(PoolId(p), fresh[p])) {
-				LOG(DEBUG, "Pool ", p, " slot capacity grew to ", _pools[p].locations.size(), "; recreating its texture arrays");
+				LOG(DEBUG, "Pool ", p, " slot capacity changed to ", _pools[p].locations.size(), "; recreating its texture arrays");
 				for (int t = 0; t < TYPE_MAX; t++) {
 					_pools[p].gens[t].clear();
 				}

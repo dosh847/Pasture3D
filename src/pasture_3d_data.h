@@ -91,7 +91,8 @@ private:
 	// locations[slot] is the location in that slot, or V2I_MAX when free; region_ids[slot] is the ObjectID of
 	// the region uploaded there, so a region object replaced at the same location (undo, reload) is
 	// re-uploaded. Its size is the array capacity, a multiple of SLOT_CHUNK. Allocation takes the LOWEST free
-	// slot. maps[] are the slot-indexed images backing the arrays; a free slot holds a placeholder.
+	// slot. maps[] are the slot-indexed images backing the arrays; a free slot holds a placeholder. Capacity
+	// grows a chunk at a time and shrinks by compaction (PASTURE3D_BAKE_MEMORY_SPEC.md M2), see _sync_slots.
 	struct SlotPool {
 		TypedArray<Vector2i> locations;
 		PackedInt64Array region_ids;
@@ -153,7 +154,9 @@ private:
 	void _clear();
 	// Slot pools. _sync_slots frees slots whose region went away (or moved to the other pool) and gives every
 	// active region of the pool without one the lowest free slot; r_fresh gets each slot whose contents must
-	// be uploaded. Returns true if the capacity grew (the arrays must be recreated).
+	// be uploaded. When less than half the capacity is used, by half a chunk or more, it packs the used slots
+	// down from 0 and shrinks the capacity to the chunks they need. Returns true if the capacity changed (the
+	// arrays must be recreated, and every slot is uploaded by that).
 	static PoolId _pool_of(const Pasture3DRegion *p_region) { return p_region->is_coarse() ? POOL_COARSE : POOL_FINE; }
 	bool _sync_slots(const PoolId p_pool, PackedInt32Array &r_fresh);
 	void _release_slot(const PoolId p_pool, const Vector2i &p_region_loc);

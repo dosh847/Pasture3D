@@ -2,7 +2,8 @@
 
 **Document Version:** 1.0
 **Target Engine:** Godot 4.7+ / GDExtension (C++ / GDScript)
-**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phase 1 built, not yet committed.
+**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phase 1 committed (`bd459c91`); phase 2 built, not yet
+committed.
 **Evidence:** `project/bench/RegionBakeMemoryProbe.gd`, runs of 2026-09-26: a small world (6 × 6 regions of
 256 m) and a large one (16 × 16 regions of 1024 m, 256 km²).
 **Builds on:** `PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md`, whose last item this is ("investigate memory
@@ -22,7 +23,7 @@ at 5.65 GB of RAM, and 3 GB of GPU arrays stay allocated after it has released e
 | ID | Finding | Status |
 |----|---------|--------|
 | M1 | Bake All's undo snapshots copy every baked tile, and none of it can be restored | **Built — Phase 1** |
-| M2 | GPU slot capacity never shrinks | **Fix — Phase 2** |
+| M2 | GPU slot capacity never shrinks | **Built — Phase 2** |
 | M3 | Each unload rewrites the region index and layer manifest | **Fix — Phase 3** |
 | M4 | Owners bake in global layer order, so regions are held across the whole run | **Fix — Phase 4** |
 | M5 | The default shared layer makes one owner the size of the world | **Fix — Phase 5** |
@@ -211,17 +212,21 @@ texture arrays keep that capacity with no regions loaded: 256 slots on the large
 control and colour at 1024², before mipmaps. The runtime streamer shares the code, so a game that passes
 through a dense area keeps its peak capacity for the rest of the session.
 
-### 4.2 Fix
+### 4.2 Fix — built
 
-- After `_sync_slots` frees slots, if the used count is at most half the capacity, compact: move the
-  highest-slot regions into the lowest free slots, and shrink the capacity to the next multiple of
-  `SLOT_CHUNK` above the used count. Moving a region changes its slot index, so the region map must be
-  rebuilt in the same `update_maps` (it already is when a slot changes).
-- Hysteresis: shrink only below half, so a bake or streamer oscillating around a chunk boundary does not
-  rebuild the arrays every step.
-- A rebuild re-uploads every array; the scoped bake calls `update_maps` once per release, so compaction
-  should run at most once per `update_maps` and not inside the release loop. Also call it from
-  `ScopedBake.finish`.
+- At the end of `_sync_slots`, when `used * 2 + SLOT_CHUNK <= capacity` (less than half used, by half a
+  chunk or more), the pool compacts: the used slots are packed down from 0 in slot order, the capacity
+  becomes the next multiple of `SLOT_CHUNK` at or above the used count (0 when nothing is loaded), the
+  pool's images are cleared so `_build_array` refills them, and the slots already handed out this call are
+  renumbered. It returns "capacity changed", which recreates the arrays as growth already did.
+- The region map is rebuilt from the slots right after `_sync_slots` in the same `update_maps`, so it
+  follows the move with no change.
+- The rule differs from the draft's "at most half, plus hysteresis" on one point: the half-chunk margin is
+  the hysteresis. It keeps 16 of 32 used at 32 (`RegionSlotGate` RS3 asserts that a removal there does not
+  recreate), and one region coming and going near a boundary never recreates anything. Under half, a bake
+  releasing n regions recreates the arrays about log₂(n) times.
+- `_sync_slots` runs once per `update_maps`, never inside a loop, so `ScopedBake.finish` needs no call of its
+  own: its last release already compacts.
 
 ### 4.3 Gate
 
@@ -232,6 +237,29 @@ through a dense area keeps its peak capacity for the rest of the session.
   region.
 - **[S3]** Streamer: moving a source away from a dense area drops capacity. Control: the pre-fix build keeps
   it.
+
+### 4.4 Results (2026-09-26)
+
+`bench/RegionSlotCompactGate.tscn`: PASS, 3/3 criteria. What the gate checks, and where it differs from §4.3:
+
+- **S1:** 64 loaded, 60 unloaded one at a time with an update each: capacity 64 → 16, and 6 array
+  creates (2 shrinks × 3 maps). Control: 20 unloaded (44 left) keeps 64 and creates nothing.
+- **S2:** there is no GPU readback headless, so it checks what the shader reads. Each kept region's texel
+  decodes to a slot whose uploaded height, control and colour images are that region's own maps. The four
+  kept regions sat in the highest slots, so all four moved. Control: a neighbour's slot holds a different
+  image. It then unloads a moved region and loads another: the slot table equals the loaded set.
+- **Mutation:** dropping the `slots` renumbering from the compaction crashes the gate. S2's bookkeeping
+  check was added because the first S2 could not see that.
+- **S3:** a streamer in the middle of a 63-region block holds capacity 64, and moving within the block
+  keeps it. Moving it to a lone region leaves 1 loaded at capacity 16.
+
+Regression: all eleven other region gates pass (RegionSlot, RegionUnload, RegionType, RegionSeam,
+RegionLayer, RegionStream, RegionWater, RegionLakeTile, RegionPanel, RegionBakeScope, RegionBakeUndo).
+
+Large F1 (16 × 16 × 1024 m) through Bake All: capacity after the bake is **0, down from 256**, so the arrays
+hold nothing with nothing loaded. The pre-M2 run left 256 slots, 3 GB of GPU arrays. The rest is unchanged
+from phase 1: RAM 151 MB → 5.13 GB → 160 MB (+6.0%), bake 103 s, snapshots 0 MB. The probe's "capacity
+before" also reads 0: the setup unloads everything after its pre-bake, and that now compacts too.
 
 ---
 
@@ -408,9 +436,9 @@ regions plus whatever the owner being baked allocates.
 
 | Phase | Finding | Done when |
 |-------|---------|-----------|
-| 0 | Probe committed as the measuring harness; large-world baseline recorded in §2.2 | Baseline recorded 2026-09-26; the probe is not yet committed |
+| 0 | Probe committed as the measuring harness; large-world baseline recorded in §2.2 | Baseline recorded 2026-09-26; probe committed in `bd459c91` |
 | 1 | M1 undo snapshots, option (a) | Built 2026-09-26: U1–U3 pass; large F1 RAM after the bake +6.0% |
-| 2 | M2 slot compaction | S1–S3 pass; large F1 capacity after bake is 16 or less |
+| 2 | M2 slot compaction | Built 2026-09-26: S1–S3 pass; large F1 capacity after the bake 0 (was 256) |
 | 3 | M3 batched index and manifest | I1–I2 pass; release time reported |
 | 4 | M4 dependency-ordered schedule | O1–O3 pass |
 | 5 | M5 chunked shared owner, option (a) | C1–C3 pass |
