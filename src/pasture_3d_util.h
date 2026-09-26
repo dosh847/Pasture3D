@@ -98,6 +98,12 @@ public:
 			const real_t p_texel, const int p_texels, const real_t p_range,
 			const int p_exact_band = 2, const bool p_half_float = true,
 			const bool p_sqrt_encoding = false);
+	// The tiled shore field (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md §I, large lakes): classifies a grid
+	// of p_count square tiles of p_tile metres from p_origin, row-major. 1 = the shore passes within p_margin
+	// of the tile (it needs a baked field), -1 = wholly inside the polygon, 0 = wholly outside. So a lake's
+	// field costs its shore length, not its area.
+	static PackedInt32Array classify_shore_tiles(const PackedVector2Array &p_poly, const Vector2 &p_origin,
+			const real_t p_tile, const Vector2i &p_count, const real_t p_margin);
 
 	// Native terrain-graph CELL-RUN evaluator (PASTURE3D_TERRAIN_GRAPH_SPEC.md §6, C++ parity step). Given
 	// a program compiled by Pasture3DTerrainGraph.compile_cell_program, evaluate the whole `p_gw x p_gh`

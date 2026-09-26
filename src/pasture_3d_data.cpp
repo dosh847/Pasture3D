@@ -1268,6 +1268,7 @@ void Pasture3DData::_load_region_index(const String &p_dir) {
 		}
 	}
 	_region_index = index;
+	_region_map_dirty = true; // The map encodes which indexed regions are not loaded
 }
 
 void Pasture3DData::_save_region_index(const String &p_dir) {
@@ -1560,6 +1561,44 @@ void Pasture3DData::_region_flags(const Pasture3DRegion *p_region, bool &r_colla
 	r_color_only = type.is_valid() && type->get_material_mode() == Pasture3DRegionType::MATERIAL_COLOR_ONLY;
 }
 
+int Pasture3DData::get_water_terrain_state(const Vector2 &p_xz, const real_t p_level, const real_t p_margin) const {
+	// Every step as water_terrain.gdshaderinc does it, in the same order and with the same roundings.
+	const Vector2i v = Vector2i((p_xz / _vertex_spacing + Vector2(0.5f, 0.5f)).floor());
+	const Vector2i loc = Vector2i(Math::floor(real_t(v.x) / real_t(_region_size)), Math::floor(real_t(v.y) / real_t(_region_size)));
+	const int map_index = get_region_map_index(loc);
+	if (map_index < 0 || map_index >= _region_map.size()) {
+		return 0;
+	}
+	const int e = _region_map[map_index];
+	if (e == 0) {
+		return 0;
+	}
+	if (e == REGION_MAP_UNLOADED) {
+		return 1;
+	}
+	const Pasture3DRegion *region = get_region_ptr(loc);
+	const Ref<Image> height = region ? region->get_height_map() : Ref<Image>();
+	if (height.is_null()) {
+		return 0;
+	}
+	const Vector2i local = v - loc * _region_size;
+	// A coarse region's lattice texel: its own map at local >> shift (the GPU reads the same texel upsampled).
+	const int shift = e < 0 ? ((ABS(e) - 1) >> 16) & 0x7 : 0;
+	const real_t h = height->get_pixel(local.x >> shift, local.y >> shift).r;
+	return h >= p_level + p_margin ? 2 : 3;
+}
+
+bool Pasture3DData::is_water_hidden(const Vector2 &p_xz, const real_t p_level, const real_t p_margin, const real_t p_radius) const {
+	static const Vector2 TAPS[5] = { Vector2(0, 0), Vector2(-1, -1), Vector2(1, -1), Vector2(-1, 1), Vector2(1, 1) };
+	for (const Vector2 &t : TAPS) {
+		const int state = get_water_terrain_state(p_xz + t * p_radius, p_level, p_margin);
+		if (state != 1 && state != 2) {
+			return false;
+		}
+	}
+	return true;
+}
+
 void Pasture3DData::_rebuild_region_map() {
 	const int size = get_region_map_size();
 	_region_map.resize(size * size);
@@ -1592,6 +1631,17 @@ void Pasture3DData::_rebuild_region_map() {
 			// Exact: the encoded values are under 2^21, far below float32's 2^24.
 			texels[map_index] = float(_region_map[map_index]);
 			_region_locations.push_back(loc);
+		}
+	}
+	// Indexed but not loaded (spec §I). A region still in _regions is loaded, or deleted and not yet saved,
+	// which is no region; either way it is not unknown.
+	if (_region_index.is_valid()) {
+		for (const Vector2i &loc : _region_index->get_locations()) {
+			const int map_index = get_region_map_index(loc);
+			if (map_index >= 0 && _region_map[map_index] == 0 && !_regions.has(loc)) {
+				_region_map[map_index] = REGION_MAP_UNLOADED;
+				texels[map_index] = float(REGION_MAP_UNLOADED);
+			}
 		}
 	}
 	Ref<Image> img = Image::create_from_data(size, size, false, Image::FORMAT_RF, texels.to_byte_array());
@@ -4447,6 +4497,8 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("unload_region", "region_location", "update"), &Pasture3DData::unload_region, DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("is_region_loaded", "region_location"), &Pasture3DData::is_region_loaded);
 	ClassDB::bind_method(D_METHOD("get_region_index"), &Pasture3DData::get_region_index);
+	ClassDB::bind_method(D_METHOD("get_water_terrain_state", "xz", "level", "margin"), &Pasture3DData::get_water_terrain_state);
+	ClassDB::bind_method(D_METHOD("is_water_hidden", "xz", "level", "margin", "radius"), &Pasture3DData::is_water_hidden);
 	ClassDB::bind_method(D_METHOD("get_region_generation", "region_location"), &Pasture3DData::get_region_generation);
 	ClassDB::bind_method(D_METHOD("get_region_generations"), &Pasture3DData::get_region_generations);
 	ClassDB::bind_method(D_METHOD("restore_layer_tiles", "layer_id", "tiles", "generations"), &Pasture3DData::restore_layer_tiles);

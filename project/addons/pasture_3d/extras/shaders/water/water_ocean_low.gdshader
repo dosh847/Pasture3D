@@ -6,6 +6,7 @@ render_mode cull_disabled, depth_draw_never, diffuse_lambert, specular_schlick_g
 	shadows_disabled;
 
 #define WATER_CLIPMAP
+#define WATER_TERRAIN_CHECK
 #define WATER_WAVE_COUNT 4
 #define WATER_DETAIL
 // One detail layer, not two. Phase 3 priced the second at 0.041 ms of the 0.259 ms

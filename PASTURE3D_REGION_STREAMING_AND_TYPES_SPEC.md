@@ -4,8 +4,73 @@
 built and gated (`bench/RegionSlotGate` 8/8, `bench/RegionSlotRenderProbe` windowed, commit 2015f72c);
 phase 2 split into 2a and 2b, both built and gated (`bench/RegionTypeGate` 8/8, `bench/RegionLayerGate`
 9/9, commit decc3889); phase 3 built and gated (`bench/RegionSeamGate` 5/5, `bench/RegionSeamRenderProbe`
-windowed 4/4, commit 3cc36c2e); phase 4 built and gated (`bench/RegionBakeScopeGate` 10/10, uncommitted; see "Phase 4 as built"); phases 4b–6 not started.** Check the symbols named here before trusting this
+windowed 4/4, commit 3cc36c2e); phase 4 built and gated (`bench/RegionBakeScopeGate` 10/10, commit 1422e15a; see "Phase 4 as built"); phase 4b built and gated (`bench/RegionWaterGate` 6/6, `bench/RegionLakeTileGate` 5/5, `bench/RegionWaterRenderProbe` windowed 4/4, uncommitted; see "Phase 4b as built"); phases 5–6 not started.** Check the symbols named here before trusting this
 header: specs in this repo go stale.
+
+Phase 4b as built (water terrain check and tiled shore SDF, §I; deviations marked):
+
+- **Region map "unloaded" value.** `Pasture3DData::REGION_MAP_UNLOADED = -(1 << 21)`. `_rebuild_region_map`
+  writes it for every index location that is empty in the map and not in `_regions`. A location still in
+  `_regions` is loaded, or deleted and not yet saved, which is no region; it is never "unknown".
+  `region_map_decode` and GLSL `region_map_slot` return -1 for it, so every existing reader treats it as
+  no region. `_load_region_index` marks the map dirty. RegionSlotGate's map-consistency check now accepts
+  the value only at an indexed, unloaded location (its RS5 expected 0 before).
+- **Globals come from the terrain material.** `Pasture3DMaterial::register_terrain_globals()` declares
+  `pasture3d_region_map`, `pasture3d_height_maps`, `pasture3d_coarse_height_maps` and `pasture3d_terrain`
+  (vertex_spacing, region_size, region_map_size, coarse_store_shift). The same four are in project.godot
+  and the editor plugin's list. `_update_uniforms` publishes them. `uninitialize` clears them if this
+  terrain was the publisher (`s_globals_terrain`). A zero region size makes the check inert, so a scene
+  with no terrain shows all its water. The terrain names no water type. Also registered from
+  `Pasture3DPoolManager::register_water_globals`.
+- **The check** is `extras/shaders/water/water_terrain.gdshaderinc`, included by `water_surface.gdshaderinc`
+  under `WATER_TERRAIN_CHECK`. That define requires `WATER_CLIPMAP` (an `#error` otherwise), and it is
+  defined by `water_ocean`, `water_ocean_low` and `water_lake_clipmap`. States: 0 no region, 1 unloaded,
+  2 land (stored height ≥ level + `land_margin`, holes included), 3 water. A coarse region is read at its
+  lattice texel `(local >> shift) << (shift - coarse_store_shift)`. The CPU mirror is
+  `Pasture3DData::get_water_terrain_state` / `is_water_hidden`.
+- **Deviation: a vertex is removed only when five taps all hide it.** The taps are its centre plus the
+  corners at ±`scale · WATER_TERRAIN_REACH` (3.5 cells, the shore mask's reach). The spec's single test
+  was wrong: a NaN vertex takes every triangle using it, so a lone vertex over land also cut the water
+  beside it. The cost is five fetch pairs per vertex, not one. **Not measured yet**; §I asks for a
+  before/after, and that needs the user's go-ahead.
+- **Tiled shore SDF** (`pasture3d_pool.gd`, `mask_tiles` Auto / Always / Never). It applies to clipmapped
+  bodies only; Auto tiles a field wider than `TILE_AUTO_TEXELS` (4096). Tiles sit on the source brush's
+  terrain region grid, or on `TILE_FALLBACK` (256 m) with no terrain. A tile is n = ceil(tile / mask_texel)
+  texels plus a 1-texel apron, sampled at uv = ((g − ti)·n + 1)/(n + 2).
+  `Pasture3DUtil.classify_shore_tiles` marks a tile as a band tile if a shore segment piece, grown by
+  `mask_range + 2s`, touches it. Every other tile is a constant, inside or outside. Only band tiles
+  are baked, and only where the region is not indexed-unloaded. The tile map (RF) holds 0 for outside or
+  not baked, −1 for inside, and k+1 for layer k. `region_map_changed` rebakes or drops tiles. Moving the
+  body re-plans the grid.
+- **Found by the gate: a tile must be baked with a margin of the range.** The baker seeds exact distance
+  only where the shore crosses its image. A shore passing just outside a bare tile was never seen, so the
+  tile read up to 21 m wrong. Tiles are now baked `ceil(range / s) + 3` texels wider on each side and
+  cropped. The single image never hit this, because it is already padded by the range.
+- **Containment mask capped.** A masked body's mask is coarsened by doublings past `MASK_CAP` (4096²
+  cells), because it is O(area): 557 M cells for a 30 km lake at wave spacing. Boundary cells still fall
+  through to the exact test. `mask_spacing` is in the build stats.
+- **Known limit, not fixed:** containment's exact test is `Geometry2D.is_point_in_polygon`, which is
+  float32. On a 30 km lake it misplaces points about 0.1 m from the shore. The field itself is right to
+  1 cm (LT2).
+- Gates:
+  - **RW** (`bench/RegionWaterGate`, headless, 6/6): the CPU mirror. RW1 encoding (control: the index
+    entry removed gives 0), RW2 unknown vs nothing, RW3 cave (control: margin 30), RW4 seabed pit
+    (control: level −30), RW5 reach (control: radius 0), RW6 coarse lattice (control: an unshifted read
+    disagrees).
+  - **RegionWaterRenderProbe** (windowed, 4/4): P1 the shader agrees with the mirror at feature points
+    and stripe edges (control: the check compiled out); P2 no shoreline gap on 20 m cells (control:
+    reach 0 leaves gaps); P3 the globals are cleared when the terrain leaves the tree; P4 the three
+    shipped shaders show the sea and remove land and unloaded regions.
+  - **LT** (`bench/RegionLakeTileGate`, headless, 5/5, a 30 km lake):
+    - LT1 bakes tiled: 596 band tiles of 13924, 34 MB against 766 MB (control: one image needs 20044
+      texels).
+    - LT2 the emulated shader read is within 0.011 m of exact near the shore, tile edges included
+      (control: without the apron, 0.95 m).
+    - LT3 a tile over an unloaded region waits for it, loads through the signal and drops on unload
+      (control: an unindexed location is baked).
+    - LT4 constant tiles are out of range (control: margin 0 leaves 72 in range).
+    - LT5 the mask is capped, and containment agrees with the fallback (control: the mask alone
+      disagrees).
 
 Phase 4 as built (bake scope, §F; deviations marked):
 

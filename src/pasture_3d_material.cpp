@@ -7,6 +7,7 @@
 #include <godot_cpp/classes/noise_texture2d.hpp>
 #include <godot_cpp/classes/reg_ex.hpp>
 #include <godot_cpp/classes/reg_ex_match.hpp>
+#include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/resource_saver.hpp>
 
@@ -665,6 +666,51 @@ void Pasture3DMaterial::_update_shader() {
 	notify_property_list_changed();
 }
 
+// The terrain that last published the globals; cleared (and the globals zeroed) when it uninitializes.
+static const Pasture3D *s_globals_terrain = nullptr;
+
+void Pasture3DMaterial::register_terrain_globals() {
+	// Process-global, as Pasture3DPoolManager::register_water_globals: the RenderingServer table is shared.
+	static bool s_registered = false;
+	if (s_registered) {
+		return;
+	}
+	s_registered = true;
+	struct GlobalDecl {
+		const char *name;
+		RenderingServer::GlobalShaderParameterType type;
+		Variant initial;
+	};
+	const GlobalDecl decls[] = {
+		{ "pasture3d_region_map", RenderingServer::GLOBAL_VAR_TYPE_SAMPLER2D, RID() },
+		{ "pasture3d_height_maps", RenderingServer::GLOBAL_VAR_TYPE_SAMPLER2DARRAY, RID() },
+		{ "pasture3d_coarse_height_maps", RenderingServer::GLOBAL_VAR_TYPE_SAMPLER2DARRAY, RID() },
+		// (vertex_spacing, region_size, region_map_size, coarse_store_shift); region_size 0 = no terrain.
+		{ "pasture3d_terrain", RenderingServer::GLOBAL_VAR_TYPE_VEC4, Vector4() },
+	};
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	for (const GlobalDecl &decl : decls) {
+		if (settings && settings->has_setting(String("shader_globals/") + decl.name)) {
+			continue;
+		}
+		RS->global_shader_parameter_add(decl.name, decl.type, decl.initial);
+	}
+}
+
+void Pasture3DMaterial::_publish_terrain_globals() const {
+	Pasture3DData *data = _terrain->get_data();
+	register_terrain_globals();
+	s_globals_terrain = _terrain;
+	const RID fine = data->get_height_maps_rid();
+	const RID coarse = data->get_coarse_maps_rid(TYPE_HEIGHT);
+	RS->global_shader_parameter_set("pasture3d_region_map", data->get_region_map_rid());
+	RS->global_shader_parameter_set("pasture3d_height_maps", fine.is_valid() ? fine : _generated_dummy.get_rid());
+	RS->global_shader_parameter_set("pasture3d_coarse_height_maps", coarse.is_valid() ? coarse : _generated_dummy.get_rid());
+	RS->global_shader_parameter_set("pasture3d_terrain", Vector4(_terrain->get_vertex_spacing(),
+			real_t(_terrain->get_region_size()), real_t(Pasture3DData::get_region_map_size()),
+			real_t(data->get_coarse_store_shift())));
+}
+
 void Pasture3DMaterial::_update_uniforms(const RID &p_material, const uint32_t p_flags) {
 	IS_DATA_INIT(VOID);
 	LOG(EXTREME, "Updating uniforms in shader");
@@ -673,6 +719,7 @@ void Pasture3DMaterial::_update_uniforms(const RID &p_material, const uint32_t p
 	// The region map is an RF texture of encoded slots (shaders/region_map.glsl); its RID survives updates.
 	RS->material_set_param(p_material, "_region_map", data->get_region_map_rid());
 	RS->material_set_param(p_material, "_region_map_size", Pasture3DData::get_region_map_size());
+	_publish_terrain_globals();
 
 	// _region_locations is indexed by the fine SLOT, so it is the fine slot table, not the active-region list.
 	// The built-in shaders no longer read it (a position already names its region); it stays for custom
@@ -814,6 +861,14 @@ void Pasture3DMaterial::initialize(Pasture3D *p_terrain) {
 
 void Pasture3DMaterial::uninitialize() {
 	LOG(INFO, "Uninitializing material");
+	if (_terrain && s_globals_terrain == _terrain) {
+		// The RIDs are about to go with the terrain's data; a stale one in a global would be sampled freed.
+		s_globals_terrain = nullptr;
+		RS->global_shader_parameter_set("pasture3d_region_map", RID());
+		RS->global_shader_parameter_set("pasture3d_height_maps", RID());
+		RS->global_shader_parameter_set("pasture3d_coarse_height_maps", RID());
+		RS->global_shader_parameter_set("pasture3d_terrain", Vector4());
+	}
 	_terrain = nullptr;
 }
 

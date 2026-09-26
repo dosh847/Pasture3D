@@ -478,6 +478,19 @@ uniform float _shore_offset : hint_range(-8.0, 8.0, 0.05) = 0.0;
 // fragment stage is supposed to be resolving. Written by the host, which is the
 // only thing that knows the spacing.
 uniform float _shore_kill_margin = 4.0;
+// THE TILED FIELD, for a body too large for one image (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md §I).
+// One texture cannot hold a 25 km lake at 1.5 m texels, and its memory grows with the area. Tiled, only
+// tiles the shore passes near carry a field; the rest are a constant, so memory follows the shore length,
+// and a tile over a region that is not loaded is not baked at all.
+//   _shore_tile_map   one texel per tile: 0 outside (or not baked), -1 inside, k + 1 = layer k of _shore_tiles
+//   _shore_tiles      (n + 2)^2 texels per layer: n over the tile plus a one-texel apron on each side, baked at
+//                     the neighbours' texel centres, so bilinear filtering across a tile edge is seamless
+//   _shore_tile_grid  xy = the grid's min corner in world XZ, z = tile size in metres, w = n
+// Chosen per material by _shore_tiled, a uniform branch, so one shader serves both.
+uniform bool _shore_tiled = false;
+uniform highp sampler2D _shore_tile_map : filter_nearest, repeat_disable;
+uniform sampler2DArray _shore_tiles : filter_linear, repeat_disable;
+uniform vec4 _shore_tile_grid = vec4(0.0, 0.0, 256.0, 170.0);
 group_uniforms;
 #endif
 
@@ -594,7 +607,30 @@ vec2 water_scroll(vec2 p_uv_per_second) {
  * bounds. Clamping here makes that explicit instead of leaning on the sampler's
  * repeat mode to be set right.
  */
+// The tiled field's normalised value at a world XZ, in [-1, 1] like one sample of _shore_sdf.
+float water_shore_tiled(vec2 p_world_xz) {
+	vec2 g = (p_world_xz - _shore_tile_grid.xy) / _shore_tile_grid.z;
+	ivec2 ti = ivec2(floor(g));
+	ivec2 count = textureSize(_shore_tile_map, 0);
+	if (ti.x < 0 || ti.y < 0 || ti.x >= count.x || ti.y >= count.y) {
+		return 1.0;
+	}
+	float e = texelFetch(_shore_tile_map, ti, 0).r;
+	if (e < -0.5) {
+		return -1.0;
+	}
+	if (e < 0.5) {
+		return 1.0;
+	}
+	float n = _shore_tile_grid.w;
+	vec2 uv = ((g - vec2(ti)) * n + 1.0) / (n + 2.0);
+	return texture(_shore_tiles, vec3(uv, e - 1.0)).r * 2.0 - 1.0;
+}
+
 float water_shore_distance(vec2 p_world_xz) {
+	if (_shore_tiled) {
+		return water_shore_tiled(p_world_xz) * _shore_range - _shore_offset;
+	}
 	vec2 uv = (p_world_xz - _shore_rect.xy) / _shore_rect.zw;
 #ifdef WATER_SHORE_HARD
 	// The control: snap to texel centres, which is what sampling this field

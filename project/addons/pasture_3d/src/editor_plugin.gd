@@ -162,6 +162,12 @@ func _register_water_globals() -> void:
 		"water_sun_direction": { "type": "vec3", "value": Vector3(0.0, -1.0, 0.0) },
 		"water_sun_color": { "type": "vec3", "value": Vector3(1.0, 1.0, 1.0) },
 		"water_time_period": { "type": "float", "value": 120.0 },
+		# The terrain's region map and heights, for the water terrain check (water_terrain.gdshaderinc).
+		# Published by Pasture3DMaterial; textures persist empty, the terrain fills them at run time.
+		"pasture3d_region_map": { "type": "sampler2D", "value": "" },
+		"pasture3d_height_maps": { "type": "sampler2DArray", "value": "" },
+		"pasture3d_coarse_height_maps": { "type": "sampler2DArray", "value": "" },
+		"pasture3d_terrain": { "type": "vec4", "value": Vector4(0.0, 0.0, 0.0, 0.0) },
 	}
 	var added: PackedStringArray = []
 	for gname: String in WATER_GLOBALS:

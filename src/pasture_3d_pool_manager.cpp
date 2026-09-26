@@ -10,6 +10,7 @@
 #include "logger.h"
 #include "pasture_3d_ocean.h"
 #include "pasture_3d.h"
+#include "pasture_3d_material.h"
 #include "pasture_3d_pool_manager.h"
 
 ///////////////////////////
@@ -75,6 +76,9 @@ void Pasture3DPoolManager::register_water_globals() {
 		return;
 	}
 	s_registered = true;
+	// The water terrain check (water_terrain.gdshaderinc) reads the terrain's globals; they must exist before
+	// a water material compiles even in a scene with no terrain, where nothing else would declare them.
+	Pasture3DMaterial::register_terrain_globals();
 
 	struct GlobalDecl {
 		const char *name;

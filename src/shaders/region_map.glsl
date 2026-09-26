@@ -9,6 +9,7 @@ R"(
 //              a Standard (texel ratio 1) region in the fine arrays (_height_maps, ...)
 //   -((slot + 1) | shift << 16 | collapse << 19 | color_only << 20)
 //              a coarse region, texel ratio 1 << shift, in the coarse arrays (_coarse_height_maps, ...)
+//   -(1 << 21) a location the region index names but that is not loaded: no region to every reader here
 // A reader that only knows "slot + 1" sees a coarse region as no region, and a flagged one as a slot past
 // its bounds.
 uniform highp sampler2D _region_map : filter_nearest, repeat_disable;
@@ -29,7 +30,7 @@ int region_map_slot(ivec2 pos) {
 		return -1;
 	}
 	int v = int(round(texelFetch(_region_map, pos, 0).r));
-	return v == 0 ? -1 : abs(v) - 1;
+	return v == 0 || v == -2097152 ? -1 : abs(v) - 1;
 }
 
 //INSERT: REGION_FETCH

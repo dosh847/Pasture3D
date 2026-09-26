@@ -169,7 +169,10 @@ func _rs5_map_matches_slot_table() -> void:
 	d.unload_region(B)
 	_check("consistent after an unload (no stale texel)", _map_consistent())
 	var idx: int = Pasture3DData.get_region_map_index(B)
-	_check("unloaded location's texel is 0", d.get_region_map()[idx] == 0)
+	# Phase 4b: an indexed location that is not loaded is the "unknown" sentinel, which every decoder reads as
+	# no region (it was 0 before the water terrain check needed to tell unknown from nothing).
+	_check("unloaded location's texel is the unknown sentinel, no slot", d.get_region_map()[idx] == -(1 << 21)
+			and Pasture3DData.region_map_decode(d.get_region_map()[idx]) == -1)
 	d.load_region(B, DIR)
 	_check("consistent after the reload", _map_consistent())
 	# Control: the consistency check sees a corrupted texel.
@@ -265,8 +268,13 @@ func _map_consistent(p_map: PackedInt32Array = PackedInt32Array(), p_data = null
 	for i in m.size():
 		if m[i] == 0:
 			continue
-		var slot: int = Pasture3DData.region_map_decode(m[i])
 		var loc := Vector2i(i % size - size / 2, i / size - size / 2)
+		if m[i] == -(1 << 21):
+			# Unknown: only where the index names a region that is not loaded.
+			if not d.get_region_index().has_entry(loc) or d.is_region_loaded(loc):
+				return false
+			continue
+		var slot: int = Pasture3DData.region_map_decode(m[i])
 		if slot < 0 or slot >= table.size() or table[slot] != loc:
 			return false
 		seen += 1

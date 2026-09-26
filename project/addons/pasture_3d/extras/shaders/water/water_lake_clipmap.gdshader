@@ -19,6 +19,7 @@ render_mode cull_disabled, depth_draw_never, diffuse_lambert, specular_schlick_g
 
 #define WATER_WAVE_COUNT 4
 #define WATER_CLIPMAP
+#define WATER_TERRAIN_CHECK
 #define WATER_SHORE_MASK
 #define WATER_DETAIL
 #define WATER_DEPTH_FADE

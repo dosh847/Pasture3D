@@ -291,8 +291,14 @@ public:
 		const int flags = (int(p_color_only) << 20) | (p_shift > 0 ? (p_shift << 16) | (int(p_collapse) << 19) : 0);
 		return p_shift > 0 ? -((p_slot + 1) | flags) : (p_slot + 1) | flags;
 	}
-	// A region id: -1 for none, else slot | shift << 16 | collapse << 19 | color_only << 20.
-	static int region_map_decode(const int p_value) { return p_value == 0 ? -1 : ABS(p_value) - 1; }
+	// A location the region index names but that is not loaded (spec §I): no slot, so every decoder reads it
+	// as no region. Only a reader that must tell "unknown" from "nothing here" (the water terrain check) looks
+	// for it. Negative, so older readers that treat a negative texel as no region stay correct.
+	static inline const int REGION_MAP_UNLOADED = -(1 << 21);
+	// A region id: -1 for none (or unloaded), else slot | shift << 16 | collapse << 19 | color_only << 20.
+	static int region_map_decode(const int p_value) {
+		return p_value == 0 || p_value == REGION_MAP_UNLOADED ? -1 : ABS(p_value) - 1;
+	}
 	static int region_id_slot(const int p_id) { return p_id < 0 ? -1 : (p_id & 0xFFFF); }
 	static bool region_id_is_coarse(const int p_id) { return p_id >= 0 && ((p_id >> 16) & 0x7) != 0; }
 	TypedArray<Vector2i> get_slot_locations() const;
@@ -346,6 +352,13 @@ public:
 	Error unload_region(const Vector2i &p_region_loc, const bool p_update = true);
 	bool is_region_loaded(const Vector2i &p_region_loc) const;
 	Ref<Pasture3DRegionIndex> get_region_index() const { return _region_index; }
+	// The water terrain check (spec §I), mirrored exactly from water_terrain.gdshaderinc so a gate can say what
+	// the shader should draw. States: 0 no region (open sea, or beyond the world), 1 indexed but unloaded,
+	// 2 land (stored height >= level + margin, holes included), 3 terrain below that (water shown).
+	int get_water_terrain_state(const Vector2 &p_xz, const real_t p_level, const real_t p_margin) const;
+	// Whether the check removes a water vertex at p_xz: its centre and the four corners at +-p_radius are all
+	// unloaded or land. p_radius is the ring's reach (3.5 cells in the shader); 0 tests the centre only.
+	bool is_water_hidden(const Vector2 &p_xz, const real_t p_level, const real_t p_margin, const real_t p_radius) const;
 	int get_region_generation(const Vector2i &p_region_loc) const { return _region_generation.get(p_region_loc, 0); }
 	// The generation of every LOADED region, including those still at 0. An undo snapshot records this;
 	// a location missing from it was not loaded when the snapshot was taken.
