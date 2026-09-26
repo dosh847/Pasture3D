@@ -9,7 +9,7 @@
 // pasture3d_terrain is zero and every vertex is kept.
 //
 // The region map encoding is defined in Pasture3DData::region_map_encode and shaders/region_map.glsl; the
-// part read here is: 0 no region, -(1 << 21) indexed but not loaded, negative a coarse region, and
+// part read here is: 0 no region, 0.25 indexed but not loaded, negative a coarse region, and
 // |v| - 1 = slot | shift << 16. Pasture3DData::get_water_terrain_state mirrors this function step for step:
 // RegionWaterGate fixes what the mirror says, and RegionWaterRenderProbe (windowed) that this agrees with it.
 
@@ -47,12 +47,12 @@ int water_terrain_state(vec2 p_xz, float p_level) {
 	if (pos.x < 0 || pos.y < 0 || pos.x >= ms || pos.y >= ms) {
 		return 0;
 	}
-	int e = int(round(texelFetch(pasture3d_region_map, pos, 0).r));
+	float raw = texelFetch(pasture3d_region_map, pos, 0).r;
+	int e = int(round(raw));
 	if (e == 0) {
-		return 0;
-	}
-	if (e == -2097152) {
-		return 1;
+		// 0.25 (Pasture3DData::REGION_MAP_UNLOADED_TEXEL) is not an integer, so it rounds to 0 for every
+		// other reader; only this check tells it from no region.
+		return raw > 0.125 ? 1 : 0;
 	}
 	int id = abs(e) - 1;
 	int slot = id & 0xFFFF;

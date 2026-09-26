@@ -297,6 +297,10 @@ public:
 	// as no region. Only a reader that must tell "unknown" from "nothing here" (the water terrain check) looks
 	// for it. Negative, so older readers that treat a negative texel as no region stay correct.
 	static inline const int REGION_MAP_UNLOADED = -(1 << 21);
+	// The GPU texel for REGION_MAP_UNLOADED. Not an integer, so int(round(v)) reads it as 0 (no region) in
+	// region_map_slot with no extra instruction: an explicit `v == -(1 << 21)` test there ran per fragment
+	// tap and cost the terrain 4% of its frame. Only the water check reads the raw value.
+	static constexpr float REGION_MAP_UNLOADED_TEXEL = 0.25f;
 	// A region id: -1 for none (or unloaded), else slot | shift << 16 | collapse << 19 | color_only << 20.
 	static int region_map_decode(const int p_value) {
 		return p_value == 0 || p_value == REGION_MAP_UNLOADED ? -1 : ABS(p_value) - 1;

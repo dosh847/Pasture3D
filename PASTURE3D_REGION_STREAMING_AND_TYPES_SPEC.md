@@ -4,7 +4,7 @@
 built and gated (`bench/RegionSlotGate` 8/8, `bench/RegionSlotRenderProbe` windowed, commit 2015f72c);
 phase 2 split into 2a and 2b, both built and gated (`bench/RegionTypeGate` 8/8, `bench/RegionLayerGate`
 9/9, commit decc3889); phase 3 built and gated (`bench/RegionSeamGate` 5/5, `bench/RegionSeamRenderProbe`
-windowed 4/4, commit 3cc36c2e); phase 4 built and gated (`bench/RegionBakeScopeGate` 10/10, commit 1422e15a; see "Phase 4 as built"); phase 4b built and gated (`bench/RegionWaterGate` 6/6, `bench/RegionLakeTileGate` 5/5, `bench/RegionWaterRenderProbe` windowed 4/4, commit d9f03e9d; see "Phase 4b as built"); phase 5 built and gated (`bench/RegionPanelGate` 6/6; see "Phase 5 as built"); phase 6 built and gated (`bench/RegionStreamGate` 7/7, uncommitted; see "Phase 6 as built"). All phases are built; the memory investigation below is next.** Check the symbols named here before trusting this
+windowed 4/4, commit 3cc36c2e); phase 4 built and gated (`bench/RegionBakeScopeGate` 10/10, commit 1422e15a; see "Phase 4 as built"); phase 4b built and gated (`bench/RegionWaterGate` 6/6, `bench/RegionLakeTileGate` 5/5, `bench/RegionWaterRenderProbe` windowed 4/4, commit d9f03e9d; see "Phase 4b as built"); phase 5 built and gated (`bench/RegionPanelGate` 6/6; see "Phase 5 as built"); phase 6 built and gated (`bench/RegionStreamGate` 7/7, commit 6420d975; see "Phase 6 as built"). All phases are built; the memory investigation below is next.** Check the symbols named here before trusting this
 header: specs in this repo go stale.
 
 Phase 6 as built (game streaming and multi-source collision, §H; deviations marked):
@@ -101,8 +101,11 @@ Phase 4b as built (water terrain check and tiled shore SDF, §I; deviations mark
 - **Region map "unloaded" value.** `Pasture3DData::REGION_MAP_UNLOADED = -(1 << 21)`. `_rebuild_region_map`
   writes it for every index location that is empty in the map and not in `_regions`. A location still in
   `_regions` is loaded, or deleted and not yet saved, which is no region; it is never "unknown".
-  `region_map_decode` and GLSL `region_map_slot` return -1 for it, so every existing reader treats it as
-  no region. `_load_region_index` marks the map dirty. RegionSlotGate's map-consistency check now accepts
+  `region_map_decode` returns -1 for it, so every CPU reader treats it as no region. **Changed 2026-09-26:**
+  the GPU texel is NOT -(1 << 21) but `REGION_MAP_UNLOADED_TEXEL` = 0.25. It is not an integer, so
+  `int(round(v))` in `region_map_slot` (and `int(v + 0.5) - 1` in the extras shaders) already reads it as
+  no region. The explicit `v == -2097152` test it replaced ran per fragment tap and cost the terrain 4%.
+  Only the water check reads the raw float (`raw > 0.125` on its `e == 0` branch). `_load_region_index` marks the map dirty. RegionSlotGate's map-consistency check now accepts
   the value only at an indexed, unloaded location (its RS5 expected 0 before).
 - **Globals come from the terrain material.** `Pasture3DMaterial::register_terrain_globals()` declares
   `pasture3d_region_map`, `pasture3d_height_maps`, `pasture3d_coarse_height_maps` and `pasture3d_terrain`
@@ -120,8 +123,15 @@ Phase 4b as built (water terrain check and tiled shore SDF, §I; deviations mark
 - **Deviation: a vertex is removed only when five taps all hide it.** The taps are its centre plus the
   corners at ±`scale · WATER_TERRAIN_REACH` (3.5 cells, the shore mask's reach). The spec's single test
   was wrong: a NaN vertex takes every triangle using it, so a lone vertex over land also cut the water
-  beside it. The cost is five fetch pairs per vertex, not one. **Not measured yet**; §I asks for a
-  before/after, and that needs the user's go-ahead.
+  beside it. The cost is five fetch pairs per vertex, not one. **Measured 2026-09-26** (`bench/RegionWaterCheckBench`,
+  windowed, 1280×800): ocean over the demo terrain, the level splitting it into land and water, the shipped
+  shader against a runtime copy without `WATER_TERRAIN_CHECK`, 4 alternating rounds. High and low tiers at
+  pitch −20° and −50°: ON−OFF between −0.7% and +0.7% of a ~0.67–0.74 ms frame, every one inside the spread
+  between repeats of the same arm. The cost is below what this machine can resolve. Witness: with
+  `land_margin` −1000 the ON image loses the ocean over the terrain (mean delta 0.086) and OFF does not
+  change (0.000). Trap: `Pasture3DOcean.set_material` ignores the material it already holds, so a uniform
+  edited on that same object never reaches the ocean's private duplicate; the first witness read 0.000 for
+  both arms because of it.
 - **Tiled shore SDF** (`pasture3d_pool.gd`, `mask_tiles` Auto / Always / Never). It applies to clipmapped
   bodies only; Auto tiles a field wider than `TILE_AUTO_TEXELS` (4096). Tiles sit on the source brush's
   terrain region grid, or on `TILE_FALLBACK` (256 m) with no terrain. A tile is n = ceil(tile / mask_texel)
@@ -289,8 +299,18 @@ Phase 3 as built (Background rendering, §D; deviations marked):
   - The `max_regions` warning is demoted to DEBUG, because slots no longer index `_region_locations`.
   - **Open: terrain frame time.** `WaterBodiesPhase2Gate` [A] measured `terrain_clipmap` at 0.316 ms against
     its 0.278 ms reference (+13.7%, pixels identical). The phase 3 vertex shader adds a region-map lookup per
-    vertex for collapse, but the reference may also be stale. An A/B timing against decc3889 decides it;
-    ask before running it ([[ask-before-perf-tests]]).
+    vertex for collapse, but the reference may also be stale. **Decided 2026-09-26 by A/B** (the same gate
+    run from a worktree build of each commit, two runs each, ocean_high_pitch20 as the unchanged control at
+    0.266–0.271 ms throughout): decc3889 (phase 2) 0.282/0.283, 3cc36c2e (phase 3) 0.311/0.313, 1422e15a
+    (phase 4) 0.311/0.311, d9f03e9d (phase 4b) 0.325/0.324, HEAD 6420d975 0.327/0.329 ms. The reference is
+    NOT stale (phase 2 matches it within 1.5%). The rise is real and has two parts: phase 3 +0.029 ms
+    (+10%, the collapse and coarse reads), and phase 4b +0.013 ms (+4%) from ONE compare,
+    `v == -2097152` in `region_map_slot`: d9f03e9d with only that line reverted times 0.311/0.312.
+    `region_map_slot` runs per fragment tap, so the unloaded test is paid on every pixel. **Resolved
+    2026-09-26:** the unloaded GPU texel is now 0.25 (see "Phase 4b as built"), and HEAD times 0.314/0.314
+    ms. The user accepted phase 3's +10%: `WaterBodiesPhase2Gate` compares `terrain_clipmap` against an
+    accepted 0.314 ms (`ACCEPTED_MS`), still printing the 0.278 reference. The pre-fix 0.328 would fail
+    that band (+4.5% against ±3%).
   - `RegionSlotRenderProbe` now waits for physics ticks: the clipmap snaps in `_physics_process`, and a
     fixed 6-frame wait was racing it (flaky, not a regression).
 

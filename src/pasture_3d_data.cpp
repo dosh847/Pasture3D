@@ -1746,7 +1746,7 @@ void Pasture3DData::_rebuild_region_map() {
 			const int map_index = get_region_map_index(loc);
 			if (map_index >= 0 && _region_map[map_index] == 0 && !_regions.has(loc)) {
 				_region_map[map_index] = REGION_MAP_UNLOADED;
-				texels[map_index] = float(REGION_MAP_UNLOADED);
+				texels[map_index] = REGION_MAP_UNLOADED_TEXEL;
 			}
 		}
 	}
