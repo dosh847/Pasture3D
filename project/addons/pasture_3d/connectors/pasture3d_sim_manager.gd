@@ -32,6 +32,8 @@
 class_name Pasture3DSimManager
 extends Pasture3DSimBase
 
+const _ScopedBake := preload("res://addons/pasture_3d/connectors/pasture3d_scoped_bake.gd")
+
 ## Iterations solved between yields back to the editor, matching Pasture3DSim. A chain yields between
 ## chunks of the CURRENT pass, so a ten-pass build is no less cancellable than a one-pass one.
 const CHUNK_ITERATIONS: int = 5
@@ -122,6 +124,13 @@ const RESULT_MAX_CELLS: int = 4194304
 	set(v):
 		eroding_brushes = v
 		update_configuration_warnings()
+## Which regions Bake All Brushes works over (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md §F). A
+## registered brush is baked when its footprint touches one of them, over its WHOLE footprint: neighbours
+## it reaches are loaded for the bake, saved, and released again, so the loaded set is unchanged after.
+## Selected Regions bakes `bake_regions`, loaded or not; All Regions bakes every region in the index.
+@export_enum("Selected Regions", "All Loaded Regions", "All Regions") var bake_scope: int = 1
+## The regions Selected Regions targets. Typed by hand until the region gizmo can select them.
+@export var bake_regions: Array[Vector2i] = []
 ## Re-solve every registered brush's erosion and re-bake its layer, as ONE undo action. A loop, not a
 ## chain: each brush erodes its own surface independently.
 @export_tool_button("Bake All Brushes") var _bake_all_btn = bake_all_brushes
@@ -1596,7 +1605,28 @@ func _bake_all_begin(p_record_undo: bool) -> Dictionary:
 		push_warning("%s: %s." % [_sim_label(), report["reason"]])
 		return fail
 	report["total"] = brushes.size()
-	return {"ok": true, "report": report, "plan": _eroding_owner_plan(brushes),
+	# §F: the scope picks target regions, and the scoped bake turns them into whole owners (registered
+	# ones, plus the closure their solves read) and the regions to load. Registered brushes are what get
+	# their caches cleared; a closure owner is baked as it stands, to feed them.
+	var sb = _ScopedBake.new(terrain)
+	var registered := {}
+	for entry: Dictionary in _eroding_owner_plan(brushes):
+		registered[entry["owner"]] = entry["brushes"]
+	sb.root_owners = registered.keys()
+	var sctx: Dictionary = sb.begin(bake_scope, bake_regions)
+	var sreport: Dictionary = sctx["report"]
+	report["scope"] = sreport["scope"]
+	report["skipped_locked"] = sreport["skipped_locked"]
+	report["skipped_budget"] = sreport["skipped_budget"]
+	if not bool(sctx["ok"]):
+		report["reason"] = sreport["reason"]
+		push_warning("%s: %s." % [_sim_label(), report["reason"]])
+		return fail
+	var plan: Array = []
+	for od: Dictionary in sctx["owners"]:
+		plan.append({"owner": od["owner"], "brushes": od["brushes"],
+				"clear": registered.get(od["owner"], []), "via": od["via"]})
+	return {"ok": true, "report": report, "plan": plan, "scoped": sctx, "sb": sb,
 			"record_undo": p_record_undo, "before": {}, "after": {},
 			"baked": 0, "total": brushes.size(), "cleared": 0, "cancelled": false}
 
@@ -1609,14 +1639,30 @@ func _bake_all_step(p_ctx: Dictionary, p_index: int) -> void:
 	var brushes: Array = entry["brushes"]
 	if brushes.is_empty():
 		return
+	# Neighbours first, so the snapshot and the bake both see the owner's whole footprint.
+	var sb = p_ctx.get("sb")
+	if sb != null:
+		sb.load_for(p_ctx["scoped"], p_index)
+	await _bake_all_owner(p_ctx, entry)
+	if sb != null:
+		sb.mark_baked(p_ctx["scoped"], p_index)
+		sb.release_after(p_ctx["scoped"], p_index)
+
+
+## One owner of Bake All: snapshot, drop the registered brushes' frozen solves, repaint, snapshot again.
+func _bake_all_owner(p_ctx: Dictionary, entry: Dictionary) -> void:
+	var owner: String = entry["owner"]
+	var brushes: Array = entry["brushes"]
+	var registered: Array = entry.get("clear", brushes)
 	if not p_ctx["before"].has(owner):
 		p_ctx["before"][owner] = _snapshot_owner(owner)
-	for b in brushes:
+	for b in registered:
 		p_ctx["cleared"] = int(p_ctx["cleared"]) + b.clear_erosion_caches()
 		# §9.9. A DLA's grown mountain is FROZEN for the same reason a solve is, so it needs the same
 		# clear for the same reason: without it Bake All serves the field it already had and does visibly
 		# nothing on a brush whose loop was reshaped under a frozen mountain.
 		p_ctx["grown"] = int(p_ctx.get("grown", 0)) + b.clear_relief_growth()
+	for b in brushes:
 		# Bake All is never a preview: full resolution until the brush is next edited.
 		b._preview_full_res = true
 		b._stamp_cache.clear()
@@ -1634,7 +1680,7 @@ func _bake_all_step(p_ctx: Dictionary, p_index: int) -> void:
 		else:
 			host.bake_layer(false)
 		p_ctx["after"][owner] = _snapshot_owner(owner)
-		p_ctx["baked"] = int(p_ctx["baked"]) + brushes.size()
+		p_ctx["baked"] = int(p_ctx["baked"]) + registered.size()
 		return
 	# `_refresh_owner` is the brush's own layer bake — clear the layer, repaint every tool bound to it,
 	# one GPU push. Called with record_undo FALSE: this run is one action, not one per layer.
@@ -1649,12 +1695,23 @@ func _bake_all_step(p_ctx: Dictionary, p_index: int) -> void:
 	else:
 		lead._refresh_owner(owner, false, [])
 	p_ctx["after"][owner] = _snapshot_owner(owner)
-	p_ctx["baked"] = int(p_ctx["baked"]) + brushes.size()
+	p_ctx["baked"] = int(p_ctx["baked"]) + registered.size()
 
 
 ## Commit the undo action over every layer actually baked, and fill in the report.
 func _bake_all_finish(p_ctx: Dictionary) -> Dictionary:
 	var report: Dictionary = p_ctx["report"]
+	var sb = p_ctx.get("sb")
+	if sb != null:
+		# The junction fixed point runs while the road owners' regions are still held; a cancelled run
+		# skips it and just hands every region back.
+		if not bool(p_ctx["cancelled"]):
+			sb.settle_roads(p_ctx["scoped"], func(od: Dictionary) -> void:
+				sb.bake_owner(od)
+				p_ctx["after"][od["owner"]] = _snapshot_owner(od["owner"]))
+		var sreport: Dictionary = sb.finish(p_ctx["scoped"])
+		for k in ["loaded_for_bake", "released", "regions_written", "road_turns", "roads_unsettled", "events"]:
+			report[k] = sreport[k]
 	report["ok"] = true
 	report["baked"] = p_ctx["baked"]
 	report["owners"] = p_ctx["after"].size()

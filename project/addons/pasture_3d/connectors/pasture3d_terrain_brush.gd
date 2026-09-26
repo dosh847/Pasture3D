@@ -748,6 +748,9 @@ func _get_configuration_warnings() -> PackedStringArray:
 		warnings.append("The Pasture3D terrain has no regions yet — add regions in Pasture3D first.")
 	if _get_splines().is_empty() and _wants_own_splines():
 		warnings.append("Add at least one spline (press Add Spline, or add a Path3D child).")
+	if _blocked_by_unloaded:
+		warnings.append("This brush reaches a region that is not loaded, so it does not update live. "
+			+ "Bake it with a scope (Selected / All regions) to load its neighbours and apply it.")
 	warnings.append_array(_mask_preview_warnings())
 	warnings.append_array(_modifier_warnings())
 	warnings.append_array(_layer_brush_membership_warnings())
@@ -1242,8 +1245,50 @@ func _rebind(old_owner: String) -> void:
 ## ---- Refresh scheduling (debounced; defers while a handle is being dragged) ----
 
 ## True when auto-refresh may queue work: not mid-programmatic-edit, enabled, in the editor and tree.
+## Set by `_can_auto_refresh` when the footprint reaches an unloaded region (the "needs bake" flag).
+var _blocked_by_unloaded: bool = false
+
 func _can_auto_refresh() -> bool:
-	return not _suspend_auto and not _snap_in_progress and auto_refresh and Engine.is_editor_hint() and is_inside_tree()
+	if _suspend_auto or _snap_in_progress or not auto_refresh or not Engine.is_editor_hint() or not is_inside_tree():
+		return false
+	# §F live editing: a brush reaching an unloaded region never runs live (a partial solve would be a
+	# different result that seams at the unloaded edge); it waits for a scoped bake instead.
+	var blocked := reaches_unloaded_region()
+	if blocked != _blocked_by_unloaded:
+		_blocked_by_unloaded = blocked
+		update_configuration_warnings()
+	return not blocked
+
+
+## The live-editing rule: true when a footprint box touches a region that exists (is indexed) but is not
+## loaded. Such a brush waits for a scoped bake (connectors/pasture3d_scoped_bake.gd).
+func reaches_unloaded_region() -> bool:
+	if not is_instance_valid(terrain) or terrain.data == null:
+		return false
+	var data = terrain.data
+	var index = data.get_region_index()
+	if index == null:
+		return false
+	var size := float(terrain.get_region_size()) * float(terrain.get_vertex_spacing())
+	for box: AABB in _own_footprints():
+		for r: Vector2i in footprint_regions(box, size):
+			if index.has_entry(r) and not data.is_region_loaded(r):
+				return true
+	return false
+
+
+## Regions a world box touches, for a region `p_size` metres on a side. The far edge is exclusive: a box
+## ending exactly on a region border does not reach the next region.
+static func footprint_regions(p_box: AABB, p_size: float) -> Array:
+	var out: Array = []
+	var x0 := int(floor(p_box.position.x / p_size))
+	var z0 := int(floor(p_box.position.z / p_size))
+	var x1 := int(ceil(p_box.end.x / p_size)) - 1
+	var z1 := int(ceil(p_box.end.z / p_size)) - 1
+	for z in range(z0, maxi(z0, z1) + 1):
+		for x in range(x0, maxi(x0, x1) + 1):
+			out.append(Vector2i(x, z))
+	return out
 
 
 ## Whole-layer refresh scheduler — for param / transform / structural changes (anything that isn't a

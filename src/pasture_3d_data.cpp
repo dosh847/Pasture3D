@@ -787,12 +787,14 @@ void Pasture3DData::_save_layer_manifest(const String &p_dir) {
 	const int layer_count = _layer_stack->get_layer_count();
 	Ref<Pasture3DLayerStack> manifest;
 	manifest.instantiate();
+	manifest->set_scene_unique_id("stack"); // deterministic bytes, as in _save_layer_slice
 	manifest->set_version(_layer_stack->get_version());
 	TypedArray<Pasture3DLayer> meta_layers;
 	for (int i = 0; i < layer_count; i++) {
 		Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
 		Ref<Pasture3DLayer> meta;
 		meta.instantiate();
+		meta->set_scene_unique_id("layer_" + itos(i)); // deterministic bytes, as in _save_layer_slice
 		if (layer) {
 			layer->ensure_layer_uid();
 			Dictionary d = layer->get_data();
@@ -826,12 +828,17 @@ void Pasture3DData::_save_layer_slice(const String &p_dir, const Vector2i &p_reg
 	bool has_pixels = false;
 	Ref<Pasture3DLayerStack> slice;
 	slice.instantiate();
+	slice->set_scene_unique_id("stack"); // see the layer ids below
 	slice->set_version(_layer_stack->get_version());
 	TypedArray<Pasture3DLayer> slice_layers;
 	for (int i = 0; i < layer_count; i++) {
 		Ref<Pasture3DLayer> slice_layer;
 		slice_layer.instantiate();
 		Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+		// A deterministic sub-resource id. Left empty, the binary saver draws a random one for every save,
+		// so re-saving an unchanged slice (every unload does) rewrites the file with different bytes, and
+		// a region nothing touched stops being byte-identical on disk (streaming spec §F).
+		slice_layer->set_scene_unique_id("layer_" + itos(i));
 		if (layer) {
 			slice_layer->set_layer_uid(layer->ensure_layer_uid());
 		}

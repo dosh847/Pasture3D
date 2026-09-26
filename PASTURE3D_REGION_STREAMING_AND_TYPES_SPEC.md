@@ -4,8 +4,81 @@
 built and gated (`bench/RegionSlotGate` 8/8, `bench/RegionSlotRenderProbe` windowed, commit 2015f72c);
 phase 2 split into 2a and 2b, both built and gated (`bench/RegionTypeGate` 8/8, `bench/RegionLayerGate`
 9/9, commit decc3889); phase 3 built and gated (`bench/RegionSeamGate` 5/5, `bench/RegionSeamRenderProbe`
-windowed 4/4); phases 4–6 not started.** Check the symbols named here before trusting this
+windowed 4/4, commit 3cc36c2e); phase 4 built and gated (`bench/RegionBakeScopeGate` 10/10, uncommitted; see "Phase 4 as built"); phases 4b–6 not started.** Check the symbols named here before trusting this
 header: specs in this repo go stale.
+
+Phase 4 as built (bake scope, §F; deviations marked):
+
+- `connectors/pasture3d_scoped_bake.gd` (a RefCounted; no `class_name`, preload it: a new global class
+  needs an editor rescan). `plan(scope, targets)` is a dry run; `bake(scope, targets)` returns the §F
+  report plus `ok`, `owners` and an ordered `events` log of `["load"|"bake"|"release", …]`.
+- **Deviation: the unit of work is the layer OWNER, not the brush.** `_refresh_owner` clears and repaints
+  every tool bound to a layer, so one brush of a shared layer cannot be baked alone; baking a subset would
+  repaint its layer-mates over a clipped domain. An owner's working set is the union of its tools'
+  `_own_footprints()`, and locks and the budget skip whole owners.
+- **"Reads below" means reads its DOMAIN:** an enabled erosion modifier, a growing relief material, or an
+  active graph modifier (frozen ones too, because Bake All clears freezes). A pointwise sample of the
+  ground is served by the lower layers' tiles as last baked, which the load brings in. The closure adds
+  every lower-layer owner whose footprint boxes overlap a domain reader's, recursively.
+- Each owner bakes the way Bake All's step does (full resolution, stamp caches dropped, layer-brush owners
+  through `bake_layer`), but synchronously. A whole-owner bake takes no dirty-rect path, so the phase 2
+  clip-edge renormalisation cannot make scopes differ.
+- The budget is a region count (`budget_regions`, default 64), not bytes.
+- Live rule: `Pasture3DTerrainBrush.reaches_unloaded_region()` (a footprint region is indexed but not
+  loaded). `_can_auto_refresh` refuses on it and the brush shows a "needs bake" configuration warning.
+- **Fixed in passing: re-saving an unchanged layer slice or manifest wrote different bytes.** The binary
+  saver draws a random `local://` id for any resource without one, including the main resource, and every
+  unload re-saves the region's slice. Slices and the manifest now carry fixed ids (`stack`, `layer_<i>`).
+  Found by RB3: a region outside the working set changed on disk with identical content.
+- Gate RB (headless, user:// data) fixture: S (R1 only, lowest layer), A (R0|R1, craggy + LIVE erosion),
+  B (R1|R2), R3 untouched. RB1 scopes agree byte-for-byte (control: a clipped bake differs, inside R1
+  too); RB2 release after the last sharer (control: `debug_release_early`); RB3 changed files lie in the
+  working set (control: working-set files did change); RB4 loaded set restored (control: the bake loaded
+  regions); RB5 closure (control: erosion off drops S); RB6 live rule; RB7 locked (loaded and via the
+  index) and budget skips, each with an unlocked or unlimited control.
+- Fixture trap: the default Mound is an uncapped slope-angle cone; its peak is 60 m × tan 30° and it never
+  reads `height`. Edit `slope_angle` to make a bake do work.
+
+- **Brush registry.** `Pasture3DSimManager` has `bake_scope` (Selected / All Loaded / All Regions,
+  default All Loaded) and `bake_regions` (Selected's targets, typed by hand until the phase 5 gizmo). Bake
+  All Brushes plans through the scoped bake with `root_owners` = the registered owners: a registered brush
+  is baked when it touches a target, the closure adds what it reads, and only registered brushes have
+  their caches cleared. It drives the steps (`begin` / `load_for` / `mark_baked` / `release_after` /
+  `settle_roads` / `finish`), so the deferred per-owner solve and Cancel are unchanged. **Changed:** owners
+  now run in layer order, not the registry list's first-appearance order, because the closure needs its
+  inputs first. The report gains `scope`, `loaded_for_bake`, `released`, `regions_written`,
+  `skipped_locked`, `skipped_budget`, `road_turns`, `roads_unsettled` and `events`.
+- **Undo across a scoped bake** covers the regions that stay loaded. A region loaded for the bake is saved
+  and released, and its generation guard makes undo skip it (the phase 0 rule: a dirty unload drops undo).
+- **Roads: the junction fixed point runs inside the bake.** After the first pass, `settle_roads` resolves
+  each network with a baked road (live refreshes suppressed), re-bakes the owners whose pins moved beyond
+  tolerance, and repeats, at most `ROAD_SETTLE_TURNS` (4). Regions a road owner touches carry an extra
+  reference released only after the settle. A road outside the baked owners whose pins moved is reported
+  in `roads_unsettled`, not loaded.
+- **Graphs.** A Road, Shape or Spline Source names an input by REFERENCE: the named brush's owner joins
+  the closure regardless of overlap, searched from the host's terrain ancestor as
+  `Pasture3DGraphSources` does. Sources are **not** skipped when the named brush reaches an unloaded
+  region (a deviation from §F's first sentence): they read scene geometry and a road's solved alignment,
+  not region data, and skipping them would make a bake's result depend on the loaded set. What §F's rule
+  is for, not operating on unloaded data, is held by the live rule, and by the graph editor, whose
+  previews mark themselves stale for a host that reaches an unloaded region.
+- `Dictionary.merge` does not overwrite by default. `begin` merging `ok: true` into a context that already
+  held `ok: false` made every bake a silent no-op. The gate's earlier criteria passed only because they
+  ran before that change.
+- Gate additions: RB8 a crossing on a hill straddling R0 | R1 settles in 3 resolves, R1 is released only
+  after the last one, and a fresh resolve then moves no pins (control: `debug_no_road_settle`, where a
+  fresh resolve moves both roads; a weak control, since without the settle nothing resolved at all). RB9
+  Bake All Brushes over Selected [R0] bakes A and its closure S, not the unregistered B, restores the
+  loaded set, and matches the scoped bake's R0 (control: R2 still holds the snapshot). RB10 a Shape Source
+  pulls in the brush it names across the map (control: an empty key). A graph needs an Output node to be
+  active, and an inactive graph names nothing.
+
+Still open:
+
+- Clear Simulation On All Brushes is not scoped: it re-bakes registered owners over the loaded regions.
+- Budget is a region count, not bytes; peak memory is the post-phase investigation below.
+- The deferred resolve a road bake queues still runs after the scoped bake. It finds the network settled
+  and changes nothing, but it is a redundant resolve.
 
 Phase 3 as built (Background rendering, §D; deviations marked):
 
