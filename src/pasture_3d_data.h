@@ -261,6 +261,8 @@ private:
 	// layers carry none, fall back to index). A slice layer whose uid is no longer in the stack belonged
 	// to a layer removed while the region was unloaded, and is dropped. Returns whether a slice existed.
 	bool _merge_layer_slice(const String &p_dir, const Vector2i &p_region_loc);
+	bool _merge_layer_slice_from(const Ref<Pasture3DLayerStack> &p_slice, const Vector2i &p_region_loc);
+	void _drop_region(const Vector2i &p_region_loc, const bool p_update);
 	// Drop every layer's tiles for one region (the region is leaving memory, or is about to be re-read).
 	void _evict_region_tiles(const Vector2i &p_region_loc);
 	// Recomposite a just-loaded region when the index says it was written under a different stack.
@@ -351,6 +353,13 @@ public:
 	// against it is skipped from now on (see _region_generation).
 	Error unload_region(const Vector2i &p_region_loc, const bool p_update = true);
 	bool is_region_loaded(const Vector2i &p_region_loc) const;
+	// Streaming's unload (spec §H): drops the region WITHOUT saving, and refuses (ERR_BUSY) one whose changes are
+	// not on disk. A game never writes its data.
+	Error release_region(const Vector2i &p_region_loc, const bool p_update = true);
+	// The region file for a location in p_dir, falling back to a legacy terrain3d_ file (r_legacy set); "" if
+	// neither exists. What load_region reads, so a streamer can read the same file on a worker thread.
+	static String region_file_path(const String &p_dir, const Vector2i &p_region_loc, bool *r_legacy = nullptr);
+	static String get_region_file_path(const String &p_dir, const Vector2i &p_region_loc) { return region_file_path(p_dir, p_region_loc); }
 	Ref<Pasture3DRegionIndex> get_region_index() const { return _region_index; }
 	// The water terrain check (spec §I), mirrored exactly from water_terrain.gdshaderinc so a gate can say what
 	// the shader should draw. States: 0 no region (open sea, or beyond the world), 1 indexed but unloaded,
@@ -607,6 +616,9 @@ public:
 	void save_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_16_bit = false);
 	void load_directory(const String &p_dir);
 	Error load_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_update = true);
+	// The main-thread half of load_region, from a region (and optional layer slice) already read from p_path.
+	Error adopt_region(const Vector2i &p_region_loc, const Ref<Pasture3DRegion> &p_region, const String &p_path,
+			const bool p_legacy, const Ref<Pasture3DLayerStack> &p_slice, const bool p_update = true);
 
 	// Editor-only layer persistence (PASTURE3D_LAYERS_GUIDE.md §7). Save/load the layer stack as
 	// pasture3d_layers*.res alongside the runtime region files, which are never touched. Called by

@@ -951,6 +951,11 @@ void Pasture3DData::load_directory(const String &p_dir) {
 	}
 
 	_clear();
+	// A game with a Pasture3DStreamer starts with no region in memory: the index says what exists, and the
+	// streamer loads what its sources are near. The editor always loads everything (editor streaming is not
+	// built).
+	const bool index_only = !IS_EDITOR && _terrain && !_terrain->get_load_all_regions();
+	TypedArray<Vector2i> on_disk;
 	for (const String &fname : files) {
 		// Skip layer manifest/slice files (pasture3d_layers*.res); they are handled by load_layers,
 		// not parsed as regions. The "pasture3d*.res" glob above otherwise sweeps them up.
@@ -970,6 +975,10 @@ void Pasture3DData::load_directory(const String &p_dir) {
 			continue;
 		}
 		const bool legacy = fname.begins_with("terrain3d");
+		on_disk.push_back(loc);
+		if (index_only) {
+			continue;
+		}
 		Ref<Pasture3DRegion> region = ResourceLoader::get_singleton()->load(path, "Pasture3DRegion", ResourceLoader::CACHE_MODE_IGNORE);
 		if (region.is_null()) {
 			LOG(ERROR, "Cannot load region at ", path);
@@ -1011,6 +1020,29 @@ void Pasture3DData::load_directory(const String &p_dir) {
 	// stack changed (a layer removed, reordered, re-weighted) was saved before the change and the manifest
 	// after it, so its file is stale against the stack that just loaded. Rebuild those composites now.
 	_load_region_index(p_dir);
+	// A file the index does not name (no index file yet, or written by an older build) is still a region. With
+	// everything loaded _index_region below fills it in; index-only, it gets a bare entry, which reads as a
+	// Standard region of unknown height.
+	for (const Vector2i &loc : on_disk) {
+		if (!_region_index->has_entry(loc)) {
+			_region_index->set_entry(loc, Dictionary());
+		}
+	}
+	if (index_only && !on_disk.is_empty()) {
+		// No region is loaded to say how big regions are. The index says; an older index does not, and then
+		// one region file is read for it and let go.
+		int size = _region_index->get_region_size();
+		if (size <= 0) {
+			bool legacy = false;
+			const String path = region_file_path(p_dir, on_disk[0], &legacy);
+			Ref<Pasture3DRegion> first = path.is_empty() ? Ref<Pasture3DRegion>() :
+					ResourceLoader::get_singleton()->load(path, "", ResourceLoader::CACHE_MODE_IGNORE);
+			size = first.is_valid() ? first->get_region_size() : 0;
+		}
+		if (size > 0) {
+			_terrain->set_region_size((Pasture3D::RegionSize)size);
+		}
+	}
 	bool recomposited = false;
 	for (const Vector2i &region_loc : _regions.keys()) {
 		recomposited = _recomposite_if_stale(region_loc) || recomposited;
@@ -1019,6 +1051,25 @@ void Pasture3DData::load_directory(const String &p_dir) {
 	if (recomposited) {
 		update_maps(TYPE_MAX, false, false);
 	}
+}
+
+String Pasture3DData::region_file_path(const String &p_dir, const Vector2i &p_region_loc, bool *r_legacy) {
+	const String fname = Util::location_to_filename(p_region_loc);
+	String path = p_dir + String("/") + fname;
+	bool legacy = false;
+	if (!FileAccess::file_exists(path)) {
+		// Fall back to a legacy Terrain3D region file for this location.
+		path = p_dir + String("/") + fname.replace("pasture3d", "terrain3d");
+		legacy = true;
+		if (!FileAccess::file_exists(path)) {
+			path = String();
+			legacy = false;
+		}
+	}
+	if (r_legacy) {
+		*r_legacy = legacy;
+	}
+	return path;
 }
 
 //TODO have load_directory call load_region, or make a load_file that loads a specific path
@@ -1037,20 +1088,40 @@ Error Pasture3DData::load_region(const Vector2i &p_region_loc, const String &p_d
 		LOG(DEBUG, "Region ", p_region_loc, " is already loaded");
 		return OK;
 	}
-	String path = p_dir + String("/") + Util::location_to_filename(p_region_loc);
 	bool legacy = false;
-	if (!FileAccess::file_exists(path)) {
-		// Fall back to a legacy Terrain3D region file for this location.
-		String legacy_path = p_dir + String("/") + Util::location_to_filename(p_region_loc).replace("pasture3d", "terrain3d");
-		if (FileAccess::file_exists(legacy_path)) {
-			path = legacy_path;
-			legacy = true;
-		} else {
-			LOG(ERROR, "File ", path, " doesn't exist");
-			return ERR_FILE_NOT_FOUND;
-		}
+	const String path = region_file_path(p_dir, p_region_loc, &legacy);
+	if (path.is_empty()) {
+		LOG(ERROR, "No region file for ", p_region_loc, " in ", p_dir);
+		return ERR_FILE_NOT_FOUND;
 	}
 	Ref<Pasture3DRegion> region = ResourceLoader::get_singleton()->load(path, "Pasture3DRegion", ResourceLoader::CACHE_MODE_IGNORE);
+	Ref<Pasture3DLayerStack> slice;
+	const String slice_path = p_dir + String("/") + Util::location_to_layer_filename(p_region_loc);
+	if (_layer_stack.is_valid() && FileAccess::file_exists(slice_path)) {
+		slice = ResourceLoader::get_singleton()->load(slice_path, "Pasture3DLayerStack", ResourceLoader::CACHE_MODE_IGNORE);
+		if (slice.is_null()) {
+			LOG(ERROR, "Cannot load layer slice at ", slice_path);
+		}
+	}
+	return adopt_region(p_region_loc, region, path, legacy, slice, p_update);
+}
+
+// The main-thread half of a load: everything after the file reads. load_region calls it with what it just
+// read; Pasture3DStreamer calls it with what a worker thread read (ResourceLoader::load_threaded_request).
+// p_path is the file the region came from, p_slice its layer slice or null.
+Error Pasture3DData::adopt_region(const Vector2i &p_region_loc, const Ref<Pasture3DRegion> &p_region, const String &p_path,
+		const bool p_legacy, const Ref<Pasture3DLayerStack> &p_slice, const bool p_update) {
+	if (_regions.has(p_region_loc)) {
+		Pasture3DRegion *existing = get_region_ptr(p_region_loc);
+		if (existing && existing->is_deleted()) {
+			LOG(ERROR, "Region ", p_region_loc, " is marked for deletion; save or undo before loading it");
+			return ERR_BUSY;
+		}
+		return OK;
+	}
+	Ref<Pasture3DRegion> region = p_region;
+	const bool legacy = p_legacy;
+	const String &path = p_path;
 	if (region.is_null()) {
 		LOG(ERROR, "Cannot load region at ", path);
 		return ERR_FILE_CORRUPT;
@@ -1082,7 +1153,7 @@ Error Pasture3DData::load_region(const Vector2i &p_region_loc, const String &p_d
 	// Anything a layer still holds for this location is a leftover (an undo restored tiles for a region that
 	// was unloaded at the time); the slice on disk is what the region left with.
 	_evict_region_tiles(p_region_loc);
-	_merge_layer_slice(p_dir, p_region_loc);
+	_merge_layer_slice_from(p_slice, p_region_loc);
 	Error err = add_region(region, false);
 	if (err != OK) {
 		_evict_region_tiles(p_region_loc);
@@ -1096,6 +1167,9 @@ Error Pasture3DData::load_region(const Vector2i &p_region_loc, const String &p_d
 		if (_terrain) {
 			_terrain->get_instancer()->update_mmis(-1, p_region_loc);
 		}
+	}
+	if (_terrain) {
+		_terrain->get_collision()->region_changed(p_region_loc);
 	}
 	emit_signal("region_loaded", p_region_loc);
 	return OK;
@@ -1138,7 +1212,27 @@ Error Pasture3DData::unload_region(const Vector2i &p_region_loc, const bool p_up
 	}
 	_index_region(p_region_loc);
 	_save_region_index(dir);
+	_drop_region(p_region_loc, p_update);
+	return OK;
+}
 
+// Streaming's unload (spec §H): a game must never write its data, so nothing is saved. A region with changes
+// not on disk (runtime deformation, or an editor edit) is refused rather than lost; the caller keeps it.
+Error Pasture3DData::release_region(const Vector2i &p_region_loc, const bool p_update) {
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	if (!region) {
+		return ERR_DOES_NOT_EXIST;
+	}
+	if (region->is_deleted() || region->is_modified()) {
+		LOG(DEBUG, "Region ", p_region_loc, " has changes that are not on disk; not releasing it");
+		return ERR_BUSY;
+	}
+	_drop_region(p_region_loc, p_update);
+	return OK;
+}
+
+// What unload_region and release_region share once the region's data is safe (or needs no saving).
+void Pasture3DData::_drop_region(const Vector2i &p_region_loc, const bool p_update) {
 	_evict_region_tiles(p_region_loc);
 	if (_terrain) {
 		_terrain->get_instancer()->destroy_by_location(p_region_loc);
@@ -1154,8 +1248,10 @@ Error Pasture3DData::unload_region(const Vector2i &p_region_loc, const bool p_up
 	if (p_update) {
 		update_maps(TYPE_MAX, false, false); // Frees the slot; nothing re-uploads
 	}
+	if (_terrain) {
+		_terrain->get_collision()->region_changed(p_region_loc);
+	}
 	emit_signal("region_unloaded", p_region_loc);
-	return OK;
 }
 
 bool Pasture3DData::is_region_loaded(const Vector2i &p_region_loc) const {
@@ -1273,6 +1369,7 @@ void Pasture3DData::_load_region_index(const String &p_dir) {
 
 void Pasture3DData::_save_region_index(const String &p_dir) {
 	const String path = p_dir + String("/") + Util::REGION_INDEX_FILENAME;
+	_region_index->set_region_size(_region_size);
 	Error err = ResourceSaver::get_singleton()->save(_region_index, path, ResourceSaver::FLAG_COMPRESS);
 	if (err != OK) {
 		LOG(ERROR, "Could not save region index: ", path, ", error: ", err);
@@ -1292,6 +1389,15 @@ bool Pasture3DData::_merge_layer_slice(const String &p_dir, const Vector2i &p_re
 		LOG(ERROR, "Cannot load layer slice at ", slice_path);
 		return false;
 	}
+	return _merge_layer_slice_from(slice, p_region_loc);
+}
+
+// The merge itself, from a slice already read (by the line above, or by a streamer's worker thread).
+bool Pasture3DData::_merge_layer_slice_from(const Ref<Pasture3DLayerStack> &p_slice, const Vector2i &p_region_loc) {
+	if (_layer_stack.is_null() || p_slice.is_null()) {
+		return false;
+	}
+	const Ref<Pasture3DLayerStack> &slice = p_slice;
 	const int layer_count = _layer_stack->get_layer_count();
 	Dictionary index_by_uid;
 	for (int i = 0; i < layer_count; i++) {
@@ -4493,6 +4599,8 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("save_directory", "directory"), &Pasture3DData::save_directory);
 	ClassDB::bind_method(D_METHOD("save_region", "region_location", "directory", "save_16_bit"), &Pasture3DData::save_region, DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("load_directory", "directory"), &Pasture3DData::load_directory);
+	ClassDB::bind_method(D_METHOD("release_region", "region_location", "update"), &Pasture3DData::release_region, DEFVAL(true));
+	ClassDB::bind_static_method("Pasture3DData", D_METHOD("get_region_file_path", "directory", "region_location"), &Pasture3DData::get_region_file_path);
 	ClassDB::bind_method(D_METHOD("load_region", "region_location", "directory", "update"), &Pasture3DData::load_region, DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("unload_region", "region_location", "update"), &Pasture3DData::unload_region, DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("is_region_loaded", "region_location"), &Pasture3DData::is_region_loaded);

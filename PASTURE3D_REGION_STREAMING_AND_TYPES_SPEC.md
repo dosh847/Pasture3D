@@ -4,8 +4,49 @@
 built and gated (`bench/RegionSlotGate` 8/8, `bench/RegionSlotRenderProbe` windowed, commit 2015f72c);
 phase 2 split into 2a and 2b, both built and gated (`bench/RegionTypeGate` 8/8, `bench/RegionLayerGate`
 9/9, commit decc3889); phase 3 built and gated (`bench/RegionSeamGate` 5/5, `bench/RegionSeamRenderProbe`
-windowed 4/4, commit 3cc36c2e); phase 4 built and gated (`bench/RegionBakeScopeGate` 10/10, commit 1422e15a; see "Phase 4 as built"); phase 4b built and gated (`bench/RegionWaterGate` 6/6, `bench/RegionLakeTileGate` 5/5, `bench/RegionWaterRenderProbe` windowed 4/4, commit d9f03e9d; see "Phase 4b as built"); phase 5 built and gated (`bench/RegionPanelGate` 6/6; see "Phase 5 as built"); phase 6 not started.** Check the symbols named here before trusting this
+windowed 4/4, commit 3cc36c2e); phase 4 built and gated (`bench/RegionBakeScopeGate` 10/10, commit 1422e15a; see "Phase 4 as built"); phase 4b built and gated (`bench/RegionWaterGate` 6/6, `bench/RegionLakeTileGate` 5/5, `bench/RegionWaterRenderProbe` windowed 4/4, commit d9f03e9d; see "Phase 4b as built"); phase 5 built and gated (`bench/RegionPanelGate` 6/6; see "Phase 5 as built"); phase 6 built and gated (`bench/RegionStreamGate` 7/7, uncommitted; see "Phase 6 as built"). All phases are built; the memory investigation below is next.** Check the symbols named here before trusting this
 header: specs in this repo go stale.
+
+Phase 6 as built (game streaming and multi-source collision, §H; deviations marked):
+
+- **Streamer.** `src/pasture_3d_streamer.h/.cpp`, a C++ `Node` (not a subresource), `Pasture3DStreamer`.
+  Properties: `enabled`, `terrain`, `sources`, `threaded`, `max_pending_loads`, `max_adopts_per_frame`,
+  `adopt_budget_msec`, `feed_collision`. With no sources set it uses the terrain's `get_cameras()`, then the
+  viewport camera; sources that were set but left the tree do NOT fall back to the camera. It runs only in a
+  game (`tick()` is public so a gate can drive it). *Deviation:* the queue is ordered by distance ÷ (1 +
+  priority), not distance ÷ priority, so priority 0 is valid. Distance is to the region's rectangle, not its
+  centre.
+- **Load split.** `Pasture3DData::load_region` is now a disk read plus `adopt_region(loc, region, path,
+  legacy, slice, update)`, the main-thread half (one slot upload, one map texel, the layer slice merge). The
+  streamer reads through `ResourceLoader.load_threaded_request` and adopts at most `max_adopts_per_frame` per
+  frame, stopping early once `adopt_budget_msec` is spent (the first adopt of a frame always runs). A read
+  whose sources left before it finished is dropped on arrival; a failed read is not retried.
+- **Release, not unload.** *Deviation:* the streamer calls a new `release_region`, which drops a region
+  without saving and returns `ERR_BUSY` for a modified or deleted one. A game never writes region data: a
+  region with changes not on disk stays loaded and is reported once through the new `region_kept` signal.
+  (`unload_region` still auto-saves, for the editor.)
+- **Starting from the index.** *New:* `Pasture3D.load_all_regions` (Regions group, default on). Off, a game
+  loads only the region index and leaves regions to the streamer; the editor always loads everything. The
+  index now stores `region_size`, since no loaded region can supply it; an index written before that reads
+  one region file for the size. Every region file on disk without an index entry gets a bare entry.
+- **Collision.** `Pasture3D.collision_targets` (new, an array of `Node3D`) gives DYNAMIC collision one patch per
+  target. The streamer's `feed_collision` passes its sources in. The shape pool is grid_width² × target count;
+  disabled shapes are parked far away. *Deviation:* a region-map change no longer rebuilds the pool.
+  `on_region_map_changed` diffs a per-region signature (object, texel ratio, whether its type collides), and
+  only the shapes over regions that differ are rebuilt; FULL mode still rebuilds. `_grab_camera` keeps physics
+  processing on while a collision target exists (it used to turn it off headless, which froze the patches).
+- **Signals:** `region_loaded`, `region_unloaded`, `region_kept`, `streaming_idle`. `get_stats()` returns
+  counters (requests, threaded requests, adopted, released, dropped, failed, kept, pending, the largest
+  per-frame adopt count and time) for gates and profiling.
+- **Not built:** streaming in the editor (the editor loads everything, as §H scoped it); a memory budget
+  (see the investigation after the phase table).
+- **Gate** `bench/RegionStreamGate` 7/7: ST1 index-only start loads what the source is near, with threaded
+  reads; ST2 a streamed region is byte-identical to its file; ST3 two sources about 1.9 km apart both have ground
+  (control: feed_collision off leaves one without); ST4 moving inside the hysteresis band loads and unloads
+  nothing (control: unload radius = load radius thrashes, 11 events); ST5 adopts stay within the per-frame
+  count and a 0 ms budget still adopts one; ST6 a region loaded or released under a still patch changes its
+  collision without replacing the body (witness: the body RID; control: `build()` replaces it); ST7 nothing
+  is written, and a modified region is kept (control: `unload_region` writes).
 
 Phase 5 as built (region gizmo and panel, §G; deviations marked):
 

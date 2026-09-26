@@ -27,8 +27,13 @@ class Pasture3DRegionIndex : public Resource {
 	//   "stack_signature": int,      // Pasture3DData::_stack_signature() when the region was last written
 	// }
 	Dictionary _entries;
+	// The terrain's region size when the index was saved; 0 in an index written before it was recorded. A game
+	// that starts with only the index (load_all_regions off) has no region file to learn the size from.
+	int _region_size = 0;
 
 public:
+	void set_region_size(const int p_size) { _region_size = p_size; }
+	int get_region_size() const { return _region_size; }
 	void set_version(const real_t p_version) { _version = p_version; }
 	real_t get_version() const { return _version; }
 	void set_entries(const Dictionary &p_entries) { _entries = p_entries; }
