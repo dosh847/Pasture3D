@@ -71,6 +71,10 @@ void Pasture3D::_initialize() {
 		_data->connect("maps_changed", callable_mp(_material.ptr(), &Pasture3DMaterial::update).bind(Pasture3DMaterial::REGION_ARRAYS));
 	}
 	// Height map was regenerated, update aabbs
+	// A region map change can change which regions collapse, and so the AABBs' xz margin.
+	if (!_data->is_connected("region_map_changed", callable_mp(this, &Pasture3D::_update_mesher_aabbs))) {
+		_data->connect("region_map_changed", callable_mp(this, &Pasture3D::_update_mesher_aabbs));
+	}
 	if (!_data->is_connected("height_maps_changed", callable_mp(this, &Pasture3D::_update_mesher_aabbs))) {
 		LOG(DEBUG, "Connecting _data::height_maps_changed signal to update_aabbs()");
 		_data->connect("height_maps_changed", callable_mp(this, &Pasture3D::_update_mesher_aabbs));

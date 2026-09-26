@@ -6,7 +6,7 @@ R"(
 //INSERT: EDITOR_NAVIGATION
 	// Show navigation
 	{
-		if(bool(floatBitsToUint(texelFetch(_control_maps, get_index_coord(floor(uv + 0.5)), 0)).r >>1u & 0x1u)) {
+		if(bool(fetch_control(get_index_coord(floor(uv + 0.5))) >>1u & 0x1u)) {
 			ALBEDO *= vec3(.5, .0, .85);
 		}
 	}

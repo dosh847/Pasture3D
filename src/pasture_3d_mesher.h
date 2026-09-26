@@ -53,6 +53,7 @@ private:
 
 	// Shared, view-independent mesh resources
 	Array _mesh_rids;
+	Vector<AABB> _mesh_base_aabbs; // Each mesh's AABB as generated; update_aabbs derives from it
 	// Per-camera clipmap instance-sets
 	Vector<ClipmapView> _views;
 	// Terrain mesher writes _target_pos per-instance (each view geomorphs to its own snap center).

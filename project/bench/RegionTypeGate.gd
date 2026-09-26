@@ -103,8 +103,10 @@ func _rt2_heights_match_the_oracle() -> void:
 	print("[RT2] ratio-4 heights match the oracle:")
 	var d = _terrain.data
 	var fine := _heights(A) # before conversion
-	var nb := {B: _heights(B), C: _heights(C), D: _heights(D)}
 	var err: int = d.set_region_type(A, _background)
+	# The neighbours as they are after conversion: B and C meet A's far edges, and phase 3 stitches their
+	# first column (row) to A's lattice. get_height answers from that.
+	var nb := {B: _heights(B), C: _heights(C), D: _heights(D)}
 	_check("set_region_type OK (%d)" % err, err == OK)
 	var r = d.get_region(A)
 	_check("ratio 4, map 64x64 (got %d, %s)" % [r.get_texel_ratio(), r.get_height_map().get_size()],
@@ -168,21 +170,27 @@ func _rt3_coarse_region_round_trips() -> void:
 	_completed += 1
 
 
-# --- RT4: a coarse region uploads through the full-size arrays, one layer per type --------------------------
+# --- RT4: a coarse region uploads into the coarse arrays, one layer per type ---------------------------------
 func _rt4_upload_is_one_layer_per_type() -> void:
 	print("[RT4] coarse upload:")
 	var d = _terrain.data
 	d.reset_upload_stats()
 	d.set_region_type(C, _coarse_keep)
 	var s: Dictionary = d.get_upload_stats()
-	_check("retype uploads 3 layers, creates 0 arrays (got %d, %d)" % [s.layer_uploads, s.array_creates], s.layer_uploads == 3 and s.array_creates == 0)
-	var slot: int = d.get_region_id(C)
-	var up: Image = d.get_height_maps()[slot]
-	_check("the uploaded layer is full size (%s)" % up.get_size(), up.get_size() == Vector2i(RS, RS))
+	# C's three layers into the coarse arrays A already created, and D's stitched height: D's -x neighbour is
+	# now C (phase 3). Nothing is recreated.
+	_check("retype uploads C's 3 layers and D's stitched height, creates 0 arrays (got %d, %d)" % [s.layer_uploads, s.array_creates],
+		s.layer_uploads == 4 and s.array_creates == 0)
+	var id: int = d.get_region_id(C)
+	_check("C is in the coarse pool (id %d)" % id, Pasture3DData.region_id_is_coarse(id))
+	var slot: int = Pasture3DData.region_id_slot(id)
+	_check("control: C left the fine pool", not d.get_slot_locations().has(C) and d.get_coarse_slot_locations()[slot] == C)
+	var up: Image = d.get_coarse_maps(0)[slot]
+	_check("the uploaded layer is the 64 map, not a full-size copy (%s)" % up.get_size(), up.get_size() == Vector2i(RS / 4, RS / 4))
 	var worst := 0.0
-	for p in [Vector2i(0, 0), Vector2i(37, 91), Vector2i(255, 255), Vector2i(128, 3)]:
-		worst = maxf(worst, absf(up.get_pixelv(p).r - d.get_height_at_vertex(C * RS + p)))
-	_check("it samples what the CPU answers (max %.6f)" % worst, worst < 1e-5)
+	for p in [Vector2i(0, 0), Vector2i(9, 23), Vector2i(63, 63), Vector2i(32, 1)]:
+		worst = maxf(worst, absf(up.get_pixelv(p).r - d.get_height_at_vertex(C * RS + p * 4)))
+	_check("its texels are the lattice heights the CPU answers (max %.6f)" % worst, worst < 1e-5)
 	_completed += 1
 
 

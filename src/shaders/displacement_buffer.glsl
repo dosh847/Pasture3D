@@ -54,6 +54,7 @@ uniform vec2 _texture_detile_array[32];
 uniform vec2 _texture_displacement_array[32];
 uniform highp sampler2DArray _height_maps : repeat_disable;
 uniform highp sampler2DArray _control_maps : repeat_disable;
+//INSERT: REGION_FETCH
 //INSERT: TEXTURE_SAMPLERS_LINEAR_ANISOTROPIC
 //INSERT: TEXTURE_SAMPLERS_LINEAR
 //INSERT: TEXTURE_SAMPLERS_NEAREST_ANISOTROPIC
@@ -103,11 +104,10 @@ ivec3 get_index_coord(const vec2 uv) {
 
 // Takes in descaled (world_space / region_size) world to region space XZ (UV2) coordinates, returns vec3 with:
 // XY: (0. to 1.) coordinates within a region
-// Z: layer index used for texturearrays, -1 if not in a region
+// Z: region id (region_map.glsl), -1 if not in a region
 vec3 get_index_uv(const vec2 uv2) {
 	int layer_index = region_map_slot(ivec2(floor(uv2)) + (_region_map_size / 2));
-	// Clamped index: _region_locations[-1] is out of bounds, and the caller ignores xy when z is -1.
-	return vec3(uv2 - _region_locations[max(layer_index, 0)], float(layer_index));
+	return vec3(uv2 - floor(uv2), float(layer_index));
 }
 
 ////////////////////////
@@ -123,7 +123,7 @@ vec2 rotate_vec2(const vec2 v, const vec2 cs) {
 }
 
 // 2-4 lookups ( 2-6 with dual scaling )
-void accumulate_material(const mat3 TNB, const float weight, const ivec3 index,
+void accumulate_material(const mat3 TNB, const float weight, const ivec3 index, const vec2 index_pos,
 			const uint control, const vec2 texture_weight, const ivec2 texture_id, const vec3 i_normal,
 			float h, inout material mat, const vec3 v_vertex) {
 
@@ -136,8 +136,7 @@ void accumulate_material(const mat3 TNB, const float weight, const ivec3 index,
 	h *= control_scale;
 
 	// Index position for detiling.
-	vec2 i_pos = fma(_region_locations[index.z], vec2(_region_size), vec2(index.xy));
-	i_pos *= _vertex_spacing * control_scale;
+	vec2 i_pos = index_pos * _vertex_spacing * control_scale;
 
 	// Projection
 	vec2 i_uv = i_vertex.xz;
@@ -229,7 +228,7 @@ void accumulate_material(const mat3 TNB, const float weight, const ivec3 index,
 }
 
 float get_height(vec2 index_id, vec2 offset) {
-	float height = texelFetch(_height_maps, get_index_coord(index_id + offset), 0).r;
+	float height = vertex_height(index_id + offset);
 //INSERT: FLAT_FRAGMENT
 	return height;
 }
@@ -307,11 +306,8 @@ void fragment() {
 
 	// Get index control data
 	// 1 - 4 lookups
-	uvec4 control = uvec4(
-		floatBitsToUint(texelFetch(_control_maps, index[0], 0).r),
-		floatBitsToUint(texelFetch(_control_maps, index[1], 0).r),
-		floatBitsToUint(texelFetch(_control_maps, index[2], 0).r),
-		floatBitsToUint(texelFetch(_control_maps, index[3], 0).r));
+	uvec4 control = uvec4(fetch_control(index[0]), fetch_control(index[1]), fetch_control(index[2]),
+		fetch_control(index[3]));
 
 //INSERT: AUTO_SHADER
 
@@ -352,13 +348,13 @@ void fragment() {
 
 	// Struct to accumulate all texture data.
 	material mat = material(0., 0.);
-	accumulate_material(TNB, weights[3], index[3], control[3], t_weights[3],
+	accumulate_material(TNB, weights[3], index[3], index_id + offsets.xx, control[3], t_weights[3],
 		texture_ids[3], index_normal[3], h[3], mat, v_vertex);
-	accumulate_material(TNB, weights[2], index[2], control[2], t_weights[2],
+	accumulate_material(TNB, weights[2], index[2], index_id + offsets.yx, control[2], t_weights[2],
 		texture_ids[2], index_normal[2], h[2], mat, v_vertex);
-	accumulate_material(TNB, weights[1], index[1], control[1], t_weights[1],
+	accumulate_material(TNB, weights[1], index[1], index_id + offsets.yy, control[1], t_weights[1],
 		texture_ids[1], index_normal[1], h[1], mat, v_vertex);
-	accumulate_material(TNB, weights[0], index[0], control[0], t_weights[0],
+	accumulate_material(TNB, weights[0], index[0], index_id + offsets.xy, control[0], t_weights[0],
 		texture_ids[0], index_normal[0], h[0], mat, v_vertex);
 
 	// normalize accumulated values back to 0.0 - 1.0 range.

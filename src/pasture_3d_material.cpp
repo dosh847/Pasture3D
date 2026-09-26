@@ -674,21 +674,23 @@ void Pasture3DMaterial::_update_uniforms(const RID &p_material, const uint32_t p
 	RS->material_set_param(p_material, "_region_map", data->get_region_map_rid());
 	RS->material_set_param(p_material, "_region_map_size", Pasture3DData::get_region_map_size());
 
-	// _region_locations is indexed by SLOT, so it is the slot table, not the active-region list.
+	// _region_locations is indexed by the fine SLOT, so it is the fine slot table, not the active-region list.
+	// The built-in shaders no longer read it (a position already names its region); it stays for custom
+	// shaders, which see only Standard regions through it.
 	TypedArray<Vector2i> slot_locations = data->get_slot_locations();
 	LOG(EXTREME, "Slot locations: ", slot_locations.size(), " ", slot_locations);
 	// Padded to exactly the length the shader compiled: a short upload would leave the tail of the uniform
-	// undefined, a long one would overrun it. Slots are allocated lowest-first, so a slot at or past the
-	// ceiling means more regions are loaded than max_regions; the shader reads those as "no region".
+	// undefined, a long one would overrun it.
 	int highest_used = -1;
 	for (int i = 0; i < slot_locations.size(); i++) {
-		if (data->get_region_id(slot_locations[i]) == i) {
+		const int id = data->get_region_id(slot_locations[i]);
+		if (!Pasture3DData::region_id_is_coarse(id) && Pasture3DData::region_id_slot(id) == i) {
 			highest_used = i;
 		}
 	}
 	if (highest_used >= (int)_max_regions) {
-		LOG(WARN, "Scene has ", data->get_region_count(), " loaded regions but max_regions is ",
-				(int)_max_regions, "; the excess will not render. Raise Pasture3DMaterial.max_regions.");
+		LOG(DEBUG, "Fine slot ", highest_used, " is past max_regions ", (int)_max_regions,
+				"; a custom shader indexing _region_locations will not see it.");
 	}
 	TypedArray<Vector2i> padded_locations;
 	padded_locations.resize((int)_max_regions);
@@ -703,20 +705,19 @@ void Pasture3DMaterial::_update_uniforms(const RID &p_material, const uint32_t p
 	RS->material_set_param(p_material, "_region_texel_size", 1.0f / region_size);
 
 	if (p_flags & REGION_ARRAYS) {
-		if (data->get_region_count() > 0) {
-			RS->material_set_param(p_material, "_height_maps", data->get_height_maps_rid());
-			RS->material_set_param(p_material, "_control_maps", data->get_control_maps_rid());
-			RS->material_set_param(p_material, "_color_maps", data->get_color_maps_rid());
-			LOG(EXTREME, "Height map RID: ", data->get_height_maps_rid());
-			LOG(EXTREME, "Control map RID: ", data->get_control_maps_rid());
-			LOG(EXTREME, "Color map RID: ", data->get_color_maps_rid());
-		} else {
-			// Send dummy texture array to stop compatibility error spam
-			RS->material_set_param(p_material, "_height_maps", _generated_dummy.get_rid());
-			RS->material_set_param(p_material, "_control_maps", _generated_dummy.get_rid());
-			RS->material_set_param(p_material, "_color_maps", _generated_dummy.get_rid());
+		// Each array set on its own: a world can be all Standard, all coarse, or neither. An empty set gets the
+		// dummy array to stop compatibility error spam.
+		static const char *FINE[TYPE_MAX] = { "_height_maps", "_control_maps", "_color_maps" };
+		static const char *COARSE[TYPE_MAX] = { "_coarse_height_maps", "_coarse_control_maps", "_coarse_color_maps" };
+		const RID fine[TYPE_MAX] = { data->get_height_maps_rid(), data->get_control_maps_rid(), data->get_color_maps_rid() };
+		for (int t = 0; t < TYPE_MAX; t++) {
+			RS->material_set_param(p_material, FINE[t], fine[t].is_valid() ? fine[t] : _generated_dummy.get_rid());
+			const RID coarse = data->get_coarse_maps_rid(MapType(t));
+			RS->material_set_param(p_material, COARSE[t], coarse.is_valid() ? coarse : _generated_dummy.get_rid());
 		}
+		LOG(EXTREME, "Height map RID: ", fine[0], ", coarse: ", data->get_coarse_maps_rid(TYPE_HEIGHT));
 	}
+	RS->material_set_param(p_material, "_coarse_store_shift", data->get_coarse_store_shift());
 
 	real_t spacing = _terrain->get_vertex_spacing();
 	LOG(EXTREME, "Setting vertex spacing in material: ", spacing);

@@ -234,6 +234,10 @@ public:
 	virtual bool is_clipmap_visible() const override { return is_visible_in_tree(); }
 	virtual real_t get_default_cull_margin() const override { return _cull_margin; }
 	virtual Vector2 get_default_height_range() const override;
+	// A collapsed vertex moves back up to (ratio - 1) vertices; the finest level's mesh unit is a vertex / subdiv.
+	virtual real_t get_default_xz_back_margin() const override {
+		return _data ? real_t(_data->get_collapse_ratio_max() - 1) * real_t(1 << _tessellation_level) : 0.f;
+	}
 
 	// --- Legacy ocean migration (§6.4) --------------------------------------
 	// Builds a Pasture3DPoolManager + Pasture3DOcean from ocean_* properties captured out of a

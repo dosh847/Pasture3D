@@ -85,34 +85,39 @@ private:
 	// update_maps); it no longer defines the slot.
 	TypedArray<Vector2i> _region_locations;
 
-	// Slot pool (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md §B). _slot_locations[slot] is the location in
-	// that slot, or V2I_MAX when free; _slot_region_ids[slot] is the ObjectID of the region uploaded there, so
-	// a region object replaced at the same location (undo, reload) is re-uploaded. Its size is the array
-	// capacity, a multiple of SLOT_CHUNK. Allocation takes the LOWEST free slot so slots stay below the
-	// material's max_regions for as long as the loaded count does.
-	TypedArray<Vector2i> _slot_locations;
-	PackedInt64Array _slot_region_ids;
-	Dictionary _region_slots; // Dict[region_location:Vector2i] -> slot:int
-
-	// Slot-indexed images backing the texture arrays; a free slot holds a placeholder of the same shape.
-	TypedArray<Image> _height_maps;
-	TypedArray<Image> _control_maps;
-	TypedArray<Image> _color_maps;
-	Ref<Image> _placeholders[TYPE_MAX]; // One blank per map type, shaped like the array it pads
+	// Slot pools (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md §B, §D), one per texture-array set: POOL_FINE
+	// holds Standard (texel ratio 1) regions at full size, POOL_COARSE every coarse region at the finest
+	// coarse ratio loaded (1 << _coarse_store_shift), so a ratio-4 region costs 1/16 of a Standard one.
+	// locations[slot] is the location in that slot, or V2I_MAX when free; region_ids[slot] is the ObjectID of
+	// the region uploaded there, so a region object replaced at the same location (undo, reload) is
+	// re-uploaded. Its size is the array capacity, a multiple of SLOT_CHUNK. Allocation takes the LOWEST free
+	// slot. maps[] are the slot-indexed images backing the arrays; a free slot holds a placeholder.
+	struct SlotPool {
+		TypedArray<Vector2i> locations;
+		PackedInt64Array region_ids;
+		Dictionary slots; // Dict[region_location:Vector2i] -> slot:int
+		TypedArray<Image> maps[TYPE_MAX];
+		Ref<Image> placeholders[TYPE_MAX]; // One blank per map type, shaped like the array it pads
+		GeneratedTexture gens[TYPE_MAX]; // The TextureArray RIDs from the RenderingServer
+	};
+	enum PoolId {
+		POOL_FINE,
+		POOL_COARSE,
+		POOL_MAX,
+	};
+	SlotPool _pools[POOL_MAX];
+	int _coarse_store_shift = 0; // log2 of the coarse arrays' texel ratio; 0 while no coarse region is loaded
+	int _collapse_ratio_max = 1; // Coarsest texel ratio among loaded regions whose type collapses; 1 with none
+	bool _seam_stitch_enabled = true; // Not saved: off only for gates that need the unstitched seam as a control
 	// Region types by path. "" and a missing file both resolve to Standard (see load_region_type).
 	mutable Dictionary _type_cache;
 	mutable Ref<Pasture3DRegionType> _fallback_standard;
 
-	// get_region_map_size()^2 encoded texels (region_map_encode): 0 = no region, else slot + 1. The CPU copy
-	// for C++ readers; _generated_region_map is the same values as an RF texture for the shaders.
+	// get_region_map_size()^2 encoded texels (region_map_encode): 0 = no region. The CPU copy for C++
+	// readers; _generated_region_map is the same values as an RF texture for the shaders.
 	PackedInt32Array _region_map;
 	bool _region_map_dirty = true;
 	GeneratedTexture _generated_region_map;
-
-	// These contain the TextureArray RIDs from the RenderingServer
-	GeneratedTexture _generated_height_maps;
-	GeneratedTexture _generated_control_maps;
-	GeneratedTexture _generated_color_maps;
 
 	// Upload accounting, so a gate can prove that loading one region uploads one layer per map type.
 	int64_t _stat_layer_uploads = 0;
@@ -146,18 +151,34 @@ private:
 
 	// Functions
 	void _clear();
-	// Slot pool. _sync_slots frees slots whose region went away and gives every active region without one
-	// the lowest free slot; r_fresh gets each slot whose contents must be uploaded. Returns true if the
-	// capacity grew (the arrays must be recreated).
-	bool _sync_slots(PackedInt32Array &r_fresh);
-	void _release_slot(const Vector2i &p_region_loc);
+	// Slot pools. _sync_slots frees slots whose region went away (or moved to the other pool) and gives every
+	// active region of the pool without one the lowest free slot; r_fresh gets each slot whose contents must
+	// be uploaded. Returns true if the capacity grew (the arrays must be recreated).
+	static PoolId _pool_of(const Pasture3DRegion *p_region) { return p_region->is_coarse() ? POOL_COARSE : POOL_FINE; }
+	bool _sync_slots(const PoolId p_pool, PackedInt32Array &r_fresh);
+	void _release_slot(const PoolId p_pool, const Vector2i &p_region_loc);
+	// The coarse arrays' ratio: the finest coarse ratio among the loaded regions (0 with none).
+	int _coarse_shift_needed() const;
 	void _rebuild_region_map();
-	// A blank shaped like p_like (size, format, mipmaps), cached per map type.
-	Ref<Image> _placeholder(const MapType p_type, const Ref<Image> &p_like);
-	void _build_array(const MapType p_type);
-	// The image a region uploads for a map type. A coarse region has no arrays of its own until phase 3, so
-	// it rides the full-size arrays as an upsampled copy, sampled the way the CPU reads it.
+	// A blank shaped like p_like (size, format, mipmaps), cached per pool and map type.
+	Ref<Image> _placeholder(const PoolId p_pool, const MapType p_type, const Ref<Image> &p_like);
+	void _build_array(const PoolId p_pool, const MapType p_type);
+	// The image a region uploads for a map type: its own map, except a coarse region coarser than the coarse
+	// arrays' ratio, which uploads a copy upsampled to it (the shader reads only its lattice texels for height).
 	Ref<Image> _gpu_map(const Pasture3DRegion *p_region, const MapType p_type) const;
+	// A region's map at full size: a coarse one upsampled as the CPU reads it (exports).
+	Ref<Image> _full_size_map(const Pasture3DRegion *p_region, const MapType p_type) const;
+	// Seam stitch (spec §D). Where the region's -x or -z neighbour is coarser, that neighbour's lattice ends on
+	// this region's first column (row), and a collapsed mesh meets it with straight segments between the
+	// lattice points. The region's edge texels between them are set to the line, so the mesh, collision and
+	// get_height agree. Reads only the neighbour's ratio (the region index's when it is unloaded) and this
+	// region's own texels, plus the next region's origin for the last segment, which is left alone while that
+	// region is unloaded. Returns true if a texel changed.
+	bool _stitch_region(const Vector2i &p_region_loc);
+	// Texel ratio of the region at a location, loaded or only indexed; 0 when there is none.
+	int _ratio_at(const Vector2i &p_region_loc) const;
+	// Region type flags for the region map, from the region's type.
+	void _region_flags(const Pasture3DRegion *p_region, bool &r_collapse, bool &r_color_only) const;
 	// Height at a fine vertex (region-local) of a coarse region: bilinear on its lattice, whose far corners
 	// are the neighbours' vertices.
 	real_t _coarse_height(const Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Vector2i &p_fine) const;
@@ -264,11 +285,29 @@ public:
 	static inline int s_region_map_size = 0; // Cached project setting; 0 until first read
 	static int _read_region_map_size();
 	static int get_region_map_index(const Vector2i &p_region_loc);
-	// The region map encoding, defined here and in shaders/region_map.glsl ONLY.
-	static int region_map_encode(const int p_slot) { return p_slot + 1; }
-	static int region_map_decode(const int p_value) { return p_value - 1; } // -1 = no region
+	// The region map encoding, defined here and in shaders/region_map.glsl ONLY. A Standard region is
+	// (slot + 1) | color_only << 20; a coarse one -((slot + 1) | shift << 16 | collapse << 19 | color_only << 20).
+	static int region_map_encode(const int p_slot, const int p_shift = 0, const bool p_collapse = false, const bool p_color_only = false) {
+		const int flags = (int(p_color_only) << 20) | (p_shift > 0 ? (p_shift << 16) | (int(p_collapse) << 19) : 0);
+		return p_shift > 0 ? -((p_slot + 1) | flags) : (p_slot + 1) | flags;
+	}
+	// A region id: -1 for none, else slot | shift << 16 | collapse << 19 | color_only << 20.
+	static int region_map_decode(const int p_value) { return p_value == 0 ? -1 : ABS(p_value) - 1; }
+	static int region_id_slot(const int p_id) { return p_id < 0 ? -1 : (p_id & 0xFFFF); }
+	static bool region_id_is_coarse(const int p_id) { return p_id >= 0 && ((p_id >> 16) & 0x7) != 0; }
 	TypedArray<Vector2i> get_slot_locations() const;
-	int get_slot_capacity() const { return _slot_locations.size(); }
+	int get_slot_capacity() const { return _pools[POOL_FINE].locations.size(); }
+	TypedArray<Vector2i> get_coarse_slot_locations() const;
+	int get_coarse_slot_capacity() const { return _pools[POOL_COARSE].locations.size(); }
+	int get_coarse_store_ratio() const { return _coarse_store_shift > 0 ? 1 << _coarse_store_shift : 0; }
+	int get_coarse_store_shift() const { return _coarse_store_shift; }
+	// Vertex collapse moves a vertex back (-x, -z) by up to this ratio minus one vertices, which can carry a
+	// triangle outside its clipmap mesh's cull AABB; the mesher widens the AABBs by it (Pasture3D).
+	int get_collapse_ratio_max() const { return _collapse_ratio_max; }
+	// The seam stitch (_stitch_region) is on by default and not saved. Off leaves a Standard region's edge
+	// against a coarser neighbour as authored, so the collapsed mesh cracks there: a gate control, not a mode.
+	void set_seam_stitch_enabled(const bool p_enabled) { _seam_stitch_enabled = p_enabled; }
+	bool is_seam_stitch_enabled() const { return _seam_stitch_enabled; }
 	Dictionary get_upload_stats() const;
 	void reset_upload_stats();
 
@@ -563,14 +602,21 @@ public:
 	bool load_layers(const String &p_dir); // Returns true if a manifest was found and loaded.
 
 	// Maps
-	TypedArray<Image> get_height_maps() const { return _height_maps; }
-	TypedArray<Image> get_control_maps() const { return _control_maps; }
-	TypedArray<Image> get_color_maps() const { return _color_maps; }
+	TypedArray<Image> get_height_maps() const { return _pools[POOL_FINE].maps[TYPE_HEIGHT]; }
+	TypedArray<Image> get_control_maps() const { return _pools[POOL_FINE].maps[TYPE_CONTROL]; }
+	TypedArray<Image> get_color_maps() const { return _pools[POOL_FINE].maps[TYPE_COLOR]; }
 	TypedArray<Image> get_maps(const MapType p_map_type) const;
 	void update_maps(const MapType p_map_type = TYPE_MAX, const bool p_all_regions = true, const bool p_generate_mipmaps = false);
-	RID get_height_maps_rid() const { return _generated_height_maps.get_rid(); }
-	RID get_control_maps_rid() const { return _generated_control_maps.get_rid(); }
-	RID get_color_maps_rid() const { return _generated_color_maps.get_rid(); }
+	RID get_height_maps_rid() const { return _pools[POOL_FINE].gens[TYPE_HEIGHT].get_rid(); }
+	RID get_control_maps_rid() const { return _pools[POOL_FINE].gens[TYPE_CONTROL].get_rid(); }
+	RID get_color_maps_rid() const { return _pools[POOL_FINE].gens[TYPE_COLOR].get_rid(); }
+	// The coarse arrays (spec §D) and their slot-indexed images; invalid and empty while no coarse region is loaded.
+	TypedArray<Image> get_coarse_maps(const MapType p_map_type) const {
+		return p_map_type >= 0 && p_map_type < TYPE_MAX ? _pools[POOL_COARSE].maps[p_map_type] : TypedArray<Image>();
+	}
+	RID get_coarse_maps_rid(const MapType p_map_type) const {
+		return p_map_type >= 0 && p_map_type < TYPE_MAX ? _pools[POOL_COARSE].gens[p_map_type].get_rid() : RID();
+	}
 
 	void set_pixel(const MapType p_map_type, const Vector3 &p_global_position, const Color &p_pixel);
 	Color get_pixel(const MapType p_map_type, const Vector3 &p_global_position) const;
@@ -671,7 +717,8 @@ inline int Pasture3DData::get_region_id(const Vector2i &p_region_loc) const {
 	int map_index = get_region_map_index(p_region_loc);
 	if (map_index >= 0) {
 		int region_id = region_map_decode(_region_map[map_index]);
-		if (region_id >= 0 && region_id < _slot_locations.size()) {
+		const int slot = region_id_slot(region_id);
+		if (slot >= 0 && slot < _pools[region_id_is_coarse(region_id) ? POOL_COARSE : POOL_FINE].locations.size()) {
 			return region_id;
 		}
 	}

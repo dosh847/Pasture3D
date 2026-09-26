@@ -3,8 +3,69 @@
 **Status (2026-09-25): phase 0 built and gated (`bench/RegionUnloadGate`, commit c2388feb); phase 1
 built and gated (`bench/RegionSlotGate` 8/8, `bench/RegionSlotRenderProbe` windowed, commit 2015f72c);
 phase 2 split into 2a and 2b, both built and gated (`bench/RegionTypeGate` 8/8, `bench/RegionLayerGate`
-9/9, uncommitted on `feat/region-streaming-phase0`); phases 3–6 not started.** Check the symbols named here before
-trusting this header: specs in this repo go stale.
+9/9, commit decc3889); phase 3 built and gated (`bench/RegionSeamGate` 5/5, `bench/RegionSeamRenderProbe`
+windowed 4/4); phases 4–6 not started.** Check the symbols named here before trusting this
+header: specs in this repo go stale.
+
+Phase 3 as built (Background rendering, §D; deviations marked):
+
+- **Two array sets, not one per ratio (deviation).** `POOL_FINE` holds Standard regions at full size, and
+  `POOL_COARSE` holds every coarse region at the finest coarse ratio loaded (`get_coarse_store_ratio`). A
+  coarser region in the same pool is uploaded upsampled to that ratio, and the shader reads only its lattice
+  texels for height, so mixed coarse ratios work but cost the finest one's VRAM. A change in the store
+  ratio recreates the coarse arrays. Each pool has its own slots, free list and placeholders
+  (`get_coarse_slot_locations`, `get_coarse_maps`, `get_coarse_maps_rid`).
+- **Region map encoding:** still an RF texture of exact integers. A Standard region is `(slot+1) |
+  color_only<<20`, a coarse one `-((slot+1) | shift<<16 | collapse<<19 | color_only<<20)`. The shader and C++
+  id is `abs(v)-1`: `slot | flags`, or -1 for none. The encoding is defined only in `region_map_encode` and
+  `region_map.glsl`, and the macros `REGION_SLOT/LAYER/SHIFT/COLLAPSE/COLOR_ONLY/COARSE` read it.
+  `region_id_slot` and `region_id_is_coarse` are the C++ readers.
+- **Shaders:**
+  - `vertex_height(pos)` is the GPU twin of `get_height_at_vertex`: bilinear on a coarse lattice, with the
+    far corners taken from the neighbour's vertex (the edge texel when there is none).
+  - `fetch_control`/`fetch_color` read the texel at or before the position, and colour sampling shifts the
+    mip by the store ratio.
+  - The shaders no longer read `_region_locations`: the region's own position is passed in.
+  - COLOR_ONLY regions skip `accumulate_material` and use a neutral material under the colour map.
+- **Vertex collapse:** a vertex over a collapsing region snaps to the lattice point **at or before** it,
+  never the nearest one. Nearest would put the last row on the finer neighbour's edge and leave that edge's
+  own vertices standing off it. The last cell fans into the neighbour's fine edge vertices.
+- **Collapse and culling:** a collapsed vertex moves up to `ratio-1` vertices toward -x/-z, which can carry
+  a triangle out of its clipmap mesh's cull AABB. The mesher widens each mesh AABB on those sides by
+  `get_default_xz_back_margin()`. That is a new `Pasture3DClipmapHost` virtual, 0 by default; the terrain
+  answers `(get_collapse_ratio_max()-1) * subdiv`. It is refreshed on `region_map_changed`. Without it, a
+  narrow camera (the picking camera, 0.1 m ortho) missed 4 of 16 samples down a collapsed cell.
+- **Seam stitch, on the data (as §D).** `_stitch_region` runs inside `update_maps` for every edited or fresh
+  region and its four neighbours (all regions on a full update). Where a region's -x or -z neighbour is
+  coarser, its first column/row between that neighbour's lattice points becomes the straight line, so the
+  fan is planar. The neighbour's ratio comes from the loaded region, else the region index. The last
+  segment ends on the next region's origin: it is skipped while that region is unloaded but indexed, and
+  held flat at the world's edge. A restitched region uploads height only and is marked modified, so the
+  stitch is saved. `set_seam_stitch_enabled(false)` (not saved) exists only as a gate control.
+- **Normals:** the fragment scales its derivative offsets and the normal's y by the region's ratio
+  (`region_ratio_at`), so a coarse region is lit at its own spacing.
+- **Proofs:**
+  - RegionSeamGate: the stitch oracle on both axes; the toggle; unloaded neighbours (restitch from the
+    index; the last segment held); layer bytes of exactly 16:1 (a ratio-2 control gives 4:1); the
+    encoding.
+  - RegionSeamRenderProbe: GPU picking against CPU `get_height` over the last cell is 0.019 m stitched
+    and 2.4 m unstitched. A cell centre is 2.0 off the bilinear with collapse and 0.019 without. There
+    is no clear colour along the border (control: the world edge).
+  - VRAM: `RENDER_TEXTURE_MEM_USED` gives exactly 16:1 per layer once a fixed 2,732 B per-layer counter
+    residual, the same in both pools, is taken off. Raw, it is 15.29:1.
+- **Limitations:**
+  - The extras shaders (lightweight, minimum, particles) treat a coarse region as absent.
+  - The displacement buffer has no per-ratio normals.
+  - A stitch flattens the Standard edge's detail irreversibly.
+  - A restitch caused by an edit to a corner origin leaves the neighbour's collision slightly stale until
+    its next collision update.
+  - The `max_regions` warning is demoted to DEBUG, because slots no longer index `_region_locations`.
+  - **Open: terrain frame time.** `WaterBodiesPhase2Gate` [A] measured `terrain_clipmap` at 0.316 ms against
+    its 0.278 ms reference (+13.7%, pixels identical). The phase 3 vertex shader adds a region-map lookup per
+    vertex for collapse, but the reference may also be stale. An A/B timing against decc3889 decides it;
+    ask before running it ([[ask-before-perf-tests]]).
+  - `RegionSlotRenderProbe` now waits for physics ticks: the clipmap snaps in `_physics_process`, and a
+    fixed 6-frame wait was racing it (flaky, not a regression).
 
 Phase 2a as built (types, CPU data paths, toggles, lock):
 

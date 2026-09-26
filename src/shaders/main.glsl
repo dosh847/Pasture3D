@@ -75,11 +75,13 @@ uniform vec2 _texture_detile_array[32];
 uniform vec4 _texture_color_array[32];
 uniform highp sampler2DArray _height_maps : repeat_disable;
 uniform highp sampler2DArray _control_maps : repeat_disable;
+//INSERT: REGION_FETCH
 //INSERT: TEXTURE_SAMPLERS_LINEAR_ANISOTROPIC
 //INSERT: TEXTURE_SAMPLERS_LINEAR
 //INSERT: TEXTURE_SAMPLERS_NEAREST_ANISOTROPIC
 //INSERT: TEXTURE_SAMPLERS_NEAREST
 uniform highp sampler2DArray _color_maps : source_color, FILTER_METHOD, repeat_disable;
+uniform highp sampler2DArray _coarse_color_maps : source_color, FILTER_METHOD, repeat_disable;
 uniform highp sampler2DArray _texture_array_albedo : source_color, FILTER_METHOD, repeat_enable;
 uniform highp sampler2DArray _texture_array_normal : hint_normal, FILTER_METHOD, repeat_enable;
 // Driven from Pasture3D.light_target. Zero direction means "no light assigned", which the
@@ -147,25 +149,38 @@ ivec3 get_index_coord(const vec2 uv) {
 
 // Takes in descaled (world_space / region_size) world to region space XZ (UV2) coordinates, returns vec3 with:
 // XY: (0. to 1.) coordinates within a region
-// Z: layer index used for texturearrays, -1 if not in a region
+// Z: region id (region_map.glsl), -1 if not in a region
 vec3 get_index_uv(const vec2 uv2) {
 	int layer_index = region_map_slot(ivec2(floor(uv2)) + (_region_map_size / 2));
-	// Clamped index: _region_locations[-1] is out of bounds, and the caller ignores xy when z is -1.
-	return vec3(uv2 - _region_locations[max(layer_index, 0)], float(layer_index));
+	return vec3(uv2 - floor(uv2), float(layer_index));
+}
+
+// Colour map at a get_index_uv result. A coarse region's texel is the mean of its cell, so the same
+// normalised UV lands on the cell centre; only the mip moves.
+vec4 sample_color(const vec3 region_uv, const float mip) {
+	int id = int(region_uv.z);
+	if (!REGION_COARSE(id)) {
+		return textureLod(_color_maps, vec3(region_uv.xy, float(REGION_LAYER(id))), mip);
+	}
+	return textureLod(_coarse_color_maps, vec3(region_uv.xy, float(REGION_SLOT(id))),
+			max(mip - float(_coarse_store_shift), 0.));
+}
+
+// Colour texel at a get_index_coord result: the cell at or before it on a coarse region.
+vec4 fetch_color(const ivec3 index) {
+	if (!REGION_COARSE(index.z)) {
+		return texelFetch(_color_maps, ivec3(index.xy, REGION_LAYER(index.z)), 0);
+	}
+	return texelFetch(_coarse_color_maps, ivec3(index.xy >> _coarse_store_shift, REGION_SLOT(index.z)), 0);
 }
 
 float interpolated_height(vec2 pos) {
 	const vec2 offsets = vec2(0, 1);
 	vec2 index_id = floor(pos);
-	ivec3 index[4];
-	index[0] = get_index_coord(index_id + offsets.xy);
-	index[1] = get_index_coord(index_id + offsets.yy);
-	index[2] = get_index_coord(index_id + offsets.yx);
-	index[3] = get_index_coord(index_id + offsets.xx);
-	float h0 = texelFetch(_height_maps, index[0], 0).r;
-	float h1 = texelFetch(_height_maps, index[1], 0).r;
-	float h2 = texelFetch(_height_maps, index[2], 0).r;
-	float h3 = texelFetch(_height_maps, index[3], 0).r;
+	float h0 = vertex_height(index_id + offsets.xy);
+	float h1 = vertex_height(index_id + offsets.yy);
+	float h2 = vertex_height(index_id + offsets.yx);
+	float h3 = vertex_height(index_id + offsets.xx);
 	vec2 f = fract(pos);
 	vec2 i = 1.0 - f;
 	vec4 w = vec4(i.x * f.y, f.x * f.y, f.x * i.y, i.x * i.y);
@@ -206,6 +221,17 @@ void vertex() {
 	vec2 end_pos = (v_vertex.xz - shift * scale) * _vertex_density;
 	v_vertex.xz -= shift * scale * vertex_lerp;
 
+	// Vertex collapse (streaming phase 3): over a region whose type collapses, a vertex snaps to the lattice
+	// point at or before it, so the mesh carries the region's own spacing. At or before, never nearest: the
+	// lattice ends at the region's far edge, and a vertex snapped onto a finer neighbour's edge would leave
+	// that edge's own vertices standing off the snapped line.
+	int c_id = region_map_slot(ivec2(floor(v_vertex.xz * _vertex_density * _region_texel_size)) + (_region_map_size / 2));
+	bool collapsed = REGION_COARSE(c_id) && REGION_COLLAPSE(c_id);
+	if (collapsed) {
+		float c_r = float(1 << REGION_SHIFT(c_id));
+		v_vertex.xz = floor(fma(v_vertex.xz, vec2(_vertex_density / c_r), vec2(1e-3))) * c_r * _vertex_spacing;
+	}
+
 	// UV coordinates in region space. 0-1 covers 1 region, 1-2 is the next region, etc.
 	UV = v_vertex.xz * _vertex_density;
 
@@ -214,7 +240,7 @@ void vertex() {
 
 	// Discard vertices for Holes. 1 lookup
 	ivec3 v_region = get_index_coord(start_pos);
-	uint control = floatBitsToUint(texelFetch(_control_maps, v_region, 0)).r;
+	uint control = fetch_control(v_region);
 	bool hole = DECODE_HOLE(control);
 
 	vec3 displacement = vec3(0.);
@@ -228,12 +254,13 @@ void vertex() {
 		float h;
 		// This branch is static for each of the clipmap segments
 		// Interpolated reads only occur where sub-texel values are required.
-		if (scale < _vertex_spacing) {
+		if (collapsed) {
+			// A lattice point: the height is its texel, whichever ring the vertex came from.
+			h = vertex_height(UV);
+		} else if (scale < _vertex_spacing) {
 			h = interpolated_height(UV);
 		} else {
-			ivec3 coord_a = get_index_coord(start_pos);
-			ivec3 coord_b = get_index_coord(end_pos);
-			h = mix(texelFetch(_height_maps, coord_a, 0).r, texelFetch(_height_maps, coord_b, 0).r, vertex_lerp);
+			h = mix(vertex_height(start_pos), vertex_height(end_pos), vertex_lerp);
 		}
 
 //INSERT: FLAT_VERTEX
@@ -266,7 +293,7 @@ vec2 rotate_vec2(const vec2 v, const vec2 cs) {
 
 // 2-4 lookups ( 2-6 with dual scaling )
 void accumulate_material(vec3 base_ddx, vec3 base_ddy, const mat3 TNB, const float weight, const ivec3 index,
-			const uint control, const vec2 texture_weight, const ivec2 texture_id, const vec3 i_normal,
+			const vec2 index_pos, const uint control, const vec2 texture_weight, const ivec2 texture_id, const vec3 i_normal,
 			float h, inout material mat) {
 
 	// Applying scaling before projection reduces the number of multiplys ops required.
@@ -280,8 +307,7 @@ void accumulate_material(vec3 base_ddx, vec3 base_ddy, const mat3 TNB, const flo
 	h *= control_scale;
 
 	// Index position for detiling.
-	vec2 i_pos = fma(_region_locations[index.z], vec2(_region_size), vec2(index.xy));
-	i_pos *= _vertex_spacing * control_scale;
+	vec2 i_pos = index_pos * _vertex_spacing * control_scale;
 
 	// Projection
 	vec2 i_uv = i_vertex.xz;
@@ -399,7 +425,7 @@ void accumulate_material(vec3 base_ddx, vec3 base_ddy, const mat3 TNB, const flo
 }
 
 float get_height(vec2 index_id, vec2 offset) {
-	float height = texelFetch(_height_maps, get_index_coord(index_id + offset), 0).r;
+	float height = vertex_height(index_id + offset);
 //INSERT: FLAT_FRAGMENT
 	return height;
 }
@@ -414,9 +440,11 @@ void fragment() {
 	
 	// Lookup offsets, ID and blend weight
 	vec3 region_uv = get_index_uv(uv2);
-	const vec3 offsets = vec3(0, 1, 2);
-	vec2 index_id = floor(uv);
-	vec2 weight = fract(uv);
+	// A coarse region is read on its own lattice: corners, weights and normals at its texel spacing.
+	float nr = region_ratio_at(floor(uv));
+	vec3 offsets = vec3(0, 1, 2) * nr;
+	vec2 index_id = floor(uv / nr) * nr;
+	vec2 weight = fract(uv / nr);
 	vec2 invert = 1.0 - weight;
 	vec4 weights = vec4(
 		invert.x * weight.y, // 0
@@ -451,7 +479,7 @@ void fragment() {
 	h[3] = get_height(index_id, offsets.xx); // 0 (0, 0)
 	h[2] = get_height(index_id, offsets.yx); // 1 (1, 0)
 	h[0] = get_height(index_id, offsets.xy); // 2 (0, 1)
-	index_normal[3] = normalize(vec3(h[3] - h[2] + u, _vertex_spacing, h[3] - h[0] + v));
+	index_normal[3] = normalize(vec3(h[3] - h[2] + u, _vertex_spacing * nr, h[3] - h[0] + v));
 
 	// Set flat world normal - overwritten if bilerp is true
 	vec3 w_normal = index_normal[3];
@@ -464,17 +492,17 @@ void fragment() {
 	base_ddy *= bias;
 
 	// Color map
-	vec4 color_map = region_uv.z > -1.0 ? textureLod(_color_maps, region_uv, region_mip) : COLOR_MAP_DEF;
+	vec4 color_map = region_uv.z > -1.0 ? sample_color(region_uv, region_mip) : COLOR_MAP_DEF;
 
 	// Branching smooth normals and manually interpolated color map - fixes cross region artifacts
 	if (bilerp) {
 		// 4 lookups if linear filtering, else 1 lookup.
 		vec4 col_map[4];
-		col_map[3] = index[3].z > -1 ? texelFetch(_color_maps, index[3], 0) : COLOR_MAP_DEF;
+		col_map[3] = index[3].z > -1 ? fetch_color(index[3]) : COLOR_MAP_DEF;
 		#ifdef FILTER_LINEAR
-		col_map[0] = index[0].z > -1 ? texelFetch(_color_maps, index[0], 0) : COLOR_MAP_DEF;
-		col_map[1] = index[1].z > -1 ? texelFetch(_color_maps, index[1], 0) : COLOR_MAP_DEF;
-		col_map[2] = index[2].z > -1 ? texelFetch(_color_maps, index[2], 0) : COLOR_MAP_DEF;
+		col_map[0] = index[0].z > -1 ? fetch_color(index[0]) : COLOR_MAP_DEF;
+		col_map[1] = index[1].z > -1 ? fetch_color(index[1]) : COLOR_MAP_DEF;
+		col_map[2] = index[2].z > -1 ? fetch_color(index[2]) : COLOR_MAP_DEF;
 
 		color_map =
 			col_map[0] * weights[0] +
@@ -494,9 +522,9 @@ void fragment() {
 		float h_7 = get_height(index_id, offsets.xz); // 7 (0, 2)
 
 		// Calculate the normal for the remaining index ids.
-		index_normal[0] = normalize(vec3(h[0] - h[1] + u, _vertex_spacing, h[0] - h_7 + v));
-		index_normal[1] = normalize(vec3(h[1] - h_5 + u, _vertex_spacing, h[1] - h_4 + v));
-		index_normal[2] = normalize(vec3(h[2] - h_6 + u, _vertex_spacing, h[2] - h[1] + v));
+		index_normal[0] = normalize(vec3(h[0] - h[1] + u, _vertex_spacing * nr, h[0] - h_7 + v));
+		index_normal[1] = normalize(vec3(h[1] - h_5 + u, _vertex_spacing * nr, h[1] - h_4 + v));
+		index_normal[2] = normalize(vec3(h[2] - h_6 + u, _vertex_spacing * nr, h[2] - h[1] + v));
 
 		// Set interpolated world normal
 		w_normal =
@@ -523,13 +551,9 @@ void fragment() {
 
 	// Get index control data
 	// 1 - 4 lookups
-	uvec4 control = uvec4(floatBitsToUint(texelFetch(_control_maps, index[3], 0).r));
+	uvec4 control = uvec4(fetch_control(index[3]));
 	if (bilerp) {
-		control = uvec4(
-		floatBitsToUint(texelFetch(_control_maps, index[0], 0).r),
-		floatBitsToUint(texelFetch(_control_maps, index[1], 0).r),
-		floatBitsToUint(texelFetch(_control_maps, index[2], 0).r),
-		control[3]);
+		control = uvec4(fetch_control(index[0]), fetch_control(index[1]), fetch_control(index[2]), control[3]);
 	}
 
 //INSERT: AUTO_SHADER
@@ -573,18 +597,25 @@ void fragment() {
 	// Struct to accumulate all texture data.
 	material mat = material(vec4(0.0), vec4(0.0), 0., 0., 0., 0.);
 
-	// 2 - 4 lookups, 2 - 6 if dual scale texture
-	accumulate_material(base_ddx, base_ddy, TNB, weights[3], index[3], control[3], t_weights[3],
-		texture_ids[3], index_normal[3], h[3], mat);
+	// A colour-only region type (Pasture3DRegionType.material_mode) skips the splat: the colour map over a
+	// neutral, flat, rough surface.
+	int f_id = int(region_uv.z);
+	if (f_id >= 0 && REGION_COLOR_ONLY(f_id)) {
+		mat = material(vec4(1.0, 1.0, 1.0, 0.5), vec4(0.0, 1.0, 0.0, 1.0), 0., 1., 0., 1.);
+	} else {
+		// 2 - 4 lookups, 2 - 6 if dual scale texture
+		accumulate_material(base_ddx, base_ddy, TNB, weights[3], index[3], index_id + offsets.xx, control[3],
+			t_weights[3], texture_ids[3], index_normal[3], h[3], mat);
 
-	// 6 - 12 lookups, 6 - 18 if dual scale texture
-	if (bilerp) {
-		accumulate_material(base_ddx, base_ddy, TNB, weights[2], index[2], control[2], t_weights[2],
-			texture_ids[2], index_normal[2], h[2], mat);
-		accumulate_material(base_ddx, base_ddy, TNB, weights[1], index[1], control[1], t_weights[1],
-			texture_ids[1], index_normal[1], h[1], mat);
-		accumulate_material(base_ddx, base_ddy, TNB, weights[0], index[0], control[0], t_weights[0],
-			texture_ids[0], index_normal[0], h[0], mat);
+		// 6 - 12 lookups, 6 - 18 if dual scale texture
+		if (bilerp) {
+			accumulate_material(base_ddx, base_ddy, TNB, weights[2], index[2], index_id + offsets.yx, control[2],
+				t_weights[2], texture_ids[2], index_normal[2], h[2], mat);
+			accumulate_material(base_ddx, base_ddy, TNB, weights[1], index[1], index_id + offsets.yy, control[1],
+				t_weights[1], texture_ids[1], index_normal[1], h[1], mat);
+			accumulate_material(base_ddx, base_ddy, TNB, weights[0], index[0], index_id + offsets.xy, control[0],
+				t_weights[0], texture_ids[0], index_normal[0], h[0], mat);
+		}
 	}
 
 	// normalize accumulated values back to 0.0 - 1.0 range.

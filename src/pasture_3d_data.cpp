@@ -26,15 +26,18 @@ void Pasture3DData::_clear() {
 	_region_map.clear();
 	_region_map.resize(get_region_map_size() * get_region_map_size());
 	_regions.clear();
-	_slot_locations.clear();
-	_slot_region_ids.clear();
-	_region_slots.clear();
-	_height_maps.clear();
-	_control_maps.clear();
-	_color_maps.clear();
-	for (int i = 0; i < TYPE_MAX; i++) {
-		_placeholders[i].unref();
+	for (int p = 0; p < POOL_MAX; p++) {
+		SlotPool &pool = _pools[p];
+		pool.locations.clear();
+		pool.region_ids.clear();
+		pool.slots.clear();
+		for (int t = 0; t < TYPE_MAX; t++) {
+			pool.maps[t].clear();
+			pool.placeholders[t].unref();
+			pool.gens[t].clear();
+		}
 	}
+	_coarse_store_shift = 0;
 	_generated_region_map.clear();
 	_region_locations.clear();
 	_region_index.instantiate();
@@ -42,9 +45,6 @@ void Pasture3DData::_clear() {
 	_type_cache.clear();
 	_fallback_standard.unref();
 	_master_height_range = V2_ZERO;
-	_generated_height_maps.clear();
-	_generated_control_maps.clear();
-	_generated_color_maps.clear();
 	_layer_stack.unref();
 	if (_gpu_raster) {
 		memdelete(_gpu_raster);
@@ -1403,15 +1403,23 @@ int Pasture3DData::_read_region_map_size() {
 	return clamped;
 }
 
-TypedArray<Vector2i> Pasture3DData::get_slot_locations() const {
+static TypedArray<Vector2i> _pool_slot_table(const TypedArray<Vector2i> &p_locations) {
 	// Free slots read as V2I_ZERO: the shader only indexes slots the region map points at.
 	TypedArray<Vector2i> out;
-	out.resize(_slot_locations.size());
-	for (int i = 0; i < _slot_locations.size(); i++) {
-		const Vector2i loc = _slot_locations[i];
+	out.resize(p_locations.size());
+	for (int i = 0; i < p_locations.size(); i++) {
+		const Vector2i loc = p_locations[i];
 		out[i] = loc == V2I_MAX ? V2I_ZERO : loc;
 	}
 	return out;
+}
+
+TypedArray<Vector2i> Pasture3DData::get_slot_locations() const {
+	return _pool_slot_table(_pools[POOL_FINE].locations);
+}
+
+TypedArray<Vector2i> Pasture3DData::get_coarse_slot_locations() const {
+	return _pool_slot_table(_pools[POOL_COARSE].locations);
 }
 
 Dictionary Pasture3DData::get_upload_stats() const {
@@ -1419,7 +1427,21 @@ Dictionary Pasture3DData::get_upload_stats() const {
 	stats["layer_uploads"] = _stat_layer_uploads;
 	stats["array_creates"] = _stat_array_creates;
 	stats["region_map_uploads"] = _stat_region_map_uploads;
-	stats["slot_capacity"] = _slot_locations.size();
+	stats["slot_capacity"] = _pools[POOL_FINE].locations.size();
+	stats["coarse_slot_capacity"] = _pools[POOL_COARSE].locations.size();
+	stats["coarse_store_ratio"] = get_coarse_store_ratio();
+	// Bytes of one array layer per pool, summed over the three map types (mipmaps included): what a slot
+	// costs in VRAM. 0 for a pool with no arrays.
+	for (int p = 0; p < POOL_MAX; p++) {
+		int64_t bytes = 0;
+		for (int t = 0; t < TYPE_MAX; t++) {
+			const Ref<Image> &ph = _pools[p].placeholders[t];
+			if (ph.is_valid() && _pools[p].gens[t].get_rid().is_valid()) {
+				bytes += ph->get_data_size();
+			}
+		}
+		stats[p == POOL_FINE ? "fine_layer_bytes" : "coarse_layer_bytes"] = bytes;
+	}
 	return stats;
 }
 
@@ -1429,76 +1451,106 @@ void Pasture3DData::reset_upload_stats() {
 	_stat_region_map_uploads = 0;
 }
 
-void Pasture3DData::_release_slot(const Vector2i &p_region_loc) {
-	if (!_region_slots.has(p_region_loc)) {
+void Pasture3DData::_release_slot(const PoolId p_pool, const Vector2i &p_region_loc) {
+	SlotPool &pool = _pools[p_pool];
+	if (!pool.slots.has(p_region_loc)) {
 		return;
 	}
-	const int slot = _region_slots[p_region_loc];
-	_region_slots.erase(p_region_loc);
-	_slot_locations[slot] = V2I_MAX;
-	_slot_region_ids[slot] = 0;
+	const int slot = pool.slots[p_region_loc];
+	pool.slots.erase(p_region_loc);
+	pool.locations[slot] = V2I_MAX;
+	pool.region_ids[slot] = 0;
 	// Drop the slot's references so an unloaded region's images can be freed. The GPU layer keeps stale
 	// texels, which nothing reads because the region map no longer points at the slot.
-	TypedArray<Image> *arrays[TYPE_MAX] = { &_height_maps, &_control_maps, &_color_maps };
 	for (int t = 0; t < TYPE_MAX; t++) {
-		if (slot < arrays[t]->size()) {
-			(*arrays[t])[slot] = _placeholders[t];
+		if (slot < pool.maps[t].size()) {
+			pool.maps[t][slot] = pool.placeholders[t];
 		}
 	}
 }
 
-bool Pasture3DData::_sync_slots(PackedInt32Array &r_fresh) {
-	const int old_capacity = _slot_locations.size();
-	// Free the slot of every location that is no longer active.
-	for (int slot = 0; slot < _slot_locations.size(); slot++) {
-		const Vector2i loc = _slot_locations[slot];
+bool Pasture3DData::_sync_slots(const PoolId p_pool, PackedInt32Array &r_fresh) {
+	SlotPool &pool = _pools[p_pool];
+	const int old_capacity = pool.locations.size();
+	// Free the slot of every location that is no longer active, or whose region now belongs to the other pool.
+	for (int slot = 0; slot < pool.locations.size(); slot++) {
+		const Vector2i loc = pool.locations[slot];
 		if (loc == V2I_MAX) {
 			continue;
 		}
 		const Pasture3DRegion *region = get_region_ptr(loc);
-		if (!region || region->is_deleted()) {
-			_release_slot(loc);
+		if (!region || region->is_deleted() || _pool_of(region) != p_pool) {
+			_release_slot(p_pool, loc);
 		}
 	}
-	// Give every active region without a slot the lowest free one, and re-upload a slot whose region object
-	// was replaced at the same location (undo, or an unload and load inside one batch).
+	// Give every active region of the pool without a slot the lowest free one, and re-upload a slot whose
+	// region object was replaced at the same location (undo, or an unload and load inside one batch).
 	for (const Vector2i &loc : _regions.keys()) {
 		const Pasture3DRegion *region = get_region_ptr(loc);
-		if (!region || region->is_deleted() || get_region_map_index(loc) < 0) {
+		if (!region || region->is_deleted() || _pool_of(region) != p_pool || get_region_map_index(loc) < 0) {
 			continue;
 		}
 		const int64_t id = int64_t(region->get_instance_id());
-		if (_region_slots.has(loc)) {
-			const int slot = _region_slots[loc];
-			if (_slot_region_ids[slot] != id) {
-				_slot_region_ids[slot] = id;
+		if (pool.slots.has(loc)) {
+			const int slot = pool.slots[loc];
+			if (pool.region_ids[slot] != id) {
+				pool.region_ids[slot] = id;
 				r_fresh.push_back(slot);
 			}
 			continue;
 		}
 		int slot = -1;
-		for (int i = 0; i < _slot_locations.size(); i++) {
-			if (Vector2i(_slot_locations[i]) == V2I_MAX) {
+		for (int i = 0; i < pool.locations.size(); i++) {
+			if (Vector2i(pool.locations[i]) == V2I_MAX) {
 				slot = i;
 				break;
 			}
 		}
 		if (slot < 0) {
-			slot = _slot_locations.size();
+			slot = pool.locations.size();
 			const int capacity = ((slot / SLOT_CHUNK) + 1) * SLOT_CHUNK;
-			_slot_locations.resize(capacity);
-			_slot_region_ids.resize(capacity);
+			pool.locations.resize(capacity);
+			pool.region_ids.resize(capacity);
 			for (int i = slot; i < capacity; i++) {
-				_slot_locations[i] = V2I_MAX;
-				_slot_region_ids[i] = 0;
+				pool.locations[i] = V2I_MAX;
+				pool.region_ids[i] = 0;
 			}
 		}
-		_slot_locations[slot] = loc;
-		_slot_region_ids[slot] = id;
-		_region_slots[loc] = slot;
+		pool.locations[slot] = loc;
+		pool.region_ids[slot] = id;
+		pool.slots[loc] = slot;
 		r_fresh.push_back(slot);
 	}
-	return _slot_locations.size() != old_capacity;
+	return pool.locations.size() != old_capacity;
+}
+
+// log2 of a texel ratio, which is a power of two.
+static int _ratio_shift(const int p_ratio) {
+	int shift = 0;
+	while ((1 << shift) < p_ratio) {
+		shift++;
+	}
+	return shift;
+}
+
+int Pasture3DData::_coarse_shift_needed() const {
+	int shift = 0;
+	const SlotPool &pool = _pools[POOL_COARSE];
+	for (int slot = 0; slot < pool.locations.size(); slot++) {
+		const Vector2i loc = pool.locations[slot];
+		const Pasture3DRegion *region = loc == V2I_MAX ? nullptr : get_region_ptr(loc);
+		if (region) {
+			const int s = _ratio_shift(region->get_texel_ratio());
+			shift = shift == 0 ? s : MIN(shift, s);
+		}
+	}
+	return shift;
+}
+
+void Pasture3DData::_region_flags(const Pasture3DRegion *p_region, bool &r_collapse, bool &r_color_only) const {
+	const Ref<Pasture3DRegionType> type = load_region_type(p_region->get_type_path());
+	r_collapse = type.is_valid() && type->get_vertex_collapse();
+	r_color_only = type.is_valid() && type->get_material_mode() == Pasture3DRegionType::MATERIAL_COLOR_ONLY;
 }
 
 void Pasture3DData::_rebuild_region_map() {
@@ -1509,15 +1561,28 @@ void Pasture3DData::_rebuild_region_map() {
 	PackedFloat32Array texels;
 	texels.resize(size * size);
 	texels.fill(0.f);
-	for (int slot = 0; slot < _slot_locations.size(); slot++) {
-		const Vector2i loc = _slot_locations[slot];
-		if (loc == V2I_MAX) {
-			continue;
-		}
-		const int map_index = get_region_map_index(loc);
-		if (map_index >= 0) {
-			_region_map[map_index] = region_map_encode(slot);
-			// Exact: the encoded values are small integers, far below float32's 2^24.
+	_collapse_ratio_max = 1;
+	for (int p = 0; p < POOL_MAX; p++) {
+		const SlotPool &pool = _pools[p];
+		for (int slot = 0; slot < pool.locations.size(); slot++) {
+			const Vector2i loc = pool.locations[slot];
+			if (loc == V2I_MAX) {
+				continue;
+			}
+			const int map_index = get_region_map_index(loc);
+			const Pasture3DRegion *region = get_region_ptr(loc);
+			if (map_index < 0 || !region) {
+				continue;
+			}
+			bool collapse = false;
+			bool color_only = false;
+			_region_flags(region, collapse, color_only);
+			const int shift = p == POOL_COARSE ? _ratio_shift(region->get_texel_ratio()) : 0;
+			_region_map[map_index] = region_map_encode(slot, shift, collapse, color_only);
+			if (collapse && shift > 0) {
+				_collapse_ratio_max = MAX(_collapse_ratio_max, 1 << shift);
+			}
+			// Exact: the encoded values are under 2^21, far below float32's 2^24.
 			texels[map_index] = float(_region_map[map_index]);
 			_region_locations.push_back(loc);
 		}
@@ -1533,8 +1598,8 @@ void Pasture3DData::_rebuild_region_map() {
 	_stat_region_map_uploads++;
 }
 
-Ref<Image> Pasture3DData::_placeholder(const MapType p_type, const Ref<Image> &p_like) {
-	Ref<Image> &ph = _placeholders[p_type];
+Ref<Image> Pasture3DData::_placeholder(const PoolId p_pool, const MapType p_type, const Ref<Image> &p_like) {
+	Ref<Image> &ph = _pools[p_pool].placeholders[p_type];
 	if (ph.is_null() || ph->get_size() != p_like->get_size() || ph->get_format() != p_like->get_format() ||
 			ph->has_mipmaps() != p_like->has_mipmaps()) {
 		ph = Image::create_empty(p_like->get_width(), p_like->get_height(), p_like->has_mipmaps(), p_like->get_format());
@@ -1542,14 +1607,13 @@ Ref<Image> Pasture3DData::_placeholder(const MapType p_type, const Ref<Image> &p
 	return ph;
 }
 
-void Pasture3DData::_build_array(const MapType p_type) {
-	TypedArray<Image> *arrays[TYPE_MAX] = { &_height_maps, &_control_maps, &_color_maps };
-	GeneratedTexture *gens[TYPE_MAX] = { &_generated_height_maps, &_generated_control_maps, &_generated_color_maps };
-	TypedArray<Image> &arr = *arrays[p_type];
-	GeneratedTexture &gen = *gens[p_type];
-	const int capacity = _slot_locations.size();
+void Pasture3DData::_build_array(const PoolId p_pool, const MapType p_type) {
+	SlotPool &pool = _pools[p_pool];
+	TypedArray<Image> &arr = pool.maps[p_type];
+	GeneratedTexture &gen = pool.gens[p_type];
+	const int capacity = pool.locations.size();
 	auto slot_region = [&](const int p_slot) -> const Pasture3DRegion * {
-		const Vector2i loc = _slot_locations[p_slot];
+		const Vector2i loc = pool.locations[p_slot];
 		return loc == V2I_MAX ? nullptr : get_region_ptr(loc);
 	};
 	Ref<Image> like;
@@ -1564,7 +1628,7 @@ void Pasture3DData::_build_array(const MapType p_type) {
 	if (like.is_null()) {
 		return; // No regions: cleared, as an empty create always did.
 	}
-	const Ref<Image> ph = _placeholder(p_type, like);
+	const Ref<Image> ph = _placeholder(p_pool, p_type, like);
 	arr.resize(capacity);
 	for (int slot = 0; slot < capacity; slot++) {
 		const Pasture3DRegion *region = slot_region(slot);
@@ -1572,6 +1636,68 @@ void Pasture3DData::_build_array(const MapType p_type) {
 	}
 	gen.create(arr);
 	_stat_array_creates++;
+}
+
+int Pasture3DData::_ratio_at(const Vector2i &p_region_loc) const {
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	if (region && !region->is_deleted()) {
+		return region->get_texel_ratio();
+	}
+	if (_region_index.is_valid() && _region_index->has_entry(p_region_loc)) {
+		return int(_region_index->get_entry(p_region_loc).get("texel_ratio", 1));
+	}
+	return 0;
+}
+
+bool Pasture3DData::_stitch_region(const Vector2i &p_region_loc) {
+	Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	Image *map = region && !region->is_deleted() ? region->get_map_ptr(TYPE_HEIGHT) : nullptr;
+	if (!map || !_seam_stitch_enabled) {
+		return false;
+	}
+	const int r = region->get_texel_ratio();
+	const int m = region->get_map_size();
+	bool changed = false;
+	// axis 0: the -x neighbour meets column 0, which runs along +z; axis 1: the -z neighbour meets row 0.
+	for (int axis = 0; axis < 2; axis++) {
+		const Vector2i across = axis == 0 ? Vector2i(1, 0) : Vector2i(0, 1);
+		const Vector2i along = axis == 0 ? Vector2i(0, 1) : Vector2i(1, 0);
+		const int nr = _ratio_at(p_region_loc - across);
+		if (nr <= r) {
+			continue;
+		}
+		const int q = nr / r; // This region's texels per neighbour lattice step
+		for (int k0 = 0; k0 < m; k0 += q) {
+			const real_t a = map->get_pixelv(along * k0).r;
+			const int k1 = k0 + q;
+			real_t b;
+			if (k1 < m) {
+				b = map->get_pixelv(along * k1).r;
+			} else {
+				// The last lattice point is the next region's origin.
+				const Vector2i next = p_region_loc + along;
+				b = get_height_at_vertex(next * _region_size);
+				if (std::isnan(b)) {
+					if (_ratio_at(next) > 0) {
+						continue; // Unloaded: the segment keeps what it was stitched to
+					}
+					b = a; // The world's edge: hold
+				}
+			}
+			for (int j = 1; j < q && k0 + j < m; j++) {
+				const Vector2i px = along * (k0 + j);
+				const real_t v = Math::lerp(a, b, real_t(j) / real_t(q));
+				if (map->get_pixelv(px).r != v) {
+					map->set_pixelv(px, Color(v, 0.f, 0.f, 1.f));
+					changed = true;
+				}
+			}
+		}
+	}
+	if (changed) {
+		region->set_modified(true);
+	}
+	return changed;
 }
 
 void Pasture3DData::update_maps(const MapType p_map_type, const bool p_all_regions, const bool p_generate_mipmaps) {
@@ -1587,19 +1713,19 @@ void Pasture3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 		}
 	}
 
-	GeneratedTexture *gens[TYPE_MAX] = { &_generated_height_maps, &_generated_control_maps, &_generated_color_maps };
-	TypedArray<Image> *arrays[TYPE_MAX] = { &_height_maps, &_control_maps, &_color_maps };
 	static const char *SIGNALS[TYPE_MAX] = { "height_maps_changed", "control_maps_changed", "color_maps_changed" };
 
 	// Mark texture arrays dirty for rebuilding
 	if (p_all_regions) {
 		LOG(EXTREME, "Marking dirty maps of type: ", p_map_type);
-		if (p_map_type < TYPE_MAX) {
-			gens[p_map_type]->clear();
-		} else {
+		for (int p = 0; p < POOL_MAX; p++) {
 			for (int t = 0; t < TYPE_MAX; t++) {
-				gens[t]->clear();
+				if (p_map_type == TYPE_MAX || p_map_type == t) {
+					_pools[p].gens[t].clear();
+				}
 			}
+		}
+		if (p_map_type == TYPE_MAX) {
 			_region_map_dirty = true;
 		}
 	}
@@ -1607,14 +1733,25 @@ void Pasture3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 	bool any_changed = false;
 
 	// Slots and the region map. A region that gained a slot needs one layer per map type uploaded; only a
-	// capacity change recreates the arrays.
-	PackedInt32Array fresh;
+	// capacity change recreates a pool's arrays.
+	PackedInt32Array fresh[POOL_MAX];
 	if (_region_map_dirty) {
 		_region_map_dirty = false;
-		if (_sync_slots(fresh)) {
-			LOG(DEBUG, "Slot capacity grew to ", _slot_locations.size(), "; recreating texture arrays");
+		for (int p = 0; p < POOL_MAX; p++) {
+			if (_sync_slots(PoolId(p), fresh[p])) {
+				LOG(DEBUG, "Pool ", p, " slot capacity grew to ", _pools[p].locations.size(), "; recreating its texture arrays");
+				for (int t = 0; t < TYPE_MAX; t++) {
+					_pools[p].gens[t].clear();
+				}
+			}
+		}
+		// The coarse arrays hold the finest coarse ratio loaded; when that moves, every coarse layer changes size.
+		const int shift = _coarse_shift_needed();
+		if (shift != _coarse_store_shift) {
+			LOG(DEBUG, "Coarse arrays move from ratio ", get_coarse_store_ratio(), " to ", shift > 0 ? 1 << shift : 0);
+			_coarse_store_shift = shift;
 			for (int t = 0; t < TYPE_MAX; t++) {
-				gens[t]->clear();
+				_pools[POOL_COARSE].gens[t].clear();
 			}
 		}
 		_rebuild_region_map();
@@ -1623,98 +1760,146 @@ void Pasture3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 		emit_signal("region_map_changed");
 	}
 
-	// An image that no longer matches its array's shape (region size, format, mipmaps) cannot go up as a
-	// single layer, so that array is recreated instead.
-	auto shape_ok = [&](const int t, const Pasture3DRegion *p_region) -> bool {
-		const Ref<Image> &ph = _placeholders[t];
-		if (p_region->is_coarse()) {
-			// Its upload is built to the array's region size and format (_gpu_map).
-			return ph.is_valid() && ph->get_size() == V2I(_region_size);
-		}
-		const Ref<Image> p_img = p_region->get_map(MapType(t));
-		return ph.is_valid() && p_img.is_valid() && p_img->get_size() == ph->get_size() &&
-				p_img->get_format() == ph->get_format() && p_img->has_mipmaps() == ph->has_mipmaps();
-	};
-	for (int t = 0; t < TYPE_MAX; t++) {
-		if (gens[t]->is_dirty()) {
-			continue;
-		}
+	// Seam stitch. A region's stitch reads its -x and -z neighbours' ratios and its +x and +z neighbours'
+	// origins, so a region that changed or arrived re-stitches itself and those four.
+	Dictionary restitched; // Dict[region_location] -> true: stitched height, uploaded below like an edit
+	if (p_map_type == TYPE_MAX || p_map_type == TYPE_HEIGHT) {
+		Dictionary todo;
 		for (const Vector2i &loc : _region_locations) {
 			const Pasture3DRegion *region = get_region_ptr(loc);
-			const int slot = _region_slots.get(loc, -1);
-			if (region && (region->is_edited() || fresh.has(slot)) && !shape_ok(t, region)) {
-				LOG(DEBUG, "Region ", loc, " map ", t, " changed shape; recreating its texture array");
-				gens[t]->clear();
-				break;
+			const PoolId p = region ? _pool_of(region) : POOL_FINE;
+			const bool is_fresh = region && fresh[p].has(int(_pools[p].slots.get(loc, -1)));
+			if (region && (p_all_regions || region->is_edited() || is_fresh)) {
+				todo[loc] = true;
+				todo[loc + Vector2i(1, 0)] = true;
+				todo[loc + Vector2i(0, 1)] = true;
+				todo[loc - Vector2i(1, 0)] = true;
+				todo[loc - Vector2i(0, 1)] = true;
+			}
+		}
+		for (const Vector2i &loc : todo.keys()) {
+			if (_stitch_region(loc)) {
+				restitched[loc] = true;
+			}
+		}
+		if (!restitched.is_empty()) {
+			calc_height_range();
+		}
+	}
+
+	// An image that no longer matches its array's shape (region size, format, mipmaps) cannot go up as a
+	// single layer, so that array is recreated instead.
+	auto shape_ok = [&](const int p, const int t, const Pasture3DRegion *p_region) -> bool {
+		const Ref<Image> &ph = _pools[p].placeholders[t];
+		if (ph.is_null()) {
+			return false;
+		}
+		if (p_region->is_coarse() && p_region->get_texel_ratio() != get_coarse_store_ratio()) {
+			// Its upload is a copy built to the coarse arrays' size (_gpu_map).
+			return ph->get_size() == V2I(_region_size >> _coarse_store_shift);
+		}
+		const Ref<Image> p_img = p_region->get_map(MapType(t));
+		return p_img.is_valid() && p_img->get_size() == ph->get_size() &&
+				p_img->get_format() == ph->get_format() && p_img->has_mipmaps() == ph->has_mipmaps();
+	};
+	for (int p = 0; p < POOL_MAX; p++) {
+		for (int t = 0; t < TYPE_MAX; t++) {
+			if (_pools[p].gens[t].is_dirty()) {
+				continue;
+			}
+			for (const Vector2i &loc : _pools[p].slots.keys()) {
+				const Pasture3DRegion *region = get_region_ptr(loc);
+				const int slot = _pools[p].slots[loc];
+				if (region && (region->is_edited() || fresh[p].has(slot)) && !shape_ok(p, t, region)) {
+					LOG(DEBUG, "Region ", loc, " map ", t, " changed shape; recreating its texture array");
+					_pools[p].gens[t].clear();
+					break;
+				}
 			}
 		}
 	}
 
-	// Recreate dirty arrays in full
-	bool rebuilt[TYPE_MAX] = { false, false, false };
-	for (int t = 0; t < TYPE_MAX; t++) {
-		if (gens[t]->is_dirty()) {
-			LOG(EXTREME, "Regenerating texture array ", t, " from regions");
-			_build_array(MapType(t));
-			rebuilt[t] = true;
-			any_changed = true;
-			if (t == TYPE_HEIGHT) {
-				calc_height_range();
+	// Recreate dirty arrays in full. A pool with no regions and no arrays stays empty and silent.
+	bool rebuilt[POOL_MAX][TYPE_MAX] = {};
+	bool signal[TYPE_MAX] = { false, false, false };
+	for (int p = 0; p < POOL_MAX; p++) {
+		for (int t = 0; t < TYPE_MAX; t++) {
+			GeneratedTexture &gen = _pools[p].gens[t];
+			if (!gen.is_dirty()) {
+				continue;
 			}
-			LOG(DEBUG, "Emitting ", SIGNALS[t]);
-			emit_signal(SIGNALS[t]);
+			const bool had_rid = gen.get_rid().is_valid() || _pools[p].maps[t].size() > 0;
+			if (_pools[p].slots.is_empty() && !had_rid) {
+				continue;
+			}
+			LOG(EXTREME, "Regenerating pool ", p, " texture array ", t, " from regions");
+			_build_array(PoolId(p), MapType(t));
+			rebuilt[p][t] = true;
+			signal[t] = true;
+			any_changed = true;
 		}
+	}
+	if (rebuilt[POOL_FINE][TYPE_HEIGHT] || rebuilt[POOL_COARSE][TYPE_HEIGHT]) {
+		calc_height_range();
 	}
 
 	// Fresh slots: exactly one layer per map type
-	if (!fresh.is_empty()) {
-		bool uploaded[TYPE_MAX] = { false, false, false };
-		for (const int slot : fresh) {
-			const Pasture3DRegion *region = get_region_ptr(Vector2i(_slot_locations[slot]));
+	bool any_fresh = false;
+	for (int p = 0; p < POOL_MAX; p++) {
+		SlotPool &pool = _pools[p];
+		for (const int slot : fresh[p]) {
+			const Pasture3DRegion *region = get_region_ptr(Vector2i(pool.locations[slot]));
 			if (!region) {
 				continue;
 			}
+			any_fresh = true;
 			for (int t = 0; t < TYPE_MAX; t++) {
-				if (rebuilt[t]) {
+				if (rebuilt[p][t] || !pool.gens[t].get_rid().is_valid()) {
 					continue;
 				}
 				const Ref<Image> img = _gpu_map(region, MapType(t));
-				(*arrays[t])[slot] = img;
-				gens[t]->update(img, slot);
+				pool.maps[t][slot] = img;
+				pool.gens[t].update(img, slot);
 				_stat_layer_uploads++;
-				uploaded[t] = true;
-			}
-		}
-		if (!rebuilt[TYPE_HEIGHT]) {
-			calc_height_range();
-		}
-		for (int t = 0; t < TYPE_MAX; t++) {
-			if (uploaded[t]) {
-				LOG(DEBUG, "Emitting ", SIGNALS[t]);
-				emit_signal(SIGNALS[t]);
+				signal[t] = true;
 			}
 		}
 	}
+	if (any_fresh) {
+		calc_height_range();
+	}
 
-	// Regions marked Edited have been changed by Pasture3DEditor::_operate_map or undo / redo processing:
-	// re-upload their layer of each requested map type that was not recreated above.
+	// Regions marked Edited have been changed by Pasture3DEditor::_operate_map or undo / redo processing, and
+	// restitched ones by the stitch above (height only): re-upload their layer of each requested map type
+	// that was not recreated above.
 	for (const Vector2i &region_loc : _region_locations) {
 		const Pasture3DRegion *region = get_region_ptr(region_loc);
-		if (!region || !region->is_edited()) {
+		const bool stitched = restitched.has(region_loc);
+		if (!region || !(region->is_edited() || stitched)) {
 			continue;
 		}
-		const int slot = _region_slots.get(region_loc, -1);
-		if (slot < 0 || fresh.has(slot)) {
+		const PoolId p = _pool_of(region);
+		SlotPool &pool = _pools[p];
+		const int slot = pool.slots.get(region_loc, -1);
+		if (slot < 0 || fresh[p].has(slot)) {
 			continue;
 		}
 		for (int t = 0; t < TYPE_MAX; t++) {
-			if (rebuilt[t] || (p_map_type != TYPE_MAX && p_map_type != t)) {
+			if (rebuilt[p][t] || !pool.gens[t].get_rid().is_valid() || (p_map_type != TYPE_MAX && p_map_type != t) ||
+					(!region->is_edited() && t != TYPE_HEIGHT)) {
 				continue;
 			}
 			const Ref<Image> img = _gpu_map(region, MapType(t));
-			(*arrays[t])[slot] = img;
-			gens[t]->update(img, slot);
+			pool.maps[t][slot] = img;
+			pool.gens[t].update(img, slot);
 			_stat_layer_uploads++;
+			signal[t] = true;
+		}
+	}
+
+	for (int t = 0; t < TYPE_MAX; t++) {
+		if (signal[t]) {
+			any_changed = true;
 			LOG(DEBUG, "Emitting ", SIGNALS[t]);
 			emit_signal(SIGNALS[t]);
 		}
@@ -3079,12 +3264,39 @@ real_t Pasture3DData::_coarse_height(const Pasture3DRegion *p_region, const Vect
 
 Ref<Image> Pasture3DData::_gpu_map(const Pasture3DRegion *p_region, const MapType p_type) const {
 	const Ref<Image> map = p_region->get_map(p_type);
+	const int store = get_coarse_store_ratio();
+	const int r = p_region->get_texel_ratio();
+	if (!p_region->is_coarse() || map.is_null() || store == 0 || r == store) {
+		return map;
+	}
+	// Coarser than the coarse arrays: a copy at their ratio. The shader reads height only at this region's
+	// lattice texels, which are exact; between them the copy is the CPU's bilinear surface. Control and
+	// colour repeat the cell at or before, as the CPU reads them.
+	const int n = _region_size / store;
+	const int q = r / store;
+	const Vector2i loc = p_region->get_location();
+	Ref<Image> up = Image::create_empty(n, n, false, map->get_format());
+	for (int y = 0; y < n; y++) {
+		for (int x = 0; x < n; x++) {
+			if (p_type == TYPE_HEIGHT) {
+				up->set_pixel(x, y, Color(_coarse_height(p_region, loc, Vector2i(x * store, y * store)), 0.f, 0.f, 1.f));
+			} else {
+				up->set_pixel(x, y, map->get_pixel(x / q, y / q));
+			}
+		}
+	}
+	if (p_type == TYPE_COLOR && map->has_mipmaps()) {
+		up->generate_mipmaps();
+	}
+	return up;
+}
+
+Ref<Image> Pasture3DData::_full_size_map(const Pasture3DRegion *p_region, const MapType p_type) const {
+	const Ref<Image> map = p_region->get_map(p_type);
 	if (!p_region->is_coarse() || map.is_null()) {
 		return map;
 	}
-	// Temporary until phase 3's per-ratio arrays: upsample to the array's size, sampled as the CPU samples,
-	// so what renders is what get_height and get_pixel answer. The far edge follows the neighbours at
-	// upload time and is not refreshed when only a neighbour changes.
+	// Sampled as the CPU samples, so an export is what get_height and get_pixel answer.
 	const int rs = _region_size;
 	const int r = p_region->get_texel_ratio();
 	const Vector2i loc = p_region->get_location();
@@ -3097,9 +3309,6 @@ Ref<Image> Pasture3DData::_gpu_map(const Pasture3DRegion *p_region, const MapTyp
 				up->set_pixel(x, y, map->get_pixel(x / r, y / r));
 			}
 		}
-	}
-	if (p_type == TYPE_COLOR) {
-		up->generate_mipmaps();
 	}
 	return up;
 }
@@ -3432,6 +3641,7 @@ Error Pasture3DData::set_region_type(const Vector2i &p_region_loc, const Ref<Pas
 	}
 	region->set_modified(true);
 	region->set_edited(true);
+	_region_map_dirty = true; // The region map carries the pool, ratio and the type's render flags
 	calc_height_range();
 	if (p_update) {
 		update_maps(TYPE_MAX, false, false);
@@ -4063,7 +4273,7 @@ Ref<Image> Pasture3DData::layered_to_image(const MapType p_map_type, const Rect2
 		Rect2i src_rect(overlap.position - region_rect.position, overlap.size);
 		Vector2i dst_pos = overlap.position - export_rect.position;
 		LOG(DEBUG, "Region ", region_loc, ": src=", src_rect, " dst=", dst_pos);
-		img->blit_rect(_gpu_map(region, map_type), src_rect, dst_pos); // Full size on a coarse region too
+		img->blit_rect(_full_size_map(region, map_type), src_rect, dst_pos); // Full size on a coarse region too
 	}
 	return img;
 }
@@ -4086,12 +4296,12 @@ void Pasture3DData::dump(const bool verbose) const {
 				LOG(MESG, "Region map array index: ", i, " / ", _region_map.size() - 1, ", Slot: ", region_map_decode(_region_map[i]));
 			}
 		}
-		Util::dump_maps(_height_maps, "Height maps");
-		Util::dump_gentex(_generated_height_maps, "height");
-		Util::dump_maps(_control_maps, "Control maps");
-		Util::dump_gentex(_generated_control_maps, "control");
-		Util::dump_maps(_color_maps, "Color maps");
-		Util::dump_gentex(_generated_color_maps, "color");
+		Util::dump_maps(_pools[POOL_FINE].maps[TYPE_HEIGHT], "Height maps");
+		Util::dump_gentex(_pools[POOL_FINE].gens[TYPE_HEIGHT], "height");
+		Util::dump_maps(_pools[POOL_FINE].maps[TYPE_CONTROL], "Control maps");
+		Util::dump_gentex(_pools[POOL_FINE].gens[TYPE_CONTROL], "control");
+		Util::dump_maps(_pools[POOL_FINE].maps[TYPE_COLOR], "Color maps");
+		Util::dump_gentex(_pools[POOL_FINE].gens[TYPE_COLOR], "color");
 	}
 }
 
@@ -4115,9 +4325,19 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_region_map"), &Pasture3DData::get_region_map);
 	ClassDB::bind_method(D_METHOD("get_region_map_rid"), &Pasture3DData::get_region_map_rid);
 	ClassDB::bind_static_method("Pasture3DData", D_METHOD("get_region_map_size"), &Pasture3DData::get_region_map_size);
-	ClassDB::bind_static_method("Pasture3DData", D_METHOD("region_map_encode", "slot"), &Pasture3DData::region_map_encode);
+	ClassDB::bind_static_method("Pasture3DData", D_METHOD("region_map_encode", "slot", "shift", "collapse", "color_only"), &Pasture3DData::region_map_encode, DEFVAL(0), DEFVAL(false), DEFVAL(false));
 	ClassDB::bind_static_method("Pasture3DData", D_METHOD("region_map_decode", "value"), &Pasture3DData::region_map_decode);
 	ClassDB::bind_method(D_METHOD("get_slot_locations"), &Pasture3DData::get_slot_locations);
+	ClassDB::bind_method(D_METHOD("get_coarse_slot_locations"), &Pasture3DData::get_coarse_slot_locations);
+	ClassDB::bind_method(D_METHOD("get_coarse_slot_capacity"), &Pasture3DData::get_coarse_slot_capacity);
+	ClassDB::bind_method(D_METHOD("get_coarse_store_ratio"), &Pasture3DData::get_coarse_store_ratio);
+	ClassDB::bind_method(D_METHOD("get_collapse_ratio_max"), &Pasture3DData::get_collapse_ratio_max);
+	ClassDB::bind_method(D_METHOD("set_seam_stitch_enabled", "enabled"), &Pasture3DData::set_seam_stitch_enabled);
+	ClassDB::bind_method(D_METHOD("is_seam_stitch_enabled"), &Pasture3DData::is_seam_stitch_enabled);
+	ClassDB::bind_method(D_METHOD("get_coarse_maps_rid", "map_type"), &Pasture3DData::get_coarse_maps_rid);
+	ClassDB::bind_method(D_METHOD("get_coarse_maps", "map_type"), &Pasture3DData::get_coarse_maps);
+	ClassDB::bind_static_method("Pasture3DData", D_METHOD("region_id_slot", "id"), &Pasture3DData::region_id_slot);
+	ClassDB::bind_static_method("Pasture3DData", D_METHOD("region_id_is_coarse", "id"), &Pasture3DData::region_id_is_coarse);
 	ClassDB::bind_method(D_METHOD("get_slot_capacity"), &Pasture3DData::get_slot_capacity);
 	ClassDB::bind_method(D_METHOD("get_upload_stats"), &Pasture3DData::get_upload_stats);
 	ClassDB::bind_method(D_METHOD("reset_upload_stats"), &Pasture3DData::reset_upload_stats);

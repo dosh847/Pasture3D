@@ -54,7 +54,11 @@ func _ready() -> void:
 
 func _is_clear_at(p_loc: Vector2i) -> bool:
 	_cam.global_position = Vector3(p_loc.x * 256 + 128, 60, p_loc.y * 256 + 128)
-	await _frames(6)
+	# The clipmap snaps to the camera in _physics_process, so a jump draws on the first frame after the next
+	# physics tick; a count of render frames alone races it (at a high frame rate 6 frames can be one tick).
+	for i in 2:
+		await get_tree().physics_frame
+	await _frames(3)
 	var img := get_viewport().get_texture().get_image()
 	var c := img.get_pixel(img.get_width() / 2, img.get_height() / 2)
 	print("    %s centre pixel %s" % [p_loc, c])
