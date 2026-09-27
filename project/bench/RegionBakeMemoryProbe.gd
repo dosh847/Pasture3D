@@ -16,6 +16,7 @@
 # `bake_all_brushes_now`. So the undo snapshots measured are the ones Bake All keeps, not the probe's own.
 # `--unfiltered` sets `debug_unfiltered_undo`, the pre-M1 snapshots (PASTURE3D_BAKE_MEMORY_SPEC.md U3).
 # `--index-per-unload` sets `debug_index_per_unload`, the pre-M3 index writes (I3).
+# `--no-spill` sets `debug_no_spill`, the pre-M6 frozen caches kept in memory (F2).
 #
 # Measured on each:
 #   [P] peak loaded regions during the bake. Also the peak the SAME refcount rule would reach under an
@@ -41,6 +42,7 @@ var RS := 256.0
 var _fixtures: Array = ["F1", "F2", "F3"]
 var _unfiltered := false
 var _index_per_unload := false
+var _no_spill := false
 
 var _fail := 0
 var _done := 0
@@ -65,9 +67,12 @@ func _ready() -> void:
 			_unfiltered = true
 		elif a == "--index-per-unload":
 			_index_per_unload = true
+		elif a == "--no-spill":
+			_no_spill = true
 	CRITERIA = _fixtures.size() * 3 + (1 if _fixtures.has("F3") else 0)
 	print("\n=== Region bake memory probe (N = %d, region %d m, %s%s) ===" % [N, int(RS), ",".join(_fixtures),
-		(", UNFILTERED undo (pre-M1)" if _unfiltered else "") + (", index per unload (pre-M3)" if _index_per_unload else "")])
+		(", UNFILTERED undo (pre-M1)" if _unfiltered else "") + (", index per unload (pre-M3)" if _index_per_unload else "")
+		+ (", no spill (pre-M6)" if _no_spill else "")])
 	for fixture in _fixtures:
 		await _run_fixture(fixture)
 	print("process static peak (Godot allocator, whole run): %.1f MB" % (OS.get_static_memory_peak_usage() / 1048576.0))
@@ -130,6 +135,7 @@ func _run_fixture(p_fixture: String) -> void:
 	mgr.bake_budget_regions = 0
 	mgr.debug_unfiltered_undo = _unfiltered
 	mgr.debug_index_per_unload = _index_per_unload
+	mgr.debug_no_spill = _no_spill
 	d.reset_upload_stats()
 	_loaded_now = 0
 	_peak_loaded = 0
@@ -227,12 +233,13 @@ func _run_fixture(p_fixture: String) -> void:
 		_mb2(snap), _mb2(snap2)])
 	# A modifier-free Mound takes the native stamp_mound_loop route, which never fills the stamp cache, so
 	# 0 entries is the route, not a finding (a modifier stack is native too).
-	print("    stamp caches on brushes: %.2f MB in %d entries; frozen erosion caches: %.2f MB" % [
-		stamp / 1048576.0, stamp_entries, ero / 1048576.0])
+	var spilled := int(rep.get("spilled_bytes", 0))
+	print("    stamp caches on brushes: %.2f MB in %d entries; frozen caches in memory: %.2f MB, spilled to disk: %.2f MB (%d brushes)" % [
+		stamp / 1048576.0, stamp_entries, ero / 1048576.0, spilled / 1048576.0, (rep.get("spilled", []) as Array).size()])
 	print("    GPU arrays at that capacity (height + control + colour, no mips): %.1f MB" % (
 		d.get_slot_capacity() * RS * RS * 12.0 / 1048576.0))
 	if p_fixture == "F3":
-		if ero == 0:
+		if ero + spilled == 0:
 			_fail += 1
 			print("    !! F3 filled no erosion cache; the witness for the brush-cache measure failed")
 		_done += 1

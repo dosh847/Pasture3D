@@ -2,8 +2,8 @@
 
 **Document Version:** 1.0
 **Target Engine:** Godot 4.7+ / GDExtension (C++ / GDScript)
-**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phases 1–4 committed (`bd459c91`, `3bbdcc53`,
-`af6a5ee2`, `53f20709`); phase 5 built, not yet committed.
+**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phases 1–5 committed (`bd459c91`, `3bbdcc53`,
+`af6a5ee2`, `53f20709`, `82dd8b3d`); phase 6 built, not yet committed.
 **Evidence:** `project/bench/RegionBakeMemoryProbe.gd`, runs of 2026-09-26: a small world (6 × 6 regions of
 256 m) and a large one (16 × 16 regions of 1024 m, 256 km²).
 **Builds on:** `PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md`, whose last item this is ("investigate memory
@@ -27,7 +27,7 @@ at 5.65 GB of RAM, and 3 GB of GPU arrays stay allocated after it has released e
 | M3 | Each unload rewrites the region index and layer manifest | **Built — Phase 3** |
 | M4 | Owners bake in global layer order, so regions are held across the whole run | **Built — Phase 4** |
 | M5 | The default shared layer makes one owner the size of the world | **Built — Phase 5** |
-| M6 | Frozen modifier caches stay in memory for every baked brush | **Fix — Phase 6** |
+| M6 | Frozen modifier caches stay in memory for every baked brush | **Built — Phase 6** |
 | M7 | The only budget is a region count, with no back-pressure | **Fix — Phase 7** |
 | — | Are released regions and their layer tiles freed? | **Yes.** Measured, see §2.3 |
 | — | Per-brush stamp cache | **Not a finding.** Native routes never fill it, see §2.4 |
@@ -569,6 +569,75 @@ is a behaviour change.
 - **[F2]** Memory held by caches after an All-regions bake on F3 is 0 once every region is released.
   Control: the pre-fix build holds it.
 
+### 8.5 Fix as built
+
+- **Where the cache lives.** `_cache` moved from the four freezable modifiers (Erosion, Relief, Graph, Road)
+  to their base, `Pasture3DNode`, which owns the spill: `spill_cache(dir)` writes it with `store_var` to
+  `<pid>_<instance id>.spill` and drops it, and `_unspill()` reads it back and deletes the file.
+- **The rule for the modifiers.** Every accessor that reads or writes `_cache` (`cache_for`, `store_cache`)
+  unspills first, and every explicit drop (`clear_cache`, the Graph's `drop_cache_for_bake`) deletes the
+  spill without reading it. `cache_bytes()` does not unspill: it reports memory, and a spill holds none. The
+  Graph's `has_cache()` is true while spilled, so a frozen graph still skips the deferred solve.
+- **The lazy read is the point.** Nothing reloads caches eagerly. A spilled modifier costs nothing until a
+  rebake asks it for an entry, and a missing or unreadable file reads as "nothing cached", which is what
+  every frozen modifier is after a reload. So a lost spill makes one re-solve and never a wrong answer.
+- **When (the scoped bake).** `begin` records each planned brush that has a freezable modifier, and the
+  regions its own footprint touches. `_release`, the single release point (road holds and `finish`
+  included), spills every brush over the released region whose regions are now all unloaded. A brush over
+  a region loaded before the bake is never spilled, because that region is never released.
+- **Refused spills.** A cache holding an Object anywhere is not spilled: `store_var` cannot carry one
+  without full objects, and a spill that turned it into null would lose state. It stays in memory, as
+  before M6. The same goes for a failed write.
+- **Files.** They go under `res://.godot/pasture3d_frozen/` (§11 decision 3), per machine and unversioned. A
+  modifier deletes its file when it is read, cleared or freed. The editor plugin sweeps other processes'
+  files older than a day at startup (`Pasture3DNode.sweep_spills`), which covers a crash. The age guard
+  protects a second Godot process on the same project, a gate running beside the editor for example.
+- **Report.** `spilled` (brush names) and `spilled_bytes` (their `cache_bytes()`), through Bake All too.
+- **Not spilled.** Two kinds of frozen state stay in memory, and nothing counts them yet. A graph's internal
+  solver freezes live on the graph resource, which several brushes can share, so "this brush's regions
+  are released" says nothing about them. A Relief material's grown DLA field lives on the material.
+- **Controls:** `debug_no_spill` (the pre-M6 build) and `debug_drop_frozen` (free the cache without
+  spilling it: what "just free it" would do).
+
+### 8.6 Results (2026-09-26)
+
+`bench/RegionFrozenSpillGate.tscn`: PASS, 3/3 criteria.
+
+- **Fixture:** 3 × 1 regions of 128 m and three Mounds with Frozen erosion: E0 in region (0,0), E1 in
+  (2,0), E2 across (1,0)/(2,0). Region (2,0) is loaded before the bake.
+- **F1:** after the bake, E0's surface is changed and it is rebaked. The spilled run reads its cache back,
+  serves it stale, deletes the file, and is byte-identical to the never-spilled run. Control: dropping the
+  cache re-solves (not stale) and differs.
+- **F2:** E0 holds 0 bytes, its file is on disk, and the report names E0 alone with the 12,996 bytes the
+  unspilled run holds. Controls: without the spill E0 holds them; E1 (pinned) and E2 (one region
+  released, one pinned) are not spilled.
+- **F3:** a read-back consumes the file (that is also the control: an uncleared spill still serves). Bake
+  (`clear_cache`) deletes the file and serves nothing. Relief, Graph and Road spill and read back too. A
+  freed modifier deletes its file, and a cache holding an Object is refused. The sweep deletes another
+  process's old file but not a young one or its own.
+- **Mutation:** a spill that writes nothing fails F1 and F3; a `clear_cache` that keeps the spill fails
+  F3; a `cache_for` that does not unspill fails F1 and F3; ignoring the "all regions released" test fails
+  F2 (E2 spills); allowing Objects fails F3; a sweep that ignores the pid fails F3.
+
+The probe (large world, 16 × 16 × 1024 m):
+
+| F3 (256 brushes, Frozen erosion) | kept (`--no-spill`, pre-M6) | spilled (M6) |
+|---|---|---|
+| Frozen caches in memory after the bake | 222.2 MB | **0** (222.2 MB on disk, 256 brushes) |
+| RAM (`MEMORY_STATIC`): start → peak → after the bake | 606 → 644 → 623 MB | 606 → 626 → **178 MB** |
+| RAM freed by then dropping the caches | 445 MB | 0.5 MB |
+| Bake time (of which save + unload) | 127.3 s (18.1 s) | 126.3 s (17.6 s) |
+
+The caches cost twice what `cache_bytes()` counts: dropping 222 MB of arrays frees 445 MB. That fits
+allocator overhead on 256 × 6 packed arrays, but it is not measured further here. The spill frees all of
+it. The run's 5.7 GB working-set peak is still the setup's (§2.2). Writing the spill costs nothing
+visible in the bake time.
+
+Regression: all region gates, BrushRegistryGate, TestBrushSinkFootprintGate, and every modifier-cache gate
+run pass (BrushErosion, BrushGraphRow, BrushDeferredDriver, GraphFreeze, RoadStale, DLA, InputFootprint,
+LayerBrushBase, LayerBrushDriver, BrushAccumulation, GraphSinkBake). RoadGraphGate fails K and O (worst
+0.25 m) with the phase 6 files reverted to HEAD too, so it predates this phase.
+
 ---
 
 ## 9. M7 — A memory budget with back-pressure
@@ -611,7 +680,7 @@ regions plus whatever the owner being baked allocates.
 | 3 | M3 batched index and manifest | Built 2026-09-26: I1, M, I2 pass; F2 release 21.3 s, writes saved ~5.8 s |
 | 4 | M4 dependency-ordered schedule | Built 2026-09-26: O1–O3 pass; large F2 peak 17 of 256 (was 220), RAM peak 559 MB (was 4.51 GB) |
 | 5 | M5 chunked shared owner, option (a) | Built 2026-09-26: C1–C3 pass; large F1 peak 1 of 256 (was 256), bake RAM peak 180 MB (was 5.65 GB) |
-| 6 | M6 frozen cache spill, option (a) | F1–F2 pass |
+| 6 | M6 frozen cache spill, option (a) | Built 2026-09-26: F1–F3 pass; large F3 caches in memory 0 (was 222 MB), RAM after the bake 178 MB (was 623 MB) |
 | 7 | M7 byte budget with back-pressure | B1–B3 pass |
 | 8 | Re-measure the large world | Probe re-run on all fixtures; §2.2 gains an "after" column |
 

@@ -69,6 +69,16 @@ extends RefCounted
 ## A split owner's budget applies per chunk. An owner that cannot be split and is over the budget is still
 ## skipped, and the manager names it.
 ##
+## ---- A RELEASED BRUSH SPILLS ITS FROZEN CACHES (PASTURE3D_BAKE_MEMORY_SPEC.md M6) ----
+##
+## A frozen modifier keeps its last solve in memory whether or not its regions are loaded, so after Bake
+## All re-solves every registered brush the caches grow with the brush count. When the bake releases the
+## last region a brush's own footprint touches, its modifiers spill their caches to `spill_dir` and read
+## them back on the next rebake that asks (Pasture3DNode.spill_cache). A brush over a region that was
+## loaded before the bake is never spilled: that region is never released.
+## Not spilled: a graph's internal solver freezes (a graph can be shared between brushes) and a Relief
+## material's grown field; they are counted by nobody yet.
+##
 ## ---- DRIVING IT ----
 ##
 ## `bake()` does everything synchronously. A caller with its own per-owner work (the brush registry's
@@ -109,6 +119,13 @@ var debug_layer_major: bool = false
 var debug_reverse_order: bool = false
 ## GATE CONTROL ONLY. Never split a shared owner, as before M5.
 var debug_no_chunks: bool = false
+## Where released brushes spill their frozen caches (M6).
+var spill_dir: String = Pasture3DNode.SPILL_DIR
+## GATE CONTROL ONLY. Keep frozen caches in memory, as before M6.
+var debug_no_spill: bool = false
+## GATE CONTROL ONLY. DROP a released brush's frozen caches instead of spilling them: what "just free it"
+## would do. The next rebake re-solves.
+var debug_drop_frozen: bool = false
 ## GATE CONTROL ONLY. Split a shared owner one tool per chunk, ignoring overlaps: the wrong split.
 var debug_chunk_by_tool: bool = false
 
@@ -416,7 +433,7 @@ func begin(p_scope: int, p_targets: Array = []) -> Dictionary:
 	var report := {"ok": false, "reason": "", "scope": ScopeNames[clampi(p_scope, 0, 2)], "targets": [], "split": {},
 			"owners": [], "regions_written": [], "loaded_for_bake": [], "released": [],
 			"skipped_locked": [], "skipped_budget": [], "events": [], "road_turns": 0,
-			"roads_unsettled": [], "release_usec": 0}
+			"roads_unsettled": [], "release_usec": 0, "spilled": [], "spilled_bytes": 0}
 	var ctx := {"ok": false, "report": report, "owners": []}
 	if terrain == null or terrain.data == null:
 		report["reason"] = "no terrain"
@@ -452,7 +469,75 @@ func begin(p_scope: int, p_targets: Array = []) -> Dictionary:
 		return ctx
 	ctx.merge({"ok": true, "owners": owners, "refs": refs, "road_hold": road_hold, "ours": {},
 			"written": {}, "baked": {}}, true) # overwrite: ctx already holds ok=false and owners=[]
+	_plan_spills(ctx)
 	return ctx
+
+
+## For every brush in the plan with a freezable modifier: the existing regions its own footprint touches
+## (`spill_regions`), and each region's brushes (`spill_at`), so a release can tell which brushes it just
+## let go of entirely.
+func _plan_spills(p_ctx: Dictionary) -> void:
+	var size := float(terrain.get_region_size()) * float(terrain.get_vertex_spacing())
+	var existing := _existing_regions()
+	var regions_of := {}
+	var at := {}
+	for od: Dictionary in p_ctx["owners"]:
+		for b in od.get("chunk", od["brushes"]):
+			if regions_of.has(b) or not _has_freezable(b):
+				continue
+			var mine := {}
+			for box: AABB in b._own_footprints():
+				if box.size == Vector3.ZERO:
+					continue
+				for r: Vector2i in Pasture3DTerrainBrush.footprint_regions(box, size):
+					if existing.has(r):
+						mine[r] = true
+			regions_of[b] = mine.keys()
+			for r: Vector2i in mine:
+				if not at.has(r):
+					at[r] = []
+				(at[r] as Array).append(b)
+	p_ctx["spill_regions"] = regions_of
+	p_ctx["spill_at"] = at
+
+
+static func _has_freezable(p_brush) -> bool:
+	if not p_brush._supports_modifiers():
+		return false
+	for m in p_brush.modifiers:
+		if m is Pasture3DNode and m._supports_freezing():
+			return true
+	return false
+
+
+## After `p_loc` was released: spill every brush over it whose regions are now all unloaded.
+func _spill_released(p_ctx: Dictionary, p_loc: Vector2i) -> void:
+	if debug_no_spill:
+		return
+	var data = terrain.data
+	var report: Dictionary = p_ctx["report"]
+	for b in p_ctx.get("spill_at", {}).get(p_loc, []):
+		if not is_instance_valid(b) or (report["spilled"] as Array).has(String(b.name)):
+			continue
+		var held := false
+		for r: Vector2i in p_ctx["spill_regions"][b]:
+			if data.is_region_loaded(r):
+				held = true
+				break
+		if held:
+			continue
+		var bytes := 0
+		for m in b.modifiers:
+			if not (m is Pasture3DNode):
+				continue
+			if debug_drop_frozen:
+				bytes += m.cache_bytes()
+				m._cache.clear()
+			else:
+				bytes += m.spill_cache(spill_dir)
+		if bytes > 0:
+			(report["spilled"] as Array).append(String(b.name))
+			report["spilled_bytes"] = int(report["spilled_bytes"]) + bytes
 
 
 ## Load every region owner `p_index` reaches that is not loaded yet.
@@ -634,6 +719,7 @@ func _release(p_ctx: Dictionary, p_loc: Vector2i) -> void:
 		push_warning("Pasture3DScopedBake: could not unload region %s (error %d)" % [p_loc, err])
 	(p_ctx["report"]["released"] as Array).append(p_loc)
 	(p_ctx["report"]["events"] as Array).append(["release", p_loc])
+	_spill_released(p_ctx, p_loc)
 
 
 static func _has_roads(p_owner: Dictionary) -> bool:

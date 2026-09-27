@@ -205,6 +205,8 @@ var debug_unfiltered_undo: bool = false
 ## Measurement control only (PASTURE3D_BAKE_MEMORY_SPEC.md I3): write the region index at every release, as
 ## before M3, so the probe can time what batching it saved.
 var debug_index_per_unload: bool = false
+## Measurement control only (PASTURE3D_BAKE_MEMORY_SPEC.md F2): keep frozen caches in memory, as before M6.
+var debug_no_spill: bool = false
 
 
 # ---- Pasture3DSimBase hooks -----------------------------------------------------------------------
@@ -1632,6 +1634,7 @@ func _bake_all_begin(p_record_undo: bool) -> Dictionary:
 	var sb = _ScopedBake.new(terrain)
 	sb.budget_regions = bake_budget_regions
 	sb.debug_index_per_unload = debug_index_per_unload
+	sb.debug_no_spill = debug_no_spill
 	var registered := {}
 	for entry: Dictionary in _eroding_owner_plan(brushes):
 		registered[entry["owner"]] = entry["brushes"]
@@ -1758,7 +1761,7 @@ func _bake_all_finish(p_ctx: Dictionary) -> Dictionary:
 				p_ctx["after"][od["owner"]] = _snapshot_owner(od["owner"], _not_undoable(p_ctx)))
 		var sreport: Dictionary = sb.finish(p_ctx["scoped"])
 		for k in ["loaded_for_bake", "released", "regions_written", "road_turns", "roads_unsettled", "events",
-				"release_usec", "split"]:
+				"release_usec", "split", "spilled", "spilled_bytes"]:
 			report[k] = sreport[k]
 	report["ok"] = true
 	report["baked"] = p_ctx["baked"]

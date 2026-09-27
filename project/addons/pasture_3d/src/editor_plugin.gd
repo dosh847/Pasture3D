@@ -96,6 +96,8 @@ func _enter_tree() -> void:
 	EditorInterface.get_inspector().mouse_entered.connect(_on_inspector_mouse_entered)
 	editor = Pasture3DEditor.new()
 	setup_editor_settings()
+	# Frozen-cache spills a crashed session left behind (PASTURE3D_BAKE_MEMORY_SPEC.md M6).
+	Pasture3DNode.sweep_spills()
 	ui = Pasture3DUI.new()
 	ui.plugin = self
 	add_child(ui)
