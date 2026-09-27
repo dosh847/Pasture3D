@@ -2,8 +2,8 @@
 
 **Document Version:** 1.0
 **Target Engine:** Godot 4.7+ / GDExtension (C++ / GDScript)
-**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phases 1–3 committed (`bd459c91`, `3bbdcc53`,
-`af6a5ee2`); phase 4 built, not yet committed.
+**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phases 1–4 committed (`bd459c91`, `3bbdcc53`,
+`af6a5ee2`, `53f20709`); phase 5 built, not yet committed.
 **Evidence:** `project/bench/RegionBakeMemoryProbe.gd`, runs of 2026-09-26: a small world (6 × 6 regions of
 256 m) and a large one (16 × 16 regions of 1024 m, 256 km²).
 **Builds on:** `PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md`, whose last item this is ("investigate memory
@@ -26,7 +26,7 @@ at 5.65 GB of RAM, and 3 GB of GPU arrays stay allocated after it has released e
 | M2 | GPU slot capacity never shrinks | **Built — Phase 2** |
 | M3 | Each unload rewrites the region index and layer manifest | **Built — Phase 3** |
 | M4 | Owners bake in global layer order, so regions are held across the whole run | **Built — Phase 4** |
-| M5 | The default shared layer makes one owner the size of the world | **Fix — Phase 5** |
+| M5 | The default shared layer makes one owner the size of the world | **Built — Phase 5** |
 | M6 | Frozen modifier caches stay in memory for every baked brush | **Fix — Phase 6** |
 | M7 | The only budget is a region count, with no back-pressure | **Fix — Phase 7** |
 | — | Are released regions and their layer tiles freed? | **Yes.** Measured, see §2.3 |
@@ -476,6 +476,63 @@ Recommendation: (a), with (c)'s warning for an owner that reads the domain and s
   Control: the unchunked bake loads 256.
 - **[C3]** A domain-reading owner is not split and is named in the warning.
 
+### 7.4 Fix as built
+
+- **The chunks (`_chunks`).** The connected components of footprint overlap among an owner's tools, found
+  by union-find over region-bucketed candidate pairs. A full owner bake clears every tool's footprint and
+  repaints every tool, and tools combine only where footprints overlap, so a component that no other tool
+  overlaps can be cleared and repainted alone and the layer gets the same bytes.
+- **Baking one.** `_refresh_owner(owner, record_undo, extra_clears, p_only)` repaints only the tools in
+  `p_only`, and clears only their footprints. It is correct only for a set that no other tool on the layer
+  overlaps, which is what a chunk is.
+- **In the plan.** Each chunk is a plan entry with its own `key` (`owner#k`), tools, boxes and regions. It
+  is budgeted, scheduled, loaded and released like an owner, and dependency edges reach every chunk of an
+  owner. `plan()` returns `split` ({owner: chunk count}); `skipped_budget` still names owners.
+- **What is not split (`_splittable`).** An owner that reads its domain; a Layer brush's owner, whose base
+  re-solves once for all members; an owner holding roads, since `settle_roads` holds every region a road
+  owner touches anyway; an owner with fewer than two tools; and an owner whose regions are all loaded
+  already, since splitting saves nothing there and one bake is cheaper than many.
+- **Bake All.** Registered-brush cache clears are filtered to the chunk. The owner's undo pair is taken
+  once: "before" at its first chunk, while nothing it owns has changed, and "after" only at its last chunk
+  (entry `last`). Taking "after" per chunk would copy the whole layer once per chunk.
+- **The warning (option (c) for what cannot split).** `_registry_warnings` names the layers the last Bake
+  All skipped over the budget, and says a domain-reading or road-holding layer cannot be split to fit.
+- **Controls:** `debug_no_chunks` (the pre-M5 whole-owner bake) and `debug_chunk_by_tool` (one tool per
+  chunk, overlaps ignored).
+
+### 7.5 Results (2026-09-26)
+
+`bench/RegionBakeChunkGate.tscn`: PASS, 3/3 criteria.
+
+- **Fixture:** 4 × 4 regions of 128 m and one shared Mounds layer: eight isolated Mounds, and a cluster of
+  three whose footprints chain across four regions. The Mounds are edited after a pre-bake, so the bake
+  changes 12 of 16 regions.
+- **C1:** 11 tools in 9 chunks (the cluster is one). Chunked, whole-owner and Bake All heights are
+  byte-identical on all 16 regions. Control: one tool per chunk differs on the cluster's regions. Bake All
+  took 2 snapshots for 9 chunks. With two regions loaded before the bake, its "after" snapshot equals the
+  owner's final state, and restoring "before" gives the pre-bake heights.
+- **C2:** peak loaded 4 (the cluster's 4 regions), against 12 unsplit (every region the owner needs).
+- **C3:** the same layer with erosion is not split, is skipped over a budget of 4, and the warning names
+  it. Controls: without erosion it is split and not skipped; with every region loaded, nothing is split.
+- **Mutation:** ignoring `reads_domain` fails C3; ignoring overlap fails C1 (the cluster splits and the
+  heights differ); an "after" per chunk fails the one-pair check. Dropping the `p_only` filter fails only
+  through the control. Repainting every tool per chunk is waste, not wrong bytes, so the gate cannot tell it
+  apart from correct by the heights alone.
+
+The probe (large world, 16 × 16 × 1024 m):
+
+| F1 (one shared owner) | before (§2.2) | chunked (M5) |
+|---|---|---|
+| Plan entries | 1 | 256 chunks |
+| Peak regions loaded | 256 of 256 | **1 of 256** |
+| RAM during the bake (start → peak → after) | 149 MB → 5.65 GB → 1.20 GB | 151 MB → **180 MB** → 160 MB |
+| Bake time (of which save + unload) | 105 s (21 s) | 89.7 s (12.3 s) |
+
+The run's own working-set peak is still 5.2 GB, and that is the setup, which loads every region for its
+first bake (§2.2). F2 and F3 are unchanged: one tool per owner has nothing to split.
+
+Regression: all region gates, BrushRegistryGate and TestBrushSinkFootprintGate pass.
+
 ---
 
 ## 8. M6 — Frozen modifier caches
@@ -553,7 +610,7 @@ regions plus whatever the owner being baked allocates.
 | 2 | M2 slot compaction | Built 2026-09-26: S1–S3 pass; large F1 capacity after the bake 0 (was 256) |
 | 3 | M3 batched index and manifest | Built 2026-09-26: I1, M, I2 pass; F2 release 21.3 s, writes saved ~5.8 s |
 | 4 | M4 dependency-ordered schedule | Built 2026-09-26: O1–O3 pass; large F2 peak 17 of 256 (was 220), RAM peak 559 MB (was 4.51 GB) |
-| 5 | M5 chunked shared owner, option (a) | C1–C3 pass |
+| 5 | M5 chunked shared owner, option (a) | Built 2026-09-26: C1–C3 pass; large F1 peak 1 of 256 (was 256), bake RAM peak 180 MB (was 5.65 GB) |
 | 6 | M6 frozen cache spill, option (a) | F1–F2 pass |
 | 7 | M7 byte budget with back-pressure | B1–B3 pass |
 | 8 | Re-measure the large world | Probe re-run on all fixtures; §2.2 gains an "after" column |

@@ -1493,7 +1493,11 @@ func force_bake_modifiers() -> void:
 ## tool's splines, then one GPU push. Sharing means editing one tool must repaint its layer-mates so an
 ## overlapping mate isn't left wiped (the road-connector partial-refresh hazard); with the O(cells)
 ## rasteriser each bake is cheap. `extra_clears` lets a rebind also drop a departing tool's footprint.
-func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> void:
+##
+## `p_only` restricts the bake to those of the layer's tools, in the order the full bake paints them: the
+## scoped bake's chunks (PASTURE3D_BAKE_MEMORY_SPEC.md M5). It is only correct for a set no other tool on the
+## layer overlaps, because clearing the set's footprints erases whatever else painted there.
+func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array, p_only: Array = []) -> void:
 	if not is_configured():
 		return
 	# Also reached by the detach and rebind paths, not only by refresh(). A brush that paints nothing owns
@@ -1502,6 +1506,8 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 	if not _paints():
 		return
 	var sibs := _tools_on_owner(owner)
+	if not p_only.is_empty():
+		sibs = sibs.filter(func(s) -> bool: return p_only.has(s))
 	var sib_gens := _arm_gens(sibs)
 	var _trace_tok := Pasture3DBakeTrace.bake_begin(self, "full")
 	var layer_id := _ensure_layer_for(owner, owner == _layer_owner)

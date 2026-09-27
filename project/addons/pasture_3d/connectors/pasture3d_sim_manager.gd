@@ -1646,9 +1646,18 @@ func _bake_all_begin(p_record_undo: bool) -> Dictionary:
 		push_warning("%s: %s." % [_sim_label(), report["reason"]])
 		return fail
 	var plan: Array = []
+	var last := {}
 	for od: Dictionary in sctx["owners"]:
-		plan.append({"owner": od["owner"], "brushes": od["brushes"],
-				"clear": registered.get(od["owner"], []), "via": od["via"]})
+		last[od["owner"]] = plan.size()
+		var clear: Array = registered.get(od["owner"], [])
+		if od.has("chunk"):
+			clear = clear.filter(func(b) -> bool: return (od["chunk"] as Array).has(b))
+		plan.append({"owner": od["owner"], "brushes": od["brushes"], "clear": clear, "via": od["via"],
+				"chunk": od.get("chunk", [])})
+	# A split owner's "after" snapshot is taken once, after its last chunk (M5): per chunk, each one would copy
+	# the whole layer again.
+	for i in plan.size():
+		plan[i]["last"] = int(last[plan[i]["owner"]]) == i
 	return {"ok": true, "report": report, "plan": plan, "scoped": sctx, "sb": sb,
 			"record_undo": p_record_undo, "before": {}, "after": {},
 			"baked": 0, "total": brushes.size(), "cleared": 0, "cancelled": false}
@@ -1679,6 +1688,7 @@ func _bake_all_owner(p_ctx: Dictionary, entry: Dictionary) -> void:
 	var registered: Array = entry.get("clear", brushes)
 	if not p_ctx["before"].has(owner):
 		p_ctx["before"][owner] = _snapshot_owner(owner, _not_undoable(p_ctx))
+		p_ctx["snapshots"] = int(p_ctx.get("snapshots", 0)) + 1
 	for b in registered:
 		p_ctx["cleared"] = int(p_ctx["cleared"]) + b.clear_erosion_caches()
 		# §9.9. A DLA's grown mountain is FROZEN for the same reason a solve is, so it needs the same
@@ -1703,6 +1713,7 @@ func _bake_all_owner(p_ctx: Dictionary, entry: Dictionary) -> void:
 		else:
 			host.bake_layer(false)
 		p_ctx["after"][owner] = _snapshot_owner(owner, _not_undoable(p_ctx))
+		p_ctx["snapshots"] = int(p_ctx.get("snapshots", 0)) + 1
 		p_ctx["baked"] = int(p_ctx["baked"]) + registered.size()
 		return
 	# `_refresh_owner` is the brush's own layer bake — clear the layer, repaint every tool bound to it,
@@ -1713,11 +1724,13 @@ func _bake_all_owner(p_ctx: Dictionary, entry: Dictionary) -> void:
 		# button and, before §14, the whole reason it froze the editor for a minute at a time. Held here
 		# so Cancel can reach the brush that is actually solving.
 		_bake_all_brush = lead
-		await lead._bake_deferred(lead._refresh_owner.bind(owner, false, []), owner, false)
+		await lead._bake_deferred(lead._refresh_owner.bind(owner, false, [], entry.get("chunk", [])), owner, false)
 		_bake_all_brush = null
 	else:
-		lead._refresh_owner(owner, false, [])
-	p_ctx["after"][owner] = _snapshot_owner(owner, _not_undoable(p_ctx))
+		lead._refresh_owner(owner, false, [], entry.get("chunk", []))
+	if bool(entry.get("last", true)):
+		p_ctx["after"][owner] = _snapshot_owner(owner, _not_undoable(p_ctx))
+		p_ctx["snapshots"] = int(p_ctx.get("snapshots", 0)) + 1
 	p_ctx["baked"] = int(p_ctx["baked"]) + registered.size()
 
 
@@ -1745,7 +1758,7 @@ func _bake_all_finish(p_ctx: Dictionary) -> Dictionary:
 				p_ctx["after"][od["owner"]] = _snapshot_owner(od["owner"], _not_undoable(p_ctx)))
 		var sreport: Dictionary = sb.finish(p_ctx["scoped"])
 		for k in ["loaded_for_bake", "released", "regions_written", "road_turns", "roads_unsettled", "events",
-				"release_usec"]:
+				"release_usec", "split"]:
 			report[k] = sreport[k]
 	report["ok"] = true
 	report["baked"] = p_ctx["baked"]
@@ -1754,6 +1767,8 @@ func _bake_all_finish(p_ctx: Dictionary) -> Dictionary:
 	report["grown"] = p_ctx.get("grown", 0)
 	report["cancelled"] = p_ctx["cancelled"]
 	report["undo"] = {"before": p_ctx["before"], "after": p_ctx["after"]}
+	# Snapshots taken, before and after together: two per owner however many chunks it baked in (M5).
+	report["snapshots"] = p_ctx.get("snapshots", 0)
 	report["not_undoable"] = report.get("loaded_for_bake", [])
 	last_bake_report = report
 
@@ -1919,6 +1934,12 @@ func _collect_brushes(p_from: Node, r_out: Array) -> void:
 func _registry_warnings() -> PackedStringArray:
 	var w := PackedStringArray()
 	var reg := resolved_eroding_brushes()
+	var sk: Array = last_bake_report.get("skipped_budget", [])
+	if not sk.is_empty():
+		w.append(("The last Bake All Brushes skipped %d layer(s) whose bake would load more than %d regions: %s. "
+			+ "A layer whose brushes read their whole domain (erosion, grown relief, a graph), or that holds "
+			+ "roads, is baked whole and cannot be split to fit; give those brushes their own layers, or raise "
+			+ "the budget.") % [sk.size(), bake_budget_regions, ", ".join(sk)])
 	var nu: Array = last_bake_report.get("not_undoable", [])
 	if not nu.is_empty():
 		w.append(("The last Bake All Brushes loaded %d region(s) that were not loaded, baked them, and released "

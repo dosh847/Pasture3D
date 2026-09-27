@@ -333,7 +333,7 @@ static func _simulate_peak(p_owners: Array, p_order: Array) -> int:
 	var by_name := {}
 	var refs := {}
 	for od: Dictionary in p_owners:
-		by_name[od["owner"]] = od
+		by_name[od["key"]] = od
 		for r in od["regions"]:
 			refs[r] = int(refs.get(r, 0)) + 1
 	var loaded := {}
@@ -358,8 +358,8 @@ static func _greedy_order(p_owners: Array) -> Array:
 		var ps := {}
 		for b: Dictionary in p_owners:
 			if int(b["order"]) < int(a["order"]) and _share(a["regions"], b["regions"]):
-				ps[b["owner"]] = true
-		preds[a["owner"]] = ps
+				ps[b["key"]] = true
+		preds[a["key"]] = ps
 	var refs := {}
 	for od: Dictionary in p_owners:
 		for r in od["regions"]:
@@ -371,10 +371,10 @@ static func _greedy_order(p_owners: Array) -> Array:
 		var best: Dictionary = {}
 		var best_score: Array = [INF, INF]
 		for od: Dictionary in p_owners:
-			if done.has(od["owner"]):
+			if done.has(od["key"]):
 				continue
 			var ready := true
-			for p in preds[od["owner"]]:
+			for p in preds[od["key"]]:
 				if not done.has(p):
 					ready = false
 					break
@@ -391,8 +391,8 @@ static func _greedy_order(p_owners: Array) -> Array:
 			if score[0] < best_score[0] or (score[0] == best_score[0] and score[1] < best_score[1]):
 				best_score = score
 				best = od
-		done[best["owner"]] = true
-		order.append(best["owner"])
+		done[best["key"]] = true
+		order.append(best["key"])
 		for r in best["regions"]:
 			loaded[r] = true
 			refs[r] = int(refs[r]) - 1

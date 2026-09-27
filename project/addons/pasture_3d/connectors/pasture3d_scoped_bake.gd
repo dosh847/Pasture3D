@@ -51,6 +51,24 @@ extends RefCounted
 ## whose predecessors have baked, the one that loads the fewest new regions, then the one that lets the
 ## most go, then the old layer-major position. It narrows the peak; it does not bound it (M7 does).
 ##
+## ---- A SHARED LAYER IS BAKED IN CHUNKS (PASTURE3D_BAKE_MEMORY_SPEC.md M5) ----
+##
+## By default every Mound shares one layer, so one owner can cover the whole world, and an owner is atomic.
+## But a full owner bake is "clear every tool's footprint, repaint every tool", and tools combine only where
+## their footprints overlap. So a group of tools that no other tool on the layer overlaps (a connected
+## component of footprint overlap) can be cleared and repainted alone, and the layer ends up with the same
+## bytes. Each chunk is planned, scheduled, loaded and released like an owner; its entry carries `chunk` (its
+## tools) and a unique `key`.
+##
+## Not split:
+## - An owner that reads its domain (erosion, grown relief, a graph): its solve sees the whole footprint.
+## - A Layer brush's owner: its base re-solves once for all members.
+## - An owner holding roads: `settle_roads` holds every region a road owner touches until the junctions
+##   settle, so a split would save nothing.
+## - An owner whose regions are all loaded: nothing to save, and one bake is cheaper than many.
+## A split owner's budget applies per chunk. An owner that cannot be split and is over the budget is still
+## skipped, and the manager names it.
+##
 ## ---- DRIVING IT ----
 ##
 ## `bake()` does everything synchronously. A caller with its own per-owner work (the brush registry's
@@ -89,6 +107,10 @@ var debug_skip_index_write: bool = false
 var debug_layer_major: bool = false
 ## GATE CONTROL ONLY. Bake in REVERSE layer order, which breaks every dependency edge.
 var debug_reverse_order: bool = false
+## GATE CONTROL ONLY. Never split a shared owner, as before M5.
+var debug_no_chunks: bool = false
+## GATE CONTROL ONLY. Split a shared owner one tool per chunk, ignoring overlaps: the wrong split.
+var debug_chunk_by_tool: bool = false
 
 
 func _init(p_terrain = null) -> void:
@@ -130,6 +152,7 @@ func plan(p_scope: int, p_targets: Array = []) -> Dictionary:
 	var out_owners: Array = []
 	var skipped_locked: Array = []
 	var skipped_budget: Array = []
+	var split := {}
 	for o: String in chosen:
 		var od: Dictionary = owners[o]
 		var regions: Array = od["regions"]
@@ -141,12 +164,26 @@ func plan(p_scope: int, p_targets: Array = []) -> Dictionary:
 		if locked:
 			skipped_locked.append(o)
 			continue
-		if budget_regions > 0 and regions.size() > budget_regions:
-			skipped_budget.append(o)
-			continue
-		out_owners.append({"owner": o, "regions": regions, "order": od["order"],
+		var entries: Array = [{"owner": o, "key": o, "regions": regions, "order": od["order"],
 				"reads_domain": od["reads_domain"], "via": chosen[o], "brushes": od["brushes"],
-				"boxes": od["boxes"], "sources": od["sources"]})
+				"boxes": od["boxes"], "sources": od["sources"]}]
+		if _splittable(o, od):
+			var chunks := _chunks(od, existing)
+			if chunks.size() > 1:
+				split[o] = chunks.size()
+				entries.clear()
+				for k in chunks.size():
+					var ch: Dictionary = chunks[k]
+					entries.append({"owner": o, "key": "%s#%d" % [o, k], "regions": ch["regions"],
+							"order": od["order"], "reads_domain": false, "via": chosen[o],
+							"brushes": ch["tools"], "boxes": ch["boxes"], "sources": od["sources"],
+							"chunk": ch["tools"]})
+		for e: Dictionary in entries:
+			if budget_regions > 0 and (e["regions"] as Array).size() > budget_regions:
+				if not skipped_budget.has(o):
+					skipped_budget.append(o)
+				continue
+			out_owners.append(e)
 	# Layer order (the closure's inputs first); within a layer, by the owner's first region. This is the
 	# pre-M4 order, and the tie-break of the scheduled one.
 	out_owners.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
@@ -165,7 +202,86 @@ func plan(p_scope: int, p_targets: Array = []) -> Dictionary:
 		for r: Vector2i in od["regions"]:
 			working[r] = true
 	return {"owners": out_owners, "skipped_locked": skipped_locked, "skipped_budget": skipped_budget,
-			"working_set": working.keys(), "targets": targets.keys(), "edges": edges}
+			"working_set": working.keys(), "targets": targets.keys(), "edges": edges, "split": split}
+
+
+## Whether an owner may be baked in chunks: see the header. `p_od` is a `_collect_owners` entry.
+func _splittable(p_owner: String, p_od: Dictionary) -> bool:
+	if debug_no_chunks or bool(p_od["reads_domain"]) or (p_od["brushes"] as Array).size() < 2:
+		return false
+	if p_owner.begins_with(Pasture3DTerrainBrush.LAYER_BRUSH_OWNER_PREFIX) or _has_roads(p_od):
+		return false
+	for r: Vector2i in p_od["regions"]:
+		if not terrain.data.is_region_loaded(r):
+			return true
+	return false
+
+
+## The connected components of footprint overlap among an owner's tools: `[{tools, boxes, regions}]`, tools
+## in the owner's order, components ordered by their first tool. A tool with no footprint paints nothing
+## and is its own component. Candidates come from bucketing boxes by region, as `_dependency_edges` does.
+func _chunks(p_od: Dictionary, p_existing: Dictionary) -> Array:
+	var tools: Array = p_od["brushes"]
+	var n := tools.size()
+	var size := float(terrain.get_region_size()) * float(terrain.get_vertex_spacing())
+	var boxes: Array = []
+	var parent: Array = []
+	var cells := {}
+	for i in n:
+		parent.append(i)
+		var bs: Array = []
+		for box: AABB in tools[i]._own_footprints():
+			if box.size != Vector3.ZERO:
+				bs.append(box)
+		boxes.append(bs)
+		if debug_chunk_by_tool:
+			continue
+		var seen := {}
+		for box: AABB in bs:
+			for r: Vector2i in Pasture3DTerrainBrush.footprint_regions(box, size):
+				if not seen.has(r):
+					seen[r] = true
+					if not cells.has(r):
+						cells[r] = []
+					(cells[r] as Array).append(i)
+	var find := func(x: int) -> int:
+		while int(parent[x]) != x:
+			parent[x] = parent[int(parent[x])]
+			x = int(parent[x])
+		return x
+	var tested := {}
+	for r in cells:
+		var ids: Array = cells[r]
+		for x in ids.size():
+			for y in range(x + 1, ids.size()):
+				var pr := Vector2i(ids[x], ids[y])
+				if tested.has(pr):
+					continue
+				tested[pr] = true
+				if _boxes_overlap(boxes[pr.x], boxes[pr.y]):
+					var a: int = find.call(pr.x)
+					var b: int = find.call(pr.y)
+					if a != b:
+						parent[maxi(a, b)] = mini(a, b)
+	var comp := {}
+	var out: Array = []
+	for i in n:
+		var root: int = find.call(i)
+		if not comp.has(root):
+			comp[root] = out.size()
+			out.append({"tools": [], "boxes": [], "regions": {}})
+		var ch: Dictionary = out[comp[root]]
+		(ch["tools"] as Array).append(tools[i])
+		(ch["boxes"] as Array).append_array(boxes[i])
+		for box: AABB in boxes[i]:
+			for r: Vector2i in Pasture3DTerrainBrush.footprint_regions(box, size):
+				if p_existing.has(r):
+					ch["regions"][r] = true
+	for ch: Dictionary in out:
+		var keys: Array = ch["regions"].keys()
+		keys.sort_custom(_region_less)
+		ch["regions"] = keys
+	return out
 
 
 ## The dependency DAG over `p_owners` (already in layer-major order, so index order is a valid topological
@@ -179,7 +295,10 @@ func _dependency_edges(p_owners: Array, p_stack_count: int) -> Dictionary:
 	var cells := {}
 	for i in n:
 		var od: Dictionary = p_owners[i]
-		index_of[od["owner"]] = i
+		# An owner name to every entry it has: a split owner is several chunks (M5).
+		if not index_of.has(od["owner"]):
+			index_of[od["owner"]] = []
+		(index_of[od["owner"]] as Array).append(i)
 		var seen := {}
 		for box: AABB in od["boxes"]:
 			for r: Vector2i in Pasture3DTerrainBrush.footprint_regions(box, size):
@@ -202,8 +321,7 @@ func _dependency_edges(p_owners: Array, p_stack_count: int) -> Dictionary:
 			edge[pr] = true
 	for i in n:
 		for s: String in p_owners[i]["sources"]:
-			if index_of.has(s):
-				var j: int = index_of[s]
+			for j: int in index_of.get(s, []):
 				edge[Vector2i(mini(i, j), maxi(i, j))] = true
 	var fresh_layers: Array = []
 	for i in n:
@@ -295,7 +413,7 @@ func bake(p_scope: int, p_targets: Array = []) -> Dictionary:
 
 ## Plan and count references. `ok` false means nothing was done and `report.reason` says why.
 func begin(p_scope: int, p_targets: Array = []) -> Dictionary:
-	var report := {"ok": false, "reason": "", "scope": ScopeNames[clampi(p_scope, 0, 2)], "targets": [],
+	var report := {"ok": false, "reason": "", "scope": ScopeNames[clampi(p_scope, 0, 2)], "targets": [], "split": {},
 			"owners": [], "regions_written": [], "loaded_for_bake": [], "released": [],
 			"skipped_locked": [], "skipped_budget": [], "events": [], "road_turns": 0,
 			"roads_unsettled": [], "release_usec": 0}
@@ -307,6 +425,7 @@ func begin(p_scope: int, p_targets: Array = []) -> Dictionary:
 	report["targets"] = p["targets"]
 	report["skipped_locked"] = p["skipped_locked"]
 	report["skipped_budget"] = p["skipped_budget"]
+	report["split"] = p["split"]
 	var target_set := {}
 	for t: Vector2i in p["targets"]:
 		target_set[t] = true
@@ -356,9 +475,10 @@ func load_for(p_ctx: Dictionary, p_index: int) -> void:
 ## Record that owner `p_index` has baked (the caller baked it between `load_for` and `release_after`).
 func mark_baked(p_ctx: Dictionary, p_index: int) -> void:
 	var od: Dictionary = p_ctx["owners"][p_index]
-	p_ctx["baked"][od["owner"]] = od
-	(p_ctx["report"]["owners"] as Array).append(od["owner"])
-	(p_ctx["report"]["events"] as Array).append(["bake", od["owner"]])
+	p_ctx["baked"][od["key"]] = od
+	if not (p_ctx["report"]["owners"] as Array).has(od["owner"]):
+		(p_ctx["report"]["owners"] as Array).append(od["owner"])
+	(p_ctx["report"]["events"] as Array).append(["bake", od["key"]])
 	for r: Vector2i in od["load"]:
 		if terrain.data.is_region_loaded(r):
 			p_ctx["written"][r] = true
@@ -405,7 +525,7 @@ func settle_roads(p_ctx: Dictionary, p_bake: Callable) -> void:
 				var outside: Array = []
 				for b in moved:
 					if road_owner.has(b):
-						rebake[road_owner[b]["owner"]] = road_owner[b]
+						rebake[road_owner[b]["key"]] = road_owner[b]
 					else:
 						outside.append(String(b.name))
 				for n in outside:
@@ -462,6 +582,9 @@ func bake_owner(p_owner: Dictionary) -> void:
 	for b in brushes:
 		b._preview_full_res = true
 		b._stamp_cache.clear()
+	if p_owner.has("chunk"):
+		(brushes[0] as Pasture3DTerrainBrush)._refresh_owner(owner, false, [], p_owner["chunk"])
+		return
 	if owner.begins_with(Pasture3DTerrainBrush.LAYER_BRUSH_OWNER_PREFIX):
 		var host = (brushes[0] as Pasture3DTerrainBrush)._layer_brush_for_owner(owner)
 		if host != null:
