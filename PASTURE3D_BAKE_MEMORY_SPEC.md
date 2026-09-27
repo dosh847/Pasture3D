@@ -2,8 +2,8 @@
 
 **Document Version:** 1.0
 **Target Engine:** Godot 4.7+ / GDExtension (C++ / GDScript)
-**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phase 1 committed (`bd459c91`); phase 2 built, not yet
-committed.
+**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phases 1 and 2 committed (`bd459c91`, `3bbdcc53`);
+phase 3 built, not yet committed.
 **Evidence:** `project/bench/RegionBakeMemoryProbe.gd`, runs of 2026-09-26: a small world (6 × 6 regions of
 256 m) and a large one (16 × 16 regions of 1024 m, 256 km²).
 **Builds on:** `PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md`, whose last item this is ("investigate memory
@@ -24,7 +24,7 @@ at 5.65 GB of RAM, and 3 GB of GPU arrays stay allocated after it has released e
 |----|---------|--------|
 | M1 | Bake All's undo snapshots copy every baked tile, and none of it can be restored | **Built — Phase 1** |
 | M2 | GPU slot capacity never shrinks | **Built — Phase 2** |
-| M3 | Each unload rewrites the region index and layer manifest | **Fix — Phase 3** |
+| M3 | Each unload rewrites the region index and layer manifest | **Built — Phase 3** |
 | M4 | Owners bake in global layer order, so regions are held across the whole run | **Fix — Phase 4** |
 | M5 | The default shared layer makes one owner the size of the world | **Fix — Phase 5** |
 | M6 | Frozen modifier caches stay in memory for every baked brush | **Fix — Phase 6** |
@@ -291,6 +291,66 @@ layers).
   every region and its correct type and ratio.
 - **[I3]** Wall time of release on the large fixture drops. Report it; there is no threshold.
 
+### 5.4 Fix as built — it differs from §5.2
+
+- **The manifest is not batched: it is written only when it changed.** Its content is plain values (every
+  layer's metadata and the stack version), so `_save_layer_manifest` hashes that, and skips the write when the
+  hash, the path, and the file's modified time all match what this data last wrote. This is better than
+  deferring it. The manifest on disk always knows every layer uid of every slice written after it, so a
+  crash cannot leave a slice that points at layers the manifest lacks. An unchanged stack costs no write at
+  all, not even one per bake. Every save path benefits, including `save_directory`.
+- **The index is batched without a batch object.** `unload_region(loc, update, write_index = true)`: with
+  false, the index is updated in memory only. The scoped bake's `_release` passes false, and `finish` calls
+  the new `write_region_index()` once when anything was released. `finish` also runs on cancel. A
+  `begin_batch`/`end_batch` pair was rejected because a batch left open, by a manager freed mid-bake, would
+  have silently stopped every later unload from writing the index. The dock's Unload Selected does the same.
+- **Crash safety needed no load-path change.** A crash after the releases leaves the index with its
+  pre-bake entries. An unload never changes a region's type, ratio or lock, so those entries are still
+  right. A stale height range is replaced when the region loads. A stale stack signature triggers a
+  recomposite on load, from a manifest and slices that are consistent by the rule above, so the result equals
+  the saved file (gate I2 checks exactly that).
+- Write counters in `get_upload_stats()`: `index_writes`, `manifest_writes`, `manifest_skips`. The report
+  gains `release_usec`. Controls: `ScopedBake.debug_index_per_unload`, also on the manager for the probe
+  (`--index-per-unload`); and `debug_skip_index_write`, the crash.
+
+### 5.5 Results (2026-09-26)
+
+`bench/RegionIndexBatchGate.tscn`: PASS, 3/3 criteria.
+
+- **I1:** a bake releasing 3 regions writes the index once. Control: per-unload writes it 3 times.
+- **M:** the same bake writes the manifest 0 times, with 3 skips as the witness. Controls:
+  - a renamed layer writes it, and the new name is on disk;
+  - a deleted manifest file is written again.
+- **I2:** the crash run's index on disk is stale, with a control showing the written run's index is not.
+  - The stack changed while R1..R3 were unloaded, so the reload recomposites them from stale signatures.
+  - Every region comes back with its type and ratio, in both the editor path and the index-only path.
+  - Heights equal both the written run's and the saved files. The bake changed R1..R3, so the compare can
+    fail.
+- **Mutations:**
+  - A manifest that is never rewritten once it exists fails M, and fails I2 on heights.
+  - Removing `finish`'s index write fails I1.
+
+Large F2 (16 × 16 × 1024 m, 481 layers): what the writes cost, now measured instead of assumed (the probe's
+[W] line):
+
+| | per write | × 256 releases |
+|---|---|---|
+| Region index | 1.3 ms | 0.3 s |
+| Layer manifest (481 layers) | 21.2 ms | 5.4 s |
+| Release total now (save + unload) | 83 ms per region | 21.3 s of a 101.5 s bake |
+
+So M3 saved about 5.8 s of about 27 s of release on F2, almost all of it the manifest. The per-unload index
+control times the same as the batched run (101.8 s against 101.6 s). **§5.1's premise was wrong:** release
+time is mostly the region files themselves, not the index and manifest. The index batching still matters,
+because its cost is O(n²). At 256 regions it is 0.3 s; at 4096 regions (a 64 × 64 world) each write would
+be about 20 ms, so about 80 s. The 163 s → 101 s drop on F2 since the §2.2 baseline belongs mostly to
+phase 1: the snapshots no longer copy 1 GB.
+
+Also seen, not part of M3: F2's RAM after the bake is +13.9% (206 → 235 MB), against +6.0% on F1. The
+3.8 MB brush caches do not explain it. Phase 8's re-measure should look at it.
+
+Regression: all region gates, BrushRegistryGate and TestBrushSinkFootprintGate pass.
+
 ---
 
 ## 6. M4 — Bake order
@@ -439,7 +499,7 @@ regions plus whatever the owner being baked allocates.
 | 0 | Probe committed as the measuring harness; large-world baseline recorded in §2.2 | Baseline recorded 2026-09-26; probe committed in `bd459c91` |
 | 1 | M1 undo snapshots, option (a) | Built 2026-09-26: U1–U3 pass; large F1 RAM after the bake +6.0% |
 | 2 | M2 slot compaction | Built 2026-09-26: S1–S3 pass; large F1 capacity after the bake 0 (was 256) |
-| 3 | M3 batched index and manifest | I1–I2 pass; release time reported |
+| 3 | M3 batched index and manifest | Built 2026-09-26: I1, M, I2 pass; F2 release 21.3 s, writes saved ~5.8 s |
 | 4 | M4 dependency-ordered schedule | O1–O3 pass |
 | 5 | M5 chunked shared owner, option (a) | C1–C3 pass |
 | 6 | M6 frozen cache spill, option (a) | F1–F2 pass |

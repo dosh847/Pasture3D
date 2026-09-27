@@ -66,6 +66,10 @@ var debug_release_early: bool = false
 var debug_no_neighbours: bool = false
 ## GATE CONTROL ONLY. Skip the junction fixed point, leaving it to the deferred resolve.
 var debug_no_road_settle: bool = false
+## GATE CONTROL ONLY. Write the region index at every release, as before M3 (PASTURE3D_BAKE_MEMORY_SPEC.md).
+var debug_index_per_unload: bool = false
+## GATE ONLY. Never write the index at `finish`: what a crash after the last release leaves on disk.
+var debug_skip_index_write: bool = false
 
 
 func _init(p_terrain = null) -> void:
@@ -156,7 +160,7 @@ func begin(p_scope: int, p_targets: Array = []) -> Dictionary:
 	var report := {"ok": false, "reason": "", "scope": ScopeNames[clampi(p_scope, 0, 2)], "targets": [],
 			"owners": [], "regions_written": [], "loaded_for_bake": [], "released": [],
 			"skipped_locked": [], "skipped_budget": [], "events": [], "road_turns": 0,
-			"roads_unsettled": []}
+			"roads_unsettled": [], "release_usec": 0}
 	var ctx := {"ok": false, "report": report, "owners": []}
 	if terrain == null or terrain.data == null:
 		report["reason"] = "no terrain"
@@ -302,6 +306,9 @@ func finish(p_ctx: Dictionary) -> Dictionary:
 	# Anything still held (a cancelled run, a failed load) goes back to how it was found.
 	for r: Vector2i in (p_ctx["ours"] as Dictionary).keys():
 		_release(p_ctx, r)
+	# Each release updated the index in memory only; it is written once, here (PASTURE3D_BAKE_MEMORY_SPEC.md M3).
+	if not (report["released"] as Array).is_empty() and not debug_index_per_unload and not debug_skip_index_write:
+		terrain.data.write_region_index()
 	report["regions_written"] = (p_ctx["written"] as Dictionary).keys()
 	report["ok"] = true
 	return report
@@ -357,8 +364,11 @@ func _release(p_ctx: Dictionary, p_loc: Vector2i) -> void:
 	if not p_ctx["ours"].has(p_loc):
 		return
 	p_ctx["ours"].erase(p_loc)
-	# unload_region saves a modified region (and its layer tiles) before dropping it.
-	var err: int = terrain.data.unload_region(p_loc)
+	# unload_region saves a modified region (and its layer tiles) before dropping it. The index is written
+	# once by `finish`, not per region: it describes the whole world, so per region it was O(n²) bytes.
+	var t0 := Time.get_ticks_usec()
+	var err: int = terrain.data.unload_region(p_loc, true, debug_index_per_unload)
+	p_ctx["report"]["release_usec"] = int(p_ctx["report"]["release_usec"]) + Time.get_ticks_usec() - t0
 	if err != OK:
 		push_warning("Pasture3DScopedBake: could not unload region %s (error %d)" % [p_loc, err])
 	(p_ctx["report"]["released"] as Array).append(p_loc)

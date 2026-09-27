@@ -288,11 +288,12 @@ func unload_selected() -> Dictionary:
 		if state(loc) != STATE_LOADED:
 			rep["skipped"][loc] = "not loaded"
 			continue
-		if d.unload_region(loc, false) == OK:
+		if d.unload_region(loc, false, false) == OK:
 			rep["done"].append(loc)
 		else:
 			rep["skipped"][loc] = "unload failed"
 	if not rep["done"].is_empty():
+		d.write_region_index() # once, not per region
 		d.update_maps()
 	changed.emit()
 	return rep

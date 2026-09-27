@@ -124,6 +124,16 @@ private:
 	int64_t _stat_layer_uploads = 0;
 	int64_t _stat_array_creates = 0;
 	int64_t _stat_region_map_uploads = 0;
+	// Write accounting (PASTURE3D_BAKE_MEMORY_SPEC.md M3): the index and the manifest describe the whole world,
+	// so a gate counts how often they are written, and how often a manifest write was found unnecessary.
+	int64_t _stat_index_writes = 0;
+	int64_t _stat_manifest_writes = 0;
+	int64_t _stat_manifest_skips = 0;
+	// What _save_layer_manifest last wrote: the content hash, the path, and the file's modified time after the
+	// write. A manifest whose content, path and file are all unchanged is not written again.
+	int64_t _manifest_hash = 0;
+	String _manifest_path;
+	uint64_t _manifest_mtime = 0;
 
 	// Optional editor-only non-destructive layer stack. Null on plain terrains; the region images
 	// above remain the composited source of truth either way, so the runtime path is unchanged.
@@ -256,6 +266,9 @@ private:
 	void _index_region(const Vector2i &p_region_loc);
 	void _load_region_index(const String &p_dir);
 	void _save_region_index(const String &p_dir);
+	// Writes the manifest only when its content differs from the file this data last wrote there, or the file
+	// changed or went since. So the manifest on disk always knows every layer uid of every slice written after
+	// it, which is what makes deferring it unnecessary, and a stack that did not change costs no write.
 	void _save_layer_manifest(const String &p_dir);
 	// Write (or remove, when it has no tiles) one region's layer slice. Layers are matched on reload by
 	// uid, so each slice layer carries its stack layer's uid.
@@ -358,7 +371,14 @@ public:
 	// disk. The region is saved first, together with its layer slice, the layer manifest and the region
 	// index, so what comes back on load is exactly what left. Its undo history is dropped: an undo recorded
 	// against it is skipped from now on (see _region_generation).
-	Error unload_region(const Vector2i &p_region_loc, const bool p_update = true);
+	// p_write_index false updates the index in memory only; a caller unloading many regions (the scoped
+	// bake) passes false and calls write_region_index once at the end (PASTURE3D_BAKE_MEMORY_SPEC.md M3).
+	// If that write never happens, the file keeps the entries of before: type, ratio and lock are unchanged
+	// by an unload, a stale height range is replaced on load, and a stale stack signature costs a
+	// recomposite on load from a manifest and slices that are consistent (see _save_layer_manifest).
+	Error unload_region(const Vector2i &p_region_loc, const bool p_update = true, const bool p_write_index = true);
+	// Write the in-memory region index to the data directory. Returns ERR_UNCONFIGURED with no directory.
+	Error write_region_index();
 	bool is_region_loaded(const Vector2i &p_region_loc) const;
 	// Streaming's unload (spec §H): drops the region WITHOUT saving, and refuses (ERR_BUSY) one whose changes are
 	// not on disk. A game never writes its data.

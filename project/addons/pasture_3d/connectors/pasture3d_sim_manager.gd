@@ -202,6 +202,9 @@ var last_bake_report: Dictionary = {}
 ## Gate control only (PASTURE3D_BAKE_MEMORY_SPEC.md U1): snapshot the regions loaded for the bake as well,
 ## as Bake All did before M1. Those bytes can never be restored.
 var debug_unfiltered_undo: bool = false
+## Measurement control only (PASTURE3D_BAKE_MEMORY_SPEC.md I3): write the region index at every release, as
+## before M3, so the probe can time what batching it saved.
+var debug_index_per_unload: bool = false
 
 
 # ---- Pasture3DSimBase hooks -----------------------------------------------------------------------
@@ -1628,6 +1631,7 @@ func _bake_all_begin(p_record_undo: bool) -> Dictionary:
 	# their caches cleared; a closure owner is baked as it stands, to feed them.
 	var sb = _ScopedBake.new(terrain)
 	sb.budget_regions = bake_budget_regions
+	sb.debug_index_per_unload = debug_index_per_unload
 	var registered := {}
 	for entry: Dictionary in _eroding_owner_plan(brushes):
 		registered[entry["owner"]] = entry["brushes"]
@@ -1740,7 +1744,8 @@ func _bake_all_finish(p_ctx: Dictionary) -> Dictionary:
 				sb.bake_owner(od)
 				p_ctx["after"][od["owner"]] = _snapshot_owner(od["owner"], _not_undoable(p_ctx)))
 		var sreport: Dictionary = sb.finish(p_ctx["scoped"])
-		for k in ["loaded_for_bake", "released", "regions_written", "road_turns", "roads_unsettled", "events"]:
+		for k in ["loaded_for_bake", "released", "regions_written", "road_turns", "roads_unsettled", "events",
+				"release_usec"]:
 			report[k] = sreport[k]
 	report["ok"] = true
 	report["baked"] = p_ctx["baked"]

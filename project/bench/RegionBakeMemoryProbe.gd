@@ -15,6 +15,7 @@
 # The bake is the real one: a Pasture3DSimManager with every brush registered, scope All Regions,
 # `bake_all_brushes_now`. So the undo snapshots measured are the ones Bake All keeps, not the probe's own.
 # `--unfiltered` sets `debug_unfiltered_undo`, the pre-M1 snapshots (PASTURE3D_BAKE_MEMORY_SPEC.md U3).
+# `--index-per-unload` sets `debug_index_per_unload`, the pre-M3 index writes (I3).
 #
 # Measured on each:
 #   [P] peak loaded regions during the bake. Also the peak the SAME refcount rule would reach under an
@@ -39,6 +40,7 @@ var N := 6
 var RS := 256.0
 var _fixtures: Array = ["F1", "F2", "F3"]
 var _unfiltered := false
+var _index_per_unload := false
 
 var _fail := 0
 var _done := 0
@@ -61,9 +63,11 @@ func _ready() -> void:
 			_fixtures = Array(a.substr(11).split(","))
 		elif a == "--unfiltered":
 			_unfiltered = true
+		elif a == "--index-per-unload":
+			_index_per_unload = true
 	CRITERIA = _fixtures.size() * 3 + (1 if _fixtures.has("F3") else 0)
 	print("\n=== Region bake memory probe (N = %d, region %d m, %s%s) ===" % [N, int(RS), ",".join(_fixtures),
-		", UNFILTERED undo (pre-M1)" if _unfiltered else ""])
+		(", UNFILTERED undo (pre-M1)" if _unfiltered else "") + (", index per unload (pre-M3)" if _index_per_unload else "")])
 	for fixture in _fixtures:
 		await _run_fixture(fixture)
 	print("process static peak (Godot allocator, whole run): %.1f MB" % (OS.get_static_memory_peak_usage() / 1048576.0))
@@ -122,6 +126,8 @@ func _run_fixture(p_fixture: String) -> void:
 	mgr.bake_scope = 2
 	mgr.bake_budget_regions = 0
 	mgr.debug_unfiltered_undo = _unfiltered
+	mgr.debug_index_per_unload = _index_per_unload
+	d.reset_upload_stats()
 	_loaded_now = 0
 	_peak_loaded = 0
 	_alive_refs.clear()
@@ -133,7 +139,10 @@ func _run_fixture(p_fixture: String) -> void:
 	var t_bake := Time.get_ticks_usec()
 	var rep: Dictionary = mgr.bake_all_brushes_now()
 	t_bake = Time.get_ticks_usec() - t_bake
-	print("bake %.1f s, %d owners baked" % [t_bake / 1e6, int(rep.get("owners", 0))])
+	var ws: Dictionary = d.get_upload_stats()
+	print("bake %.1f s, of which releasing (save + unload) %.1f s, %d owners baked; index writes %d, manifest writes %d (%d skipped)"
+		% [t_bake / 1e6, int(rep.get("release_usec", 0)) / 1e6, int(rep.get("owners", 0)), int(ws.index_writes),
+			int(ws.manifest_writes), int(ws.manifest_skips)])
 	var before: Dictionary = rep["undo"]["before"]
 	var after: Dictionary = rep["undo"]["after"]
 	var order: Array = []
@@ -248,6 +257,7 @@ func _run_fixture(p_fixture: String) -> void:
 		_fail += 1
 		print("    !! M1: the snapshots hold regions the bake loaded")
 	_done += 1
+	_time_writes(d)
 
 	_root.queue_free()
 	await get_tree().process_frame
@@ -465,3 +475,31 @@ func _wipe_dir() -> void:
 	var da := DirAccess.open(DIR)
 	for f in da.get_files():
 		da.remove(f)
+
+
+## [W] What one index write and one manifest write cost on this world (PASTURE3D_BAKE_MEMORY_SPEC.md I3), so
+## the per-release writes M3 removed can be priced: the index timed directly, the manifest as the difference
+## between an unload that writes it (a layer renamed first) and one that skips it. Medians of 5.
+func _time_writes(d) -> void:
+	var t_index: Array = []
+	for i in 5:
+		var t0 := Time.get_ticks_usec()
+		d.write_region_index()
+		t_index.append(Time.get_ticks_usec() - t0)
+	var loc := Vector2i(0, 0)
+	var stack = d.get_layer_stack()
+	var t_skip: Array = []
+	var t_write: Array = []
+	for i in 5:
+		for renamed in [false, true]:
+			d.load_region(loc, _terrain.data_directory)
+			if renamed and stack != null and stack.get_layer_count() > 1:
+				stack.get_layer(1).set_layer_name("probe_%d" % i)
+			var t0 := Time.get_ticks_usec()
+			d.unload_region(loc)
+			(t_write if renamed else t_skip).append(Time.get_ticks_usec() - t0)
+	t_index.sort()
+	t_skip.sort()
+	t_write.sort()
+	print("[W] one index write %.1f ms; one manifest write %.1f ms (unload %.1f ms with it, %.1f ms without)"
+		% [t_index[2] / 1000.0, (t_write[2] - t_skip[2]) / 1000.0, t_write[2] / 1000.0, t_skip[2] / 1000.0])

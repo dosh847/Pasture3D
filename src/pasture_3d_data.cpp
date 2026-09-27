@@ -785,32 +785,53 @@ void Pasture3DData::_save_layer_manifest(const String &p_dir) {
 		return;
 	}
 	const int layer_count = _layer_stack->get_layer_count();
+	// The content first: the manifest is every layer's metadata and the stack version, all plain values, so
+	// their hash says whether the file this data wrote last is still what it would write now.
+	Array content;
+	content.push_back(_layer_stack->get_version());
+	for (int i = 0; i < layer_count; i++) {
+		Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+		Dictionary d;
+		if (layer) {
+			layer->ensure_layer_uid();
+			d = layer->get_data();
+			d.erase("tiles"); // Metadata only.
+		}
+		content.push_back(d);
+	}
+	const int64_t hash = int64_t(Variant(content).hash());
+	const String manifest_path = p_dir + String("/") + Util::LAYER_MANIFEST_FILENAME;
+	if (hash == _manifest_hash && manifest_path == _manifest_path && FileAccess::file_exists(manifest_path) &&
+			FileAccess::get_modified_time(manifest_path) == _manifest_mtime) {
+		_stat_manifest_skips++;
+		return;
+	}
 	Ref<Pasture3DLayerStack> manifest;
 	manifest.instantiate();
 	manifest->set_scene_unique_id("stack"); // deterministic bytes, as in _save_layer_slice
 	manifest->set_version(_layer_stack->get_version());
 	TypedArray<Pasture3DLayer> meta_layers;
 	for (int i = 0; i < layer_count; i++) {
-		Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
 		Ref<Pasture3DLayer> meta;
 		meta.instantiate();
 		meta->set_scene_unique_id("layer_" + itos(i)); // deterministic bytes, as in _save_layer_slice
-		if (layer) {
-			layer->ensure_layer_uid();
-			Dictionary d = layer->get_data();
-			d.erase("tiles"); // Metadata only.
-			meta->set_data(d);
+		if (_layer_stack->get_layer_ptr(i)) {
+			meta->set_data(content[i + 1]);
 		}
 		meta_layers.push_back(meta);
 	}
 	manifest->set_layers(meta_layers);
-	const String manifest_path = p_dir + String("/") + Util::LAYER_MANIFEST_FILENAME;
+	_manifest_hash = 0; // A failed write leaves nothing trusted
 	Error err = ResourceSaver::get_singleton()->save(manifest, manifest_path, ResourceSaver::FLAG_COMPRESS);
+	_stat_manifest_writes++;
 	if (err != OK) {
 		LOG(ERROR, "Could not save layer manifest: ", manifest_path, ", error: ", err);
 		return;
 	}
 	manifest->take_over_path(manifest_path);
+	_manifest_hash = hash;
+	_manifest_path = manifest_path;
+	_manifest_mtime = FileAccess::get_modified_time(manifest_path);
 }
 
 // Per-region slice: an index-aligned stack whose layer i carries only this region's tiles for stack layer
@@ -1179,7 +1200,7 @@ Error Pasture3DData::adopt_region(const Vector2i &p_region_loc, const Ref<Pastur
 // Auto-saves first: the region file, its layer slice, the layer manifest (the slice's uids must resolve
 // against a manifest that knows them) and the region index. Refuses rather than lose data when it cannot
 // save, and refuses a region marked for deletion (that is remove_region's job, finished by the next save).
-Error Pasture3DData::unload_region(const Vector2i &p_region_loc, const bool p_update) {
+Error Pasture3DData::unload_region(const Vector2i &p_region_loc, const bool p_update, const bool p_write_index) {
 	Ref<Pasture3DRegion> region = get_region(p_region_loc);
 	if (region.is_null()) {
 		LOG(ERROR, "No loaded region at ", p_region_loc);
@@ -1211,8 +1232,19 @@ Error Pasture3DData::unload_region(const Vector2i &p_region_loc, const bool p_up
 		_save_layer_slice(dir, p_region_loc, _is_base_aliased());
 	}
 	_index_region(p_region_loc);
-	_save_region_index(dir);
+	if (p_write_index) {
+		_save_region_index(dir);
+	}
 	_drop_region(p_region_loc, p_update);
+	return OK;
+}
+
+Error Pasture3DData::write_region_index() {
+	const String dir = _data_dir();
+	if (dir.is_empty()) {
+		return ERR_UNCONFIGURED;
+	}
+	_save_region_index(dir);
 	return OK;
 }
 
@@ -1371,6 +1403,7 @@ void Pasture3DData::_save_region_index(const String &p_dir) {
 	const String path = p_dir + String("/") + Util::REGION_INDEX_FILENAME;
 	_region_index->set_region_size(_region_size);
 	Error err = ResourceSaver::get_singleton()->save(_region_index, path, ResourceSaver::FLAG_COMPRESS);
+	_stat_index_writes++;
 	if (err != OK) {
 		LOG(ERROR, "Could not save region index: ", path, ", error: ", err);
 	}
@@ -1541,6 +1574,9 @@ Dictionary Pasture3DData::get_upload_stats() const {
 	stats["layer_uploads"] = _stat_layer_uploads;
 	stats["array_creates"] = _stat_array_creates;
 	stats["region_map_uploads"] = _stat_region_map_uploads;
+	stats["index_writes"] = _stat_index_writes;
+	stats["manifest_writes"] = _stat_manifest_writes;
+	stats["manifest_skips"] = _stat_manifest_skips;
 	stats["slot_capacity"] = _pools[POOL_FINE].locations.size();
 	stats["coarse_slot_capacity"] = _pools[POOL_COARSE].locations.size();
 	stats["coarse_store_ratio"] = get_coarse_store_ratio();
@@ -1563,6 +1599,9 @@ void Pasture3DData::reset_upload_stats() {
 	_stat_layer_uploads = 0;
 	_stat_array_creates = 0;
 	_stat_region_map_uploads = 0;
+	_stat_index_writes = 0;
+	_stat_manifest_writes = 0;
+	_stat_manifest_skips = 0;
 }
 
 void Pasture3DData::_release_slot(const PoolId p_pool, const Vector2i &p_region_loc) {
@@ -4648,7 +4687,8 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("release_region", "region_location", "update"), &Pasture3DData::release_region, DEFVAL(true));
 	ClassDB::bind_static_method("Pasture3DData", D_METHOD("get_region_file_path", "directory", "region_location"), &Pasture3DData::get_region_file_path);
 	ClassDB::bind_method(D_METHOD("load_region", "region_location", "directory", "update"), &Pasture3DData::load_region, DEFVAL(true));
-	ClassDB::bind_method(D_METHOD("unload_region", "region_location", "update"), &Pasture3DData::unload_region, DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("unload_region", "region_location", "update", "write_index"), &Pasture3DData::unload_region, DEFVAL(true), DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("write_region_index"), &Pasture3DData::write_region_index);
 	ClassDB::bind_method(D_METHOD("is_region_loaded", "region_location"), &Pasture3DData::is_region_loaded);
 	ClassDB::bind_method(D_METHOD("get_region_index"), &Pasture3DData::get_region_index);
 	ClassDB::bind_method(D_METHOD("get_water_terrain_state", "xz", "level", "margin"), &Pasture3DData::get_water_terrain_state);
