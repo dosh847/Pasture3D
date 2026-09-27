@@ -527,7 +527,8 @@ func _refresh_consumers() -> void:
 ## ---- The run (§9, phase 4) ------------------------------------------------------------------------------
 
 ## Stage order, appended by every bake: "clear" (Bake All), "base_solve" per stage-1 solve pass,
-## "base_commit" when stage 1 is done, "child:<name>" per member bake pass. Gates read it; not persisted.
+## "base_commit" when stage 1 is done, "child:<name>" per member bake pass, "cancelled" when a cancel ended
+## the run before its members baked. Gates read it; not persisted.
 var work_log: Array[String] = []
 ## Gate control (LB-L, LB-S): the members bake, and collect their pending solves, before the base commits.
 var children_before_base: bool = false
@@ -575,6 +576,8 @@ func bake_layer_run(p_record_undo: bool = false, p_lead: Node = null, p_member_b
 		await _run_base()
 		if not _cancel and lead != null and is_instance_valid(lead):
 			await _run_members(lead, bake, owner)
+		elif _cancel:
+			work_log.append("cancelled")
 	_layer_run_active = false
 	# Every pass of the member stage has repainted what the base moved; the next edit starts from nothing.
 	_base_change = AABB()

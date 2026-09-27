@@ -385,6 +385,19 @@ func _i_a_stack_edit_is_not_an_unchanged_curve() -> void:
 	m._stack_dirty = false
 	m._on_modifier_changed()
 	_check("handler", m._stack_dirty, "_on_modifier_changed sets _stack_dirty = %s (want true)" % m._stack_dirty)
+	# ...and it arms a tick only where the other schedulers would. Headless, `_can_auto_refresh` is false, so
+	# no timer: an ungated arm here was a tick that superseded a Live-only deferred run for an edit that
+	# could never bake (LayerBrushDriverGate S, whenever the solve outlasted REFRESH_DELAY).
+	m._cancel_refresh_timer()
+	m._on_modifier_changed()
+	var armed := is_instance_valid(m._timer)
+	_check("handler gated", not m._can_auto_refresh() and not armed and m._stack_dirty,
+			"auto refresh %s, the edit armed a tick %s (want false, false), still dirty %s" % [m._can_auto_refresh(),
+			armed, m._stack_dirty])
+	# CONTROL: the timer is observable headless, attached, so the negative above is not vacuous.
+	m._arm_refresh_timer()
+	_check("handler gated control", is_instance_valid(m._timer),
+			"a direct arm on the same brush makes a tick %s (want true)" % is_instance_valid(m._timer))
 	m._cancel_refresh_timer()
 	remove_child(m)
 	m.free()

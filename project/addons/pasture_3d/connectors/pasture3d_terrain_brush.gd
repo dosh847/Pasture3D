@@ -5728,7 +5728,12 @@ func _on_modifier_changed() -> void:
 	# moved, and the rect path's "nothing changed" skip reads exactly that. Say what did change.
 	_stack_dirty = true
 	_queue_mask_preview()
-	_arm_refresh_timer()
+	# Gated like the other three schedulers. It used to arm unconditionally, so a modifier edit on a brush
+	# with Auto Refresh off (or over an unloaded region, or headless) still armed a tick, and a tick that
+	# lands during a Live-only deferred run SUPERSEDES it: the run was cancelled by an edit that was never
+	# going to bake. The dirty state above stays recorded either way.
+	if _can_auto_refresh():
+		_arm_refresh_timer()
 	update_configuration_warnings()
 
 
