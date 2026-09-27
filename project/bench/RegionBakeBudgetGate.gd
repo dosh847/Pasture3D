@@ -114,6 +114,14 @@ func _b1(p_none: Dictionary, p_fit: Dictionary, p_tiny: Dictionary, p_owner_byte
 	var quiet := not _has(mgr._registry_warnings(), "memory budget")
 	mgr.free()
 	_check("the manager warns about owners over the budget (control: and not when none was)", warned and quiet)
+	# Phase 8's default: one figure, on by default, shared by Bake All and a bare scoped bake (the dock).
+	var m2 := Pasture3DSimManager.new()
+	var mgr_default := m2.bake_memory_budget_mb
+	m2.free()
+	var sb_default: float = ScopedBake.new(null).memory_budget_mb
+	print("    default budget: manager %.0f MB, scoped bake %.0f MB" % [mgr_default, sb_default])
+	_check("the default budget is on, and Bake All and a bare scoped bake share it",
+		sb_default > 0.0 and mgr_default == sb_default)
 	_completed += 1
 
 

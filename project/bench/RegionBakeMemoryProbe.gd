@@ -17,7 +17,8 @@
 # `--unfiltered` sets `debug_unfiltered_undo`, the pre-M1 snapshots (PASTURE3D_BAKE_MEMORY_SPEC.md U3).
 # `--index-per-unload` sets `debug_index_per_unload`, the pre-M3 index writes (I3).
 # `--no-spill` sets `debug_no_spill`, the pre-M6 frozen caches kept in memory (F2).
-# `--budget-mb=X` sets `bake_memory_budget_mb` (M7). Early releases break [P]'s simulator, which models the
+# `--budget-mb=X` sets `bake_memory_budget_mb` (M7). Without it the probe bakes with NO budget (0), not the
+#   1024 MB default, so a baseline run stays unbudgeted. Early releases break [P]'s simulator, which models the
 #   refcount rule alone, so under a budget [P]'s witness is the scheduler's own: gauge peak == simulated.
 #
 # Measured on each:

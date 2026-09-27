@@ -138,8 +138,13 @@ var debug_layer_major: bool = false
 var debug_reverse_order: bool = false
 ## GATE CONTROL ONLY. Never split a shared owner, as before M5.
 var debug_no_chunks: bool = false
+## The default memory budget (PASTURE3D_BAKE_MEMORY_SPEC.md §9.6, chosen from the phase 8 measurements).
+## A safety net, not a throttle: after M4/M5 no measured bake's planned regions reach it (the largest,
+## 256 km² of one-layer-per-brush, peaks at 241 MB), and it matches `budget_regions` 64 at the largest
+## region size (~14 MB each). The allocator sees about 47 MB + 1.27 x the estimate, so ~1.35 GB here.
+const DEFAULT_MEMORY_BUDGET_MB := 1024.0
 ## Bytes of planned regions loaded at once, as `_region_costs` estimates them (M7). 0 means no budget.
-var memory_budget_mb: float = 0.0
+var memory_budget_mb: float = DEFAULT_MEMORY_BUDGET_MB
 ## GATE CONTROL ONLY. Mark a region unmodified before releasing it early, so it is dropped unsaved: what
 ## back-pressure without the save would do.
 var debug_evict_unsaved: bool = false

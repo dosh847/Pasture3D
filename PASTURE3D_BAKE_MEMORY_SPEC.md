@@ -2,8 +2,9 @@
 
 **Document Version:** 1.0
 **Target Engine:** Godot 4.7+ / GDExtension (C++ / GDScript)
-**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phases 1–6 committed (`bd459c91`, `3bbdcc53`,
-`af6a5ee2`, `53f20709`, `82dd8b3d`, `bda8c021`); phase 7 built, not yet committed.
+**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phases 1–7 committed (`bd459c91`, `3bbdcc53`,
+`af6a5ee2`, `53f20709`, `82dd8b3d`, `bda8c021`, `e4ea0902`); phase 8 re-measured 2026-09-27 (§2.2 after,
+§9.6 default budget), not yet committed.
 **Evidence:** `project/bench/RegionBakeMemoryProbe.gd`, runs of 2026-09-26: a small world (6 × 6 regions of
 256 m) and a large one (16 × 16 regions of 1024 m, 256 km²).
 **Builds on:** `PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md`, whose last item this is ("investigate memory
@@ -96,6 +97,31 @@ RAM is Godot's allocator counter (`MEMORY_STATIC`), which holds the maps, tiles 
 working-set row covers the whole run, **including the setup**, which loads every region for its first
 bake; on F3 that setup, not the bake, is the peak. The bake's own peak is the "RAM during the bake" row.
 F3 starts at 595 MB because the setup's own frozen solves are already cached.
+
+**After M1–M7 (phase 8, 2026-09-27)**, the same large world and the same probe. Bake All, no memory budget
+(`--budget-mb` absent). F2's figures come from its phase 7 unbudgeted run on the same code:
+
+| | F1 | F2 | F3 |
+|---|---|---|---|
+| Owners as planned | 1 owner in 256 chunks | 480 | 256 |
+| Peak regions loaded | 1 / 256 (was 256) | 17 / 256 (was 220) | 1 / 256 (was 1) |
+| Estimated peak (M7 gauge) | 14 MB | 241 MB | 14 MB |
+| Bake time (of which save + unload) | 88 s (12 s), was 105 s (21 s) | 89–222 s (15–35 s), was 163 s (78 s) | 116 s (16 s), was 128 s (41 s) |
+| Undo snapshots after the bake | 0 MB (was 1024 MB) | 0 MB (was 1080 MB) | 0 MB (was 1024 MB) |
+| Frozen caches in memory after the bake | — | — | 0 MB, 222 MB spilled (was 222 MB held) |
+| RAM during the bake: start → peak → after | 152 → 181 → 160 MB (peak was 5.65 GB) | 207 → 560 → 232 MB (peak was 4.81 GB) | 606 → 626 → 178 MB (after was 1.65 GB) |
+| Slot capacity after the bake, 0 loaded | 0 (was 256) | 0 | 0 |
+| Peak working set of the whole run | 5.2 GB | 5.3 GB | 5.7 GB |
+
+- Every bake now holds, while baking, a small multiple of the owner being baked, and leaves behind
+  roughly what it started with.
+- The whole-run working set is unchanged, because it is the probe's **setup**, which loads every region
+  for its first bake. It is not the bake.
+- F2's bake time is noise. Two runs of the identical schedule (the unbudgeted one and a 256 MB run that
+  evicted nothing) took 222 s and 89 s. Wall times on this machine vary with disk cache and load, and
+  only compare within a run.
+- F3's start is still 606 MB, because the setup's own frozen solves are cached in memory: the setup is
+  one ALL_LOADED bake, which releases nothing and so spills nothing. The bake that follows ends at 178 MB.
 
 Reading across:
 
@@ -739,6 +765,35 @@ Large F2 (16 × 16 regions of 1024 m, 480 owners), through Bake All:
 - The shorter wall time under the budget is not a speedup that can be relied on. The 61 extra loads cost
   I/O, and the release time is the same.
 
+### 9.6 The default figure (phase 8, 2026-09-27)
+
+The budget-to-allocator ratio across a range, on large F2 (the only fixture with more than one region
+loaded at once):
+
+| Budget | Gauge peak | Peak regions | Loads (evicted) | MEMORY_STATIC rise at peak |
+|---|---|---|---|---|
+| none | 241.1 MB | 17 | 256 (0) | 353 MB |
+| 256 MB | 241.1 MB | 17 | 256 (0) | 353 MB |
+| 128 MB | 127.7 MB | 9 | 317 (61) | 207 MB |
+| 64 MB | 57.0 MB | 4 | 416 (160) | 119 MB |
+
+- F1 and F3 peak at one region (14 MB), so a 128 MB budget changes nothing on either; both were run to
+  confirm it, and neither evicted.
+- The rise fits about **47 MB + 1.27 × the gauge**. The 47 MB is what an owner's bake allocates beside its
+  regions, which the gauge does not count.
+
+**The default is 1024 MB** (`Pasture3DScopedBake.DEFAULT_MEMORY_BUDGET_MB`), and the manager reads the same
+constant, so Bake All and the dock's Bake Selected share it:
+
+- **It is a safety net, not a throttle.** After M4 and M5, no measured bake's planned regions reach it;
+  the largest is 241 MB. Below the budget the schedule and the bytes are identical to having none (the
+  256 MB row). A tighter figure would trade I/O for memory on bakes that fit comfortably.
+- **It matches `budget_regions` 64** at the largest region size: 64 × ~14 MB is 896 MB. An owner too big
+  for the byte budget on its own is already one the region budget flags, so the two warnings agree.
+- **At the cap, the allocator sees about 1.35 GB.** Against the pre-spec peaks of 4.8–5.7 GB, that is the
+  worst a bake can hold across owners. One owner larger than it still bakes, and is reported.
+- The probe keeps baking with no budget unless `--budget-mb` is given, so its baselines stay comparable.
+
 ---
 
 ## 10. Phases
@@ -753,7 +808,7 @@ Large F2 (16 × 16 regions of 1024 m, 480 owners), through Bake All:
 | 5 | M5 chunked shared owner, option (a) | Built 2026-09-26: C1–C3 pass; large F1 peak 1 of 256 (was 256), bake RAM peak 180 MB (was 5.65 GB) |
 | 6 | M6 frozen cache spill, option (a) | Built 2026-09-26: F1–F3 pass; large F3 caches in memory 0 (was 222 MB), RAM after the bake 178 MB (was 623 MB) |
 | 7 | M7 byte budget with back-pressure | Built 2026-09-26: B1–B3 pass; large F2 at 128 MB: peak 9 regions (was 17), bake RAM peak 414 MB (was 560), 61 reloads |
-| 8 | Re-measure the large world | Probe re-run on all fixtures; §2.2 gains an "after" column |
+| 8 | Re-measure the large world | Done 2026-09-27: §2.2 after table; M7 default 1024 MB (§9.6) |
 
 Each phase's gate follows the bench-gate practices: every criterion has a control that fails, and the gate
 counts completed criteria, not only failures. Large-world runs take several minutes and several GB of
@@ -772,3 +827,4 @@ RAM; they are perf tests, so ask before running them.
    reload, so a per-machine, unversioned location keeps that behaviour and keeps tens of MB of float grids
    out of version control.
 4. M7: a fixed default figure, chosen in phase 7 from the phase 8 measurements, and settable per bake.
+   Chosen: 1024 MB (§9.6).

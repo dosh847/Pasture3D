@@ -140,9 +140,9 @@ const RESULT_MAX_CELLS: int = 4194304
 var bake_budget_regions: int = 64
 ## The scoped bake's memory budget in MB (PASTURE3D_BAKE_MEMORY_SPEC.md M7): how much of the planned
 ## regions may be loaded at once, as the bake estimates them. Over it, the bake releases regions early
-## (saving them) and loads them again when needed. 0 means no budget. The default figure comes from the
-## phase 8 measurements.
-var bake_memory_budget_mb: float = 0.0
+## (saving them) and loads them again when needed. 0 means no budget. The default is the scoped bake's,
+## so Bake All and the dock's Bake Selected share one figure. Not exported yet.
+var bake_memory_budget_mb: float = _ScopedBake.DEFAULT_MEMORY_BUDGET_MB
 ## Re-solve every registered brush's erosion and re-bake its layer, as ONE undo action. A loop, not a
 ## chain: each brush erodes its own surface independently.
 @export_tool_button("Bake All Brushes") var _bake_all_btn = bake_all_brushes
