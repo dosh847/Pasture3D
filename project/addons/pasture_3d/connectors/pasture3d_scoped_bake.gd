@@ -36,6 +36,21 @@ extends RefCounted
 ## region, so after a scoped bake released its neighbours the junction would never settle. So the bake runs
 ## the fixed point itself (`settle_roads`) while every region a road owner touches is still held.
 ##
+## ---- ORDER: A DEPENDENCY DAG, NOT LAYER ORDER (PASTURE3D_BAKE_MEMORY_SPEC.md M4) ----
+##
+## Owners used to bake in layer order, so a region touched by owners in several layers stayed loaded from
+## the first of them to the last. The real constraint is narrower. Owner A must bake before owner B only
+## when B can read what A writes:
+## - A is on a lower layer and their footprint boxes overlap. A brush samples the ground below it only
+##   within its own footprint; that is the rule above, and the input closure relies on it too.
+## - A is on a lower layer and one of them names the other through a graph source. That pair keeps its
+##   layer order, as before.
+## - Both layers are not created yet. A layer is appended at the top when it first bakes, so the order these
+##   owners bake in IS their layer order, and it stays the planned one.
+## Any order that respects those edges bakes the same bytes. `plan()` picks one greedily: among the owners
+## whose predecessors have baked, the one that loads the fewest new regions, then the one that lets the
+## most go, then the old layer-major position. It narrows the peak; it does not bound it (M7 does).
+##
 ## ---- DRIVING IT ----
 ##
 ## `bake()` does everything synchronously. A caller with its own per-owner work (the brush registry's
@@ -70,6 +85,10 @@ var debug_no_road_settle: bool = false
 var debug_index_per_unload: bool = false
 ## GATE ONLY. Never write the index at `finish`: what a crash after the last release leaves on disk.
 var debug_skip_index_write: bool = false
+## GATE CONTROL ONLY. Bake in plain layer order, as before M4.
+var debug_layer_major: bool = false
+## GATE CONTROL ONLY. Bake in REVERSE layer order, which breaks every dependency edge.
+var debug_reverse_order: bool = false
 
 
 func _init(p_terrain = null) -> void:
@@ -126,19 +145,138 @@ func plan(p_scope: int, p_targets: Array = []) -> Dictionary:
 			skipped_budget.append(o)
 			continue
 		out_owners.append({"owner": o, "regions": regions, "order": od["order"],
-				"reads_domain": od["reads_domain"], "via": chosen[o], "brushes": od["brushes"]})
-	# Layer order (the closure's inputs first); within a layer, by the owner's first region so owners
-	# sharing regions sit together and a loaded neighbour is reused before it is released.
+				"reads_domain": od["reads_domain"], "via": chosen[o], "brushes": od["brushes"],
+				"boxes": od["boxes"], "sources": od["sources"]})
+	# Layer order (the closure's inputs first); within a layer, by the owner's first region. This is the
+	# pre-M4 order, and the tie-break of the scheduled one.
 	out_owners.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		if int(a["order"]) != int(b["order"]):
 			return int(a["order"]) < int(b["order"])
 		return _region_less(_first_region(a["regions"]), _first_region(b["regions"])))
+	var edges := 0
+	if debug_reverse_order:
+		out_owners.reverse()
+	elif not debug_layer_major:
+		var dag := _dependency_edges(out_owners, terrain.data.get_layer_stack_size())
+		edges = dag["count"]
+		out_owners = _schedule(out_owners, dag["succ"], dag["preds"])
 	var working := {}
 	for od: Dictionary in out_owners:
 		for r: Vector2i in od["regions"]:
 			working[r] = true
 	return {"owners": out_owners, "skipped_locked": skipped_locked, "skipped_budget": skipped_budget,
-			"working_set": working.keys(), "targets": targets.keys()}
+			"working_set": working.keys(), "targets": targets.keys(), "edges": edges}
+
+
+## The dependency DAG over `p_owners` (already in layer-major order, so index order is a valid topological
+## order): `{succ: [[j...]], preds: [n], count}`, an edge i -> j meaning i bakes first. Candidate pairs come
+## from bucketing each box by the regions it covers, whether or not they exist, so the overlap test runs on
+## owners that can overlap rather than on every pair.
+func _dependency_edges(p_owners: Array, p_stack_count: int) -> Dictionary:
+	var n := p_owners.size()
+	var size := float(terrain.get_region_size()) * float(terrain.get_vertex_spacing())
+	var index_of := {}
+	var cells := {}
+	for i in n:
+		var od: Dictionary = p_owners[i]
+		index_of[od["owner"]] = i
+		var seen := {}
+		for box: AABB in od["boxes"]:
+			for r: Vector2i in Pasture3DTerrainBrush.footprint_regions(box, size):
+				if not seen.has(r):
+					seen[r] = true
+					if not cells.has(r):
+						cells[r] = []
+					(cells[r] as Array).append(i)
+	var pairs := {}
+	for r in cells:
+		var ids: Array = cells[r]
+		for x in ids.size():
+			for y in range(x + 1, ids.size()):
+				pairs[Vector2i(mini(ids[x], ids[y]), maxi(ids[x], ids[y]))] = true
+	var edge := {}
+	for pr: Vector2i in pairs:
+		var a: Dictionary = p_owners[pr.x]
+		var b: Dictionary = p_owners[pr.y]
+		if int(a["order"]) != int(b["order"]) and _boxes_overlap(a["boxes"], b["boxes"]):
+			edge[pr] = true
+	for i in n:
+		for s: String in p_owners[i]["sources"]:
+			if index_of.has(s):
+				var j: int = index_of[s]
+				edge[Vector2i(mini(i, j), maxi(i, j))] = true
+	var fresh_layers: Array = []
+	for i in n:
+		if int(p_owners[i]["order"]) >= p_stack_count:
+			fresh_layers.append(i)
+	for k in range(1, fresh_layers.size()):
+		edge[Vector2i(fresh_layers[k - 1], fresh_layers[k])] = true
+	var succ: Array = []
+	var preds: Array = []
+	succ.resize(n)
+	preds.resize(n)
+	for i in n:
+		succ[i] = []
+		preds[i] = 0
+	for e: Vector2i in edge:
+		# Index order is layer order, so the lower index is the lower layer.
+		(succ[e.x] as Array).append(e.y)
+		preds[e.y] = int(preds[e.y]) + 1
+	return {"succ": succ, "preds": preds, "count": edge.size()}
+
+
+## Greedy list scheduling over the DAG, replaying the refcount release rule: among ready owners, fewest
+## regions to load, then most regions it is the last to need, then layer-major position.
+func _schedule(p_owners: Array, p_succ: Array, p_preds: Array) -> Array:
+	var n := p_owners.size()
+	var data = terrain.data
+	var loaded := {}
+	var refs := {}
+	for od: Dictionary in p_owners:
+		for r: Vector2i in od["regions"]:
+			refs[r] = int(refs.get(r, 0)) + 1
+	for r: Vector2i in refs:
+		if data.is_region_loaded(r):
+			loaded[r] = true
+	var pinned := loaded.duplicate() # loaded before the bake: never released
+	var preds: Array = p_preds.duplicate()
+	var ready: Array = []
+	for i in n:
+		if int(preds[i]) == 0:
+			ready.append(i)
+	var out: Array = []
+	while not ready.is_empty():
+		var best := -1
+		var best_fresh := 0
+		var best_frees := 0
+		for i: int in ready:
+			var fresh := 0
+			var frees := 0
+			for r: Vector2i in p_owners[i]["regions"]:
+				if not loaded.has(r):
+					fresh += 1
+				if int(refs[r]) == 1 and not pinned.has(r):
+					frees += 1
+			if best < 0 or fresh < best_fresh or (fresh == best_fresh and (frees > best_frees
+					or (frees == best_frees and i < best))):
+				best = i
+				best_fresh = fresh
+				best_frees = frees
+		ready.erase(best)
+		out.append(p_owners[best])
+		for r: Vector2i in p_owners[best]["regions"]:
+			loaded[r] = true
+			refs[r] = int(refs[r]) - 1
+			if int(refs[r]) <= 0 and not pinned.has(r):
+				loaded.erase(r)
+		for j: int in p_succ[best]:
+			preds[j] = int(preds[j]) - 1
+			if int(preds[j]) == 0:
+				ready.append(j)
+	if out.size() != n:
+		push_error("Pasture3DScopedBake: the owner dependencies have a cycle; baking in layer order")
+		return p_owners
+	return out
 
 
 ## Bake everything the plan names, synchronously. Returns the report `finish` describes.

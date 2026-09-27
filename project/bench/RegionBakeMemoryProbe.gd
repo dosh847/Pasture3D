@@ -106,7 +106,10 @@ func _run_fixture(p_fixture: String) -> void:
 
 	var sb := ScopedBake.new(_terrain)
 	sb.budget_regions = 0 # measure, never skip
+	var t_plan := Time.get_ticks_usec()
 	var plan: Dictionary = sb.plan(ScopedBake.Scope.ALL_REGIONS)
+	t_plan = Time.get_ticks_usec() - t_plan
+	print("plan %.2f s, %d dependency edges (the bake plans again; this is its cost)" % [t_plan / 1e6, int(plan.get("edges", 0))])
 	var owners: Array = plan["owners"]
 	var widest := 0
 	for od: Dictionary in owners:

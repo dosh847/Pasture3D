@@ -2,8 +2,8 @@
 
 **Document Version:** 1.0
 **Target Engine:** Godot 4.7+ / GDExtension (C++ / GDScript)
-**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phases 1 and 2 committed (`bd459c91`, `3bbdcc53`);
-phase 3 built, not yet committed.
+**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phases 1–3 committed (`bd459c91`, `3bbdcc53`,
+`af6a5ee2`); phase 4 built, not yet committed.
 **Evidence:** `project/bench/RegionBakeMemoryProbe.gd`, runs of 2026-09-26: a small world (6 × 6 regions of
 256 m) and a large one (16 × 16 regions of 1024 m, 256 km²).
 **Builds on:** `PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md`, whose last item this is ("investigate memory
@@ -25,7 +25,7 @@ at 5.65 GB of RAM, and 3 GB of GPU arrays stay allocated after it has released e
 | M1 | Bake All's undo snapshots copy every baked tile, and none of it can be restored | **Built — Phase 1** |
 | M2 | GPU slot capacity never shrinks | **Built — Phase 2** |
 | M3 | Each unload rewrites the region index and layer manifest | **Built — Phase 3** |
-| M4 | Owners bake in global layer order, so regions are held across the whole run | **Fix — Phase 4** |
+| M4 | Owners bake in global layer order, so regions are held across the whole run | **Built — Phase 4** |
 | M5 | The default shared layer makes one owner the size of the world | **Fix — Phase 5** |
 | M6 | Frozen modifier caches stay in memory for every baked brush | **Fix — Phase 6** |
 | M7 | The only budget is a region count, with no back-pressure | **Fix — Phase 7** |
@@ -391,6 +391,58 @@ chains, and no order beats the chain. The fix narrows the peak; it does not boun
   byte, on F2. Control: an order that violates one edge differs.
 - **[O3]** Peak loaded on F2 is at most the greedy simulator's figure. Report both.
 
+### 6.6 Fix as built
+
+- **The edges (`_dependency_edges`).** Owner A bakes before B when A is on a lower layer and either their
+  footprint boxes overlap (`_boxes_overlap`), or one names the other through a graph source. Graph-source
+  pairs were baked in layer order before, and keeping that order means no pair changes its relative order.
+- **An addition §6.3 missed.** Owners whose layer does not exist yet are chained in their planned order. A
+  layer is appended at the top when it first bakes, so their bake order IS their final layer order;
+  reordering them would change the stack, not only the schedule.
+- **Candidate pairs.** They come from bucketing each box by the regions it covers, whether or not those
+  regions exist, so the overlap test runs on owners that can overlap and not on every pair.
+- **The scheduler (`_schedule`).** Greedy list scheduling that replays the refcount rule. Among ready owners
+  it picks the fewest regions to load, then the most regions it is the last to need, then the old
+  layer-major position. Regions loaded before the bake are pinned: they never count as freed.
+- **Safety.** A cycle, which should be impossible because every edge points up the layer order, logs an
+  error and falls back to layer order.
+- **What it rests on.** The rule the scoped bake's header already states: a brush samples the ground below
+  it only within its own footprint box, and the input closure relies on it too. If a brush ever reads past
+  its box, both are wrong together.
+- **Controls:** `debug_layer_major` (the pre-M4 order) and `debug_reverse_order` (every edge broken).
+
+### 6.7 Results (2026-09-26)
+
+`bench/RegionBakeOrderGate.tscn`: PASS, 3/3 criteria.
+
+- **Fixture:** 4 × 4 regions of 128 m and 31 owners on shuffled layers. Small boundary Mounds, wide corner
+  Mounds overlapping them, and two eroded Mounds (domain readers) on top.
+- **O1:** the plan's DAG has exactly the 26 edges a brute-force all-pairs scan finds, and none is broken.
+  Control: ordering by first region breaks 11.
+- **O2:** scheduled and layer-major bakes are byte-identical on all 16 regions; every region changed in the
+  bake, and the two orders differ. Control: the reverse order differs on 8 regions.
+- **O3:** peak loaded 9 against layer-major 16, of 16.
+- **Mutation:** dropping the overlap edges fails O1 and, independently, O2 (2 regions differ).
+
+The probe (it plans exactly as the bake does, and its simulator reproduces the measured peak):
+
+| F2 (one layer per brush, shuffled) | layer-major (§2.2) | scheduled (M4) |
+|---|---|---|
+| Small (6 × 6 × 256 m): peak loaded | 32 of 36 | 7 of 36 |
+| Large (16 × 16 × 1024 m): peak loaded | 220 of 256 | **17 of 256** |
+| Large: RAM peak during the bake | 4.51 GB | **559 MB** |
+| Large: bake time | 101.5 s | 99.0 s |
+| Large: `plan()` time, 480 owners | — | 0.41 s |
+
+**§6.4's limit was wrong for F2.** It assumed "randomly ordered overlapping layers make long dependency
+chains". F2's Mounds share regions, but none of their boxes overlap, so the DAG has no edges and the order
+is free. The probe's own greedy figure (54 now, 134 in §2.2) keys on shared regions, a much coarser
+constraint, and its tie-breaks follow the plan's input order, which is why it moved. Chains remain possible
+wherever boxes really do overlap in layers; M7 still bounds those. F1 (one owner) and F3 (one owner per
+region, no sharing) are unchanged by this phase.
+
+Regression: all region gates, BrushRegistryGate and TestBrushSinkFootprintGate pass.
+
 ---
 
 ## 7. M5 — The shared default layer is one owner
@@ -500,7 +552,7 @@ regions plus whatever the owner being baked allocates.
 | 1 | M1 undo snapshots, option (a) | Built 2026-09-26: U1–U3 pass; large F1 RAM after the bake +6.0% |
 | 2 | M2 slot compaction | Built 2026-09-26: S1–S3 pass; large F1 capacity after the bake 0 (was 256) |
 | 3 | M3 batched index and manifest | Built 2026-09-26: I1, M, I2 pass; F2 release 21.3 s, writes saved ~5.8 s |
-| 4 | M4 dependency-ordered schedule | O1–O3 pass |
+| 4 | M4 dependency-ordered schedule | Built 2026-09-26: O1–O3 pass; large F2 peak 17 of 256 (was 220), RAM peak 559 MB (was 4.51 GB) |
 | 5 | M5 chunked shared owner, option (a) | C1–C3 pass |
 | 6 | M6 frozen cache spill, option (a) | F1–F2 pass |
 | 7 | M7 byte budget with back-pressure | B1–B3 pass |
