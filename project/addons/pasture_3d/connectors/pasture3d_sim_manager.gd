@@ -136,8 +136,13 @@ const RESULT_MAX_CELLS: int = 4194304
 ## The regions Selected Regions targets. Typed by hand until the region gizmo can select them.
 @export var bake_regions: Array[Vector2i] = []
 ## The scoped bake's per-owner region budget: an owner touching more regions than this is skipped and
-## reported, 0 means no limit. Not exported yet; PASTURE3D_BAKE_MEMORY_SPEC.md M7 replaces it with bytes.
+## reported, 0 means no limit. Not exported yet.
 var bake_budget_regions: int = 64
+## The scoped bake's memory budget in MB (PASTURE3D_BAKE_MEMORY_SPEC.md M7): how much of the planned
+## regions may be loaded at once, as the bake estimates them. Over it, the bake releases regions early
+## (saving them) and loads them again when needed. 0 means no budget. The default figure comes from the
+## phase 8 measurements.
+var bake_memory_budget_mb: float = 0.0
 ## Re-solve every registered brush's erosion and re-bake its layer, as ONE undo action. A loop, not a
 ## chain: each brush erodes its own surface independently.
 @export_tool_button("Bake All Brushes") var _bake_all_btn = bake_all_brushes
@@ -1633,6 +1638,7 @@ func _bake_all_begin(p_record_undo: bool) -> Dictionary:
 	# their caches cleared; a closure owner is baked as it stands, to feed them.
 	var sb = _ScopedBake.new(terrain)
 	sb.budget_regions = bake_budget_regions
+	sb.memory_budget_mb = bake_memory_budget_mb
 	sb.debug_index_per_unload = debug_index_per_unload
 	sb.debug_no_spill = debug_no_spill
 	var registered := {}
@@ -1761,7 +1767,8 @@ func _bake_all_finish(p_ctx: Dictionary) -> Dictionary:
 				p_ctx["after"][od["owner"]] = _snapshot_owner(od["owner"], _not_undoable(p_ctx)))
 		var sreport: Dictionary = sb.finish(p_ctx["scoped"])
 		for k in ["loaded_for_bake", "released", "regions_written", "road_turns", "roads_unsettled", "events",
-				"release_usec", "split", "spilled", "spilled_bytes"]:
+				"release_usec", "split", "spilled", "spilled_bytes", "evicted", "over_budget", "peak_bytes",
+				"sim_peak_bytes", "budget_bytes"]:
 			report[k] = sreport[k]
 	report["ok"] = true
 	report["baked"] = p_ctx["baked"]
@@ -1937,6 +1944,11 @@ func _collect_brushes(p_from: Node, r_out: Array) -> void:
 func _registry_warnings() -> PackedStringArray:
 	var w := PackedStringArray()
 	var reg := resolved_eroding_brushes()
+	var ob: Array = last_bake_report.get("over_budget", [])
+	if not ob.is_empty():
+		w.append(("The last Bake All Brushes went over its %.0f MB memory budget to bake %d layer(s) or chunk(s) "
+			+ "whose regions do not fit in it on their own: %s. Raise the budget, or split those layers.")
+			% [bake_memory_budget_mb, ob.size(), ", ".join(ob)])
 	var sk: Array = last_bake_report.get("skipped_budget", [])
 	if not sk.is_empty():
 		w.append(("The last Bake All Brushes skipped %d layer(s) whose bake would load more than %d regions: %s. "

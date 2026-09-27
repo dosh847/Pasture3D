@@ -79,6 +79,21 @@ extends RefCounted
 ## Not spilled: a graph's internal solver freezes (a graph can be shared between brushes) and a Relief
 ## material's grown field; they are counted by nobody yet.
 ##
+## ---- A BYTE BUDGET WITH BACK-PRESSURE (PASTURE3D_BAKE_MEMORY_SPEC.md M7) ----
+##
+## `budget_regions` only skips an owner too big on its own; it never limits how much is loaded at once.
+## `memory_budget_mb` does, in the scheduler. Each planned region has a cost estimated before anything
+## loads (`_region_costs`): its maps at its type's texel ratio, plus, for each planned owner touching it,
+## its boxes' area there rounded out to layer tiles. When no ready owner's missing regions fit, the
+## scheduler picks one anyway and marks regions to release early (`evict` on its entry), those no ready
+## owner needs first, then those with the fewest owners still to come. `load_for` releases them (which
+## saves them) before loading. A region released early is loaded again by the next owner that needs it,
+## so the bake's bytes do not change; only its I/O does.
+## Never released early: a region loaded before the bake (pinned), one an owner about to bake needs, and
+## one a road owner has touched (`settle_roads` rebakes those owners in place). An owner that cannot fit
+## even so bakes anyway and is reported under `over_budget`. The estimate does not see layers outside
+## the plan, so the budget bounds the plan's regions, not the process.
+##
 ## ---- DRIVING IT ----
 ##
 ## `bake()` does everything synchronously. A caller with its own per-owner work (the brush registry's
@@ -94,6 +109,10 @@ enum Scope { SELECTED, ALL_LOADED, ALL_REGIONS }
 ## Turns of the junction fixed point before a bake gives up and reports the network unsettled. The gates
 ## settle crossings in two; four leaves room without letting an oscillation run forever.
 const ROAD_SETTLE_TURNS := 4
+## Height, control and colour maps, 4 bytes a texel each (M7's region cost).
+const MAP_BYTES_PER_TEXEL := 12
+## A layer tile's edge in map texels (Pasture3DLayer's default tile size).
+const TILE_TEXELS := 64
 
 var terrain
 ## A layer owner whose working set is larger than this many regions is skipped and reported, never baked
@@ -119,6 +138,11 @@ var debug_layer_major: bool = false
 var debug_reverse_order: bool = false
 ## GATE CONTROL ONLY. Never split a shared owner, as before M5.
 var debug_no_chunks: bool = false
+## Bytes of planned regions loaded at once, as `_region_costs` estimates them (M7). 0 means no budget.
+var memory_budget_mb: float = 0.0
+## GATE CONTROL ONLY. Mark a region unmodified before releasing it early, so it is dropped unsaved: what
+## back-pressure without the save would do.
+var debug_evict_unsaved: bool = false
 ## Where released brushes spill their frozen caches (M6).
 var spill_dir: String = Pasture3DNode.SPILL_DIR
 ## GATE CONTROL ONLY. Keep frozen caches in memory, as before M6.
@@ -208,18 +232,21 @@ func plan(p_scope: int, p_targets: Array = []) -> Dictionary:
 			return int(a["order"]) < int(b["order"])
 		return _region_less(_first_region(a["regions"]), _first_region(b["regions"])))
 	var edges := 0
+	var costs := _region_costs(out_owners)
+	var sim := {}
 	if debug_reverse_order:
 		out_owners.reverse()
 	elif not debug_layer_major:
 		var dag := _dependency_edges(out_owners, terrain.data.get_layer_stack_size())
 		edges = dag["count"]
-		out_owners = _schedule(out_owners, dag["succ"], dag["preds"])
+		out_owners = _schedule(out_owners, dag["succ"], dag["preds"], costs, sim)
 	var working := {}
 	for od: Dictionary in out_owners:
 		for r: Vector2i in od["regions"]:
 			working[r] = true
 	return {"owners": out_owners, "skipped_locked": skipped_locked, "skipped_budget": skipped_budget,
-			"working_set": working.keys(), "targets": targets.keys(), "edges": edges, "split": split}
+			"working_set": working.keys(), "targets": targets.keys(), "edges": edges,
+			"costs": costs, "sim_peak_bytes": int(sim.get("peak", 0)), "split": split}
 
 
 ## Whether an owner may be baked in chunks: see the header. `p_od` is a `_collect_owners` entry.
@@ -360,9 +387,57 @@ func _dependency_edges(p_owners: Array, p_stack_count: int) -> Dictionary:
 	return {"succ": succ, "preds": preds, "count": edge.size()}
 
 
+## Each planned region's estimated bytes while loaded (M7): its three maps (height, control, colour; 4 bytes
+## a texel each) at its type's texel ratio, plus, for each planned owner's box over it, the box's area
+## there rounded out to 64-texel layer tiles at 4 bytes a texel. Overlapping boxes count twice, which errs
+## high. Layers no planned owner writes are not seen.
+func _region_costs(p_owners: Array) -> Dictionary:
+	var data = terrain.data
+	var index = data.get_region_index()
+	var rs := int(terrain.get_region_size())
+	var vs := float(terrain.get_vertex_spacing())
+	var size := float(rs) * vs
+	var costs := {}
+	var ratio := {}
+	for od: Dictionary in p_owners:
+		for r: Vector2i in od["regions"]:
+			if costs.has(r):
+				continue
+			var tr := 1
+			var reg = data.get_region(r) if data.is_region_loaded(r) else null
+			if reg != null:
+				tr = maxi(1, reg.get_texel_ratio())
+			elif index != null and index.has_entry(r):
+				tr = maxi(1, int(index.get_entry(r).get("texel_ratio", 1)))
+			ratio[r] = tr
+			var m := rs / tr
+			costs[r] = m * m * MAP_BYTES_PER_TEXEL
+	for od: Dictionary in p_owners:
+		for box: AABB in od["boxes"]:
+			for r: Vector2i in Pasture3DTerrainBrush.footprint_regions(box, size):
+				if not costs.has(r):
+					continue
+				var m := rs / int(ratio[r])
+				var tile := mini(TILE_TEXELS, m)
+				var texel := vs * float(ratio[r])
+				var ox := float(r.x) * size
+				var oz := float(r.y) * size
+				var x0 := clampi(int(floor((box.position.x - ox) / texel / tile)) * tile, 0, m)
+				var x1 := clampi(int(ceil((box.end.x - ox) / texel / tile)) * tile, 0, m)
+				var z0 := clampi(int(floor((box.position.z - oz) / texel / tile)) * tile, 0, m)
+				var z1 := clampi(int(ceil((box.end.z - oz) / texel / tile)) * tile, 0, m)
+				costs[r] = int(costs[r]) + maxi(0, x1 - x0) * maxi(0, z1 - z0) * 4
+	return costs
+
+
 ## Greedy list scheduling over the DAG, replaying the refcount release rule: among ready owners, fewest
-## regions to load, then most regions it is the last to need, then layer-major position.
-func _schedule(p_owners: Array, p_succ: Array, p_preds: Array) -> Array:
+## regions to load, then most regions it is the last to need, then layer-major position. With a memory
+## budget (M7), owners whose missing regions fit come first, and when none fits the chosen owner's entry
+## gets `evict` (regions to release early) and, if even that is not enough, `over_budget`. `p_sim` receives
+## `peak`, the estimated bytes the schedule peaks at.
+func _schedule(p_owners: Array, p_succ: Array, p_preds: Array, p_costs: Dictionary = {},
+		p_sim: Dictionary = {}) -> Array:
+	var budget := int(memory_budget_mb * 1048576.0)
 	var n := p_owners.size()
 	var data = terrain.data
 	var loaded := {}
@@ -374,6 +449,11 @@ func _schedule(p_owners: Array, p_succ: Array, p_preds: Array) -> Array:
 		if data.is_region_loaded(r):
 			loaded[r] = true
 	var pinned := loaded.duplicate() # loaded before the bake: never released
+	var held := {} # touched by a road owner: held until `settle_roads`, never released early (budget only)
+	var used := 0
+	for r: Vector2i in loaded:
+		used += int(p_costs.get(r, 0))
+	var peak := used
 	var preds: Array = p_preds.duplicate()
 	var ready: Array = []
 	for i in n:
@@ -384,33 +464,93 @@ func _schedule(p_owners: Array, p_succ: Array, p_preds: Array) -> Array:
 		var best := -1
 		var best_fresh := 0
 		var best_frees := 0
+		var best_fits := false
+		var best_bytes := 0
 		for i: int in ready:
 			var fresh := 0
 			var frees := 0
+			var fresh_bytes := 0
 			for r: Vector2i in p_owners[i]["regions"]:
 				if not loaded.has(r):
 					fresh += 1
+					fresh_bytes += int(p_costs.get(r, 0))
 				if int(refs[r]) == 1 and not pinned.has(r):
 					frees += 1
-			if best < 0 or fresh < best_fresh or (fresh == best_fresh and (frees > best_frees
-					or (frees == best_frees and i < best))):
+			# With a budget, an owner that fits beats one that does not; then the rule as before.
+			var fits := budget <= 0 or used + fresh_bytes <= budget
+			if best < 0 or (fits and not best_fits) or (fits == best_fits and (fresh < best_fresh
+					or (fresh == best_fresh and (frees > best_frees or (frees == best_frees and i < best))))):
 				best = i
 				best_fresh = fresh
 				best_frees = frees
+				best_fits = fits
+				best_bytes = fresh_bytes
 		ready.erase(best)
-		out.append(p_owners[best])
-		for r: Vector2i in p_owners[best]["regions"]:
-			loaded[r] = true
-			refs[r] = int(refs[r]) - 1
-			if int(refs[r]) <= 0 and not pinned.has(r):
+		var entry: Dictionary = p_owners[best]
+		entry.erase("evict")
+		entry.erase("over_budget")
+		if not best_fits:
+			var evict := _evictions(entry, ready, p_owners, loaded, pinned, held, refs, p_costs,
+					used + best_bytes - budget)
+			for r: Vector2i in evict:
 				loaded.erase(r)
+				used -= int(p_costs.get(r, 0))
+			entry["evict"] = evict
+			if used + best_bytes > budget:
+				entry["over_budget"] = true
+		out.append(entry)
+		var road := budget > 0 and _has_roads(entry)
+		for r: Vector2i in entry["regions"]:
+			if not loaded.has(r):
+				loaded[r] = true
+				used += int(p_costs.get(r, 0))
+			if road:
+				held[r] = true
+		peak = maxi(peak, used)
+		for r: Vector2i in entry["regions"]:
+			refs[r] = int(refs[r]) - 1
+			if int(refs[r]) <= 0 and not pinned.has(r) and not held.has(r):
+				loaded.erase(r)
+				used -= int(p_costs.get(r, 0))
 		for j: int in p_succ[best]:
 			preds[j] = int(preds[j]) - 1
 			if int(preds[j]) == 0:
 				ready.append(j)
+	p_sim["peak"] = peak
 	if out.size() != n:
 		push_error("Pasture3DScopedBake: the owner dependencies have a cycle; baking in layer order")
 		return p_owners
+	return out
+
+
+## Regions to release early so `p_entry` fits, until `p_need` bytes are freed or nothing more may go: not
+## pinned, not road-held, not the entry's own. Those no ready owner needs go first, then those with the
+## fewest owners still to come, then region order, so the choice is deterministic.
+func _evictions(p_entry: Dictionary, p_ready: Array, p_owners: Array, p_loaded: Dictionary,
+		p_pinned: Dictionary, p_held: Dictionary, p_refs: Dictionary, p_costs: Dictionary, p_need: int) -> Array:
+	var own := {}
+	for r: Vector2i in p_entry["regions"]:
+		own[r] = true
+	var soon := {}
+	for j: int in p_ready:
+		for r: Vector2i in p_owners[j]["regions"]:
+			soon[r] = true
+	var cands: Array = []
+	for r: Vector2i in p_loaded:
+		if not p_pinned.has(r) and not p_held.has(r) and not own.has(r):
+			cands.append(r)
+	cands.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		if soon.has(a) != soon.has(b):
+			return not soon.has(a)
+		if int(p_refs[a]) != int(p_refs[b]):
+			return int(p_refs[a]) < int(p_refs[b])
+		return _region_less(a, b))
+	var out: Array = []
+	for r: Vector2i in cands:
+		if p_need <= 0:
+			break
+		out.append(r)
+		p_need -= int(p_costs.get(r, 0))
 	return out
 
 
@@ -433,7 +573,8 @@ func begin(p_scope: int, p_targets: Array = []) -> Dictionary:
 	var report := {"ok": false, "reason": "", "scope": ScopeNames[clampi(p_scope, 0, 2)], "targets": [], "split": {},
 			"owners": [], "regions_written": [], "loaded_for_bake": [], "released": [],
 			"skipped_locked": [], "skipped_budget": [], "events": [], "road_turns": 0,
-			"roads_unsettled": [], "release_usec": 0, "spilled": [], "spilled_bytes": 0}
+			"roads_unsettled": [], "release_usec": 0, "spilled": [], "spilled_bytes": 0,
+			"evicted": [], "over_budget": [], "peak_bytes": 0, "sim_peak_bytes": 0, "budget_bytes": 0}
 	var ctx := {"ok": false, "report": report, "owners": []}
 	if terrain == null or terrain.data == null:
 		report["reason"] = "no terrain"
@@ -443,6 +584,8 @@ func begin(p_scope: int, p_targets: Array = []) -> Dictionary:
 	report["skipped_locked"] = p["skipped_locked"]
 	report["skipped_budget"] = p["skipped_budget"]
 	report["split"] = p["split"]
+	report["sim_peak_bytes"] = p["sim_peak_bytes"]
+	report["budget_bytes"] = int(memory_budget_mb * 1048576.0)
 	var target_set := {}
 	for t: Vector2i in p["targets"]:
 		target_set[t] = true
@@ -467,8 +610,15 @@ func begin(p_scope: int, p_targets: Array = []) -> Dictionary:
 	if not refs.is_empty() and String(terrain.data_directory).is_empty():
 		report["reason"] = "the bake needs unloaded regions %s but the terrain has no data_directory" % [refs.keys()]
 		return ctx
+	# The budget's gauge: the estimated bytes of planned regions loaded now, as the scheduler counted them.
+	var costs: Dictionary = p["costs"]
+	var used := 0
+	for r: Vector2i in costs:
+		if data.is_region_loaded(r):
+			used += int(costs[r])
+	report["peak_bytes"] = used
 	ctx.merge({"ok": true, "owners": owners, "refs": refs, "road_hold": road_hold, "ours": {},
-			"written": {}, "baked": {}}, true) # overwrite: ctx already holds ok=false and owners=[]
+			"written": {}, "baked": {}, "costs": costs, "used": used}, true) # overwrite: ctx already holds ok=false and owners=[]
 	_plan_spills(ctx)
 	return ctx
 
@@ -545,6 +695,16 @@ func load_for(p_ctx: Dictionary, p_index: int) -> void:
 	var data = terrain.data
 	var od: Dictionary = p_ctx["owners"][p_index]
 	var report: Dictionary = p_ctx["report"]
+	# Back-pressure first (M7): release what the scheduler marked, saving it, before loading more.
+	for r: Vector2i in od.get("evict", []):
+		if not p_ctx["ours"].has(r):
+			continue
+		if debug_evict_unsaved and data.is_region_loaded(r):
+			data.get_region(r).set_modified(false)
+		_release(p_ctx, r)
+		(report["evicted"] as Array).append(r)
+	if bool(od.get("over_budget", false)):
+		(report["over_budget"] as Array).append(od["key"])
 	for r: Vector2i in od["load"]:
 		if data.is_region_loaded(r):
 			continue
@@ -553,6 +713,8 @@ func load_for(p_ctx: Dictionary, p_index: int) -> void:
 			push_warning("Pasture3DScopedBake: could not load region %s (error %d)" % [r, err])
 			continue
 		p_ctx["ours"][r] = true
+		p_ctx["used"] = int(p_ctx["used"]) + int(p_ctx["costs"].get(r, 0))
+		report["peak_bytes"] = maxi(int(report["peak_bytes"]), int(p_ctx["used"]))
 		(report["loaded_for_bake"] as Array).append(r)
 		(report["events"] as Array).append(["load", r])
 
@@ -712,6 +874,7 @@ func _release(p_ctx: Dictionary, p_loc: Vector2i) -> void:
 	p_ctx["ours"].erase(p_loc)
 	# unload_region saves a modified region (and its layer tiles) before dropping it. The index is written
 	# once by `finish`, not per region: it describes the whole world, so per region it was O(n²) bytes.
+	p_ctx["used"] = int(p_ctx.get("used", 0)) - int(p_ctx.get("costs", {}).get(p_loc, 0))
 	var t0 := Time.get_ticks_usec()
 	var err: int = terrain.data.unload_region(p_loc, true, debug_index_per_unload)
 	p_ctx["report"]["release_usec"] = int(p_ctx["report"]["release_usec"]) + Time.get_ticks_usec() - t0

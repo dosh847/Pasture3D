@@ -17,6 +17,8 @@
 # `--unfiltered` sets `debug_unfiltered_undo`, the pre-M1 snapshots (PASTURE3D_BAKE_MEMORY_SPEC.md U3).
 # `--index-per-unload` sets `debug_index_per_unload`, the pre-M3 index writes (I3).
 # `--no-spill` sets `debug_no_spill`, the pre-M6 frozen caches kept in memory (F2).
+# `--budget-mb=X` sets `bake_memory_budget_mb` (M7). Early releases break [P]'s simulator, which models the
+#   refcount rule alone, so under a budget [P]'s witness is the scheduler's own: gauge peak == simulated.
 #
 # Measured on each:
 #   [P] peak loaded regions during the bake. Also the peak the SAME refcount rule would reach under an
@@ -43,6 +45,7 @@ var _fixtures: Array = ["F1", "F2", "F3"]
 var _unfiltered := false
 var _index_per_unload := false
 var _no_spill := false
+var _budget_mb := 0.0
 
 var _fail := 0
 var _done := 0
@@ -69,10 +72,12 @@ func _ready() -> void:
 			_index_per_unload = true
 		elif a == "--no-spill":
 			_no_spill = true
+		elif a.begins_with("--budget-mb="):
+			_budget_mb = float(a.substr(12))
 	CRITERIA = _fixtures.size() * 3 + (1 if _fixtures.has("F3") else 0)
 	print("\n=== Region bake memory probe (N = %d, region %d m, %s%s) ===" % [N, int(RS), ",".join(_fixtures),
 		(", UNFILTERED undo (pre-M1)" if _unfiltered else "") + (", index per unload (pre-M3)" if _index_per_unload else "")
-		+ (", no spill (pre-M6)" if _no_spill else "")])
+		+ (", no spill (pre-M6)" if _no_spill else "") + (", budget %.0f MB" % _budget_mb if _budget_mb > 0.0 else "")])
 	for fixture in _fixtures:
 		await _run_fixture(fixture)
 	print("process static peak (Godot allocator, whole run): %.1f MB" % (OS.get_static_memory_peak_usage() / 1048576.0))
@@ -136,6 +141,7 @@ func _run_fixture(p_fixture: String) -> void:
 	mgr.debug_unfiltered_undo = _unfiltered
 	mgr.debug_index_per_unload = _index_per_unload
 	mgr.debug_no_spill = _no_spill
+	mgr.bake_memory_budget_mb = _budget_mb
 	d.reset_upload_stats()
 	_loaded_now = 0
 	_peak_loaded = 0
@@ -177,7 +183,15 @@ func _run_fixture(p_fixture: String) -> void:
 		(rep["loaded_for_bake"] as Array).size(), (rep["released"] as Array).size()])
 	print("    simulated, the order used: %d   (witness: must equal measured)" % sim_used)
 	print("    simulated, overlap-constrained greedy order: %d   (lower bound: widest owner %d)" % [sim_greedy, widest])
-	if sim_used != _peak_loaded:
+	print("    gauge peak %.1f MB, simulated %.1f MB, budget %.1f MB; loads %d, evicted %d, over budget %d" % [
+		int(rep.get("peak_bytes", 0)) / 1048576.0, int(rep.get("sim_peak_bytes", 0)) / 1048576.0, _budget_mb,
+		(rep["loaded_for_bake"] as Array).size(), (rep.get("evicted", []) as Array).size(),
+		(rep.get("over_budget", []) as Array).size()])
+	if _budget_mb > 0.0:
+		if int(rep.get("peak_bytes", 0)) != int(rep.get("sim_peak_bytes", -1)):
+			_fail += 1
+			print("    !! the gauge does not reproduce the scheduler's simulated peak")
+	elif sim_used != _peak_loaded:
 		_fail += 1
 		print("    !! the simulator does not reproduce the bake; its other numbers mean nothing")
 	if _peak_loaded == 0:

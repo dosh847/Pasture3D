@@ -2,8 +2,8 @@
 
 **Document Version:** 1.0
 **Target Engine:** Godot 4.7+ / GDExtension (C++ / GDScript)
-**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phases 1–5 committed (`bd459c91`, `3bbdcc53`,
-`af6a5ee2`, `53f20709`, `82dd8b3d`); phase 6 built, not yet committed.
+**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phases 1–6 committed (`bd459c91`, `3bbdcc53`,
+`af6a5ee2`, `53f20709`, `82dd8b3d`, `bda8c021`); phase 7 built, not yet committed.
 **Evidence:** `project/bench/RegionBakeMemoryProbe.gd`, runs of 2026-09-26: a small world (6 × 6 regions of
 256 m) and a large one (16 × 16 regions of 1024 m, 256 km²).
 **Builds on:** `PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md`, whose last item this is ("investigate memory
@@ -28,7 +28,7 @@ at 5.65 GB of RAM, and 3 GB of GPU arrays stay allocated after it has released e
 | M4 | Owners bake in global layer order, so regions are held across the whole run | **Built — Phase 4** |
 | M5 | The default shared layer makes one owner the size of the world | **Built — Phase 5** |
 | M6 | Frozen modifier caches stay in memory for every baked brush | **Built — Phase 6** |
-| M7 | The only budget is a region count, with no back-pressure | **Fix — Phase 7** |
+| M7 | The only budget is a region count, with no back-pressure | **Built — Phase 7** |
 | — | Are released regions and their layer tiles freed? | **Yes.** Measured, see §2.3 |
 | — | Per-brush stamp cache | **Not a finding.** Native routes never fill it, see §2.4 |
 
@@ -668,6 +668,77 @@ regions plus whatever the owner being baked allocates.
   saving it first loses its edits and differs.
 - **[B3]** Reported: wall time with the budget against without (reloads cost I/O).
 
+### 9.4 As built (2026-09-26)
+
+- `memory_budget_mb` on the scoped bake, `bake_memory_budget_mb` on the manager (0, off, until phase 8
+  picks the default figure; §11 decision 4). Not exported yet, like `bake_budget_regions`.
+- **The cost is an estimate made at plan time** (`_region_costs`): a region's maps at its type's texel ratio
+  (12 bytes a texel: height, control, colour), plus, for every planned owner whose boxes touch it, the
+  boxes' area there rounded out to 64-texel layer tiles, 4 bytes a texel. Nothing is measured from the
+  allocator, so the schedule is deterministic and the runtime gauge can be checked against it.
+- **The scheduler, not `load_for`, decides.** `_schedule` prefers a ready owner whose missing regions fit.
+  When none fits it takes the usual best owner and gives its entry `evict`, the regions to release first.
+  The order is: regions no ready owner needs, then those with the fewest owners still to come, then
+  region order. This differs from §9.2's "remaining owners furthest in the plan": the schedule is built
+  one step at a time, so the plan's future order is not known yet, and the remaining refcount is its
+  proxy. If eviction still cannot make room, the entry is marked `over_budget`.
+- `load_for` releases the `evict` regions through `_release`, which saves before unloading, before it loads
+  anything. So a region released early is written, and read back by the next owner that needs it.
+- The runtime gauge (`used`) adds a region's cost on load and removes it on release. Its peak is reported as
+  `peak_bytes` next to the scheduler's `sim_peak_bytes`; the two must match.
+- **Never released early:**
+  - regions loaded before the bake (pinned);
+  - the regions of the owner about to bake;
+  - under a budget, every region a road owner has touched, because `settle_roads` rebakes road owners in
+    place after the loop.
+- **Not bounded:**
+  - layers outside the plan: the estimate sees only planned owners' boxes;
+  - `debug_layer_major` and `debug_reverse_order`, which bypass `_schedule`;
+  - what an owner's own bake allocates.
+  The budget bounds the plan's regions, not the process.
+- **Report:** `evicted`, `over_budget` (owner keys), `peak_bytes`, `sim_peak_bytes`, `budget_bytes`. The
+  manager copies them into its report and warns, naming the owners, when `over_budget` is non-empty.
+
+### 9.5 Results
+
+Gate `project/bench/RegionBakeBudgetGate.gd` (RegionBakeOrderGate's fixture: 4 × 4 regions of 128 m, 31
+owners on shuffled layers, two eroded Mounds on top), PASS 3/3:
+
+| | No budget | 2.81 MB (1.25 × widest owner) | 1.13 MB (below the 4-region owners) |
+|---|---|---|---|
+| Gauge peak | 4.38 MB | 2.75 MB (simulated 2.75) | 2.25 MB |
+| Regions loaded at once | 9 | 6 | 4 |
+| Loads | 16 | 22 | 43 |
+| Evicted / over budget | 0 / 0 | 6 / 0 | 27 / 7 (exactly the 7 owners bigger than it) |
+| Heights vs no budget | — | identical, 16 of 16 | identical |
+
+- Bake All with the budget is identical to Bake All without it, and it also evicts 6.
+- Control: releasing early without saving (`debug_evict_unsaved`) differs on 6 regions.
+- The gate caught all five mutations:
+  - eviction skipped;
+  - the gauge never decremented;
+  - `over_budget` never reported;
+  - the budget ignored in `_schedule`;
+  - every early release unsaved.
+
+Large F2 (16 × 16 regions of 1024 m, 480 owners), through Bake All:
+
+| | No budget | 128 MB |
+|---|---|---|
+| Gauge peak (simulated) | 241.1 MB (241.1) | 127.7 MB (127.7) |
+| Peak loaded regions | 17 | 9 |
+| Region loads / evictions | 256 / 0 | 317 / 61 |
+| Bake RAM peak (MEMORY_STATIC) | 559.5 MB | 413.8 MB |
+| Bake wall / of which releasing | 222.2 s / 35.3 s | 185.0 s / 35.2 s |
+
+- Under the budget, the probe's [P] refcount simulator no longer applies, because it does not model early
+  releases. The probe's witness becomes gauge == simulated instead (`--budget-mb=X`).
+- The estimate counts about 60% of what the allocator sees. Above its start, MEMORY_STATIC rose 353 MB
+  against a 241 MB gauge, and 207 MB against 128 MB. A figure chosen in phase 8 should allow for that
+  ratio.
+- The shorter wall time under the budget is not a speedup that can be relied on. The 61 extra loads cost
+  I/O, and the release time is the same.
+
 ---
 
 ## 10. Phases
@@ -681,7 +752,7 @@ regions plus whatever the owner being baked allocates.
 | 4 | M4 dependency-ordered schedule | Built 2026-09-26: O1–O3 pass; large F2 peak 17 of 256 (was 220), RAM peak 559 MB (was 4.51 GB) |
 | 5 | M5 chunked shared owner, option (a) | Built 2026-09-26: C1–C3 pass; large F1 peak 1 of 256 (was 256), bake RAM peak 180 MB (was 5.65 GB) |
 | 6 | M6 frozen cache spill, option (a) | Built 2026-09-26: F1–F3 pass; large F3 caches in memory 0 (was 222 MB), RAM after the bake 178 MB (was 623 MB) |
-| 7 | M7 byte budget with back-pressure | B1–B3 pass |
+| 7 | M7 byte budget with back-pressure | Built 2026-09-26: B1–B3 pass; large F2 at 128 MB: peak 9 regions (was 17), bake RAM peak 414 MB (was 560), 61 reloads |
 | 8 | Re-measure the large world | Probe re-run on all fixtures; §2.2 gains an "after" column |
 
 Each phase's gate follows the bench-gate practices: every criterion has a control that fails, and the gate
