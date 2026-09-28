@@ -869,6 +869,12 @@ bool Pasture3D::has_streamer() const {
 	while (top->get_parent()) {
 		top = top->get_parent();
 	}
+	// In the editor the topmost ancestor is the editor's own UI; the scene being edited is what counts.
+	if (IS_EDITOR && is_inside_tree()) {
+		if (const Node *scene = get_tree()->get_edited_scene_root()) {
+			top = scene;
+		}
+	}
 	std::vector<const Node *> stack{ top };
 	while (!stack.empty()) {
 		const Node *node = stack.back();
@@ -888,6 +894,22 @@ bool Pasture3D::has_streamer() const {
 
 bool Pasture3D::restores_region_state() const {
 	return IS_EDITOR || _debug_restore_region_state;
+}
+
+// A large world whose game will load everything is usually a missing streamer, and nothing else says so.
+// Empty when there is nothing to say. Bound so a gate can read it: the configuration-warnings virtual is not.
+String Pasture3D::get_region_loading_warning() const {
+	if (_region_loading != REGION_LOADING_AUTO || !_data || _data_directory.is_empty() || has_streamer()) {
+		return String();
+	}
+	const Ref<Pasture3DRegionIndex> index = _data->get_region_index();
+	const int count = MAX(index.is_valid() ? int(index->get_locations().size()) : 0, _data->get_region_count());
+	if (count <= 1) {
+		return String();
+	}
+	return "No Pasture3DStreamer drives this terrain, so a running game loads all " + itos(count) +
+			" regions at start. Add a Pasture3DStreamer (as a child, or pointed at this terrain) to load regions as "
+			"the player nears them, or set region_loading to All to silence this.";
 }
 
 // A running game that starts with only the region index. Never the editor.
@@ -1283,6 +1305,10 @@ PackedStringArray Pasture3D::_get_configuration_warnings() const {
 	// this node no longer has. They are captured rather than dropped (see _set), so
 	// the settings survive until the user converts them -- but silence would let
 	// somebody open, save, and lose an ocean without ever being told.
+	const String loading = get_region_loading_warning();
+	if (!loading.is_empty()) {
+		psa.push_back(loading);
+	}
 	if (!_legacy_ocean.is_empty()) {
 		psa.push_back("This scene's ocean settings predate Pasture3DOcean. Press \"Migrate Ocean\" to "
 					  "convert them into a Pasture3DPoolManager + Pasture3DOcean, or clear them with "
@@ -1814,6 +1840,7 @@ void Pasture3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_region_loading"), &Pasture3D::get_region_loading);
 	ClassDB::bind_method(D_METHOD("has_streamer"), &Pasture3D::has_streamer);
 	ClassDB::bind_method(D_METHOD("starts_index_only"), &Pasture3D::starts_index_only);
+	ClassDB::bind_method(D_METHOD("get_region_loading_warning"), &Pasture3D::get_region_loading_warning);
 	ClassDB::bind_method(D_METHOD("restores_region_state"), &Pasture3D::restores_region_state);
 	ClassDB::bind_method(D_METHOD("set_debug_restore_region_state", "enabled"), &Pasture3D::set_debug_restore_region_state);
 	ClassDB::bind_method(D_METHOD("get_debug_restore_region_state"), &Pasture3D::get_debug_restore_region_state);

@@ -307,6 +307,24 @@ void Pasture3DStreamer::set_enabled(const bool p_enabled) {
 	if (!_enabled) {
 		_idle = false;
 	}
+	_refresh_terrain_warnings();
+}
+
+void Pasture3DStreamer::set_terrain(Node *p_terrain) {
+	_refresh_terrain_warnings(); // The terrain it leaves
+	_terrain.set_target(p_terrain);
+	_refresh_terrain_warnings();
+}
+
+// The terrain warns when no streamer drives it (Pasture3D::has_streamer), so it has to hear when one arrives,
+// leaves, or changes target. Deferred: during EXIT_TREE this node is still in the hierarchy the terrain walks.
+void Pasture3DStreamer::_refresh_terrain_warnings() const {
+	if (!Engine::get_singleton()->is_editor_hint()) {
+		return;
+	}
+	if (Pasture3D *terrain = _get_terrain()) {
+		terrain->call_deferred("update_configuration_warnings");
+	}
 }
 
 void Pasture3DStreamer::set_sources(const TypedArray<Node3D> &p_sources) {
@@ -386,11 +404,16 @@ void Pasture3DStreamer::_notification(int p_what) {
 			set_process(!Engine::get_singleton()->is_editor_hint());
 			break;
 		}
+		case NOTIFICATION_ENTER_TREE: {
+			_refresh_terrain_warnings();
+			break;
+		}
 		case NOTIFICATION_PROCESS: {
 			tick();
 			break;
 		}
 		case NOTIFICATION_EXIT_TREE: {
+			_refresh_terrain_warnings();
 			if (_feed_collision && !_fed_ids.empty()) {
 				_fed_ids.clear();
 				if (Pasture3D *terrain = _get_terrain()) {

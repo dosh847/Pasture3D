@@ -87,6 +87,7 @@ class Pasture3DStreamer : public Node {
 	int _last_adopt_usec = 0;
 
 	Pasture3D *_get_terrain() const;
+	void _refresh_terrain_warnings() const;
 	std::vector<Node3D *> _resolve_sources() const;
 	Ref<Pasture3DRegionType> _type_of(const Vector2i &p_loc) const;
 	real_t _distance_to(const Vector2i &p_loc, const PackedVector3Array &p_positions, const real_t p_region_world) const;
@@ -102,7 +103,7 @@ public:
 
 	void set_enabled(const bool p_enabled);
 	bool get_enabled() const { return _enabled; }
-	void set_terrain(Node *p_terrain) { _terrain.set_target(p_terrain); }
+	void set_terrain(Node *p_terrain);
 	Node *get_terrain() const { return _terrain.get_target(); }
 	// Enabled and pointed at p_terrain (set, or else its parent). Answers before this node enters the tree.
 	bool streams(const Pasture3D *p_terrain) const { return _enabled && p_terrain && _get_terrain() == p_terrain; }

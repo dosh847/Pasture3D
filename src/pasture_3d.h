@@ -278,6 +278,7 @@ public:
 	RegionLoading get_region_loading() const { return _region_loading; }
 	bool has_streamer() const;
 	bool starts_index_only() const;
+	String get_region_loading_warning() const;
 	// The editor reopens with the regions that were loaded when the index was last written. The debug flag
 	// gives a headless gate (never the editor) the same rule; nothing else sets it.
 	bool restores_region_state() const;

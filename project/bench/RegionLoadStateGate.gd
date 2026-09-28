@@ -22,6 +22,8 @@
 #   [G] a game ignores the record: Auto with no streamer loads all four. Auto with an enabled streamer, as a
 #       CHILD of the terrain and as a LATER SIBLING (neither has entered the tree when the terrain loads), and
 #       Streamed with none, load nothing. Controls: a disabled streamer and All with a streamer load all four
+#   [W] the terrain warns that a game will load every region when no streamer drives it (Auto). Controls: no
+#       warning with a streamer child, or with region_loading All
 #
 # Headless. user:// data, wiped at start.
 #
@@ -31,7 +33,7 @@ extends Node
 const DIR := "user://region_load_state_gate"
 const RS := 64
 const ROW := [0, 1, 2, 3]
-const CRITERIA := 4
+const CRITERIA := 5
 
 var _fail := 0
 var _ran := 0
@@ -41,7 +43,7 @@ func _ready() -> void:
 	print("\n=== RegionLoadStateGate ===\n")
 	_wipe(DIR)
 	await _build_fixture()
-	for f in [_u, _l, _o, _g]:
+	for f in [_u, _l, _o, _g, _w]:
 		await f.call()
 	if _ran != CRITERIA:
 		_check("completed", false, "%d of %d criteria ran" % [_ran, CRITERIA])
@@ -229,4 +231,27 @@ func _g() -> void:
 			+ " | controls: disabled streamer %s, All with streamer %s")
 			% [auto_none[0], auto_child[0], auto_sib[0], auto_child[1], auto_sib[1], streamed[0],
 					disabled[0], all_s[0]])
+	_ran += 1
+
+
+func _warns(p_mode: int, p_streamer: bool) -> bool:
+	var root := Node.new()
+	var t := Pasture3D.new()
+	t.region_loading = p_mode
+	t.data_directory = DIR
+	root.add_child(t)
+	if p_streamer:
+		t.add_child(ClassDB.instantiate("Pasture3DStreamer"))
+	add_child(root)
+	var hit := str(t.get_region_loading_warning()).begins_with("No Pasture3DStreamer")
+	await _close(root)
+	return hit
+
+
+func _w() -> void:
+	var none: bool = await _warns(Pasture3D.REGION_LOADING_AUTO, false)
+	var with_s: bool = await _warns(Pasture3D.REGION_LOADING_AUTO, true)
+	var all_mode: bool = await _warns(Pasture3D.REGION_LOADING_ALL, false)
+	_check("[W] no-streamer warning", none and not with_s and not all_mode,
+			"Auto without a streamer warns %s | controls: with a streamer %s, All %s" % [none, with_s, all_mode])
 	_ran += 1
