@@ -658,6 +658,9 @@ func _ring_fixture() -> Dictionary:
 	terrain.add_child(net)
 	var t := Pasture3DRoadType.new()
 	t.type_name = "ring"
+	# Unrounded: [SH] length asserts the plan grew by exactly the seam, and rounding the two new corners
+	# at the seam shortens it by design. RoadCornerFilletGate owns the rounded closure.
+	t.sharp_point_radius = 0.0
 	t.lane_count = 2
 	t.lane_width = 3.5
 	net.road_types = [t]

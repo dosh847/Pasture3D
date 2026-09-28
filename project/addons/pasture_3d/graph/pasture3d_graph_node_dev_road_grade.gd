@@ -117,12 +117,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 			p_rect.position.x + 0.5 * dx, p_rect.position.y + 0.5 * dz, vs,
 			_path.points, _path.alignment,
 			_path.sample_half_widths, _path.sample_shoulders, _path.sample_verges,
-			_path.sample_suppress, {
-				"crown": _path.crown,
-				"cut_batter": _path.cut_batter,
-				"fill_batter": _path.fill_batter,
-				"skip": _path.sample_skip,
-			})
+			_path.sample_suppress, _path.grade_opts())
 
 	var height: PackedFloat32Array = res["height"]
 	if amount < 1.0:

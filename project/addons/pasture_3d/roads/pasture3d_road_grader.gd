@@ -90,6 +90,319 @@ static func surface_height(p_centre: float, p_bank: float, p_crown: float, p_u: 
 	return p_centre + p_bank * p_u + eta * z_crown
 
 
+## The ground height `p_beyond` metres past the edge of formation, for a batter leaving the edge at
+## `p_z_edge` and meeting ground `p_ground`. THE BATTER, DEFINED ONCE -- the native `road_batter_height`
+## is this, line for line, and the corridor grader, the junction footprint batter and the wall mesh all
+## read one or the other.
+##
+##   p_edge_slope   outward slope of the finished surface at the edge (`edge_slope`); read only when
+##                  `p_hinge` > 0
+##   p_toe          metres either side of the toe the batter is filleted into the ground; 0 = crease
+##   p_hinge        metres over which the edge rolls over into the batter (the curve spans 2x this)
+##   p_cut_wall     a cut batter taller than this becomes a vertical face; 0 = never
+##   p_fill_wall    the same for fill
+##
+## ---- WHY THE HINGE STARTS AT THE EDGE ----
+##
+## A vertical curve normally straddles the grade change. Straddling it here would lower the shoulder,
+## which the ribbon lies on, and the ribbon would float over a dip along its own edge. So the curve leaves
+## the edge at the surface's own cross-slope and arrives at the batter slope `2 * p_hinge` further out; the
+## batter beyond it runs `(g1 - g2) * p_hinge` proud of the unrounded one, moving the toe out by about
+## `p_hinge`.
+##
+## ---- WHY THE TOE'S WIDTH IS CAPPED BY THE RUN ----
+##
+## The smooth max lifts the result by up to k/4 wherever the batter and the ground are within k of each
+## other. Right at the edge, on ground just below the road, that is a lip standing proud of the formation.
+## Capping k by the run so far makes the blend vanish at the edge, where the batter starts.
+static func batter_height(p_ground: float, p_z_edge: float, p_edge_slope: float, p_beyond: float,
+		p_cut_batter: float, p_fill_batter: float, p_toe: float = 0.0, p_hinge: float = 0.0,
+		p_cut_wall: float = 0.0, p_fill_wall: float = 0.0) -> float:
+	var fill := p_z_edge > p_ground
+	var batter := p_fill_batter if fill else p_cut_batter
+	var g2 := -batter if fill else batter
+	var x := maxf(p_beyond, 0.0)
+	var line := batter_line(p_z_edge, p_edge_slope, g2, x, p_hinge)
+	var wall := p_fill_wall if fill else p_cut_wall
+	if wall > 0.0 and ((p_z_edge - line) if fill else (line - p_z_edge)) > wall:
+		return p_ground
+	var k := batter * minf(maxf(p_toe, 0.0), x)
+	if k > 1e-9:
+		var hk := maxf(k - absf(line - p_ground), 0.0) / k
+		var bump := hk * hk * k * 0.25
+		return (maxf(p_ground, line) + bump) if fill else (minf(p_ground, line) - bump)
+	return maxf(p_ground, line) if fill else minf(p_ground, line)
+
+
+## The batter's own surface `p_x` metres past the edge, before it meets the ground: the straight batter at
+## slope `p_g2` (negative falls), rolled over from the edge slope `p_g1` across `2 * p_hinge` metres.
+static func batter_line(p_z_edge: float, p_g1: float, p_g2: float, p_x: float, p_hinge: float) -> float:
+	var r := maxf(p_hinge, 0.0)
+	if r <= 1e-6:
+		return p_z_edge + p_g2 * p_x
+	if p_x < 2.0 * r:
+		return p_z_edge + p_g1 * p_x + (p_g2 - p_g1) * p_x * p_x / (4.0 * r)
+	return p_z_edge + (p_g1 + p_g2) * r + p_g2 * (p_x - 2.0 * r)
+
+
+## Metres past the edge at which a batter has climbed (`p_g2` > 0) or fallen (`p_g2` < 0) `p_height` from
+## the edge: where a retaining wall of that height stands. INF when it never does.
+static func wall_run(p_height: float, p_g1: float, p_g2: float, p_hinge: float) -> float:
+	if p_height <= 0.0 or absf(p_g2) < 1e-6:
+		return INF
+	var sgn := signf(p_g2)
+	var lo := 0.0
+	var hi := 2.0 * maxf(p_hinge, 0.0) + p_height / absf(p_g2) + 1.0
+	for _i in 24:
+		if sgn * (batter_line(0.0, p_g1, p_g2, hi, p_hinge)) >= p_height:
+			break
+		hi *= 2.0
+	for _i in 48:
+		var mid := 0.5 * (lo + hi)
+		if sgn * batter_line(0.0, p_g1, p_g2, mid, p_hinge) >= p_height:
+			hi = mid
+		else:
+			lo = mid
+	return hi
+
+
+## Outward slope of the finished road surface at the formation edge `p_edge_d` on side `p_side`, taken
+## from one short step inside it. Native `road_edge_slope`, line for line.
+static func edge_slope(p_z_ref: float, p_bank: float, p_crown: float, p_edge_d: float, p_side: float,
+		p_half: float, p_crown_mode: int = 0, p_max_bank: float = 0.0) -> float:
+	var step := minf(0.05, maxf(p_edge_d, 1e-3) * 0.5)
+	var side := p_side if p_side != 0.0 else 1.0
+	var z_edge := surface_height(p_z_ref, p_bank, p_crown, p_edge_d * side, p_half, p_crown_mode, p_max_bank)
+	var z_in := surface_height(p_z_ref, p_bank, p_crown, (p_edge_d - step) * side, p_half, p_crown_mode,
+			p_max_bank)
+	return (z_edge - z_in) / step
+
+
+## A turn sharper than this at a spline point, in radians, is a kink to be rounded. Well under what anyone
+## draws on purpose, and well over the rounding noise of mirrored handles, which is zero.
+const KINK_MIN_ANGLE: float = 0.01
+
+## Most of the arc length to a neighbouring kink (or the end of an open road) one fillet may use, so two
+## close kinks each get room and neither fillet swallows the other.
+const FILLET_SHARE: float = 0.45
+
+## Degrees of turn per sample along a fillet.
+const FILLET_STEP_DEG: float = 4.0
+
+
+## Round every kink of a plan polyline into an arc of radius `p_radius`, WITHOUT editing the spline it came
+## from. The one geometry every consumer of the plan reads (grading, ribbon, paint, junctions, pace notes),
+## so they all flow through the corner together; rounding any one of them alone would leave the ribbon
+## hanging off the graded ground by the corner's miter.
+##
+##   p_pts      the plan, world XZ, as tessellated
+##   p_kinks    plan vertex indices to round, with the turn angle there in `p_angles` (radians). For a
+##              closed plan, a kink at the closure is index 0 (the last vertex repeats the first).
+##   p_ctrl     plan vertex index of every spline control point, in global point order
+##   p_closed   the plan is a closed loop
+##
+## Returns `{plan, cum, ctrl_s}`: the new polyline, its arc lengths, and the arc length at which every
+## control point now sits. A rounded control point sits at its arc's midpoint, and on a closed plan whose
+## closure was rounded that midpoint is s = 0, so arc length keeps starting where the first point is.
+##
+## ---- THE TANGENT LENGTH IS CAPPED, NOT THE RADIUS ----
+##
+## `T = R tan(theta/2)` back and forward from the kink. Two kinks closer than that would overlap their
+## arcs, and a hairpin (theta near pi) would reach back kilometres. So `T` is capped at FILLET_SHARE of the
+## distance to the neighbouring kink or end, and a capped corner is simply rounded tighter than asked --
+## the kink goes either way, which is the point.
+static func fillet_plan(p_pts: PackedVector2Array, p_kinks: PackedInt32Array, p_angles: PackedFloat32Array,
+		p_ctrl: PackedInt32Array, p_radius: float, p_closed: bool) -> Dictionary:
+	var cum := cumulative_length(p_pts)
+	var n := p_pts.size()
+	var ctrl_s := PackedFloat32Array()
+	for v in p_ctrl:
+		ctrl_s.append(cum[clampi(v, 0, n - 1)] if n > 0 else 0.0)
+	if p_radius <= 0.0 or n < 3 or p_kinks.is_empty():
+		return {"plan": p_pts, "cum": cum, "ctrl_s": ctrl_s}
+	var total: float = cum[n - 1]
+	# Kinks in arc-length order.
+	var order: Array = []
+	for i in p_kinks.size():
+		var v: int = p_kinks[i]
+		if v < 0 or v >= n:
+			continue
+		if not p_closed and (v == 0 or v == n - 1):
+			continue
+		if p_closed and v == n - 1:
+			v = 0
+		var th: float = p_angles[i] if i < p_angles.size() else 0.0
+		if th < KINK_MIN_ANGLE:
+			continue
+		order.append([cum[v], v, th])
+	if order.is_empty():
+		return {"plan": p_pts, "cum": cum, "ctrl_s": ctrl_s}
+	order.sort_custom(func(a, b): return a[0] < b[0])
+	# Kinks at one arc length are one corner (a spline join, a doubled point): keep the sharpest. Left as
+	# two they would leave each other no room, and neither would be rounded.
+	var merged: Array = []
+	for o in order:
+		if not merged.is_empty() and float(o[0]) - float(merged[merged.size() - 1][0]) < 1e-4:
+			if float(o[2]) > float(merged[merged.size() - 1][2]):
+				merged[merged.size() - 1] = o
+			continue
+		merged.append(o)
+	order = merged
+	var k := order.size()
+	var corners: Array = []
+	for i in k:
+		var s: float = order[i][0]
+		var th: float = order[i][2]
+		var room_back: float
+		var room_fwd: float
+		if p_closed:
+			var s_prev: float = order[(i - 1 + k) % k][0]
+			var s_next: float = order[(i + 1) % k][0]
+			room_back = fposmod(s - s_prev, total) if k > 1 else total * 0.5
+			room_fwd = fposmod(s_next - s, total) if k > 1 else total * 0.5
+			# An arc may not cross the seam unless it is the seam's own: the walk below splices one
+			# wrapping arc, the closure's, and no other.
+			if int(order[i][1]) != 0:
+				room_back = minf(room_back, s / FILLET_SHARE)
+				room_fwd = minf(room_fwd, (total - s) / FILLET_SHARE)
+		else:
+			room_back = s - (float(order[i - 1][0]) if i > 0 else 0.0)
+			room_fwd = (float(order[i + 1][0]) if i < k - 1 else total) - s
+		var t_len := p_radius * tan(minf(th, PI - 0.02) * 0.5)
+		t_len = minf(t_len, FILLET_SHARE * minf(room_back, room_fwd))
+		if t_len <= 1e-3:
+			continue
+		corners.append({"s": s, "v": int(order[i][1]), "t": t_len})
+	if corners.is_empty():
+		return {"plan": p_pts, "cum": cum, "ctrl_s": ctrl_s}
+
+	# Each corner's arc, as points from A (s - t) to B (s + t) inclusive.
+	for c in corners:
+		var sa: float = float(c["s"]) - float(c["t"])
+		var sb: float = float(c["s"]) + float(c["t"])
+		if p_closed:
+			sa = fposmod(sa, total)
+			sb = fposmod(sb, total)
+		var a := plan_point_at(p_pts, cum, sa)
+		var b := plan_point_at(p_pts, cum, sb)
+		var ta := _segment_dir_at(p_pts, cum, sa, true)
+		var tb := _segment_dir_at(p_pts, cum, sb, false)
+		c["arc"] = _fillet_arc(a, ta, b, tb)
+
+	var out := PackedVector2Array()
+	var old_to_new := PackedInt32Array()
+	old_to_new.resize(n)
+	old_to_new.fill(-1)
+	var mids: Dictionary = {} # corner vertex -> new index of its arc midpoint
+	var wrap: Dictionary = {}
+	var walk: Array = corners
+	var s_lo := -1.0
+	var s_hi := total + 1.0
+	if p_closed and int(corners[0]["v"]) == 0:
+		# The closure itself is rounded: walk the rest strictly between its two tangent points, and splice
+		# its arc around the seam, starting from the arc's midpoint so s = 0 stays at the first point.
+		wrap = corners[0]
+		walk = corners.slice(1)
+		s_lo = float(wrap["t"])
+		s_hi = total - float(wrap["t"])
+	var wrap_arc: PackedVector2Array = wrap.get("arc", PackedVector2Array())
+	var wrap_mid := wrap_arc.size() / 2
+	if not wrap.is_empty():
+		for j in range(wrap_mid, wrap_arc.size()):
+			_append_point(out, wrap_arc[j])
+		mids[0] = 0
+	var ci := 0
+	for v in n:
+		var s: float = cum[v]
+		if s <= s_lo or s >= s_hi:
+			continue
+		while ci < walk.size() and float(walk[ci]["s"]) + float(walk[ci]["t"]) <= s:
+			_splice_arc(out, walk[ci], mids)
+			ci += 1
+		if ci < walk.size() and s > float(walk[ci]["s"]) - float(walk[ci]["t"]):
+			continue # inside the next corner's arc
+		_append_point(out, p_pts[v])
+		old_to_new[v] = out.size() - 1
+	while ci < walk.size():
+		_splice_arc(out, walk[ci], mids)
+		ci += 1
+	if not wrap.is_empty():
+		for j in range(0, wrap_mid + 1):
+			_append_point(out, wrap_arc[j])
+		out[out.size() - 1] = out[0]
+	var new_cum := cumulative_length(out)
+	for i in p_ctrl.size():
+		var v: int = clampi(p_ctrl[i], 0, n - 1)
+		if p_closed and v == n - 1:
+			v = 0
+		if mids.has(v):
+			ctrl_s[i] = new_cum[int(mids[v])]
+		elif old_to_new[v] >= 0:
+			ctrl_s[i] = new_cum[old_to_new[v]]
+		else:
+			# A control point swallowed by a neighbouring corner's arc: where that arc passes nearest it.
+			ctrl_s[i] = float(nearest_on_plan(out, new_cum, p_pts[v])[1])
+	return {"plan": out, "cum": new_cum, "ctrl_s": ctrl_s}
+
+
+static func _append_point(r_out: PackedVector2Array, p: Vector2) -> void:
+	if r_out.is_empty() or r_out[r_out.size() - 1].distance_squared_to(p) > 1e-10:
+		r_out.append(p)
+
+
+static func _splice_arc(r_out: PackedVector2Array, p_corner: Dictionary, r_mids: Dictionary) -> void:
+	var arc: PackedVector2Array = p_corner["arc"]
+	var mid := arc.size() / 2
+	for j in arc.size():
+		_append_point(r_out, arc[j])
+		if j == mid:
+			r_mids[int(p_corner["v"])] = r_out.size() - 1
+
+
+## Direction of the plan segment containing `p_s`. `p_before` takes the segment ENDING there when `p_s`
+## falls exactly on a vertex, so a tangent point on a vertex reads the side the arc joins from. Zero-length
+## segments (two splines meeting at one point) are stepped over.
+static func _segment_dir_at(p_pts: PackedVector2Array, p_cum: PackedFloat32Array, p_s: float,
+		p_before: bool) -> Vector2:
+	var n := p_pts.size()
+	var i := 0
+	while i < n - 2 and (p_cum[i + 1] < p_s or (not p_before and p_cum[i + 1] <= p_s)):
+		i += 1
+	var j := i
+	if p_before:
+		while j > 0 and p_pts[j].distance_squared_to(p_pts[j + 1]) < 1e-10:
+			j -= 1
+	else:
+		while j < n - 2 and p_pts[j].distance_squared_to(p_pts[j + 1]) < 1e-10:
+			j += 1
+	var d := p_pts[j + 1] - p_pts[j]
+	return d.normalized() if d.length_squared() > 1e-12 else Vector2.RIGHT
+
+
+## A cubic from `p_a` leaving along `p_ta` to `p_b` arriving along `p_tb`, with the handle length that makes
+## it a circular arc when the two tangents are symmetric about the chord.
+static func _fillet_arc(p_a: Vector2, p_ta: Vector2, p_b: Vector2, p_tb: Vector2) -> PackedVector2Array:
+	var chord := p_a.distance_to(p_b)
+	var phi := acos(clampf(p_ta.dot(p_tb), -1.0, 1.0))
+	var h := chord / 3.0
+	if phi > 1e-4:
+		var r := chord / (2.0 * sin(phi * 0.5))
+		h = 4.0 / 3.0 * tan(phi * 0.25) * r
+	h = minf(h, chord)
+	var c1 := p_a + p_ta * h
+	var c2 := p_b - p_tb * h
+	# EVEN, so the middle sample is u = 0.5 -- the arc's own midpoint, where the control point it rounds is
+	# said to sit (and, on a closed plan, where s = 0 starts). An odd count put it half a step along.
+	var m := clampi(int(ceil(rad_to_deg(phi) / FILLET_STEP_DEG)), 4, 64)
+	m += m % 2
+	var out := PackedVector2Array()
+	for j in m + 1:
+		var u := float(j) / float(m)
+		var w := 1.0 - u
+		out.append(p_a * (w * w * w) + c1 * (3.0 * w * w * u) + c2 * (3.0 * w * u * u) + p_b * (u * u * u))
+	return out
+
+
 ## World XZ of the point `p_s` metres along the plan polyline. Clamped at both ends.
 ##
 ## Public because the mesher, the brush and the junction gizmo all need it, and three copies of "walk the
@@ -272,6 +585,10 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 	var max_bank: float = float(p_opts.get("max_bank", 0.0))
 	var cut_batter: float = maxf(float(p_opts.get("cut_batter", 1.0)), 0.01)
 	var fill_batter: float = maxf(float(p_opts.get("fill_batter", 0.6)), 0.01)
+	var toe_round: float = maxf(float(p_opts.get("toe_rounding", 0.0)), 0.0)
+	var hinge_round: float = maxf(float(p_opts.get("hinge_rounding", 0.0)), 0.0)
+	var cut_wall: float = float(p_opts.get("cut_wall_height", 0.0))
+	var fill_wall: float = float(p_opts.get("fill_wall_height", 0.0))
 	# `skip` is NOT `p_suppress`. Suppress means "a structure carries the road here", and says so in the
 	# structure mask. Skip means "this arc length belongs to something else" — a junction footprint the
 	# approach was trimmed back from (§6) — and must leave no trace at all: marking it as a bridge deck
@@ -367,7 +684,9 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 			var z_ref: float = p_alignment.height_at(s)
 			var rise := absf(z_ref - ground)
 			var slope: float = cut_batter if z_ref < ground else fill_batter
-			var reach := edge_d + rise / slope + verge
+			# Plus the rounding, which reaches past the unrounded toe: the hinge pushes the batter out by
+			# about its radius, and the toe fillet spreads its own width beyond that.
+			var reach := edge_d + rise / slope + verge + toe_round + 2.0 * hinge_round
 			if d > reach:
 				continue
 			# Another road's formation. Refused before the suppress branch so a protected cell reports
@@ -398,11 +717,10 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 				# until it MEETS the ground, and the meet is a max/min rather than a solved crossing —
 				# which is what makes the join continuous with no seam to chase, at any terrain slope.
 				var z_edge := surface_height(z_road, bank, crown, edge_d * side, half, crown_mode, max_bank)
-				var beyond := d - edge_d
-				if z_edge > ground:
-					h = maxf(ground, z_edge - beyond * fill_batter)
-				else:
-					h = minf(ground, z_edge + beyond * cut_batter)
+				var g1 := edge_slope(z_road, bank, crown, edge_d, side, half, crown_mode, max_bank) \
+						if hinge_round > 0.0 else 0.0
+				h = batter_height(ground, z_edge, g1, d - edge_d, cut_batter, fill_batter, toe_round,
+						hinge_round, cut_wall, fill_wall)
 
 			graded[idx] = h
 			# Coverage masks. `roadbed` is the carriageway ONLY — the shoulder is not driving surface and

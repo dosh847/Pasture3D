@@ -132,6 +132,10 @@ func eval_path(p_inputs: Array) -> Pasture3DGraphPath:
 	_out.crown = src.crown
 	_out.cut_batter = src.cut_batter
 	_out.fill_batter = src.fill_batter
+	_out.toe_rounding = src.toe_rounding
+	_out.hinge_rounding = src.hinge_rounding
+	_out.cut_wall_height = src.cut_wall_height
+	_out.fill_wall_height = src.fill_wall_height
 	if moves_the_line():
 		_out.alignment = null
 		_out.sample_half_widths = PackedFloat32Array()

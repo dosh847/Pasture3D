@@ -196,6 +196,9 @@ func _fixture() -> Dictionary:
 	t.type_name = "cost"
 	t.lane_count = 2
 	t.lane_width = 3.5
+	# Unrounded, so the plan IS the tessellation and [CA] correct can compare against one written out by
+	# hand. Rounding the plan is RoadCornerFilletGate's; this gate is about the cache holding it.
+	t.sharp_point_radius = 0.0
 	net.road_types = [t]
 
 	var brush := Pasture3DRoadBrush.new()

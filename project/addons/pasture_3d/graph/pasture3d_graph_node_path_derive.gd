@@ -197,6 +197,10 @@ func _derive_path(p_inputs: Array) -> Pasture3DGraphPath:
 		_out.crown = src.crown
 		_out.cut_batter = src.cut_batter
 		_out.fill_batter = src.fill_batter
+		_out.toe_rounding = src.toe_rounding
+		_out.hinge_rounding = src.hinge_rounding
+		_out.cut_wall_height = src.cut_wall_height
+		_out.fill_wall_height = src.fill_wall_height
 		# A derive never moves the centreline (Drape writes heights, Width writes widths, From Flow makes
 		# its own line), so a solved road's profile still describes THIS line and is kept. That is the
 		# opposite of the reshape family's default and is the whole of `moves_the_line()`'s argument.

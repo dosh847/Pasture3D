@@ -124,6 +124,25 @@ extends Resource
 @export var crown: float = 0.05
 @export var cut_batter: float = 1.0
 @export var fill_batter: float = 0.6
+## Batter shaping, metres (Pasture3DRoadGrader.batter_height). 0 is the unshaped batter.
+@export var toe_rounding: float = 0.0
+@export var hinge_rounding: float = 0.0
+@export var cut_wall_height: float = 0.0
+@export var fill_wall_height: float = 0.0
+
+
+## The grader options this path's cross-section scalars stand for, so every consumer passes the same set.
+func grade_opts() -> Dictionary:
+	return {
+		"crown": crown,
+		"cut_batter": cut_batter,
+		"fill_batter": fill_batter,
+		"toe_rounding": toe_rounding,
+		"hinge_rounding": hinge_rounding,
+		"cut_wall_height": cut_wall_height,
+		"fill_wall_height": fill_wall_height,
+		"skip": sample_skip,
+	}
 
 
 ## Everything a consumer of this path reads, as one int.
@@ -156,7 +175,7 @@ func content_digest() -> int:
 		points, half_widths, heights, closed,
 		alignment.content_digest() if alignment != null else 0,
 		sample_half_widths, sample_shoulders, sample_verges, sample_suppress, sample_skip,
-		crown, cut_batter, fill_batter,
+		crown, cut_batter, fill_batter, toe_rounding, hinge_rounding, cut_wall_height, fill_wall_height,
 	])
 
 

@@ -71,6 +71,8 @@ func _layer_brush_refusal_reason() -> String:
 		for s: Pasture3DRoadSegment in segments:
 			if s != null and not s.changed.is_connected(_on_road_changed):
 				s.changed.connect(_on_road_changed)
+			if s != null:
+				s.bind_road(self)
 		_on_road_changed()
 
 ## Close the spline into a loop. Roads are usually open runs; a ring road or a closed test circuit is
@@ -220,6 +222,13 @@ var _plan_cache: PackedVector2Array = PackedVector2Array()
 var _plan_cum_cache: PackedFloat32Array = PackedFloat32Array()
 var _plan_token_cache: Array = []
 var _plan_revision: int = 0
+## Arc length of every spline control point along the plan, in global point order (the numbering the
+## gizmo uses). Built with the plan, because rounding a kink moves where its point sits.
+var _plan_ctrl_s_cache: PackedFloat32Array = PackedFloat32Array()
+## The radius sharp points are rounded to, as last resolved from the road type. In the plan token: the
+## type is resolved through the chain, so no signal on this node says it changed, and resolving it on
+## every plan read would walk the chain thousands of times a bake. Refreshed where the chain can change.
+var _sharp_radius: float = 0.0
 
 ## Resampled-plan curvature, keyed by the plan build it was taken from and the sampling it was taken at.
 ## `grading_profile` is called several times per bake — its own grading step, `earthwork_over`, and once
@@ -250,6 +259,7 @@ func _init() -> void:
 
 func _ready() -> void:
 	super()
+	_refresh_sharp_radius()
 	if road_defaults != null and not road_defaults.changed.is_connected(_on_road_changed):
 		road_defaults.changed.connect(_on_road_changed)
 	for s: Pasture3DRoadSegment in segments:
@@ -269,6 +279,7 @@ func _notification(p_what: int) -> void:
 	super(p_what)
 	if p_what == NOTIFICATION_ENTER_TREE:
 		_rewire_content_sources()
+		_refresh_sharp_radius()
 
 
 ## Attach `_on_road_changed` to the levels of the resolve chain this brush does not own.
@@ -336,6 +347,7 @@ func _disconnect_content(p_src: Object) -> void:
 ## doing it after the refresh would leave one edit's worth of silence.
 func _on_road_changed() -> void:
 	_rewire_content_sources()
+	_refresh_sharp_radius()
 	update_configuration_warnings()
 	_schedule_refresh()
 
@@ -473,19 +485,87 @@ func resolved_lanes(p_distance: float = NAN) -> Array:
 ## rule the modifier stack uses and the only one that survives being read out loud.
 func segment_at(p_distance: float) -> Pasture3DRoadSegment:
 	var found: Pasture3DRoadSegment = null
-	for s: Pasture3DRoadSegment in segments:
-		if s != null and s.covers(p_distance):
+	for s: Pasture3DRoadSegment in _live_segments():
+		if s.covers(p_distance):
 			found = s
 	return found
 
 
 ## The segments that exist, in array order. Null entries are a normal intermediate inspector state.
+##
+## Also where a segment learns which road it is on, which a range picked by POINT needs to resolve. The
+## `segments` setter binds too, but an in-place `segments.append(...)` never runs a setter.
 func _live_segments() -> Array:
 	var out: Array = []
 	for seg: Pasture3DRoadSegment in segments:
 		if seg != null:
+			if seg._bound_road() != self:
+				seg.bind_road(self)
 			out.append(seg)
 	return out
+
+
+## Set `p_seg`'s start (or, `p_end`, its end) to the spline point selected in the viewport, undoably.
+## What the segment's "Start at / End at Selected Point" buttons call.
+func segment_pick_selected_point(p_seg: Pasture3DRoadSegment, p_end: bool) -> void:
+	var sel: Array = Pasture3DTerrainBrush._editor_selected_point
+	if int(sel[0]) != get_instance_id() or int(sel[1]) < 0:
+		push_warning("Pasture3D: select a point on this road in the viewport first.")
+		return
+	if int(sel[2]) != point_count_total():
+		push_warning("Pasture3D: points were added or removed since that selection; select the point again.")
+		return
+	set_segment_point(p_seg, p_end, int(sel[1]))
+
+
+## Pick spline point `p_gpi` as `p_seg`'s start (or end), as one undo action in the editor.
+func set_segment_point(p_seg: Pasture3DRoadSegment, p_end: bool, p_gpi: int) -> void:
+	if p_seg == null:
+		return
+	var prop := &"to_point" if p_end else &"from_point"
+	var ur := _editor_undo()
+	if ur:
+		ur.create_action("Road Segment %s at Point %d" % ["End" if p_end else "Start", p_gpi])
+		ur.add_do_property(p_seg, prop, p_gpi)
+		ur.add_undo_property(p_seg, prop, p_seg.get(prop))
+		ur.commit_action()
+	else:
+		p_seg.set(prop, p_gpi)
+
+
+## Keep every segment's picked points on the SAME points when one is inserted or removed before them.
+## A removed point that a segment was picked on falls back to the distance it resolved to, so the range
+## stays where it was rather than jumping to the next point.
+func _editor_points_shifted(p_ur: EditorUndoRedoManager, p_gpi: int, p_delta: int) -> void:
+	if p_gpi < 0:
+		return
+	for seg: Pasture3DRoadSegment in _live_segments():
+		for pair in [[&"from_point", &"from_distance", seg.from_point], [&"to_point", &"to_distance", seg.to_point]]:
+			var cur: int = pair[2]
+			if cur < 0:
+				continue
+			var nxt := cur
+			var dist_prop: StringName = pair[1]
+			var fallback := NAN
+			if p_delta > 0 and cur >= p_gpi:
+				nxt = cur + 1
+			elif p_delta < 0 and cur > p_gpi:
+				nxt = cur - 1
+			elif p_delta < 0 and cur == p_gpi:
+				nxt = -1
+				fallback = point_arc_length(cur)
+			if nxt == cur:
+				continue
+			if p_ur != null:
+				p_ur.add_do_property(seg, pair[0], nxt)
+				p_ur.add_undo_property(seg, pair[0], cur)
+				if is_finite(fallback):
+					p_ur.add_do_property(seg, dist_prop, fallback)
+					p_ur.add_undo_property(seg, dist_prop, seg.get(dist_prop))
+			else:
+				seg.set(pair[0], nxt)
+				if is_finite(fallback):
+					seg.set(dist_prop, fallback)
 
 
 ## Which segment governs each distance in `p_at`, as an index into `p_segs`, or -1 for none.
@@ -504,8 +584,8 @@ func _segment_owners(p_at: PackedFloat32Array, p_segs: Array) -> PackedInt32Arra
 	owner.fill(-1)
 	for k in p_segs.size():
 		var seg: Pasture3DRoadSegment = p_segs[k]
-		var lo: int = p_at.bsearch(seg.from_distance, true)
-		var hi: int = mini(p_at.bsearch(seg.to_distance, true), owner.size())
+		var lo: int = p_at.bsearch(seg.start(), true)
+		var hi: int = mini(p_at.bsearch(seg.end(), true), owner.size())
 		for i in range(lo, hi):
 			owner[i] = k
 	return owner
@@ -593,7 +673,16 @@ func corridor_half_width() -> float:
 			if road_mod.fill_batter_override >= 0.0:
 				batter = minf(batter, road_mod.fill_batter_override)
 	var widen := t.curve_widening_max if t.curve_widening_enabled else 0.0
-	return t.disturbed_width(resolved_lane_count()) * 0.5 + widen + allowance / maxf(batter, 0.05)
+	# The rounding reaches past the unrounded toe (see Pasture3DRoadGrader.batter_height).
+	var toe := t.toe_rounding
+	var hinge := t.hinge_rounding
+	for m in modifiers:
+		if m is Pasture3DNodeRoad and m.is_active():
+			var rm: Pasture3DNodeRoad = m
+			toe = rm.resolved_number(rm.toe_rounding_override, toe)
+			hinge = rm.resolved_number(rm.hinge_rounding_override, hinge)
+	return t.disturbed_width(resolved_lane_count()) * 0.5 + widen + allowance / maxf(batter, 0.05) \
+			+ toe + 2.0 * hinge
 
 
 func _padding() -> float:
@@ -735,7 +824,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 			"shoulder": prof["shoulder"],
 			"verge": prof["verge"],
 			"suppress": prof["suppress"],
-			"opts": {
+			"opts": _with_batter_shape({
 				"crown": prof["crown"],
 				"crown_mode": t.crown_mode if t != null else 0,
 				"cut_batter": prof["cut_batter"],
@@ -752,7 +841,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 				# looks. The mask is not free (it stamps every other road's plan), but it is built once
 				# per bake and the alternative is a fast path that is fast and wrong.
 				"protect": _foreign_formation_mask(gw, gh, min_x, min_z, vs),
-			},
+			}, prof),
 			"reach": reach,
 			"blend": _blend,
 			"composite": not _defer_composite,
@@ -1122,7 +1211,25 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 				if p_mod != null and t != null else 1.0,
 		"fill_batter": p_mod.resolved_number(p_mod.fill_batter_override, t.fill_batter) \
 				if p_mod != null and t != null else 0.6,
+		"toe_rounding": p_mod.resolved_number(p_mod.toe_rounding_override, t.toe_rounding) \
+				if p_mod != null and t != null else 0.0,
+		"hinge_rounding": p_mod.resolved_number(p_mod.hinge_rounding_override, t.hinge_rounding) \
+				if p_mod != null and t != null else 0.0,
+		"cut_wall_height": p_mod.resolved_number(p_mod.cut_wall_override, t.cut_wall_height) \
+				if p_mod != null and t != null else 0.0,
+		"fill_wall_height": p_mod.resolved_number(p_mod.fill_wall_override, t.fill_wall_height) \
+				if p_mod != null and t != null else 0.0,
 	}
+
+
+## The batter-shaping options out of a `grading_profile`, merged into a grader options Dictionary. ONE
+## place, because the road is graded along three routes (the native stamp, `grade_surface` and
+## `earthwork_over`) and a shaping that reached two of them would round the road in the editor and leave
+## its junction merges square.
+static func _with_batter_shape(p_opts: Dictionary, p_prof: Dictionary) -> Dictionary:
+	for k in ["toe_rounding", "hinge_rounding", "cut_wall_height", "fill_wall_height"]:
+		p_opts[k] = float(p_prof.get(k, 0.0))
+	return p_opts
 
 
 ## Grade `p_z` (an ABSOLUTE surface, row-major gw × gh) into this road's corridor, for one
@@ -1236,7 +1343,7 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	_rebake_if_corridor_outgrew(used_pad)
 
 	var res := Pasture3DRoadGrader.grade(p_z, p_gw, p_gh, p_min_x, p_min_z, p_vs, plan, alignment,
-			half, shoulder, verge, suppress, {
+			half, shoulder, verge, suppress, _with_batter_shape({
 				"crown": prof["crown"],
 				"crown_mode": t.crown_mode if t != null else 0,
 				"max_bank": t.max_superelevation if t != null else 0.0,
@@ -1252,7 +1359,7 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 				# `skip` is still what trims the RIBBON — see `junction_skips`. Two consumers, two shapes.
 				"exclude": _junction_exclusion_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs),
 				"protect": _foreign_formation_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs),
-			})
+			}, prof))
 	# The alignment this bake solved is what makes this road detectable, so the resolve is asked for
 	# AFTER it exists — and coalesced on the network, so a refresh that bakes six roads resolves once.
 	if jnet != null:
@@ -1532,13 +1639,14 @@ func earthwork_over(p_ground: PackedFloat32Array, p_gw: int, p_gh: int, p_min_x:
 	var prof := grading_profile(mod, ds, n_s)
 	var t := resolved_road_type()
 	var res := Pasture3DRoadGrader.grade(p_ground.duplicate(), p_gw, p_gh, p_min_x, p_min_z, p_vs,
-			plan, alignment, prof["half"], prof["shoulder"], prof["verge"], prof["suppress"], {
+			plan, alignment, prof["half"], prof["shoulder"], prof["verge"], prof["suppress"],
+			_with_batter_shape({
 				"crown": prof["crown"],
 				"crown_mode": t.crown_mode if t != null else 0,
 				"max_bank": t.max_superelevation if t != null else 0.0,
 				"cut_batter": prof["cut_batter"],
 				"fill_batter": prof["fill_batter"],
-			})
+			}, prof))
 	return res["height"]
 
 
@@ -1682,6 +1790,9 @@ func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_g
 	var cut_batter: float = maxf(float(p_surf.get("cut_batter", 1.0)), 0.01)
 	var fill_batter: float = maxf(float(p_surf.get("fill_batter", 0.6)), 0.01)
 	var verge: float = maxf(float(p_surf.get("verge", 4.0)), 0.0)
+	var toe: float = maxf(float(p_surf.get("toe_rounding", 0.0)), 0.0)
+	var cut_wall: float = float(p_surf.get("cut_wall_height", 0.0))
+	var fill_wall: float = float(p_surf.get("fill_wall_height", 0.0))
 
 	# How far out the batter can possibly reach: the deepest it has to climb, over the shallower slope,
 	# plus the verge. Computed rather than authored, for the reason the corridor's `reach` is — a capped
@@ -1711,7 +1822,7 @@ func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_g
 			var h: float = p_ground[lrow + lix]
 			if is_finite(h):
 				rise = maxf(rise, maxf(h - z_lo, z_hi - h))
-	var reach: float = minf(rise / minf(cut_batter, fill_batter) + verge, MAX_LOCAL_BATTER_RADIUS)
+	var reach: float = minf(rise / minf(cut_batter, fill_batter) + verge + toe, MAX_LOCAL_BATTER_RADIUS)
 	var reach_sq := reach * reach
 
 	var ix0 := clampi(int(floor((lo.x - reach - p_min_x) / p_vs)), 0, p_gw - 1)
@@ -1763,8 +1874,10 @@ func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_g
 			if beyond > reach:
 				continue
 			var z_edge := float(edge[1])
-			var cand: float = (maxf(ground, z_edge - beyond * fill_batter) if z_edge > ground
-					else minf(ground, z_edge + beyond * cut_batter))
+			# The corridor's batter, shaped the same way -- except the hinge: a footprint edge has no one
+			# cross-slope to roll over from, so it leaves the edge flat.
+			var cand: float = Pasture3DRoadGrader.batter_height(ground, z_edge, 0.0, beyond, cut_batter,
+					fill_batter, toe, 0.0, cut_wall, fill_wall)
 			# COMBINED, by the same commutative rule `_merge_junction_earthwork` uses: the bigger
 			# earthwork governs. `cand` is derived from the junction record and the pre-road ground and
 			# from nothing this road did, so every road that meets here computes the same number -- and
@@ -1986,17 +2099,139 @@ func _ensure_plan() -> void:
 	if not _plan_token_cache.is_empty() and _plan_token_cache == token:
 		return
 	var out := PackedVector2Array()
+	var ctrl := PackedInt32Array()
+	var kinks := PackedInt32Array()
+	var angles := PackedFloat32Array()
+	var prev_end := -1
 	for path: Path3D in _get_splines():
-		if path == null or path.curve == null or path.curve.point_count < 2:
+		if path == null or path.curve == null:
+			continue
+		var c := path.curve
+		if c.point_count < 2:
+			# Its points still count in the global numbering, so every later point keeps its index.
+			for _k in c.point_count:
+				ctrl.append(maxi(out.size() - 1, 0))
 			continue
 		var xf := path.global_transform
-		for p in path.curve.tessellate():
+		var base := out.size()
+		var tess := c.tessellate()
+		for p in tess:
 			var w: Vector3 = xf * p
 			out.append(Vector2(w.x, w.z))
-	_plan_cache = out
-	_plan_cum_cache = Pasture3DRoadGrader.cumulative_length(out)
+		# Where each control point landed. `tessellate` copies the point positions in, so an exact match
+		# walking forward finds them; a miss (it never should) falls back to the nearest vertex.
+		var at := 0
+		for k in c.point_count:
+			var pk := c.get_point_position(k)
+			var found := -1
+			for j in range(at, tess.size()):
+				if tess[j] == pk:
+					found = j
+					break
+			if found < 0:
+				var best := INF
+				for j in tess.size():
+					var dd := tess[j].distance_squared_to(pk)
+					if dd < best:
+						best = dd
+						found = j
+			at = found
+			ctrl.append(base + found)
+			var th := _kink_angle(c, k, xf.basis, c.closed)
+			if th >= Pasture3DRoadGrader.KINK_MIN_ANGLE:
+				kinks.append(base + found)
+				angles.append(th)
+		# Two splines under one brush meet where one ends and the next begins. A join is a kink whenever
+		# the two do not leave in the same direction, and nothing on either curve says so.
+		# ONE kink, at the first spline's end: the next one starts at the same place, and two kinks at one
+		# arc length leave each other no room and neither is rounded.
+		if prev_end >= 0:
+			var th := _polyline_turn(out, prev_end)
+			if th >= Pasture3DRoadGrader.KINK_MIN_ANGLE:
+				kinks.append(prev_end)
+				angles.append(th)
+		prev_end = out.size() - 1
+	var rounded := Pasture3DRoadGrader.fillet_plan(out, kinks, angles, ctrl, _sharp_radius,
+			_is_closed() and out.size() > 2 and out[0].distance_squared_to(out[out.size() - 1]) < 1e-8)
+	_plan_cache = rounded["plan"]
+	_plan_cum_cache = rounded["cum"]
+	_plan_ctrl_s_cache = rounded["ctrl_s"]
 	_plan_token_cache = token
 	plan_builds += 1
+
+
+## Turn in plan at spline point `p_k`, radians, from the curve's own handles rather than the tessellation:
+## a point with mirrored handles is exactly 0, where the tessellation around it turns by up to its
+## tolerance. The direction a curve arrives or leaves along is its handle, or with no handle the far
+## control point of that span, or with neither the neighbouring point -- the Bezier end tangent.
+static func _kink_angle(p_c: Curve3D, p_k: int, p_basis: Basis, p_closed: bool) -> float:
+	var n := p_c.point_count
+	var has_prev := p_k > 0 or p_closed
+	var has_next := p_k < n - 1 or p_closed
+	if not (has_prev and has_next):
+		return 0.0
+	var kp := (p_k - 1 + n) % n
+	var kn := (p_k + 1) % n
+	var pk := p_c.get_point_position(p_k)
+	var t_in: Vector3
+	if p_c.get_point_in(p_k).length_squared() > 1e-10:
+		t_in = -p_c.get_point_in(p_k)
+	elif p_c.get_point_out(kp).length_squared() > 1e-10:
+		t_in = pk - (p_c.get_point_position(kp) + p_c.get_point_out(kp))
+	else:
+		t_in = pk - p_c.get_point_position(kp)
+	var t_out: Vector3
+	if p_c.get_point_out(p_k).length_squared() > 1e-10:
+		t_out = p_c.get_point_out(p_k)
+	elif p_c.get_point_in(kn).length_squared() > 1e-10:
+		t_out = (p_c.get_point_position(kn) + p_c.get_point_in(kn)) - pk
+	else:
+		t_out = p_c.get_point_position(kn) - pk
+	var a3 := p_basis * t_in
+	var b3 := p_basis * t_out
+	var a := Vector2(a3.x, a3.z)
+	var b := Vector2(b3.x, b3.z)
+	if a.length_squared() < 1e-12 or b.length_squared() < 1e-12:
+		return 0.0
+	return acos(clampf(a.normalized().dot(b.normalized()), -1.0, 1.0))
+
+
+## Turn of a polyline at vertex `p_v`, radians, stepping over zero-length segments either side.
+static func _polyline_turn(p_pts: PackedVector2Array, p_v: int) -> float:
+	var n := p_pts.size()
+	var i := p_v - 1
+	while i >= 0 and p_pts[i].distance_squared_to(p_pts[p_v]) < 1e-10:
+		i -= 1
+	var j := p_v + 1
+	while j < n and p_pts[j].distance_squared_to(p_pts[p_v]) < 1e-10:
+		j += 1
+	if i < 0 or j >= n:
+		return 0.0
+	var a := (p_pts[p_v] - p_pts[i]).normalized()
+	var b := (p_pts[j] - p_pts[p_v]).normalized()
+	return acos(clampf(a.dot(b), -1.0, 1.0))
+
+
+## Re-resolve the sharp-point radius from the road type. Cheap to call; the plan only rebuilds when the
+## number actually moved, because it is part of the plan token.
+func _refresh_sharp_radius() -> void:
+	var t := resolved_road_type()
+	_sharp_radius = t.resolved_sharp_point_radius(resolved_lane_count()) if t != null else 0.0
+
+
+## Arc length along the plan of spline point `p_gpi` (global point order, as the gizmo numbers them), or
+## NAN when there is no such point. Where a segment picked by point starts or ends.
+func point_arc_length(p_gpi: int) -> float:
+	_ensure_plan()
+	if p_gpi < 0 or p_gpi >= _plan_ctrl_s_cache.size():
+		return NAN
+	return _plan_ctrl_s_cache[p_gpi]
+
+
+## How many spline points this road has, in the numbering `point_arc_length` takes.
+func point_count_total() -> int:
+	_ensure_plan()
+	return _plan_ctrl_s_cache.size()
 
 
 ## Curvature of the plan resampled at `p_ds` over `p_n_s` samples. Empty when the plan cannot bend.
@@ -2020,7 +2255,7 @@ func _plan_curvature_at(p_ds: float, p_n_s: int) -> PackedFloat32Array:
 
 
 func _plan_token() -> Array:
-	var token: Array = [_plan_revision, closed]
+	var token: Array = [_plan_revision, closed, _sharp_radius]
 	for path: Path3D in _get_splines():
 		if path == null:
 			continue
@@ -2156,22 +2391,19 @@ func _get_configuration_warnings() -> PackedStringArray:
 	if resolved_road_type() == null:
 		out.append("No road type resolves here. Set one on this brush, or add one to the network catalogue.")
 	var total := _spline_length()
-	for s: Pasture3DRoadSegment in segments:
-		if s != null:
-			out.append_array(s.range_warnings(total))
+	for s: Pasture3DRoadSegment in _live_segments():
+		out.append_array(s.range_warnings(total))
 	return out
 
 
 ## Total arc length of this brush's splines, metres, or NAN when there is nothing to measure. Used to
 ## tell a segment it has been left past the end of a shortened spline.
 func _spline_length() -> float:
-	var total := 0.0
-	var any := false
-	for path: Path3D in _get_splines():
-		if path != null and path.curve != null and path.curve.point_count >= 2:
-			total += path.curve.get_baked_length()
-			any = true
-	return total if any else NAN
+	# The PLAN's length, which is what segment distances are measured along: with sharp points rounded it
+	# is a little shorter than the curves' own baked length, and a range checked against the longer one
+	# would claim ground past the end of the road.
+	var cum := _plan_cum()
+	return float(cum[cum.size() - 1]) if cum.size() >= 2 else NAN
 
 
 # ---- JUNCTIONS (P4a) --------------------------------------------------------------------------------
@@ -2391,6 +2623,10 @@ func graph_path() -> Pasture3DGraphPath:
 		path.crown = prof["crown"]
 		path.cut_batter = prof["cut_batter"]
 		path.fill_batter = prof["fill_batter"]
+		path.toe_rounding = prof["toe_rounding"]
+		path.hinge_rounding = prof["hinge_rounding"]
+		path.cut_wall_height = prof["cut_wall_height"]
+		path.fill_wall_height = prof["fill_wall_height"]
 	return path
 
 
@@ -2408,10 +2644,10 @@ func surface_intervals() -> Array:
 	if not is_finite(total) or total <= 0.0:
 		return []
 	var cuts := PackedFloat32Array([0.0, total])
-	for seg in segments:
-		if seg == null or seg.length() <= 0.0:
+	for seg in _live_segments():
+		if seg.length() <= 0.0:
 			continue
-		for edge in [seg.from_distance, seg.to_distance]:
+		for edge in [seg.start(), seg.end()]:
 			var e := clampf(float(edge), 0.0, total)
 			if not cuts.has(e):
 				cuts.append(e)
@@ -3038,17 +3274,31 @@ func road_length() -> float:
 
 ## Reversing the spline flips arc length (s -> L - s), so every segment range is mirrored to stay on
 ## the same stretch of road. The length does not change, and the map is its own inverse, as undo needs.
+## A picked point is renumbered the way `reverse_splines` renumbers it -- each spline reversed in place --
+## and the start and end swap, because the old end is now the nearer one.
 func _on_splines_reversed() -> void:
 	var total := total_arc_length()
 	if total <= 0.0:
 		return
+	var rev := PackedInt32Array()
+	for path: Path3D in _get_splines():
+		if path == null or path.curve == null:
+			continue
+		var base := rev.size()
+		var c := path.curve.point_count
+		for i in c:
+			rev.append(base + (c - 1 - i))
 	for sg: Pasture3DRoadSegment in segments:
 		if sg == null:
 			continue
 		var a := total - sg.to_distance
 		var b := total - sg.from_distance
+		var pa := rev[sg.to_point] if sg.to_point >= 0 and sg.to_point < rev.size() else -1
+		var pb := rev[sg.from_point] if sg.from_point >= 0 and sg.from_point < rev.size() else -1
 		sg.from_distance = a
 		sg.to_distance = b
+		sg.from_point = pa
+		sg.to_point = pb
 
 
 ## Total arc length of this road's plan centreline, metres.

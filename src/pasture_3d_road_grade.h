@@ -100,6 +100,23 @@ inline double road_surface_height(double p_centre, double p_bank, double p_crown
 	return p_centre + p_bank * p_u + eta * z_crown;
 }
 
+// The ground height `p_beyond` metres past the edge of formation, for a batter leaving the edge at
+// `p_z_edge` and meeting ground `p_ground`. THE BATTER, DEFINED ONCE: the corridor grader, the junction
+// footprint batter and the GDScript oracle (`Pasture3DRoadGrader.batter_height`) all mean this.
+//   p_edge_slope   outward slope of the finished surface at the edge (road_edge_slope); read only when
+//                  p_hinge_round > 0
+//   p_toe_round    metres either side of the toe the batter is filleted into the ground; 0 = hard crease
+//   p_hinge_round  metres over which the edge rolls over into the batter (the curve spans 2x this)
+//   p_cut_wall     a cut batter taller than this becomes a vertical face; 0 = never
+//   p_fill_wall    the same for fill
+double road_batter_height(double p_ground, double p_z_edge, double p_edge_slope, double p_beyond,
+		double p_cut_batter, double p_fill_batter, double p_toe_round, double p_hinge_round,
+		double p_cut_wall, double p_fill_wall);
+
+// Outward slope of the finished road surface at the formation edge `p_edge_d` on side `p_side`.
+double road_edge_slope(double p_z_ref, double p_bank, double p_crown, double p_edge_d, double p_side,
+		double p_half_width, int p_crown_mode, double p_max_bank);
+
 // Grade a heightfield around one road. `p_height` is row-major p_gw * p_gh in METRES and may contain NaN
 // for cells outside the brush's own loop — those pass through untouched, which is what keeps the
 // brush-loop boundary contract intact.
@@ -112,7 +129,8 @@ inline double road_surface_height(double p_centre, double p_bank, double p_crown
 // means "this arc length belongs to a junction", and marking it as a deck would put a viaduct at every
 // crossroads.
 //
-// p_opts: crown, cut_batter, fill_batter, surface_fade, skip (PackedByteArray).
+// p_opts: crown, cut_batter, fill_batter, surface_fade, skip (PackedByteArray), toe_rounding,
+// hinge_rounding, cut_wall_height, fill_wall_height (see road_batter_height).
 // Returns { ok, height, roadbed, cut, fill, verge, structure, surface }.
 Dictionary road_grade_grid(const PackedFloat32Array &p_height, int p_gw, int p_gh, double p_min_x,
 		double p_min_z, double p_vs, const PackedVector2Array &p_plan, double p_align_ds,

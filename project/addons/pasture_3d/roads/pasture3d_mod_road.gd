@@ -85,6 +85,29 @@ extends Pasture3DNode
 		fill_batter_override = v
 		_touch()
 
+## The RoadType's batter shaping, overridden for this road alone: `toe_rounding`, `hinge_rounding`,
+## `cut_wall_height` and `fill_wall_height`, in metres. Negative takes the type's; 0 switches that shaping
+## off here even when the type has it.
+@export var toe_rounding_override: float = -1.0:
+	set(v):
+		toe_rounding_override = v
+		_touch()
+
+@export var hinge_rounding_override: float = -1.0:
+	set(v):
+		hinge_rounding_override = v
+		_touch()
+
+@export var cut_wall_override: float = -1.0:
+	set(v):
+		cut_wall_override = v
+		_touch()
+
+@export var fill_wall_override: float = -1.0:
+	set(v):
+		fill_wall_override = v
+		_touch()
+
 @export_group("Structures")
 ## Height difference at which an unbridged stretch is REPORTED as wanting a structure, metres. It does
 ## not suppress anything on its own — an author marking a bridge segment does that (§4.2) — it only
@@ -198,6 +221,10 @@ func to_params() -> Dictionary:
 		"crown_override": crown_override,
 		"cut_batter_override": cut_batter_override,
 		"fill_batter_override": fill_batter_override,
+		"toe_rounding_override": toe_rounding_override,
+		"hinge_rounding_override": hinge_rounding_override,
+		"cut_wall_override": cut_wall_override,
+		"fill_wall_override": fill_wall_override,
 		"structure_threshold": structure_threshold,
 		"publish_masks": publish_masks,
 	}
@@ -205,7 +232,8 @@ func to_params() -> Dictionary:
 
 func content_key() -> int:
 	return hash([alignment_step, smooth_radius, verge_override, crown_override, cut_batter_override,
-			fill_batter_override, structure_threshold, publish_masks, enabled])
+			fill_batter_override, toe_rounding_override, hinge_rounding_override, cut_wall_override,
+			fill_wall_override, structure_threshold, publish_masks, enabled])
 
 
 func modifier_warnings(p_host) -> PackedStringArray:

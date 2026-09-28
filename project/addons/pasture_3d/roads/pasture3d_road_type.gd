@@ -178,6 +178,16 @@ enum KerbType {
 		mountain_banking_cap = maxf(v, 0.0)
 		emit_changed()
 
+## Radius a SHARP point on the spline is rounded to, metres: a split-tangent point, a corner point with
+## no handles, or the join between two splines. The road (ribbon, grading, paint and junctions alike)
+## runs through an arc instead of a kink, and the spline itself is not edited. -1 is automatic (1.5x the
+## half-width of formation, the tightest a ribbon follows without its inner edge folding); 0 keeps the
+## kink.
+@export_range(-1.0, 200.0, 0.5, "or_greater", "suffix:m") var sharp_point_radius: float = -1.0:
+	set(v):
+		sharp_point_radius = maxf(v, -1.0)
+		emit_changed()
+
 ## Fractional reduction in max_grade across sharp switchback curves (hairpin grade compensation).
 @export var hairpin_grade_compensation: float = 0.5:
 	set(v):
@@ -266,11 +276,48 @@ enum KerbType {
 		fill_batter = maxf(v, 0.05)
 		emit_changed()
 
-## Metres over which the earthworks blend back into untouched terrain. Also the outer bound of the
-## corridor a rally stage counts as "still on the road" (§9.3).
+## Metres of disturbed ground reserved past where the batter lands: how far out the grader is allowed to
+## write, and the outer bound of the corridor a rally stage counts as "still on the road" (§9.3). It does
+## NOT soften anything -- the batter meets the ground at a crease whatever this is. `toe_rounding` and
+## `hinge_rounding` below are the controls that smooth the earthworks into the landscape.
 @export var verge_width: float = 4.0:
 	set(v):
 		verge_width = maxf(v, 0.0)
+		emit_changed()
+
+## Metres either side of the batter's toe over which it is filleted into the ground, so a fill or a cut
+## runs out into the landscape instead of meeting it at a crease. 0 keeps the crease.
+@export_range(0.0, 20.0, 0.1, "or_greater", "suffix:m") var toe_rounding: float = 0.0:
+	set(v):
+		toe_rounding = maxf(v, 0.0)
+		emit_changed()
+
+## Metres over which the edge of formation rolls over into the batter, so the shoulder does not end at
+## a sharp lip. The curve starts AT the edge and spans twice this, so the carriageway is never lowered;
+## it pushes the batter out by about this much. 0 keeps the crease.
+@export_range(0.0, 10.0, 0.1, "or_greater", "suffix:m") var hinge_rounding: float = 0.0:
+	set(v):
+		hinge_rounding = maxf(v, 0.0)
+		emit_changed()
+
+## A CUT batter taller than this, metres, becomes a vertical retaining wall instead of carrying on up the
+## hillside. The wall is cut into the terrain and drawn as a mesh beside the ribbon. 0 = never.
+@export_range(0.0, 60.0, 0.5, "or_greater", "suffix:m") var cut_wall_height: float = 0.0:
+	set(v):
+		cut_wall_height = maxf(v, 0.0)
+		emit_changed()
+
+## A FILL batter deeper than this, metres, becomes a vertical retaining wall: the fan of fill down a
+## mountainside stops at the wall. 0 = never.
+@export_range(0.0, 60.0, 0.5, "or_greater", "suffix:m") var fill_wall_height: float = 0.0:
+	set(v):
+		fill_wall_height = maxf(v, 0.0)
+		emit_changed()
+
+## Material for the retaining walls. Empty uses a plain concrete grey.
+@export var wall_material: Material = null:
+	set(v):
+		wall_material = v
 		emit_changed()
 
 ## Kerb-return radius where this road meets another, metres. The sweep a vehicle turns through at an
@@ -382,6 +429,13 @@ func half_width(p_lane_count: int = -1) -> float:
 	return (float(lanes) * lane_width) * 0.5 + shoulder_width
 
 
+## The radius `sharp_point_radius` resolves to for a road of this type, metres. 0 means leave the kink.
+func resolved_sharp_point_radius(p_lane_count: int = -1) -> float:
+	if sharp_point_radius >= 0.0:
+		return sharp_point_radius
+	return 1.5 * (half_width(p_lane_count) + shoulder_width)
+
+
 ## Total width the road disturbs, metres: the sealed surface plus a verge each side. The footprint a
 ## brush has to reserve, and the outer edge of the rally corridor.
 func disturbed_width(p_lane_count: int = -1) -> float:
@@ -407,6 +461,7 @@ func grading_signature() -> Array:
 	return [
 		lane_width, lane_count, shoulder_width, crown, crown_mode, verge_width,
 		cut_batter, fill_batter,
+		toe_rounding, hinge_rounding, cut_wall_height, fill_wall_height, sharp_point_radius,
 		max_grade, max_superelevation, design_speed,
 		vertical_crest_accel_limit, vertical_sag_accel_limit,
 		# IN, despite being a junction setting rather than a cross-section one: the kerb return is paid

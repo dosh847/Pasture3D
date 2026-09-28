@@ -64,6 +64,9 @@ func _create_road_brush_with_kink(half_w: float) -> Pasture3DRoadBrush:
 	rt.lane_count = 2
 	rt.lane_width = half_w
 	rt.shoulder_width = 0.5
+	# The destructive tool on a plan nothing else rounds. With the default automatic rounding the plan
+	# through this kink already clears r_crit, and the detector rightly finds nothing to fix.
+	rt.sharp_point_radius = 0.0
 	brush.road_defaults = Pasture3DRoadOverrides.new()
 	brush.road_defaults.road_type = rt
 

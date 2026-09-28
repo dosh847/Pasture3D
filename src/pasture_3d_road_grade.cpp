@@ -58,6 +58,61 @@ PackedFloat32Array zeros(int p_n) {
 
 } // namespace
 
+double godot::road_batter_height(double p_ground, double p_z_edge, double p_edge_slope, double p_beyond,
+		double p_cut_batter, double p_fill_batter, double p_toe_round, double p_hinge_round,
+		double p_cut_wall, double p_fill_wall) {
+	const bool fill = p_z_edge > p_ground;
+	const double batter = fill ? p_fill_batter : p_cut_batter;
+	const double g2 = fill ? -batter : batter;
+	const double x = std::max(p_beyond, 0.0);
+	// THE HINGE. A parabola that leaves the formation edge at the surface's own cross-slope and arrives at
+	// the batter slope `2 r` further out -- the vertical-curve formula, laid sideways. It starts AT the edge
+	// rather than straddling it, so the formation (and the ribbon lying on it) is never lowered; the price
+	// is that the batter beyond it runs `(g1 - g2) r` proud of the unrounded one, moving the toe out by
+	// about r.
+	double line;
+	const double r = std::max(p_hinge_round, 0.0);
+	if (r > 1e-6) {
+		const double g1 = p_edge_slope;
+		line = x < 2.0 * r ? p_z_edge + g1 * x + (g2 - g1) * x * x / (4.0 * r)
+						   : p_z_edge + (g1 + g2) * r + g2 * (x - 2.0 * r);
+	} else {
+		line = p_z_edge + g2 * x;
+	}
+	// THE WALL. A batter taller than this stops being earth and becomes a vertical face: past the run at
+	// which it has climbed (cut) or fallen (fill) `wall` metres from the edge, the ground is left alone.
+	// That is a retaining wall on a mountain road -- the fan of fill down the hillside stops at the wall
+	// instead of running on until it meets the slope.
+	const double wall = fill ? p_fill_wall : p_cut_wall;
+	if (wall > 0.0 && (fill ? p_z_edge - line : line - p_z_edge) > wall) {
+		return p_ground;
+	}
+	// THE TOE. A polynomial smooth-max (fill) or smooth-min (cut) of the batter against the ground: the
+	// concave crease where they meet becomes a fillet about `toe_round` metres wide either side. `k` is that
+	// width in HEIGHT -- how fast batter and ground part company -- and it is capped by the run so far, so
+	// the blend cannot reach back to the formation edge and lift it.
+	const double k = batter * std::min(std::max(p_toe_round, 0.0), x);
+	if (k > 1e-9) {
+		const double diff = std::abs(line - p_ground);
+		const double hk = std::max(k - diff, 0.0) / k;
+		const double bump = hk * hk * k * 0.25;
+		return fill ? std::max(p_ground, line) + bump : std::min(p_ground, line) - bump;
+	}
+	return fill ? std::max(p_ground, line) : std::min(p_ground, line);
+}
+
+double godot::road_edge_slope(double p_z_ref, double p_bank, double p_crown, double p_edge_d, double p_side,
+		double p_half_width, int p_crown_mode, double p_max_bank) {
+	// Outward slope of the finished surface AT the formation edge, from one step inside it: the hinge
+	// parabola leaves at this slope, so the edge has no crease. From inside, because that is the surface
+	// the ribbon draws; the extension past the edge is the grader's, not the road's.
+	const double step = std::min(0.05, std::max(p_edge_d, 1e-3) * 0.5);
+	const double side = p_side != 0.0 ? p_side : 1.0;
+	const double z_edge = road_surface_height(p_z_ref, p_bank, p_crown, p_edge_d * side, p_half_width, p_crown_mode, p_max_bank);
+	const double z_in = road_surface_height(p_z_ref, p_bank, p_crown, (p_edge_d - step) * side, p_half_width, p_crown_mode, p_max_bank);
+	return (z_edge - z_in) / step;
+}
+
 Dictionary godot::road_grade_grid(const PackedFloat32Array &p_height, int p_gw, int p_gh, double p_min_x,
 		double p_min_z, double p_vs, const PackedVector2Array &p_plan, double p_align_ds,
 		double p_align_s0, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
@@ -99,6 +154,12 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 	const double cut_batter = std::max(p_opts.has("cut_batter") ? (double)p_opts["cut_batter"] : 1.0, 0.01);
 	const double fill_batter = std::max(p_opts.has("fill_batter") ? (double)p_opts["fill_batter"] : 0.6, 0.01);
 	const double fade = std::max(p_opts.has("surface_fade") ? (double)p_opts["surface_fade"] : 1.0, 0.0);
+	// Batter shaping. Every one defaults to the unshaped batter, so a caller that never heard of them
+	// grades exactly as before. See `road_batter_height`.
+	const double toe_round = std::max(p_opts.has("toe_rounding") ? (double)p_opts["toe_rounding"] : 0.0, 0.0);
+	const double hinge_round = std::max(p_opts.has("hinge_rounding") ? (double)p_opts["hinge_rounding"] : 0.0, 0.0);
+	const double cut_wall = p_opts.has("cut_wall_height") ? (double)p_opts["cut_wall_height"] : 0.0;
+	const double fill_wall = p_opts.has("fill_wall_height") ? (double)p_opts["fill_wall_height"] : 0.0;
 	PackedByteArray skip;
 	if (p_opts.has("skip")) {
 		skip = p_opts["skip"];
@@ -185,7 +246,9 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 				const double z_ref = align_height_at(s, p_align_ds, p_align_s0, z_ptr, n_align);
 				const double rise = std::abs(z_ref - ground);
 				const double slope = z_ref < ground ? cut_batter : fill_batter;
-				if (d > edge_d + rise / slope + verge) {
+				// The rounding reaches past the unrounded toe: the hinge pushes the batter out by about its
+				// radius, and the toe fillet spreads its own width beyond that.
+				if (d > edge_d + rise / slope + verge + toe_round + 2.0 * hinge_round) {
 					continue;
 				}
 				// Another road's formation. Refused before the suppress branch so a protected cell reports
@@ -225,9 +288,11 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 					// ground, and the meet is a max/min rather than a solved crossing — which is what makes
 					// the join continuous with no seam to chase, at any terrain slope.
 					const double z_edge = road_surface_height(z_ref, bank, crown, edge_d * side, hw, crown_mode, max_bank);
-					const double beyond = d - edge_d;
-					h = z_edge > ground ? std::max(ground, z_edge - beyond * fill_batter)
-										: std::min(ground, z_edge + beyond * cut_batter);
+					const double g1 = hinge_round > 0.0
+							? road_edge_slope(z_ref, bank, crown, edge_d, side, hw, crown_mode, max_bank)
+							: 0.0;
+					h = road_batter_height(ground, z_edge, g1, d - edge_d, cut_batter, fill_batter, toe_round,
+							hinge_round, cut_wall, fill_wall);
 				}
 				graded[idx] = (float)h;
 

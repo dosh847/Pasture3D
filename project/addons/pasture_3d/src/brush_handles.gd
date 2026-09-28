@@ -157,11 +157,13 @@ func _update_selected_point(p_node: Node3D, p_gpi: int, p_kind: int = 0) -> void
 			# The count the index is valid against — see `_sel_count`.
 			_sel_count = n
 			p_node.update_gizmos.call_deferred()
+		Pasture3DTerrainBrush._editor_selected_point = [id, p_gpi, n]
 	elif sel_node_id == id and sel_gpi != -1:
 		sel_gpi = -1
 		sel_kind = 0
 		_sel_count = -1
 		p_node.update_gizmos.call_deferred()
+		Pasture3DTerrainBrush._editor_selected_point = [0, -1, -1]
 
 
 ## Whether to draw point `p_gpi`'s tangent handles: only the selected point, or all when the toggle is

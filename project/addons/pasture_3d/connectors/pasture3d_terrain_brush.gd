@@ -220,6 +220,11 @@ static var _show_all_labels: bool = false
 ## Shared across every brush: the "Toggle Tangents" button flips this so the gizmo (brush_gizmo.gd) draws
 ## every loop point's tangent handles instead of just the selected point's.
 static var _show_all_tangents: bool = false
+## The loop point last selected in the viewport, as [brush instance id, running point index, total point
+## count when it was taken]. Written by the gizmo (brush_handles.gd), read by inspector buttons that act on
+## "the selected point" -- a road segment's "Start at Selected Point". The count is there for the reason
+## brush_handles gives `_sel_count`: a selection taken before a point was added names a neighbour now.
+static var _editor_selected_point: Array = [0, -1, -1]
 ## Reentrancy guard: true while ANY brush is programmatically snapping curve points to the surface.
 ## Prevents brushes that share a Curve3D resource from ping-ponging re-bakes off each other's snaps.
 static var _snap_in_progress: bool = false
@@ -4152,13 +4157,16 @@ func editor_add_point(world: Vector3, p_seated: bool = false) -> void:
 				if denom > 1e-9:
 					t = clampf(((local.x - a.x) * ab.x + (local.z - a.z) * ab.z) / denom, 0.0, 1.0)
 				local.y = lerpf(a.y, b.y, t)
+	var gpi := global_point_index(best_path, clampi(idx, 0, best_path.curve.point_count))
 	var ur := _editor_undo()
 	if ur:
 		ur.create_action("Add %s Point" % _spline_basename())
 		ur.add_do_method(best_path.curve, "add_point", local, Vector3.ZERO, Vector3.ZERO, idx)
 		ur.add_undo_method(best_path.curve, "remove_point", idx)
+		_editor_points_shifted(ur, gpi, 1)
 		ur.commit_action()
 	else:
+		_editor_points_shifted(null, gpi, 1)
 		best_path.curve.add_point(local, Vector3.ZERO, Vector3.ZERO, idx)
 	update_gizmos() # show the new point marker right away
 
@@ -4171,15 +4179,38 @@ func editor_remove_point(path: Path3D, idx: int) -> void:
 		push_warning("Pasture3D: a %s needs at least %d points." % [_spline_basename(), _min_points()])
 		return
 	var pos := path.curve.get_point_position(idx)
+	var gpi := global_point_index(path, idx)
 	var ur := _editor_undo()
 	if ur:
 		ur.create_action("Remove %s Point" % _spline_basename())
 		ur.add_do_method(path.curve, "remove_point", idx)
 		ur.add_undo_method(path.curve, "add_point", pos, Vector3.ZERO, Vector3.ZERO, idx)
+		_editor_points_shifted(ur, gpi, -1)
 		ur.commit_action()
 	else:
+		_editor_points_shifted(null, gpi, -1)
 		path.curve.remove_point(idx)
 	update_gizmos() # drop the removed point's marker right away
+
+
+## Running index of point `p_idx` of `p_path` across all of this brush's splines -- the numbering the
+## gizmo selects by (brush_handles.gd `sel_gpi`). -1 when `p_path` is not one of them.
+func global_point_index(p_path: Path3D, p_idx: int) -> int:
+	var base := 0
+	for s in _get_splines():
+		if s == p_path:
+			return base + p_idx
+		if s != null and s.curve != null:
+			base += s.curve.point_count
+	return -1
+
+
+## Hook for brushes that name spline points BY INDEX (a road segment picked by point). About to insert
+## (`p_delta` 1) a point at running index `p_gpi`, or remove (-1) the point there. Record the renumbering
+## on `p_ur` inside the open action so one undo restores both, or apply it directly when `p_ur` is null.
+## Called BEFORE the curve changes, so the removed point can still be measured.
+func _editor_points_shifted(_p_ur: EditorUndoRedoManager, _p_gpi: int, _p_delta: int) -> void:
+	pass
 
 
 ## Toggle a loop point between a smooth curve and a sharp corner (double-click). Smoothing seeds

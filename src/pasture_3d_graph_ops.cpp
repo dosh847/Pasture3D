@@ -392,6 +392,10 @@ bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 				if (pr.has("crown")) e.crown = (double)pr["crown"];
 				if (pr.has("cut_batter")) e.cut_batter = (double)pr["cut_batter"];
 				if (pr.has("fill_batter")) e.fill_batter = (double)pr["fill_batter"];
+				if (pr.has("toe_rounding")) e.toe_rounding = (double)pr["toe_rounding"];
+				if (pr.has("hinge_rounding")) e.hinge_rounding = (double)pr["hinge_rounding"];
+				if (pr.has("cut_wall_height")) e.cut_wall_height = (double)pr["cut_wall_height"];
+				if (pr.has("fill_wall_height")) e.fill_wall_height = (double)pr["fill_wall_height"];
 				// A profile with no solved heights cannot grade. Marked here rather than checked in the
 				// op, so "can this road be cut" is decided in one place for every consumer.
 				if (e.align_z.is_empty()) e.has_profile = false;
@@ -1462,6 +1466,10 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				opts["crown"] = geo->crown;
 				opts["cut_batter"] = geo->cut_batter;
 				opts["fill_batter"] = geo->fill_batter;
+				opts["toe_rounding"] = geo->toe_rounding;
+				opts["hinge_rounding"] = geo->hinge_rounding;
+				opts["cut_wall_height"] = geo->cut_wall_height;
+				opts["fill_wall_height"] = geo->fill_wall_height;
 				opts["skip"] = geo->skip;
 				Dictionary res = road_grade_grid_geom(geo->geom, in_arr, p_gw, p_gh,
 						(double)p_rect.position.x + 0.5 * dx, (double)p_rect.position.y + 0.5 * dz, vs,

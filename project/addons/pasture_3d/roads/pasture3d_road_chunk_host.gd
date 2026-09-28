@@ -114,6 +114,21 @@ var _pick_digest: String = ""
 var _apron_chunks: Dictionary = {}
 var _apron_digests: Dictionary = {}
 
+## The retaining walls a batter height cap leaves standing (Pasture3DRoadType.cut_wall_height /
+## fill_wall_height). One node for the whole road, OUTSIDE `_chunks`: a wall is built from the graded
+## TERRAIN as well as the alignment, so it has its own digest, and a ribbon rebuild must not drop it.
+var _walls: MeshInstance3D = null
+var _walls_digest: int = 0
+## How many wall faces and caps the last build emitted, as quads. What a gate reads.
+var wall_quads: int = 0
+
+## Metres a wall face is sunk below the ground it stands on, so a grid step or a later bake of the ground
+## beside it never shows a gap under the wall.
+const WALL_EMBED: float = 1.0
+## Height a wall must actually stand before one is drawn. The grader leaves ground alone past the wall
+## run; where that ground happens to sit within this of the wall top there is no face to build.
+const WALL_MIN_FACE: float = 0.05
+
 
 func _ready() -> void:
 	set_process(true)
@@ -127,12 +142,14 @@ func _ready() -> void:
 func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 	if p_brush == null:
 		_clear()
+		_clear_walls()
 		_last_digest = ""
 		last_rebuilt = false
 		return 0
 	var run := p_brush.build_run()
 	if run.is_empty():
 		_clear()
+		_clear_walls()
 		_last_digest = ""
 		last_rebuilt = false
 		_why(p_brush, "the road has no solved alignment yet (build_run is empty)")
@@ -140,10 +157,14 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 	var t: Pasture3DRoadType = p_brush.resolved_road_type()
 	if t == null:
 		_clear()
+		_clear_walls()
 		_last_digest = ""
 		last_rebuilt = false
 		_why(p_brush, "the road has no road type")
 		return 0
+	# Before the ribbon's early return, and whatever the surface mode: the walls stand on the TERRAIN,
+	# which the ribbon digest does not see, and a draped road needs its walls as much as a meshed one.
+	_rebuild_walls(p_brush, run, t)
 
 	# ---- WHAT THE SKIP DIGEST OWES, AND WHY IT IS A LIST OF VALUES ----
 	#
@@ -220,10 +241,10 @@ func rebuild(p_brush: Pasture3DRoadBrush) -> int:
 	var region := _region_metres(p_brush)
 	var skips := p_brush.junction_skips()
 	var extra_cuts := PackedFloat32Array()
-	for seg: Pasture3DRoadSegment in p_brush.segments:
-		if seg != null and (seg.left_kerb != Pasture3DRoadType.KerbType.INHERIT or seg.right_kerb != Pasture3DRoadType.KerbType.INHERIT or seg.is_bridge):
-			extra_cuts.append(seg.from_distance)
-			extra_cuts.append(seg.to_distance)
+	for seg: Pasture3DRoadSegment in p_brush._live_segments():
+		if seg.left_kerb != Pasture3DRoadType.KerbType.INHERIT or seg.right_kerb != Pasture3DRoadType.KerbType.INHERIT or seg.is_bridge:
+			extra_cuts.append(seg.start())
+			extra_cuts.append(seg.end())
 	var spans := Pasture3DRoadMesher.chunk_spans(plan, cum, region, skips, extra_cuts)
 	if spans.is_empty():
 		_why(p_brush, "no spans left: %.1f m of road, %.0f m regions, %d junction footprint(s)"
@@ -675,6 +696,190 @@ func rebuild_aprons(p_aprons: Array, p_lift: float = Pasture3DRoadMesher.DEPTH_L
 	return _chunks.size()
 
 
+func _clear_walls() -> void:
+	if _walls != null and is_instance_valid(_walls):
+		if _walls.get_parent() != null:
+			_walls.get_parent().remove_child(_walls)
+		_walls.queue_free()
+	_walls = null
+	_walls_digest = 0
+	wall_quads = 0
+
+
+## Build the retaining walls where the grader capped a batter, as one mesh.
+##
+## ---- WHERE A WALL STANDS ----
+##
+## The grader (`Pasture3DRoadGrader.batter_height`) runs the batter out from the formation edge until it
+## has climbed or fallen the wall height, and past that run leaves the ground ALONE. So the terrain holds
+## a batter up to `wall_run` and raw hillside beyond, and the step between them is the wall. This reads
+## both halves back rather than recomputing the grade: the batter line from the same definition the
+## grader used, the hillside from the baked terrain just past the run. Where that hillside sits within
+## WALL_MIN_FACE of the batter's end there is no step, and no wall is drawn.
+##
+## ---- WHICH SIDE OF THE STEP ----
+##
+## The heightfield cannot draw a vertical face: between the last graded vertex and the first untouched
+## one it draws a steep triangle a vertex apart. The wall is put on the side of that triangle that HIDES
+## it -- a fill wall out past it, on the low ground, facing away from the road; a cut wall in front of it,
+## on the batter, facing the road -- and a cap spans the band between the face and the run at the wall's
+## top, so the steep triangle is covered from both sides.
+func _rebuild_walls(p_brush: Pasture3DRoadBrush, p_run: Dictionary, p_type: Pasture3DRoadType) -> void:
+	var alignment: Pasture3DRoadAlignment = p_run["alignment"]
+	var plan: PackedVector2Array = p_run["plan"]
+	var cum: PackedFloat32Array = p_run["cum"]
+	var terrain: Variant = p_brush.terrain
+	if alignment == null or alignment.count() < 2 or plan.size() < 2 or terrain == null or terrain.data == null:
+		_clear_walls()
+		return
+	var prof := p_brush.grading_profile(p_brush.road_modifier(), alignment.ds, alignment.count())
+	var cut_wall := float(prof.get("cut_wall_height", 0.0))
+	var fill_wall := float(prof.get("fill_wall_height", 0.0))
+	if cut_wall <= 0.0 and fill_wall <= 0.0:
+		_clear_walls()
+		return
+	var half: PackedFloat32Array = prof["half"]
+	var shoulder: PackedFloat32Array = prof["shoulder"]
+	var suppress: PackedByteArray = prof["suppress"]
+	var skip: PackedByteArray = prof["skip"]
+	var crown := float(prof.get("crown", 0.05))
+	var cut_b := maxf(float(prof.get("cut_batter", 1.0)), 0.01)
+	var fill_b := maxf(float(prof.get("fill_batter", 0.6)), 0.01)
+	var hinge := maxf(float(prof.get("hinge_rounding", 0.0)), 0.0)
+	var crown_mode: int = p_type.crown_mode
+	var max_bank: float = p_type.max_superelevation
+	var band := 1.5 * float(terrain.vertex_spacing)
+
+	# Each side's walls as rows of [position along the road, the four heights/offsets], split wherever a
+	# sample has no wall so a strip never bridges a gap.
+	var strips: Array = []
+	var digest := PackedFloat32Array()
+	for side in [-1.0, 1.0]:
+		for kind in [0, 1]: # 0 fill, 1 cut
+			var height := fill_wall if kind == 0 else cut_wall
+			if height <= 0.0:
+				continue
+			var cur: Array = []
+			for i in alignment.count():
+				var row := _wall_row(alignment, plan, cum, i, side, kind, height, half, shoulder, crown,
+						crown_mode, max_bank, cut_b, fill_b, hinge, band, suppress, skip, terrain)
+				if row.is_empty():
+					if cur.size() >= 2:
+						strips.append({"side": side, "kind": kind, "rows": cur})
+					cur = []
+					continue
+				cur.append(row)
+				for v in row:
+					if v is Vector3:
+						digest.append_array([v.x, v.y, v.z])
+			if cur.size() >= 2:
+				strips.append({"side": side, "kind": kind, "rows": cur})
+	var h := hash(digest) ^ hash(p_type.wall_material.get_instance_id() if p_type.wall_material != null else 0)
+	if h == _walls_digest and (_walls != null or strips.is_empty()):
+		return
+	_clear_walls()
+	_walls_digest = h
+	if strips.is_empty():
+		return
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var quads := 0
+	for strip in strips:
+		var rows: Array = strip["rows"]
+		for r in range(rows.size() - 1):
+			var a: Array = rows[r]
+			var b: Array = rows[r + 1]
+			# a/b: [face_top, face_bottom, cap_back, outward_normal]
+			var n_face: Vector3 = (a[3] + b[3]).normalized()
+			_quad(st, a[0], b[0], b[1], a[1], n_face)
+			_quad(st, a[2], b[2], b[0], a[0], Vector3.UP)
+			quads += 2
+	var mesh := st.commit()
+	_walls = MeshInstance3D.new()
+	_walls.name = "RetainingWalls"
+	_walls.top_level = true
+	_walls.mesh = mesh
+	var mat: Material = p_type.wall_material
+	if mat == null:
+		var sm := StandardMaterial3D.new()
+		sm.albedo_color = Color(0.55, 0.54, 0.5)
+		sm.roughness = 0.95
+		sm.cull_mode = BaseMaterial3D.CULL_DISABLED
+		mat = sm
+	_walls.material_override = mat
+	add_child(_walls)
+	wall_quads = quads
+
+
+## One wall cross-section at alignment sample `p_i`, or [] where no wall stands there:
+## [face top, face bottom, cap back edge, face normal], world space. See `_rebuild_walls`.
+func _wall_row(p_al: Pasture3DRoadAlignment, p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
+		p_i: int, p_side: float, p_kind: int, p_height: float, p_half: PackedFloat32Array,
+		p_shoulder: PackedFloat32Array, p_crown: float, p_crown_mode: int, p_max_bank: float,
+		p_cut_b: float, p_fill_b: float, p_hinge: float, p_band: float, p_suppress: PackedByteArray,
+		p_skip: PackedByteArray, p_terrain: Variant) -> Array:
+	# A bridge grades nothing and a junction's ground is the junction's: no batter, so no wall.
+	if (p_i < p_suppress.size() and p_suppress[p_i] != 0) or (p_i < p_skip.size() and p_skip[p_i] != 0):
+		return []
+	var s := float(p_i) * p_al.ds
+	var total: float = p_cum[p_cum.size() - 1]
+	if s > total:
+		return []
+	var half: float = p_half[p_i] if p_i < p_half.size() else 3.5
+	var shoulder: float = p_shoulder[p_i] if p_i < p_shoulder.size() else 0.5
+	var edge_d := half + shoulder
+	var z_ref := p_al.height_at(s)
+	var bank: float = p_al.bank[p_i] if p_i < p_al.bank.size() else 0.0
+	var z_edge := Pasture3DRoadGrader.surface_height(z_ref, bank, p_crown, edge_d * p_side, half, p_crown_mode,
+			p_max_bank)
+	var g1 := Pasture3DRoadGrader.edge_slope(z_ref, bank, p_crown, edge_d, p_side, half, p_crown_mode,
+			p_max_bank) if p_hinge > 0.0 else 0.0
+	var g2 := -p_fill_b if p_kind == 0 else p_cut_b
+	var run := Pasture3DRoadGrader.wall_run(p_height, g1, g2, p_hinge)
+	if not is_finite(run):
+		return []
+	var c := Pasture3DRoadGrader.plan_point_at(p_plan, p_cum, s)
+	var tan2 := Pasture3DRoadGrader._segment_dir_at(p_plan, p_cum, s, false)
+	var across := Vector2(-tan2.y, tan2.x) * p_side # the grader's positive side is this across
+	var at := func(p_d: float) -> Vector2: return c + across * p_d
+	# The hillside the grader left alone, just past the run.
+	var out_xz: Vector2 = at.call(edge_d + run + p_band)
+	var ground: float = p_terrain.data.get_height(Vector3(out_xz.x, 0.0, out_xz.y))
+	if not is_finite(ground):
+		return []
+	var top_line := Pasture3DRoadGrader.batter_line(z_edge, g1, g2, run, p_hinge)
+	var n3 := Vector3(across.x, 0.0, across.y)
+	if p_kind == 0:
+		# FILL: the batter stops `p_height` below the edge and the hillside is further down still.
+		if ground > top_line - WALL_MIN_FACE:
+			return []
+		var face: Vector2 = at.call(edge_d + run + p_band)
+		var back: Vector2 = at.call(edge_d + run)
+		return [Vector3(face.x, top_line, face.y), Vector3(face.x, ground - WALL_EMBED, face.y),
+				Vector3(back.x, top_line, back.y), n3]
+	# CUT: the batter stops `p_height` above the edge and the hillside stands higher.
+	if ground < top_line + WALL_MIN_FACE:
+		return []
+	var face_d := maxf(edge_d + run - p_band, edge_d)
+	var face_c: Vector2 = at.call(face_d)
+	var low := Pasture3DRoadGrader.batter_line(z_edge, g1, g2, face_d - edge_d, p_hinge)
+	var back_c: Vector2 = at.call(edge_d + run)
+	return [Vector3(face_c.x, ground, face_c.y), Vector3(face_c.x, low - WALL_EMBED, face_c.y),
+			Vector3(back_c.x, ground, back_c.y), -n3]
+
+
+## One quad a-b-c-d (in order around it) facing `p_n`. Godot's front face winds CLOCKWISE seen from the
+## front, which is the opposite of the right-hand rule, so the order is chosen by testing the geometric
+## normal against `p_n` rather than assumed.
+static func _quad(p_st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3, p_n: Vector3) -> void:
+	var geo := (b - a).cross(c - a)
+	var tris: Array = [[a, b, c], [a, c, d]] if geo.dot(p_n) < 0.0 else [[a, c, b], [a, d, c]]
+	for tri in tris:
+		for v in tri:
+			p_st.set_normal(p_n)
+			p_st.add_vertex(v)
+
+
 ## World metres across one terrain region — the unit chunk cuts snap to, so a chunk's lifetime matches
 ## the region it sits in.
 func _region_metres(p_brush: Pasture3DRoadBrush) -> float:
@@ -689,9 +894,9 @@ func _segments_bridge_signature(p_brush: Pasture3DRoadBrush) -> String:
 	if p_brush == null or p_brush.segments.is_empty():
 		return ""
 	var s := ""
-	for seg: Pasture3DRoadSegment in p_brush.segments:
-		if seg != null and seg.is_bridge:
-			s += "B(%.1f,%.1f)" % [seg.from_distance, seg.to_distance]
+	for seg: Pasture3DRoadSegment in p_brush._live_segments():
+		if seg.is_bridge:
+			s += "B(%.1f,%.1f)" % [seg.start(), seg.end()]
 	return s
 
 
@@ -702,9 +907,9 @@ func _segments_kerb_signature(p_brush: Pasture3DRoadBrush) -> String:
 	var s := ""
 	if p_brush.road_defaults != null:
 		s += "D(%d,%d)" % [p_brush.road_defaults.left_kerb, p_brush.road_defaults.right_kerb]
-	for seg: Pasture3DRoadSegment in p_brush.segments:
-		if seg != null and (seg.left_kerb != Pasture3DRoadType.KerbType.INHERIT or seg.right_kerb != Pasture3DRoadType.KerbType.INHERIT):
-			s += "K(%.1f,%.1f,%d,%d)" % [seg.from_distance, seg.to_distance, seg.left_kerb, seg.right_kerb]
+	for seg: Pasture3DRoadSegment in p_brush._live_segments():
+		if seg.left_kerb != Pasture3DRoadType.KerbType.INHERIT or seg.right_kerb != Pasture3DRoadType.KerbType.INHERIT:
+			s += "K(%.1f,%.1f,%d,%d)" % [seg.start(), seg.end(), seg.left_kerb, seg.right_kerb]
 	return s
 
 
