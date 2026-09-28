@@ -118,6 +118,13 @@ func _padding() -> float:
 	return maxf(edge_offset, 0.0) + 2.0
 
 
+## The mask ramps over falloff_width inward from the (offset) edge, and each smoothing pass is a 3-tap blur
+## that carries a change one more cell. See `_edit_reach` on the base.
+func _edit_reach() -> float:
+	var vs: float = terrain.vertex_spacing if terrain else 1.0
+	return maxf(maxf(falloff_width, 0.0) + maxf(-edge_offset, 0.0) + smooth_passes * vs, _stack_edit_reach())
+
+
 ## Starter shape: a closed square loop in local space.
 func _make_starter_curve() -> Curve3D:
 	var c := Curve3D.new()

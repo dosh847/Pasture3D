@@ -86,6 +86,11 @@ func _padding() -> float:
 	return maxf(edge_offset, 0.0) + 2.0
 
 
+## The mask ramps over falloff_width inward from the (offset) edge. See `_edit_reach` on the base.
+func _edit_reach() -> float:
+	return maxf(falloff_width, 0.0) + maxf(-edge_offset, 0.0)
+
+
 ## Make `material` a dropdown of the terrain's texture slots when assets are available.
 func _validate_property(property: Dictionary) -> void:
 	# Chain: the base hides `corner_radius` on brushes with no loop SDF and the Make Splines Unique

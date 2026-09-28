@@ -184,6 +184,20 @@ func _padding() -> float:
 	return maxf(edge_offset, 0.0) + 2.0
 
 
+## Uncapped, the height is a function of the whole loop: the cone is slope x distance to the nearest edge,
+## and the fixed-width dome is normalised on the widest interior distance. Capped, a cell further in than
+## the ramp's run reads the flat top whichever edge is nearest. Mirrors `ramp_denom` in stamp_mound_loop.
+## A negative edge_offset moves the ramp that far further in.
+func _edit_reach() -> float:
+	if not capped:
+		return INF
+	var run := falloff_width
+	if flank_mode == FlankMode.SLOPE_ANGLE:
+		var slope_run := absf(height) / maxf(tan(deg_to_rad(slope_angle)), 0.0001)
+		run = minf(slope_run, falloff_width) if falloff_width > 0.0 else slope_run
+	return maxf(maxf(run, 0.001) + maxf(-edge_offset, 0.0), _stack_edit_reach())
+
+
 ## Starter shape: a closed square loop in local space.
 func _make_starter_curve() -> Curve3D:
 	var c := Curve3D.new()

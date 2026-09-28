@@ -5004,7 +5004,8 @@ func _spline_dirty_aabb(path: Path3D, moved_indices: PackedInt32Array,
 	if not is_instance_valid(path) or path.curve == null:
 		return AABB()
 	var n_pts := path.curve.point_count
-	if moved_indices.is_empty() or moved_indices.size() >= n_pts or n_pts < 2:
+	var reach := 0.0 if rect_ignores_edit_reach else _edit_reach()
+	if moved_indices.is_empty() or moved_indices.size() >= n_pts or n_pts < 2 or is_inf(reach):
 		var whole := _spline_footprint_aabb(path)
 		# Neither may be merged blind: AABB.merge on a zero-size box drags the result out to the world
 		# origin, which would clear half the terrain. A curve emptied of its points gives a zero `whole`
@@ -5015,15 +5016,16 @@ func _spline_dirty_aabb(path: Path3D, moved_indices: PackedInt32Array,
 			return p_prev_painted
 		return whole.merge(p_prev_painted)
 
-	var pad := _total_padding()
+	var pad := _total_padding() + reach
 	var mn := Vector2(INF, INF)
 	var mx := Vector2(-INF, -INF)
+	# A closed loop's first point also bounds the closing span from its LAST point, and clamping the
+	# neighbour index at 0 left that span out of the box.
+	var closed := (_is_closed() or path.curve.closed) and not rect_no_closed_wrap
 
 	# Expand bounds from current points touching changed spans
 	for idx in moved_indices:
-		var i0 := maxi(idx - 1, 0)
-		var i1 := mini(idx + 1, n_pts - 1)
-		for k in range(i0, i1 + 1):
+		for k in _span_neighbours(idx, n_pts, closed):
 			var wp := path.to_global(path.curve.get_point_position(k))
 			mn.x = minf(mn.x, wp.x)
 			mn.y = minf(mn.y, wp.z)
@@ -5045,9 +5047,7 @@ func _spline_dirty_aabb(path: Path3D, moved_indices: PackedInt32Array,
 	if not prev.is_empty():
 		var n_prev := prev.size() / 3
 		for idx in moved_indices:
-			var i0 := maxi(idx - 1, 0)
-			var i1 := mini(idx + 1, n_prev - 1)
-			for k in range(i0, i1 + 1):
+			for k in _span_neighbours(idx, n_prev, closed):
 				var pp: Vector3 = prev[k * 3]
 				for corner in [pp, pp + prev[k * 3 + 1], pp + prev[k * 3 + 2]]:
 					var wp := path.to_global(corner)
@@ -5062,6 +5062,18 @@ func _spline_dirty_aabb(path: Path3D, moved_indices: PackedInt32Array,
 	mn -= Vector2(pad, pad)
 	mx += Vector2(pad, pad)
 	return AABB(Vector3(mn.x, -10000.0, mn.y), Vector3(mx.x - mn.x, 20000.0, mx.y - mn.y))
+
+
+## Point `p_idx` and its neighbours on either side, the points bounding the spans it shapes. Wrapped on a
+## closed loop, clamped on an open one. An index past the end (a removed point) is dropped.
+func _span_neighbours(p_idx: int, p_n: int, p_closed: bool) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	for k in [p_idx - 1, p_idx, p_idx + 1]:
+		if p_closed and p_n > 0:
+			k = posmod(k, p_n)
+		if k >= 0 and k < p_n and not out.has(k):
+			out.append(k)
+	return out
 
 
 ## Snap a footprint AABB to the terrain grid → [min_x, max_x, min_z, max_z] (world XZ).
@@ -7517,6 +7529,46 @@ func _effective_modifier_margin() -> float:
 ## of the grid edge is averaged with samples that were never rasterised. See `_crease_blur_reach()`.
 func _total_padding() -> float:
 	return _padding() + _effective_modifier_margin() + _crease_blur_reach()
+
+
+## How far INWARD from an edge an edit to that edge can change this brush's paint, in metres, on top of
+## `_total_padding()`. A dirty-rect bake after a point drag pads the moved span's box by it; INF sends the
+## drag down the whole-footprint path instead.
+##
+## ---- WHY THE PADDING ALONE WAS NOT ENOUGH ----
+##
+## `_total_padding()` is how far the paint reaches OUTWARD past the outline. An SDF brush also reaches
+## inward: every cell reads its distance to the NEAREST edge, so a moved edge changes every cell whose
+## distance to it matters. A capped ramp stops mattering at its run. A free-rising cone or a dome
+## normalised on the widest interior distance never stops, so moving one vertex moves ground up to the
+## ridge, far outside the span's box. The rect bake left those cells at the previous shape, in blocks whose
+## edges were the layer's tile edges (demo_massive_world, 2026-09-27; gate bench/RectEditReachGate).
+##
+## 0 is right for a brush with no loop to measure from. Not `_stack_edit_reach()` by default: a road's
+## grading step is a field step too, and the road already bounds what its edit moved with its own spill
+## boxes (RectBakeAlignmentGate [A]/[E]); sending it whole-footprint threw those away.
+func _edit_reach() -> float:
+	return 0.0
+
+
+## The modifier stack's part of a LOOP brush's `_edit_reach()` (Mound, Plow). A field step (smoothing,
+## erosion, graph) solves over the whole grid, and a relief modifier is framed by the whole loop, so
+## neither is local to a moved span. Noise reads world XZ at one cell and adds nothing.
+func _stack_edit_reach() -> float:
+	if not _supports_modifiers():
+		return 0.0
+	for m in modifiers:
+		if m == null or not m.is_active():
+			continue
+		if m is Pasture3DNodeRelief or m.needs_grid():
+			return INF
+	return 0.0
+
+
+## Gate controls (RectEditReachGate): a point drag's box ignores `_edit_reach()` / does not wrap a closed
+## loop's neighbours past its first and last point.
+var rect_ignores_edit_reach: bool = false
+var rect_no_closed_wrap: bool = false
 
 
 ## How far, in metres, the crease-smoothing kernel reaches — the sum of the three box passes' half-widths.
