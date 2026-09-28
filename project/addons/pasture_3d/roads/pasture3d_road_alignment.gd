@@ -119,8 +119,13 @@ var _deepest: float = -1.0
 func deepest_structure() -> float:
 	if _deepest < 0.0:
 		var worst := 0.0
+		# Non-finite offsets are skipped, not max'd: `maxf(x, NaN)` is NaN, and a NaN here is cached forever
+		# (the `< 0.0` re-check is false for it) and widens every corridor box to NaN. See
+		# `Pasture3DRoadBrush._fill_ground_gaps`, which keeps the solve from producing one.
 		for i in count():
-			worst = maxf(worst, absf(offset_at(i)))
+			var off := offset_at(i)
+			if is_finite(off):
+				worst = maxf(worst, absf(off))
 		_deepest = worst
 	return _deepest
 

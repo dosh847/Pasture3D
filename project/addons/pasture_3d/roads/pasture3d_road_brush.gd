@@ -232,6 +232,9 @@ var _curv_key: Array = []
 ## than a timer, so the criterion is deterministic and does not depend on what else the machine is doing.
 var plan_builds: int = 0
 
+## Gate control (RoadOffTerrainGate): hand the solve the raw ground, NaN gaps and all.
+var ground_gaps_unfilled: bool = false
+
 ## The upstream emitters `_on_road_changed` is currently attached to — this brush's group, its network and
 ## its resolved road type. Held so they can be disconnected again: the group and network are found by
 ## walking parents and the road type is RESOLVED, so all three can change without this node being
@@ -685,6 +688,8 @@ func _paint_flat_footprint(path: Path3D) -> void:
 			for i in n_s:
 				var at := _plan_point_at(plan, cum, float(i) * ds)
 				ground[i] = _base_height_below(Vector3(at.x, 0.0, at.y))
+		if not ground_gaps_unfilled:
+			ground = _fill_ground_gaps(ground)
 
 		var t := resolved_road_type()
 		var max_grade := t.max_grade if t != null else 0.15
@@ -1181,6 +1186,8 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 				below.fill(NAN)
 		var h: float = below[i]
 		ground[i] = h if is_finite(h) else _base_height_below(Vector3(at.x, 0.0, at.y))
+	if not ground_gaps_unfilled:
+		ground = _fill_ground_gaps(ground)
 
 	var t := resolved_road_type()
 	if t == null:
@@ -2100,7 +2107,46 @@ func _sample_grid(p_z: PackedFloat32Array, p_gw: int, p_gh: int, p_min_x: float,
 		if is_finite(pair[0]):
 			acc += float(pair[0]) * float(pair[1])
 			wsum += float(pair[1])
-	return (acc / wsum) if wsum > 0.0 else 0.0
+	# NaN, not 0.0, when no corner has ground: flat zero is a height the solve would grade toward, and the
+	# native route (get_height_below_along_plan) already answers NaN there. `_fill_ground_gaps` repairs both.
+	return (acc / wsum) if wsum > 0.0 else NAN
+
+
+## Ground under the centreline with its no-terrain samples filled, so the solve never sees NaN.
+##
+## ---- ONE NaN WAS THE WHOLE ROAD ----
+##
+## A plan that leaves the loaded regions (a sparse world, an unloaded region, a road overhanging the edge)
+## samples NaN ground there. The solver's cut/fill balance shifts the WHOLE profile by a mean over every
+## sample, so one NaN made every `z` NaN; `deepest_structure` then made `corridor_half_width` NaN, and with
+## it `_padding`, every rect-bake box and the footprint itself -- the road painted nothing anywhere.
+##
+## A gap between two stretches of ground is interpolated linearly by arc length; a gap at either end holds
+## the nearest real sample. Nothing is invented where it is SEEN: the grader skips grid cells with no ground,
+## so the filled stretch shapes the profile's approach and paints nothing. A plan with no ground at all
+## reads 0.0 throughout -- it grades nothing either way, and it keeps the boxes finite.
+static func _fill_ground_gaps(p_ground: PackedFloat32Array) -> PackedFloat32Array:
+	var n := p_ground.size()
+	var out := p_ground.duplicate()
+	var last := -1
+	for i in n:
+		if not is_finite(out[i]):
+			continue
+		if last < 0:
+			for k in i:
+				out[k] = out[i]
+		elif i - last > 1:
+			var a: float = out[last]
+			var b: float = out[i]
+			for k in range(last + 1, i):
+				out[k] = lerpf(a, b, float(k - last) / float(i - last))
+		last = i
+	if last < 0:
+		out.fill(0.0)
+	else:
+		for k in range(last + 1, n):
+			out[k] = out[last]
+	return out
 
 
 func _get_configuration_warnings() -> PackedStringArray:
