@@ -7,6 +7,7 @@
 #include <godot_cpp/classes/noise_texture2d.hpp>
 #include <godot_cpp/classes/reg_ex.hpp>
 #include <godot_cpp/classes/reg_ex_match.hpp>
+#include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/resource_saver.hpp>
 
@@ -44,6 +45,9 @@ void Pasture3DMaterial::_preload_shaders() {
 	_parse_shader(
 #include "shaders/max_regions.glsl"
 			, "max_regions");
+	_parse_shader(
+#include "shaders/region_map.glsl"
+			, "region_map");
 	_parse_shader(
 #include "shaders/projection.glsl"
 			, "projection");
@@ -662,42 +666,83 @@ void Pasture3DMaterial::_update_shader() {
 	notify_property_list_changed();
 }
 
+// The terrain that last published the globals; cleared (and the globals zeroed) when it uninitializes.
+static const Pasture3D *s_globals_terrain = nullptr;
+
+void Pasture3DMaterial::register_terrain_globals() {
+	// Process-global, as Pasture3DPoolManager::register_water_globals: the RenderingServer table is shared.
+	static bool s_registered = false;
+	if (s_registered) {
+		return;
+	}
+	s_registered = true;
+	struct GlobalDecl {
+		const char *name;
+		RenderingServer::GlobalShaderParameterType type;
+		Variant initial;
+	};
+	const GlobalDecl decls[] = {
+		{ "pasture3d_region_map", RenderingServer::GLOBAL_VAR_TYPE_SAMPLER2D, RID() },
+		{ "pasture3d_height_maps", RenderingServer::GLOBAL_VAR_TYPE_SAMPLER2DARRAY, RID() },
+		{ "pasture3d_coarse_height_maps", RenderingServer::GLOBAL_VAR_TYPE_SAMPLER2DARRAY, RID() },
+		// (vertex_spacing, region_size, region_map_size, coarse_store_shift); region_size 0 = no terrain.
+		{ "pasture3d_terrain", RenderingServer::GLOBAL_VAR_TYPE_VEC4, Vector4() },
+	};
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	for (const GlobalDecl &decl : decls) {
+		if (settings && settings->has_setting(String("shader_globals/") + decl.name)) {
+			continue;
+		}
+		RS->global_shader_parameter_add(decl.name, decl.type, decl.initial);
+	}
+}
+
+void Pasture3DMaterial::_publish_terrain_globals() const {
+	Pasture3DData *data = _terrain->get_data();
+	register_terrain_globals();
+	s_globals_terrain = _terrain;
+	const RID fine = data->get_height_maps_rid();
+	const RID coarse = data->get_coarse_maps_rid(TYPE_HEIGHT);
+	RS->global_shader_parameter_set("pasture3d_region_map", data->get_region_map_rid());
+	RS->global_shader_parameter_set("pasture3d_height_maps", fine.is_valid() ? fine : _generated_dummy.get_rid());
+	RS->global_shader_parameter_set("pasture3d_coarse_height_maps", coarse.is_valid() ? coarse : _generated_dummy.get_rid());
+	RS->global_shader_parameter_set("pasture3d_terrain", Vector4(_terrain->get_vertex_spacing(),
+			real_t(_terrain->get_region_size()), real_t(Pasture3DData::get_region_map_size()),
+			real_t(data->get_coarse_store_shift())));
+}
+
 void Pasture3DMaterial::_update_uniforms(const RID &p_material, const uint32_t p_flags) {
 	IS_DATA_INIT(VOID);
 	LOG(EXTREME, "Updating uniforms in shader");
 
 	Pasture3DData *data = _terrain->get_data();
-	PackedInt32Array region_map = data->get_region_map();
-	LOG(EXTREME, "region_map.size(): ", region_map.size());
-	if (region_map.size() != Pasture3DData::REGION_MAP_SIZE * Pasture3DData::REGION_MAP_SIZE) {
-		LOG(ERROR, "Expected region_map.size() of ", Pasture3DData::REGION_MAP_SIZE * Pasture3DData::REGION_MAP_SIZE);
-		return;
-	}
-	RS->material_set_param(p_material, "_region_map", region_map);
-	RS->material_set_param(p_material, "_region_map_size", Pasture3DData::REGION_MAP_SIZE);
-	if (Pasture3D::debug_level >= EXTREME) {
-		LOG(EXTREME, "Region map");
-		for (int i = 0; i < region_map.size(); i++) {
-			if (region_map[i]) {
-				LOG(EXTREME, "Region id: ", region_map[i], " array index: ", i);
-			}
+	// The region map is an RF texture of encoded slots (shaders/region_map.glsl); its RID survives updates.
+	RS->material_set_param(p_material, "_region_map", data->get_region_map_rid());
+	RS->material_set_param(p_material, "_region_map_size", Pasture3DData::get_region_map_size());
+	_publish_terrain_globals();
+
+	// _region_locations is indexed by the fine SLOT, so it is the fine slot table, not the active-region list.
+	// The built-in shaders no longer read it (a position already names its region); it stays for custom
+	// shaders, which see only Standard regions through it.
+	TypedArray<Vector2i> slot_locations = data->get_slot_locations();
+	LOG(EXTREME, "Slot locations: ", slot_locations.size(), " ", slot_locations);
+	// Padded to exactly the length the shader compiled: a short upload would leave the tail of the uniform
+	// undefined, a long one would overrun it.
+	int highest_used = -1;
+	for (int i = 0; i < slot_locations.size(); i++) {
+		const int id = data->get_region_id(slot_locations[i]);
+		if (!Pasture3DData::region_id_is_coarse(id) && Pasture3DData::region_id_slot(id) == i) {
+			highest_used = i;
 		}
 	}
-
-	TypedArray<Vector2i> region_locations = data->get_region_locations();
-	LOG(EXTREME, "Region_locations size: ", region_locations.size(), " ", region_locations);
-	// Padded to exactly the length the shader compiled. The array is no longer always 1024
-	// (see RegionMaximum), and a short upload would leave the tail of the uniform undefined
-	// while a long one would overrun it. Regions past the ceiling are dropped here and read as
-	// "no region" in the shader, which is what the MAX_REGIONS bounds check exists for.
-	if (region_locations.size() > (int)_max_regions) {
-		LOG(WARN, "Scene has ", region_locations.size(), " regions but max_regions is ",
-				(int)_max_regions, "; the excess will not render. Raise Pasture3DMaterial.max_regions.");
+	if (highest_used >= (int)_max_regions) {
+		LOG(DEBUG, "Fine slot ", highest_used, " is past max_regions ", (int)_max_regions,
+				"; a custom shader indexing _region_locations will not see it.");
 	}
 	TypedArray<Vector2i> padded_locations;
 	padded_locations.resize((int)_max_regions);
-	for (int i = 0; i < MIN(region_locations.size(), (int)_max_regions); ++i) {
-		padded_locations[i] = region_locations[i];
+	for (int i = 0; i < MIN(slot_locations.size(), (int)_max_regions); ++i) {
+		padded_locations[i] = slot_locations[i];
 	}
 	RS->material_set_param(p_material, "_region_locations", padded_locations);
 
@@ -707,20 +752,19 @@ void Pasture3DMaterial::_update_uniforms(const RID &p_material, const uint32_t p
 	RS->material_set_param(p_material, "_region_texel_size", 1.0f / region_size);
 
 	if (p_flags & REGION_ARRAYS) {
-		if (data->get_region_count() > 0) {
-			RS->material_set_param(p_material, "_height_maps", data->get_height_maps_rid());
-			RS->material_set_param(p_material, "_control_maps", data->get_control_maps_rid());
-			RS->material_set_param(p_material, "_color_maps", data->get_color_maps_rid());
-			LOG(EXTREME, "Height map RID: ", data->get_height_maps_rid());
-			LOG(EXTREME, "Control map RID: ", data->get_control_maps_rid());
-			LOG(EXTREME, "Color map RID: ", data->get_color_maps_rid());
-		} else {
-			// Send dummy texture array to stop compatibility error spam
-			RS->material_set_param(p_material, "_height_maps", _generated_dummy.get_rid());
-			RS->material_set_param(p_material, "_control_maps", _generated_dummy.get_rid());
-			RS->material_set_param(p_material, "_color_maps", _generated_dummy.get_rid());
+		// Each array set on its own: a world can be all Standard, all coarse, or neither. An empty set gets the
+		// dummy array to stop compatibility error spam.
+		static const char *FINE[TYPE_MAX] = { "_height_maps", "_control_maps", "_color_maps" };
+		static const char *COARSE[TYPE_MAX] = { "_coarse_height_maps", "_coarse_control_maps", "_coarse_color_maps" };
+		const RID fine[TYPE_MAX] = { data->get_height_maps_rid(), data->get_control_maps_rid(), data->get_color_maps_rid() };
+		for (int t = 0; t < TYPE_MAX; t++) {
+			RS->material_set_param(p_material, FINE[t], fine[t].is_valid() ? fine[t] : _generated_dummy.get_rid());
+			const RID coarse = data->get_coarse_maps_rid(MapType(t));
+			RS->material_set_param(p_material, COARSE[t], coarse.is_valid() ? coarse : _generated_dummy.get_rid());
 		}
+		LOG(EXTREME, "Height map RID: ", fine[0], ", coarse: ", data->get_coarse_maps_rid(TYPE_HEIGHT));
 	}
+	RS->material_set_param(p_material, "_coarse_store_shift", data->get_coarse_store_shift());
 
 	real_t spacing = _terrain->get_vertex_spacing();
 	LOG(EXTREME, "Setting vertex spacing in material: ", spacing);
@@ -817,6 +861,14 @@ void Pasture3DMaterial::initialize(Pasture3D *p_terrain) {
 
 void Pasture3DMaterial::uninitialize() {
 	LOG(INFO, "Uninitializing material");
+	if (_terrain && s_globals_terrain == _terrain) {
+		// The RIDs are about to go with the terrain's data; a stale one in a global would be sampled freed.
+		s_globals_terrain = nullptr;
+		RS->global_shader_parameter_set("pasture3d_region_map", RID());
+		RS->global_shader_parameter_set("pasture3d_height_maps", RID());
+		RS->global_shader_parameter_set("pasture3d_coarse_height_maps", RID());
+		RS->global_shader_parameter_set("pasture3d_terrain", Vector4());
+	}
 	_terrain = nullptr;
 }
 

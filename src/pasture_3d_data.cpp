@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <godot_cpp/classes/project_settings.hpp>
+#include <godot_cpp/classes/resource_loader.hpp>
 
 #include "logger.h"
 #include "pasture_3d_data.h"
@@ -23,13 +24,27 @@ void Pasture3DData::_clear() {
 	LOG(INFO, "Clearing data");
 	_region_map_dirty = true;
 	_region_map.clear();
-	_region_map.resize(REGION_MAP_SIZE * REGION_MAP_SIZE);
+	_region_map.resize(get_region_map_size() * get_region_map_size());
 	_regions.clear();
+	for (int p = 0; p < POOL_MAX; p++) {
+		SlotPool &pool = _pools[p];
+		pool.locations.clear();
+		pool.region_ids.clear();
+		pool.slots.clear();
+		for (int t = 0; t < TYPE_MAX; t++) {
+			pool.maps[t].clear();
+			pool.placeholders[t].unref();
+			pool.gens[t].clear();
+		}
+	}
+	_coarse_store_shift = 0;
+	_generated_region_map.clear();
 	_region_locations.clear();
+	_region_index.instantiate();
+	_region_generation.clear();
+	_type_cache.clear();
+	_fallback_standard.unref();
 	_master_height_range = V2_ZERO;
-	_generated_height_maps.clear();
-	_generated_control_maps.clear();
-	_generated_color_maps.clear();
 	_layer_stack.unref();
 	if (_gpu_raster) {
 		memdelete(_gpu_raster);
@@ -63,6 +78,11 @@ bool Pasture3DData::gpu_raster_available() {
 	return gpu && gpu->available();
 }
 
+// Lerp that holds p_a at t == 0, so a NaN neighbour the weight never reaches cannot poison the result.
+static inline real_t _lerp_hold(const real_t p_a, const real_t p_b, const real_t p_t) {
+	return p_t == 0.f ? p_a : p_a + (p_b - p_a) * p_t;
+}
+
 // Builds a one-layer stack whose dense "Base" layer aliases the loaded region height maps, so an
 // existing terrain opens as a single-layer stack with no pixel copy. Called when no layer files are
 // present (phase 1 has no layer persistence yet, so this always runs after load). The stack is not
@@ -73,6 +93,7 @@ void Pasture3DData::_synthesize_base_layer() {
 		return;
 	}
 	_layer_stack.instantiate();
+	_sync_region_map_sizes();
 	Ref<Pasture3DLayer> base;
 	base.instantiate();
 	base->set_layer_name("Base");
@@ -80,6 +101,8 @@ void Pasture3DData::_synthesize_base_layer() {
 	base->set_tile_size(_region_size); // Phase 1: one tile per region == the region image
 	base->set_blend_mode(Pasture3DLayer::REPLACE);
 	base->set_base(true);
+	// Into the stack before its tiles: that is where it learns a coarse region's tile edge.
+	_layer_stack->add_layer_ref(base);
 	Array locations = _regions.keys();
 	for (const Vector2i &region_loc : locations) {
 		Pasture3DRegion *region = get_region_ptr(region_loc);
@@ -88,7 +111,6 @@ void Pasture3DData::_synthesize_base_layer() {
 		}
 	}
 	base->set_modified(false);
-	_layer_stack->add_layer_ref(base);
 	LOG(INFO, "Synthesized Base layer over ", locations.size(), " region(s)");
 }
 
@@ -315,7 +337,7 @@ void Pasture3DData::initialize(Pasture3D *p_terrain) {
 	LOG(INFO, "Initializing data");
 	bool prev_initialized = _terrain != nullptr;
 	_terrain = p_terrain;
-	_region_map.resize(REGION_MAP_SIZE * REGION_MAP_SIZE);
+	_region_map.resize(get_region_map_size() * get_region_map_size());
 	_vertex_spacing = _terrain->get_vertex_spacing();
 	if (!prev_initialized && !_terrain->get_data_directory().is_empty()) {
 		load_directory(_terrain->get_data_directory());
@@ -405,6 +427,13 @@ void Pasture3DData::change_region_size(int p_new_size) {
 	if (!is_valid_region_size(p_new_size)) {
 		LOG(ERROR, "Invalid region size: ", p_new_size, ". Must be power of 2, 64-2048");
 		return;
+	}
+	for (const Vector2i &loc : _regions.keys()) {
+		const Pasture3DRegion *region = get_region_ptr(loc);
+		if (region && !region->is_deleted() && region->is_coarse()) {
+			LOG(ERROR, "Region ", loc, " is coarse; set every region Standard before changing region size");
+			return;
+		}
 	}
 	if (p_new_size == _region_size) {
 		return;
@@ -568,7 +597,7 @@ Error Pasture3DData::add_region(const Ref<Pasture3DRegion> &p_region, const bool
 	// Check bounds and slow report errors
 	if (get_region_map_index(region_loc) < 0) {
 		LOG(ERROR, "Location ", region_loc, " out of bounds. Max: ",
-				-REGION_MAP_SIZE / 2, " to ", REGION_MAP_SIZE / 2 - 1);
+				-get_region_map_size() / 2, " to ", get_region_map_size() / 2 - 1);
 		return FAILED;
 	}
 	p_region->sanitize_maps();
@@ -588,7 +617,7 @@ Error Pasture3DData::add_region(const Ref<Pasture3DRegion> &p_region, const bool
 	_region_map_dirty = true;
 	LOG(DEBUG, "Storing region ", region_loc, " version ", vformat("%.3f", p_region->get_version()), " id: ", _region_locations.size());
 	if (p_update) {
-		update_maps(TYPE_MAX, true, false);
+		update_maps(TYPE_MAX, false, false); // The new region takes one slot; nothing else re-uploads
 		_terrain->get_instancer()->update_mmis(-1, V2I_MAX, true);
 	}
 	return OK;
@@ -625,7 +654,7 @@ void Pasture3DData::remove_region(const Ref<Pasture3DRegion> &p_region, const bo
 	LOG(DEBUG, "Removing from region_locations, new size: ", _region_locations.size());
 	if (p_update) {
 		LOG(DEBUG, "Updating generated maps");
-		update_maps(TYPE_MAX, true, false);
+		update_maps(TYPE_MAX, false, false); // Frees the slot
 		_terrain->get_instancer()->update_mmis(-1, V2I_MAX, true);
 	}
 }
@@ -639,6 +668,11 @@ void Pasture3DData::save_directory(const String &p_dir) {
 	// Persist the editor-side layer stack as pasture3d_layers*.res. The runtime region files written
 	// above are the authoritative composited data and are not touched by this (see §7.2).
 	save_layers(p_dir);
+	// After save_layers: a region's index entry records the stack signature it was written under.
+	for (const Vector2i &region_loc : _regions.keys()) {
+		_index_region(region_loc);
+	}
+	_save_region_index(p_dir);
 	if (IS_EDITOR && !EditorInterface::get_singleton()->get_resource_filesystem()->is_scanning()) {
 		EditorInterface::get_singleton()->get_resource_filesystem()->scan();
 	}
@@ -657,6 +691,7 @@ void Pasture3DData::save_region(const Vector2i &p_region_loc, const String &p_di
 	if (region->is_deleted()) {
 		LOG(DEBUG, "Removing ", p_region_loc, " from _regions");
 		_regions.erase(p_region_loc);
+		_region_index->erase_entry(p_region_loc);
 		LOG(DEBUG, "File to be deleted: ", path);
 		if (!FileAccess::file_exists(path)) {
 			LOG(INFO, "File to delete ", path, " doesn't exist. (Maybe from add, undo, save)");
@@ -672,6 +707,13 @@ void Pasture3DData::save_region(const Vector2i &p_region_loc, const String &p_di
 			LOG(ERROR, "Could not remove file: ", fname, ", error code: ", err);
 		}
 		LOG(INFO, "File ", path, " deleted");
+		// Its layer slice goes too. save_layers only visits regions still in _regions, so the slice used
+		// to outlive the region, and a region later created at the same location loaded the dead one's
+		// layer pixels.
+		const String slice_fname = Util::location_to_layer_filename(p_region_loc);
+		if (da->file_exists(slice_fname)) {
+			da->remove(slice_fname);
+		}
 		return;
 	}
 	Error err = region->save(path, p_16_bit);
@@ -722,79 +764,128 @@ void Pasture3DData::save_layers(const String &p_dir) {
 	}
 
 	const int layer_count = _layer_stack->get_layer_count();
-
-	// Manifest: a metadata-only copy of the stack. Each layer is cloned with its tiles dropped so the
-	// file stays small and never carries the aliased Base pixels.
-	Ref<Pasture3DLayerStack> manifest;
-	manifest.instantiate();
-	manifest->set_version(_layer_stack->get_version());
-	TypedArray<Pasture3DLayer> meta_layers;
-	for (int i = 0; i < layer_count; i++) {
-		Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
-		Ref<Pasture3DLayer> meta;
-		meta.instantiate();
-		if (layer) {
-			Dictionary d = layer->get_data();
-			d.erase("tiles"); // Metadata only.
-			meta->set_data(d);
-		}
-		meta_layers.push_back(meta);
-	}
-	manifest->set_layers(meta_layers);
-	const String manifest_path = p_dir + String("/") + Util::LAYER_MANIFEST_FILENAME;
-	Error err = ResourceSaver::get_singleton()->save(manifest, manifest_path, ResourceSaver::FLAG_COMPRESS);
-	if (err != OK) {
-		LOG(ERROR, "Could not save layer manifest: ", manifest_path, ", error: ", err);
-		return;
-	}
-	manifest->take_over_path(manifest_path);
+	_save_layer_manifest(p_dir);
 
 	// While the Base still aliases the region maps its pixels ARE the runtime data, so they are never
 	// serialized (re-aliased on load). Once un-aliased (the moment a real layer exists) the Base owns
 	// true base heights that the flattened region map no longer holds, so those must be persisted too
 	// — otherwise live re-compositing after load would read the flattened map as the base (§5.1).
 	const bool base_aliased = _is_base_aliased();
-
-	// Per-region slices: for each region, an index-aligned stack whose layer i carries only that
-	// region's tiles for stack layer i. Regions with no tiles to save are skipped, and any stale slice
-	// file removed, to keep the layout sparse.
 	for (const Vector2i &region_loc : _regions.keys()) {
-		const String slice_fname = Util::location_to_layer_filename(region_loc);
-		const String slice_path = p_dir + String("/") + slice_fname;
-		bool has_pixels = false;
-		Ref<Pasture3DLayerStack> slice;
-		slice.instantiate();
-		slice->set_version(_layer_stack->get_version());
-		TypedArray<Pasture3DLayer> slice_layers;
-		for (int i = 0; i < layer_count; i++) {
-			Ref<Pasture3DLayer> slice_layer;
-			slice_layer.instantiate();
-			if (i > 0 || !base_aliased) { // Serialize upper layers always; Base only once un-aliased.
-				Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
-				if (layer && layer->has_region(region_loc)) {
-					Dictionary tiles;
-					tiles[region_loc] = layer->get_tiles()[region_loc];
-					slice_layer->set_tiles(tiles);
-					has_pixels = true;
-				}
-			}
-			slice_layers.push_back(slice_layer);
-		}
-		if (!has_pixels) {
-			if (da->file_exists(slice_fname)) {
-				da->remove(slice_fname);
-			}
-			continue;
-		}
-		slice->set_layers(slice_layers);
-		Error serr = ResourceSaver::get_singleton()->save(slice, slice_path, ResourceSaver::FLAG_COMPRESS);
-		if (serr != OK) {
-			LOG(ERROR, "Could not save layer slice: ", slice_path, ", error: ", serr);
-		} else {
-			slice->take_over_path(slice_path);
-		}
+		_save_layer_slice(p_dir, region_loc, base_aliased);
 	}
 	LOG(INFO, "Saved layer stack (", layer_count, " layers) to ", p_dir);
+}
+
+// Manifest: a metadata-only copy of the stack. Each layer is cloned with its tiles dropped so the file
+// stays small and never carries the aliased Base pixels. The clone keeps the layer's uid, which is what
+// a slice written now, or written by an unload an hour ago, matches its layers against.
+void Pasture3DData::_save_layer_manifest(const String &p_dir) {
+	if (_layer_stack.is_null()) {
+		return;
+	}
+	const int layer_count = _layer_stack->get_layer_count();
+	// The content first: the manifest is every layer's metadata and the stack version, all plain values, so
+	// their hash says whether the file this data wrote last is still what it would write now.
+	Array content;
+	content.push_back(_layer_stack->get_version());
+	for (int i = 0; i < layer_count; i++) {
+		Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+		Dictionary d;
+		if (layer) {
+			layer->ensure_layer_uid();
+			d = layer->get_data();
+			d.erase("tiles"); // Metadata only.
+		}
+		content.push_back(d);
+	}
+	const int64_t hash = int64_t(Variant(content).hash());
+	const String manifest_path = p_dir + String("/") + Util::LAYER_MANIFEST_FILENAME;
+	if (hash == _manifest_hash && manifest_path == _manifest_path && FileAccess::file_exists(manifest_path) &&
+			FileAccess::get_modified_time(manifest_path) == _manifest_mtime) {
+		_stat_manifest_skips++;
+		return;
+	}
+	Ref<Pasture3DLayerStack> manifest;
+	manifest.instantiate();
+	manifest->set_scene_unique_id("stack"); // deterministic bytes, as in _save_layer_slice
+	manifest->set_version(_layer_stack->get_version());
+	TypedArray<Pasture3DLayer> meta_layers;
+	for (int i = 0; i < layer_count; i++) {
+		Ref<Pasture3DLayer> meta;
+		meta.instantiate();
+		meta->set_scene_unique_id("layer_" + itos(i)); // deterministic bytes, as in _save_layer_slice
+		if (_layer_stack->get_layer_ptr(i)) {
+			meta->set_data(content[i + 1]);
+		}
+		meta_layers.push_back(meta);
+	}
+	manifest->set_layers(meta_layers);
+	_manifest_hash = 0; // A failed write leaves nothing trusted
+	Error err = ResourceSaver::get_singleton()->save(manifest, manifest_path, ResourceSaver::FLAG_COMPRESS);
+	_stat_manifest_writes++;
+	if (err != OK) {
+		LOG(ERROR, "Could not save layer manifest: ", manifest_path, ", error: ", err);
+		return;
+	}
+	manifest->take_over_path(manifest_path);
+	_manifest_hash = hash;
+	_manifest_path = manifest_path;
+	_manifest_mtime = FileAccess::get_modified_time(manifest_path);
+}
+
+// Per-region slice: an index-aligned stack whose layer i carries only this region's tiles for stack layer
+// i, stamped with that layer's uid. Index-aligned so a build that predates uids still reads it; the uid is
+// what a reload trusts, because the stack may have been reordered or lost layers while this region was
+// unloaded. A region with no tiles to save gets no slice, and a stale one is removed.
+void Pasture3DData::_save_layer_slice(const String &p_dir, const Vector2i &p_region_loc, const bool p_base_aliased) {
+	Ref<DirAccess> da = DirAccess::open(p_dir);
+	if (da.is_null() || _layer_stack.is_null()) {
+		return;
+	}
+	const int layer_count = _layer_stack->get_layer_count();
+	const String slice_fname = Util::location_to_layer_filename(p_region_loc);
+	const String slice_path = p_dir + String("/") + slice_fname;
+	bool has_pixels = false;
+	Ref<Pasture3DLayerStack> slice;
+	slice.instantiate();
+	slice->set_scene_unique_id("stack"); // see the layer ids below
+	slice->set_version(_layer_stack->get_version());
+	TypedArray<Pasture3DLayer> slice_layers;
+	for (int i = 0; i < layer_count; i++) {
+		Ref<Pasture3DLayer> slice_layer;
+		slice_layer.instantiate();
+		Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+		// A deterministic sub-resource id. Left empty, the binary saver draws a random one for every save,
+		// so re-saving an unchanged slice (every unload does) rewrites the file with different bytes, and
+		// a region nothing touched stops being byte-identical on disk (streaming spec §F).
+		slice_layer->set_scene_unique_id("layer_" + itos(i));
+		if (layer) {
+			slice_layer->set_layer_uid(layer->ensure_layer_uid());
+		}
+		if (i > 0 || !p_base_aliased) { // Serialize upper layers always; Base only once un-aliased.
+			if (layer && layer->has_region(p_region_loc)) {
+				Dictionary tiles;
+				tiles[p_region_loc] = layer->get_tiles()[p_region_loc];
+				slice_layer->set_tiles(tiles);
+				has_pixels = true;
+			}
+		}
+		slice_layers.push_back(slice_layer);
+	}
+	if (!has_pixels) {
+		if (da->file_exists(slice_fname)) {
+			da->remove(slice_fname);
+		}
+		return;
+	}
+	slice->set_layers(slice_layers);
+	Error serr = ResourceSaver::get_singleton()->save(slice, slice_path, ResourceSaver::FLAG_COMPRESS);
+	if (serr != OK) {
+		LOG(ERROR, "Could not save layer slice: ", slice_path, ", error: ", serr);
+	} else {
+		slice->take_over_path(slice_path);
+	}
 }
 
 // Loads a previously saved layer stack (manifest + per-region slices) into _layer_stack and re-aliases
@@ -819,32 +910,20 @@ bool Pasture3DData::load_layers(const String &p_dir) {
 		return false;
 	}
 
-	// Merge each region's saved pixel slice back into the matching (index-aligned) layers.
+	// Layers from a manifest written before uids existed get one now; their slices carry none and are
+	// matched by index, which is still right because nothing could reorder a stack behind a slice then.
+	for (int i = 0; i < layer_count; i++) {
+		Pasture3DLayer *layer = manifest->get_layer_ptr(i);
+		if (layer) {
+			layer->ensure_layer_uid();
+		}
+	}
+	_layer_stack = manifest;
+	_sync_region_map_sizes();
+
+	// Merge each region's saved pixel slice back into the matching layers.
 	for (const Vector2i &region_loc : _regions.keys()) {
-		const String slice_path = p_dir + String("/") + Util::location_to_layer_filename(region_loc);
-		if (!FileAccess::file_exists(slice_path)) {
-			continue;
-		}
-		Ref<Pasture3DLayerStack> slice = ResourceLoader::get_singleton()->load(slice_path, "Pasture3DLayerStack", ResourceLoader::CACHE_MODE_IGNORE);
-		if (slice.is_null()) {
-			LOG(ERROR, "Cannot load layer slice at ", slice_path);
-			continue;
-		}
-		const int slice_count = MIN(slice->get_layer_count(), layer_count);
-		// i==0 (Base) carries pixels only when it was un-aliased at save time; if absent it is re-aliased below.
-		for (int i = 0; i < slice_count; i++) {
-			Pasture3DLayer *slice_layer = slice->get_layer_ptr(i);
-			Pasture3DLayer *layer = manifest->get_layer_ptr(i);
-			if (!slice_layer || !layer) {
-				continue;
-			}
-			Dictionary slice_tiles = slice_layer->get_tiles();
-			if (slice_tiles.has(region_loc)) {
-				Dictionary tiles = layer->get_tiles();
-				tiles[region_loc] = slice_tiles[region_loc];
-				layer->set_tiles(tiles);
-			}
-		}
+		_merge_layer_slice(p_dir, region_loc);
 	}
 
 	// Re-alias the Base layer (index 0) onto the loaded region maps ONLY for regions whose own base
@@ -864,7 +943,6 @@ bool Pasture3DData::load_layers(const String &p_dir) {
 		}
 		base->set_modified(false);
 	}
-	_layer_stack = manifest;
 	for (const Vector2i &region_loc : _regions.keys()) {
 
 		Pasture3DRegion *region = get_region_ptr(region_loc);
@@ -894,10 +972,15 @@ void Pasture3DData::load_directory(const String &p_dir) {
 	}
 
 	_clear();
+	// A game with a Pasture3DStreamer starts with no region in memory: the index says what exists, and the
+	// streamer loads what its sources are near. The editor always loads everything (editor streaming is not
+	// built).
+	const bool index_only = !IS_EDITOR && _terrain && !_terrain->get_load_all_regions();
+	TypedArray<Vector2i> on_disk;
 	for (const String &fname : files) {
 		// Skip layer manifest/slice files (pasture3d_layers*.res); they are handled by load_layers,
 		// not parsed as regions. The "pasture3d*.res" glob above otherwise sweeps them up.
-		if (fname.begins_with(Util::LAYER_FILE_PREFIX)) {
+		if (fname.begins_with(Util::LAYER_FILE_PREFIX) || fname == Util::REGION_INDEX_FILENAME) {
 			continue;
 		}
 		String path = p_dir + String("/") + fname;
@@ -913,6 +996,10 @@ void Pasture3DData::load_directory(const String &p_dir) {
 			continue;
 		}
 		const bool legacy = fname.begins_with("terrain3d");
+		on_disk.push_back(loc);
+		if (index_only) {
+			continue;
+		}
 		Ref<Pasture3DRegion> region = ResourceLoader::get_singleton()->load(path, "Pasture3DRegion", ResourceLoader::CACHE_MODE_IGNORE);
 		if (region.is_null()) {
 			LOG(ERROR, "Cannot load region at ", path);
@@ -950,28 +1037,115 @@ void Pasture3DData::load_directory(const String &p_dir) {
 	if (!load_layers(p_dir)) {
 		_synthesize_base_layer();
 	}
+	// The index says, per region, which stack its file was composited under. A region unloaded while the
+	// stack changed (a layer removed, reordered, re-weighted) was saved before the change and the manifest
+	// after it, so its file is stale against the stack that just loaded. Rebuild those composites now.
+	_load_region_index(p_dir);
+	// A file the index does not name (no index file yet, or written by an older build) is still a region. With
+	// everything loaded _index_region below fills it in; index-only, it gets a bare entry, which reads as a
+	// Standard region of unknown height.
+	for (const Vector2i &loc : on_disk) {
+		if (!_region_index->has_entry(loc)) {
+			_region_index->set_entry(loc, Dictionary());
+		}
+	}
+	if (index_only && !on_disk.is_empty()) {
+		// No region is loaded to say how big regions are. The index says; an older index does not, and then
+		// one region file is read for it and let go.
+		int size = _region_index->get_region_size();
+		if (size <= 0) {
+			bool legacy = false;
+			const String path = region_file_path(p_dir, on_disk[0], &legacy);
+			Ref<Pasture3DRegion> first = path.is_empty() ? Ref<Pasture3DRegion>() :
+					ResourceLoader::get_singleton()->load(path, "", ResourceLoader::CACHE_MODE_IGNORE);
+			size = first.is_valid() ? first->get_region_size() : 0;
+		}
+		if (size > 0) {
+			_terrain->set_region_size((Pasture3D::RegionSize)size);
+		}
+	}
+	bool recomposited = false;
+	for (const Vector2i &region_loc : _regions.keys()) {
+		recomposited = _recomposite_if_stale(region_loc) || recomposited;
+		_index_region(region_loc);
+	}
+	if (recomposited) {
+		update_maps(TYPE_MAX, false, false);
+	}
 }
 
-//TODO have load_directory call load_region, or make a load_file that loads a specific path
-void Pasture3DData::load_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_update) {
-	LOG(INFO, "Loading region from location ", p_region_loc);
-	String path = p_dir + String("/") + Util::location_to_filename(p_region_loc);
+String Pasture3DData::region_file_path(const String &p_dir, const Vector2i &p_region_loc, bool *r_legacy) {
+	const String fname = Util::location_to_filename(p_region_loc);
+	String path = p_dir + String("/") + fname;
 	bool legacy = false;
 	if (!FileAccess::file_exists(path)) {
 		// Fall back to a legacy Terrain3D region file for this location.
-		String legacy_path = p_dir + String("/") + Util::location_to_filename(p_region_loc).replace("pasture3d", "terrain3d");
-		if (FileAccess::file_exists(legacy_path)) {
-			path = legacy_path;
-			legacy = true;
-		} else {
-			LOG(ERROR, "File ", path, " doesn't exist");
-			return;
+		path = p_dir + String("/") + fname.replace("pasture3d", "terrain3d");
+		legacy = true;
+		if (!FileAccess::file_exists(path)) {
+			path = String();
+			legacy = false;
 		}
 	}
+	if (r_legacy) {
+		*r_legacy = legacy;
+	}
+	return path;
+}
+
+//TODO have load_directory call load_region, or make a load_file that loads a specific path
+// Loads one region from disk into memory (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md phase 0). Its layer
+// slice is merged BEFORE add_region so a base that persisted its own pixels wins over base adoption, which
+// only fills a base that has nothing for this location.
+Error Pasture3DData::load_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_update) {
+	LOG(INFO, "Loading region from location ", p_region_loc);
+	if (_regions.has(p_region_loc)) {
+		Pasture3DRegion *existing = get_region_ptr(p_region_loc);
+		if (existing && existing->is_deleted()) {
+			// Deleted but not yet saved: reading the file back would silently undo the delete.
+			LOG(ERROR, "Region ", p_region_loc, " is marked for deletion; save or undo before loading it");
+			return ERR_BUSY;
+		}
+		LOG(DEBUG, "Region ", p_region_loc, " is already loaded");
+		return OK;
+	}
+	bool legacy = false;
+	const String path = region_file_path(p_dir, p_region_loc, &legacy);
+	if (path.is_empty()) {
+		LOG(ERROR, "No region file for ", p_region_loc, " in ", p_dir);
+		return ERR_FILE_NOT_FOUND;
+	}
 	Ref<Pasture3DRegion> region = ResourceLoader::get_singleton()->load(path, "Pasture3DRegion", ResourceLoader::CACHE_MODE_IGNORE);
+	Ref<Pasture3DLayerStack> slice;
+	const String slice_path = p_dir + String("/") + Util::location_to_layer_filename(p_region_loc);
+	if (_layer_stack.is_valid() && FileAccess::file_exists(slice_path)) {
+		slice = ResourceLoader::get_singleton()->load(slice_path, "Pasture3DLayerStack", ResourceLoader::CACHE_MODE_IGNORE);
+		if (slice.is_null()) {
+			LOG(ERROR, "Cannot load layer slice at ", slice_path);
+		}
+	}
+	return adopt_region(p_region_loc, region, path, legacy, slice, p_update);
+}
+
+// The main-thread half of a load: everything after the file reads. load_region calls it with what it just
+// read; Pasture3DStreamer calls it with what a worker thread read (ResourceLoader::load_threaded_request).
+// p_path is the file the region came from, p_slice its layer slice or null.
+Error Pasture3DData::adopt_region(const Vector2i &p_region_loc, const Ref<Pasture3DRegion> &p_region, const String &p_path,
+		const bool p_legacy, const Ref<Pasture3DLayerStack> &p_slice, const bool p_update) {
+	if (_regions.has(p_region_loc)) {
+		Pasture3DRegion *existing = get_region_ptr(p_region_loc);
+		if (existing && existing->is_deleted()) {
+			LOG(ERROR, "Region ", p_region_loc, " is marked for deletion; save or undo before loading it");
+			return ERR_BUSY;
+		}
+		return OK;
+	}
+	Ref<Pasture3DRegion> region = p_region;
+	const bool legacy = p_legacy;
+	const String &path = p_path;
 	if (region.is_null()) {
 		LOG(ERROR, "Cannot load region at ", path);
-		return;
+		return ERR_FILE_CORRUPT;
 	}
 	if (legacy) {
 		// Re-class to Pasture3DRegion and mark modified so the next save migrates the file name.
@@ -981,21 +1155,352 @@ void Pasture3DData::load_region(const Vector2i &p_region_loc, const String &p_di
 		region = migrated;
 		region->set_modified(true);
 	}
-	if (_regions.is_empty()) {
+	if (_regions.is_empty() && _terrain) {
 		_terrain->set_region_size((Pasture3D::RegionSize)region->get_region_size());
-	} else {
-		if (_terrain->get_region_size() != (Pasture3D::RegionSize)region->get_region_size()) {
-			LOG(ERROR, "Region size mismatch. First loaded: ", _terrain->get_region_size(), " next: ",
-					region->get_region_size(), " in file: ", path);
-			return;
-		}
+	} else if (_region_size > 0 && _region_size != region->get_region_size()) {
+		LOG(ERROR, "Region size mismatch. Terrain: ", _region_size, " region: ",
+				region->get_region_size(), " in file: ", path);
+		return ERR_INVALID_DATA;
 	}
 	if (!legacy) {
 		region->take_over_path(path);
+		// Deserialisation runs the map and range setters, which flag the region modified. It is exactly its
+		// file right now, and the index and unload both read modified as "memory is ahead of the file".
+		region->set_modified(false);
 	}
 	region->set_location(p_region_loc);
 	region->set_version(CURRENT_DATA_VERSION); // Sends upgrade warning if old version
-	add_region(region, p_update);
+
+	// Anything a layer still holds for this location is a leftover (an undo restored tiles for a region that
+	// was unloaded at the time); the slice on disk is what the region left with.
+	_evict_region_tiles(p_region_loc);
+	_merge_layer_slice_from(p_slice, p_region_loc);
+	Error err = add_region(region, false);
+	if (err != OK) {
+		_evict_region_tiles(p_region_loc);
+		return err;
+	}
+	_recomposite_if_stale(p_region_loc);
+	_index_region(p_region_loc);
+	_bump_generation(p_region_loc);
+	if (p_update) {
+		update_maps(TYPE_MAX, false, false); // One slot, one layer per map type
+		if (_terrain) {
+			_terrain->get_instancer()->update_mmis(-1, p_region_loc);
+		}
+	}
+	if (_terrain) {
+		_terrain->get_collision()->region_changed(p_region_loc);
+	}
+	emit_signal("region_loaded", p_region_loc);
+	return OK;
+}
+
+// Takes a region out of memory and keeps it on disk (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md phase 0).
+// Auto-saves first: the region file, its layer slice, the layer manifest (the slice's uids must resolve
+// against a manifest that knows them) and the region index. Refuses rather than lose data when it cannot
+// save, and refuses a region marked for deletion (that is remove_region's job, finished by the next save).
+Error Pasture3DData::unload_region(const Vector2i &p_region_loc, const bool p_update, const bool p_write_index) {
+	Ref<Pasture3DRegion> region = get_region(p_region_loc);
+	if (region.is_null()) {
+		LOG(ERROR, "No loaded region at ", p_region_loc);
+		return ERR_DOES_NOT_EXIST;
+	}
+	if (region->is_deleted()) {
+		LOG(ERROR, "Region ", p_region_loc, " is marked for deletion; save or undo before unloading it");
+		return ERR_BUSY;
+	}
+	const String dir = _data_dir();
+	if (dir.is_empty()) {
+		// Nowhere to write it, so unloading would destroy it.
+		LOG(ERROR, "Cannot unload region ", p_region_loc, ": the terrain has no data directory to save it to");
+		return ERR_UNCONFIGURED;
+	}
+	const String path = dir + String("/") + Util::location_to_filename(p_region_loc);
+	if (!region->is_modified() && !FileAccess::file_exists(path)) {
+		// Never saved and unmodified (e.g. a blank region added and left alone): it still has to be written,
+		// or it would stop existing.
+		region->set_modified(true);
+	}
+	save_region(p_region_loc, dir, _terrain ? _terrain->get_save_16_bit() : false);
+	if (region->is_modified() || !FileAccess::file_exists(path)) {
+		LOG(ERROR, "Region ", p_region_loc, " could not be saved; not unloading it");
+		return ERR_FILE_CANT_WRITE;
+	}
+	if (_layer_stack.is_valid() && _layer_stack->get_layer_count() > 1) {
+		_save_layer_manifest(dir);
+		_save_layer_slice(dir, p_region_loc, _is_base_aliased());
+	}
+	_index_region(p_region_loc);
+	if (p_write_index) {
+		_save_region_index(dir);
+	}
+	_drop_region(p_region_loc, p_update);
+	return OK;
+}
+
+Error Pasture3DData::write_region_index() {
+	const String dir = _data_dir();
+	if (dir.is_empty()) {
+		return ERR_UNCONFIGURED;
+	}
+	_save_region_index(dir);
+	return OK;
+}
+
+// Streaming's unload (spec §H): a game must never write its data, so nothing is saved. A region with changes
+// not on disk (runtime deformation, or an editor edit) is refused rather than lost; the caller keeps it.
+Error Pasture3DData::release_region(const Vector2i &p_region_loc, const bool p_update) {
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	if (!region) {
+		return ERR_DOES_NOT_EXIST;
+	}
+	if (region->is_deleted() || region->is_modified()) {
+		LOG(DEBUG, "Region ", p_region_loc, " has changes that are not on disk; not releasing it");
+		return ERR_BUSY;
+	}
+	_drop_region(p_region_loc, p_update);
+	return OK;
+}
+
+// What unload_region and release_region share once the region's data is safe (or needs no saving).
+void Pasture3DData::_drop_region(const Vector2i &p_region_loc, const bool p_update) {
+	_evict_region_tiles(p_region_loc);
+	if (_terrain) {
+		_terrain->get_instancer()->destroy_by_location(p_region_loc);
+	}
+	_regions.erase(p_region_loc);
+	int region_id = _region_locations.find(p_region_loc);
+	if (region_id >= 0) {
+		_region_locations.remove_at(region_id);
+	}
+	_region_map_dirty = true;
+	_bump_generation(p_region_loc);
+	LOG(INFO, "Unloaded region ", p_region_loc);
+	if (p_update) {
+		update_maps(TYPE_MAX, false, false); // Frees the slot; nothing re-uploads
+	}
+	if (_terrain) {
+		_terrain->get_collision()->region_changed(p_region_loc);
+	}
+	emit_signal("region_unloaded", p_region_loc);
+}
+
+bool Pasture3DData::is_region_loaded(const Vector2i &p_region_loc) const {
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	return region && !region->is_deleted();
+}
+
+TypedArray<Vector2i> Pasture3DData::restore_layer_tiles(const int p_layer_id, const Dictionary &p_tiles, const Dictionary &p_generations) {
+	TypedArray<Vector2i> changed;
+	if (_layer_stack.is_null()) {
+		return changed;
+	}
+	Pasture3DLayer *layer = _layer_stack->get_layer_ptr(p_layer_id);
+	if (!layer) {
+		return changed;
+	}
+	// Every location either side might name: what the layer holds now and what the snapshot holds.
+	Dictionary locations;
+	for (const Vector2i &loc : layer->get_region_locations()) {
+		locations[loc] = true;
+	}
+	for (const Vector2i &loc : p_tiles.keys()) {
+		locations[loc] = true;
+	}
+	for (const Vector2i &loc : locations.keys()) {
+		if (!is_region_loaded(loc)) {
+			continue; // Nothing operates on an unloaded region; its tiles are on disk.
+		}
+		if (!p_generations.has(loc) || int(p_generations[loc]) != get_region_generation(loc)) {
+			LOG(WARN, "Undo skipped region ", loc, " on layer ", p_layer_id, ": it was unloaded or loaded since this edit");
+			continue;
+		}
+		layer->restore_region_tiles(loc, p_tiles.get(loc, Dictionary()));
+		changed.push_back(loc);
+	}
+	return changed;
+}
+
+Dictionary Pasture3DData::get_region_generations() const {
+	Dictionary gens;
+	for (const Vector2i &loc : _regions.keys()) {
+		if (is_region_loaded(loc)) {
+			gens[loc] = get_region_generation(loc);
+		}
+	}
+	return gens;
+}
+
+void Pasture3DData::_bump_generation(const Vector2i &p_region_loc) {
+	_region_generation[p_region_loc] = get_region_generation(p_region_loc) + 1;
+}
+
+String Pasture3DData::_data_dir() const {
+	return _terrain ? _terrain->get_data_directory() : String();
+}
+
+int64_t Pasture3DData::_stack_signature() const {
+	if (_layer_stack.is_null()) {
+		return 0;
+	}
+	String sig;
+	const int count = _layer_stack->get_layer_count();
+	for (int i = 0; i < count; i++) {
+		const Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+		if (!layer) {
+			continue;
+		}
+		sig += layer->get_layer_uid() + ":" + itos(layer->get_blend_mode()) + ":" + String::num(layer->get_opacity(), 6) +
+				":" + (layer->is_visible() ? "1" : "0") + ":" + itos(layer->get_map_type()) + ":" +
+				(layer->is_base() ? "1" : "0") + ";";
+	}
+	return int64_t(sig.hash());
+}
+
+// The entry describes the FILE, so a region whose memory is ahead of its file (modified, or never saved)
+// is left as it was: recording the current signature for it would tell the next load that a stale file is
+// current. Called after every write, where modified has just been cleared.
+void Pasture3DData::_index_region(const Vector2i &p_region_loc) {
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	if (!region || region->is_deleted() || region->is_modified()) {
+		return;
+	}
+	Dictionary entry = _region_index->get_entry(p_region_loc).duplicate();
+	entry["height_range"] = region->get_height_range();
+	entry["stack_signature"] = _stack_signature();
+	entry["type_path"] = region->get_type_path();
+	entry["texel_ratio"] = region->get_texel_ratio();
+	entry["locked"] = region->is_locked();
+	_region_index->set_entry(p_region_loc, entry);
+}
+
+void Pasture3DData::_load_region_index(const String &p_dir) {
+	const String path = p_dir + String("/") + Util::REGION_INDEX_FILENAME;
+	Ref<Pasture3DRegionIndex> index;
+	if (FileAccess::file_exists(path)) {
+		index = ResourceLoader::get_singleton()->load(path, "Pasture3DRegionIndex", ResourceLoader::CACHE_MODE_IGNORE);
+		if (index.is_null()) {
+			LOG(ERROR, "Cannot load region index at ", path, "; rebuilding it from the region files");
+		}
+	}
+	if (index.is_null()) {
+		index.instantiate();
+	}
+	// Entries whose file is gone (deleted outside the editor) describe nothing.
+	for (const Vector2i &loc : index->get_locations()) {
+		const String fname = Util::location_to_filename(loc);
+		if (!FileAccess::file_exists(p_dir + String("/") + fname) &&
+				!FileAccess::file_exists(p_dir + String("/") + fname.replace("pasture3d", "terrain3d"))) {
+			index->erase_entry(loc);
+		}
+	}
+	_region_index = index;
+	_region_map_dirty = true; // The map encodes which indexed regions are not loaded
+}
+
+void Pasture3DData::_save_region_index(const String &p_dir) {
+	const String path = p_dir + String("/") + Util::REGION_INDEX_FILENAME;
+	_region_index->set_region_size(_region_size);
+	Error err = ResourceSaver::get_singleton()->save(_region_index, path, ResourceSaver::FLAG_COMPRESS);
+	_stat_index_writes++;
+	if (err != OK) {
+		LOG(ERROR, "Could not save region index: ", path, ", error: ", err);
+	}
+}
+
+bool Pasture3DData::_merge_layer_slice(const String &p_dir, const Vector2i &p_region_loc) {
+	if (_layer_stack.is_null()) {
+		return false;
+	}
+	const String slice_path = p_dir + String("/") + Util::location_to_layer_filename(p_region_loc);
+	if (!FileAccess::file_exists(slice_path)) {
+		return false;
+	}
+	Ref<Pasture3DLayerStack> slice = ResourceLoader::get_singleton()->load(slice_path, "Pasture3DLayerStack", ResourceLoader::CACHE_MODE_IGNORE);
+	if (slice.is_null()) {
+		LOG(ERROR, "Cannot load layer slice at ", slice_path);
+		return false;
+	}
+	return _merge_layer_slice_from(slice, p_region_loc);
+}
+
+// The merge itself, from a slice already read (by the line above, or by a streamer's worker thread).
+bool Pasture3DData::_merge_layer_slice_from(const Ref<Pasture3DLayerStack> &p_slice, const Vector2i &p_region_loc) {
+	if (_layer_stack.is_null() || p_slice.is_null()) {
+		return false;
+	}
+	const Ref<Pasture3DLayerStack> &slice = p_slice;
+	const int layer_count = _layer_stack->get_layer_count();
+	Dictionary index_by_uid;
+	for (int i = 0; i < layer_count; i++) {
+		const Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+		if (layer && !layer->get_layer_uid().is_empty()) {
+			index_by_uid[layer->get_layer_uid()] = i;
+		}
+	}
+	const int slice_count = slice->get_layer_count();
+	for (int i = 0; i < slice_count; i++) {
+		Pasture3DLayer *slice_layer = slice->get_layer_ptr(i);
+		if (!slice_layer) {
+			continue;
+		}
+		Dictionary slice_tiles = slice_layer->get_tiles();
+		if (!slice_tiles.has(p_region_loc)) {
+			continue;
+		}
+		const String uid = slice_layer->get_layer_uid();
+		int target = -1;
+		if (uid.is_empty()) {
+			target = i < layer_count ? i : -1; // Legacy slice: index-aligned by construction.
+		} else if (index_by_uid.has(uid)) {
+			target = index_by_uid[uid];
+		}
+		if (target < 0) {
+			LOG(INFO, "Region ", p_region_loc, ": dropping tiles of a layer removed while it was unloaded");
+			continue;
+		}
+		Pasture3DLayer *layer = _layer_stack->get_layer_ptr(target);
+		Dictionary tiles = layer->get_tiles();
+		tiles[p_region_loc] = slice_tiles[p_region_loc];
+		layer->set_tiles(tiles);
+	}
+	return true;
+}
+
+void Pasture3DData::_evict_region_tiles(const Vector2i &p_region_loc) {
+	if (_layer_stack.is_null()) {
+		return;
+	}
+	const int layer_count = _layer_stack->get_layer_count();
+	for (int i = 0; i < layer_count; i++) {
+		Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+		if (layer && layer->has_region(p_region_loc)) {
+			layer->restore_region_tiles(p_region_loc, Dictionary()); // Empty = erase.
+		}
+	}
+}
+
+bool Pasture3DData::_recomposite_if_stale(const Vector2i &p_region_loc) {
+	if (_layer_stack.is_null()) {
+		return false;
+	}
+	Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	const Dictionary entry = _region_index->get_entry(p_region_loc);
+	if (!region || !entry.has("stack_signature") || int64_t(entry["stack_signature"]) == _stack_signature()) {
+		return false;
+	}
+	// A Base aliasing the region map IS the composite; there is no separate source to rebuild it from.
+	const Pasture3DLayer *base = _layer_stack->get_layer_ptr(0);
+	if (base) {
+		Ref<Image> tile = base->get_tile(p_region_loc, V2I_ZERO);
+		if (tile.is_valid() && tile == region->get_height_map()) {
+			return false;
+		}
+	}
+	LOG(INFO, "Region ", p_region_loc, " was written under a different layer stack; recompositing");
+	composite_region(p_region_loc, Rect2i(), false);
+	return true;
 }
 
 TypedArray<Image> Pasture3DData::get_maps(const MapType p_map_type) const {
@@ -1019,6 +1524,430 @@ TypedArray<Image> Pasture3DData::get_maps(const MapType p_map_type) const {
 	return TypedArray<Image>();
 }
 
+int Pasture3DData::_read_region_map_size() {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	int size = REGION_MAP_SIZE_DEFAULT;
+	if (ps) {
+		if (!ps->has_setting(REGION_MAP_SIZE_SETTING)) {
+			ps->set_setting(REGION_MAP_SIZE_SETTING, REGION_MAP_SIZE_DEFAULT);
+			ps->set_initial_value(REGION_MAP_SIZE_SETTING, REGION_MAP_SIZE_DEFAULT);
+			ps->set_restart_if_changed(REGION_MAP_SIZE_SETTING, true);
+			Dictionary info;
+			info["name"] = REGION_MAP_SIZE_SETTING;
+			info["type"] = Variant::INT;
+			info["hint"] = PROPERTY_HINT_ENUM;
+			info["hint_string"] = "32,64,128,256,512,1024";
+			ps->add_property_info(info);
+		}
+		size = int(ps->get_setting_with_override(REGION_MAP_SIZE_SETTING));
+	}
+	// A power of two: get_region_map_index bounds-checks with a mask.
+	const int clamped = CLAMP(int(closest_power_of_2(uint32_t(MAX(size, 1)))), 32, 1024);
+	if (clamped != size) {
+		UtilityFunctions::push_warning(vformat("Pasture3D: %s = %d is not a power of two in [32, 1024]; using %d",
+				REGION_MAP_SIZE_SETTING, size, clamped));
+	}
+	return clamped;
+}
+
+static TypedArray<Vector2i> _pool_slot_table(const TypedArray<Vector2i> &p_locations) {
+	// Free slots read as V2I_ZERO: the shader only indexes slots the region map points at.
+	TypedArray<Vector2i> out;
+	out.resize(p_locations.size());
+	for (int i = 0; i < p_locations.size(); i++) {
+		const Vector2i loc = p_locations[i];
+		out[i] = loc == V2I_MAX ? V2I_ZERO : loc;
+	}
+	return out;
+}
+
+TypedArray<Vector2i> Pasture3DData::get_slot_locations() const {
+	return _pool_slot_table(_pools[POOL_FINE].locations);
+}
+
+TypedArray<Vector2i> Pasture3DData::get_coarse_slot_locations() const {
+	return _pool_slot_table(_pools[POOL_COARSE].locations);
+}
+
+Dictionary Pasture3DData::get_upload_stats() const {
+	Dictionary stats;
+	stats["layer_uploads"] = _stat_layer_uploads;
+	stats["array_creates"] = _stat_array_creates;
+	stats["region_map_uploads"] = _stat_region_map_uploads;
+	stats["index_writes"] = _stat_index_writes;
+	stats["manifest_writes"] = _stat_manifest_writes;
+	stats["manifest_skips"] = _stat_manifest_skips;
+	stats["slot_capacity"] = _pools[POOL_FINE].locations.size();
+	stats["coarse_slot_capacity"] = _pools[POOL_COARSE].locations.size();
+	stats["coarse_store_ratio"] = get_coarse_store_ratio();
+	// Bytes of one array layer per pool, summed over the three map types (mipmaps included): what a slot
+	// costs in VRAM. 0 for a pool with no arrays.
+	for (int p = 0; p < POOL_MAX; p++) {
+		int64_t bytes = 0;
+		for (int t = 0; t < TYPE_MAX; t++) {
+			const Ref<Image> &ph = _pools[p].placeholders[t];
+			if (ph.is_valid() && _pools[p].gens[t].get_rid().is_valid()) {
+				bytes += ph->get_data_size();
+			}
+		}
+		stats[p == POOL_FINE ? "fine_layer_bytes" : "coarse_layer_bytes"] = bytes;
+	}
+	return stats;
+}
+
+void Pasture3DData::reset_upload_stats() {
+	_stat_layer_uploads = 0;
+	_stat_array_creates = 0;
+	_stat_region_map_uploads = 0;
+	_stat_index_writes = 0;
+	_stat_manifest_writes = 0;
+	_stat_manifest_skips = 0;
+}
+
+void Pasture3DData::_release_slot(const PoolId p_pool, const Vector2i &p_region_loc) {
+	SlotPool &pool = _pools[p_pool];
+	if (!pool.slots.has(p_region_loc)) {
+		return;
+	}
+	const int slot = pool.slots[p_region_loc];
+	pool.slots.erase(p_region_loc);
+	pool.locations[slot] = V2I_MAX;
+	pool.region_ids[slot] = 0;
+	// Drop the slot's references so an unloaded region's images can be freed. The GPU layer keeps stale
+	// texels, which nothing reads because the region map no longer points at the slot.
+	for (int t = 0; t < TYPE_MAX; t++) {
+		if (slot < pool.maps[t].size()) {
+			pool.maps[t][slot] = pool.placeholders[t];
+		}
+	}
+}
+
+bool Pasture3DData::_sync_slots(const PoolId p_pool, PackedInt32Array &r_fresh) {
+	SlotPool &pool = _pools[p_pool];
+	const int old_capacity = pool.locations.size();
+	// Free the slot of every location that is no longer active, or whose region now belongs to the other pool.
+	for (int slot = 0; slot < pool.locations.size(); slot++) {
+		const Vector2i loc = pool.locations[slot];
+		if (loc == V2I_MAX) {
+			continue;
+		}
+		const Pasture3DRegion *region = get_region_ptr(loc);
+		if (!region || region->is_deleted() || _pool_of(region) != p_pool) {
+			_release_slot(p_pool, loc);
+		}
+	}
+	// Give every active region of the pool without a slot the lowest free one, and re-upload a slot whose
+	// region object was replaced at the same location (undo, or an unload and load inside one batch).
+	for (const Vector2i &loc : _regions.keys()) {
+		const Pasture3DRegion *region = get_region_ptr(loc);
+		if (!region || region->is_deleted() || _pool_of(region) != p_pool || get_region_map_index(loc) < 0) {
+			continue;
+		}
+		const int64_t id = int64_t(region->get_instance_id());
+		if (pool.slots.has(loc)) {
+			const int slot = pool.slots[loc];
+			if (pool.region_ids[slot] != id) {
+				pool.region_ids[slot] = id;
+				r_fresh.push_back(slot);
+			}
+			continue;
+		}
+		int slot = -1;
+		for (int i = 0; i < pool.locations.size(); i++) {
+			if (Vector2i(pool.locations[i]) == V2I_MAX) {
+				slot = i;
+				break;
+			}
+		}
+		if (slot < 0) {
+			slot = pool.locations.size();
+			const int capacity = ((slot / SLOT_CHUNK) + 1) * SLOT_CHUNK;
+			pool.locations.resize(capacity);
+			pool.region_ids.resize(capacity);
+			for (int i = slot; i < capacity; i++) {
+				pool.locations[i] = V2I_MAX;
+				pool.region_ids[i] = 0;
+			}
+		}
+		pool.locations[slot] = loc;
+		pool.region_ids[slot] = id;
+		pool.slots[loc] = slot;
+		r_fresh.push_back(slot);
+	}
+	// Compaction (PASTURE3D_BAKE_MEMORY_SPEC.md M2). Without it the arrays keep their peak capacity, every
+	// free slot a full-size placeholder, for the rest of the session: an All-regions bake left 3 GB of arrays
+	// with nothing loaded, and a streamer keeps the capacity of the densest place it has been. It fires when
+	// less than half the capacity is used by half a chunk or more: under half, so a bake releasing n regions
+	// recreates the arrays about log2(n) times rather than once per chunk; the half-chunk margin, so one
+	// region coming and going near a boundary never recreates anything (16 of 32 used stays at 32). A move
+	// changes a region's slot, and the region map is rebuilt from the slots right after this in update_maps,
+	// so it follows.
+	const int capacity = pool.locations.size();
+	const int used = pool.slots.size();
+	const int target = ((used + SLOT_CHUNK - 1) / SLOT_CHUNK) * SLOT_CHUNK;
+	if (used * 2 + SLOT_CHUNK <= capacity) {
+		LOG(DEBUG, "Pool ", p_pool, " compacts from ", capacity, " slots to ", target, " (", used, " used)");
+		TypedArray<Vector2i> locations;
+		PackedInt64Array region_ids;
+		locations.resize(target);
+		region_ids.resize(target);
+		for (int i = 0; i < target; i++) {
+			locations[i] = V2I_MAX;
+			region_ids[i] = 0;
+		}
+		PackedInt32Array moved_to;
+		moved_to.resize(capacity);
+		int next = 0;
+		for (int slot = 0; slot < capacity; slot++) {
+			moved_to[slot] = -1;
+			const Vector2i loc = pool.locations[slot];
+			if (loc == V2I_MAX) {
+				continue;
+			}
+			locations[next] = loc;
+			region_ids[next] = pool.region_ids[slot];
+			pool.slots[loc] = next;
+			moved_to[slot] = next;
+			next++;
+		}
+		pool.locations = locations;
+		pool.region_ids = region_ids;
+		for (int t = 0; t < TYPE_MAX; t++) {
+			pool.maps[t].clear(); // _build_array refills them at the new capacity
+		}
+		// Slots handed out above were numbered before the move.
+		for (int i = 0; i < r_fresh.size(); i++) {
+			r_fresh[i] = moved_to[r_fresh[i]];
+		}
+	}
+	return pool.locations.size() != old_capacity;
+}
+
+// log2 of a texel ratio, which is a power of two.
+static int _ratio_shift(const int p_ratio) {
+	int shift = 0;
+	while ((1 << shift) < p_ratio) {
+		shift++;
+	}
+	return shift;
+}
+
+int Pasture3DData::_coarse_shift_needed() const {
+	int shift = 0;
+	const SlotPool &pool = _pools[POOL_COARSE];
+	for (int slot = 0; slot < pool.locations.size(); slot++) {
+		const Vector2i loc = pool.locations[slot];
+		const Pasture3DRegion *region = loc == V2I_MAX ? nullptr : get_region_ptr(loc);
+		if (region) {
+			const int s = _ratio_shift(region->get_texel_ratio());
+			shift = shift == 0 ? s : MIN(shift, s);
+		}
+	}
+	return shift;
+}
+
+void Pasture3DData::_region_flags(const Pasture3DRegion *p_region, bool &r_collapse, bool &r_color_only) const {
+	const Ref<Pasture3DRegionType> type = load_region_type(p_region->get_type_path());
+	r_collapse = type.is_valid() && type->get_vertex_collapse();
+	r_color_only = type.is_valid() && type->get_material_mode() == Pasture3DRegionType::MATERIAL_COLOR_ONLY;
+}
+
+int Pasture3DData::get_water_terrain_state(const Vector2 &p_xz, const real_t p_level, const real_t p_margin) const {
+	// Every step as water_terrain.gdshaderinc does it, in the same order and with the same roundings.
+	const Vector2i v = Vector2i((p_xz / _vertex_spacing + Vector2(0.5f, 0.5f)).floor());
+	const Vector2i loc = Vector2i(Math::floor(real_t(v.x) / real_t(_region_size)), Math::floor(real_t(v.y) / real_t(_region_size)));
+	const int map_index = get_region_map_index(loc);
+	if (map_index < 0 || map_index >= _region_map.size()) {
+		return 0;
+	}
+	const int e = _region_map[map_index];
+	if (e == 0) {
+		return 0;
+	}
+	if (e == REGION_MAP_UNLOADED) {
+		return 1;
+	}
+	const Pasture3DRegion *region = get_region_ptr(loc);
+	const Ref<Image> height = region ? region->get_height_map() : Ref<Image>();
+	if (height.is_null()) {
+		return 0;
+	}
+	const Vector2i local = v - loc * _region_size;
+	// A coarse region's lattice texel: its own map at local >> shift (the GPU reads the same texel upsampled).
+	const int shift = e < 0 ? ((ABS(e) - 1) >> 16) & 0x7 : 0;
+	const real_t h = height->get_pixel(local.x >> shift, local.y >> shift).r;
+	return h >= p_level + p_margin ? 2 : 3;
+}
+
+bool Pasture3DData::is_water_hidden(const Vector2 &p_xz, const real_t p_level, const real_t p_margin, const real_t p_radius) const {
+	static const Vector2 TAPS[5] = { Vector2(0, 0), Vector2(-1, -1), Vector2(1, -1), Vector2(-1, 1), Vector2(1, 1) };
+	for (const Vector2 &t : TAPS) {
+		const int state = get_water_terrain_state(p_xz + t * p_radius, p_level, p_margin);
+		if (state != 1 && state != 2) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void Pasture3DData::_rebuild_region_map() {
+	const int size = get_region_map_size();
+	_region_map.resize(size * size);
+	_region_map.fill(0);
+	_region_locations = TypedArray<Vector2i>(); // enforce new pointer
+	PackedFloat32Array texels;
+	texels.resize(size * size);
+	texels.fill(0.f);
+	_collapse_ratio_max = 1;
+	for (int p = 0; p < POOL_MAX; p++) {
+		const SlotPool &pool = _pools[p];
+		for (int slot = 0; slot < pool.locations.size(); slot++) {
+			const Vector2i loc = pool.locations[slot];
+			if (loc == V2I_MAX) {
+				continue;
+			}
+			const int map_index = get_region_map_index(loc);
+			const Pasture3DRegion *region = get_region_ptr(loc);
+			if (map_index < 0 || !region) {
+				continue;
+			}
+			bool collapse = false;
+			bool color_only = false;
+			_region_flags(region, collapse, color_only);
+			const int shift = p == POOL_COARSE ? _ratio_shift(region->get_texel_ratio()) : 0;
+			_region_map[map_index] = region_map_encode(slot, shift, collapse, color_only);
+			if (collapse && shift > 0) {
+				_collapse_ratio_max = MAX(_collapse_ratio_max, 1 << shift);
+			}
+			// Exact: the encoded values are under 2^21, far below float32's 2^24.
+			texels[map_index] = float(_region_map[map_index]);
+			_region_locations.push_back(loc);
+		}
+	}
+	// Indexed but not loaded (spec §I). A region still in _regions is loaded, or deleted and not yet saved,
+	// which is no region; either way it is not unknown.
+	if (_region_index.is_valid()) {
+		for (const Vector2i &loc : _region_index->get_locations()) {
+			const int map_index = get_region_map_index(loc);
+			if (map_index >= 0 && _region_map[map_index] == 0 && !_regions.has(loc)) {
+				_region_map[map_index] = REGION_MAP_UNLOADED;
+				texels[map_index] = REGION_MAP_UNLOADED_TEXEL;
+			}
+		}
+	}
+	Ref<Image> img = Image::create_from_data(size, size, false, Image::FORMAT_RF, texels.to_byte_array());
+	const Ref<Image> old = _generated_region_map.get_image();
+	if (_generated_region_map.get_rid().is_valid() && old.is_valid() && old->get_size() == img->get_size()) {
+		_generated_region_map.update_2d(img);
+	} else {
+		_generated_region_map.clear();
+		_generated_region_map.create(img);
+	}
+	_stat_region_map_uploads++;
+}
+
+Ref<Image> Pasture3DData::_placeholder(const PoolId p_pool, const MapType p_type, const Ref<Image> &p_like) {
+	Ref<Image> &ph = _pools[p_pool].placeholders[p_type];
+	if (ph.is_null() || ph->get_size() != p_like->get_size() || ph->get_format() != p_like->get_format() ||
+			ph->has_mipmaps() != p_like->has_mipmaps()) {
+		ph = Image::create_empty(p_like->get_width(), p_like->get_height(), p_like->has_mipmaps(), p_like->get_format());
+	}
+	return ph;
+}
+
+void Pasture3DData::_build_array(const PoolId p_pool, const MapType p_type) {
+	SlotPool &pool = _pools[p_pool];
+	TypedArray<Image> &arr = pool.maps[p_type];
+	GeneratedTexture &gen = pool.gens[p_type];
+	const int capacity = pool.locations.size();
+	auto slot_region = [&](const int p_slot) -> const Pasture3DRegion * {
+		const Vector2i loc = pool.locations[p_slot];
+		return loc == V2I_MAX ? nullptr : get_region_ptr(loc);
+	};
+	Ref<Image> like;
+	for (int slot = 0; slot < capacity && like.is_null(); slot++) {
+		const Pasture3DRegion *region = slot_region(slot);
+		if (region) {
+			like = _gpu_map(region, p_type);
+		}
+	}
+	arr.clear();
+	gen.clear();
+	if (like.is_null()) {
+		return; // No regions: cleared, as an empty create always did.
+	}
+	const Ref<Image> ph = _placeholder(p_pool, p_type, like);
+	arr.resize(capacity);
+	for (int slot = 0; slot < capacity; slot++) {
+		const Pasture3DRegion *region = slot_region(slot);
+		arr[slot] = region ? _gpu_map(region, p_type) : ph;
+	}
+	gen.create(arr);
+	_stat_array_creates++;
+}
+
+int Pasture3DData::_ratio_at(const Vector2i &p_region_loc) const {
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	if (region && !region->is_deleted()) {
+		return region->get_texel_ratio();
+	}
+	if (_region_index.is_valid() && _region_index->has_entry(p_region_loc)) {
+		return int(_region_index->get_entry(p_region_loc).get("texel_ratio", 1));
+	}
+	return 0;
+}
+
+bool Pasture3DData::_stitch_region(const Vector2i &p_region_loc) {
+	Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	Image *map = region && !region->is_deleted() ? region->get_map_ptr(TYPE_HEIGHT) : nullptr;
+	if (!map || !_seam_stitch_enabled) {
+		return false;
+	}
+	const int r = region->get_texel_ratio();
+	const int m = region->get_map_size();
+	bool changed = false;
+	// axis 0: the -x neighbour meets column 0, which runs along +z; axis 1: the -z neighbour meets row 0.
+	for (int axis = 0; axis < 2; axis++) {
+		const Vector2i across = axis == 0 ? Vector2i(1, 0) : Vector2i(0, 1);
+		const Vector2i along = axis == 0 ? Vector2i(0, 1) : Vector2i(1, 0);
+		const int nr = _ratio_at(p_region_loc - across);
+		if (nr <= r) {
+			continue;
+		}
+		const int q = nr / r; // This region's texels per neighbour lattice step
+		for (int k0 = 0; k0 < m; k0 += q) {
+			const real_t a = map->get_pixelv(along * k0).r;
+			const int k1 = k0 + q;
+			real_t b;
+			if (k1 < m) {
+				b = map->get_pixelv(along * k1).r;
+			} else {
+				// The last lattice point is the next region's origin.
+				const Vector2i next = p_region_loc + along;
+				b = get_height_at_vertex(next * _region_size);
+				if (std::isnan(b)) {
+					if (_ratio_at(next) > 0) {
+						continue; // Unloaded: the segment keeps what it was stitched to
+					}
+					b = a; // The world's edge: hold
+				}
+			}
+			for (int j = 1; j < q && k0 + j < m; j++) {
+				const Vector2i px = along * (k0 + j);
+				const real_t v = Math::lerp(a, b, real_t(j) / real_t(q));
+				if (map->get_pixelv(px).r != v) {
+					map->set_pixelv(px, Color(v, 0.f, 0.f, 1.f));
+					changed = true;
+				}
+			}
+		}
+	}
+	if (changed) {
+		region->set_modified(true);
+	}
+	return changed;
+}
+
 void Pasture3DData::update_maps(const MapType p_map_type, const bool p_all_regions, const bool p_generate_mipmaps) {
 	// Generate region color mipmaps
 	if (p_generate_mipmaps && (p_map_type == TYPE_COLOR || p_map_type == TYPE_MAX)) {
@@ -1032,145 +1961,198 @@ void Pasture3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 		}
 	}
 
+	static const char *SIGNALS[TYPE_MAX] = { "height_maps_changed", "control_maps_changed", "color_maps_changed" };
+
 	// Mark texture arrays dirty for rebuilding
 	if (p_all_regions) {
 		LOG(EXTREME, "Marking dirty maps of type: ", p_map_type);
-		switch (p_map_type) {
-			case TYPE_HEIGHT:
-				_generated_height_maps.clear();
-				break;
-			case TYPE_CONTROL:
-				_generated_control_maps.clear();
-				break;
-			case TYPE_COLOR:
-				_generated_color_maps.clear();
-				break;
-			default:
-				_generated_height_maps.clear();
-				_generated_control_maps.clear();
-				_generated_color_maps.clear();
-				_region_map_dirty = true;
-				break;
+		for (int p = 0; p < POOL_MAX; p++) {
+			for (int t = 0; t < TYPE_MAX; t++) {
+				if (p_map_type == TYPE_MAX || p_map_type == t) {
+					_pools[p].gens[t].clear();
+				}
+			}
+		}
+		if (p_map_type == TYPE_MAX) {
+			_region_map_dirty = true;
 		}
 	}
 
 	bool any_changed = false;
 
-	// Rebuild region map if dirty
+	// Slots and the region map. A region that gained a slot needs one layer per map type uploaded; only a
+	// capacity change recreates a pool's arrays.
+	PackedInt32Array fresh[POOL_MAX];
 	if (_region_map_dirty) {
-		LOG(EXTREME, "Regenerating ", REGION_MAP_VSIZE, " region map array from active regions");
-		_region_map.clear();
-		_region_map.resize(REGION_MAP_SIZE * REGION_MAP_SIZE);
 		_region_map_dirty = false;
-		_region_locations = TypedArray<Vector2i>(); // enforce new pointer
-		int region_id = 0;
-		for (const Vector2i &region_loc : _regions.keys()) {
-			const Pasture3DRegion *region = get_region_ptr(region_loc);
-			if (region && !region->is_deleted()) {
-				region_id += 1; // Begin at 1 since 0 = no region
-				int map_index = get_region_map_index(region_loc);
-				if (map_index >= 0) {
-					_region_map[map_index] = region_id;
-					_region_locations.push_back(region_loc);
+		for (int p = 0; p < POOL_MAX; p++) {
+			if (_sync_slots(PoolId(p), fresh[p])) {
+				LOG(DEBUG, "Pool ", p, " slot capacity changed to ", _pools[p].locations.size(), "; recreating its texture arrays");
+				for (int t = 0; t < TYPE_MAX; t++) {
+					_pools[p].gens[t].clear();
 				}
 			}
 		}
+		// The coarse arrays hold the finest coarse ratio loaded; when that moves, every coarse layer changes size.
+		const int shift = _coarse_shift_needed();
+		if (shift != _coarse_store_shift) {
+			LOG(DEBUG, "Coarse arrays move from ratio ", get_coarse_store_ratio(), " to ", shift > 0 ? 1 << shift : 0);
+			_coarse_store_shift = shift;
+			for (int t = 0; t < TYPE_MAX; t++) {
+				_pools[POOL_COARSE].gens[t].clear();
+			}
+		}
+		_rebuild_region_map();
 		any_changed = true;
 		LOG(DEBUG, "Emitting region_map_changed");
 		emit_signal("region_map_changed");
 	}
 
-	// Rebuild height maps if dirty
-	if (_generated_height_maps.is_dirty()) {
-		LOG(EXTREME, "Regenerating height texture array from regions");
-		_height_maps.clear();
-		for (const Vector2i &region_loc : _region_locations) {
-			const Pasture3DRegion *region = get_region_ptr(region_loc);
-			if (region) {
-				_height_maps.push_back(region->get_height_map());
-			} else {
-				LOG(ERROR, "Can't find region ", region_loc, ", _regions: ", _regions,
-						", locations: ", _region_locations, ". Please report this error.");
-				return;
+	// Seam stitch. A region's stitch reads its -x and -z neighbours' ratios and its +x and +z neighbours'
+	// origins, so a region that changed or arrived re-stitches itself and those four.
+	Dictionary restitched; // Dict[region_location] -> true: stitched height, uploaded below like an edit
+	if (p_map_type == TYPE_MAX || p_map_type == TYPE_HEIGHT) {
+		Dictionary todo;
+		for (const Vector2i &loc : _region_locations) {
+			const Pasture3DRegion *region = get_region_ptr(loc);
+			const PoolId p = region ? _pool_of(region) : POOL_FINE;
+			const bool is_fresh = region && fresh[p].has(int(_pools[p].slots.get(loc, -1)));
+			if (region && (p_all_regions || region->is_edited() || is_fresh)) {
+				todo[loc] = true;
+				todo[loc + Vector2i(1, 0)] = true;
+				todo[loc + Vector2i(0, 1)] = true;
+				todo[loc - Vector2i(1, 0)] = true;
+				todo[loc - Vector2i(0, 1)] = true;
 			}
 		}
-		_generated_height_maps.create(_height_maps);
-		calc_height_range();
-		any_changed = true;
-		LOG(DEBUG, "Emitting height_maps_changed");
-		emit_signal("height_maps_changed");
-	}
-
-	// Rebulid control maps if dirty
-	if (_generated_control_maps.is_dirty()) {
-		LOG(EXTREME, "Regenerating control texture array from regions");
-		_control_maps.clear();
-		for (const Vector2i &region_loc : _region_locations) {
-			const Pasture3DRegion *region = get_region_ptr(region_loc);
-			if (region) {
-				_control_maps.push_back(region->get_control_map());
+		for (const Vector2i &loc : todo.keys()) {
+			if (_stitch_region(loc)) {
+				restitched[loc] = true;
 			}
 		}
-		_generated_control_maps.create(_control_maps);
-		any_changed = true;
-		LOG(DEBUG, "Emitting control_maps_changed");
-		emit_signal("control_maps_changed");
-	}
-
-	// Rebulid color maps if dirty
-	if (_generated_color_maps.is_dirty()) {
-		LOG(EXTREME, "Regenerating color texture array from regions");
-		_color_maps.clear();
-		for (const Vector2i &region_loc : _region_locations) {
-			const Pasture3DRegion *region = get_region_ptr(region_loc);
-			if (region) {
-				_color_maps.push_back(region->get_color_map());
-			}
+		if (!restitched.is_empty()) {
+			calc_height_range();
 		}
-		_generated_color_maps.create(_color_maps);
-		any_changed = true;
-		LOG(DEBUG, "Emitting color_maps_changed");
-		emit_signal("color_maps_changed");
 	}
 
-	// If no maps have been rebuilt, update only individual regions in the array.
-	// Regions marked Edited have been changed by Pasture3DEditor::_operate_map or undo / redo processing.
-	if (!any_changed) {
-		for (const Vector2i &region_loc : _region_locations) {
-			const Pasture3DRegion *region = get_region_ptr(region_loc);
-			if (region && region->is_edited()) {
-				int region_id = get_region_id(region_loc);
-				switch (p_map_type) {
-					case TYPE_HEIGHT:
-						_generated_height_maps.update(region->get_height_map(), region_id);
-						LOG(DEBUG, "Emitting height_maps_changed");
-						emit_signal("height_maps_changed");
-						break;
-					case TYPE_CONTROL:
-						_generated_control_maps.update(region->get_control_map(), region_id);
-						LOG(DEBUG, "Emitting control_maps_changed");
-						emit_signal("control_maps_changed");
-						break;
-					case TYPE_COLOR:
-						_generated_color_maps.update(region->get_color_map(), region_id);
-						LOG(DEBUG, "Emitting color_maps_changed");
-						emit_signal("color_maps_changed");
-						break;
-					default:
-						_generated_height_maps.update(region->get_height_map(), region_id);
-						_generated_control_maps.update(region->get_control_map(), region_id);
-						_generated_color_maps.update(region->get_color_map(), region_id);
-						LOG(DEBUG, "Emitting height_maps_changed");
-						emit_signal("height_maps_changed");
-						LOG(DEBUG, "Emitting control_maps_changed");
-						emit_signal("control_maps_changed");
-						LOG(DEBUG, "Emitting color_maps_changed");
-						emit_signal("color_maps_changed");
-						break;
+	// An image that no longer matches its array's shape (region size, format, mipmaps) cannot go up as a
+	// single layer, so that array is recreated instead.
+	auto shape_ok = [&](const int p, const int t, const Pasture3DRegion *p_region) -> bool {
+		const Ref<Image> &ph = _pools[p].placeholders[t];
+		if (ph.is_null()) {
+			return false;
+		}
+		if (p_region->is_coarse() && p_region->get_texel_ratio() != get_coarse_store_ratio()) {
+			// Its upload is a copy built to the coarse arrays' size (_gpu_map).
+			return ph->get_size() == V2I(_region_size >> _coarse_store_shift);
+		}
+		const Ref<Image> p_img = p_region->get_map(MapType(t));
+		return p_img.is_valid() && p_img->get_size() == ph->get_size() &&
+				p_img->get_format() == ph->get_format() && p_img->has_mipmaps() == ph->has_mipmaps();
+	};
+	for (int p = 0; p < POOL_MAX; p++) {
+		for (int t = 0; t < TYPE_MAX; t++) {
+			if (_pools[p].gens[t].is_dirty()) {
+				continue;
+			}
+			for (const Vector2i &loc : _pools[p].slots.keys()) {
+				const Pasture3DRegion *region = get_region_ptr(loc);
+				const int slot = _pools[p].slots[loc];
+				if (region && (region->is_edited() || fresh[p].has(slot)) && !shape_ok(p, t, region)) {
+					LOG(DEBUG, "Region ", loc, " map ", t, " changed shape; recreating its texture array");
+					_pools[p].gens[t].clear();
+					break;
 				}
 			}
 		}
 	}
+
+	// Recreate dirty arrays in full. A pool with no regions and no arrays stays empty and silent.
+	bool rebuilt[POOL_MAX][TYPE_MAX] = {};
+	bool signal[TYPE_MAX] = { false, false, false };
+	for (int p = 0; p < POOL_MAX; p++) {
+		for (int t = 0; t < TYPE_MAX; t++) {
+			GeneratedTexture &gen = _pools[p].gens[t];
+			if (!gen.is_dirty()) {
+				continue;
+			}
+			const bool had_rid = gen.get_rid().is_valid() || _pools[p].maps[t].size() > 0;
+			if (_pools[p].slots.is_empty() && !had_rid) {
+				continue;
+			}
+			LOG(EXTREME, "Regenerating pool ", p, " texture array ", t, " from regions");
+			_build_array(PoolId(p), MapType(t));
+			rebuilt[p][t] = true;
+			signal[t] = true;
+			any_changed = true;
+		}
+	}
+	if (rebuilt[POOL_FINE][TYPE_HEIGHT] || rebuilt[POOL_COARSE][TYPE_HEIGHT]) {
+		calc_height_range();
+	}
+
+	// Fresh slots: exactly one layer per map type
+	bool any_fresh = false;
+	for (int p = 0; p < POOL_MAX; p++) {
+		SlotPool &pool = _pools[p];
+		for (const int slot : fresh[p]) {
+			const Pasture3DRegion *region = get_region_ptr(Vector2i(pool.locations[slot]));
+			if (!region) {
+				continue;
+			}
+			any_fresh = true;
+			for (int t = 0; t < TYPE_MAX; t++) {
+				if (rebuilt[p][t] || !pool.gens[t].get_rid().is_valid()) {
+					continue;
+				}
+				const Ref<Image> img = _gpu_map(region, MapType(t));
+				pool.maps[t][slot] = img;
+				pool.gens[t].update(img, slot);
+				_stat_layer_uploads++;
+				signal[t] = true;
+			}
+		}
+	}
+	if (any_fresh) {
+		calc_height_range();
+	}
+
+	// Regions marked Edited have been changed by Pasture3DEditor::_operate_map or undo / redo processing, and
+	// restitched ones by the stitch above (height only): re-upload their layer of each requested map type
+	// that was not recreated above.
+	for (const Vector2i &region_loc : _region_locations) {
+		const Pasture3DRegion *region = get_region_ptr(region_loc);
+		const bool stitched = restitched.has(region_loc);
+		if (!region || !(region->is_edited() || stitched)) {
+			continue;
+		}
+		const PoolId p = _pool_of(region);
+		SlotPool &pool = _pools[p];
+		const int slot = pool.slots.get(region_loc, -1);
+		if (slot < 0 || fresh[p].has(slot)) {
+			continue;
+		}
+		for (int t = 0; t < TYPE_MAX; t++) {
+			if (rebuilt[p][t] || !pool.gens[t].get_rid().is_valid() || (p_map_type != TYPE_MAX && p_map_type != t) ||
+					(!region->is_edited() && t != TYPE_HEIGHT)) {
+				continue;
+			}
+			const Ref<Image> img = _gpu_map(region, MapType(t));
+			pool.maps[t][slot] = img;
+			pool.gens[t].update(img, slot);
+			_stat_layer_uploads++;
+			signal[t] = true;
+		}
+	}
+
+	for (int t = 0; t < TYPE_MAX; t++) {
+		if (signal[t]) {
+			any_changed = true;
+			LOG(DEBUG, "Emitting ", SIGNALS[t]);
+			emit_signal(SIGNALS[t]);
+		}
+	}
+
 	if (any_changed) {
 		LOG(DEBUG, "Emitting maps_changed");
 		emit_signal("maps_changed");
@@ -1218,6 +2200,11 @@ void Pasture3DData::composite_region(const Vector2i &p_region_loc, const Rect2i 
 		_composite_color_region(region, p_region_loc, rect);
 	}
 	region->set_edited(true);
+	// The composited runtime image changed, so it has to reach disk. Per-sample layer writes already mark
+	// their region, but a whole-layer recomposite (layer remove/move/opacity, an undo restore) came only
+	// through here and did not: the next save skipped the region and its file kept the old composite. A
+	// reload then compares index signatures and trusts the file, so the file must be what was composited.
+	region->set_modified(true);
 	if (p_update) {
 		// Reuse the is_edited() fast path: only edited regions are pushed to the GPU.
 		update_maps(TYPE_HEIGHT, false, false);
@@ -1246,7 +2233,7 @@ void Pasture3DData::_accumulate_height(real_t *p_acc, const Vector2i &p_region_l
 		if (!layer->has_region(p_region_loc)) {
 			continue; // (C) per-region cull.
 		}
-		const int ts = layer->get_tile_size();
+		const int ts = layer->get_region_tile_size(p_region_loc);
 		const real_t op = layer->get_opacity();
 		const int bm = (int)layer->get_blend_mode();
 		const int tx0 = rect_x / ts;
@@ -1354,6 +2341,40 @@ PackedFloat32Array Pasture3DData::composite_height_below(const int p_below_layer
 			if (ix0 >= ix1 || iz0 >= iz1) {
 				continue;
 			}
+			const int r = region->get_texel_ratio();
+			if (r > 1) {
+				// Coarse: composite the texels under these vertices, then read each vertex bilinearly on the
+				// lattice, the far edge held (as get_height_below_point does).
+				const int m = region->get_map_size();
+				const int fx0 = ox + ix0 - rx * rsz;
+				const int fz0 = oz + iz0 - ry * rsz;
+				const int fx1 = ox + ix1 - rx * rsz;
+				const int fz1 = oz + iz1 - ry * rsz;
+				const int cx0 = fx0 / r;
+				const int cz0 = fz0 / r;
+				const int cx1 = MIN(m, (fx1 - 1) / r + 2);
+				const int cz1 = MIN(m, (fz1 - 1) / r + 2);
+				const int cw = cx1 - cx0;
+				acc.assign((size_t)cw * (cz1 - cz0), NAN);
+				_accumulate_height(acc.data(), loc, Rect2i(cx0, cz0, cw, cz1 - cz0), p_below_layer_id);
+				auto at = [&](const int p_cx, const int p_cz) -> real_t {
+					return acc[(size_t)(MIN(p_cz, m - 1) - cz0) * cw + (MIN(p_cx, m - 1) - cx0)];
+				};
+				for (int iz = iz0; iz < iz1; iz++) {
+					const int fz = oz + iz - ry * rsz;
+					const int jz = fz / r;
+					const real_t tz = real_t(fz - jz * r) / real_t(r);
+					for (int ix = ix0; ix < ix1; ix++) {
+						const int fx = ox + ix - rx * rsz;
+						const int jx = fx / r;
+						const real_t tx = real_t(fx - jx * r) / real_t(r);
+						const real_t top = _lerp_hold(at(jx, jz), at(jx + 1, jz), tx);
+						const real_t bot = _lerp_hold(at(jx, jz + 1), at(jx + 1, jz + 1), tx);
+						optr[iz * p_gw + ix] = _lerp_hold(top, bot, tz);
+					}
+				}
+				continue;
+			}
 			const int rw = ix1 - ix0;
 			const int rh = iz1 - iz0;
 			const Rect2i rect(ox + ix0 - rx * rsz, oz + iz0 - ry * rsz, rw, rh);
@@ -1391,6 +2412,29 @@ real_t Pasture3DData::get_height_below_point(const int p_below_layer_id, const V
 	if (p_img_pos.x < 0 || p_img_pos.x >= _region_size || p_img_pos.y < 0 || p_img_pos.y >= _region_size) {
 		return NAN;
 	}
+	const int r = region->get_texel_ratio();
+	if (r == 1) {
+		return _height_below_px(p_below_layer_id, p_region_loc, p_img_pos);
+	}
+	// Coarse: bilinear on the lattice, the far edge held (a neighbour's layers are not read here).
+	const int m = region->get_map_size();
+	const Vector2i i0(p_img_pos.x / r, p_img_pos.y / r);
+	const real_t tx = real_t(p_img_pos.x - i0.x * r) / real_t(r);
+	const real_t ty = real_t(p_img_pos.y - i0.y * r) / real_t(r);
+	const Vector2i i1(MIN(i0.x + 1, m - 1), MIN(i0.y + 1, m - 1));
+	const real_t h00 = _height_below_px(p_below_layer_id, p_region_loc, i0);
+	const real_t h10 = tx > 0.f ? _height_below_px(p_below_layer_id, p_region_loc, Vector2i(i1.x, i0.y)) : h00;
+	const real_t h01 = ty > 0.f ? _height_below_px(p_below_layer_id, p_region_loc, Vector2i(i0.x, i1.y)) : h00;
+	const real_t h11 = (tx > 0.f && ty > 0.f) ? _height_below_px(p_below_layer_id, p_region_loc, i1) : (tx > 0.f ? h10 : h01);
+	return _lerp_hold(_lerp_hold(h00, h10, tx), _lerp_hold(h01, h11, tx), ty);
+}
+
+real_t Pasture3DData::_height_below_px(const int p_below_layer_id, const Vector2i &p_region_loc, const Vector2i &p_img_pos) {
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	const int map_size = region ? region->get_map_size() : 0;
+	if (p_img_pos.x < 0 || p_img_pos.x >= map_size || p_img_pos.y < 0 || p_img_pos.y >= map_size) {
+		return NAN;
+	}
 	real_t dst = NAN;
 	const int end = MIN(p_below_layer_id, _layer_stack->get_layer_count());
 	for (int i = 0; i < end; i++) {
@@ -1398,7 +2442,7 @@ real_t Pasture3DData::get_height_below_point(const int p_below_layer_id, const V
 		if (!layer || !layer->is_visible() || layer->get_map_type() != TYPE_HEIGHT || !layer->has_region(p_region_loc)) {
 			continue;
 		}
-		const int ts = layer->get_tile_size();
+		const int ts = layer->get_region_tile_size(p_region_loc);
 		const Vector2i tile_coord(p_img_pos.x / ts, p_img_pos.y / ts);
 		Ref<Image> tile = layer->get_tile(p_region_loc, tile_coord);
 		if (tile.is_null()) {
@@ -1514,10 +2558,10 @@ void Pasture3DData::_composite_control_region(Pasture3DRegion *p_region, const V
 
 	// Seed accumulator from base layer (if present and has region) or fallback to current control_map
 	const float *ctrl_ptr = reinterpret_cast<const float *>(control_map->ptr());
-	const int rsz = _region_size;
+	const int rsz = control_map->get_width(); // The region's map size, smaller on a coarse region
 
 	if (base && base->has_region(p_region_loc)) {
-		const int ts = base->get_tile_size();
+		const int ts = base->get_region_tile_size(p_region_loc);
 		const int tx0 = rect_x / ts;
 		const int tx1 = (rect_x + rect_w - 1) / ts;
 		const int ty0 = rect_y / ts;
@@ -1569,7 +2613,7 @@ void Pasture3DData::_composite_control_region(Pasture3DRegion *p_region, const V
 		if (!layer || layer->is_base() || !layer->is_visible() || layer->get_map_type() != TYPE_CONTROL || !layer->has_region(p_region_loc)) {
 			continue;
 		}
-		const int ts = layer->get_tile_size();
+		const int ts = layer->get_region_tile_size(p_region_loc);
 		const int tx0 = rect_x / ts;
 		const int tx1 = (rect_x + rect_w - 1) / ts;
 		const int ty0 = rect_y / ts;
@@ -1644,7 +2688,7 @@ void Pasture3DData::_composite_color_region(Pasture3DRegion *p_region, const Vec
 	}
 	const int base_idx = _layer_stack->find_base_layer(TYPE_COLOR);
 	const Pasture3DLayer *base = base_idx >= 0 ? _layer_stack->get_layer_ptr(base_idx) : nullptr;
-	const int rsz = _region_size;
+	const int rsz = color_map->get_width(); // The region's map size, smaller on a coarse region
 
 	struct AccumColor {
 		float r = 0.f;
@@ -1658,7 +2702,7 @@ void Pasture3DData::_composite_color_region(Pasture3DRegion *p_region, const Vec
 
 	// Seed accumulator from base layer (if present and has region) or fallback to current color_map
 	if (base && base->has_region(p_region_loc)) {
-		const int ts = base->get_tile_size();
+		const int ts = base->get_region_tile_size(p_region_loc);
 		const int tx0 = rect_x / ts;
 		const int tx1 = (rect_x + rect_w - 1) / ts;
 		const int ty0 = rect_y / ts;
@@ -1719,7 +2763,7 @@ void Pasture3DData::_composite_color_region(Pasture3DRegion *p_region, const Vec
 			continue;
 		}
 		const real_t op = layer->get_opacity();
-		const int ts = layer->get_tile_size();
+		const int ts = layer->get_region_tile_size(p_region_loc);
 		const int tx0 = rect_x / ts;
 		const int tx1 = (rect_x + rect_w - 1) / ts;
 		const int ty0 = rect_y / ts;
@@ -1810,7 +2854,7 @@ void Pasture3DData::composite_area(const AABB &p_area, const bool p_update) {
 			}
 			// composite_region clamps the rect to the region; an empty rect would mean the whole region, so
 			// skip a region the area only grazes to a zero-width pixel rect (nothing to composite there).
-			const Rect2i px_rect = _region_pixel_rect(p_area, loc);
+			const Rect2i px_rect = _region_map_rect(p_area, region);
 			if (px_rect.has_area()) {
 				composite_region(loc, px_rect, p_update);
 			}
@@ -1836,18 +2880,20 @@ int Pasture3DData::_ensure_typed_base(const MapType p_map_type) {
 	base->set_blend_mode(Pasture3DLayer::REPLACE);
 	base->set_base(true);
 	base->set_reserved(true); // Internal; not a user-editable layer.
+	// Into the stack before its tiles: that is where it learns a coarse region's tile edge.
+	idx = _layer_stack->add_layer_ref(base);
 	for (const Vector2i &region_loc : _regions.keys()) {
 		Pasture3DRegion *region = get_region_ptr(region_loc);
 		if (!region || region->is_deleted()) {
 			continue;
 		}
 		Ref<Image> src = region->get_map_ptr(p_map_type);
-		if (src.is_valid() && src->get_width() == _region_size && src->get_height() == _region_size) {
+		const int m = region->get_map_size();
+		if (src.is_valid() && src->get_width() == m && src->get_height() == m) {
 			base->set_region_image(region_loc, Image::create_from_data(src->get_width(), src->get_height(), src->has_mipmaps(), src->get_format(), src->get_data()));
 		}
 	}
 	base->set_modified(true);
-	idx = _layer_stack->add_layer_ref(base);
 	// A non-Base layer now exists, so the height Base must own its buffer too (live-recomposite safety).
 	_unalias_base_layer();
 	return idx;
@@ -1858,6 +2904,7 @@ void Pasture3DData::_adopt_region_into_bases(Pasture3DRegion *p_region) {
 		return;
 	}
 	const Vector2i loc = p_region->get_location();
+	_sync_region_map_size(loc); // Every region joining the stack passes through here
 	const int layer_count = _layer_stack->get_layer_count();
 	for (int i = 0; i < layer_count; i++) {
 		Pasture3DLayer *base = _layer_stack->get_layer_ptr(i);
@@ -1868,12 +2915,13 @@ void Pasture3DData::_adopt_region_into_bases(Pasture3DRegion *p_region) {
 		if (src.is_null()) {
 			continue;
 		}
-		if (src->get_width() != base->get_tile_size() || src->get_height() != base->get_tile_size()) {
+		const int base_ts = base->get_region_tile_size(loc);
+		if (src->get_width() != base_ts || src->get_height() != base_ts) {
 			// A base synthesized before a region-size change carries a stale tile size (e.g. a stack
 			// saved by an older build). An empty base can simply be re-sized to match; one with pixel
 			// data can't be fixed here, and silently skipping would leave the region uncovered forever —
 			// warn so the mismatch is visible.
-			if (base->get_region_locations().is_empty()) {
+			if (base->get_region_locations().is_empty() && !p_region->is_coarse()) {
 				base->set_tile_size(src->get_width());
 			} else {
 				LOG(WARN, "Base layer '", base->get_layer_name(), "' tile size ", base->get_tile_size(),
@@ -1977,6 +3025,47 @@ Vector2i Pasture3DData::_global_to_region_pixel(const Vector3 &p_global_position
 	return img_pos.clamp(V2I_ZERO, V2I(_region_size - 1));
 }
 
+bool Pasture3DData::_layer_pixel(const Pasture3DRegion *p_region, const Vector2i &p_fine, const bool p_lattice_only, Vector2i &r_px) const {
+	const int r = p_region->get_texel_ratio();
+	if (r == 1) {
+		r_px = p_fine;
+		return true;
+	}
+	if (p_lattice_only && (p_fine.x % r != 0 || p_fine.y % r != 0)) {
+		return false;
+	}
+	r_px = Vector2i(p_fine.x / r, p_fine.y / r); // p_fine is region-local, so non-negative
+	return true;
+}
+
+Rect2i Pasture3DData::_region_map_rect(const AABB &p_area, const Pasture3DRegion *p_region) const {
+	const Rect2i fine = _region_pixel_rect(p_area, p_region->get_location());
+	const int r = p_region->get_texel_ratio();
+	if (r == 1 || !fine.has_area()) {
+		return fine;
+	}
+	const Vector2i lo((fine.position.x + r - 1) / r, (fine.position.y + r - 1) / r);
+	const Vector2i hi((fine.get_end().x + r - 1) / r, (fine.get_end().y + r - 1) / r);
+	return Rect2i(lo, hi - lo);
+}
+
+void Pasture3DData::_sync_region_map_size(const Vector2i &p_region_loc) {
+	if (_layer_stack.is_null()) {
+		return;
+	}
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	_layer_stack->set_region_map_size(p_region_loc, region && region->is_coarse() ? region->get_map_size() : 0);
+}
+
+void Pasture3DData::_sync_region_map_sizes() {
+	if (_layer_stack.is_null()) {
+		return;
+	}
+	for (const Vector2i &loc : _regions.keys()) {
+		_sync_region_map_size(loc);
+	}
+}
+
 int Pasture3DData::find_layer_by_owner(const String &p_owner_id) const {
 	return _layer_stack.is_valid() ? _layer_stack->find_layer_by_owner(p_owner_id) : -1;
 }
@@ -2038,6 +3127,9 @@ void Pasture3DData::set_height_on_layer(const int p_layer_id, const Vector3 &p_g
 	if (!region || region->is_deleted()) {
 		return; // No region here; skip silently (the tool may sweep beyond the terrain bounds).
 	}
+	if (!_layer_pixel(region, img_pos, true, img_pos)) {
+		return; // Off a coarse region's lattice: its texel is written at its own vertex
+	}
 	layer->set_sample(region_loc, img_pos, p_height, p_weight);
 	if (p_composite) {
 		composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
@@ -2057,6 +3149,9 @@ void Pasture3DData::add_height_on_layer(const int p_layer_id, const Vector3 &p_g
 	if (!region || region->is_deleted()) {
 		return;
 	}
+	if (!_layer_pixel(region, img_pos, true, img_pos)) {
+		return; // A delta applied at every fine vertex would reach a coarse texel r^2 times
+	}
 	// Accumulate within this layer (uncovered reads as 0); the blend mode decides how it stacks below.
 	real_t current = layer->get_weight(region_loc, img_pos) > 0.f ? layer->get_value(region_loc, img_pos) : 0.f;
 	layer->set_sample(region_loc, img_pos, current + p_delta, p_weight);
@@ -2073,6 +3168,10 @@ real_t Pasture3DData::get_layer_height(const int p_layer_id, const Vector3 &p_gl
 	}
 	Vector2i region_loc;
 	Vector2i img_pos = _global_to_region_pixel(p_global_position, region_loc);
+	const Pasture3DRegion *region = get_region_ptr(region_loc);
+	if (region) {
+		_layer_pixel(region, img_pos, false, img_pos);
+	}
 	return layer->get_value(region_loc, img_pos);
 }
 
@@ -2089,6 +3188,7 @@ void Pasture3DData::set_control_on_layer(const int p_layer_id, const Vector3 &p_
 	if (!region || region->is_deleted()) {
 		return;
 	}
+	_layer_pixel(region, img_pos, false, img_pos); // Control and colour take the texel under the point
 	// Control is a packed uint32 stored as float bits in the R channel (same encoding as the region map).
 	layer->set_sample(region_loc, img_pos, as_float(uint32_t(p_control)), p_weight);
 	if (p_composite) {
@@ -2126,6 +3226,7 @@ void Pasture3DData::set_color_on_layer(const int p_layer_id, const Vector3 &p_gl
 	if (!region || region->is_deleted()) {
 		return;
 	}
+	_layer_pixel(region, img_pos, false, img_pos);
 	layer->set_sample_color(region_loc, img_pos, p_color, p_weight);
 	if (p_composite) {
 		composite_region(region_loc, Rect2i(img_pos, V2I(1)), false);
@@ -2219,9 +3320,9 @@ void Pasture3DData::clear_layer_in_area(const int p_layer_id, const AABB &p_area
 		return; // No stack / invalid layer: nothing to clear (plain-terrain writes go to the Base image).
 	}
 	// A layer tiled at region granularity has one tile per region; sub-tile clearing then degrades to
-	// clearing that whole tile. Sub-tiled layers (the default) drop only the tiles the AABB overlaps.
-	const bool region_granular = layer->get_tile_size() >= _region_size;
-	const int ts = layer->get_tile_size();
+	// clearing that whole tile. Sub-tiled layers (the default) drop only the tiles the AABB overlaps. A coarse
+	// region's tile covers more ground than the caller's tile-aligned box, so there only the texels in the
+	// box lose their coverage.
 	Vector3 mn = p_area.position;
 	Vector3 mx = p_area.position + p_area.size;
 	Vector2i loc_min = get_region_location(mn);
@@ -2238,10 +3339,15 @@ void Pasture3DData::clear_layer_in_area(const int p_layer_id, const AABB &p_area
 				continue;
 			}
 			bool cleared = false;
-			const Rect2i px_rect = region_granular ? Rect2i() : _region_pixel_rect(p_area, loc);
+			const bool coarse = region->is_coarse();
+			const int ts = layer->get_region_tile_size(loc);
+			const bool region_granular = !coarse && ts >= _region_size;
+			const Rect2i px_rect = region_granular ? Rect2i() : _region_map_rect(p_area, region);
 			if (region_granular) {
 				layer->clear_region(loc);
 				cleared = true;
+			} else if (coarse) {
+				cleared = layer->clear_samples_in_rect(loc, px_rect);
 			} else {
 				cleared = layer->clear_tiles_in_rect(loc, px_rect);
 			}
@@ -2252,7 +3358,9 @@ void Pasture3DData::clear_layer_in_area(const int p_layer_id, const AABB &p_area
 					// Tiles NOT overlapping the AABB (e.g. a co-located feature in another sub-tile) keep
 					// their existing composite. An empty rect (region-granular) means the whole region.
 					Rect2i comp_rect; // empty => whole region
-					if (!region_granular && px_rect.has_area()) {
+					if (coarse) {
+						comp_rect = px_rect;
+					} else if (!region_granular && px_rect.has_area()) {
 						const int x0 = (px_rect.position.x / ts) * ts;
 						const int y0 = (px_rect.position.y / ts) * ts;
 						const int x1 = ((px_rect.position.x + px_rect.size.x + ts - 1) / ts) * ts;
@@ -2299,10 +3407,8 @@ void Pasture3DData::set_pixel(const MapType p_map_type, const Vector3 &p_global_
 		LOG(ERROR, "No active region found at: ", p_global_position);
 		return;
 	}
-	Vector2i global_offset = region_loc * _region_size;
-	Vector3 descaled_pos = p_global_position / _vertex_spacing;
-	Vector2i img_pos = Vector2i(descaled_pos.x - global_offset.x, descaled_pos.z - global_offset.y);
-	img_pos = img_pos.clamp(V2I_ZERO, V2I(_region_size - 1));
+	// On a coarse region this writes the lattice texel at or before the position.
+	const Vector2i img_pos = region->world_to_pixel(p_global_position, _vertex_spacing);
 	Image *map = region->get_map_ptr(p_map_type);
 	if (map) {
 		map->set_pixelv(img_pos, p_pixel);
@@ -2323,10 +3429,8 @@ Color Pasture3DData::get_pixel(const MapType p_map_type, const Vector3 &p_global
 	if (region->is_deleted()) {
 		return COLOR_NAN;
 	}
-	Vector2i global_offset = region_loc * _region_size;
-	Vector3 descaled_pos = p_global_position / _vertex_spacing;
-	Vector2i img_pos = Vector2i(descaled_pos.x - global_offset.x, descaled_pos.z - global_offset.y);
-	img_pos = img_pos.clamp(V2I_ZERO, V2I(_region_size - 1));
+	// Nearest-below lattice texel. Heights on a coarse region are interpolated by get_height instead.
+	const Vector2i img_pos = region->world_to_pixel(p_global_position, _vertex_spacing);
 	Image *map = region->get_map_ptr(p_map_type);
 	if (map) {
 		return map->get_pixelv(img_pos);
@@ -2342,23 +3446,459 @@ real_t Pasture3DData::get_height(const Vector3 &p_global_position) const {
 	Vector3 pos = p_global_position;
 	const real_t &step = _vertex_spacing;
 	pos.y = 0.f;
+	// The vertex at or before the position, as get_pixel always chose it.
+	const Vector2i v00(int(Math::floor(pos.x / step)), int(Math::floor(pos.z / step)));
 	// Round to nearest vertex
 	Vector3 pos_round = pos.snapped(Vector3(step, 0.f, step));
 	// If requested position is close to a vertex, return its height
 	if ((pos - pos_round).length_squared() < 0.0001f) {
-		return get_pixel(TYPE_HEIGHT, pos).r;
+		return get_height_at_vertex(Vector2i(int(Math::round(pos.x / step)), int(Math::round(pos.z / step))));
 	} else {
-		// Otherwise, bilinearly interpolate 4 surrounding vertices
-		Vector3 pos00 = Vector3(floor(pos.x / step) * step, 0.f, floor(pos.z / step) * step);
-		real_t ht00 = get_pixel(TYPE_HEIGHT, pos00).r;
-		Vector3 pos01 = pos00 + Vector3(0.f, 0.f, step);
-		real_t ht01 = get_pixel(TYPE_HEIGHT, pos01).r;
-		Vector3 pos10 = pos00 + Vector3(step, 0.f, 0.f);
-		real_t ht10 = get_pixel(TYPE_HEIGHT, pos10).r;
+		// Otherwise, bilinearly interpolate 4 surrounding vertices. On a coarse region each vertex is itself
+		// bilinear on the coarse lattice, and a fine cell lies inside one coarse cell, so this is exactly the
+		// coarse bilinear surface.
+		Vector3 pos00 = Vector3(v00.x * step, 0.f, v00.y * step);
+		real_t ht00 = get_height_at_vertex(v00);
+		real_t ht01 = get_height_at_vertex(v00 + Vector2i(0, 1));
+		real_t ht10 = get_height_at_vertex(v00 + Vector2i(1, 0));
+		real_t ht11 = get_height_at_vertex(v00 + Vector2i(1, 1));
 		Vector3 pos11 = pos00 + Vector3(step, 0.f, step);
-		real_t ht11 = get_pixel(TYPE_HEIGHT, pos11).r;
 		return bilerp(ht00, ht01, ht10, ht11, pos00, pos11, pos);
 	}
+}
+
+real_t Pasture3DData::get_height_at_vertex(const Vector2i &p_vertex) const {
+	const Vector2i loc = V2I_DIVIDE_FLOOR(p_vertex, _region_size);
+	const Pasture3DRegion *region = get_region_ptr(loc);
+	if (!region || region->is_deleted()) {
+		return NAN;
+	}
+	const Vector2i fine = p_vertex - loc * _region_size;
+	if (region->is_coarse()) {
+		return _coarse_height(region, loc, fine);
+	}
+	const Image *map = region->get_map_ptr(TYPE_HEIGHT);
+	return map ? map->get_pixelv(fine).r : NAN;
+}
+
+real_t Pasture3DData::_coarse_height(const Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Vector2i &p_fine) const {
+	const Image *map = p_region->get_map_ptr(TYPE_HEIGHT);
+	if (!map) {
+		return NAN;
+	}
+	const int r = p_region->get_texel_ratio();
+	const int m = p_region->get_map_size();
+	const Vector2i i0(p_fine.x / r, p_fine.y / r);
+	const Vector2i rem = p_fine - i0 * r;
+	// A lattice corner past the far edge is the neighbour's vertex. With no neighbour there, hold the edge.
+	auto corner = [&](const int ix, const int iy) -> real_t {
+		if (ix < m && iy < m) {
+			return map->get_pixel(ix, iy).r;
+		}
+		const real_t h = get_height_at_vertex(p_region_loc * _region_size + Vector2i(ix * r, iy * r));
+		return std::isnan(h) ? map->get_pixel(MIN(ix, m - 1), MIN(iy, m - 1)).r : h;
+	};
+	if (rem == V2I_ZERO) {
+		return corner(i0.x, i0.y);
+	}
+	const real_t tx = real_t(rem.x) / real_t(r);
+	const real_t ty = real_t(rem.y) / real_t(r);
+	const real_t h00 = corner(i0.x, i0.y);
+	const real_t h10 = rem.x ? corner(i0.x + 1, i0.y) : h00;
+	const real_t h01 = rem.y ? corner(i0.x, i0.y + 1) : h00;
+	const real_t h11 = (rem.x && rem.y) ? corner(i0.x + 1, i0.y + 1) : (rem.x ? h10 : h01);
+	return Math::lerp(Math::lerp(h00, h10, tx), Math::lerp(h01, h11, tx), ty);
+}
+
+Ref<Image> Pasture3DData::_gpu_map(const Pasture3DRegion *p_region, const MapType p_type) const {
+	const Ref<Image> map = p_region->get_map(p_type);
+	const int store = get_coarse_store_ratio();
+	const int r = p_region->get_texel_ratio();
+	if (!p_region->is_coarse() || map.is_null() || store == 0 || r == store) {
+		return map;
+	}
+	// Coarser than the coarse arrays: a copy at their ratio. The shader reads height only at this region's
+	// lattice texels, which are exact; between them the copy is the CPU's bilinear surface. Control and
+	// colour repeat the cell at or before, as the CPU reads them.
+	const int n = _region_size / store;
+	const int q = r / store;
+	const Vector2i loc = p_region->get_location();
+	Ref<Image> up = Image::create_empty(n, n, false, map->get_format());
+	for (int y = 0; y < n; y++) {
+		for (int x = 0; x < n; x++) {
+			if (p_type == TYPE_HEIGHT) {
+				up->set_pixel(x, y, Color(_coarse_height(p_region, loc, Vector2i(x * store, y * store)), 0.f, 0.f, 1.f));
+			} else {
+				up->set_pixel(x, y, map->get_pixel(x / q, y / q));
+			}
+		}
+	}
+	if (p_type == TYPE_COLOR && map->has_mipmaps()) {
+		up->generate_mipmaps();
+	}
+	return up;
+}
+
+Ref<Image> Pasture3DData::_full_size_map(const Pasture3DRegion *p_region, const MapType p_type) const {
+	const Ref<Image> map = p_region->get_map(p_type);
+	if (!p_region->is_coarse() || map.is_null()) {
+		return map;
+	}
+	// Sampled as the CPU samples, so an export is what get_height and get_pixel answer.
+	const int rs = _region_size;
+	const int r = p_region->get_texel_ratio();
+	const Vector2i loc = p_region->get_location();
+	Ref<Image> up = Image::create_empty(rs, rs, false, map->get_format());
+	for (int y = 0; y < rs; y++) {
+		for (int x = 0; x < rs; x++) {
+			if (p_type == TYPE_HEIGHT) {
+				up->set_pixel(x, y, Color(_coarse_height(p_region, loc, Vector2i(x, y)), 0.f, 0.f, 1.f));
+			} else {
+				up->set_pixel(x, y, map->get_pixel(x / r, y / r));
+			}
+		}
+	}
+	return up;
+}
+
+void Pasture3DData::_resample_region(Pasture3DRegion *p_region, const Vector2i &p_region_loc, const int p_ratio) {
+	const int rs = _region_size;
+	const int r0 = p_region->get_texel_ratio();
+	const int r1 = p_ratio;
+	const int m1 = rs / r1;
+	const Image *old_h = p_region->get_map_ptr(TYPE_HEIGHT);
+	const Image *old_c = p_region->get_map_ptr(TYPE_CONTROL);
+	const Image *old_col = p_region->get_map_ptr(TYPE_COLOR);
+	if (!old_h || !old_c || !old_col) {
+		LOG(ERROR, "Region ", p_region_loc, " is missing a map; cannot resample");
+		return;
+	}
+	// Height: the surface the CPU answers today at each fine vertex (neighbours included on a coarse
+	// region), clamped to the region.
+	auto H = [&](int fx, int fy) -> real_t {
+		fx = CLAMP(fx, 0, rs - 1);
+		fy = CLAMP(fy, 0, rs - 1);
+		return r0 > 1 ? _coarse_height(p_region, p_region_loc, Vector2i(fx, fy)) : old_h->get_pixel(fx, fy).r;
+	};
+	Ref<Image> h = Image::create_empty(m1, m1, false, FORMAT[TYPE_HEIGHT]);
+	Ref<Image> c = Image::create_empty(m1, m1, false, FORMAT[TYPE_CONTROL]);
+	Ref<Image> col = Image::create_empty(m1, m1, false, FORMAT[TYPE_COLOR]);
+	const int half = r1 / 2;
+	for (int jy = 0; jy < m1; jy++) {
+		for (int jx = 0; jx < m1; jx++) {
+			const int fx = jx * r1;
+			const int fy = jy * r1;
+			// Height. Coarsening: a box of width r1 centred on the lattice vertex, half weight on its two end
+			// vertices so the weights sum to r1 per axis. Refining: the surface at the vertex.
+			real_t hv;
+			if (r1 > r0) {
+				double sum = 0.0;
+				for (int dy = -half; dy <= half; dy++) {
+					const double wy = (dy == -half || dy == half) ? 0.5 : 1.0;
+					for (int dx = -half; dx <= half; dx++) {
+						const double wx = (dx == -half || dx == half) ? 0.5 : 1.0;
+						sum += wx * wy * double(H(fx + dx, fy + dy));
+					}
+				}
+				hv = real_t(sum / double(r1 * r1));
+			} else {
+				hv = H(fx, fy);
+			}
+			h->set_pixel(jx, jy, Color(hv, 0.f, 0.f, 1.f));
+			// Control is bit-packed and cannot be averaged: the texel at the lattice vertex.
+			c->set_pixel(jx, jy, old_c->get_pixel(fx / r0, fy / r0));
+			// Colour covers a cell, [j * r1, (j + 1) * r1): the mean of the old texels in it when coarsening.
+			if (r1 > r0) {
+				const int a = fx / r0;
+				const int b = (fx + r1 - 1) / r0;
+				const int ay = fy / r0;
+				const int by = (fy + r1 - 1) / r0;
+				Color acc(0.f, 0.f, 0.f, 0.f);
+				for (int y = ay; y <= by; y++) {
+					for (int x = a; x <= b; x++) {
+						acc += old_col->get_pixel(x, y);
+					}
+				}
+				col->set_pixel(jx, jy, acc / real_t((b - a + 1) * (by - ay + 1)));
+			} else {
+				col->set_pixel(jx, jy, old_col->get_pixel(fx / r0, fy / r0));
+			}
+		}
+	}
+	col->generate_mipmaps();
+	p_region->set_texel_ratio(r1);
+	p_region->set_height_map(h);
+	p_region->set_control_map(c);
+	p_region->set_color_map(col);
+}
+
+Ref<Pasture3DRegionType> Pasture3DData::load_region_type(const String &p_path) const {
+	const String path = p_path.is_empty() ? String(Pasture3DRegionType::STANDARD_PATH) : p_path;
+	if (_type_cache.has(path)) {
+		return _type_cache[path];
+	}
+	Ref<Pasture3DRegionType> type;
+	if (ResourceLoader::get_singleton()->exists(path)) {
+		type = ResourceLoader::get_singleton()->load(path);
+	}
+	if (type.is_null()) {
+		// A missing type is Standard. A coarse region of it then reads as mismatched, not converted.
+		if (path != String(Pasture3DRegionType::STANDARD_PATH)) {
+			LOG(WARN, "Region type ", path, " not found; its regions are treated as Standard");
+		}
+		if (_fallback_standard.is_null()) {
+			_fallback_standard.instantiate();
+		}
+		type = _fallback_standard;
+	}
+	_type_cache[path] = type;
+	return type;
+}
+
+Ref<Pasture3DRegionType> Pasture3DData::get_region_type_of(const Pasture3DRegion *p_region) const {
+	return p_region ? load_region_type(p_region->get_type_path()) : Ref<Pasture3DRegionType>();
+}
+
+Ref<Pasture3DRegionType> Pasture3DData::get_region_type(const Vector2i &p_region_loc) const {
+	return get_region_type_of(get_region_ptr(p_region_loc));
+}
+
+bool Pasture3DData::is_region_type_mismatched(const Vector2i &p_region_loc) const {
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	return region && region->get_texel_ratio() != get_region_type_of(region)->get_texel_ratio();
+}
+
+bool Pasture3DData::region_has_collision(const Pasture3DRegion *p_region) const {
+	return p_region && get_region_type_of(p_region)->get_collision();
+}
+
+bool Pasture3DData::region_keeps_instances(const Pasture3DRegion *p_region) const {
+	return p_region && get_region_type_of(p_region)->get_instancer_mode() == Pasture3DRegionType::INSTANCER_KEEP;
+}
+
+Error Pasture3DData::set_region_locked(const Vector2i &p_region_loc, const bool p_locked) {
+	Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	if (!region || region->is_deleted()) {
+		LOG(ERROR, "No region at ", p_region_loc);
+		return ERR_DOES_NOT_EXIST;
+	}
+	region->set_locked(p_locked);
+	return OK;
+}
+
+bool Pasture3DData::is_region_locked(const Vector2i &p_region_loc) const {
+	const Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	return region && region->is_locked();
+}
+
+Dictionary Pasture3DData::_resample_layer_tiles(const Pasture3DLayer *p_layer, const Dictionary &p_tiles, const int p_ts0,
+		const int p_r0, const int p_r1, const int p_ts1) const {
+	Dictionary out;
+	if (p_tiles.is_empty()) {
+		return out;
+	}
+	const int rs = _region_size;
+	const int m0 = rs / p_r0;
+	const int m1 = rs / p_r1;
+	const MapType type = p_layer->get_map_type();
+	Image::Format fmt = Image::FORMAT_MAX;
+	for (const Vector2i &coord : Array(p_tiles.keys())) {
+		const Ref<Image> t = p_tiles[coord];
+		if (t.is_valid()) {
+			fmt = t->get_format();
+			break;
+		}
+	}
+	if (fmt == Image::FORMAT_MAX) {
+		return out;
+	}
+	const bool rgba = fmt == Image::FORMAT_RGBA8;
+	const bool rf = fmt == Image::FORMAT_RF;
+	// The overlay's coverage, or none: a Base (and any RF tile) is always covered, and a colour Base's alpha
+	// is roughness, not coverage.
+	const bool has_cov = !p_layer->is_base() && !rf;
+	// An old texel; an absent tile reads uncovered.
+	auto old_px = [&](int x, int y) -> Color {
+		x = CLAMP(x, 0, m0 - 1);
+		y = CLAMP(y, 0, m0 - 1);
+		const Vector2i coord(x / p_ts0, y / p_ts0);
+		const Ref<Image> t = p_tiles.get(coord, Ref<Image>());
+		return t.is_valid() ? t->get_pixel(x - coord.x * p_ts0, y - coord.y * p_ts0) : Color(0.f, 0.f, 0.f, 0.f);
+	};
+	// Height, continuous: at a fine vertex, bilinear on the old lattice (held at the far edge), coverage-
+	// premultiplied so an uncovered texel's value never bleeds in. Returns (value * w, w).
+	auto fine = [&](const int fx, const int fy) -> Vector2 {
+		const int ix = fx / p_r0;
+		const int iy = fy / p_r0;
+		const real_t tx = real_t(fx - ix * p_r0) / real_t(p_r0);
+		const real_t ty = real_t(fy - iy * p_r0) / real_t(p_r0);
+		Vector2 acc;
+		for (int k = 0; k < 4; k++) {
+			const real_t w = (k & 1 ? tx : 1.f - tx) * (k & 2 ? ty : 1.f - ty);
+			if (w == 0.f) {
+				continue;
+			}
+			const Color c = old_px(ix + (k & 1), iy + (k >> 1));
+			const real_t cov = has_cov ? c.g : 1.f;
+			acc += Vector2(c.r * cov, cov) * w;
+		}
+		return acc;
+	};
+	Ref<Image> img = Image::create_empty(m1, m1, false, fmt);
+	const int half = p_r1 / 2;
+	for (int jy = 0; jy < m1; jy++) {
+		for (int jx = 0; jx < m1; jx++) {
+			const int fx = jx * p_r1;
+			const int fy = jy * p_r1;
+			Color c;
+			if (type == TYPE_CONTROL) {
+				// Bit-packed: the old texel at the lattice vertex, coverage and all.
+				c = old_px(fx / p_r0, fy / p_r0);
+			} else if (rgba) {
+				// Colour covers a cell, [j * r1, (j + 1) * r1): coarsening takes the mean of the old texels in it,
+				// alpha-weighted on an overlay; refining takes the texel under the cell.
+				if (p_r1 > p_r0) {
+					const int a = fx / p_r0;
+					const int b = (fx + p_r1 - 1) / p_r0;
+					const int ay = fy / p_r0;
+					const int by = (fy + p_r1 - 1) / p_r0;
+					Color sum(0.f, 0.f, 0.f, 0.f);
+					real_t wsum = 0.f;
+					for (int y = ay; y <= by; y++) {
+						for (int x = a; x <= b; x++) {
+							const Color o = old_px(x, y);
+							const real_t w = has_cov ? o.a : 1.f;
+							sum += Color(o.r * w, o.g * w, o.b * w, o.a);
+							wsum += w;
+						}
+					}
+					const real_t n = real_t((b - a + 1) * (by - ay + 1));
+					c = wsum > 0.f ? Color(sum.r / wsum, sum.g / wsum, sum.b / wsum, sum.a / n) : Color(0.f, 0.f, 0.f, 0.f);
+				} else {
+					c = old_px(fx / p_r0, fy / p_r0);
+				}
+			} else {
+				// Height: coarsening is the box a region coarsens with (width r1 centred on the lattice vertex,
+				// half weight on the ends, clamped to the region); refining is the surface at the vertex.
+				Vector2 acc;
+				if (p_r1 > p_r0) {
+					for (int dy = -half; dy <= half; dy++) {
+						const real_t wy = (dy == -half || dy == half) ? 0.5f : 1.f;
+						for (int dx = -half; dx <= half; dx++) {
+							const real_t wx = (dx == -half || dx == half) ? 0.5f : 1.f;
+							acc += fine(CLAMP(fx + dx, 0, rs - 1), CLAMP(fy + dy, 0, rs - 1)) * (wx * wy);
+						}
+					}
+					acc /= real_t(p_r1 * p_r1);
+				} else {
+					acc = fine(fx, fy);
+				}
+				const real_t v = acc.y > 0.f ? acc.x / acc.y : 0.f;
+				c = Color(v, has_cov ? acc.y : 0.f, 0.f, 1.f);
+			}
+			img->set_pixel(jx, jy, c);
+		}
+	}
+	// Split into the new tile edge; an overlay tile left with no coverage is not kept.
+	for (int ty = 0; ty * p_ts1 < m1; ty++) {
+		for (int tx = 0; tx * p_ts1 < m1; tx++) {
+			const Ref<Image> t = img->get_region(Rect2i(tx * p_ts1, ty * p_ts1, p_ts1, p_ts1));
+			bool covered = !has_cov;
+			for (int y = 0; y < p_ts1 && !covered; y++) {
+				for (int x = 0; x < p_ts1 && !covered; x++) {
+					const Color o = t->get_pixel(x, y);
+					covered = (rgba ? o.a : o.g) > 0.f;
+				}
+			}
+			if (covered) {
+				out[Vector2i(tx, ty)] = t;
+			}
+		}
+	}
+	return out;
+}
+
+Error Pasture3DData::set_region_type(const Vector2i &p_region_loc, const Ref<Pasture3DRegionType> &p_type, const bool p_update) {
+	Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	if (!region || region->is_deleted()) {
+		LOG(ERROR, "No region at ", p_region_loc);
+		return ERR_DOES_NOT_EXIST;
+	}
+	if (p_type.is_null()) {
+		LOG(ERROR, "No region type given");
+		return ERR_INVALID_PARAMETER;
+	}
+	if (region->is_locked()) {
+		LOG(WARN, "Region ", p_region_loc, " is locked; its type was not changed");
+		return ERR_LOCKED;
+	}
+	const String path = p_type->get_path();
+	if (path.is_empty() || !path.begins_with("res://") && !path.begins_with("user://")) {
+		LOG(ERROR, "Region type '", p_type->get_type_name(), "' is not a saved resource. A region stores its type by path: save it first");
+		return ERR_FILE_BAD_PATH;
+	}
+	const int ratio = p_type->get_texel_ratio();
+	if (_region_size / ratio < Pasture3DRegionType::MIN_MAP_SIZE) {
+		LOG(ERROR, "Texel ratio ", ratio, " leaves region size ", _region_size, " under ", Pasture3DRegionType::MIN_MAP_SIZE, " texels");
+		return ERR_INVALID_PARAMETER;
+	}
+	const int old_ratio = region->get_texel_ratio();
+	if (ratio != old_ratio) {
+		// Every layer's tiles over the region follow it to the new resolution, and the stack then recomposites
+		// the region from them. The region maps are resampled too, for the maps no layer of that type covers.
+		// A Base aliasing the region height map is dropped instead and re-aliased to the resampled map.
+		std::vector<Pasture3DLayer *> layers;
+		std::vector<Dictionary> old_tiles;
+		std::vector<int> old_ts;
+		const int layer_count = _layer_stack.is_valid() ? _layer_stack->get_layer_count() : 0;
+		for (int i = 0; i < layer_count; i++) {
+			Pasture3DLayer *layer = _layer_stack->get_layer_ptr(i);
+			if (!layer || !layer->has_region(p_region_loc)) {
+				continue;
+			}
+			const Ref<Image> tile0 = layer->get_tile(p_region_loc, V2I_ZERO);
+			if (!(layer->is_base() && tile0.is_valid() && tile0 == region->get_height_map())) {
+				layers.push_back(layer);
+				old_tiles.push_back(Dictionary(layer->get_tiles()[p_region_loc]));
+				old_ts.push_back(layer->get_region_tile_size(p_region_loc));
+			}
+			layer->clear_region(p_region_loc);
+			layer->set_modified(true);
+		}
+		_resample_region(region, p_region_loc, ratio);
+		_sync_region_map_size(p_region_loc);
+		for (size_t i = 0; i < layers.size(); i++) {
+			const Dictionary tiles = _resample_layer_tiles(layers[i], old_tiles[i], old_ts[i], old_ratio, ratio,
+					layers[i]->get_region_tile_size(p_region_loc));
+			if (!tiles.is_empty()) {
+				layers[i]->restore_region_tiles(p_region_loc, tiles);
+			}
+		}
+		_adopt_region_into_bases(region); // Re-aliases a single-layer Base; a no-op for the others
+		_bump_generation(p_region_loc); // Undo recorded against the old resolution no longer applies
+		if (layer_count > 1) {
+			composite_region(p_region_loc, Rect2i(), false);
+		}
+	}
+	region->set_type_path(path);
+	if (!region_keeps_instances(region) && !region->get_instances().is_empty()) {
+		region->set_instances(Dictionary());
+		if (_terrain) {
+			_terrain->get_instancer()->destroy_by_location(p_region_loc);
+		}
+	}
+	region->set_modified(true);
+	region->set_edited(true);
+	_region_map_dirty = true; // The region map carries the pool, ratio and the type's render flags
+	calc_height_range();
+	if (p_update) {
+		update_maps(TYPE_MAX, false, false);
+		region->set_edited(false);
+		if (_terrain) {
+			_terrain->get_collision()->update(V2I_MAX, true);
+		}
+	}
+	return OK;
 }
 
 Vector3 Pasture3DData::get_normal(const Vector3 &p_global_position) const {
@@ -2569,7 +4109,7 @@ void Pasture3DData::import_images(const TypedArray<Image> &p_images, const Vecto
 	}
 
 	Vector3 descaled_position = p_global_position / _vertex_spacing;
-	int max_dimension = _region_size * REGION_MAP_SIZE / 2;
+	int max_dimension = _region_size * get_region_map_size() / 2;
 	if ((std::abs(descaled_position.x) > max_dimension) || (std::abs(descaled_position.z) > max_dimension)) {
 		LOG(ERROR, "Specify a position within +/-", Vector3(max_dimension, 0.f, max_dimension) * _vertex_spacing);
 		return;
@@ -2622,7 +4162,7 @@ void Pasture3DData::import_images(const TypedArray<Image> &p_images, const Vecto
 	int end_region_z = (int)Math::floor(real_t(img_end_z) / real_t(_region_size));
 
 	// Clamp region indices to valid range
-	int half_region_map = REGION_MAP_SIZE / 2;
+	int half_region_map = get_region_map_size() / 2;
 	start_region_x = CLAMP(start_region_x, -half_region_map, half_region_map - 1);
 	start_region_z = CLAMP(start_region_z, -half_region_map, half_region_map - 1);
 	end_region_x = CLAMP(end_region_x, -half_region_map, half_region_map - 1);
@@ -2662,6 +4202,11 @@ void Pasture3DData::import_images(const TypedArray<Image> &p_images, const Vecto
 					" from img(", src_x, ",", src_z, ") to region(", dst_x, ",", dst_z, ")");
 
 			Ref<Pasture3DRegion> region = get_region(region_loc);
+			if (region.is_valid() && !region->is_deleted() && region->is_coarse()) {
+				LOG(ERROR, "Region ", region_loc, " is coarse (texel ratio ", region->get_texel_ratio(),
+						"); import into it is refused. Set it Standard first");
+				continue;
+			}
 			if (region.is_null()) {
 				region.instantiate();
 				region->set_location(region_loc);
@@ -2976,7 +4521,7 @@ Ref<Image> Pasture3DData::layered_to_image(const MapType p_map_type, const Rect2
 		Rect2i src_rect(overlap.position - region_rect.position, overlap.size);
 		Vector2i dst_pos = overlap.position - export_rect.position;
 		LOG(DEBUG, "Region ", region_loc, ": src=", src_rect, " dst=", dst_pos);
-		img->blit_rect(region->get_map(map_type), src_rect, dst_pos);
+		img->blit_rect(_full_size_map(region, map_type), src_rect, dst_pos); // Full size on a coarse region too
 	}
 	return img;
 }
@@ -2996,15 +4541,15 @@ void Pasture3DData::dump(const bool verbose) const {
 	if (verbose) {
 		for (int i = 0; i < _region_map.size(); i++) {
 			if (_region_map[i]) {
-				LOG(MESG, "Region map array index: ", i, " / ", _region_map.size() - 1, ", Region id: ", _region_map[i]);
+				LOG(MESG, "Region map array index: ", i, " / ", _region_map.size() - 1, ", Slot: ", region_map_decode(_region_map[i]));
 			}
 		}
-		Util::dump_maps(_height_maps, "Height maps");
-		Util::dump_gentex(_generated_height_maps, "height");
-		Util::dump_maps(_control_maps, "Control maps");
-		Util::dump_gentex(_generated_control_maps, "control");
-		Util::dump_maps(_color_maps, "Color maps");
-		Util::dump_gentex(_generated_color_maps, "color");
+		Util::dump_maps(_pools[POOL_FINE].maps[TYPE_HEIGHT], "Height maps");
+		Util::dump_gentex(_pools[POOL_FINE].gens[TYPE_HEIGHT], "height");
+		Util::dump_maps(_pools[POOL_FINE].maps[TYPE_CONTROL], "Control maps");
+		Util::dump_gentex(_pools[POOL_FINE].gens[TYPE_CONTROL], "control");
+		Util::dump_maps(_pools[POOL_FINE].maps[TYPE_COLOR], "Color maps");
+		Util::dump_gentex(_pools[POOL_FINE].gens[TYPE_COLOR], "color");
 	}
 }
 
@@ -3019,7 +4564,6 @@ void Pasture3DData::_bind_methods() {
 	BIND_ENUM_CONSTANT(EXPORT_SLICED);
 	BIND_ENUM_CONSTANT(EXPORT_PER_REGION);
 
-	BIND_CONSTANT(REGION_MAP_SIZE);
 
 	ClassDB::bind_method(D_METHOD("get_region_count"), &Pasture3DData::get_region_count);
 	ClassDB::bind_method(D_METHOD("set_region_locations", "region_locations"), &Pasture3DData::set_region_locations);
@@ -3027,6 +4571,24 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_regions_active", "copy", "deep"), &Pasture3DData::get_regions_active, DEFVAL(false), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("get_regions_all"), &Pasture3DData::get_regions_all);
 	ClassDB::bind_method(D_METHOD("get_region_map"), &Pasture3DData::get_region_map);
+	ClassDB::bind_method(D_METHOD("get_region_map_rid"), &Pasture3DData::get_region_map_rid);
+	ClassDB::bind_static_method("Pasture3DData", D_METHOD("get_region_map_size"), &Pasture3DData::get_region_map_size);
+	ClassDB::bind_static_method("Pasture3DData", D_METHOD("region_map_encode", "slot", "shift", "collapse", "color_only"), &Pasture3DData::region_map_encode, DEFVAL(0), DEFVAL(false), DEFVAL(false));
+	ClassDB::bind_static_method("Pasture3DData", D_METHOD("region_map_decode", "value"), &Pasture3DData::region_map_decode);
+	ClassDB::bind_method(D_METHOD("get_slot_locations"), &Pasture3DData::get_slot_locations);
+	ClassDB::bind_method(D_METHOD("get_coarse_slot_locations"), &Pasture3DData::get_coarse_slot_locations);
+	ClassDB::bind_method(D_METHOD("get_coarse_slot_capacity"), &Pasture3DData::get_coarse_slot_capacity);
+	ClassDB::bind_method(D_METHOD("get_coarse_store_ratio"), &Pasture3DData::get_coarse_store_ratio);
+	ClassDB::bind_method(D_METHOD("get_collapse_ratio_max"), &Pasture3DData::get_collapse_ratio_max);
+	ClassDB::bind_method(D_METHOD("set_seam_stitch_enabled", "enabled"), &Pasture3DData::set_seam_stitch_enabled);
+	ClassDB::bind_method(D_METHOD("is_seam_stitch_enabled"), &Pasture3DData::is_seam_stitch_enabled);
+	ClassDB::bind_method(D_METHOD("get_coarse_maps_rid", "map_type"), &Pasture3DData::get_coarse_maps_rid);
+	ClassDB::bind_method(D_METHOD("get_coarse_maps", "map_type"), &Pasture3DData::get_coarse_maps);
+	ClassDB::bind_static_method("Pasture3DData", D_METHOD("region_id_slot", "id"), &Pasture3DData::region_id_slot);
+	ClassDB::bind_static_method("Pasture3DData", D_METHOD("region_id_is_coarse", "id"), &Pasture3DData::region_id_is_coarse);
+	ClassDB::bind_method(D_METHOD("get_slot_capacity"), &Pasture3DData::get_slot_capacity);
+	ClassDB::bind_method(D_METHOD("get_upload_stats"), &Pasture3DData::get_upload_stats);
+	ClassDB::bind_method(D_METHOD("reset_upload_stats"), &Pasture3DData::reset_upload_stats);
 	ClassDB::bind_static_method("Pasture3DData", D_METHOD("get_region_map_index", "region_location"), &Pasture3DData::get_region_map_index);
 
 	ClassDB::bind_method(D_METHOD("do_for_regions", "area", "callback"), &Pasture3DData::do_for_regions);
@@ -3039,6 +4601,13 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("has_region", "region_location"), &Pasture3DData::has_region);
 	ClassDB::bind_method(D_METHOD("has_regionp", "global_position"), &Pasture3DData::has_regionp);
 	ClassDB::bind_method(D_METHOD("get_region", "region_location"), &Pasture3DData::get_region);
+	ClassDB::bind_method(D_METHOD("load_region_type", "path"), &Pasture3DData::load_region_type);
+	ClassDB::bind_method(D_METHOD("get_region_type", "region_location"), &Pasture3DData::get_region_type);
+	ClassDB::bind_method(D_METHOD("set_region_type", "region_location", "type", "update"), &Pasture3DData::set_region_type, DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("is_region_type_mismatched", "region_location"), &Pasture3DData::is_region_type_mismatched);
+	ClassDB::bind_method(D_METHOD("set_region_locked", "region_location", "locked"), &Pasture3DData::set_region_locked);
+	ClassDB::bind_method(D_METHOD("is_region_locked", "region_location"), &Pasture3DData::is_region_locked);
+	ClassDB::bind_method(D_METHOD("get_height_at_vertex", "vertex"), &Pasture3DData::get_height_at_vertex);
 	ClassDB::bind_method(D_METHOD("get_regionp", "global_position"), &Pasture3DData::get_regionp);
 
 	ClassDB::bind_method(D_METHOD("set_region_modified", "region_location", "modified"), &Pasture3DData::set_region_modified);
@@ -3115,7 +4684,18 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("save_directory", "directory"), &Pasture3DData::save_directory);
 	ClassDB::bind_method(D_METHOD("save_region", "region_location", "directory", "save_16_bit"), &Pasture3DData::save_region, DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("load_directory", "directory"), &Pasture3DData::load_directory);
+	ClassDB::bind_method(D_METHOD("release_region", "region_location", "update"), &Pasture3DData::release_region, DEFVAL(true));
+	ClassDB::bind_static_method("Pasture3DData", D_METHOD("get_region_file_path", "directory", "region_location"), &Pasture3DData::get_region_file_path);
 	ClassDB::bind_method(D_METHOD("load_region", "region_location", "directory", "update"), &Pasture3DData::load_region, DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("unload_region", "region_location", "update", "write_index"), &Pasture3DData::unload_region, DEFVAL(true), DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("write_region_index"), &Pasture3DData::write_region_index);
+	ClassDB::bind_method(D_METHOD("is_region_loaded", "region_location"), &Pasture3DData::is_region_loaded);
+	ClassDB::bind_method(D_METHOD("get_region_index"), &Pasture3DData::get_region_index);
+	ClassDB::bind_method(D_METHOD("get_water_terrain_state", "xz", "level", "margin"), &Pasture3DData::get_water_terrain_state);
+	ClassDB::bind_method(D_METHOD("is_water_hidden", "xz", "level", "margin", "radius"), &Pasture3DData::is_water_hidden);
+	ClassDB::bind_method(D_METHOD("get_region_generation", "region_location"), &Pasture3DData::get_region_generation);
+	ClassDB::bind_method(D_METHOD("get_region_generations"), &Pasture3DData::get_region_generations);
+	ClassDB::bind_method(D_METHOD("restore_layer_tiles", "layer_id", "tiles", "generations"), &Pasture3DData::restore_layer_tiles);
 	ClassDB::bind_method(D_METHOD("save_layers", "directory"), &Pasture3DData::save_layers);
 	ClassDB::bind_method(D_METHOD("load_layers", "directory"), &Pasture3DData::load_layers);
 
@@ -3182,4 +4762,6 @@ void Pasture3DData::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("color_maps_changed"));
 	ADD_SIGNAL(MethodInfo("maps_edited", PropertyInfo(Variant::AABB, "edited_area")));
 	ADD_SIGNAL(MethodInfo("layers_changed"));
+	ADD_SIGNAL(MethodInfo("region_loaded", PropertyInfo(Variant::VECTOR2I, "region_location")));
+	ADD_SIGNAL(MethodInfo("region_unloaded", PropertyInfo(Variant::VECTOR2I, "region_location")));
 }

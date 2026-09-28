@@ -21,6 +21,8 @@ public:
 	bool is_dirty() const { return _dirty; }
 	RID create(const TypedArray<Image> &p_layers);
 	void update(const Ref<Image> &p_image, const int p_layer);
+	// Replaces a Texture2D created by create(Ref<Image>) with a same-sized image, keeping its RID.
+	void update_2d(const Ref<Image> &p_image);
 	RID create(const Ref<Image> &p_image);
 	Ref<Image> get_image() const { return _image; }
 	RID get_rid() const { return _rid; }

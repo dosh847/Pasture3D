@@ -925,6 +925,52 @@ static inline uint16_t _float_to_half(const float p_value) {
  * option rather than the default. Both encodings stay reachable because the sqrt one is now a
  * control that must fail.
  */
+PackedInt32Array Pasture3DUtil::classify_shore_tiles(const PackedVector2Array &p_poly, const Vector2 &p_origin,
+		const real_t p_tile, const Vector2i &p_count, const real_t p_margin) {
+	PackedInt32Array out;
+	if (p_poly.size() < 3 || p_tile <= 0.f || p_count.x < 1 || p_count.y < 1) {
+		return out;
+	}
+	const int cols = p_count.x;
+	const int rows = p_count.y;
+	PackedByteArray inside;
+	inside.resize(cols * rows);
+	// Tile centres: a tile the shore does not come near is on one side of it throughout.
+	_pool_inside_mask(p_poly, (double)p_origin.x + p_tile * 0.5, (double)p_origin.y + p_tile * 0.5,
+			(double)p_tile, cols, rows, inside.ptrw());
+	out.resize(cols * rows);
+	int32_t *o = out.ptrw();
+	const uint8_t *ins = inside.ptr();
+	for (int i = 0; i < cols * rows; i++) {
+		o[i] = ins[i] ? -1 : 0;
+	}
+	// Band: every tile within p_margin of a segment. Long segments are split to pieces no longer than a
+	// tile, so a diagonal shore marks a strip of tiles rather than its whole bounding box.
+	const int n = p_poly.size();
+	const Vector2 *poly = p_poly.ptr();
+	for (int i = 0; i < n; i++) {
+		const Vector2 a = poly[i];
+		const Vector2 b = poly[(i + 1) % n];
+		const int pieces = MAX(1, (int)Math::ceil(a.distance_to(b) / p_tile));
+		for (int k = 0; k < pieces; k++) {
+			const Vector2 p0 = a.lerp(b, real_t(k) / pieces);
+			const Vector2 p1 = a.lerp(b, real_t(k + 1) / pieces);
+			const Vector2 lo = Vector2(MIN(p0.x, p1.x), MIN(p0.y, p1.y)) - Vector2(p_margin, p_margin) - p_origin;
+			const Vector2 hi = Vector2(MAX(p0.x, p1.x), MAX(p0.y, p1.y)) + Vector2(p_margin, p_margin) - p_origin;
+			const int x0 = CLAMP((int)Math::floor(lo.x / p_tile), 0, cols - 1);
+			const int y0 = CLAMP((int)Math::floor(lo.y / p_tile), 0, rows - 1);
+			const int x1 = CLAMP((int)Math::floor(hi.x / p_tile), 0, cols - 1);
+			const int y1 = CLAMP((int)Math::floor(hi.y / p_tile), 0, rows - 1);
+			for (int y = y0; y <= y1; y++) {
+				for (int x = x0; x <= x1; x++) {
+					o[y * cols + x] = 1;
+				}
+			}
+		}
+	}
+	return out;
+}
+
 Ref<Image> Pasture3DUtil::build_shore_sdf(const PackedVector2Array &p_poly, const Vector2 &p_min,
 		const real_t p_texel, const int p_texels, const real_t p_range,
 		const int p_exact_band, const bool p_half_float, const bool p_sqrt_encoding) {
@@ -2874,6 +2920,9 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("build_shore_sdf", "polygon", "min", "texel", "texels", "range",
 					"exact_band", "half_float", "sqrt_encoding"),
 			&Pasture3DUtil::build_shore_sdf, DEFVAL(2), DEFVAL(true), DEFVAL(false));
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("classify_shore_tiles", "polygon", "origin", "tile", "count", "margin"),
+			&Pasture3DUtil::classify_shore_tiles);
 
 	// Image handling
 	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("black_to_alpha", "image"), &Pasture3DUtil::black_to_alpha);

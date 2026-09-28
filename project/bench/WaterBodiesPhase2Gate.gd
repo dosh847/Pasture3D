@@ -85,7 +85,12 @@ const CAPTURE_TOLERANCE := 0.002
 # convincingly stable. If this gate fails on FRAME TIME ALONE while every capture
 # reads 0.000000, RE-RUN IT before believing it; only a deviation that reproduces on
 # the same config across consecutive runs is real.
-const ACCEPTED_MS := {"ocean_high_pitch4": 0.222}
+#
+# terrain_clipmap (accepted 2026-09-26, PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md, "Phase 3 as built"):
+# region streaming phase 3's vertex collapse and coarse reads cost the terrain +10% (0.283 -> 0.312 ms by
+# A/B of the builds), and the user accepted it. 0.314 is HEAD after the phase 4b unloaded-compare fix. This
+# one is not intermittent: it reproduced on every run of every build that has phase 3.
+const ACCEPTED_MS := {"ocean_high_pitch4": 0.222, "terrain_clipmap": 0.314}
 
 var _fail := 0
 var _out_dir := ""
@@ -292,12 +297,18 @@ func _gate_a_neutral() -> void:
 		if ref_ms.has("terrain_clipmap") and ref_ms["terrain_clipmap"] is Dictionary and \
 				ref_ms["terrain_clipmap"].has("median"):
 			var ref_median := float(ref_ms["terrain_clipmap"]["median"])
-			var band := maxf(ref_median * MS_TOLERANCE_FRAC, MS_TOLERANCE_ABS)
-			var delta := tms - ref_median
+			# Against the accepted value when there is one (see ACCEPTED_MS); the frozen reference is
+			# still printed, so the accepted cost stays visible.
+			var base: float = ACCEPTED_MS.get("terrain_clipmap", ref_median)
+			var band := maxf(base * MS_TOLERANCE_FRAC, MS_TOLERANCE_ABS)
+			var delta := tms - base
 			compared += 1
-			print("      vs ref %.4f ms -> delta %+.4f ms (%+.1f%%) %s" % [
-				ref_median, delta, 100.0 * delta / maxf(ref_median, 1e-9),
-				"ok" if absf(delta) <= band else "OVER"])
+			if ACCEPTED_MS.has("terrain_clipmap"):
+				print("      ACCEPTED (region streaming phase 3): vs accepted %.4f ms; original reference was %.4f" % [
+					base, ref_median])
+			print("      vs %s %.4f ms -> delta %+.4f ms (%+.1f%%) %s" % [
+				"accepted" if ACCEPTED_MS.has("terrain_clipmap") else "ref", base, delta,
+				100.0 * delta / maxf(base, 1e-9), "ok" if absf(delta) <= band else "OVER"])
 			if absf(delta) > band:
 				_fail += 1
 				print("      !! the TERRAIN clipmap regressed; §6.2's mesher rewiring is not neutral")

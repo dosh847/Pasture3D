@@ -51,6 +51,12 @@ private:
 	bool _locked = false;
 	bool _reserved = false; // Owned by a tool/node; user edits disabled
 	String _owner_id; // Optional: node path / generator id that owns it
+	// Stable identity across saves, reorders and removals. A region's layer slice is written when the
+	// region unloads and read back when it loads, and the stack can be reordered or lose layers in
+	// between, so the slice matches its layers by uid, not by index. Empty on layers saved before uids
+	// existed; ensure_layer_uid() assigns one lazily so a legacy slice (whose layers have none) is still
+	// recognisable as legacy and falls back to index matching.
+	String _uid;
 	MapType _map_type = TYPE_HEIGHT; // height (RGF value+weight), control (RGF bits+weight), color (RGBA8 rgb+weight-alpha)
 	int _tile_size = 64; // Sub-region tile edge in vertices (power of two, <= region_size)
 	// Dense, always-covered base of its map type (Phase 7). The bottom of each map type's sub-stack:
@@ -66,10 +72,14 @@ private:
 
 	// Working data, not saved
 	bool _modified = false;
+	// region_location -> map size, for coarse regions only (streaming phase 2b). Shared with the stack and
+	// every layer in it (a Dictionary copy shares storage), and kept by Pasture3DData. Over a coarse region
+	// pixels are that region's MAP pixels, and a tile's edge is min(_tile_size, map size).
+	Dictionary _region_map_sizes;
 
 	// Helpers
-	Vector2i _tile_coord(const Vector2i &p_px) const { return V2I_DIVIDE_FLOOR(p_px, _tile_size); }
-	Vector2i _tile_local(const Vector2i &p_px, const Vector2i &p_tile_coord) const { return p_px - p_tile_coord * _tile_size; }
+	Vector2i _tile_coord(const Vector2i &p_px, const int p_ts) const { return V2I_DIVIDE_FLOOR(p_px, p_ts); }
+	Vector2i _tile_local(const Vector2i &p_px, const Vector2i &p_tile_coord, const int p_ts) const { return p_px - p_tile_coord * p_ts; }
 	Image *_get_tile_ptr(const Vector2i &p_region_loc, const Vector2i &p_tile_coord) const;
 	Ref<Image> _get_or_create_tile(const Vector2i &p_region_loc, const Vector2i &p_tile_coord);
 	Image::Format _overlay_format() const; // RGBA8 for color, RGF for height/control overlays
@@ -98,12 +108,27 @@ public:
 	bool is_reserved() const { return _reserved; }
 	void set_owner_id(const String &p_owner_id);
 	String get_owner_id() const { return _owner_id; }
+	void set_layer_uid(const String &p_uid) { _uid = p_uid; }
+	String get_layer_uid() const { return _uid; }
+	String ensure_layer_uid(); // Assigns a fresh uid if empty; returns it.
 	void set_map_type(const MapType p_map_type);
 	MapType get_map_type() const { return _map_type; }
 	void set_tile_size(const int p_tile_size);
 	int get_tile_size() const { return _tile_size; }
 	void set_base(const bool p_is_base);
 	bool is_base() const { return _is_base; }
+	// The tile edge over one region: _tile_size, or a coarse region's map size if that is smaller.
+	int get_region_tile_size(const Vector2i &p_region_loc) const {
+		if (_region_map_sizes.is_empty()) {
+			return _tile_size;
+		}
+		const int m = int(_region_map_sizes.get(p_region_loc, 0));
+		return (m > 0 && m < _tile_size) ? m : _tile_size; // (MIN here is the blend mode)
+	}
+	void set_region_map_sizes(const Dictionary &p_sizes) { _region_map_sizes = p_sizes; }
+	// Zero coverage for the region pixels in p_px_rect, keeping the tiles. A coarse tile covers more ground
+	// than a brush's tile-aligned dirty box, so dropping it whole would lose what other brushes wrote there.
+	bool clear_samples_in_rect(const Vector2i &p_region_loc, const Rect2i &p_px_rect);
 
 	// Pixel access. p_px is a vertex offset within the region [0, region_size).
 	// set_sample writes a scalar value + weight (height / control overlays, FORMAT_RGF tiles).

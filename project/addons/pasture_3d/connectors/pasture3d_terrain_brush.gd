@@ -25,6 +25,8 @@ const PASTURE_3D_MAPTYPE_HEIGHT: int = 0  # Pasture3DData.MapType.TYPE_HEIGHT
 const PASTURE_3D_MAPTYPE_CONTROL: int = 1 # Pasture3DData.MapType.TYPE_CONTROL
 const PASTURE_3D_MAPTYPE_COLOR: int = 2   # Pasture3DData.MapType.TYPE_COLOR
 const BLEND_REPLACE: int = 0 # Pasture3DLayer.BlendMode.REPLACE
+## Reserved _snapshot_owner key holding the region generations the snapshot was taken at.
+const SNAPSHOT_GENERATIONS_KEY := "@generations"
 const BLEND_ADD: int = 1     # Pasture3DLayer.BlendMode.ADD
 const BLEND_MAX: int = 2     # Pasture3DLayer.BlendMode.MAX
 const BLEND_MIN: int = 3     # Pasture3DLayer.BlendMode.MIN
@@ -746,6 +748,9 @@ func _get_configuration_warnings() -> PackedStringArray:
 		warnings.append("The Pasture3D terrain has no regions yet — add regions in Pasture3D first.")
 	if _get_splines().is_empty() and _wants_own_splines():
 		warnings.append("Add at least one spline (press Add Spline, or add a Path3D child).")
+	if _blocked_by_unloaded:
+		warnings.append("This brush reaches a region that is not loaded, so it does not update live. "
+			+ "Bake it with a scope (Selected / All regions) to load its neighbours and apply it.")
 	warnings.append_array(_mask_preview_warnings())
 	warnings.append_array(_modifier_warnings())
 	warnings.append_array(_layer_brush_membership_warnings())
@@ -1240,8 +1245,50 @@ func _rebind(old_owner: String) -> void:
 ## ---- Refresh scheduling (debounced; defers while a handle is being dragged) ----
 
 ## True when auto-refresh may queue work: not mid-programmatic-edit, enabled, in the editor and tree.
+## Set by `_can_auto_refresh` when the footprint reaches an unloaded region (the "needs bake" flag).
+var _blocked_by_unloaded: bool = false
+
 func _can_auto_refresh() -> bool:
-	return not _suspend_auto and not _snap_in_progress and auto_refresh and Engine.is_editor_hint() and is_inside_tree()
+	if _suspend_auto or _snap_in_progress or not auto_refresh or not Engine.is_editor_hint() or not is_inside_tree():
+		return false
+	# §F live editing: a brush reaching an unloaded region never runs live (a partial solve would be a
+	# different result that seams at the unloaded edge); it waits for a scoped bake instead.
+	var blocked := reaches_unloaded_region()
+	if blocked != _blocked_by_unloaded:
+		_blocked_by_unloaded = blocked
+		update_configuration_warnings()
+	return not blocked
+
+
+## The live-editing rule: true when a footprint box touches a region that exists (is indexed) but is not
+## loaded. Such a brush waits for a scoped bake (connectors/pasture3d_scoped_bake.gd).
+func reaches_unloaded_region() -> bool:
+	if not is_instance_valid(terrain) or terrain.data == null:
+		return false
+	var data = terrain.data
+	var index = data.get_region_index()
+	if index == null:
+		return false
+	var size := float(terrain.get_region_size()) * float(terrain.get_vertex_spacing())
+	for box: AABB in _own_footprints():
+		for r: Vector2i in footprint_regions(box, size):
+			if index.has_entry(r) and not data.is_region_loaded(r):
+				return true
+	return false
+
+
+## Regions a world box touches, for a region `p_size` metres on a side. The far edge is exclusive: a box
+## ending exactly on a region border does not reach the next region.
+static func footprint_regions(p_box: AABB, p_size: float) -> Array:
+	var out: Array = []
+	var x0 := int(floor(p_box.position.x / p_size))
+	var z0 := int(floor(p_box.position.z / p_size))
+	var x1 := int(ceil(p_box.end.x / p_size)) - 1
+	var z1 := int(ceil(p_box.end.z / p_size)) - 1
+	for z in range(z0, maxi(z0, z1) + 1):
+		for x in range(x0, maxi(x0, x1) + 1):
+			out.append(Vector2i(x, z))
+	return out
 
 
 ## Whole-layer refresh scheduler — for param / transform / structural changes (anything that isn't a
@@ -1446,7 +1493,11 @@ func force_bake_modifiers() -> void:
 ## tool's splines, then one GPU push. Sharing means editing one tool must repaint its layer-mates so an
 ## overlapping mate isn't left wiped (the road-connector partial-refresh hazard); with the O(cells)
 ## rasteriser each bake is cheap. `extra_clears` lets a rebind also drop a departing tool's footprint.
-func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> void:
+##
+## `p_only` restricts the bake to those of the layer's tools, in the order the full bake paints them: the
+## scoped bake's chunks (PASTURE3D_BAKE_MEMORY_SPEC.md M5). It is only correct for a set no other tool on the
+## layer overlaps, because clearing the set's footprints erases whatever else painted there.
+func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array, p_only: Array = []) -> void:
 	if not is_configured():
 		return
 	# Also reached by the detach and rebind paths, not only by refresh(). A brush that paints nothing owns
@@ -1455,6 +1506,8 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array) -> vo
 	if not _paints():
 		return
 	var sibs := _tools_on_owner(owner)
+	if not p_only.is_empty():
+		sibs = sibs.filter(func(s) -> bool: return p_only.has(s))
 	var sib_gens := _arm_gens(sibs)
 	var _trace_tok := Pasture3DBakeTrace.bake_begin(self, "full")
 	var layer_id := _ensure_layer_for(owner, owner == _layer_owner)
@@ -3536,11 +3589,16 @@ func _editor_undo() -> EditorUndoRedoManager:
 
 
 ## Deep snapshot of all tool layers' tiles for owner and affiliated channels (empty Dictionary if no layer yet = the initial state).
-func _snapshot_owner(owner: String) -> Dictionary:
+##
+## `p_exclude` ({Vector2i: true}) leaves regions out entirely: no tiles copied and no generation recorded,
+## which is what a restore reads as "not part of this snapshot" and skips. Bake All passes the regions it
+## loaded for the bake (PASTURE3D_BAKE_MEMORY_SPEC.md M1): it releases them before anyone can undo, the
+## release bumps their generation, and a restore would skip them anyway, so copying them bought nothing.
+func _snapshot_owner(owner: String, p_exclude: Dictionary = {}) -> Dictionary:
 	var out := {}
 	if not is_instance_valid(terrain) or not terrain.data or not terrain.data.has_method("get_layer_stack"):
 		var layer := _resolve_layer_for(owner)
-		return _copy_tiles(layer.get_tiles()) if layer else {}
+		return _copy_tiles(layer.get_tiles(), p_exclude) if layer else {}
 	var stack = terrain.data.get_layer_stack()
 	if stack == null:
 		return out
@@ -3548,7 +3606,13 @@ func _snapshot_owner(owner: String) -> Dictionary:
 	for idx in aff_indices:
 		var l = stack.get_layer(idx)
 		if l != null:
-			out[l.get_owner_id()] = _copy_tiles(l.get_tiles())
+			out[l.get_owner_id()] = _copy_tiles(l.get_tiles(), p_exclude)
+	# Reserved key (owner ids never start with '@'): the region generations this snapshot belongs to, so a
+	# restore skips a region unloaded or reloaded in between.
+	var gens: Dictionary = terrain.data.get_region_generations()
+	for loc in p_exclude:
+		gens.erase(loc)
+	out[SNAPSHOT_GENERATIONS_KEY] = gens
 	return out
 
 
@@ -3561,6 +3625,7 @@ func _restore_owner(owner: String, snapshot: Dictionary) -> void:
 	if not is_instance_valid(terrain) or not terrain.data or not terrain.data.has_method("composite_region"):
 		return
 	var stack = terrain.data.get_layer_stack() if terrain.data.has_method("get_layer_stack") else null
+	var generations = snapshot.get(SNAPSHOT_GENERATIONS_KEY)
 	var is_legacy := false
 	if not snapshot.is_empty():
 		var first_key = snapshot.keys()[0]
@@ -3587,6 +3652,10 @@ func _restore_owner(owner: String, snapshot: Dictionary) -> void:
 				if l == null:
 					continue
 				var oid: String = l.get_owner_id()
+				if generations is Dictionary:
+					for loc in terrain.data.restore_layer_tiles(idx, snapshot.get(oid, {}), generations):
+						regions[loc] = true
+					continue
 				for loc in l.get_tiles():
 					regions[loc] = true
 				if snapshot.has(oid):
@@ -3673,10 +3742,13 @@ func detach_placement() -> bool:
 
 
 ## Deep copy of the {region_loc -> {tile_coord -> Image}} tile structure. get_tiles/set_tiles share
-## the live Images by reference, so we copy each one (copy_from) to keep snapshots immutable.
-func _copy_tiles(tiles: Dictionary) -> Dictionary:
+## the live Images by reference, so we copy each one (copy_from) to keep snapshots immutable. Regions in
+## `p_exclude` are left out.
+func _copy_tiles(tiles: Dictionary, p_exclude: Dictionary = {}) -> Dictionary:
 	var out := {}
 	for loc in tiles:
+		if p_exclude.has(loc):
+			continue
 		var inner: Dictionary = tiles[loc]
 		var inner_copy := {}
 		for coord in inner:
@@ -5656,7 +5728,12 @@ func _on_modifier_changed() -> void:
 	# moved, and the rect path's "nothing changed" skip reads exactly that. Say what did change.
 	_stack_dirty = true
 	_queue_mask_preview()
-	_arm_refresh_timer()
+	# Gated like the other three schedulers. It used to arm unconditionally, so a modifier edit on a brush
+	# with Auto Refresh off (or over an unloaded region, or headless) still armed a tick, and a tick that
+	# lands during a Live-only deferred run SUPERSEDES it: the run was cancelled by an edit that was never
+	# going to bake. The dirty state above stays recorded either way.
+	if _can_auto_refresh():
+		_arm_refresh_timer()
 	update_configuration_warnings()
 
 

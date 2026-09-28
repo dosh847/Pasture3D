@@ -732,6 +732,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 			"suppress": prof["suppress"],
 			"opts": {
 				"crown": prof["crown"],
+				"crown_mode": t.crown_mode if t != null else 0,
 				"cut_batter": prof["cut_batter"],
 				"fill_batter": prof["fill_batter"],
 				# See `grade_surface`: the ground refuses junction footprints per CELL, not the whole

@@ -1,0 +1,830 @@
+# Pasture3D Bake Memory — Load/Unload Cycle of the Scoped Bake
+
+**Document Version:** 1.0
+**Target Engine:** Godot 4.7+ / GDExtension (C++ / GDScript)
+**Status:** ACCEPTED 2026-09-26 (decisions in §11). Phases 1–7 committed (`bd459c91`, `3bbdcc53`,
+`af6a5ee2`, `53f20709`, `82dd8b3d`, `bda8c021`, `e4ea0902`); phase 8 re-measured 2026-09-27 (§2.2 after,
+§9.6 default budget), not yet committed.
+**Evidence:** `project/bench/RegionBakeMemoryProbe.gd`, runs of 2026-09-26: a small world (6 × 6 regions of
+256 m) and a large one (16 × 16 regions of 1024 m, 256 km²).
+**Builds on:** `PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md`, whose last item this is ("investigate memory
+management for the bake's load/unload cycle, especially All regions"). Streaming phases 0–6 are in
+commits up to `89c887a0`.
+
+---
+
+## 1. Scope
+
+The scoped bake (`connectors/pasture3d_scoped_bake.gd`) was built to bound **correctness**: a region is
+held until every owner that touches it has baked, then saved and unloaded. This spec is about the other
+half, **peak memory**. The headline: streaming bounds the regions that are loaded, but several things the
+bake keeps next to them grow with the size of the world. On the large fixture, an "All regions" bake peaks
+at 5.65 GB of RAM, and 3 GB of GPU arrays stay allocated after it has released every region.
+
+| ID | Finding | Status |
+|----|---------|--------|
+| M1 | Bake All's undo snapshots copy every baked tile, and none of it can be restored | **Built — Phase 1** |
+| M2 | GPU slot capacity never shrinks | **Built — Phase 2** |
+| M3 | Each unload rewrites the region index and layer manifest | **Built — Phase 3** |
+| M4 | Owners bake in global layer order, so regions are held across the whole run | **Built — Phase 4** |
+| M5 | The default shared layer makes one owner the size of the world | **Built — Phase 5** |
+| M6 | Frozen modifier caches stay in memory for every baked brush | **Built — Phase 6** |
+| M7 | The only budget is a region count, with no back-pressure | **Built — Phase 7** |
+| — | Are released regions and their layer tiles freed? | **Yes.** Measured, see §2.3 |
+| — | Per-brush stamp cache | **Not a finding.** Native routes never fill it, see §2.4 |
+
+Order matters. M1 and M2 are the biggest and the simplest, and each one changes the numbers every later
+phase is measured against. M7 (a budget) comes last because a budget is only useful once the peak it
+guards is no larger than it has to be.
+
+---
+
+## 2. Measurements
+
+### 2.1 The probe
+
+`RegionBakeMemoryProbe.gd` builds a world of N × N blank regions in `user://region_bake_memory_probe`,
+places brushes, bakes once with everything loaded (so every owner's layer exists on disk), unloads
+everything, and then runs an "All regions" bake the way Bake All does: `load_for`, a `before` snapshot,
+`bake_owner`, an `after` snapshot, `mark_baked`, `release_after`. Three fixtures:
+
+- **F1:** one Mound per region, all on the default shared "Mounds" layer, so one owner.
+- **F2:** one Mound straddling each right and each lower region boundary, each on its own layer, created in
+  a seeded shuffled order. Layer order is creation order, so it is spatially arbitrary.
+- **F3:** one Mound per region, each on its own layer, each with a Frozen erosion modifier.
+
+It is a measurement, not a pass/fail gate, but its measures have witnesses:
+
+- the peak-loaded simulator must reproduce the measured peak for the order the bake used;
+- a region held by a variable must count as alive after unload (the weakref control);
+- F3 must fill the erosion cache (the witness for the brush-cache measure);
+- the undo snapshots must be non-empty.
+
+Run: `--headless --path project res://bench/RegionBakeMemoryProbe.tscn -- --n=16 --size=1024 --fixtures=F1`.
+Peak working set comes from the harness sampling the engine process (the `_console` exe is a wrapper).
+
+### 2.2 Results
+
+Small world, 6 × 6 × 256 m (the whole world's maps are 30 MB):
+
+| | F1 | F2 | F3 |
+|---|---|---|---|
+| Owners | 1 | 60 | 36 |
+| Peak regions loaded | 36 / 36 | 32 / 36 | 1 / 36 |
+| Peak under a dependency-respecting greedy order | 36 | 20 | 1 |
+| Undo snapshots, before + after | 9.0 MB | 15.0 MB | 9.0 MB |
+| Share of snapshots in regions loaded for the bake | 100% | 100% | 100% |
+| Frozen erosion caches after the bake | — | — | 2.1 MB |
+| Slot capacity after the bake, 0 regions loaded | 48 | 48 | 48 |
+
+Large world, 16 × 16 × 1024 m (the whole world's maps are 3.4 GB):
+
+| | F1 | F2 | F3 |
+|---|---|---|---|
+| Owners (layers) | 1 (2) | 480 (481) | 256 (257) |
+| Peak regions loaded | 256 / 256 | 220 / 256 | 1 / 256 |
+| Peak under a dependency-respecting greedy order | 256 | 134 | 1 |
+| Bake time (of which save + unload) | 105 s (21 s) | 163 s (78 s) | 128 s (41 s) |
+| Undo snapshots, before + after | 1024 MB | 1080 MB | 1024 MB |
+| Share in regions loaded for the bake | 100% | 100% | 100% |
+| Frozen erosion caches after the bake | — | — | 222 MB |
+| RAM during the bake: start → peak → after | 149 MB → 5.65 GB → 1.20 GB | 189 MB → 4.81 GB → 1.31 GB | 595 MB → 1.67 GB → 1.65 GB |
+| RAM after dropping snapshots and caches | 159 MB | 200 MB | 160 MB |
+| Peak working set of the whole run | 5.8 GB | 5.3 GB | 5.7 GB |
+| Slot capacity after the bake, 0 loaded | 256 (3 GB of GPU arrays) | 256 | 256 |
+
+RAM is Godot's allocator counter (`MEMORY_STATIC`), which holds the maps, tiles and snapshots. The
+working-set row covers the whole run, **including the setup**, which loads every region for its first
+bake; on F3 that setup, not the bake, is the peak. The bake's own peak is the "RAM during the bake" row.
+F3 starts at 595 MB because the setup's own frozen solves are already cached.
+
+**After M1–M7 (phase 8, 2026-09-27)**, the same large world and the same probe. Bake All, no memory budget
+(`--budget-mb` absent). F2's figures come from its phase 7 unbudgeted run on the same code:
+
+| | F1 | F2 | F3 |
+|---|---|---|---|
+| Owners as planned | 1 owner in 256 chunks | 480 | 256 |
+| Peak regions loaded | 1 / 256 (was 256) | 17 / 256 (was 220) | 1 / 256 (was 1) |
+| Estimated peak (M7 gauge) | 14 MB | 241 MB | 14 MB |
+| Bake time (of which save + unload) | 88 s (12 s), was 105 s (21 s) | 89–222 s (15–35 s), was 163 s (78 s) | 116 s (16 s), was 128 s (41 s) |
+| Undo snapshots after the bake | 0 MB (was 1024 MB) | 0 MB (was 1080 MB) | 0 MB (was 1024 MB) |
+| Frozen caches in memory after the bake | — | — | 0 MB, 222 MB spilled (was 222 MB held) |
+| RAM during the bake: start → peak → after | 152 → 181 → 160 MB (peak was 5.65 GB) | 207 → 560 → 232 MB (peak was 4.81 GB) | 606 → 626 → 178 MB (after was 1.65 GB) |
+| Slot capacity after the bake, 0 loaded | 0 (was 256) | 0 | 0 |
+| Peak working set of the whole run | 5.2 GB | 5.3 GB | 5.7 GB |
+
+- Every bake now holds, while baking, a small multiple of the owner being baked, and leaves behind
+  roughly what it started with.
+- The whole-run working set is unchanged, because it is the probe's **setup**, which loads every region
+  for its first bake. It is not the bake.
+- F2's bake time is noise. Two runs of the identical schedule (the unbudgeted one and a 256 MB run that
+  evicted nothing) took 222 s and 89 s. Wall times on this machine vary with disk cache and load, and
+  only compare within a run.
+- F3's start is still 606 MB, because the setup's own frozen solves are cached in memory: the setup is
+  one ALL_LOADED bake, which releases nothing and so spills nothing. The bake that follows ends at 178 MB.
+
+Reading across:
+
+- F1 and F2 are dominated by loaded regions (M4, M5); F3, whose owners each touch one region, is not, and
+  yet still ends the bake at 1.65 GB with one region loaded: 1 GB of snapshots (M1), 222 MB of frozen
+  caches (M6), and the rest the owners' layer bookkeeping.
+- Every fixture ends with 1 GB or more of snapshots that undo cannot use (M1).
+- Save + unload is 20–48% of the bake, and grows with the layer count (M3): F2's 481-layer manifest is
+  rewritten on every one of its 256 unloads.
+
+### 2.3 Released regions are freed
+
+Every region object and every layer tile image the bake loaded was weakref'd at load. After the bake, none
+is alive (0 of 16 896 on the large F1). The control (a region held by a variable) is seen as alive, then
+freed once dropped. There are no `Ref` cycles holding released regions. RAM after the bake returns to its
+starting level once the undo snapshots are dropped (159 MB against 149 MB).
+
+### 2.4 The stamp cache is not a finding
+
+`_stamp_cache` holds one full-resolution float grid per spline. It read zero entries on all three
+fixtures, including F3, whose brushes carry a modifier stack. Both a plain Mound and one with modifiers
+take the native `stamp_mound_loop` route, which never stores a stamp; only GDScript fallback routes do.
+It is left alone.
+
+---
+
+## 3. M1 — Undo snapshots
+
+### 3.1 Evidence
+
+Bake All (`pasture3d_sim_manager.gd`, `_bake_all_owner`) takes `_snapshot_owner(owner)` before and after
+each owner. A snapshot is a deep copy (`_copy_tiles`) of every tile of every layer the owner writes, for
+every loaded region. The pair is kept:
+
+1. in `p_ctx` for the whole run;
+2. in the EditorUndoRedo action as the do/undo arguments;
+3. in `last_bake_report["undo"]`.
+
+On every fixture, 100% of the snapshot bytes belong to regions the bake loaded and later released. On the
+large F1 that is 1 GB, and it is what keeps RAM at 1.2 GB after the bake instead of 159 MB.
+
+### 3.2 It is also a correctness problem
+
+A snapshot stores the region generations it was taken at, and `_restore_owner` skips any region whose
+generation has changed (`restore_layer_tiles(idx, tiles, generations)`). Unloading bumps the generation.
+So **undoing an All-regions bake restores nothing in any region the bake loaded**: the memory buys an undo
+that silently does nothing for most of the world. Only regions that were already loaded, and so stay
+loaded, are restored.
+
+### 3.3 Decision (resolved: option (a))
+
+Undo of a bake over regions that are no longer loaded. Options:
+
+- **(a) No undo for released regions (recommended as the first step).** Don't snapshot a region the bake
+  loads. Undo covers what was loaded before the bake and says so: the report lists the regions whose
+  bake cannot be undone, and the manager says so before and after the bake.
+- **(b) Disk-backed undo.** Before the bake first saves a region, copy its region file and layer slice into
+  a per-action backup directory. Undo copies the files back and reloads any that are loaded. It costs disk
+  and I/O, not RAM, and it makes undo real. It needs a policy for pruning backups when the undo history
+  drops the action.
+
+Recommendation: build (a) now, because it is the memory fix and it makes the current behaviour honest. Add
+(b) as a later phase if undo over unloaded regions is wanted.
+
+### 3.4 Fix, option (a) — built
+
+- `_snapshot_owner(owner, p_exclude)` and `_copy_tiles(tiles, p_exclude)` leave excluded regions out
+  entirely: no tiles, and no generation. A restore reads a region with no generation as "not in this
+  snapshot" and skips it (`restore_layer_tiles`), so the filter needs no change on the restore side.
+- Every Bake All snapshot (before, after, and the road-settle rebakes) excludes
+  `_not_undoable(ctx)`: the scoped report's `loaded_for_bake` so far. The before snapshot is taken after
+  `load_for`, so an owner's own loaded neighbours are already in it.
+- The report gains `not_undoable` (the regions loaded for the bake).
+- There is no dock for Bake All; the Sim Manager is its UI. So: the `bake_scope` tooltip says undo covers
+  only regions that were loaded; the editor bake prints a notice before it starts when the scope is not
+  All Loaded Regions; and the manager's configuration warnings name the count after a bake that had any.
+- `debug_unfiltered_undo` restores the pre-M1 snapshots, for the controls.
+- Also added: `bake_budget_regions` on the manager (default 64, passed to the scoped bake), so a probe can
+  bake a world-sized owner through Bake All. It is a plain var; M7 replaces it.
+
+### 3.5 Gate
+
+- **[U1]** After an All-regions bake from an empty loaded set, the snapshots hold 0 bytes. Control: the
+  unfiltered snapshot (a debug flag) holds more than 0.
+- **[U2]** A region that was loaded before the bake is still restored by undo, byte for byte. Control: a
+  region that was loaded for the bake is not, and is listed in `not_undoable`.
+- **[U3]** RAM after the bake is within 10% of RAM before it (large fixture). Control: the unfiltered run
+  exceeds it.
+
+### 3.6 Results (2026-09-26)
+
+`bench/RegionBakeUndoGate.tscn`: PASS, 3/3 criteria (U1, U2, and the warning with its control). The probe
+now bakes through `bake_all_brushes_now` and measures U3 (`--unfiltered` is the control):
+
+| Large F1 (16 × 16 × 1024 m) | Filtered (M1) | Unfiltered (control) |
+|---|---|---|
+| Undo snapshots | 0 MB | 1024 MB |
+| RAM: start → peak → after | 151 MB → 5.13 GB → 160 MB (+6.0%) | 151 MB → 5.65 GB → 1.20 GB (+699%) |
+| Peak working set | 5.3 GB | 5.8 GB |
+
+Small world, all three fixtures: after the bake +0.1% to +0.4% filtered, +9% to +16% unfiltered. The peak
+falls too, because the snapshots used to accumulate during the bake. Regression gates BrushRegistry,
+RegionBakeScope, RegionUnload and TestBrushSinkFootprint pass.
+
+---
+
+## 4. M2 — Slot capacity never shrinks
+
+### 4.1 Evidence
+
+`_sync_slots` (`pasture_3d_data.cpp`) grows each pool in `SLOT_CHUNK` (16) steps and never shrinks it.
+`_build_array` fills free slots with a full-size placeholder. After a bake that held the whole world, the
+texture arrays keep that capacity with no regions loaded: 256 slots on the large fixture, 3 GB of height,
+control and colour at 1024², before mipmaps. The runtime streamer shares the code, so a game that passes
+through a dense area keeps its peak capacity for the rest of the session.
+
+### 4.2 Fix — built
+
+- At the end of `_sync_slots`, when `used * 2 + SLOT_CHUNK <= capacity` (less than half used, by half a
+  chunk or more), the pool compacts: the used slots are packed down from 0 in slot order, the capacity
+  becomes the next multiple of `SLOT_CHUNK` at or above the used count (0 when nothing is loaded), the
+  pool's images are cleared so `_build_array` refills them, and the slots already handed out this call are
+  renumbered. It returns "capacity changed", which recreates the arrays as growth already did.
+- The region map is rebuilt from the slots right after `_sync_slots` in the same `update_maps`, so it
+  follows the move with no change.
+- The rule differs from the draft's "at most half, plus hysteresis" on one point: the half-chunk margin is
+  the hysteresis. It keeps 16 of 32 used at 32 (`RegionSlotGate` RS3 asserts that a removal there does not
+  recreate), and one region coming and going near a boundary never recreates anything. Under half, a bake
+  releasing n regions recreates the arrays about log₂(n) times.
+- `_sync_slots` runs once per `update_maps`, never inside a loop, so `ScopedBake.finish` needs no call of its
+  own: its last release already compacts.
+
+### 4.3 Gate
+
+- **[S1]** Load 64 regions, unload 60: capacity drops to 16. Control: unloading 20 (44 left, more than half)
+  leaves it at 64.
+- **[S2]** After compaction, every loaded region still samples its own heights on the GPU path (the
+  region map points at the moved slot). Control: compaction without the region map rebuild samples the wrong
+  region.
+- **[S3]** Streamer: moving a source away from a dense area drops capacity. Control: the pre-fix build keeps
+  it.
+
+### 4.4 Results (2026-09-26)
+
+`bench/RegionSlotCompactGate.tscn`: PASS, 3/3 criteria. What the gate checks, and where it differs from §4.3:
+
+- **S1:** 64 loaded, 60 unloaded one at a time with an update each: capacity 64 → 16, and 6 array
+  creates (2 shrinks × 3 maps). Control: 20 unloaded (44 left) keeps 64 and creates nothing.
+- **S2:** there is no GPU readback headless, so it checks what the shader reads. Each kept region's texel
+  decodes to a slot whose uploaded height, control and colour images are that region's own maps. The four
+  kept regions sat in the highest slots, so all four moved. Control: a neighbour's slot holds a different
+  image. It then unloads a moved region and loads another: the slot table equals the loaded set.
+- **Mutation:** dropping the `slots` renumbering from the compaction crashes the gate. S2's bookkeeping
+  check was added because the first S2 could not see that.
+- **S3:** a streamer in the middle of a 63-region block holds capacity 64, and moving within the block
+  keeps it. Moving it to a lone region leaves 1 loaded at capacity 16.
+
+Regression: all eleven other region gates pass (RegionSlot, RegionUnload, RegionType, RegionSeam,
+RegionLayer, RegionStream, RegionWater, RegionLakeTile, RegionPanel, RegionBakeScope, RegionBakeUndo).
+
+Large F1 (16 × 16 × 1024 m) through Bake All: capacity after the bake is **0, down from 256**, so the arrays
+hold nothing with nothing loaded. The pre-M2 run left 256 slots, 3 GB of GPU arrays. The rest is unchanged
+from phase 1: RAM 151 MB → 5.13 GB → 160 MB (+6.0%), bake 103 s, snapshots 0 MB. The probe's "capacity
+before" also reads 0: the setup unloads everything after its pre-bake, and that now compacts too.
+
+---
+
+## 5. M3 — Each unload rewrites the index and manifest
+
+### 5.1 Evidence
+
+`unload_region` saves the region and then, every time, `_save_layer_manifest`, `_save_layer_slice`,
+`_index_region` and `_save_region_index`. The index and the manifest describe the whole world, so an
+All-regions bake over n regions writes them n times: O(n²) bytes, and the manifest also grows with the
+layer count. Save + unload is 21 s of 105 s on the large F1 (2 layers) and 78 s of 163 s on F2 (481
+layers).
+
+### 5.2 Fix
+
+- `unload_region` gains a batched form, or the data gains `begin_batch()` / `end_batch()`. Inside a batch,
+  the manifest and index are marked dirty rather than written, and `end_batch()` writes them once.
+- The scoped bake opens a batch in `begin` and closes it in `finish`, including on cancel.
+- Crash safety: the region files are written as before. If the editor dies mid-bake, the index can be
+  stale. The load path must tolerate that: a region file with no index entry is indexed on first scan,
+  and an index entry whose file is newer is re-read. Check what `_index_region` needs and make the load path
+  rebuild an entry from the file.
+
+### 5.3 Gate
+
+- **[I1]** An All-regions bake over n regions writes the index once. Count writes with a debug counter.
+  Control: the unbatched path writes it n times.
+- **[I2]** Kill the batch before `end_batch` (skip it in a debug mode): reloading the directory still finds
+  every region and its correct type and ratio.
+- **[I3]** Wall time of release on the large fixture drops. Report it; there is no threshold.
+
+### 5.4 Fix as built — it differs from §5.2
+
+- **The manifest is not batched: it is written only when it changed.** Its content is plain values (every
+  layer's metadata and the stack version), so `_save_layer_manifest` hashes that, and skips the write when the
+  hash, the path, and the file's modified time all match what this data last wrote. This is better than
+  deferring it. The manifest on disk always knows every layer uid of every slice written after it, so a
+  crash cannot leave a slice that points at layers the manifest lacks. An unchanged stack costs no write at
+  all, not even one per bake. Every save path benefits, including `save_directory`.
+- **The index is batched without a batch object.** `unload_region(loc, update, write_index = true)`: with
+  false, the index is updated in memory only. The scoped bake's `_release` passes false, and `finish` calls
+  the new `write_region_index()` once when anything was released. `finish` also runs on cancel. A
+  `begin_batch`/`end_batch` pair was rejected because a batch left open, by a manager freed mid-bake, would
+  have silently stopped every later unload from writing the index. The dock's Unload Selected does the same.
+- **Crash safety needed no load-path change.** A crash after the releases leaves the index with its
+  pre-bake entries. An unload never changes a region's type, ratio or lock, so those entries are still
+  right. A stale height range is replaced when the region loads. A stale stack signature triggers a
+  recomposite on load, from a manifest and slices that are consistent by the rule above, so the result equals
+  the saved file (gate I2 checks exactly that).
+- Write counters in `get_upload_stats()`: `index_writes`, `manifest_writes`, `manifest_skips`. The report
+  gains `release_usec`. Controls: `ScopedBake.debug_index_per_unload`, also on the manager for the probe
+  (`--index-per-unload`); and `debug_skip_index_write`, the crash.
+
+### 5.5 Results (2026-09-26)
+
+`bench/RegionIndexBatchGate.tscn`: PASS, 3/3 criteria.
+
+- **I1:** a bake releasing 3 regions writes the index once. Control: per-unload writes it 3 times.
+- **M:** the same bake writes the manifest 0 times, with 3 skips as the witness. Controls:
+  - a renamed layer writes it, and the new name is on disk;
+  - a deleted manifest file is written again.
+- **I2:** the crash run's index on disk is stale, with a control showing the written run's index is not.
+  - The stack changed while R1..R3 were unloaded, so the reload recomposites them from stale signatures.
+  - Every region comes back with its type and ratio, in both the editor path and the index-only path.
+  - Heights equal both the written run's and the saved files. The bake changed R1..R3, so the compare can
+    fail.
+- **Mutations:**
+  - A manifest that is never rewritten once it exists fails M, and fails I2 on heights.
+  - Removing `finish`'s index write fails I1.
+
+Large F2 (16 × 16 × 1024 m, 481 layers): what the writes cost, now measured instead of assumed (the probe's
+[W] line):
+
+| | per write | × 256 releases |
+|---|---|---|
+| Region index | 1.3 ms | 0.3 s |
+| Layer manifest (481 layers) | 21.2 ms | 5.4 s |
+| Release total now (save + unload) | 83 ms per region | 21.3 s of a 101.5 s bake |
+
+So M3 saved about 5.8 s of about 27 s of release on F2, almost all of it the manifest. The per-unload index
+control times the same as the batched run (101.8 s against 101.6 s). **§5.1's premise was wrong:** release
+time is mostly the region files themselves, not the index and manifest. The index batching still matters,
+because its cost is O(n²). At 256 regions it is 0.3 s; at 4096 regions (a 64 × 64 world) each write would
+be about 20 ms, so about 80 s. The 163 s → 101 s drop on F2 since the §2.2 baseline belongs mostly to
+phase 1: the snapshots no longer copy 1 GB.
+
+Also seen, not part of M3: F2's RAM after the bake is +13.9% (206 → 235 MB), against +6.0% on F1. The
+3.8 MB brush caches do not explain it. Phase 8's re-measure should look at it.
+
+Regression: all region gates, BrushRegistryGate and TestBrushSinkFootprintGate pass.
+
+---
+
+## 6. M4 — Bake order
+
+### 6.1 Evidence
+
+`plan()` sorts owners by layer order first, then by first region. A region touched by owners in several
+layers stays loaded from the first of them to the last. On F2 the bake held 32 of 36 regions at once on the
+small world, and 220 of 256 on the large one, while no owner touches more than 2.
+
+### 6.2 Which constraint is real
+
+Layer order is stricter than needed. Two owners must bake in layer order only when a later one reads the
+earlier one's output where they overlap: a snap brush reads the layers below it, and a domain reader reads
+the composite. Owners that share no area can bake in any order. The real constraint is a DAG: an edge from
+each lower owner to every higher owner whose footprint boxes overlap it (the same `_boxes_overlap` the input
+closure uses).
+
+### 6.3 Fix
+
+- Build the DAG in `plan()`.
+- Schedule with a greedy list scheduler: among ready owners, prefer the one that loads the fewest new
+  regions, then the one that releases the most. The probe's `_greedy_order` is this, keyed on shared regions
+  rather than overlapping boxes. Boxes are the real constraint and are looser, so the real order can only
+  do better.
+- The refcount release rule is unchanged.
+
+### 6.4 Limits
+
+On F2 the greedy order still holds 20 of 36 (small) and 134 of 256 (large). Randomly ordered overlapping layers make long dependency
+chains, and no order beats the chain. The fix narrows the peak; it does not bound it. M7 bounds it.
+
+### 6.5 Gate
+
+- **[O1]** The order respects every DAG edge (checked against a brute-force overlap scan). Control: the plain
+  first-region sort violates at least one edge on F2.
+- **[O2]** Every region's heights after the new order equal those after the layer-major order, byte for
+  byte, on F2. Control: an order that violates one edge differs.
+- **[O3]** Peak loaded on F2 is at most the greedy simulator's figure. Report both.
+
+### 6.6 Fix as built
+
+- **The edges (`_dependency_edges`).** Owner A bakes before B when A is on a lower layer and either their
+  footprint boxes overlap (`_boxes_overlap`), or one names the other through a graph source. Graph-source
+  pairs were baked in layer order before, and keeping that order means no pair changes its relative order.
+- **An addition §6.3 missed.** Owners whose layer does not exist yet are chained in their planned order. A
+  layer is appended at the top when it first bakes, so their bake order IS their final layer order;
+  reordering them would change the stack, not only the schedule.
+- **Candidate pairs.** They come from bucketing each box by the regions it covers, whether or not those
+  regions exist, so the overlap test runs on owners that can overlap and not on every pair.
+- **The scheduler (`_schedule`).** Greedy list scheduling that replays the refcount rule. Among ready owners
+  it picks the fewest regions to load, then the most regions it is the last to need, then the old
+  layer-major position. Regions loaded before the bake are pinned: they never count as freed.
+- **Safety.** A cycle, which should be impossible because every edge points up the layer order, logs an
+  error and falls back to layer order.
+- **What it rests on.** The rule the scoped bake's header already states: a brush samples the ground below
+  it only within its own footprint box, and the input closure relies on it too. If a brush ever reads past
+  its box, both are wrong together.
+- **Controls:** `debug_layer_major` (the pre-M4 order) and `debug_reverse_order` (every edge broken).
+
+### 6.7 Results (2026-09-26)
+
+`bench/RegionBakeOrderGate.tscn`: PASS, 3/3 criteria.
+
+- **Fixture:** 4 × 4 regions of 128 m and 31 owners on shuffled layers. Small boundary Mounds, wide corner
+  Mounds overlapping them, and two eroded Mounds (domain readers) on top.
+- **O1:** the plan's DAG has exactly the 26 edges a brute-force all-pairs scan finds, and none is broken.
+  Control: ordering by first region breaks 11.
+- **O2:** scheduled and layer-major bakes are byte-identical on all 16 regions; every region changed in the
+  bake, and the two orders differ. Control: the reverse order differs on 8 regions.
+- **O3:** peak loaded 9 against layer-major 16, of 16.
+- **Mutation:** dropping the overlap edges fails O1 and, independently, O2 (2 regions differ).
+
+The probe (it plans exactly as the bake does, and its simulator reproduces the measured peak):
+
+| F2 (one layer per brush, shuffled) | layer-major (§2.2) | scheduled (M4) |
+|---|---|---|
+| Small (6 × 6 × 256 m): peak loaded | 32 of 36 | 7 of 36 |
+| Large (16 × 16 × 1024 m): peak loaded | 220 of 256 | **17 of 256** |
+| Large: RAM peak during the bake | 4.51 GB | **559 MB** |
+| Large: bake time | 101.5 s | 99.0 s |
+| Large: `plan()` time, 480 owners | — | 0.41 s |
+
+**§6.4's limit was wrong for F2.** It assumed "randomly ordered overlapping layers make long dependency
+chains". F2's Mounds share regions, but none of their boxes overlap, so the DAG has no edges and the order
+is free. The probe's own greedy figure (54 now, 134 in §2.2) keys on shared regions, a much coarser
+constraint, and its tie-breaks follow the plan's input order, which is why it moved. Chains remain possible
+wherever boxes really do overlap in layers; M7 still bounds those. F1 (one owner) and F3 (one owner per
+region, no sharing) are unchanged by this phase.
+
+Regression: all region gates, BrushRegistryGate and TestBrushSinkFootprintGate pass.
+
+---
+
+## 7. M5 — The shared default layer is one owner
+
+### 7.1 Evidence
+
+By default every Mound shares one "Mounds" layer, so they are one owner, and an owner is atomic: its bake
+clears the layer and repaints every tool on it. On F1 the owner covers the whole world, so the bake loads
+the whole world (256 of 256 regions, 5.65 GB). With the default `budget_regions` of 64, a real All-regions
+bake would **skip** that owner on the large world instead (`skipped_budget`). The probe raises the budget to
+measure it.
+
+### 7.2 Decision needed
+
+- **(a) Bake a shared owner in spatial chunks (recommended).** When an owner reads no domain,
+  `_refresh_owner_rect` already clears a box and repaints only the tools that touch it. The scoped bake
+  splits the owner into chunks (for example, connected groups of tools whose footprints overlap), and each
+  chunk loads, bakes and releases like an owner. It keeps the one-layer workflow and bounds the peak by the
+  largest connected group.
+- **(b) One layer per brush by default.** Simple, but it changes what users see in the layer stack, and a
+  world of thousands of brushes becomes thousands of layers.
+- **(c) Leave it, and warn.** The dock warns when an owner exceeds the budget and names it.
+
+Recommendation: (a), with (c)'s warning for an owner that reads the domain and so cannot be split.
+
+### 7.3 Gate
+
+- **[C1]** On F1 the chunked bake's heights equal the whole-owner bake's, byte for byte. Control: a chunk
+  that clears its box but misses one overlapping tool differs.
+- **[C2]** Peak loaded on F1 is the largest chunk's region count (4 at most for one Mound per region).
+  Control: the unchunked bake loads 256.
+- **[C3]** A domain-reading owner is not split and is named in the warning.
+
+### 7.4 Fix as built
+
+- **The chunks (`_chunks`).** The connected components of footprint overlap among an owner's tools, found
+  by union-find over region-bucketed candidate pairs. A full owner bake clears every tool's footprint and
+  repaints every tool, and tools combine only where footprints overlap, so a component that no other tool
+  overlaps can be cleared and repainted alone and the layer gets the same bytes.
+- **Baking one.** `_refresh_owner(owner, record_undo, extra_clears, p_only)` repaints only the tools in
+  `p_only`, and clears only their footprints. It is correct only for a set that no other tool on the layer
+  overlaps, which is what a chunk is.
+- **In the plan.** Each chunk is a plan entry with its own `key` (`owner#k`), tools, boxes and regions. It
+  is budgeted, scheduled, loaded and released like an owner, and dependency edges reach every chunk of an
+  owner. `plan()` returns `split` ({owner: chunk count}); `skipped_budget` still names owners.
+- **What is not split (`_splittable`).** An owner that reads its domain; a Layer brush's owner, whose base
+  re-solves once for all members; an owner holding roads, since `settle_roads` holds every region a road
+  owner touches anyway; an owner with fewer than two tools; and an owner whose regions are all loaded
+  already, since splitting saves nothing there and one bake is cheaper than many.
+- **Bake All.** Registered-brush cache clears are filtered to the chunk. The owner's undo pair is taken
+  once: "before" at its first chunk, while nothing it owns has changed, and "after" only at its last chunk
+  (entry `last`). Taking "after" per chunk would copy the whole layer once per chunk.
+- **The warning (option (c) for what cannot split).** `_registry_warnings` names the layers the last Bake
+  All skipped over the budget, and says a domain-reading or road-holding layer cannot be split to fit.
+- **Controls:** `debug_no_chunks` (the pre-M5 whole-owner bake) and `debug_chunk_by_tool` (one tool per
+  chunk, overlaps ignored).
+
+### 7.5 Results (2026-09-26)
+
+`bench/RegionBakeChunkGate.tscn`: PASS, 3/3 criteria.
+
+- **Fixture:** 4 × 4 regions of 128 m and one shared Mounds layer: eight isolated Mounds, and a cluster of
+  three whose footprints chain across four regions. The Mounds are edited after a pre-bake, so the bake
+  changes 12 of 16 regions.
+- **C1:** 11 tools in 9 chunks (the cluster is one). Chunked, whole-owner and Bake All heights are
+  byte-identical on all 16 regions. Control: one tool per chunk differs on the cluster's regions. Bake All
+  took 2 snapshots for 9 chunks. With two regions loaded before the bake, its "after" snapshot equals the
+  owner's final state, and restoring "before" gives the pre-bake heights.
+- **C2:** peak loaded 4 (the cluster's 4 regions), against 12 unsplit (every region the owner needs).
+- **C3:** the same layer with erosion is not split, is skipped over a budget of 4, and the warning names
+  it. Controls: without erosion it is split and not skipped; with every region loaded, nothing is split.
+- **Mutation:** ignoring `reads_domain` fails C3; ignoring overlap fails C1 (the cluster splits and the
+  heights differ); an "after" per chunk fails the one-pair check. Dropping the `p_only` filter fails only
+  through the control. Repainting every tool per chunk is waste, not wrong bytes, so the gate cannot tell it
+  apart from correct by the heights alone.
+
+The probe (large world, 16 × 16 × 1024 m):
+
+| F1 (one shared owner) | before (§2.2) | chunked (M5) |
+|---|---|---|
+| Plan entries | 1 | 256 chunks |
+| Peak regions loaded | 256 of 256 | **1 of 256** |
+| RAM during the bake (start → peak → after) | 149 MB → 5.65 GB → 1.20 GB | 151 MB → **180 MB** → 160 MB |
+| Bake time (of which save + unload) | 105 s (21 s) | 89.7 s (12.3 s) |
+
+The run's own working-set peak is still 5.2 GB, and that is the setup, which loads every region for its
+first bake (§2.2). F2 and F3 are unchanged: one tool per owner has nothing to split.
+
+Regression: all region gates, BrushRegistryGate and TestBrushSinkFootprintGate pass.
+
+---
+
+## 8. M6 — Frozen modifier caches
+
+### 8.1 Evidence
+
+Erosion, relief and graph modifiers default to or support Frozen: they keep their last solve in `_cache`,
+in memory only (the erosion cache stores five float grids per bake grid). After Bake All clears and
+re-solves every registered brush, each holds a fresh solve. That is independent of which regions are
+loaded, so it grows with the number of brushes in the world. F3: 2.1 MB for 36 brushes on 118 m loops
+(small world), 222 MB for 256 brushes on 471 m loops (large). A real mountain-sized erosion brush is larger
+again.
+
+### 8.2 Why it cannot just be dropped
+
+Frozen is state, not a cache. A frozen modifier serves its stored solve on every rebake until the user
+presses Bake; dropping the entry makes the next rebake re-solve on whatever the surface is then, which can
+change the landscape. So "free the cache of a brush whose regions are all released" is not a memory fix, it
+is a behaviour change.
+
+### 8.3 Decision needed
+
+- **(a) Spill to disk (recommended).** When a brush's regions are all released, write its frozen entries to
+  a cache directory (`<data_directory>/.cache/`, or the project's `.godot` folder) keyed by the brush's
+  scene path and the entry's extent, and drop them from memory. Reload on the next rebake that needs them.
+  A missing file means "not frozen", which is the same as today after a reload.
+- **(b) Keep them in memory with an LRU budget,** spilling the oldest. The same mechanism with a trigger.
+- **(c) Leave it.** Document the cost.
+
+### 8.4 Gate
+
+- **[F1]** After spilling and reloading, a Frozen brush's bake is byte-identical to one that never spilled.
+  Control: dropping without spilling re-solves and differs on a fixture where the surface changed.
+- **[F2]** Memory held by caches after an All-regions bake on F3 is 0 once every region is released.
+  Control: the pre-fix build holds it.
+
+### 8.5 Fix as built
+
+- **Where the cache lives.** `_cache` moved from the four freezable modifiers (Erosion, Relief, Graph, Road)
+  to their base, `Pasture3DNode`, which owns the spill: `spill_cache(dir)` writes it with `store_var` to
+  `<pid>_<instance id>.spill` and drops it, and `_unspill()` reads it back and deletes the file.
+- **The rule for the modifiers.** Every accessor that reads or writes `_cache` (`cache_for`, `store_cache`)
+  unspills first, and every explicit drop (`clear_cache`, the Graph's `drop_cache_for_bake`) deletes the
+  spill without reading it. `cache_bytes()` does not unspill: it reports memory, and a spill holds none. The
+  Graph's `has_cache()` is true while spilled, so a frozen graph still skips the deferred solve.
+- **The lazy read is the point.** Nothing reloads caches eagerly. A spilled modifier costs nothing until a
+  rebake asks it for an entry, and a missing or unreadable file reads as "nothing cached", which is what
+  every frozen modifier is after a reload. So a lost spill makes one re-solve and never a wrong answer.
+- **When (the scoped bake).** `begin` records each planned brush that has a freezable modifier, and the
+  regions its own footprint touches. `_release`, the single release point (road holds and `finish`
+  included), spills every brush over the released region whose regions are now all unloaded. A brush over
+  a region loaded before the bake is never spilled, because that region is never released.
+- **Refused spills.** A cache holding an Object anywhere is not spilled: `store_var` cannot carry one
+  without full objects, and a spill that turned it into null would lose state. It stays in memory, as
+  before M6. The same goes for a failed write.
+- **Files.** They go under `res://.godot/pasture3d_frozen/` (§11 decision 3), per machine and unversioned. A
+  modifier deletes its file when it is read, cleared or freed. The editor plugin sweeps other processes'
+  files older than a day at startup (`Pasture3DNode.sweep_spills`), which covers a crash. The age guard
+  protects a second Godot process on the same project, a gate running beside the editor for example.
+- **Report.** `spilled` (brush names) and `spilled_bytes` (their `cache_bytes()`), through Bake All too.
+- **Not spilled.** Two kinds of frozen state stay in memory, and nothing counts them yet. A graph's internal
+  solver freezes live on the graph resource, which several brushes can share, so "this brush's regions
+  are released" says nothing about them. A Relief material's grown DLA field lives on the material.
+- **Controls:** `debug_no_spill` (the pre-M6 build) and `debug_drop_frozen` (free the cache without
+  spilling it: what "just free it" would do).
+
+### 8.6 Results (2026-09-26)
+
+`bench/RegionFrozenSpillGate.tscn`: PASS, 3/3 criteria.
+
+- **Fixture:** 3 × 1 regions of 128 m and three Mounds with Frozen erosion: E0 in region (0,0), E1 in
+  (2,0), E2 across (1,0)/(2,0). Region (2,0) is loaded before the bake.
+- **F1:** after the bake, E0's surface is changed and it is rebaked. The spilled run reads its cache back,
+  serves it stale, deletes the file, and is byte-identical to the never-spilled run. Control: dropping the
+  cache re-solves (not stale) and differs.
+- **F2:** E0 holds 0 bytes, its file is on disk, and the report names E0 alone with the 12,996 bytes the
+  unspilled run holds. Controls: without the spill E0 holds them; E1 (pinned) and E2 (one region
+  released, one pinned) are not spilled.
+- **F3:** a read-back consumes the file (that is also the control: an uncleared spill still serves). Bake
+  (`clear_cache`) deletes the file and serves nothing. Relief, Graph and Road spill and read back too. A
+  freed modifier deletes its file, and a cache holding an Object is refused. The sweep deletes another
+  process's old file but not a young one or its own.
+- **Mutation:** a spill that writes nothing fails F1 and F3; a `clear_cache` that keeps the spill fails
+  F3; a `cache_for` that does not unspill fails F1 and F3; ignoring the "all regions released" test fails
+  F2 (E2 spills); allowing Objects fails F3; a sweep that ignores the pid fails F3.
+
+The probe (large world, 16 × 16 × 1024 m):
+
+| F3 (256 brushes, Frozen erosion) | kept (`--no-spill`, pre-M6) | spilled (M6) |
+|---|---|---|
+| Frozen caches in memory after the bake | 222.2 MB | **0** (222.2 MB on disk, 256 brushes) |
+| RAM (`MEMORY_STATIC`): start → peak → after the bake | 606 → 644 → 623 MB | 606 → 626 → **178 MB** |
+| RAM freed by then dropping the caches | 445 MB | 0.5 MB |
+| Bake time (of which save + unload) | 127.3 s (18.1 s) | 126.3 s (17.6 s) |
+
+The caches cost twice what `cache_bytes()` counts: dropping 222 MB of arrays frees 445 MB. That fits
+allocator overhead on 256 × 6 packed arrays, but it is not measured further here. The spill frees all of
+it. The run's 5.7 GB working-set peak is still the setup's (§2.2). Writing the spill costs nothing
+visible in the bake time.
+
+Regression: all region gates, BrushRegistryGate, TestBrushSinkFootprintGate, and every modifier-cache gate
+run pass (BrushErosion, BrushGraphRow, BrushDeferredDriver, GraphFreeze, RoadStale, DLA, InputFootprint,
+LayerBrushBase, LayerBrushDriver, BrushAccumulation, GraphSinkBake). RoadGraphGate fails K and O (worst
+0.25 m) with the phase 6 files reverted to HEAD too, so it predates this phase.
+
+---
+
+## 9. M7 — A memory budget with back-pressure
+
+### 9.1 Evidence
+
+`budget_regions` (default 64) skips an owner that touches more regions than that; it never limits how many
+regions are loaded at once across owners. After M4 and M5, peak memory is the peak working set of loaded
+regions plus whatever the owner being baked allocates.
+
+### 9.2 Fix
+
+- A byte budget, `bake_memory_budget_mb`, in the scoped bake, measured from the loaded regions' map and
+  layer tile sizes (known from the region type and layer count; no allocator probing).
+- Before `load_for`, if loading the owner's missing regions would exceed the budget, the scheduler picks a
+  different ready owner that fits. If none fits, it releases regions whose remaining owners are furthest in
+  the plan, **saving them first**. A region released early is reloaded when a later owner needs it, so the
+  bake's result must be unchanged; the refcount rule becomes "release when unneeded, or when the budget
+  requires it".
+- An owner larger than the budget on its own still bakes, alone, and is reported (it cannot be split
+  further without M5's chunking).
+
+### 9.3 Gate
+
+- **[B1]** With a budget of k regions on F2, peak loaded never exceeds k, except while baking an owner
+  larger than k. Control: no budget exceeds k.
+- **[B2]** Heights are byte-identical with and without the budget. Control: releasing a region without
+  saving it first loses its edits and differs.
+- **[B3]** Reported: wall time with the budget against without (reloads cost I/O).
+
+### 9.4 As built (2026-09-26)
+
+- `memory_budget_mb` on the scoped bake, `bake_memory_budget_mb` on the manager (0, off, until phase 8
+  picks the default figure; §11 decision 4). Not exported yet, like `bake_budget_regions`.
+- **The cost is an estimate made at plan time** (`_region_costs`): a region's maps at its type's texel ratio
+  (12 bytes a texel: height, control, colour), plus, for every planned owner whose boxes touch it, the
+  boxes' area there rounded out to 64-texel layer tiles, 4 bytes a texel. Nothing is measured from the
+  allocator, so the schedule is deterministic and the runtime gauge can be checked against it.
+- **The scheduler, not `load_for`, decides.** `_schedule` prefers a ready owner whose missing regions fit.
+  When none fits it takes the usual best owner and gives its entry `evict`, the regions to release first.
+  The order is: regions no ready owner needs, then those with the fewest owners still to come, then
+  region order. This differs from §9.2's "remaining owners furthest in the plan": the schedule is built
+  one step at a time, so the plan's future order is not known yet, and the remaining refcount is its
+  proxy. If eviction still cannot make room, the entry is marked `over_budget`.
+- `load_for` releases the `evict` regions through `_release`, which saves before unloading, before it loads
+  anything. So a region released early is written, and read back by the next owner that needs it.
+- The runtime gauge (`used`) adds a region's cost on load and removes it on release. Its peak is reported as
+  `peak_bytes` next to the scheduler's `sim_peak_bytes`; the two must match.
+- **Never released early:**
+  - regions loaded before the bake (pinned);
+  - the regions of the owner about to bake;
+  - under a budget, every region a road owner has touched, because `settle_roads` rebakes road owners in
+    place after the loop.
+- **Not bounded:**
+  - layers outside the plan: the estimate sees only planned owners' boxes;
+  - `debug_layer_major` and `debug_reverse_order`, which bypass `_schedule`;
+  - what an owner's own bake allocates.
+  The budget bounds the plan's regions, not the process.
+- **Report:** `evicted`, `over_budget` (owner keys), `peak_bytes`, `sim_peak_bytes`, `budget_bytes`. The
+  manager copies them into its report and warns, naming the owners, when `over_budget` is non-empty.
+
+### 9.5 Results
+
+Gate `project/bench/RegionBakeBudgetGate.gd` (RegionBakeOrderGate's fixture: 4 × 4 regions of 128 m, 31
+owners on shuffled layers, two eroded Mounds on top), PASS 3/3:
+
+| | No budget | 2.81 MB (1.25 × widest owner) | 1.13 MB (below the 4-region owners) |
+|---|---|---|---|
+| Gauge peak | 4.38 MB | 2.75 MB (simulated 2.75) | 2.25 MB |
+| Regions loaded at once | 9 | 6 | 4 |
+| Loads | 16 | 22 | 43 |
+| Evicted / over budget | 0 / 0 | 6 / 0 | 27 / 7 (exactly the 7 owners bigger than it) |
+| Heights vs no budget | — | identical, 16 of 16 | identical |
+
+- Bake All with the budget is identical to Bake All without it, and it also evicts 6.
+- Control: releasing early without saving (`debug_evict_unsaved`) differs on 6 regions.
+- The gate caught all five mutations:
+  - eviction skipped;
+  - the gauge never decremented;
+  - `over_budget` never reported;
+  - the budget ignored in `_schedule`;
+  - every early release unsaved.
+
+Large F2 (16 × 16 regions of 1024 m, 480 owners), through Bake All:
+
+| | No budget | 128 MB |
+|---|---|---|
+| Gauge peak (simulated) | 241.1 MB (241.1) | 127.7 MB (127.7) |
+| Peak loaded regions | 17 | 9 |
+| Region loads / evictions | 256 / 0 | 317 / 61 |
+| Bake RAM peak (MEMORY_STATIC) | 559.5 MB | 413.8 MB |
+| Bake wall / of which releasing | 222.2 s / 35.3 s | 185.0 s / 35.2 s |
+
+- Under the budget, the probe's [P] refcount simulator no longer applies, because it does not model early
+  releases. The probe's witness becomes gauge == simulated instead (`--budget-mb=X`).
+- The estimate counts about 60% of what the allocator sees. Above its start, MEMORY_STATIC rose 353 MB
+  against a 241 MB gauge, and 207 MB against 128 MB. A figure chosen in phase 8 should allow for that
+  ratio.
+- The shorter wall time under the budget is not a speedup that can be relied on. The 61 extra loads cost
+  I/O, and the release time is the same.
+
+### 9.6 The default figure (phase 8, 2026-09-27)
+
+The budget-to-allocator ratio across a range, on large F2 (the only fixture with more than one region
+loaded at once):
+
+| Budget | Gauge peak | Peak regions | Loads (evicted) | MEMORY_STATIC rise at peak |
+|---|---|---|---|---|
+| none | 241.1 MB | 17 | 256 (0) | 353 MB |
+| 256 MB | 241.1 MB | 17 | 256 (0) | 353 MB |
+| 128 MB | 127.7 MB | 9 | 317 (61) | 207 MB |
+| 64 MB | 57.0 MB | 4 | 416 (160) | 119 MB |
+
+- F1 and F3 peak at one region (14 MB), so a 128 MB budget changes nothing on either; both were run to
+  confirm it, and neither evicted.
+- The rise fits about **47 MB + 1.27 × the gauge**. The 47 MB is what an owner's bake allocates beside its
+  regions, which the gauge does not count.
+
+**The default is 1024 MB** (`Pasture3DScopedBake.DEFAULT_MEMORY_BUDGET_MB`), and the manager reads the same
+constant, so Bake All and the dock's Bake Selected share it:
+
+- **It is a safety net, not a throttle.** After M4 and M5, no measured bake's planned regions reach it;
+  the largest is 241 MB. Below the budget the schedule and the bytes are identical to having none (the
+  256 MB row). A tighter figure would trade I/O for memory on bakes that fit comfortably.
+- **It matches `budget_regions` 64** at the largest region size: 64 × ~14 MB is 896 MB. An owner too big
+  for the byte budget on its own is already one the region budget flags, so the two warnings agree.
+- **At the cap, the allocator sees about 1.35 GB.** Against the pre-spec peaks of 4.8–5.7 GB, that is the
+  worst a bake can hold across owners. One owner larger than it still bakes, and is reported.
+- The probe keeps baking with no budget unless `--budget-mb` is given, so its baselines stay comparable.
+
+---
+
+## 10. Phases
+
+| Phase | Finding | Done when |
+|-------|---------|-----------|
+| 0 | Probe committed as the measuring harness; large-world baseline recorded in §2.2 | Baseline recorded 2026-09-26; probe committed in `bd459c91` |
+| 1 | M1 undo snapshots, option (a) | Built 2026-09-26: U1–U3 pass; large F1 RAM after the bake +6.0% |
+| 2 | M2 slot compaction | Built 2026-09-26: S1–S3 pass; large F1 capacity after the bake 0 (was 256) |
+| 3 | M3 batched index and manifest | Built 2026-09-26: I1, M, I2 pass; F2 release 21.3 s, writes saved ~5.8 s |
+| 4 | M4 dependency-ordered schedule | Built 2026-09-26: O1–O3 pass; large F2 peak 17 of 256 (was 220), RAM peak 559 MB (was 4.51 GB) |
+| 5 | M5 chunked shared owner, option (a) | Built 2026-09-26: C1–C3 pass; large F1 peak 1 of 256 (was 256), bake RAM peak 180 MB (was 5.65 GB) |
+| 6 | M6 frozen cache spill, option (a) | Built 2026-09-26: F1–F3 pass; large F3 caches in memory 0 (was 222 MB), RAM after the bake 178 MB (was 623 MB) |
+| 7 | M7 byte budget with back-pressure | Built 2026-09-26: B1–B3 pass; large F2 at 128 MB: peak 9 regions (was 17), bake RAM peak 414 MB (was 560), 61 reloads |
+| 8 | Re-measure the large world | Done 2026-09-27: §2.2 after table; M7 default 1024 MB (§9.6) |
+
+Each phase's gate follows the bench-gate practices: every criterion has a control that fails, and the gate
+counts completed criteria, not only failures. Large-world runs take several minutes and several GB of
+RAM; they are perf tests, so ask before running them.
+
+---
+
+## 11. Resolved questions (2026-09-26)
+
+1. M1: option (a). A region the bake had to load is not undoable, and the report and the dock say so.
+   Disk-backed undo (b) is not planned.
+2. M5: option (a). A shared owner that reads no domain is baked in spatial chunks; one that reads the
+   domain is not split, and the dock warns when it is over the budget.
+3. M6: option (a), spill to disk. The spill goes under the project's `.godot` folder
+   (`res://.godot/pasture3d_frozen/`), not beside the terrain data. A frozen entry has never survived a
+   reload, so a per-machine, unversioned location keeps that behaviour and keeps tens of MB of float grids
+   out of version control.
+4. M7: a fixed default figure, chosen in phase 7 from the phase 8 measurements, and settable per bake.
+   Chosen: 1024 MB (§9.6).

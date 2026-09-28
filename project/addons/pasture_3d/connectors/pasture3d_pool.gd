@@ -28,6 +28,12 @@ const PRESET_PATHS := {
 ## the morph is written against ring scales the sheet does not have and would shear it.
 const MASKED_SHADER := WATER_DIR + "water_lake_masked.gdshader"
 const MASKED_CLIPMAP_SHADER := WATER_DIR + "water_lake_clipmap.gdshader"
+## Containment-mask cells a masked body may hold before the mask is coarsened (see _build_surface).
+const MASK_CAP := 4096 * 4096
+## A clipmapped field wider than this many texels is tiled under Auto (see mask_tiles).
+const TILE_AUTO_TEXELS := 4096
+## Tile size with no terrain to align to. With one, a tile is a region.
+const TILE_FALLBACK := 256.0
 
 ## How the outline becomes geometry.
 ##
@@ -162,6 +168,16 @@ enum SurfaceMode {
 		# water is missing and it is wanted back now.
 		if _clipmap != null and is_instance_valid(_clipmap):
 			_clipmap.set_cull_views(v)
+## Bake the distance field as TILES on the terrain's region grid rather than as one image
+## (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md §I). One image stops at the 16384-texel texture limit
+## (about 24.5 km at 1.5 m texels) and costs the square of the lake's width. Tiled, only tiles the shore
+## passes near carry a field, so the cost is the shore length; and a tile over a region that is not
+## loaded is not baked until the region loads. Clipmapped bodies only: the static sheet keeps one image.
+## Auto tiles a field wider than TILE_AUTO_TEXELS.
+@export_enum("Auto", "Always", "Never") var mask_tiles: int = 0:
+	set(v):
+		mask_tiles = v
+		_schedule_rebuild()
 @export_group("")
 
 ## The offset loop in LOCAL XZ, as of the last rebuild. Every containment query reads this rather
@@ -200,6 +216,17 @@ var _sdf_texels := 0
 ## Sheet spacing the last masked build actually used, which is not mask_sheet_spacing when the
 ## vertex ceiling forced it coarser. Read by _shape_warnings so the trade is stated.
 var _sheet_spacing_used := 0.0
+# The tiled field (mask_tiles). _tile_class is Pasture3DUtil.classify_shore_tiles over the grid; band tiles
+# hold a baked Image in _tile_images, keyed by tile index, only while their region is not unloaded.
+var _tiled := false
+var _tile_poly := PackedVector2Array() # world XZ: the tiles sit on the world's region grid
+var _tile_origin := Vector2.ZERO
+var _tile_size := 0.0
+var _tile_n := 0
+var _tile_count := Vector2i.ZERO
+var _tile_class := PackedInt32Array()
+var _tile_images := {}
+var _tile_data: Object = null # the terrain data whose region map decides what is baked
 ## The clipmap child, in MASKED mode when mask_static_sheet is off. An internal node with no owner,
 ## like Surface: it is derived from the outline and rebuilt with it, so serialising it would only
 ## let a stale copy load from a scene.
@@ -413,19 +440,33 @@ func _build_surface(p_spacing: float) -> void:
 		_build_failed("loop smaller than one grid cell")
 		return
 
-	# The mesher's inside mask, kept for containment queries (see _contains_local). Built BEFORE the
-	# mode branch and at the same resolution either way, so a masked body answers is_point_underwater
-	# from exactly what a meshed one would -- the surface changed, the water did not.
+	_masked = _wants_mask(gw * gh)
+
+	# The mesher's inside mask, kept for containment queries (see _contains_local). At the same
+	# resolution either way, so a masked body answers is_point_underwater from exactly what a meshed
+	# one would -- the surface changed, the water did not.
+	#
+	# EXCEPT past MASK_CAP cells on a masked body, where it is coarsened by doublings: it is O(area),
+	# and a 30 km lake at wave spacing is half a gigabyte of it (spec §I, large lakes). It is only the
+	# broad phase: a cell the shore crosses still falls through to the exact test, so what a coarser
+	# mask can misjudge is a feature narrower than its cell poking through a cell whose four corners
+	# agree. A meshed body never reaches the cap, because its own vertex ceiling is far below it.
+	var mask_spacing := p_spacing
+	var mgw := gw
+	var mgh := gh
+	while _masked and mgw * mgh > MASK_CAP:
+		mask_spacing *= 2.0
+		mgw = int(ceil((mx.x - mn.x) / mask_spacing)) + 1
+		mgh = int(ceil((mx.y - mn.y) / mask_spacing)) + 1
 	if ClassDB.class_exists("Pasture3DUtil") \
 			and ClassDB.class_has_method("Pasture3DUtil", "build_inside_mask", true):
-		_mask = Pasture3DUtil.build_inside_mask(poly, mn, p_spacing, gw, gh)
+		_mask = Pasture3DUtil.build_inside_mask(poly, mn, mask_spacing, mgw, mgh)
 	else:
-		_mask = _inside_mask(poly, mn, p_spacing, gw, gh)
-	_mask_gw = gw
-	_mask_gh = gh
-	_mask_spacing = p_spacing
-
-	_masked = _wants_mask(gw * gh)
+		_mask = _inside_mask(poly, mn, mask_spacing, mgw, mgh)
+	_mask_gw = mgw
+	_mask_gh = mgh
+	_mask_spacing = mask_spacing
+	_last_stats["mask_spacing"] = mask_spacing
 	_last_stats["masked"] = _masked
 	if _masked:
 		_build_masked(poly, mn, mx, p_spacing)
@@ -577,11 +618,19 @@ func _build_masked(p_poly: PackedVector2Array, p_min: Vector2, p_max: Vector2,
 	var field_extent: float = maxf(sheet.size.x, sheet.size.y) + (mask_range + mask_texel * 2.0) * 2.0
 	var field_min: Vector2 = sheet.get_center() - Vector2(field_extent, field_extent) * 0.5
 	var texels := int(ceil(field_extent / mask_texel))
-	var sdf: Image = Pasture3DUtil.build_shore_sdf(p_poly, field_min, mask_texel, texels,
-		mask_range, 2, true)
-	if sdf == null:
-		_build_failed("the distance field could not be baked")
-		return
+	var tiled := clipmapped and (mask_tiles == 1 or (mask_tiles == 0 and texels > TILE_AUTO_TEXELS))
+	var sdf: Image = null
+	if tiled:
+		if not _plan_tiles(p_poly):
+			_build_failed("the tiled distance field could not be planned")
+			return
+	else:
+		_drop_tiles()
+		sdf = Pasture3DUtil.build_shore_sdf(p_poly, field_min, mask_texel, texels,
+			mask_range, 2, true)
+		if sdf == null:
+			_build_failed("the distance field could not be baked")
+			return
 	_sdf_rect_local = Vector4(field_min.x, field_min.y, texels * mask_texel, texels * mask_texel)
 	_sdf_texels = texels
 
@@ -591,8 +640,10 @@ func _build_masked(p_poly: PackedVector2Array, p_min: Vector2, p_max: Vector2,
 	# same water at the same level is a doubled surface, not a redundant one.
 	_surface.mesh = null if clipmapped else _build_sheet_mesh(sheet.position, nx, nz, spacing)
 	_apply_material()
-	_apply_shore_uniforms(ImageTexture.create_from_image(sdf),
+	_apply_shore_uniforms(ImageTexture.create_from_image(sdf) if sdf != null else null,
 		p_wave_spacing if clipmapped else spacing)
+	if tiled:
+		_refresh_tiles(true)
 	if clipmapped:
 		_drop_sheet_cull_box()
 		_ensure_clipmap(p_min, p_max, p_wave_spacing)
@@ -623,8 +674,12 @@ func _build_masked(p_poly: PackedVector2Array, p_min: Vector2, p_max: Vector2,
 	if clipmapped:
 		_last_stats["clipmap_lods"] = _clipmap.mesh_lods
 		_last_stats["clipmap_reach"] = _clipmap.get_reach()
-	_last_stats["sdf_texels"] = texels
-	_last_stats["sdf_bytes"] = texels * texels * 2
+	_last_stats["sdf_tiled"] = tiled
+	# What one image would have needed, tiled or not: the number that says whether tiling was forced.
+	_last_stats["field_texels"] = texels
+	if not tiled:
+		_last_stats["sdf_texels"] = texels
+		_last_stats["sdf_bytes"] = texels * texels * 2
 
 
 ## Split-screen views, as the manager last reported them. Called by Pasture3DPoolManager, which
@@ -759,6 +814,7 @@ func _apply_shore_uniforms(p_texture: Texture2D, p_sheet_spacing: float) -> void
 	if _runtime_material == null:
 		return
 	_runtime_material.set_shader_parameter("_shore_sdf", p_texture)
+	_runtime_material.set_shader_parameter("_shore_tiled", _tiled)
 	_runtime_material.set_shader_parameter("_shore_rect", _world_shore_rect())
 	_runtime_material.set_shader_parameter("_shore_texels",
 		Vector2(_sdf_texels, _sdf_texels))
@@ -992,6 +1048,167 @@ func _cell_state(p_local_xz: Vector2) -> int:
 	return 1 if n == 4 else 2
 
 
+# ---- tiled distance field (mask_tiles) ------------------------------------------
+
+## Lay the tile grid over the outline and classify it. Nothing is baked here: _refresh_tiles bakes the
+## band tiles whose regions are not unloaded.
+func _plan_tiles(p_poly: PackedVector2Array) -> bool:
+	var o := global_position
+	var wp := PackedVector2Array()
+	wp.resize(p_poly.size())
+	for i in p_poly.size():
+		wp[i] = p_poly[i] + Vector2(o.x, o.z)
+	var terrain: Node = _tile_terrain()
+	var tile := TILE_FALLBACK
+	if terrain != null:
+		tile = float(terrain.region_size) * float(terrain.vertex_spacing)
+	var n := int(ceil(tile / mask_texel))
+	var s := tile / float(n)
+	var mn := wp[0]
+	var mx := wp[0]
+	for v in wp:
+		mn = Vector2(minf(mn.x, v.x), minf(mn.y, v.y))
+		mx = Vector2(maxf(mx.x, v.x), maxf(mx.y, v.y))
+	# Grown past the outline by the field's range, so a tile the grid leaves out is one no sample could
+	# read as anything but "outside".
+	var pad := mask_range + s * 2.0
+	var origin := ((mn - Vector2(pad, pad)) / tile).floor() * tile
+	var count := Vector2i(((mx + Vector2(pad, pad) - origin) / tile).ceil())
+	# A tile is a constant only when its footprint grown by the apron stays farther than the range from
+	# the shore, so every texel it would hold is clamped to the same end: the constant and the band
+	# agree at every tile edge.
+	var cls: PackedInt32Array = Pasture3DUtil.classify_shore_tiles(wp, origin, tile, count, mask_range + s * 2.0)
+	if cls.size() != count.x * count.y:
+		return false
+	_drop_tiles()
+	_tiled = true
+	_tile_poly = wp
+	_tile_origin = origin
+	_tile_size = tile
+	_tile_n = n
+	_tile_count = count
+	_tile_class = cls
+	_watch_tile_data(terrain.data if terrain != null else null)
+	return true
+
+
+## Bake the band tiles that are wanted and drop the ones that are not, then upload. A tile over a region
+## the terrain index names but has not loaded is not wanted: the water terrain check hides the water
+## there anyway, and baking it would make memory follow the lake instead of the loaded world.
+func _refresh_tiles(p_force_upload := false) -> void:
+	if not _tiled:
+		return
+	var s := _tile_size / float(_tile_n)
+	# Baked with the field's range as a margin and cropped to the apron. The baker seeds exact distance only
+	# where the shore crosses the image, so a shore passing just outside a bare tile is never seen: its
+	# texels are chamfered from far-off seeds or clamped to the range (RegionLakeTileGate LT2, 21 m off).
+	# The single image never meets this because it is padded by the range already.
+	var pad := int(ceil(mask_range / s)) + 3
+	var base := Vector2i((_tile_origin / _tile_size).round())
+	var changed := p_force_upload
+	for i in _tile_class.size():
+		if _tile_class[i] != 1:
+			continue
+		var cell := Vector2i(i % _tile_count.x, i / _tile_count.x)
+		var wanted := not _tile_region_unloaded(base + cell)
+		if wanted and not _tile_images.has(i):
+			var tmin := _tile_origin + Vector2(cell) * _tile_size
+			var img: Image = Pasture3DUtil.build_shore_sdf(_tile_poly, tmin - Vector2(s, s) * (1 + pad), s,
+				_tile_n + 2 + pad * 2, mask_range, 2, true)
+			if img == null:
+				continue
+			img = img.get_region(Rect2i(pad, pad, _tile_n + 2, _tile_n + 2))
+			_tile_images[i] = img
+			changed = true
+		elif not wanted and _tile_images.has(i):
+			_tile_images.erase(i)
+			changed = true
+	if changed:
+		_upload_tiles()
+
+
+func _upload_tiles() -> void:
+	var keys: Array = _tile_images.keys()
+	keys.sort()
+	var layers: Array[Image] = []
+	var layer_of := {}
+	for k in keys:
+		layer_of[k] = layers.size()
+		layers.append(_tile_images[k])
+	var cls := PackedFloat32Array()
+	cls.resize(_tile_class.size())
+	var bands := 0
+	for i in _tile_class.size():
+		match _tile_class[i]:
+			-1:
+				cls[i] = -1.0
+			1:
+				bands += 1
+				cls[i] = float(layer_of[i] + 1) if layer_of.has(i) else 0.0
+			_:
+				cls[i] = 0.0
+	var map := Image.create_from_data(_tile_count.x, _tile_count.y, false, Image.FORMAT_RF,
+		cls.to_byte_array())
+	if layers.is_empty():
+		# A sampler2DArray still needs an array: one outside-valued layer that nothing indexes.
+		var blank := Image.create(_tile_n + 2, _tile_n + 2, false, Image.FORMAT_RH)
+		blank.fill(Color(1, 0, 0, 1))
+		layers.append(blank)
+	var arr := Texture2DArray.new()
+	arr.create_from_images(layers)
+	if _runtime_material != null:
+		_runtime_material.set_shader_parameter("_shore_tiled", true)
+		_runtime_material.set_shader_parameter("_shore_tile_map", ImageTexture.create_from_image(map))
+		_runtime_material.set_shader_parameter("_shore_tiles", arr)
+		_runtime_material.set_shader_parameter("_shore_tile_grid",
+			Vector4(_tile_origin.x, _tile_origin.y, _tile_size, float(_tile_n)))
+	_last_stats["sdf_tiles"] = _tile_images.size()
+	_last_stats["sdf_tiles_band"] = bands
+	_last_stats["sdf_tiles_total"] = _tile_class.size()
+	_last_stats["sdf_texels"] = _tile_n
+	_last_stats["sdf_bytes"] = _tile_images.size() * (_tile_n + 2) * (_tile_n + 2) * 2
+
+
+func _drop_tiles() -> void:
+	_tiled = false
+	_tile_poly = PackedVector2Array()
+	_tile_class = PackedInt32Array()
+	_tile_images.clear()
+	_tile_count = Vector2i.ZERO
+	_watch_tile_data(null)
+	if _runtime_material != null:
+		_runtime_material.set_shader_parameter("_shore_tiled", false)
+
+
+## The terrain whose region grid the tiles sit on: the source brush's. Null falls back to TILE_FALLBACK.
+func _tile_terrain() -> Node:
+	var brush := _source_brush()
+	if brush == null or not ("terrain" in brush):
+		return null
+	var t = brush.terrain
+	return t if t != null and is_instance_valid(t) and t.data != null else null
+
+
+func _tile_region_unloaded(p_loc: Vector2i) -> bool:
+	if _tile_data == null or not is_instance_valid(_tile_data):
+		return false
+	return _tile_data.get_region_index().has_entry(p_loc) and not _tile_data.is_region_loaded(p_loc)
+
+
+func _watch_tile_data(p_data: Object) -> void:
+	if _tile_data != null and is_instance_valid(_tile_data) \
+			and _tile_data.region_map_changed.is_connected(_on_tile_regions_changed):
+		_tile_data.region_map_changed.disconnect(_on_tile_regions_changed)
+	_tile_data = p_data
+	if _tile_data != null:
+		_tile_data.region_map_changed.connect(_on_tile_regions_changed)
+
+
+## A region loaded or unloaded: bake what it brought in, drop what it took away.
+func _on_tile_regions_changed() -> void:
+	_refresh_tiles()
+
+
 ## The pool's outline in local XZ, as the mesh was last built from it. Exposed so a gate — or a
 ## tool — can check containment against the same polygon the node uses rather than a re-derived one.
 func get_polygon() -> PackedVector2Array:
@@ -1012,6 +1229,10 @@ func _notification(what: int) -> void:
 		# where the lake used to be.
 		if _runtime_material != null:
 			_runtime_material.set_shader_parameter("_shore_rect", _world_shore_rect())
+		if _tiled and not _poly_cache.is_empty() and not _tile_poly.is_empty() and not _tile_poly[0].is_equal_approx(
+				_poly_cache[0] + Vector2(global_position.x, global_position.z)):
+			# The tiles sit on the world's region grid, not the body's: moving the body re-plans them.
+			_schedule_rebuild()
 		if _clipmap != null and is_instance_valid(_clipmap):
 			_clipmap.domain_origin = global_position
 			var amp := _wave_amplitude_sum()
@@ -1036,6 +1257,7 @@ func _forget_surface() -> void:
 	_sdf_rect_local = Vector4.ZERO
 	_sdf_texels = 0
 	_sheet_spacing_used = 0.0
+	_drop_tiles()
 	# The clipmap goes with the rest. A failed build that kept it would leave rings drawing water
 	# cut to an outline that no longer exists, which is the rendering half of the bug _build_failed
 	# is here to prevent.

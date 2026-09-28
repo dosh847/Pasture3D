@@ -131,7 +131,7 @@ var _lut_cache: Array = []
 # Keyed by GRID EXTENT, because a brush with several loops bakes several grids and one slot would thrash
 # between them. Each entry holds the solve's own key — a hash of the exact surface handed to the solver,
 # which is what makes staleness detection complete: nothing upstream can change without changing it.
-var _cache: Dictionary = {}
+# `_cache` itself is declared on Pasture3DNode, which can spill it to disk (M6).
 
 ## Set after a bake when a frozen entry was served against a surface it was not solved for. Reported as
 ## a configuration warning rather than silently re-solving or silently serving old data.
@@ -163,8 +163,9 @@ func _supports_freezing() -> bool:
 
 ## Drop every cached solve, so the next refresh recomputes. This is the explicit Bake.
 func clear_cache() -> void:
-	if _cache.is_empty() and not _stale:
+	if _cache.is_empty() and not _stale and not is_spilled():
 		return
+	_drop_spill()
 	_cache.clear()
 	_stale = false
 	_touch()
@@ -182,11 +183,13 @@ func cache_bytes() -> int:
 ## The cache entry for one bake grid, or an empty Dictionary. `p_extent` identifies the grid; the host
 ## compares the entry's `key` against the surface it is about to solve.
 func cache_for(p_extent: String) -> Dictionary:
+	_unspill()
 	return _cache.get(p_extent, {})
 
 
 ## Store one solve. Called by the host after a bake, with what the solver actually produced.
 func store_cache(p_extent: String, p_entry: Dictionary) -> void:
+	_unspill()
 	_cache[p_extent] = p_entry
 
 

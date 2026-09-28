@@ -10,6 +10,13 @@
 #ifndef WATER_SURFACE_INC
 #define WATER_SURFACE_INC
 
+#ifdef WATER_TERRAIN_CHECK
+#ifndef WATER_CLIPMAP
+#error "WATER_TERRAIN_CHECK sizes its reach by the clipmap ring; it needs WATER_CLIPMAP"
+#endif
+#include "res://addons/pasture_3d/extras/shaders/water/water_terrain.gdshaderinc"
+#endif
+
 void vertex() {
 	vec3 world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 
@@ -128,6 +135,15 @@ void vertex() {
 	float shore_kill = _shore_kill_margin;
 #endif
 	if (water_shore_distance(world_pos.xz) > shore_kill) {
+		VERTEX = vec3(0.0 / 0.0);
+	}
+#endif
+
+#ifdef WATER_TERRAIN_CHECK
+	// Water under land, or over a region that is not loaded (water_terrain.gdshaderinc). The undisplaced
+	// sheet, after the morph, for the reasons the shore mask gives above; and the same 3.5-cell reach,
+	// because a NaN vertex removes every triangle that uses it.
+	if (water_terrain_hides(world_pos.xz, world_pos.y, scale * WATER_TERRAIN_REACH)) {
 		VERTEX = vec3(0.0 / 0.0);
 	}
 #endif

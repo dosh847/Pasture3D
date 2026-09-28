@@ -42,7 +42,7 @@ Ref<Pasture3DRegion> Pasture3DEditor::_operate_region(const Vector2i &p_region_l
 	if (data->get_region_map_index(p_region_loc) < 0) {
 		if (can_print) {
 			LOG(INFO, "Location ", p_region_loc, " out of bounds. Max: ",
-					-Pasture3DData::REGION_MAP_SIZE / 2, " to ", Pasture3DData::REGION_MAP_SIZE / 2 - 1);
+					-Pasture3DData::get_region_map_size() / 2, " to ", Pasture3DData::get_region_map_size() / 2 - 1);
 		}
 		return Ref<Pasture3DRegion>();
 	}
@@ -57,6 +57,13 @@ Ref<Pasture3DRegion> Pasture3DEditor::_operate_region(const Vector2i &p_region_l
 	if (region.is_null() || (region.is_valid() && region->is_deleted())) {
 		// And tool is Add Region, or Height + auto_regions
 		if ((_tool == REGION && _operation == ADD) || ((_tool == SCULPT || _tool == HEIGHT) && _brush_data["auto_regions"])) {
+			// An indexed region that is not loaded has a file: a blank added over it would be saved on top of it
+			// (spec §F, nothing operates on an unloaded region). A deleted one is still in _regions, not unloaded.
+			const Ref<Pasture3DRegionIndex> index = data->get_region_index();
+			if (region.is_null() && index.is_valid() && index->has_entry(p_region_loc)) {
+				_refuse_region(p_region_loc, "not loaded; load it from the Regions dock first");
+				return region;
+			}
 			LOG(DEBUG, "Adding blank region at: ", p_region_loc, ", ptr: ", ptr_to_str(*region));
 			region = data->add_region_blank(p_region_loc);
 			if (region.is_null()) {
@@ -70,6 +77,10 @@ Ref<Pasture3DRegion> Pasture3DEditor::_operate_region(const Vector2i &p_region_l
 
 	// If removing region
 	else if (region.is_valid() && _tool == REGION && _operation == SUBTRACT) {
+		if (region->is_locked()) {
+			_refuse_region(p_region_loc, "locked");
+			return region;
+		}
 		LOG(DEBUG, "Removing region at: ", p_region_loc, ", ptr: ", ptr_to_str(*region));
 		_original_regions.push_back(region);
 		height_range = region->get_height_range();
@@ -189,6 +200,11 @@ void Pasture3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 	edited_area.size = Vector3(brush_size, 0.f, brush_size);
 
 	if (_tool == INSTANCER) {
+		const Pasture3DRegion *inst_region = data->get_region_ptr(data->get_region_location(p_global_position));
+		if (inst_region && inst_region->is_locked()) {
+			_refuse_region(inst_region->get_location(), "locked");
+			return;
+		}
 		if (modifier_ctrl) {
 			_terrain->get_instancer()->remove_instances(p_global_position, _brush_data);
 		} else {
@@ -204,6 +220,8 @@ void Pasture3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 	// rebuild at the end of the last _operate() call, but until painting is finished we only
 	// need to track if _added_removed_locations has changed between now and the end of the loop
 	int regions_added_removed = _added_removed_locations.size();
+	const Pasture3DRegion *checked_region = nullptr;
+	String refusal;
 
 	for (real_t x = 0.f; x < brush_size; x += vertex_spacing) {
 		for (real_t y = 0.f; y < brush_size; y += vertex_spacing) {
@@ -220,6 +238,15 @@ void Pasture3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 				continue;
 			}
 
+			if (region.ptr() != checked_region) { // Brush pixels run in region order; ask once per run
+				checked_region = region.ptr();
+				refusal = _region_refusal(checked_region, map_type, route_to_layer);
+			}
+			if (!refusal.is_empty()) {
+				_refuse_region(region_loc, refusal);
+				continue;
+			}
+
 			// Get map for this region and tool
 			Image *map = region->get_map_ptr(map_type);
 			if (!map) {
@@ -231,6 +258,15 @@ void Pasture3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 			Vector2i map_pixel_position = Vector2i(uv_position * region_size);
 			if (!_is_in_bounds(map_pixel_position, region_vsize)) {
 				continue;
+			}
+			// A coarse region is written only where a lattice vertex falls, once per texel: the brush walks
+			// fine vertices, and applying it at every one would apply it texel_ratio^2 times.
+			if (region->is_coarse()) {
+				const int r = region->get_texel_ratio();
+				if (map_pixel_position.x % r != 0 || map_pixel_position.y % r != 0) {
+					continue;
+				}
+				map_pixel_position /= r;
 			}
 
 			Vector2 brush_uv = Vector2(x, y) / brush_size;
@@ -675,6 +711,32 @@ void Pasture3DEditor::_backup_layer_tile(const Vector2i &p_region_loc) {
 	_layer_undo_tiles[p_region_loc] = _stroke_layer->duplicate_region_tiles(p_region_loc);
 }
 
+String Pasture3DEditor::_region_refusal(const Pasture3DRegion *p_region, const MapType p_map_type, const bool p_to_layer) const {
+	if (p_region->is_locked()) {
+		return "locked";
+	}
+	const Ref<Pasture3DRegionType> type = _terrain->get_data()->get_region_type_of(p_region);
+	if (p_map_type == TYPE_HEIGHT && !type->get_sculptable()) {
+		return "type '" + type->get_type_name() + "' is not sculptable";
+	}
+	if (p_map_type != TYPE_HEIGHT && !type->get_paintable()) {
+		return "type '" + type->get_type_name() + "' is not paintable";
+	}
+	return "";
+}
+
+void Pasture3DEditor::_refuse_region(const Vector2i &p_region_loc, const String &p_reason) {
+	if (_stroke_refused.has(p_region_loc)) {
+		return;
+	}
+	_stroke_refused[p_region_loc] = p_reason;
+	LOG(WARN, "Region ", p_region_loc, " refused the stroke: ", p_reason);
+	Object *plugin = _terrain ? _terrain->get_plugin() : nullptr;
+	if (plugin && plugin->has_method("flash_region_warning")) {
+		plugin->call("flash_region_warning", p_region_loc, p_reason);
+	}
+}
+
 void Pasture3DEditor::_notify_layer_blocked(const Ref<Pasture3DLayer> &p_layer, BlockReason p_reason) const {
 	const bool hidden = (p_reason == BLOCK_HIDDEN);
 	LOG(WARN, "Active layer '", p_layer->get_layer_name(), "' is ", hidden ? "hidden" : "locked or reserved", "; stroke blocked");
@@ -748,6 +810,31 @@ void Pasture3DEditor::_store_undo() {
 		redo_data["layer_tiles"] = redo_snap;
 	}
 
+	// Region generations at commit time, shared by both directions. A region unloaded (or reloaded) since
+	// then is a different object on disk: applying this snapshot to it would resurrect or overwrite data the
+	// unload already saved, so _apply_undo skips every location whose generation has moved on.
+	{
+		const Pasture3DData *data = _terrain->get_data();
+		Dictionary generations;
+		auto note = [&](const Array &p_locs) {
+			for (const Vector2i &loc : p_locs) {
+				generations[loc] = data->get_region_generation(loc);
+			}
+		};
+		note(_undo_data.get("region_locations", Array()));
+		note(redo_data["region_locations"]);
+		note(_added_removed_locations);
+		for (const Ref<Pasture3DRegion> &region : _original_regions) {
+			if (region.is_valid()) {
+				generations[region->get_location()] = data->get_region_generation(region->get_location());
+			}
+		}
+		note(_layer_undo_tiles.keys());
+		note(_layer_redo_tiles.keys());
+		_undo_data["generations"] = generations;
+		redo_data["generations"] = generations.duplicate();
+	}
+
 	// Request the plugin store the undo/redo data.
 	if (_terrain->get_plugin()->has_method("create_undo_action")) {
 		LOG(INFO, "Storing undo snapshot");
@@ -774,6 +861,21 @@ void Pasture3DEditor::_apply_undo(const Dictionary &p_data) {
 
 	Pasture3DData *data = _terrain->get_data();
 
+	// A snapshot only applies to the region generations it was taken from (see _store_undo).
+	const bool guarded = p_data.has("generations");
+	const Dictionary generations = p_data.get("generations", Dictionary());
+	auto valid = [&](const Vector2i &p_loc) -> bool {
+		if (!guarded) {
+			return true;
+		}
+		if (generations.has(p_loc) && int(generations[p_loc]) == data->get_region_generation(p_loc)) {
+			return true;
+		}
+		LOG(WARN, "Undo/redo skips region ", p_loc, ": it was unloaded or reloaded since this action");
+		return false;
+	};
+	bool skipped = false;
+
 	// Restore the active layer's source tiles. The composited region images are restored by the
 	// edited_regions path below; restoring the layer source keeps a later recomposite consistent.
 	if (p_data.has("layer_tiles")) {
@@ -783,7 +885,11 @@ void Pasture3DEditor::_apply_undo(const Dictionary &p_data) {
 		if (layer.is_valid()) {
 			Array locs = tiles.keys();
 			for (const Vector2i &loc : locs) {
-				layer->restore_region_tiles(loc, tiles[loc]);
+				if (valid(loc)) {
+					layer->restore_region_tiles(loc, tiles[loc]);
+				} else {
+					skipped = true;
+				}
 			}
 		}
 	}
@@ -795,6 +901,10 @@ void Pasture3DEditor::_apply_undo(const Dictionary &p_data) {
 		for (Ref<Pasture3DRegion> region : undo_regions) {
 			if (region.is_null()) {
 				LOG(ERROR, "Null region saved in undo data. Please report this error.");
+				continue;
+			}
+			if (!valid(region->get_location())) {
+				skipped = true;
 				continue;
 			}
 			region->sanitize_maps(); // Live data may not have some maps so must be sanitized
@@ -820,7 +930,7 @@ void Pasture3DEditor::_apply_undo(const Dictionary &p_data) {
 		TypedArray<Vector2i> region_locs = p_data["added_regions"];
 		for (const Vector2i region_loc : region_locs) {
 			Ref<Pasture3DRegion> region = data->get_region(region_loc);
-			if (region.is_valid()) {
+			if (region.is_valid() && valid(region_loc)) {
 				LOG(DEBUG, "Marking region: ", region_loc, " +deleted, +modified, ", ptr_to_str(*region));
 				region->set_deleted(true);
 				region->set_modified(true);
@@ -832,7 +942,7 @@ void Pasture3DEditor::_apply_undo(const Dictionary &p_data) {
 		TypedArray<Vector2i> region_locs = p_data["removed_regions"];
 		for (const Vector2i region_loc : region_locs) {
 			Ref<Pasture3DRegion> region = data->get_region(region_loc);
-			if (region.is_valid()) {
+			if (region.is_valid() && valid(region_loc)) {
 				LOG(DEBUG, "Marking region: ", region_loc, " -deleted, +modified, ", ptr_to_str(*region));
 				region->set_deleted(false);
 				region->set_modified(true);
@@ -845,11 +955,31 @@ void Pasture3DEditor::_apply_undo(const Dictionary &p_data) {
 	if (p_data.has("region_locations")) {
 		// Load w/ duplicate or it gets a bit wonky undoing removed regions w/ saves
 		TypedArray<Vector2i> locations = p_data["region_locations"];
+		if (guarded) {
+			// The snapshot's order for the locations it still owns, then whatever it does not own as it is now:
+			// an unloaded region leaves the list, a reloaded one stays.
+			TypedArray<Vector2i> reconciled;
+			for (const Vector2i &loc : locations) {
+				if (valid(loc)) {
+					reconciled.push_back(loc);
+				} else {
+					skipped = true;
+				}
+			}
+			for (const Vector2i &loc : data->get_region_locations()) {
+				if (!generations.has(loc) || int(generations[loc]) != data->get_region_generation(loc)) {
+					if (!reconciled.has(loc)) {
+						reconciled.push_back(loc);
+					}
+				}
+			}
+			locations = reconciled;
+		}
 		_terrain->get_data()->set_region_locations(locations.duplicate());
 		LOG(DEBUG, "Locations(", locations.size(), "): ", locations);
 	}
 	// If this undo set modifies the region qty, we must rebuild the arrays. Otherwise we can update individual layers
-	if (p_data.has("added_regions") || p_data.has("removed_regions")) {
+	if (p_data.has("added_regions") || p_data.has("removed_regions") || skipped) {
 		data->update_maps(TYPE_MAX, true, false);
 	} else {
 		data->update_maps(TYPE_MAX, false, false);
@@ -1047,6 +1177,7 @@ void Pasture3DEditor::start_operation(const Vector3 &p_global_position) {
 	// Terrain3D e0108aa. stop_operation() is idempotent and already clears the layer-stroke state
 	// below, which is why the per-field resets that used to be here are gone.
 	stop_operation();
+	_stroke_refused.clear();
 	LOG(INFO, "Setting up undo snapshot");
 	_undo_data.clear();
 	_undo_data["region_locations"] = _terrain->get_data()->get_region_locations().duplicate();
@@ -1212,6 +1343,7 @@ void Pasture3DEditor::_bind_methods() {
 	BIND_ENUM_CONSTANT(TOOL_MAX);
 
 	ClassDB::bind_method(D_METHOD("set_terrain", "terrain"), &Pasture3DEditor::set_terrain);
+	ClassDB::bind_method(D_METHOD("get_stroke_refusals"), &Pasture3DEditor::get_stroke_refusals);
 	ClassDB::bind_method(D_METHOD("get_terrain"), &Pasture3DEditor::get_terrain);
 
 	ClassDB::bind_method(D_METHOD("set_brush_data", "data"), &Pasture3DEditor::set_brush_data);

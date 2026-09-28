@@ -95,8 +95,8 @@ enum FeatherMode {
 # only saves re-evaluating after a reload, and several loops bake several grids that must not thrash one
 # slot. Each entry is `{key, grid}` — `key` is the graph's content revision at bake time, the staleness
 # signal. The host (Pasture3DTerrainBrush._compile_modifiers / _commit_modifier_caches) drives all of it;
-# these methods are the storage it calls, the same contract the erosion modifier uses.
-var _cache: Dictionary = {}
+# these methods are the storage it calls, the same contract the erosion modifier uses. `_cache` itself is
+# declared on Pasture3DNode, which can spill it to disk (M6).
 ## Monotonic counter stamped onto an entry each time it is stored or served — the LRU order.
 var _access_tick: int = 0
 var _stale: bool = false
@@ -150,12 +150,14 @@ func bake_graph(p_host: Pasture3DTerrainBrush = null) -> void:
 ## touches the resource, which arms the brush's debounced re-bake -- fine on its own, but a caller baking
 ## several graph modifiers on one brush would arm one refresh per modifier and then bake again on top.
 func drop_cache_for_bake() -> void:
+	_drop_spill()
 	_cache.clear()
 	_stale = false
 
 
 ## Drop every cached evaluation, so the next refresh recomputes.
 func clear_cache() -> void:
+	_drop_spill()
 	_cache.clear()
 	_stale = false
 	_touch()
@@ -169,7 +171,7 @@ func cache_bytes() -> int:
 
 
 func has_cache() -> bool:
-	return not _cache.is_empty()
+	return not _cache.is_empty() or is_spilled()
 
 
 ## How far a frozen solve may be re-projected, in cells. Two cells is the bounding-box rounding the
@@ -193,6 +195,7 @@ const ORIGIN_TOLERANCE_CELLS := 2
 ## interpolation is needed), clamping the one- or two-cell band that falls off the source edge. Anything
 ## further away, or any change of dimensions, is a miss.
 func cache_for(p_extent: String) -> Dictionary:
+	_unspill()
 	if _cache.has(p_extent):
 		# Serving IS an access. Without this the tick would only record when an entry was solved, so an
 		# extent that keeps being served would age out under an extent that keeps being re-solved.
@@ -276,6 +279,7 @@ const MAX_CACHE_BYTES := 64 * 1024 * 1024
 
 
 func store_cache(p_extent: String, p_entry: Dictionary) -> void:
+	_unspill()
 	var parts := p_extent.split(",")
 	if parts.size() >= 4:
 		p_entry["gw"] = parts[2].to_int()

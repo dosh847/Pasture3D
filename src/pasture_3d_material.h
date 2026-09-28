@@ -133,10 +133,15 @@ private:
 	String _inject_editor_code(const String &p_shader) const;
 	void _update_shader();
 	void _update_uniforms(const RID &p_material, const uint32_t p_update = UNIFORMS_ONLY);
+	void _publish_terrain_globals() const;
 	void _set_shader_parameters(const Dictionary &p_dict);
 	Dictionary _get_shader_parameters() const { return _shader_params; }
 
 public:
+	// Global shader uniforms a shader outside the terrain reads the region map and heights through (spec §I:
+	// the water terrain check, water_terrain.gdshaderinc). Declared here and in the editor plugin's
+	// project.godot entries; one terrain publishes at a time, and pasture3d_terrain.y == 0 means none has.
+	static void register_terrain_globals();
 	Pasture3DMaterial() {}
 	~Pasture3DMaterial() { destroy(); }
 	void initialize(Pasture3D *p_terrain);

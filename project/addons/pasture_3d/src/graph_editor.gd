@@ -2285,6 +2285,12 @@ func _refresh_previews() -> void:
 		# must not keep a stale badge from the last time one was on.
 		_clear_previews_stale()
 		return
+	# §F live editing: a host reaching an unloaded region does not run live, and its previews would sample
+	# ground that is not there. Say so on the thumbnails rather than show a surface the bake will not make.
+	if is_instance_valid(host_brush) and host_brush.has_method("reaches_unloaded_region") 			and host_brush.reaches_unloaded_region():
+		_mark_previews_stale({"reason": "the host brush reaches a region that is not loaded",
+				"node": -1, "op": &"", "detail": "bake it with a scope to load its neighbours"})
+		return
 	# COLOR roots never enter the compile. A colour is a sideband resolved by walking upstream, not a kernel
 	# op, so handing one to the compiler bailed the WHOLE preview (which once earned Color Mix and Color Blend
 	# fake op ids). What a colour node needs from the program is its field input -- Color Blend's mask, Color

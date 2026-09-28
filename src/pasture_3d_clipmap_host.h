@@ -41,6 +41,10 @@ public:
 	// the terrain's own path. The ocean always passes explicit values.
 	virtual real_t get_default_cull_margin() const = 0;
 	virtual Vector2 get_default_height_range() const = 0;
+	// How far, in the finest level's mesh units, the vertex shader may move a vertex toward -x and -z: the
+	// cull AABBs are widened by it on those sides. The terrain's vertex collapse moves vertices back onto a
+	// coarse region's lattice; a host whose vertices stay put answers 0.
+	virtual real_t get_default_xz_back_margin() const { return 0.f; }
 
 	// Can a view centred here draw anything at all?
 	//

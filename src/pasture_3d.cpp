@@ -61,9 +61,9 @@ void Pasture3D::_initialize() {
 		_data->connect("region_map_changed", callable_mp(this, &Pasture3D::update_region_labels));
 	}
 	// Any region was changed, regenerate collision if enabled
-	if (!_data->is_connected("region_map_changed", callable_mp(_collision, &Pasture3DCollision::build))) {
-		LOG(DEBUG, "Connecting _data::region_map_changed signal to build()");
-		_data->connect("region_map_changed", callable_mp(_collision, &Pasture3DCollision::build));
+	if (!_data->is_connected("region_map_changed", callable_mp(_collision, &Pasture3DCollision::on_region_map_changed))) {
+		LOG(DEBUG, "Connecting _data::region_map_changed signal to on_region_map_changed()");
+		_data->connect("region_map_changed", callable_mp(_collision, &Pasture3DCollision::on_region_map_changed));
 	}
 	// Any map was regenerated or regions changed, update material uniforms without rebuilding shaders
 	if (!_data->is_connected("maps_changed", callable_mp(_material.ptr(), &Pasture3DMaterial::update).bind(Pasture3DMaterial::REGION_ARRAYS))) {
@@ -71,6 +71,10 @@ void Pasture3D::_initialize() {
 		_data->connect("maps_changed", callable_mp(_material.ptr(), &Pasture3DMaterial::update).bind(Pasture3DMaterial::REGION_ARRAYS));
 	}
 	// Height map was regenerated, update aabbs
+	// A region map change can change which regions collapse, and so the AABBs' xz margin.
+	if (!_data->is_connected("region_map_changed", callable_mp(this, &Pasture3D::_update_mesher_aabbs))) {
+		_data->connect("region_map_changed", callable_mp(this, &Pasture3D::_update_mesher_aabbs));
+	}
 	if (!_data->is_connected("height_maps_changed", callable_mp(this, &Pasture3D::_update_mesher_aabbs))) {
 		LOG(DEBUG, "Connecting _data::height_maps_changed signal to update_aabbs()");
 		_data->connect("height_maps_changed", callable_mp(this, &Pasture3D::_update_mesher_aabbs));
@@ -162,6 +166,14 @@ void Pasture3D::_grab_camera() {
 		LOG(DEBUG, "Grabbing the in-game viewport camera: ", _camera.get_target());
 	}
 	if (!_camera.is_valid() && !_clipmap_target.is_valid()) {
+		// Collision targets (a streamer's sources) still need the physics tick: it is what moves their patches.
+		bool collision_follows = _collision_target.is_valid();
+		for (const TargetNode3D &target : _collision_targets) {
+			collision_follows = collision_follows || target.is_valid();
+		}
+		if (collision_follows) {
+			return;
+		}
 		set_physics_process(false); // No target to follow, disable snapping until one set
 		LOG(ERROR, "Cannot find clipmap target or active camera. LODs won't be updated. Set manually with set_clipmap_target() or set_camera()");
 	}
@@ -821,6 +833,45 @@ void Pasture3D::set_light_target(Node3D *p_node) {
 			_material->set_shader_param("_light_direction", V3_ZERO);
 		}
 	}
+}
+
+void Pasture3D::set_collision_targets(const TypedArray<Node3D> &p_nodes) {
+	_collision_targets.clear();
+	for (int i = 0; i < p_nodes.size(); i++) {
+		TargetNode3D target;
+		target.set_target(Object::cast_to<Node3D>(p_nodes[i]));
+		if (target.is_set()) {
+			_collision_targets.push_back(target);
+		}
+	}
+	if (!_collision_targets.empty()) {
+		set_physics_process(true);
+	}
+}
+
+TypedArray<Node3D> Pasture3D::get_collision_targets() const {
+	TypedArray<Node3D> nodes;
+	for (const TargetNode3D &target : _collision_targets) {
+		if (Node3D *node = target.get_target()) {
+			nodes.push_back(node);
+		}
+	}
+	return nodes;
+}
+
+PackedVector3Array Pasture3D::get_collision_target_positions() const {
+	PackedVector3Array positions;
+	if (!IS_EDITOR) {
+		for (const TargetNode3D &target : _collision_targets) {
+			if (target.is_valid()) {
+				positions.push_back(target.get_target()->get_global_position());
+			}
+		}
+	}
+	if (positions.is_empty()) {
+		positions.push_back(get_collision_target_position());
+	}
+	return positions;
 }
 
 Vector3 Pasture3D::get_collision_target_position() const {
@@ -1707,6 +1758,11 @@ void Pasture3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_clipmap_target"), &Pasture3D::get_clipmap_target);
 	ClassDB::bind_method(D_METHOD("get_clipmap_target_position"), &Pasture3D::get_clipmap_target_position);
 	ClassDB::bind_method(D_METHOD("set_collision_target", "node"), &Pasture3D::set_collision_target);
+	ClassDB::bind_method(D_METHOD("set_collision_targets", "nodes"), &Pasture3D::set_collision_targets);
+	ClassDB::bind_method(D_METHOD("get_collision_targets"), &Pasture3D::get_collision_targets);
+	ClassDB::bind_method(D_METHOD("get_collision_target_positions"), &Pasture3D::get_collision_target_positions);
+	ClassDB::bind_method(D_METHOD("set_load_all_regions", "enabled"), &Pasture3D::set_load_all_regions);
+	ClassDB::bind_method(D_METHOD("get_load_all_regions"), &Pasture3D::get_load_all_regions);
 	ClassDB::bind_method(D_METHOD("get_collision_target"), &Pasture3D::get_collision_target);
 	ClassDB::bind_method(D_METHOD("get_collision_target_position"), &Pasture3D::get_collision_target_position);
 	ClassDB::bind_method(D_METHOD("set_light_target", "node"), &Pasture3D::set_light_target);
@@ -1845,6 +1901,9 @@ void Pasture3D::_bind_methods() {
 	ADD_GROUP("Regions", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "region_size", PROPERTY_HINT_ENUM, "64:64,128:128,256:256,512:512,1024:1024,2048:2048", PROPERTY_USAGE_EDITOR), "change_region_size", "get_region_size");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "save_16_bit"), "set_save_16_bit", "get_save_16_bit");
+	// Off: a running game loads only the region index, and a Pasture3DStreamer brings regions in. The editor
+	// always loads every region.
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "load_all_regions"), "set_load_all_regions", "get_load_all_regions");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "label_distance", PROPERTY_HINT_RANGE, "0.0,10000.0,0.5,or_greater"), "set_label_distance", "get_label_distance");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "label_size", PROPERTY_HINT_RANGE, "24,128,1"), "set_label_size", "get_label_size");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "show_grid"), "set_show_region_grid", "get_show_region_grid");

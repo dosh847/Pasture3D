@@ -125,7 +125,6 @@ var last_masks: Dictionary = {}
 ## solved from, and Pasture3DRoadBrush.restorable_alignment returns null when that no longer matches, so
 ## a spline edited with the plugin disabled produces "needs a bake" rather than a road in the wrong place.
 @export var last_alignment: Pasture3DRoadAlignment = null
-var _cache: Dictionary = {}
 var _stale: bool = false
 
 
@@ -149,6 +148,7 @@ func op() -> StringName:
 
 
 func clear_cache() -> void:
+	_drop_spill()
 	_cache.clear()
 	_stale = false
 	_touch()
@@ -165,10 +165,12 @@ func cache_bytes() -> int:
 
 
 func cache_for(p_extent: String) -> Dictionary:
+	_unspill()
 	return _cache.get(p_extent, {})
 
 
 func store_cache(p_extent: String, p_entry: Dictionary) -> void:
+	_unspill()
 	_cache[p_extent] = p_entry
 
 

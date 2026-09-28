@@ -4,6 +4,7 @@
 #include <godot_cpp/classes/height_map_shape3d.hpp>
 #include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/classes/world3d.hpp>
+#include <unordered_map>
 
 #include <godot_cpp/classes/scene_tree.hpp>
 
@@ -31,7 +32,7 @@ Dictionary Pasture3DCollision::_get_shape_data(const Vector2i &p_position, const
 	const bool is_bg_flat_or_noise = bg_mode == Pasture3DMaterial::WorldBackground::FLAT || bg_mode == Pasture3DMaterial::WorldBackground::NOISE;
 	const real_t ground_level = material->get("ground_level");
 	const real_t region_blend = material->get("region_blend");
-	const int region_map_size = Pasture3DData::REGION_MAP_SIZE;
+	const int region_map_size = Pasture3DData::get_region_map_size();
 	const PackedInt32Array region_map = data->get_region_map();
 	const int region_size = _terrain->get_region_size();
 	const real_t region_texel_size = 1.f / real_t(region_size);
@@ -40,8 +41,8 @@ Dictionary Pasture3DCollision::_get_shape_data(const Vector2i &p_position, const
 		Vector2i pos = Vector2i(Math::floor(uv2.x), Math::floor(uv2.y)) + Vector2i(region_map_size / 2, region_map_size / 2);
 		int layer_index = 0;
 		if ((uint32_t)(pos.x | pos.y) < (uint32_t)region_map_size) {
-			int v = region_map[pos.y * region_map_size + pos.x];
-			layer_index = Math::clamp(v - 1, -1, 0) + 1;
+			const int slot = Pasture3DData::region_map_decode(region_map[pos.y * region_map_size + pos.x]);
+			layer_index = slot >= 0 ? 1 : 0;
 		}
 		return real_t(layer_index);
 	};
@@ -72,9 +73,6 @@ Dictionary Pasture3DCollision::_get_shape_data(const Vector2i &p_position, const
 	real_t min_height = FLT_MAX;
 	real_t max_height = -FLT_MAX;
 
-	Ref<Image> map, map_x, map_z, map_xz; // height maps
-	Ref<Image> cmap, cmap_x, cmap_z, cmap_xz; // control maps w/ holes
-
 	// Get region_loc of top left corner of descaled and grid snapped collision shape position
 	Vector2i region_loc = V2I_DIVIDE_FLOOR(p_position, region_size);
 	const Pasture3DRegion *region = data->get_region_ptr(region_loc);
@@ -82,24 +80,26 @@ Dictionary Pasture3DCollision::_get_shape_data(const Vector2i &p_position, const
 		LOG(EXTREME, "Region not found at: ", region_loc, ". Returning blank");
 		return Dictionary();
 	}
-	map = region->get_map(TYPE_HEIGHT);
-	cmap = region->get_map(TYPE_CONTROL);
 
-	// Get +X, +Z adjacent regions in case we run over
-	region = data->get_region_ptr(region_loc + Vector2i(1, 0));
-	if (region && !region->is_deleted()) {
-		map_x = region->get_map(TYPE_HEIGHT);
-		cmap_x = region->get_map(TYPE_CONTROL);
-	}
-	region = data->get_region_ptr(region_loc + Vector2i(0, 1));
-	if (region && !region->is_deleted()) {
-		map_z = region->get_map(TYPE_HEIGHT);
-		cmap_z = region->get_map(TYPE_CONTROL);
-	}
-	region = data->get_region_ptr(region_loc + Vector2i(1, 1));
-	if (region && !region->is_deleted()) {
-		map_xz = region->get_map(TYPE_HEIGHT);
-		cmap_xz = region->get_map(TYPE_CONTROL);
+	// This region and the +X, +Z, +XZ neighbours the last row/col runs over, indexed x + 2z. A region whose
+	// type has collision off contributes holes (NaN). A coarse one is read through get_height_at_vertex, which
+	// interpolates its lattice; a Standard one is read straight from its maps.
+	struct Source {
+		const Image *map = nullptr;
+		const Image *cmap = nullptr;
+		int ratio = 1;
+		bool active = false;
+	};
+	Source src[4];
+	for (int q = 0; q < 4; q++) {
+		const Pasture3DRegion *r = data->get_region_ptr(region_loc + Vector2i(q & 1, q >> 1));
+		if (!r || r->is_deleted() || !data->region_has_collision(r)) {
+			continue;
+		}
+		src[q].map = r->get_map_ptr(TYPE_HEIGHT);
+		src[q].cmap = r->get_map_ptr(TYPE_CONTROL);
+		src[q].ratio = r->get_texel_ratio();
+		src[q].active = src[q].map && src[q].cmap;
 	}
 
 	for (int z = 0; z < hshape_size; z++) {
@@ -120,14 +120,13 @@ Dictionary Pasture3DCollision::_get_shape_data(const Vector2i &p_position, const
 
 			// Set heights on local map, or adjacent maps if on the last row/col
 			real_t height = NAN;
-			if (!next_x && !next_z && map.is_valid()) {
-				height = is_hole(cmap->get_pixel(img_x, img_y).r) ? NAN : map->get_pixel(img_x, img_y).r;
-			} else if (next_x && !next_z && map_x.is_valid()) {
-				height = is_hole(cmap_x->get_pixel(img_x, img_y).r) ? NAN : map_x->get_pixel(img_x, img_y).r;
-			} else if (!next_x && next_z && map_z.is_valid()) {
-				height = is_hole(cmap_z->get_pixel(img_x, img_y).r) ? NAN : map_z->get_pixel(img_x, img_y).r;
-			} else if (next_x && next_z && map_xz.is_valid()) {
-				height = is_hole(cmap_xz->get_pixel(img_x, img_y).r) ? NAN : map_xz->get_pixel(img_x, img_y).r;
+			const Source &s = src[(next_x ? 1 : 0) + (next_z ? 2 : 0)];
+			if (s.active) {
+				if (s.ratio > 1) {
+					height = is_hole(s.cmap->get_pixel(img_x / s.ratio, img_y / s.ratio).r) ? NAN : data->get_height_at_vertex(shape_pos);
+				} else {
+					height = is_hole(s.cmap->get_pixel(img_x, img_y).r) ? NAN : s.map->get_pixel(img_x, img_y).r;
+				}
 			}
 			if (!std::isnan(height) && is_bg_flat_or_noise) {
 				Vector2 uv2 = Vector2(shape_pos) * region_texel_size;
@@ -150,8 +149,9 @@ Dictionary Pasture3DCollision::_get_shape_data(const Vector2i &p_position, const
 	shape_data["depth"] = hshape_size;
 	shape_data["heights"] = map_data;
 	shape_data["xform"] = xform;
-	shape_data["min_height"] = min_height;
-	shape_data["max_height"] = max_height;
+	// All holes (a collision-off region): an empty range, not FLT_MAX..-FLT_MAX.
+	shape_data["min_height"] = min_height <= max_height ? min_height : 0.f;
+	shape_data["max_height"] = min_height <= max_height ? max_height : 0.f;
 	return shape_data;
 }
 
@@ -276,7 +276,8 @@ void Pasture3DCollision::build() {
 	if (is_dynamic_mode()) {
 		int grid_width = _radius * 2 / _shape_size;
 		grid_width = int_ceil_pow2(grid_width, 4);
-		shape_count = grid_width * grid_width;
+		_pool_targets = MAX(1, int(_terrain->get_collision_target_positions().size()));
+		shape_count = grid_width * grid_width * _pool_targets;
 		hshape_size = _shape_size + 1;
 		LOG(DEBUG, "Grid width: ", grid_width);
 	} else {
@@ -314,6 +315,7 @@ void Pasture3DCollision::build() {
 	}
 
 	_initialized = true;
+	_region_sig = _snapshot_regions();
 	update();
 }
 
@@ -330,110 +332,115 @@ void Pasture3DCollision::update(const Vector2i &p_region_loc, const bool p_rebui
 	real_t spacing = _terrain->get_vertex_spacing();
 
 	if (is_dynamic_mode()) {
-		// Snap descaled position to a _shape_size grid (eg. multiples of 16)
-		Vector2i snapped_pos = _snap_to_grid(_terrain->get_collision_target_position() / spacing);
-		LOG(EXTREME, "Updating collision at ", snapped_pos);
-
-		// Return if target hasn't moved to next grid slot
-		if (!p_rebuild && (_last_snapped_pos - snapped_pos).length_squared() == 0) {
+		const PackedVector3Array targets = _terrain->get_collision_target_positions();
+		const int target_count = MAX(1, int(targets.size()));
+		if (target_count != _pool_targets) {
+			// One patch's worth of shapes per target: a new target count means a new pool.
+			_pool_targets = target_count;
+			build();
+			return;
+		}
+		// Snap each descaled target position to a _shape_size grid (eg. multiples of 16)
+		std::vector<Vector2i> snapped;
+		for (int t = 0; t < targets.size(); t++) {
+			snapped.push_back(_snap_to_grid(targets[t] / spacing));
+		}
+		if (snapped.empty()) {
+			snapped.push_back(_snap_to_grid(V3_ZERO));
+		}
+		// Return if no target has moved to the next grid slot and no region under a patch changed
+		if (!p_rebuild && _changed_regions.empty() && snapped == _last_snapped) {
 			return;
 		}
 
-		LOG(EXTREME, "---- 1. Defining area as a radius on a grid ----");
-		// Create a 0-N grid, center on snapped_pos
-		PackedInt32Array grid;
+		// 1. The cells wanted: every _shape_size cell whose centre lies within _radius of any target, keyed by
+		// its top left corner. Overlapping patches share cells, so the pool (one patch per target) suffices.
 		int grid_width = _radius * 2 / _shape_size; // 64*2/16 = 8
 		grid_width = int_ceil_pow2(grid_width, 4);
-		grid.resize(grid_width * grid_width);
-		grid.fill(-1);
-		Vector2i grid_offset = -V2I(grid_width / 2); // offset # cells to center of grid
-		Vector2i grid_corner = snapped_pos + grid_offset * _shape_size; // Top left of grid
-		LOG(EXTREME, "New snapped_pos: ", snapped_pos);
-		LOG(EXTREME, "grid_corner: ", grid_corner);
-		LOG(EXTREME, "radius: ", _radius, ", grid_width: ", grid_width, ", grid_offset: ", grid_offset, ", # cells: ", grid.size());
-		LOG(EXTREME, "shape_size: ", _shape_size);
-
-		LOG(EXTREME, "---- 2. Checking existing shapes ----");
-		// If shape is within area, skip
-		// Else, mark unused
-
-		// Stores index into _shapes array
-		TypedArray<int> inactive_shape_ids;
-
-		real_t radius_sqr = real_t(_radius * _radius);
-		Vector2i shape_offset = V2I(_shape_size / 2); // offset meters to top left corner of shape
-		int shape_count = is_editor_mode() ? _shapes.size() : PS->body_get_shape_count(_static_body_rid);
-		for (int i = 0; i < shape_count; i++) {
-			Vector3 shape_global_pos = _shape_get_position(i);
-			if (p_rebuild || shape_global_pos.x > 1e20f) {
-				inactive_shape_ids.push_back(i);
-				_shape_set_disabled(i, true);
-				LOG(EXTREME, "Shape ", i, " marked inactive (rebuild or out of bounds)");
-				continue;
+		const Vector2i grid_offset = -V2I(grid_width / 2); // offset # cells to center of grid
+		const real_t radius_sqr = real_t(_radius * _radius);
+		const Vector2i shape_offset = V2I(_shape_size / 2); // offset meters to top left corner of shape
+		auto key_of = [](const Vector2i &p) -> int64_t { return (int64_t(p.x) << 32) ^ int64_t(uint32_t(p.y)); };
+		std::unordered_map<int64_t, int> wanted; // key -> shape id holding it, or -1
+		std::vector<Vector2i> wanted_order;
+		for (const Vector2i &centre : snapped) {
+			const Vector2i grid_corner = centre + grid_offset * _shape_size; // Top left of grid
+			for (int i = 0; i < grid_width * grid_width; i++) {
+				const Vector2i shape_pos = grid_corner + Vector2i(i % grid_width, i / grid_width) * _shape_size;
+				if ((shape_pos + shape_offset).distance_squared_to(centre) > radius_sqr) {
+					continue;
+				}
+				if (wanted.emplace(key_of(shape_pos), -1).second) {
+					wanted_order.push_back(shape_pos);
+				}
 			}
+		}
+		// A shape reads its region and the +X/+Z neighbours (its last row and column), so it is stale when its
+		// footprint, last vertex included, touches a region that was loaded or unloaded.
+		const int region_size = _terrain->get_region_size();
+		auto stale = [&](const Vector2i &shape_pos) -> bool {
+			for (const Vector2i &loc : _changed_regions) {
+				const Vector2i lo = loc * region_size;
+				const Vector2i hi = lo + V2I(region_size);
+				if (shape_pos.x <= hi.x && shape_pos.x + _shape_size >= lo.x && shape_pos.y <= hi.y &&
+						shape_pos.y + _shape_size >= lo.y) {
+					return true;
+				}
+			}
+			return false;
+		};
 
-			// Descale global position of shape center
-			Vector3 shape_center = shape_global_pos / spacing;
-			// Unique key: Top left corner of shape, snapped to grid
-			Vector2i shape_pos = _snap_to_grid(v3v2i(shape_center) - shape_offset);
-			if (v3v2i(shape_center).distance_squared_to(snapped_pos) <= radius_sqr) {
-				// Get index into shape array
-				Vector2i grid_loc = (shape_pos - grid_corner) / _shape_size;
-				int idx = grid_loc.y * grid_width + grid_loc.x;
-				if (idx >= 0 && idx < grid.size()) {
-					grid[idx] = i;
+		// 2. Keep every active shape that is still wanted and not stale; free the rest.
+		std::vector<int> inactive_shape_ids;
+		const int shape_count = is_editor_mode() ? int(_shapes.size()) : PS->body_get_shape_count(_static_body_rid);
+		for (int i = 0; i < shape_count; i++) {
+			const Vector3 shape_global_pos = _shape_get_position(i);
+			if (!p_rebuild && shape_global_pos.x < 1e20f) {
+				// Unique key: Top left corner of shape, snapped to grid
+				const Vector2i shape_pos = _snap_to_grid(v3v2i(shape_global_pos / spacing) - shape_offset);
+				auto it = wanted.find(key_of(shape_pos));
+				if (it != wanted.end() && it->second < 0 && !stale(shape_pos)) {
+					it->second = i;
 					_shape_set_disabled(i, false);
-					LOG(EXTREME, "Shape ", i, ": shape_center: ", shape_center, ", shape_pos: ", shape_pos, ", grid_loc: ",
-							grid_loc, ", index: ", idx, " active");
 					continue;
 				}
 			}
-
 			inactive_shape_ids.push_back(i);
 			_shape_set_disabled(i, true);
-			LOG(EXTREME, "Shape ", i, ": shape_center: ", shape_center, ", shape_pos: ", shape_pos,
-					" out of bounds, marking inactive");
+			// Park it, so a disabled shape is never mistaken for one still holding its old cell.
+			_shape_set_transform(i, Transform3D(Basis(), V3_MAX));
 		}
-		LOG(EXTREME, "_inactive_shapes size: ", inactive_shape_ids.size());
 
-		LOG(EXTREME, "---- 3. Review grid cells in area ----");
-		// If cell is full, skip
-		// Else assign shape and form it
-
-		for (int i = 0; i < grid.size(); i++) {
-			Vector2i grid_loc(i % grid_width, i / grid_width);
-			if (!p_rebuild && grid[i] >= 0) {
-				LOG(EXTREME, "grid[", i, ":", grid_loc, "] already active, skipping");
+		// 3. Form a shape for every wanted cell nobody holds. A cell over no loaded region stays empty, and is
+		// tried again when a region is loaded under it (region_changed) or a target moves.
+		int built = 0;
+		for (const Vector2i &shape_pos : wanted_order) {
+			if (wanted[key_of(shape_pos)] >= 0) {
 				continue;
 			}
-
-			// Unique key: Top left corner of shape, snapped to grid
-			Vector2i shape_pos = grid_corner + grid_loc * _shape_size;
-			Vector2i shape_center = shape_pos + shape_offset;
-			if (shape_center.distance_squared_to(snapped_pos) > radius_sqr) {
-				LOG(EXTREME, "grid[", i, ":", grid_loc, "] shape_pos : ", shape_pos, " out of circle, skipping");
-				continue;
-			}
-			if (inactive_shape_ids.size() == 0) {
+			if (inactive_shape_ids.empty()) {
 				LOG(ERROR, "No more unused shapes! Aborting!");
 				break;
 			}
 			Dictionary shape_data = _get_shape_data(shape_pos, _shape_size);
 			if (shape_data.is_empty()) {
-				LOG(EXTREME, "grid[", i, ":", grid_loc, "] shape_pos : ", shape_pos, " No region found");
 				continue;
 			}
-			int shape_id = inactive_shape_ids.pop_back();
+			const int shape_id = inactive_shape_ids.back();
+			inactive_shape_ids.pop_back();
 			Transform3D xform = shape_data["xform"];
-			LOG(EXTREME, "grid[", i, ":", grid_loc, "] shape_pos : ", shape_pos, " act ", v3v2i(xform.origin) - shape_offset, " placing shape id ", shape_id);
 			xform.scale(Vector3(spacing, 1.f, spacing));
 			_shape_set_transform(shape_id, xform);
 			_shape_set_disabled(shape_id, false);
 			_shape_set_data(shape_id, shape_data);
+			wanted[key_of(shape_pos)] = shape_id;
+			built++;
 		}
-		_last_snapped_pos = snapped_pos;
-		LOG(EXTREME, "Setting _last_snapped_pos: ", _last_snapped_pos);
-		LOG(EXTREME, "inactive_shape_ids size: ", inactive_shape_ids.size());
+		_last_snapped = snapped;
+		_changed_regions.clear();
+		_last_update_built = built;
+		LOG(EXTREME, "Collision: ", int(snapped.size()), " targets, ", int(wanted.size()), " cells, built ", built,
+				", free ", int(inactive_shape_ids.size()));
 
 	} else {
 		// Full collision
@@ -458,12 +465,14 @@ void Pasture3DCollision::update(const Vector2i &p_region_loc, const bool p_rebui
 			_shape_set_data(i, shape_data);
 		}
 	}
-	LOG(EXTREME, "Collision update time: ", Time::get_singleton()->get_ticks_usec() - time, " us");
+	_last_update_usec = Time::get_singleton()->get_ticks_usec() - time;
+	LOG(EXTREME, "Collision update time: ", _last_update_usec, " us");
 }
 
 void Pasture3DCollision::destroy() {
 	_initialized = false;
-	_last_snapped_pos = V2I_MAX;
+	_last_snapped.clear();
+	_changed_regions.clear();
 
 	// Physics Server
 	if (_static_body_rid.is_valid()) {
@@ -492,6 +501,74 @@ void Pasture3DCollision::destroy() {
 		remove_from_tree(_static_body);
 		memdelete_safely(_static_body);
 	}
+}
+
+std::map<Vector2i, uint64_t, Pasture3DCollision::LocLess> Pasture3DCollision::_snapshot_regions() const {
+	std::map<Vector2i, uint64_t, LocLess> sig;
+	const Pasture3DData *data = _terrain->get_data();
+	for (const Vector2i &loc : data->get_region_locations()) {
+		const Pasture3DRegion *region = data->get_region_ptr(loc);
+		if (!region || region->is_deleted()) {
+			continue;
+		}
+		sig[loc] = (region->get_instance_id() * 31u + uint64_t(region->get_texel_ratio())) * 2u +
+				(data->region_has_collision(region) ? 1u : 0u);
+	}
+	return sig;
+}
+
+void Pasture3DCollision::on_region_map_changed() {
+	if (!_initialized) {
+		return;
+	}
+	if (!is_dynamic_mode()) {
+		build(); // One shape per loaded region: the count may have changed
+		return;
+	}
+	// Rebuilding the whole pool here (as this once did) re-created every shape on every region load.
+	std::map<Vector2i, uint64_t, LocLess> now = _snapshot_regions();
+	for (const auto &[loc, sig] : now) {
+		auto it = _region_sig.find(loc);
+		if (it == _region_sig.end() || it->second != sig) {
+			_changed_regions.push_back(loc);
+		}
+	}
+	for (const auto &[loc, sig] : _region_sig) {
+		if (!now.count(loc)) {
+			_changed_regions.push_back(loc);
+		}
+	}
+	_region_sig = now;
+}
+
+void Pasture3DCollision::region_changed(const Vector2i &p_region_loc) {
+	if (!_initialized) {
+		return;
+	}
+	if (is_dynamic_mode()) {
+		_changed_regions.push_back(p_region_loc); // Picked up by the next update, in the physics tick
+	} else {
+		build(); // One shape per loaded region: the count changed
+	}
+}
+
+Dictionary Pasture3DCollision::get_stats() const {
+	Dictionary stats;
+	int active = 0;
+	int pool = 0;
+	if (_initialized) {
+		pool = is_editor_mode() ? int(_shapes.size()) : PS->body_get_shape_count(_static_body_rid);
+		for (int i = 0; i < pool; i++) {
+			// The physics server cannot report a shape disabled; every disabled shape is parked at V3_MAX.
+			active += _shape_get_position(i).x < 1e20f ? 1 : 0;
+		}
+	}
+	stats["usec"] = _last_update_usec;
+	stats["built"] = _last_update_built;
+	stats["active"] = active;
+	stats["pool"] = pool;
+	stats["targets"] = int(_last_snapped.size());
+	return stats;
 }
 
 void Pasture3DCollision::set_mode(const CollisionMode p_mode) {
@@ -618,6 +695,8 @@ void Pasture3DCollision::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("build"), &Pasture3DCollision::build);
 	ClassDB::bind_method(D_METHOD("update", "region_location", "rebuild"), &Pasture3DCollision::update, DEFVAL(V2I_MAX), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("destroy"), &Pasture3DCollision::destroy);
+	ClassDB::bind_method(D_METHOD("region_changed", "region_location"), &Pasture3DCollision::region_changed);
+	ClassDB::bind_method(D_METHOD("get_stats"), &Pasture3DCollision::get_stats);
 	ClassDB::bind_method(D_METHOD("set_mode", "mode"), &Pasture3DCollision::set_mode);
 	ClassDB::bind_method(D_METHOD("get_mode"), &Pasture3DCollision::get_mode);
 	ClassDB::bind_method(D_METHOD("is_enabled"), &Pasture3DCollision::is_enabled);

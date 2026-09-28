@@ -294,6 +294,7 @@ void Pasture3DMesher::_clear_mesh_types() {
 		RS->free_rid(rid);
 	}
 	_mesh_rids.clear();
+	_mesh_base_aabbs.clear();
 	return;
 }
 
@@ -660,8 +661,22 @@ void Pasture3DMesher::update_aabbs(const real_t p_cull_margin, const Vector2 &p_
 	// sea_level +/- amplitude and sits wherever the sea does, so a sea level of 300
 	// inflated the y-extent to 600 m of nothing.
 	height_range.y -= height_range.x;
-	for (const RID &rid : _mesh_rids) {
-		AABB aabb = RS->mesh_get_custom_aabb(rid);
+	if (_mesh_base_aabbs.size() != _mesh_rids.size()) {
+		_mesh_base_aabbs.clear();
+		for (const RID &rid : _mesh_rids) {
+			_mesh_base_aabbs.push_back(RS->mesh_get_custom_aabb(rid));
+		}
+	}
+	// A vertex the shader moves toward -x/-z (vertex collapse) takes its triangles past the mesh's own
+	// bounds; a camera whose frustum holds those triangles but not the mesh would cull them.
+	const real_t back = MAX(_host->get_default_xz_back_margin(), real_t(0.f));
+	for (int i = 0; i < _mesh_rids.size(); i++) {
+		const RID rid = _mesh_rids[i];
+		AABB aabb = _mesh_base_aabbs[i];
+		aabb.position.x -= back;
+		aabb.position.z -= back;
+		aabb.size.x += back;
+		aabb.size.z += back;
 		aabb.position.y = height_range.x - cull_margin;
 		aabb.size.y = height_range.y + cull_margin * 2.f;
 		RS->mesh_set_custom_aabb(rid, aabb);

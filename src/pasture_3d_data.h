@@ -7,6 +7,8 @@
 #include "generated_texture.h"
 #include "pasture_3d_layer_stack.h"
 #include "pasture_3d_region.h"
+#include "pasture_3d_region_index.h"
+#include "pasture_3d_region_type.h"
 
 class Pasture3D;
 
@@ -23,14 +25,20 @@ class Pasture3DData : public Object {
 
 public: // Constants
 	static inline const real_t CURRENT_DATA_VERSION = 0.93f; // Current Data format version
-	static inline const int REGION_MAP_SIZE = 32;
+	// The region map's edge in region locations, from the project setting REGION_MAP_SIZE_SETTING (read
+	// once per process: the map is sized when the first terrain initialises). Locations run from
+	// -size/2 to size/2 - 1 on each axis.
+	static inline const int REGION_MAP_SIZE_DEFAULT = 256;
+	static inline const char *REGION_MAP_SIZE_SETTING = "pasture_3d/regions/region_map_size";
+	// Texture-array slots are allocated in chunks of this many, so a load rarely has to grow (recreate) the
+	// arrays. Growing re-uploads every slot; filling a free slot uploads one layer.
+	static inline const int SLOT_CHUNK = 16;
 	// The GPU crossover defaults, in cells. Public and named so the READER (_gpu_raster_threshold,
 	// graph_gpu_threshold) and the Project Settings REGISTRATION cannot disagree — they did, by 16x,
 	// for the whole life of the GPU rasteriser, and every stamp between 256^2 and 1024^2 quietly took
 	// the CPU path as a result.
 	static inline const int GPU_RASTER_THRESHOLD_DEFAULT = 65536;  // 256^2
 	static inline const int GRAPH_GPU_THRESHOLD_DEFAULT = 65536;   // 256^2
-	static inline const Vector2i REGION_MAP_VSIZE = V2I(REGION_MAP_SIZE);
 
 	enum HeightFilter {
 		HEIGHT_FILTER_NEAREST,
@@ -61,8 +69,9 @@ private:
 	// Regions are dual indexed:
 	// 1) By `region_location:Vector2i` as the primary key. This is the only stable index
 	// so should be the main index for users.
-	// 2) By `region_id:int`. This index changes on every add/remove, depends on load order,
-	// and is not stable. It should not be relied on by users and is primarily for internal use.
+	// 2) By `region_id:int`, which is the region's SLOT in the texture arrays. A region keeps its slot
+	// for as long as it is loaded; unloading or deleting it frees the slot for the next region to load.
+	// Slots are internal: users should index by location.
 
 	// Private functions should be indexed by region_id or region_location
 	// Public functions by region_location or global_position
@@ -72,31 +81,71 @@ private:
 	// by the Undo system.
 	Dictionary _regions; // Dict[region_location:Vector2i] -> Pasture3DRegion
 
-	// All _active_ region maps are maintained in these secondary indices.
-	// Regions are considered active if and only if they exist in `_region_locations`. The other
-	// arrays are built off of this index; its order defines region_id.
-	// The image arrays are converted to TextureArrays for the shader.
-
+	// Active regions are the loaded, non-deleted ones. `_region_locations` lists them (in slot order after
+	// update_maps); it no longer defines the slot.
 	TypedArray<Vector2i> _region_locations;
-	TypedArray<Image> _height_maps;
-	TypedArray<Image> _control_maps;
-	TypedArray<Image> _color_maps;
 
-	// Editing occurs on the Image arrays above, which are converted to Texture arrays
-	// below for the shader.
+	// Slot pools (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md §B, §D), one per texture-array set: POOL_FINE
+	// holds Standard (texel ratio 1) regions at full size, POOL_COARSE every coarse region at the finest
+	// coarse ratio loaded (1 << _coarse_store_shift), so a ratio-4 region costs 1/16 of a Standard one.
+	// locations[slot] is the location in that slot, or V2I_MAX when free; region_ids[slot] is the ObjectID of
+	// the region uploaded there, so a region object replaced at the same location (undo, reload) is
+	// re-uploaded. Its size is the array capacity, a multiple of SLOT_CHUNK. Allocation takes the LOWEST free
+	// slot. maps[] are the slot-indexed images backing the arrays; a free slot holds a placeholder. Capacity
+	// grows a chunk at a time and shrinks by compaction (PASTURE3D_BAKE_MEMORY_SPEC.md M2), see _sync_slots.
+	struct SlotPool {
+		TypedArray<Vector2i> locations;
+		PackedInt64Array region_ids;
+		Dictionary slots; // Dict[region_location:Vector2i] -> slot:int
+		TypedArray<Image> maps[TYPE_MAX];
+		Ref<Image> placeholders[TYPE_MAX]; // One blank per map type, shaped like the array it pads
+		GeneratedTexture gens[TYPE_MAX]; // The TextureArray RIDs from the RenderingServer
+	};
+	enum PoolId {
+		POOL_FINE,
+		POOL_COARSE,
+		POOL_MAX,
+	};
+	SlotPool _pools[POOL_MAX];
+	int _coarse_store_shift = 0; // log2 of the coarse arrays' texel ratio; 0 while no coarse region is loaded
+	int _collapse_ratio_max = 1; // Coarsest texel ratio among loaded regions whose type collapses; 1 with none
+	bool _seam_stitch_enabled = true; // Not saved: off only for gates that need the unstitched seam as a control
+	// Region types by path. "" and a missing file both resolve to Standard (see load_region_type).
+	mutable Dictionary _type_cache;
+	mutable Ref<Pasture3DRegionType> _fallback_standard;
 
-	// 32x32 grid with region_id:int at its location, no region = 0, region_ids >= 1
+	// get_region_map_size()^2 encoded texels (region_map_encode): 0 = no region. The CPU copy for C++
+	// readers; _generated_region_map is the same values as an RF texture for the shaders.
 	PackedInt32Array _region_map;
 	bool _region_map_dirty = true;
+	GeneratedTexture _generated_region_map;
 
-	// These contain the TextureArray RIDs from the RenderingServer
-	GeneratedTexture _generated_height_maps;
-	GeneratedTexture _generated_control_maps;
-	GeneratedTexture _generated_color_maps;
+	// Upload accounting, so a gate can prove that loading one region uploads one layer per map type.
+	int64_t _stat_layer_uploads = 0;
+	int64_t _stat_array_creates = 0;
+	int64_t _stat_region_map_uploads = 0;
+	// Write accounting (PASTURE3D_BAKE_MEMORY_SPEC.md M3): the index and the manifest describe the whole world,
+	// so a gate counts how often they are written, and how often a manifest write was found unnecessary.
+	int64_t _stat_index_writes = 0;
+	int64_t _stat_manifest_writes = 0;
+	int64_t _stat_manifest_skips = 0;
+	// What _save_layer_manifest last wrote: the content hash, the path, and the file's modified time after the
+	// write. A manifest whose content, path and file are all unchanged is not written again.
+	int64_t _manifest_hash = 0;
+	String _manifest_path;
+	uint64_t _manifest_mtime = 0;
 
 	// Optional editor-only non-destructive layer stack. Null on plain terrains; the region images
 	// above remain the composited source of truth either way, so the runtime path is unchanged.
 	Ref<Pasture3DLayerStack> _layer_stack;
+
+	// Every region on disk, loaded or not (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md §A). _regions holds
+	// only what is loaded, so once regions can unload this is the only record that an unloaded one exists.
+	Ref<Pasture3DRegionIndex> _region_index;
+	// region_location -> number of times it has been loaded or unloaded this session (0 when never). Undo
+	// snapshots record it, and an undo whose recorded generation no longer matches skips that region: the
+	// region it captured was unloaded, and what is there now (if anything) is a different load of it.
+	Dictionary _region_generation;
 
 	// GPU analytic rasteriser (PASTURE3D_BRUSH_GPU_RASTER_SPEC.md). Lazily created on the first large
 	// stamp; owns a local RenderingDevice. Null until used; freed in _clear(). Plain pointer (not an
@@ -113,6 +162,40 @@ private:
 
 	// Functions
 	void _clear();
+	// Slot pools. _sync_slots frees slots whose region went away (or moved to the other pool) and gives every
+	// active region of the pool without one the lowest free slot; r_fresh gets each slot whose contents must
+	// be uploaded. When less than half the capacity is used, by half a chunk or more, it packs the used slots
+	// down from 0 and shrinks the capacity to the chunks they need. Returns true if the capacity changed (the
+	// arrays must be recreated, and every slot is uploaded by that).
+	static PoolId _pool_of(const Pasture3DRegion *p_region) { return p_region->is_coarse() ? POOL_COARSE : POOL_FINE; }
+	bool _sync_slots(const PoolId p_pool, PackedInt32Array &r_fresh);
+	void _release_slot(const PoolId p_pool, const Vector2i &p_region_loc);
+	// The coarse arrays' ratio: the finest coarse ratio among the loaded regions (0 with none).
+	int _coarse_shift_needed() const;
+	void _rebuild_region_map();
+	// A blank shaped like p_like (size, format, mipmaps), cached per pool and map type.
+	Ref<Image> _placeholder(const PoolId p_pool, const MapType p_type, const Ref<Image> &p_like);
+	void _build_array(const PoolId p_pool, const MapType p_type);
+	// The image a region uploads for a map type: its own map, except a coarse region coarser than the coarse
+	// arrays' ratio, which uploads a copy upsampled to it (the shader reads only its lattice texels for height).
+	Ref<Image> _gpu_map(const Pasture3DRegion *p_region, const MapType p_type) const;
+	// A region's map at full size: a coarse one upsampled as the CPU reads it (exports).
+	Ref<Image> _full_size_map(const Pasture3DRegion *p_region, const MapType p_type) const;
+	// Seam stitch (spec §D). Where the region's -x or -z neighbour is coarser, that neighbour's lattice ends on
+	// this region's first column (row), and a collapsed mesh meets it with straight segments between the
+	// lattice points. The region's edge texels between them are set to the line, so the mesh, collision and
+	// get_height agree. Reads only the neighbour's ratio (the region index's when it is unloaded) and this
+	// region's own texels, plus the next region's origin for the last segment, which is left alone while that
+	// region is unloaded. Returns true if a texel changed.
+	bool _stitch_region(const Vector2i &p_region_loc);
+	// Texel ratio of the region at a location, loaded or only indexed; 0 when there is none.
+	int _ratio_at(const Vector2i &p_region_loc) const;
+	// Region type flags for the region map, from the region's type.
+	void _region_flags(const Pasture3DRegion *p_region, bool &r_collapse, bool &r_color_only) const;
+	// Height at a fine vertex (region-local) of a coarse region: bilinear on its lattice, whose far corners
+	// are the neighbours' vertices.
+	real_t _coarse_height(const Pasture3DRegion *p_region, const Vector2i &p_region_loc, const Vector2i &p_fine) const;
+	void _resample_region(Pasture3DRegion *p_region, const Vector2i &p_region_loc, const int p_ratio);
 	void _synthesize_base_layer();
 	// Whether the dense Base layer (index 0) still aliases the region height maps (same Ref<Image>).
 	// Aliasing is the zero-copy load state; it is correct for a single flatten but double-applies
@@ -128,6 +211,20 @@ private:
 	// Region-local vertex rect (clamped to [0, region_size]) covered by a world-space AABB's XZ extent,
 	// for one region location. Used to scope a sub-tile clear to the footprint of a tool re-render.
 	Rect2i _region_pixel_rect(const AABB &p_area, const Vector2i &p_region_loc) const;
+	// _region_pixel_rect in the region's MAP pixels: on a coarse region, the texels whose lattice vertex lies
+	// in the fine rect (texel j sits on fine vertex j * texel_ratio).
+	Rect2i _region_map_rect(const AABB &p_area, const Pasture3DRegion *p_region) const;
+	// A region-local fine vertex to the pixel layers store it at. On a coarse region that is its texel; with
+	// p_lattice_only a vertex off the lattice has no texel of its own and returns false, so a writer walking
+	// fine vertices writes each texel once.
+	bool _layer_pixel(const Pasture3DRegion *p_region, const Vector2i &p_fine, const bool p_lattice_only, Vector2i &r_px) const;
+	// Keep the stack's region -> map size table (which every layer shares) in step with the regions.
+	void _sync_region_map_size(const Vector2i &p_region_loc);
+	void _sync_region_map_sizes();
+	// A layer's tiles over one region, taken to a new texel ratio (streaming phase 2b).
+	Dictionary _resample_layer_tiles(const Pasture3DLayer *p_layer, const Dictionary &p_tiles, const int p_ts0, const int p_r0, const int p_r1, const int p_ts1) const;
+	// get_height_below_point in layer pixels (a coarse region's texels).
+	real_t _height_below_px(const int p_below_layer_id, const Vector2i &p_region_loc, const Vector2i &p_px);
 	// Per-map-type compositing passes (Phase 7), each writing one region map over the given rect:
 	//   height  — REPLACE/ADD/MAX/MIN blend (unchanged; byte-identical to pre-Phase-7).
 	//   control — topmost-covered-wins; a covered overlay fully replaces the value below (no float blend).
@@ -158,8 +255,38 @@ private:
 	Error _save_export_image(const Ref<Image> &p_img, const String &p_path, const String &p_ext, const MapType p_map_type) const;
 	Rect2i _region_bounds_px() const;
 
+	// Region load/unload (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md phase 0).
+	// A hash of what a region's composite depends on besides its own tiles: every layer's uid, order,
+	// blend, opacity, visibility and map type. Recorded in the index when a region is written; a region
+	// that loads under a different signature was composited against a stack that has since changed.
+	int64_t _stack_signature() const;
+	String _data_dir() const;
+	void _bump_generation(const Vector2i &p_region_loc);
+	// Record a loaded region's height range and the current stack signature in the index.
+	void _index_region(const Vector2i &p_region_loc);
+	void _load_region_index(const String &p_dir);
+	void _save_region_index(const String &p_dir);
+	// Writes the manifest only when its content differs from the file this data last wrote there, or the file
+	// changed or went since. So the manifest on disk always knows every layer uid of every slice written after
+	// it, which is what makes deferring it unnecessary, and a stack that did not change costs no write.
+	void _save_layer_manifest(const String &p_dir);
+	// Write (or remove, when it has no tiles) one region's layer slice. Layers are matched on reload by
+	// uid, so each slice layer carries its stack layer's uid.
+	void _save_layer_slice(const String &p_dir, const Vector2i &p_region_loc, const bool p_base_aliased);
+	// Merge one region's saved slice into the live stack, matching layers by uid (legacy slices, whose
+	// layers carry none, fall back to index). A slice layer whose uid is no longer in the stack belonged
+	// to a layer removed while the region was unloaded, and is dropped. Returns whether a slice existed.
+	bool _merge_layer_slice(const String &p_dir, const Vector2i &p_region_loc);
+	bool _merge_layer_slice_from(const Ref<Pasture3DLayerStack> &p_slice, const Vector2i &p_region_loc);
+	void _drop_region(const Vector2i &p_region_loc, const bool p_update);
+	// Drop every layer's tiles for one region (the region is leaving memory, or is about to be re-read).
+	void _evict_region_tiles(const Vector2i &p_region_loc);
+	// Recomposite a just-loaded region when the index says it was written under a different stack.
+	// Returns whether it recomposited.
+	bool _recomposite_if_stale(const Vector2i &p_region_loc);
+
 public:
-	Pasture3DData() {}
+	Pasture3DData() { _region_index.instantiate(); }
 	void initialize(Pasture3D *p_terrain);
 	~Pasture3DData() { _clear(); }
 
@@ -171,7 +298,46 @@ public:
 	TypedArray<Pasture3DRegion> get_regions_active(const bool p_copy = false, const bool p_deep = false) const;
 	Dictionary get_regions_all() const { return _regions; }
 	PackedInt32Array get_region_map() const { return _region_map; }
+	RID get_region_map_rid() const { return _generated_region_map.get_rid(); }
+	static int get_region_map_size();
+	static inline int s_region_map_size = 0; // Cached project setting; 0 until first read
+	static int _read_region_map_size();
 	static int get_region_map_index(const Vector2i &p_region_loc);
+	// The region map encoding, defined here and in shaders/region_map.glsl ONLY. A Standard region is
+	// (slot + 1) | color_only << 20; a coarse one -((slot + 1) | shift << 16 | collapse << 19 | color_only << 20).
+	static int region_map_encode(const int p_slot, const int p_shift = 0, const bool p_collapse = false, const bool p_color_only = false) {
+		const int flags = (int(p_color_only) << 20) | (p_shift > 0 ? (p_shift << 16) | (int(p_collapse) << 19) : 0);
+		return p_shift > 0 ? -((p_slot + 1) | flags) : (p_slot + 1) | flags;
+	}
+	// A location the region index names but that is not loaded (spec §I): no slot, so every decoder reads it
+	// as no region. Only a reader that must tell "unknown" from "nothing here" (the water terrain check) looks
+	// for it. Negative, so older readers that treat a negative texel as no region stay correct.
+	static inline const int REGION_MAP_UNLOADED = -(1 << 21);
+	// The GPU texel for REGION_MAP_UNLOADED. Not an integer, so int(round(v)) reads it as 0 (no region) in
+	// region_map_slot with no extra instruction: an explicit `v == -(1 << 21)` test there ran per fragment
+	// tap and cost the terrain 4% of its frame. Only the water check reads the raw value.
+	static constexpr float REGION_MAP_UNLOADED_TEXEL = 0.25f;
+	// A region id: -1 for none (or unloaded), else slot | shift << 16 | collapse << 19 | color_only << 20.
+	static int region_map_decode(const int p_value) {
+		return p_value == 0 || p_value == REGION_MAP_UNLOADED ? -1 : ABS(p_value) - 1;
+	}
+	static int region_id_slot(const int p_id) { return p_id < 0 ? -1 : (p_id & 0xFFFF); }
+	static bool region_id_is_coarse(const int p_id) { return p_id >= 0 && ((p_id >> 16) & 0x7) != 0; }
+	TypedArray<Vector2i> get_slot_locations() const;
+	int get_slot_capacity() const { return _pools[POOL_FINE].locations.size(); }
+	TypedArray<Vector2i> get_coarse_slot_locations() const;
+	int get_coarse_slot_capacity() const { return _pools[POOL_COARSE].locations.size(); }
+	int get_coarse_store_ratio() const { return _coarse_store_shift > 0 ? 1 << _coarse_store_shift : 0; }
+	int get_coarse_store_shift() const { return _coarse_store_shift; }
+	// Vertex collapse moves a vertex back (-x, -z) by up to this ratio minus one vertices, which can carry a
+	// triangle outside its clipmap mesh's cull AABB; the mesher widens the AABBs by it (Pasture3D).
+	int get_collapse_ratio_max() const { return _collapse_ratio_max; }
+	// The seam stitch (_stitch_region) is on by default and not saved. Off leaves a Standard region's edge
+	// against a coarser neighbour as authored, so the collapsed mesh cracks there: a gate control, not a mode.
+	void set_seam_stitch_enabled(const bool p_enabled) { _seam_stitch_enabled = p_enabled; }
+	bool is_seam_stitch_enabled() const { return _seam_stitch_enabled; }
+	Dictionary get_upload_stats() const;
+	void reset_upload_stats();
 
 	void do_for_regions(const Rect2i &p_area, const Callable &p_callback);
 	void change_region_size(int region_size);
@@ -200,10 +366,72 @@ public:
 	void remove_regionl(const Vector2i &p_region_loc, const bool p_update = true);
 	void remove_region(const Ref<Pasture3DRegion> &p_region, const bool p_update = true);
 
+	// Region load/unload (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md phase 0). remove_region above means
+	// DELETE (the file goes on the next save); unload_region takes a region out of memory and keeps it on
+	// disk. The region is saved first, together with its layer slice, the layer manifest and the region
+	// index, so what comes back on load is exactly what left. Its undo history is dropped: an undo recorded
+	// against it is skipped from now on (see _region_generation).
+	// p_write_index false updates the index in memory only; a caller unloading many regions (the scoped
+	// bake) passes false and calls write_region_index once at the end (PASTURE3D_BAKE_MEMORY_SPEC.md M3).
+	// If that write never happens, the file keeps the entries of before: type, ratio and lock are unchanged
+	// by an unload, a stale height range is replaced on load, and a stale stack signature costs a
+	// recomposite on load from a manifest and slices that are consistent (see _save_layer_manifest).
+	Error unload_region(const Vector2i &p_region_loc, const bool p_update = true, const bool p_write_index = true);
+	// Write the in-memory region index to the data directory. Returns ERR_UNCONFIGURED with no directory.
+	Error write_region_index();
+	bool is_region_loaded(const Vector2i &p_region_loc) const;
+	// Streaming's unload (spec §H): drops the region WITHOUT saving, and refuses (ERR_BUSY) one whose changes are
+	// not on disk. A game never writes its data.
+	Error release_region(const Vector2i &p_region_loc, const bool p_update = true);
+	// The region file for a location in p_dir, falling back to a legacy terrain3d_ file (r_legacy set); "" if
+	// neither exists. What load_region reads, so a streamer can read the same file on a worker thread.
+	static String region_file_path(const String &p_dir, const Vector2i &p_region_loc, bool *r_legacy = nullptr);
+	static String get_region_file_path(const String &p_dir, const Vector2i &p_region_loc) { return region_file_path(p_dir, p_region_loc); }
+	Ref<Pasture3DRegionIndex> get_region_index() const { return _region_index; }
+	// The water terrain check (spec §I), mirrored exactly from water_terrain.gdshaderinc so a gate can say what
+	// the shader should draw. States: 0 no region (open sea, or beyond the world), 1 indexed but unloaded,
+	// 2 land (stored height >= level + margin, holes included), 3 terrain below that (water shown).
+	int get_water_terrain_state(const Vector2 &p_xz, const real_t p_level, const real_t p_margin) const;
+	// Whether the check removes a water vertex at p_xz: its centre and the four corners at +-p_radius are all
+	// unloaded or land. p_radius is the ring's reach (3.5 cells in the shader); 0 tests the centre only.
+	bool is_water_hidden(const Vector2 &p_xz, const real_t p_level, const real_t p_margin, const real_t p_radius) const;
+	int get_region_generation(const Vector2i &p_region_loc) const { return _region_generation.get(p_region_loc, 0); }
+	// The generation of every LOADED region, including those still at 0. An undo snapshot records this;
+	// a location missing from it was not loaded when the snapshot was taken.
+	Dictionary get_region_generations() const;
+	// Generation-aware restore of one layer's tiles from an undo snapshot. Only LOADED regions whose
+	// generation still equals the one recorded in p_generations are touched: set to the snapshot's tiles,
+	// or erased when the snapshot has none. Anything loaded or unloaded since is left as it is now.
+	// Returns the regions it changed, for the caller to recomposite.
+	TypedArray<Vector2i> restore_layer_tiles(const int p_layer_id, const Dictionary &p_tiles, const Dictionary &p_generations);
+
+	// Region types and lock (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md §C, phase 2)
+	Ref<Pasture3DRegionType> load_region_type(const String &p_path) const;
+	Ref<Pasture3DRegionType> get_region_type(const Vector2i &p_region_loc) const;
+	Ref<Pasture3DRegionType> get_region_type_of(const Pasture3DRegion *p_region) const;
+	// Retypes a region. A different texel_ratio resamples its maps (downsampling DISCARDS detail, and
+	// going coarse discards the region's layer tiles: a coarse region has no layers until phase 2b).
+	// A DROP type clears its instances. Refused on a locked region. The type must be a saved resource:
+	// a region stores it by path.
+	Error set_region_type(const Vector2i &p_region_loc, const Ref<Pasture3DRegionType> &p_type, const bool p_update = true);
+	// The region's cached texel_ratio differs from its type's: the type changed or went missing. Only
+	// set_region_type converts it.
+	bool is_region_type_mismatched(const Vector2i &p_region_loc) const;
+	Error set_region_locked(const Vector2i &p_region_loc, const bool p_locked);
+	bool is_region_locked(const Vector2i &p_region_loc) const;
+	bool region_has_collision(const Pasture3DRegion *p_region) const;
+	bool region_keeps_instances(const Pasture3DRegion *p_region) const;
+	// Height at a fine vertex (global vertex coordinates), whatever the region's resolution. NaN outside
+	// every region. The one place a coarse region's lattice is interpolated.
+	real_t get_height_at_vertex(const Vector2i &p_vertex) const;
+
 	// Layer stack (editor-only, optional)
 	bool has_layer_stack() const { return _layer_stack.is_valid(); }
 	Ref<Pasture3DLayerStack> get_layer_stack() const { return _layer_stack; }
-	void set_layer_stack(const Ref<Pasture3DLayerStack> &p_stack) { _layer_stack = p_stack; }
+	void set_layer_stack(const Ref<Pasture3DLayerStack> &p_stack) {
+		_layer_stack = p_stack;
+		_sync_region_map_sizes();
+	}
 
 	// True when sculpt strokes should route into the active layer instead of writing the region image
 	// directly: a real layer exists above the Base (count > 1). A Base-only stack (plain terrain, or a
@@ -414,7 +642,10 @@ public:
 	void save_directory(const String &p_dir);
 	void save_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_16_bit = false);
 	void load_directory(const String &p_dir);
-	void load_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_update = true);
+	Error load_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_update = true);
+	// The main-thread half of load_region, from a region (and optional layer slice) already read from p_path.
+	Error adopt_region(const Vector2i &p_region_loc, const Ref<Pasture3DRegion> &p_region, const String &p_path,
+			const bool p_legacy, const Ref<Pasture3DLayerStack> &p_slice, const bool p_update = true);
 
 	// Editor-only layer persistence (PASTURE3D_LAYERS_GUIDE.md §7). Save/load the layer stack as
 	// pasture3d_layers*.res alongside the runtime region files, which are never touched. Called by
@@ -423,14 +654,21 @@ public:
 	bool load_layers(const String &p_dir); // Returns true if a manifest was found and loaded.
 
 	// Maps
-	TypedArray<Image> get_height_maps() const { return _height_maps; }
-	TypedArray<Image> get_control_maps() const { return _control_maps; }
-	TypedArray<Image> get_color_maps() const { return _color_maps; }
+	TypedArray<Image> get_height_maps() const { return _pools[POOL_FINE].maps[TYPE_HEIGHT]; }
+	TypedArray<Image> get_control_maps() const { return _pools[POOL_FINE].maps[TYPE_CONTROL]; }
+	TypedArray<Image> get_color_maps() const { return _pools[POOL_FINE].maps[TYPE_COLOR]; }
 	TypedArray<Image> get_maps(const MapType p_map_type) const;
 	void update_maps(const MapType p_map_type = TYPE_MAX, const bool p_all_regions = true, const bool p_generate_mipmaps = false);
-	RID get_height_maps_rid() const { return _generated_height_maps.get_rid(); }
-	RID get_control_maps_rid() const { return _generated_control_maps.get_rid(); }
-	RID get_color_maps_rid() const { return _generated_color_maps.get_rid(); }
+	RID get_height_maps_rid() const { return _pools[POOL_FINE].gens[TYPE_HEIGHT].get_rid(); }
+	RID get_control_maps_rid() const { return _pools[POOL_FINE].gens[TYPE_CONTROL].get_rid(); }
+	RID get_color_maps_rid() const { return _pools[POOL_FINE].gens[TYPE_COLOR].get_rid(); }
+	// The coarse arrays (spec §D) and their slot-indexed images; invalid and empty while no coarse region is loaded.
+	TypedArray<Image> get_coarse_maps(const MapType p_map_type) const {
+		return p_map_type >= 0 && p_map_type < TYPE_MAX ? _pools[POOL_COARSE].maps[p_map_type] : TypedArray<Image>();
+	}
+	RID get_coarse_maps_rid(const MapType p_map_type) const {
+		return p_map_type >= 0 && p_map_type < TYPE_MAX ? _pools[POOL_COARSE].gens[p_map_type].get_rid() : RID();
+	}
 
 	void set_pixel(const MapType p_map_type, const Vector3 &p_global_position, const Color &p_pixel);
 	Color get_pixel(const MapType p_map_type, const Vector3 &p_global_position) const;
@@ -503,14 +741,21 @@ VARIANT_ENUM_CAST(Pasture3DData::ExportMode);
 // the world, returning the _region_map index, which contains the region_id.
 // Valid region locations are -16, -16 to 15, 15, or when offset: 0, 0 to 31, 31
 // If any bits other than 0x1F are set, it's out of bounds and returns -1
+inline int Pasture3DData::get_region_map_size() {
+	if (s_region_map_size == 0) {
+		s_region_map_size = _read_region_map_size();
+	}
+	return s_region_map_size;
+}
+
 inline int Pasture3DData::get_region_map_index(const Vector2i &p_region_loc) {
-	// Offset world to positive values only
-	Vector2i loc = p_region_loc + (REGION_MAP_VSIZE / 2);
-	// Catch values > 31
-	if ((uint32_t(loc.x | loc.y) & uint32_t(~0x1F)) > 0) {
+	const int size = get_region_map_size();
+	// Offset world to positive values only; the size is a power of two.
+	Vector2i loc = p_region_loc + V2I(size / 2);
+	if ((uint32_t(loc.x | loc.y) & uint32_t(~(size - 1))) > 0) {
 		return -1;
 	}
-	return loc.y * REGION_MAP_SIZE + loc.x;
+	return loc.y * size + loc.x;
 }
 
 // Returns a region location given a global position. No bounds checking nor data access.
@@ -523,8 +768,9 @@ inline Vector2i Pasture3DData::get_region_location(const Vector3 &p_global_posit
 inline int Pasture3DData::get_region_id(const Vector2i &p_region_loc) const {
 	int map_index = get_region_map_index(p_region_loc);
 	if (map_index >= 0) {
-		int region_id = _region_map[map_index] - 1; // 0 = no region
-		if (region_id >= 0 && region_id < _region_locations.size()) {
+		int region_id = region_map_decode(_region_map[map_index]);
+		const int slot = region_id_slot(region_id);
+		if (slot >= 0 && slot < _pools[region_id_is_coarse(region_id) ? POOL_COARSE : POOL_FINE].locations.size()) {
 			return region_id;
 		}
 	}

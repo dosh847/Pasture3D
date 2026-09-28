@@ -42,7 +42,6 @@ extends Pasture3DNode
 		strength = v
 		_touch()
 
-var _cache: Dictionary = {}
 var _stale: bool = false
 
 
@@ -51,8 +50,9 @@ func _supports_freezing() -> bool:
 
 
 func clear_cache() -> void:
-	if _cache.is_empty() and not _stale:
+	if _cache.is_empty() and not _stale and not is_spilled():
 		return
+	_drop_spill()
 	_cache.clear()
 	_stale = false
 	_touch()
@@ -66,10 +66,12 @@ func cache_bytes() -> int:
 
 
 func cache_for(p_extent: String) -> Dictionary:
+	_unspill()
 	return _cache.get(p_extent, {})
 
 
 func store_cache(p_extent: String, p_entry: Dictionary) -> void:
+	_unspill()
 	_cache[p_extent] = p_entry
 
 

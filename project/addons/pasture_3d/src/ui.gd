@@ -77,9 +77,6 @@ var editor_decal_fade: float :
 			editor_decal_color[0].a = value
 			if is_shader_valid():
 				RenderingServer.material_set_param(mat_rid, "_editor_decal_color", editor_decal_color)
-				if value < 0.001:
-					var r_map: PackedInt32Array = plugin.terrain.data.get_region_map()
-					RenderingServer.material_set_param(mat_rid, "_region_map", r_map)
 
 
 func _enter_tree() -> void:
@@ -423,6 +420,9 @@ func set_active_operation() -> void:
 	if plugin.editor:
 		plugin.editor.set_tool(active_tool)
 		plugin.editor.set_operation(active_operation)
+		# The region gizmo is drawn only in the Region tool (§G).
+		if plugin.has_method("update_region_gizmo"):
+			plugin.update_region_gizmo()
 
 
 func update_decal() -> void:
@@ -453,10 +453,8 @@ func update_decal() -> void:
 	editor_decal_timer.start()
 	
 	## Region Operations
-	var r_map: PackedInt32Array = plugin.terrain.data.get_region_map()
 	if plugin.editor.get_tool() == Pasture3DEditor.REGION:
 		var r_size: float = float(plugin.terrain.get_region_size()) * plugin.terrain.get_vertex_spacing()
-		var map_size: int = plugin.terrain.data.REGION_MAP_SIZE
 		var half_r_size: float = r_size * 0.5
 		var pos: Vector2 = (Vector2(plugin.mouse_global_position.x, plugin.mouse_global_position.z) +
 			Vector2(half_r_size, half_r_size)).snappedf(r_size) - Vector2(half_r_size, half_r_size)
@@ -467,25 +465,18 @@ func update_decal() -> void:
 		editor_decal_part[1] = false # Disable reticle
 		
 		var loc: Vector2i = plugin.terrain.data.get_region_location(plugin.mouse_global_position)
-		loc += Vector2i(map_size / 2, map_size / 2)
-		if !(loc.x < 0 or loc.x > map_size - 1 or loc.y < 0 or loc.y > map_size - 1):
-			var index: int = clampi(loc.y * map_size + loc.x, 0, map_size * map_size - 1)
-			if plugin.terrain.material.get_world_background() == Pasture3DMaterial.WorldBackground.NONE:
-				if r_map[index] == 0 and active_operation == Pasture3DEditor.ADD:
-					r_map[index] = -index - 1
-				else:
-					r_map[index] = r_map[index]
-			
+		if Pasture3DData.get_region_map_index(loc) >= 0:
+			var has_region: bool = plugin.terrain.data.has_region(loc)
 			match active_operation:
 				Pasture3DEditor.ADD:
-					if r_map[index] <= 0:
+					if not has_region:
 						editor_decal_color[0] = Color.WHITE
 						editor_decal_color[0].a = 0.25
 					else:
 						hide_decal()
 				
 				Pasture3DEditor.SUBTRACT:
-					if r_map[index] > 0:
+					if has_region:
 						editor_decal_color[0] = Color.WHITE * .15
 						editor_decal_color[0].a = 0.75
 					else:
@@ -627,7 +618,6 @@ func update_decal() -> void:
 		RenderingServer.material_set_param(mat_rid, "_editor_decal_color", editor_decal_color)
 		RenderingServer.material_set_param(mat_rid, "_editor_decal_visible", editor_decal_visible)
 		RenderingServer.material_set_param(mat_rid, "_editor_decal_part", editor_decal_part)
-		RenderingServer.material_set_param(mat_rid, "_region_map", r_map)
 
 
 ## Crosshair under the cursor for the Place Brush tool. Shows just the cursor reticle (no brush circle)
@@ -649,7 +639,6 @@ func show_placement_decal(world_pos: Vector3) -> void:
 	editor_decal_visible = [true, false, false]
 	editor_decal_part = [false, true] # reticle only (crosshair), no brush texture
 	editor_decal_timer.start()
-	var r_map: PackedInt32Array = plugin.terrain.data.get_region_map()
 	RenderingServer.material_set_param(mat_rid, "_editor_brush_texture", editor_brush_texture_rid)
 	RenderingServer.material_set_param(mat_rid, "_editor_decal_position", editor_decal_position)
 	RenderingServer.material_set_param(mat_rid, "_editor_decal_rotation", editor_decal_rotation)
@@ -657,7 +646,6 @@ func show_placement_decal(world_pos: Vector3) -> void:
 	RenderingServer.material_set_param(mat_rid, "_editor_decal_color", editor_decal_color)
 	RenderingServer.material_set_param(mat_rid, "_editor_decal_visible", editor_decal_visible)
 	RenderingServer.material_set_param(mat_rid, "_editor_decal_part", editor_decal_part)
-	RenderingServer.material_set_param(mat_rid, "_region_map", r_map)
 
 
 func is_shader_valid() -> bool:
@@ -675,9 +663,7 @@ func is_shader_valid() -> bool:
 func hide_decal() -> void:
 	editor_decal_visible = [false, false, false]
 	if is_shader_valid():
-		var r_map: PackedInt32Array = plugin.terrain.data.get_region_map()
 		RenderingServer.material_set_param(mat_rid, "_editor_decal_visible", editor_decal_visible)
-		RenderingServer.material_set_param(mat_rid, "_region_map", r_map)
 
 
 # These array sizes are reset to 0 when closing scenes for some unknown reason, so check and reset

@@ -44,7 +44,12 @@ public: // Constants
 private:
 	// Saved data
 	real_t _version = 0.8f; // Set to first version to ensure we always upgrades this
-	int _region_size = 0;
+	int _region_size = 0; // The region's world footprint in vertices, whatever its resolution
+	// The type (PASTURE3D_REGION_STREAMING_AND_TYPES_SPEC.md §C). texel_ratio is a cached copy of the type's,
+	// so the file describes its own maps: they are region_size / texel_ratio texels wide. "" is Standard.
+	int _texel_ratio = 1;
+	String _type_path;
+	bool _locked = false; // Refuses hand strokes and type changes
 	Vector2 _height_range = V2_ZERO;
 	// Maps
 	Ref<Image> _height_map;
@@ -69,6 +74,18 @@ public:
 	real_t get_version() const { return _version; }
 	void set_region_size(const int p_region_size);
 	int get_region_size() const { return _region_size; }
+	void set_texel_ratio(const int p_ratio);
+	int get_texel_ratio() const { return _texel_ratio; }
+	bool is_coarse() const { return _texel_ratio > 1; }
+	// Texels per side of this region's maps.
+	int get_map_size() const { return _texel_ratio > 0 ? _region_size / _texel_ratio : 0; }
+	void set_type_path(const String &p_path);
+	String get_type_path() const { return _type_path; }
+	void set_locked(const bool p_locked);
+	bool is_locked() const { return _locked; }
+	// THE world -> map texel conversion for this region (spec §E): the texel whose lattice point is at or
+	// before the position, clamped to the map. Coarse texel i sits on fine vertex i * texel_ratio.
+	Vector2i world_to_pixel(const Vector3 &p_global_position, const real_t p_vertex_spacing) const;
 
 	// Maps
 	void set_map(const MapType p_map_type, const Ref<Image> &p_image);

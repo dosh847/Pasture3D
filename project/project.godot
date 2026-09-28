@@ -71,3 +71,19 @@ water_time_period={
 "type": "float",
 "value": 120.0
 }
+pasture3d_region_map={
+"type": "sampler2D",
+"value": ""
+}
+pasture3d_height_maps={
+"type": "sampler2DArray",
+"value": ""
+}
+pasture3d_coarse_height_maps={
+"type": "sampler2DArray",
+"value": ""
+}
+pasture3d_terrain={
+"type": "vec4",
+"value": Vector4(0, 0, 0, 0)
+}

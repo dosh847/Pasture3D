@@ -6,6 +6,7 @@
 #include <godot_cpp/classes/collision_shape3d.hpp>
 #include <godot_cpp/classes/physics_material.hpp>
 #include <godot_cpp/classes/static_body3d.hpp>
+#include <map>
 #include <vector>
 
 #include "constants.h"
@@ -44,7 +45,21 @@ private:
 	std::vector<CollisionShape3D *> _shapes; // All CollisionShape3Ds
 
 	bool _initialized = false;
-	Vector2i _last_snapped_pos = V2I_MAX;
+	// DYNAMIC modes: one patch per collision target (Pasture3D::get_collision_target_positions, spec §H), the
+	// shape pool sized for _pool_targets of them. The snapped centres of the last update, and the regions
+	// loaded or unloaded since, whose shapes are rebuilt on the next update however still the targets are.
+	int _pool_targets = 1;
+	std::vector<Vector2i> _last_snapped;
+	std::vector<Vector2i> _changed_regions;
+	// What each loaded region looked like to collision at the last region-map change: its object, texel
+	// ratio, whether its type collides. A DYNAMIC patch rebuilds only the shapes over regions that differ.
+	struct LocLess {
+		bool operator()(const Vector2i &a, const Vector2i &b) const { return a.x != b.x ? a.x < b.x : a.y < b.y; }
+	};
+	std::map<Vector2i, uint64_t, LocLess> _region_sig;
+	std::map<Vector2i, uint64_t, LocLess> _snapshot_regions() const;
+	int _last_update_usec = 0;
+	int _last_update_built = 0;
 
 	Vector2i _snap_to_grid(const Vector2i &p_pos) const;
 	Vector2i _snap_to_grid(const Vector3 &p_pos) const;
@@ -63,9 +78,15 @@ public:
 	void initialize(Pasture3D *p_terrain);
 
 	void build();
-	void reset_target_position() { _last_snapped_pos = V2I_MAX; }
+	void reset_target_position() { _last_snapped.clear(); }
 	void update(const Vector2i &p_region_loc = V2I_MAX, const bool p_rebuild = false);
 	void destroy();
+	// A region was loaded or unloaded: DYNAMIC rebuilds the shapes over it on the next update, FULL rebuilds.
+	void region_changed(const Vector2i &p_region_loc);
+	// Connected to Pasture3DData::region_map_changed. FULL rebuilds; DYNAMIC queues the regions that changed.
+	void on_region_map_changed();
+	// What the last update did, for gates: {usec, built, active, pool, targets}.
+	Dictionary get_stats() const;
 
 	void set_mode(const CollisionMode p_mode);
 	CollisionMode get_mode() const { return _mode; }

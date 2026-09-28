@@ -188,6 +188,123 @@ func cache_bytes() -> int:
 	return 0
 
 
+# ---- Spilling the frozen cache to disk (PASTURE3D_BAKE_MEMORY_SPEC.md M6) -----------------------------
+#
+# A FROZEN modifier's `_cache` is state, not a cache: it is served on every rebake until the user presses
+# Bake, so dropping it would let the next rebake re-solve on whatever the surface is then. But it is also
+# per brush and independent of which regions are loaded, so on a large world it grows with the brush count.
+# A scoped bake that releases every region a brush touches spills that brush's caches here: written to one
+# file and dropped from memory. The first accessor that needs them reads them back (`_unspill`) and deletes
+# the file. A file that is missing or unreadable reads as "nothing cached", which is what every frozen
+# modifier already is after a reload.
+#
+# THE RULE FOR SUBCLASSES: every accessor that reads or writes `_cache` calls `_unspill()` first, and every
+# explicit drop (a Bake button, `clear_cache`) calls `_drop_spill()`. `cache_bytes()` does not unspill: it
+# reports what memory holds, and a spilled cache holds none.
+
+## Where spills go by default: per machine and unversioned (§11 decision 3), like the cache always was.
+const SPILL_DIR := "res://.godot/pasture3d_frozen"
+
+## The frozen cache, keyed by grid extent. Declared here, not per subclass, so the spill can reach it.
+var _cache: Dictionary = {}
+## The file `_cache` is spilled to, or "" while it is in memory.
+var _spill_path: String = ""
+
+
+func is_spilled() -> bool:
+	return not _spill_path.is_empty()
+
+
+## Write `_cache` to a file in `p_dir` and drop it from memory. Returns the bytes released, or 0 when there
+## is nothing to spill or it cannot be: a value `store_var` cannot carry (an Object), or a failed write. The
+## cache then stays in memory, which is exactly the behaviour before M6.
+func spill_cache(p_dir: String = SPILL_DIR) -> int:
+	if _cache.is_empty() or is_spilled() or not _plain(_cache):
+		return 0
+	var bytes := cache_bytes()
+	DirAccess.make_dir_recursive_absolute(p_dir)
+	var path := p_dir.path_join("%d_%d.spill" % [OS.get_process_id(), get_instance_id()])
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		return 0
+	f.store_var(_cache)
+	var err := f.get_error()
+	f.close()
+	if err != OK:
+		DirAccess.remove_absolute(path)
+		return 0
+	_cache = {}
+	_spill_path = path
+	return bytes
+
+
+## Read a spilled cache back and delete its file. Anything stored since the spill wins over what the
+## file holds (the accessors unspill first, so there should be nothing).
+func _unspill() -> void:
+	if _spill_path.is_empty():
+		return
+	var path := _spill_path
+	_spill_path = ""
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f != null:
+		var v = f.get_var()
+		f.close()
+		if v is Dictionary:
+			(v as Dictionary).merge(_cache, true)
+			_cache = v
+	DirAccess.remove_absolute(path)
+
+
+## Forget a spill without reading it: the explicit Bake, which re-solves anyway.
+func _drop_spill() -> void:
+	if _spill_path.is_empty():
+		return
+	DirAccess.remove_absolute(_spill_path)
+	_spill_path = ""
+
+
+func _notification(p_what: int) -> void:
+	# Inline, not `_drop_spill()`: a script method cannot be called on an instance being deleted.
+	if p_what == NOTIFICATION_PREDELETE and not _spill_path.is_empty():
+		DirAccess.remove_absolute(_spill_path)
+
+
+## Delete spill files another process left behind (a crash, a killed gate), once they are older than
+## `p_max_age_sec`. A live process deletes its own files as it reads or frees them; the age guard is for a
+## second Godot process on the same project, whose files are young. Returns how many were deleted.
+static func sweep_spills(p_dir: String = SPILL_DIR, p_max_age_sec: int = 86400) -> int:
+	var da := DirAccess.open(p_dir)
+	if da == null:
+		return 0
+	var mine := "%d_" % OS.get_process_id()
+	var now := int(Time.get_unix_time_from_system())
+	var n := 0
+	for f in da.get_files():
+		if not f.ends_with(".spill") or f.begins_with(mine):
+			continue
+		var path := p_dir.path_join(f)
+		if now - int(FileAccess.get_modified_time(path)) > p_max_age_sec and da.remove(f) == OK:
+			n += 1
+	return n
+
+
+## True when `p_v` holds no Object at any depth: `store_var` cannot carry one without full objects, and a
+## spill that silently turned one into null would lose state.
+static func _plain(p_v: Variant) -> bool:
+	match typeof(p_v):
+		TYPE_OBJECT:
+			return false
+		TYPE_DICTIONARY:
+			for k in p_v:
+				if not _plain(k) or not _plain(p_v[k]):
+					return false
+		TYPE_ARRAY:
+			for e in p_v:
+				if not _plain(e):
+					return false
+	return true
+
+
 ## Problems worth telling the user about, in the host brush's configuration warnings. `p_host` is the
 ## Pasture3DTerrainBrush this modifier is mounted on — some complaints are only true for a given host
 ## (a Host Profile selector under a Plow, say), so the modifier has to be able to ask.
