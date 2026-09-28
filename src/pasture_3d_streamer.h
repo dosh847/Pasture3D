@@ -37,8 +37,9 @@ class Pasture3DRegionType;
  * With feed_collision, the sources become the terrain's collision targets, so every source gets its own
  * DYNAMIC collision patch.
  *
- * Runs only in a game, never in the editor. Set the terrain's load_all_regions off, or the game starts by
- * loading everything and then releases what is far away.
+ * Runs only in a game, never in the editor. With the terrain's region_loading on Auto (the default) or
+ * Streamed, the game starts with only the region index; on All it loads everything and then releases what
+ * is far away.
  */
 class Pasture3DStreamer : public Node {
 	GDCLASS(Pasture3DStreamer, Node);
@@ -103,6 +104,8 @@ public:
 	bool get_enabled() const { return _enabled; }
 	void set_terrain(Node *p_terrain) { _terrain.set_target(p_terrain); }
 	Node *get_terrain() const { return _terrain.get_target(); }
+	// Enabled and pointed at p_terrain (set, or else its parent). Answers before this node enters the tree.
+	bool streams(const Pasture3D *p_terrain) const { return _enabled && p_terrain && _get_terrain() == p_terrain; }
 	void set_sources(const TypedArray<Node3D> &p_sources);
 	TypedArray<Node3D> get_sources() const;
 	void set_threaded(const bool p_threaded) { _threaded = p_threaded; }

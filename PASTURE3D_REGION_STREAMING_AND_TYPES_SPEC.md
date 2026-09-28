@@ -25,10 +25,16 @@ Phase 6 as built (game streaming and multi-source collision, §H; deviations mar
   without saving and returns `ERR_BUSY` for a modified or deleted one. A game never writes region data: a
   region with changes not on disk stays loaded and is reported once through the new `region_kept` signal.
   (`unload_region` still auto-saves, for the editor.)
-- **Starting from the index.** *New:* `Pasture3D.load_all_regions` (Regions group, default on). Off, a game
-  loads only the region index and leaves regions to the streamer; the editor always loads everything. The
-  index now stores `region_size`, since no loaded region can supply it; an index written before that reads
-  one region file for the size. Every region file on disk without an index entry gets a bare entry.
+- **Starting from the index.** *New:* `Pasture3D.region_loading` (Regions group; replaced the earlier
+  `load_all_regions` bool on 2026-09-27). Auto (default): a game loads only the region index when an enabled
+  Pasture3DStreamer drives the terrain, found by walking the scene hierarchy while it enters (a streamer later
+  in the scene has not entered yet but exists), and every region when none does. All and Streamed force
+  either. The index now stores `region_size`, since no loaded region can supply it; an index written before
+  that reads one region file for the size. Every region file on disk without an index entry gets a bare entry.
+- **The editor reopens with its last loaded set** (2026-09-27). Each index entry records `loaded`: a load
+  indexes it true, a drop sets it false, unload writes the index after the drop, and the dock's Load writes it
+  too. The editor skips a file whose entry says false; an entry without the key reads as loaded. A game ignores
+  the record (`Pasture3D.restores_region_state`). Gate: bench/RegionLoadStateGate.
 - **Collision.** `Pasture3D.collision_targets` (new, an array of `Node3D`) gives DYNAMIC collision one patch per
   target. The streamer's `feed_collision` passes its sources in. The shape pool is grid_width² × target count;
   disabled shapes are parked far away. *Deviation:* a region-map change no longer rebuilds the pool.

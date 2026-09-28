@@ -368,9 +368,9 @@ PackedStringArray Pasture3DStreamer::_get_configuration_warnings() const {
 	const Pasture3D *terrain = _get_terrain();
 	if (!terrain) {
 		warnings.push_back("Needs a Pasture3D: make it a child of one, or set terrain.");
-	} else if (terrain->get_load_all_regions()) {
-		warnings.push_back("The terrain's load_all_regions is on, so the game loads every region at start and then "
-						   "releases the far ones. Turn it off to start with only the region index.");
+	} else if (terrain->get_region_loading() == Pasture3D::REGION_LOADING_ALL) {
+		warnings.push_back("The terrain's region_loading is All, so the game loads every region at start and then "
+						   "releases the far ones. Set it to Auto to start with only the region index.");
 	}
 	return warnings;
 }

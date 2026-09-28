@@ -9,7 +9,7 @@
 #
 # Fixture: region size 64, spacing 1. Regions (0..7, 0) and (30, 0), region (i, 0) flat at height 10 + i, all
 # of a test type (load 40 m, unload 100 m). Built and saved by one terrain, then streamed by a second with
-# load_all_regions off. DYNAMIC_GAME collision, radius 32.
+# region_loading Streamed. DYNAMIC_GAME collision, radius 32.
 #
 # Headless (a running scene, so not the editor: DYNAMIC_GAME builds). user:// data, wiped at start.
 #
@@ -80,7 +80,7 @@ func _build_fixture() -> void:
 
 func _new_terrain(p_load_all: bool):
 	var t = ClassDB.instantiate("Pasture3D")
-	t.load_all_regions = p_load_all
+	t.region_loading = Pasture3D.REGION_LOADING_ALL if p_load_all else Pasture3D.REGION_LOADING_STREAMED
 	t.collision_radius = 32
 	t.collision_shape_size = 16
 	add_child(t)
@@ -90,14 +90,14 @@ func _new_terrain(p_load_all: bool):
 
 func _st1_starts_empty_and_streams_in() -> void:
 	print("[ST1] a streamed game starts with only the index, and loads what its source is near:")
-	# Control: the same data with load_all_regions on loads every region at start.
+	# Control: the same data with region_loading All loads every region at start.
 	var all = _new_terrain(true)
 	await _frames(1)
 	var all_count: int = all.data.get_region_count()
 	all.queue_free()
 	_t = _new_terrain(false)
 	await _frames(1)
-	_check("control: load_all_regions loads all %d at start (got %d)" % [ROW.size(), all_count], all_count == ROW.size())
+	_check("control: region_loading All loads all %d at start (got %d)" % [ROW.size(), all_count], all_count == ROW.size())
 	_check("the region size (%d) came from the index, not the default" % _t.get_region_size(), _t.get_region_size() == RS)
 	_check("control: a terrain with no data has the default size (%d)" % ClassDB.instantiate("Pasture3D").get_region_size(),
 		ClassDB.instantiate("Pasture3D").get_region_size() != RS)

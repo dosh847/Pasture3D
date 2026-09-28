@@ -176,7 +176,7 @@ func _i2_crash() -> void:
 	_check("editor path: types and ratios are intact", _types_ok)
 	# The game path: nothing loaded, the index is all there is.
 	var t = ClassDB.instantiate("Pasture3D")
-	t.load_all_regions = false
+	t.region_loading = Pasture3D.REGION_LOADING_STREAMED
 	add_child(t)
 	t.data_directory = DIR
 	await _frames(2)
@@ -247,7 +247,7 @@ func _build(p_stack_change: bool = false) -> void:
 ## Reload DIR with every region loaded; {loc: height bytes}. Sets _types_ok from the loaded regions.
 func _reload_heights(_p_all: bool) -> Dictionary:
 	var t = ClassDB.instantiate("Pasture3D")
-	t.load_all_regions = true
+	t.region_loading = Pasture3D.REGION_LOADING_ALL
 	add_child(t)
 	t.data_directory = DIR
 	await _frames(2)

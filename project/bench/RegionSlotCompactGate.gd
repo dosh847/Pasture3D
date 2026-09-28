@@ -209,7 +209,7 @@ static func _height_of(p_loc: Vector2i) -> float:
 
 func _new_terrain(p_load_all: bool):
 	var t = ClassDB.instantiate("Pasture3D")
-	t.load_all_regions = p_load_all
+	t.region_loading = Pasture3D.REGION_LOADING_ALL if p_load_all else Pasture3D.REGION_LOADING_STREAMED
 	add_child(t)
 	t.data_directory = DIR
 	return t

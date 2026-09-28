@@ -973,9 +973,13 @@ void Pasture3DData::load_directory(const String &p_dir) {
 
 	_clear();
 	// A game with a Pasture3DStreamer starts with no region in memory: the index says what exists, and the
-	// streamer loads what its sources are near. The editor always loads everything (editor streaming is not
-	// built).
-	const bool index_only = !IS_EDITOR && _terrain && !_terrain->get_load_all_regions();
+	// streamer loads what its sources are near (Pasture3D::starts_index_only).
+	const bool index_only = _terrain && _terrain->starts_index_only();
+	// The editor reopens with the regions that were loaded when the index was last written: an entry
+	// recorded unloaded stays on disk. The index is read BEFORE the files for that, and an entry without the
+	// flag (an index from an older build) reads as loaded, which is what every region used to be.
+	_load_region_index(p_dir);
+	const bool restore_unloaded = !index_only && _terrain && _terrain->restores_region_state();
 	TypedArray<Vector2i> on_disk;
 	for (const String &fname : files) {
 		// Skip layer manifest/slice files (pasture3d_layers*.res); they are handled by load_layers,
@@ -998,6 +1002,10 @@ void Pasture3DData::load_directory(const String &p_dir) {
 		const bool legacy = fname.begins_with("terrain3d");
 		on_disk.push_back(loc);
 		if (index_only) {
+			continue;
+		}
+		if (restore_unloaded && !bool(_region_index->get_entry(loc).get("loaded", true))) {
+			LOG(INFO, "Region ", loc, " was unloaded when the index was written; leaving it on disk");
 			continue;
 		}
 		Ref<Pasture3DRegion> region = ResourceLoader::get_singleton()->load(path, "Pasture3DRegion", ResourceLoader::CACHE_MODE_IGNORE);
@@ -1037,10 +1045,9 @@ void Pasture3DData::load_directory(const String &p_dir) {
 	if (!load_layers(p_dir)) {
 		_synthesize_base_layer();
 	}
-	// The index says, per region, which stack its file was composited under. A region unloaded while the
-	// stack changed (a layer removed, reordered, re-weighted) was saved before the change and the manifest
-	// after it, so its file is stale against the stack that just loaded. Rebuild those composites now.
-	_load_region_index(p_dir);
+	// The index (read above) says, per region, which stack its file was composited under. A region unloaded
+	// while the stack changed (a layer removed, reordered, re-weighted) was saved before the change and the
+	// manifest after it, so its file is stale against the stack that just loaded. Rebuild those composites now.
 	// A file the index does not name (no index file yet, or written by an older build) is still a region. With
 	// everything loaded _index_region below fills it in; index-only, it gets a bare entry, which reads as a
 	// Standard region of unknown height.
@@ -1049,8 +1056,8 @@ void Pasture3DData::load_directory(const String &p_dir) {
 			_region_index->set_entry(loc, Dictionary());
 		}
 	}
-	if (index_only && !on_disk.is_empty()) {
-		// No region is loaded to say how big regions are. The index says; an older index does not, and then
+	if (_regions.is_empty() && !on_disk.is_empty()) {
+		// No region is loaded to say how big regions are (index only, or an editor that left every one unloaded). The index says; an older index does not, and then
 		// one region file is read for it and let go.
 		int size = _region_index->get_region_size();
 		if (size <= 0) {
@@ -1232,10 +1239,11 @@ Error Pasture3DData::unload_region(const Vector2i &p_region_loc, const bool p_up
 		_save_layer_slice(dir, p_region_loc, _is_base_aliased());
 	}
 	_index_region(p_region_loc);
+	_drop_region(p_region_loc, p_update);
+	// After the drop, which records the entry unloaded: that is the state the editor reopens with.
 	if (p_write_index) {
 		_save_region_index(dir);
 	}
-	_drop_region(p_region_loc, p_update);
 	return OK;
 }
 
@@ -1273,6 +1281,13 @@ void Pasture3DData::_drop_region(const Vector2i &p_region_loc, const bool p_upda
 	int region_id = _region_locations.find(p_region_loc);
 	if (region_id >= 0) {
 		_region_locations.remove_at(region_id);
+	}
+	// What the editor reopens with (load_directory). A game's release changes it too, but a game never writes
+	// the index.
+	if (_region_index->has_entry(p_region_loc)) {
+		Dictionary entry = _region_index->get_entry(p_region_loc).duplicate();
+		entry["loaded"] = false;
+		_region_index->set_entry(p_region_loc, entry);
 	}
 	_region_map_dirty = true;
 	_bump_generation(p_region_loc);
@@ -1372,6 +1387,7 @@ void Pasture3DData::_index_region(const Vector2i &p_region_loc) {
 	entry["type_path"] = region->get_type_path();
 	entry["texel_ratio"] = region->get_texel_ratio();
 	entry["locked"] = region->is_locked();
+	entry["loaded"] = true;
 	_region_index->set_entry(p_region_loc, entry);
 }
 

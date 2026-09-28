@@ -275,6 +275,9 @@ func load_selected(p_dir: String = "") -> Dictionary:
 		else:
 			rep["skipped"][loc] = "load failed"
 	if not rep["done"].is_empty():
+		# The index records which regions are loaded, and the editor reopens with that set. Unload writes it
+		# already; without this, a load was forgotten unless the scene was saved.
+		d.write_region_index()
 		d.update_maps()
 	changed.emit()
 	return rep

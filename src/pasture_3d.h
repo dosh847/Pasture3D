@@ -48,6 +48,14 @@ public: // Constants
 		SIZE_2048 = 2048,
 	};
 
+	// What a running game loads at start. The editor ignores it: it reopens with the regions that were
+	// loaded when it last wrote the region index.
+	enum RegionLoading {
+		REGION_LOADING_AUTO, // Only the index when a Pasture3DStreamer drives this terrain, else every region
+		REGION_LOADING_ALL, // Every region, streamer or not
+		REGION_LOADING_STREAMED, // Only the index, streamer or not
+	};
+
 	// Pasture3D: per-camera clipmaps use a reserved top range of render layers, one bit per player,
 	// descending: camera i -> bit (TERRAIN_TOP_BIT - i). Default 19 => layers 20,19,18,17 for
 	// cameras 0..3. Keep gameplay (karts, props) on layers 1-16 so every camera sees it.
@@ -98,7 +106,8 @@ private:
 	// Regions
 	RegionSize _region_size = SIZE_256;
 	bool _save_16_bit = false;
-	bool _load_all_regions = true;
+	RegionLoading _region_loading = REGION_LOADING_AUTO;
+	bool _debug_restore_region_state = false;
 	real_t _label_distance = 0.f;
 	int _label_size = 48;
 
@@ -265,8 +274,15 @@ public:
 	// Where the DYNAMIC patches go: the editor camera in the editor, else every valid node set by
 	// set_collision_targets, else the single get_collision_target_position().
 	PackedVector3Array get_collision_target_positions() const;
-	void set_load_all_regions(const bool p_enabled) { _load_all_regions = p_enabled; }
-	bool get_load_all_regions() const { return _load_all_regions; }
+	void set_region_loading(const RegionLoading p_mode) { _region_loading = p_mode; }
+	RegionLoading get_region_loading() const { return _region_loading; }
+	bool has_streamer() const;
+	bool starts_index_only() const;
+	// The editor reopens with the regions that were loaded when the index was last written. The debug flag
+	// gives a headless gate (never the editor) the same rule; nothing else sets it.
+	bool restores_region_state() const;
+	void set_debug_restore_region_state(const bool p_enabled) { _debug_restore_region_state = p_enabled; }
+	bool get_debug_restore_region_state() const { return _debug_restore_region_state; }
 	void set_light_target(Node3D *p_node);
 	Node3D *get_light_target() const { return _light_target.ptr(); }
 	void snap();
@@ -409,6 +425,7 @@ protected:
 };
 
 VARIANT_ENUM_CAST(Pasture3D::RegionSize);
+VARIANT_ENUM_CAST(Pasture3D::RegionLoading);
 VARIANT_ENUM_CAST(Pasture3D::DebugLevel);
 
 constexpr Pasture3D::DebugLevel MESG = Pasture3D::DebugLevel::MESG;

@@ -22,6 +22,7 @@
 #include "pasture_3d_util.h"
 #include "pasture_3d_ocean.h"
 #include "pasture_3d_pool_manager.h"
+#include "pasture_3d_streamer.h"
 #include "unit_testing.h"
 
 // Initialize static member variable
@@ -857,6 +858,51 @@ TypedArray<Node3D> Pasture3D::get_collision_targets() const {
 		}
 	}
 	return nodes;
+}
+
+// Is a Pasture3DStreamer set to drive this terrain? Asked while the data loads, which is when the terrain
+// enters the tree. A scene enters top-down, so a streamer later in the scene (or a child of this terrain) has
+// not entered yet; it does exist, though, because the whole scene is instantiated before any of it enters.
+// So the walk is over the node hierarchy from the topmost ancestor, not over the tree's groups.
+bool Pasture3D::has_streamer() const {
+	const Node *top = this;
+	while (top->get_parent()) {
+		top = top->get_parent();
+	}
+	std::vector<const Node *> stack{ top };
+	while (!stack.empty()) {
+		const Node *node = stack.back();
+		stack.pop_back();
+		if (const Pasture3DStreamer *streamer = Object::cast_to<Pasture3DStreamer>(node)) {
+			if (streamer->streams(this)) {
+				return true;
+			}
+		}
+		const int count = node->get_child_count();
+		for (int i = 0; i < count; i++) {
+			stack.push_back(node->get_child(i));
+		}
+	}
+	return false;
+}
+
+bool Pasture3D::restores_region_state() const {
+	return IS_EDITOR || _debug_restore_region_state;
+}
+
+// A running game that starts with only the region index. Never the editor.
+bool Pasture3D::starts_index_only() const {
+	if (IS_EDITOR) {
+		return false;
+	}
+	switch (_region_loading) {
+		case REGION_LOADING_ALL:
+			return false;
+		case REGION_LOADING_STREAMED:
+			return true;
+		default:
+			return has_streamer();
+	}
 }
 
 PackedVector3Array Pasture3D::get_collision_target_positions() const {
@@ -1719,6 +1765,9 @@ void Pasture3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(SIZE_512);
 	BIND_ENUM_CONSTANT(SIZE_1024);
 	BIND_ENUM_CONSTANT(SIZE_2048);
+	BIND_ENUM_CONSTANT(REGION_LOADING_AUTO);
+	BIND_ENUM_CONSTANT(REGION_LOADING_ALL);
+	BIND_ENUM_CONSTANT(REGION_LOADING_STREAMED);
 
 	ClassDB::bind_method(D_METHOD("get_version"), &Pasture3D::get_version);
 	ClassDB::bind_method(D_METHOD("set_debug_level", "level"), &Pasture3D::set_debug_level);
@@ -1761,8 +1810,13 @@ void Pasture3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_collision_targets", "nodes"), &Pasture3D::set_collision_targets);
 	ClassDB::bind_method(D_METHOD("get_collision_targets"), &Pasture3D::get_collision_targets);
 	ClassDB::bind_method(D_METHOD("get_collision_target_positions"), &Pasture3D::get_collision_target_positions);
-	ClassDB::bind_method(D_METHOD("set_load_all_regions", "enabled"), &Pasture3D::set_load_all_regions);
-	ClassDB::bind_method(D_METHOD("get_load_all_regions"), &Pasture3D::get_load_all_regions);
+	ClassDB::bind_method(D_METHOD("set_region_loading", "mode"), &Pasture3D::set_region_loading);
+	ClassDB::bind_method(D_METHOD("get_region_loading"), &Pasture3D::get_region_loading);
+	ClassDB::bind_method(D_METHOD("has_streamer"), &Pasture3D::has_streamer);
+	ClassDB::bind_method(D_METHOD("starts_index_only"), &Pasture3D::starts_index_only);
+	ClassDB::bind_method(D_METHOD("restores_region_state"), &Pasture3D::restores_region_state);
+	ClassDB::bind_method(D_METHOD("set_debug_restore_region_state", "enabled"), &Pasture3D::set_debug_restore_region_state);
+	ClassDB::bind_method(D_METHOD("get_debug_restore_region_state"), &Pasture3D::get_debug_restore_region_state);
 	ClassDB::bind_method(D_METHOD("get_collision_target"), &Pasture3D::get_collision_target);
 	ClassDB::bind_method(D_METHOD("get_collision_target_position"), &Pasture3D::get_collision_target_position);
 	ClassDB::bind_method(D_METHOD("set_light_target", "node"), &Pasture3D::set_light_target);
@@ -1901,9 +1955,10 @@ void Pasture3D::_bind_methods() {
 	ADD_GROUP("Regions", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "region_size", PROPERTY_HINT_ENUM, "64:64,128:128,256:256,512:512,1024:1024,2048:2048", PROPERTY_USAGE_EDITOR), "change_region_size", "get_region_size");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "save_16_bit"), "set_save_16_bit", "get_save_16_bit");
-	// Off: a running game loads only the region index, and a Pasture3DStreamer brings regions in. The editor
-	// always loads every region.
-	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "load_all_regions"), "set_load_all_regions", "get_load_all_regions");
+	// A running game's start: Auto loads only the region index when a Pasture3DStreamer drives this terrain
+	// (it brings regions in as its sources need them), and every region when none does. The editor ignores
+	// this and reopens with the regions that were loaded when it last wrote the region index.
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "region_loading", PROPERTY_HINT_ENUM, "Auto,All,Streamed"), "set_region_loading", "get_region_loading");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "label_distance", PROPERTY_HINT_RANGE, "0.0,10000.0,0.5,or_greater"), "set_label_distance", "get_label_distance");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "label_size", PROPERTY_HINT_RANGE, "24,128,1"), "set_label_size", "get_label_size");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "show_grid"), "set_show_region_grid", "get_show_region_grid");

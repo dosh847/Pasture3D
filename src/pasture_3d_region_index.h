@@ -28,7 +28,7 @@ class Pasture3DRegionIndex : public Resource {
 	// }
 	Dictionary _entries;
 	// The terrain's region size when the index was saved; 0 in an index written before it was recorded. A game
-	// that starts with only the index (load_all_regions off) has no region file to learn the size from.
+	// that starts with only the index (Pasture3D::starts_index_only) has no region file to learn the size from.
 	int _region_size = 0;
 
 public:
