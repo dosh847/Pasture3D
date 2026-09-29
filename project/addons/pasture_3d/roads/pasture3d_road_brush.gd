@@ -692,7 +692,7 @@ func corridor_half_width() -> float:
 		wall_list.append_array([seg.cut_wall, seg.fill_wall])
 	for w in wall_list:
 		if Pasture3DRoadWall.active(w):
-			wall_out = maxf(wall_out, w.step_offset(true))
+			wall_out = maxf(wall_out, w.step_offset())
 			if w.beyond_batter > 0.0:
 				batter = minf(batter, w.beyond_batter)
 	return t.disturbed_width(resolved_lane_count()) * 0.5 + widen + allowance / maxf(batter, 0.05) \

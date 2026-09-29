@@ -455,7 +455,7 @@ static func build_wall_plan(p_plan: PackedVector2Array, p_cum: PackedFloat32Arra
 			key[slot] = widx * 2 + (1 if e_kind[e] > 0.0 else 0)
 			continue
 		back_e.append(e)
-		back_pts.append(e_c[e] + e_across[e] * (e_edge[e] + wr.step_offset(e_kind[e] > 0.0)))
+		back_pts.append(e_c[e] + e_across[e] * (e_edge[e] + wr.step_offset()))
 	if not back_e.is_empty():
 		var gb: PackedFloat32Array = p_sampler.call(back_pts)
 		for q in back_e.size():
@@ -558,7 +558,7 @@ static func build_wall_plan(p_plan: PackedVector2Array, p_cum: PackedFloat32Arra
 				out[a + 2] = wr.trigger_height if mode == WALL_BATTER_TOP else minf(tops[g - r0], wr.max_height)
 				out[a + 3] = alpha
 				out[a + 4] = wr.offset
-				out[a + 5] = wr.step_offset(cut)
+				out[a + 5] = wr.step_offset()
 				out[a + 6] = beyond
 				any_wall = true
 	return out if any_wall else PackedFloat32Array()

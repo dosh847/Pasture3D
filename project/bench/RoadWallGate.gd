@@ -32,8 +32,9 @@
 #       batter graded where the ditch was
 #   [K] override resolution: segment beats modifier beats type, and a disabled wall resolves to none.
 #       Control: the type alone resolves to its wall
-#   [L] landscape_offset: a cut wall's terrain step moves out by it and the ground in front of the moved step
-#       is road level; the fill wall's step does not move. Control: at 0 the same probe reads raw hillside
+#   [L] landscape_offset: the terrain step moves out by it on both kinds, the face does not, and the ground
+#       in front of the moved step is road level (cut) or the shelf (fill). Control: at 0 the same probes
+#       read raw hillside and raw valley
 #
 # Every fixture wall but [L]'s pins landscape_offset to 0, so the arithmetic above is offset + thickness.
 #
@@ -529,11 +530,13 @@ func _l() -> void:
 	var g_flush := _grade(flush)
 	var xs_cut := _rec(set_back, 100, 1)[5]
 	var xs_fill := _rec(set_back, 100, -1)[5]
+	var shelf := _h_at(g_back, 100, -6)
 	var face := _rec(set_back, 100, 1)[4]
-	# Edge 4.5; the step at 1.1 + 1.0 = 2.1 puts z 6 in front of it (road level), and at 1.1 behind it.
-	_check("L", absf(xs_cut - 2.1) < 1e-6 and absf(face - 0.5) < 1e-6 and absf(xs_fill - 1.1) < 1e-6
-			and absf(_h_at(g_back, 100, 6) - ROAD) < 0.02 and _h_at(g_flush, 100, 6) > ROAD + 1.0
+	# Edge 4.5; the step at 1.1 + 1.0 = 2.1 puts |z| 6 in front of it (road level), and at 1.1 behind it.
+	_check("L", absf(xs_cut - 2.1) < 1e-6 and absf(face - 0.5) < 1e-6 and absf(xs_fill - 2.1) < 1e-6
+			and absf(_h_at(g_back, 100, 6) - ROAD) < 0.02 and absf(shelf - ROAD) < 0.02
+			and _h_at(g_flush, 100, 6) > ROAD + 1.0 and _h_at(g_flush, 100, -6) < ROAD - 1.0
 			and Pasture3DRoadWall.new().landscape_offset == 0.5,
-			"cut step %.2f (want 2.1), face %.2f (want 0.5), fill step %.2f (want 1.1), %.2f at z 6 (want 40.00), default %.2f; control: at 0 the probe reads %.2f (want the hillside)"
-			% [xs_cut, face, xs_fill, _h_at(g_back, 100, 6), Pasture3DRoadWall.new().landscape_offset,
-			_h_at(g_flush, 100, 6)])
+			"cut step %.2f, fill step %.2f (want 2.1 both), face %.2f (want 0.5), %.2f / %.2f at z 6 / -6 (want 40.00 both), default %.2f; control: at 0 the probes read %.2f / %.2f (want the hillside and the valley)"
+			% [xs_cut, xs_fill, face, _h_at(g_back, 100, 6), shelf, Pasture3DRoadWall.new().landscape_offset,
+			_h_at(g_flush, 100, 6), _h_at(g_flush, 100, -6)])

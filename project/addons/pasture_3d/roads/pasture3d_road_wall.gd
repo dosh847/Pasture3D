@@ -61,25 +61,25 @@ enum EndTreatment {
 		max_height = maxf(v, 0.25)
 		emit_changed()
 
-## Metres through the wall. The terrain steps at `offset + thickness` (plus `landscape_offset` on a cut).
+## Metres through the wall. The terrain steps at `offset + thickness + landscape_offset`.
 @export_range(0.1, 5.0, 0.05, "or_greater", "suffix:m") var thickness: float = 0.6:
 	set(v):
 		thickness = maxf(v, 0.05)
 		emit_changed()
 
-## CUT walls: metres the terrain's step is set back behind the wall, so a steep hillside cannot poke
-## through the face. The heightfield draws the step as a ramp across a cell, and that ramp starts a cell
-## BEFORE the step; set back far enough, it starts behind the face rather than in front of it. The coping
-## covers the gap. Ignored on a fill wall, whose ground falls away from the shelf.
+## Metres the terrain's step is set back behind the wall. The heightfield draws the step as a ramp across
+## a cell, and that ramp starts a cell BEFORE the step; set back far enough, it starts behind the wall
+## rather than in front of it, so a steep hillside cannot poke through a cut wall's face. On a fill wall it
+## widens the shelf the wall stands on. The coping covers the gap.
 @export_range(0.0, 5.0, 0.05, "or_greater", "suffix:m") var landscape_offset: float = 0.5:
 	set(v):
 		landscape_offset = maxf(v, 0.0)
 		emit_changed()
 
 
-## Metres from the edge of formation to where the terrain steps, for a cut (`p_cut`) or a fill wall.
-func step_offset(p_cut: bool) -> float:
-	return offset + thickness + (landscape_offset if p_cut else 0.0)
+## Metres from the edge of formation to where the terrain steps.
+func step_offset() -> float:
+	return offset + thickness + landscape_offset
 
 ## Slope of the batter above a cut wall or below a fill wall, rise/run. 0 uses the road type's batter.
 @export_range(0.0, 10.0, 0.05, "or_greater") var beyond_batter: float = 0.0:
