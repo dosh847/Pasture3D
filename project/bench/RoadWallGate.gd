@@ -533,7 +533,7 @@ func _l() -> void:
 	# Edge 4.5; the step at 1.1 + 1.0 = 2.1 puts z 6 in front of it (road level), and at 1.1 behind it.
 	_check("L", absf(xs_cut - 2.1) < 1e-6 and absf(face - 0.5) < 1e-6 and absf(xs_fill - 1.1) < 1e-6
 			and absf(_h_at(g_back, 100, 6) - ROAD) < 0.02 and _h_at(g_flush, 100, 6) > ROAD + 1.0
-			and Pasture3DRoadWall.new().landscape_offset == 0.25,
+			and Pasture3DRoadWall.new().landscape_offset == 0.5,
 			"cut step %.2f (want 2.1), face %.2f (want 0.5), fill step %.2f (want 1.1), %.2f at z 6 (want 40.00), default %.2f; control: at 0 the probe reads %.2f (want the hillside)"
 			% [xs_cut, face, xs_fill, _h_at(g_back, 100, 6), Pasture3DRoadWall.new().landscape_offset,
 			_h_at(g_flush, 100, 6)])

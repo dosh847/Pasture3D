@@ -71,7 +71,7 @@ enum EndTreatment {
 ## through the face. The heightfield draws the step as a ramp across a cell, and that ramp starts a cell
 ## BEFORE the step; set back far enough, it starts behind the face rather than in front of it. The coping
 ## covers the gap. Ignored on a fill wall, whose ground falls away from the shelf.
-@export_range(0.0, 5.0, 0.05, "or_greater", "suffix:m") var landscape_offset: float = 0.25:
+@export_range(0.0, 5.0, 0.05, "or_greater", "suffix:m") var landscape_offset: float = 0.5:
 	set(v):
 		landscape_offset = maxf(v, 0.0)
 		emit_changed()

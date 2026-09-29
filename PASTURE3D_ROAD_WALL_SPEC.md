@@ -32,7 +32,7 @@ wall holds the hillside back above the road; a fill wall holds the road up above
 | | `offset` | metres from the edge of formation to the wall's inner face (a ditch in front of a cut wall) |
 | Size | `max_height` | the tallest the wall is built. Past it, the batter continues above a cut wall or below a fill wall |
 | | `thickness` | metres through the wall. The terrain step sits at `offset + thickness` |
-| | `landscape_offset` | cut walls only, default 0.25: the terrain step is set back this far behind the wall, so the one-cell ramp the heightfield draws at the step starts behind the face instead of poking through it. The coping covers the gap |
+| | `landscape_offset` | cut walls only, default 0.5: the terrain step is set back this far behind the wall, so the one-cell ramp the heightfield draws at the step starts behind the face instead of poking through it. The coping covers the gap |
 | | `beyond_batter` | slope of the batter above a cut wall or below a fill wall, rise/run. 0 uses the type's batter |
 | | `embed_depth` | metres the face is sunk below the ground in front of it (mesh only) |
 | | `lean` | face batter, run/rise: 0.1 leans the face back 10 cm per metre (mesh only) |
