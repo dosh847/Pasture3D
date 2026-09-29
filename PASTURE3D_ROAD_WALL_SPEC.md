@@ -32,6 +32,7 @@ wall holds the hillside back above the road; a fill wall holds the road up above
 | | `offset` | metres from the edge of formation to the wall's inner face (a ditch in front of a cut wall) |
 | Size | `max_height` | the tallest the wall is built. Past it, the batter continues above a cut wall or below a fill wall |
 | | `thickness` | metres through the wall. The terrain step sits at `offset + thickness` |
+| | `landscape_offset` | cut walls only, default 0.25: the terrain step is set back this far behind the wall, so the one-cell ramp the heightfield draws at the step starts behind the face instead of poking through it. The coping covers the gap |
 | | `beyond_batter` | slope of the batter above a cut wall or below a fill wall, rise/run. 0 uses the type's batter |
 | | `embed_depth` | metres the face is sunk below the ground in front of it (mesh only) |
 | | `lean` | face batter, run/rise: 0.1 leans the face back 10 cm per metre (mesh only) |
@@ -76,7 +77,7 @@ lives at `(i * 2 + k) * 7`:
 - `W`: the wall height.
 - `alpha`: 0 to 1, the end taper.
 - `o`: the face offset.
-- `x_s = o + thickness`: the step.
+- `x_s`: the terrain step, `o + thickness`, plus `landscape_offset` on a cut wall (`Pasture3DRoadWall.step_offset`).
 - `beyond`: the slope past the wall.
 
 Building it:
@@ -173,5 +174,6 @@ footprint has no wall plan.
 | I | fill wall | mirrored step below the edge |
 | J | mesh | faces present, at `o` for a cut wall, and the terrain signature ignores the material |
 | K | override resolution | a segment wall beats the modifier, which beats the type; `enabled = false` removes it |
+| L | landscape_offset | a cut wall's terrain step moves out by it while the mesh face stays at `o`; a fill wall ignores it |
 
 `RoadEarthworksShapeGate` criteria W and M move here and are deleted from that gate.

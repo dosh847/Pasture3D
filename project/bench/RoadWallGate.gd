@@ -32,11 +32,15 @@
 #       batter graded where the ditch was
 #   [K] override resolution: segment beats modifier beats type, and a disabled wall resolves to none.
 #       Control: the type alone resolves to its wall
+#   [L] landscape_offset: a cut wall's terrain step moves out by it and the ground in front of the moved step
+#       is road level; the fill wall's step does not move. Control: at 0 the same probe reads raw hillside
+#
+# Every fixture wall but [L]'s pins landscape_offset to 0, so the arithmetic above is offset + thickness.
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/RoadWallGate.tscn
 extends Node
 
-const CRITERIA: PackedStringArray = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K"]
+const CRITERIA: PackedStringArray = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]
 const L := 200
 const Z0 := -40
 const GH := 81
@@ -63,6 +67,7 @@ func _ready() -> void:
 		_i()
 		await _j()
 	_k()
+	_l()
 	var missing := 0
 	for c in CRITERIA:
 		if not _seen.has(c):
@@ -86,6 +91,7 @@ func _check(p_name: String, p_ok: bool, p_detail: String) -> void:
 
 func _wall(p_set: Dictionary = {}) -> Pasture3DRoadWall:
 	var w := Pasture3DRoadWall.new()
+	w.landscape_offset = 0.0
 	for k in p_set:
 		w.set(k, p_set[k])
 	return w
@@ -514,3 +520,20 @@ func _k() -> void:
 	_check("K", all == seg_w and no_seg == mod_w and switched == null and fill_none == null and type_only == type_w,
 			"segment wins: %s, modifier next: %s, disabled override switches it off: %s, no fill wall anywhere: %s; control: the type alone resolves to its wall: %s"
 			% [all == seg_w, no_seg == mod_w, switched == null, fill_none == null, type_only == type_w])
+
+func _l() -> void:
+	print("[L] landscape_offset")
+	var set_back := _setup(_wall({"landscape_offset": 1.0}), _wall({"landscape_offset": 1.0}), _plane)
+	var flush := _setup(_wall(), _wall(), _plane)
+	var g_back := _grade(set_back)
+	var g_flush := _grade(flush)
+	var xs_cut := _rec(set_back, 100, 1)[5]
+	var xs_fill := _rec(set_back, 100, -1)[5]
+	var face := _rec(set_back, 100, 1)[4]
+	# Edge 4.5; the step at 1.1 + 1.0 = 2.1 puts z 6 in front of it (road level), and at 1.1 behind it.
+	_check("L", absf(xs_cut - 2.1) < 1e-6 and absf(face - 0.5) < 1e-6 and absf(xs_fill - 1.1) < 1e-6
+			and absf(_h_at(g_back, 100, 6) - ROAD) < 0.02 and _h_at(g_flush, 100, 6) > ROAD + 1.0
+			and Pasture3DRoadWall.new().landscape_offset == 0.25,
+			"cut step %.2f (want 2.1), face %.2f (want 0.5), fill step %.2f (want 1.1), %.2f at z 6 (want 40.00), default %.2f; control: at 0 the probe reads %.2f (want the hillside)"
+			% [xs_cut, face, xs_fill, _h_at(g_back, 100, 6), Pasture3DRoadWall.new().landscape_offset,
+			_h_at(g_flush, 100, 6)])

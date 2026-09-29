@@ -61,11 +61,25 @@ enum EndTreatment {
 		max_height = maxf(v, 0.25)
 		emit_changed()
 
-## Metres through the wall. The terrain steps at `offset + thickness`.
+## Metres through the wall. The terrain steps at `offset + thickness` (plus `landscape_offset` on a cut).
 @export_range(0.1, 5.0, 0.05, "or_greater", "suffix:m") var thickness: float = 0.6:
 	set(v):
 		thickness = maxf(v, 0.05)
 		emit_changed()
+
+## CUT walls: metres the terrain's step is set back behind the wall, so a steep hillside cannot poke
+## through the face. The heightfield draws the step as a ramp across a cell, and that ramp starts a cell
+## BEFORE the step; set back far enough, it starts behind the face rather than in front of it. The coping
+## covers the gap. Ignored on a fill wall, whose ground falls away from the shelf.
+@export_range(0.0, 5.0, 0.05, "or_greater", "suffix:m") var landscape_offset: float = 0.25:
+	set(v):
+		landscape_offset = maxf(v, 0.0)
+		emit_changed()
+
+
+## Metres from the edge of formation to where the terrain steps, for a cut (`p_cut`) or a fill wall.
+func step_offset(p_cut: bool) -> float:
+	return offset + thickness + (landscape_offset if p_cut else 0.0)
 
 ## Slope of the batter above a cut wall or below a fill wall, rise/run. 0 uses the road type's batter.
 @export_range(0.0, 10.0, 0.05, "or_greater") var beyond_batter: float = 0.0:
@@ -173,8 +187,8 @@ enum EndTreatment {
 ## The fields that move the GROUND. The finish, `embed_depth` and `lean` are absent: they shape the
 ## mesh only, and a stamp key that saw them would re-rasterise a road for a change of material.
 func terrain_signature() -> Array:
-	return [enabled, placement, trigger_height, offset, max_height, thickness, beyond_batter, top_mode,
-			step_length, step_height, top_smoothing, min_length, gap_bridge, end_treatment, end_taper_length]
+	return [enabled, placement, trigger_height, offset, max_height, thickness, landscape_offset, beyond_batter,
+			top_mode, step_length, step_height, top_smoothing, min_length, gap_bridge, end_treatment, end_taper_length]
 
 
 ## The fields the mesh reads on top of the terrain ones.
