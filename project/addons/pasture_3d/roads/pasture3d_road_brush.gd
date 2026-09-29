@@ -681,8 +681,22 @@ func corridor_half_width() -> float:
 			var rm: Pasture3DNodeRoad = m
 			toe = rm.resolved_number(rm.toe_rounding_override, toe)
 			hinge = rm.resolved_number(rm.hinge_rounding_override, hinge)
+	# A ROAD_SIDE wall moves the batter out by its offset and thickness, and a shallower batter past it
+	# reaches further for the same depth.
+	var wall_out := 0.0
+	var wall_list: Array = [t.cut_wall, t.fill_wall]
+	for m in modifiers:
+		if m is Pasture3DNodeRoad and m.is_active():
+			wall_list.append_array([m.cut_wall_override, m.fill_wall_override])
+	for seg: Pasture3DRoadSegment in _live_segments():
+		wall_list.append_array([seg.cut_wall, seg.fill_wall])
+	for w in wall_list:
+		if Pasture3DRoadWall.active(w):
+			wall_out = maxf(wall_out, w.offset + w.thickness)
+			if w.beyond_batter > 0.0:
+				batter = minf(batter, w.beyond_batter)
 	return t.disturbed_width(resolved_lane_count()) * 0.5 + widen + allowance / maxf(batter, 0.05) \
-			+ toe + 2.0 * hinge
+			+ toe + 2.0 * hinge + wall_out
 
 
 func _padding() -> float:
@@ -811,6 +825,9 @@ func _paint_flat_footprint(path: Path3D) -> void:
 		alignment.input_digest = alignment_digest(road_mod)
 		road_mod.last_alignment = alignment
 		_after_alignment_solve(_resample_plan(plan, cum, ds, n_s), ds, alignment)
+		# The walls from the ground this route grades: the layers below, throughout. No max_bank, because
+		# this route's grader is not given one either.
+		_plan_walls(alignment, plan, cum, prof, 0.0)
 
 		_rebake_if_corridor_outgrew(used_pad)
 
@@ -829,6 +846,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 				"crown_mode": t.crown_mode if t != null else 0,
 				"cut_batter": prof["cut_batter"],
 				"fill_batter": prof["fill_batter"],
+				"wall_plan": alignment.wall_plan,
 				# See `grade_surface`: the ground refuses junction footprints per CELL, not the whole
 				# corridor width per arc length. A road WITH a junction never reaches here at all
 				# (`_road_native_is_complete`), but one without can still have its batter sweep across a
@@ -1093,6 +1111,16 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 	verge.resize(p_n_s); verge.fill(def_verge)
 	suppress.resize(p_n_s); suppress.fill(0)
 	jump_mask.resize(p_n_s); jump_mask.fill(0)
+	# THE WALLS, as an index per sample into `walls` (-1 = none), so a segment can change the wall design
+	# over its range while the plan and the grader see only numbers. Most specific first: the segment,
+	# then this road's modifier, then the type.
+	var walls: Array = []
+	var cut_idx := PackedInt32Array()
+	var fill_idx := PackedInt32Array()
+	cut_idx.resize(p_n_s)
+	fill_idx.resize(p_n_s)
+	cut_idx.fill(_wall_slot(walls, _resolved_wall(null, p_mod, t, true)))
+	fill_idx.fill(_wall_slot(walls, _resolved_wall(null, p_mod, t, false)))
 
 	# ---- WHY THE UNIFORM FILL ABOVE IS USUALLY THE WHOLE ANSWER -------------------------------------
 	#
@@ -1121,6 +1149,10 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 		var seg_verge := PackedFloat32Array()
 		var seg_bridge := PackedByteArray()
 		var seg_jump := PackedByteArray()
+		var seg_cut := PackedInt32Array()
+		var seg_fill := PackedInt32Array()
+		seg_cut.resize(segs.size())
+		seg_fill.resize(segs.size())
 		seg_half.resize(segs.size())
 		seg_shoulder.resize(segs.size())
 		seg_verge.resize(segs.size())
@@ -1140,6 +1172,8 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 				seg_verge[k] = tt.verge_width if tt != null else 4.0
 			seg_bridge[k] = 1 if seg.is_bridge else 0
 			seg_jump[k] = 1 if seg.allow_airborne_jump else 0
+			seg_cut[k] = _wall_slot(walls, _resolved_wall(seg, p_mod, tt, true))
+			seg_fill[k] = _wall_slot(walls, _resolved_wall(seg, p_mod, tt, false))
 		for i in p_n_s:
 			var k := owner[i]
 			# -1 is "no segment here", and the uniform fill is already exactly right for those samples.
@@ -1150,6 +1184,8 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 			verge[i] = seg_verge[k]
 			suppress[i] = seg_bridge[k]
 			jump_mask[i] = seg_jump[k]
+			cut_idx[i] = seg_cut[k]
+			fill_idx[i] = seg_fill[k]
 
 	if t != null and t.curve_widening_enabled:
 		var curv := _plan_curvature_at(p_ds, p_n_s)
@@ -1215,11 +1251,34 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 				if p_mod != null and t != null else 0.0,
 		"hinge_rounding": p_mod.resolved_number(p_mod.hinge_rounding_override, t.hinge_rounding) \
 				if p_mod != null and t != null else 0.0,
-		"cut_wall_height": p_mod.resolved_number(p_mod.cut_wall_override, t.cut_wall_height) \
-				if p_mod != null and t != null else 0.0,
-		"fill_wall_height": p_mod.resolved_number(p_mod.fill_wall_override, t.fill_wall_height) \
-				if p_mod != null and t != null else 0.0,
+		"walls": walls, "cut_wall_idx": cut_idx, "fill_wall_idx": fill_idx,
 	}
+
+
+## The wall one level of the chain resolves to, or null for none: the segment's own, then the modifier's
+## override, then the type's. A wall with `enabled` off is an answer too -- it is how an override switches
+## a wall OFF -- so it stops the walk and resolves to none.
+static func _resolved_wall(p_seg: Pasture3DRoadSegment, p_mod: Pasture3DNodeRoad, p_type: Pasture3DRoadType,
+		p_cut: bool) -> Pasture3DRoadWall:
+	var w: Pasture3DRoadWall = null
+	if p_seg != null:
+		w = p_seg.cut_wall if p_cut else p_seg.fill_wall
+	if w == null and p_mod != null:
+		w = p_mod.cut_wall_override if p_cut else p_mod.fill_wall_override
+	if w == null and p_type != null:
+		w = p_type.cut_wall if p_cut else p_type.fill_wall
+	return w if Pasture3DRoadWall.active(w) else null
+
+
+## `p_wall`'s index in `p_walls`, appending it the first time; -1 for no wall.
+static func _wall_slot(p_walls: Array, p_wall: Pasture3DRoadWall) -> int:
+	if p_wall == null:
+		return -1
+	var i := p_walls.find(p_wall)
+	if i >= 0:
+		return i
+	p_walls.append(p_wall)
+	return p_walls.size() - 1
 
 
 ## The batter-shaping options out of a `grading_profile`, merged into a grader options Dictionary. ONE
@@ -1227,9 +1286,81 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 ## `earthwork_over`) and a shaping that reached two of them would round the road in the editor and leave
 ## its junction merges square.
 static func _with_batter_shape(p_opts: Dictionary, p_prof: Dictionary) -> Dictionary:
-	for k in ["toe_rounding", "hinge_rounding", "cut_wall_height", "fill_wall_height"]:
+	for k in ["toe_rounding", "hinge_rounding"]:
 		p_opts[k] = float(p_prof.get(k, 0.0))
 	return p_opts
+
+
+## Build this road's retaining walls for a freshly solved `p_alignment` and store them on it
+## (PASTURE3D_ROAD_WALL_SPEC.md §4). Called on BOTH bake routes, straight after the solve, because the
+## grader and the wall mesh both read `alignment.wall_plan` and neither may see a plan the other did not.
+##
+## `p_grid` is the bake's own ground when it has one: a point inside it reads the grid, so a wall stands
+## on the surface the step grades rather than on the terrain under an erosion step above it. Every other
+## point reads the layers below this road's.
+func _plan_walls(p_alignment: Pasture3DRoadAlignment, p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
+		p_prof: Dictionary, p_max_bank: float, p_grid: PackedFloat32Array = PackedFloat32Array(),
+		p_gw: int = 0, p_gh: int = 0, p_min_x: float = 0.0, p_min_z: float = 0.0, p_vs: float = 1.0) -> void:
+	if p_alignment == null:
+		return
+	var walls: Array = p_prof.get("walls", [])
+	if walls.is_empty():
+		p_alignment.wall_plan = PackedFloat32Array()
+		return
+	var t := resolved_road_type()
+	var gx1 := p_min_x + float(p_gw - 1) * p_vs
+	var gz1 := p_min_z + float(p_gh - 1) * p_vs
+	var has_grid := not p_grid.is_empty() and p_gw > 0 and p_gh > 0
+	var sampler := func(p_pts: PackedVector2Array) -> PackedFloat32Array:
+		var out := PackedFloat32Array()
+		out.resize(p_pts.size())
+		out.fill(NAN)
+		var rest := PackedVector2Array()
+		var rest_i := PackedInt32Array()
+		for j in p_pts.size():
+			var at := p_pts[j]
+			if has_grid and at.x >= p_min_x and at.x <= gx1 and at.y >= p_min_z and at.y <= gz1:
+				var h := _sample_grid(p_grid, p_gw, p_gh, p_min_x, p_min_z, p_vs, at)
+				if is_finite(h):
+					out[j] = h
+					continue
+			rest.append(at)
+			rest_i.append(j)
+		if not rest.is_empty():
+			var below := _heights_below_at(rest)
+			for q in rest.size():
+				out[rest_i[q]] = below[q] if q < below.size() else NAN
+		return out
+	var step := maxf(float(terrain.vertex_spacing) if terrain != null else 1.0, 0.5)
+	p_alignment.wall_plan = Pasture3DRoadGrader.build_wall_plan(p_plan, p_cum, p_alignment, p_prof, {
+		"crown_mode": t.crown_mode if t != null else 0,
+		"max_bank": p_max_bank,
+	}, sampler, step)
+
+
+## The ground below this road's layer at each of `p_pts`, in ONE native call.
+##
+## `get_height_below_along_plan` samples a polyline at arc lengths `i * ds`. Handed the points themselves
+## as the polyline, with an arc length of exactly `i` at point `i` and `ds = 1`, sample `i` lands on point
+## `i` -- so a batch of scattered points costs one call rather than one per point.
+func _heights_below_at(p_pts: PackedVector2Array) -> PackedFloat32Array:
+	var n := p_pts.size()
+	var out := PackedFloat32Array()
+	if n == 0:
+		return out
+	if terrain != null and terrain.data != null and terrain.data.has_method("get_height_below_along_plan"):
+		var pts := p_pts if n >= 2 else PackedVector2Array([p_pts[0], p_pts[0]])
+		var cum := PackedFloat32Array()
+		cum.resize(pts.size())
+		for i in pts.size():
+			cum[i] = float(i)
+		out = terrain.data.get_height_below_along_plan(_layer_id, pts, cum, 1.0, n)
+		if out.size() == n:
+			return out
+	out.resize(n)
+	for i in n:
+		out[i] = _base_height_below(Vector3(p_pts[i].x, 0.0, p_pts[i].y))
+	return out
 
 
 ## Grade `p_z` (an ABSOLUTE surface, row-major gw × gh) into this road's corridor, for one
@@ -1339,6 +1470,9 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	alignment.input_digest = alignment_digest(p_mod)
 	p_mod.last_alignment = alignment
 	_after_alignment_solve(pts, ds, alignment)
+	# The walls from the surface entering this step where the grid covers it, so a wall sees the erosion
+	# above it; the layers below elsewhere.
+	_plan_walls(alignment, plan, cum, prof, t.max_superelevation, p_z, p_gw, p_gh, p_min_x, p_min_z, p_vs)
 
 	_rebake_if_corridor_outgrew(used_pad)
 
@@ -1349,6 +1483,7 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 				"max_bank": t.max_superelevation if t != null else 0.0,
 				"cut_batter": prof["cut_batter"],
 				"fill_batter": prof["fill_batter"],
+				"wall_plan": alignment.wall_plan,
 				# NO `skip` FOR THE GROUND. `skip` is per arc-length sample, so it refuses at every
 				# lateral distance out to the corridor reach, blanking a trim-length by reach-wide swath
 				# either side of every junction. `grade_junction_footprints` then fills only the polygon,
@@ -1646,6 +1781,7 @@ func earthwork_over(p_ground: PackedFloat32Array, p_gw: int, p_gh: int, p_min_x:
 				"max_bank": t.max_superelevation if t != null else 0.0,
 				"cut_batter": prof["cut_batter"],
 				"fill_batter": prof["fill_batter"],
+				"wall_plan": alignment.wall_plan,
 			}, prof))
 	return res["height"]
 
@@ -1791,8 +1927,6 @@ func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_g
 	var fill_batter: float = maxf(float(p_surf.get("fill_batter", 0.6)), 0.01)
 	var verge: float = maxf(float(p_surf.get("verge", 4.0)), 0.0)
 	var toe: float = maxf(float(p_surf.get("toe_rounding", 0.0)), 0.0)
-	var cut_wall: float = float(p_surf.get("cut_wall_height", 0.0))
-	var fill_wall: float = float(p_surf.get("fill_wall_height", 0.0))
 
 	# How far out the batter can possibly reach: the deepest it has to climb, over the shallower slope,
 	# plus the verge. Computed rather than authored, for the reason the corridor's `reach` is — a capped
@@ -1877,7 +2011,7 @@ func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_g
 			# The corridor's batter, shaped the same way -- except the hinge: a footprint edge has no one
 			# cross-slope to roll over from, so it leaves the edge flat.
 			var cand: float = Pasture3DRoadGrader.batter_height(ground, z_edge, 0.0, beyond, cut_batter,
-					fill_batter, toe, 0.0, cut_wall, fill_wall)
+					fill_batter, toe, 0.0)
 			# COMBINED, by the same commutative rule `_merge_junction_earthwork` uses: the bigger
 			# earthwork governs. `cand` is derived from the junction record and the pre-road ground and
 			# from nothing this road did, so every road that meets here computes the same number -- and
@@ -2625,8 +2759,6 @@ func graph_path() -> Pasture3DGraphPath:
 		path.fill_batter = prof["fill_batter"]
 		path.toe_rounding = prof["toe_rounding"]
 		path.hinge_rounding = prof["hinge_rounding"]
-		path.cut_wall_height = prof["cut_wall_height"]
-		path.fill_wall_height = prof["fill_wall_height"]
 	return path
 
 

@@ -85,9 +85,8 @@ extends Pasture3DNode
 		fill_batter_override = v
 		_touch()
 
-## The RoadType's batter shaping, overridden for this road alone: `toe_rounding`, `hinge_rounding`,
-## `cut_wall_height` and `fill_wall_height`, in metres. Negative takes the type's; 0 switches that shaping
-## off here even when the type has it.
+## The RoadType's batter shaping, overridden for this road alone: `toe_rounding` and `hinge_rounding`, in
+## metres. Negative takes the type's; 0 switches that shaping off here even when the type has it.
 @export var toe_rounding_override: float = -1.0:
 	set(v):
 		toe_rounding_override = v
@@ -98,13 +97,17 @@ extends Pasture3DNode
 		hinge_rounding_override = v
 		_touch()
 
-@export var cut_wall_override: float = -1.0:
+## The RoadType's retaining walls, overridden for this road alone. Empty takes the type's; a wall with
+## `enabled` off switches the type's wall off here. A segment's own wall beats both.
+@export var cut_wall_override: Pasture3DRoadWall = null:
 	set(v):
+		_rewatch_wall(cut_wall_override, v)
 		cut_wall_override = v
 		_touch()
 
-@export var fill_wall_override: float = -1.0:
+@export var fill_wall_override: Pasture3DRoadWall = null:
 	set(v):
+		_rewatch_wall(fill_wall_override, v)
 		fill_wall_override = v
 		_touch()
 
@@ -213,6 +216,15 @@ func resolved_number(p_override: float, p_type_value: float) -> float:
 	return p_override if p_override >= 0.0 else p_type_value
 
 
+## Follow an override wall's `changed`: editing the wall resource moves this road's ground, and a plain
+## sub-resource edit tells nobody.
+func _rewatch_wall(p_old: Resource, p_new: Resource) -> void:
+	if p_old != null and p_old.changed.is_connected(_touch):
+		p_old.changed.disconnect(_touch)
+	if p_new != null and not p_new.changed.is_connected(_touch):
+		p_new.changed.connect(_touch)
+
+
 func to_params() -> Dictionary:
 	return {
 		"alignment_step": alignment_step,
@@ -223,8 +235,10 @@ func to_params() -> Dictionary:
 		"fill_batter_override": fill_batter_override,
 		"toe_rounding_override": toe_rounding_override,
 		"hinge_rounding_override": hinge_rounding_override,
-		"cut_wall_override": cut_wall_override,
-		"fill_wall_override": fill_wall_override,
+		# The walls' ground-moving fields, not the resources: a params block is compared by value, and a
+		# resource compares by identity, so an edit inside the wall would read as no change.
+		"cut_wall_override": Pasture3DRoadType.wall_terrain_signature(cut_wall_override),
+		"fill_wall_override": Pasture3DRoadType.wall_terrain_signature(fill_wall_override),
 		"structure_threshold": structure_threshold,
 		"publish_masks": publish_masks,
 	}
@@ -232,8 +246,10 @@ func to_params() -> Dictionary:
 
 func content_key() -> int:
 	return hash([alignment_step, smooth_radius, verge_override, crown_override, cut_batter_override,
-			fill_batter_override, toe_rounding_override, hinge_rounding_override, cut_wall_override,
-			fill_wall_override, structure_threshold, publish_masks, enabled])
+			fill_batter_override, toe_rounding_override, hinge_rounding_override,
+			Pasture3DRoadType.wall_terrain_signature(cut_wall_override),
+			Pasture3DRoadType.wall_terrain_signature(fill_wall_override),
+			structure_threshold, publish_masks, enabled])
 
 
 func modifier_warnings(p_host) -> PackedStringArray:

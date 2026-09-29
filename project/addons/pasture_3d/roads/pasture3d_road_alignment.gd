@@ -50,6 +50,10 @@ extends Resource
 @export var bank: PackedFloat32Array = PackedFloat32Array()
 ## Sample indices whose height was pinned by the designer and not solved for.
 @export var pinned: PackedInt32Array = PackedInt32Array()
+## The retaining walls this road was graded with: one record per sample and side, stride
+## `Pasture3DRoadGrader.WALL_STRIDE` (see `Pasture3DRoadGrader.build_wall_plan`). Empty = no walls. Stored
+## here because the grader and the wall mesh must read the SAME plan, and the alignment is what both hold.
+@export var wall_plan: PackedFloat32Array = PackedFloat32Array()
 
 @export_group("Diagnostics")
 ## The gradient limit the solve was run under, rise/run. Kept so a result can be checked against the
@@ -246,4 +250,4 @@ func structure_intervals(p_bridge_threshold: float = 6.0, p_tunnel_threshold: fl
 ## number nothing downstream reads. `input_digest` is likewise excluded — it identifies the INPUTS, and a
 ## digest of a digest of the inputs is not a digest of the result.
 func content_digest() -> int:
-	return hash([ds, s0, z, ground, curvature, bank, pinned])
+	return hash([ds, s0, z, ground, curvature, bank, pinned, wall_plan])

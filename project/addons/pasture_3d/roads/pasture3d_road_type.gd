@@ -300,24 +300,19 @@ enum KerbType {
 		hinge_rounding = maxf(v, 0.0)
 		emit_changed()
 
-## A CUT batter taller than this, metres, becomes a vertical retaining wall instead of carrying on up the
-## hillside. The wall is cut into the terrain and drawn as a mesh beside the ribbon. 0 = never.
-@export_range(0.0, 60.0, 0.5, "or_greater", "suffix:m") var cut_wall_height: float = 0.0:
+## The retaining wall that holds the hillside back where this road CUTS into rising ground. Empty = no
+## wall: the batter climbs until it meets the ground. See Pasture3DRoadWall.
+@export var cut_wall: Pasture3DRoadWall = null:
 	set(v):
-		cut_wall_height = maxf(v, 0.0)
+		_rewatch(cut_wall, v)
+		cut_wall = v
 		emit_changed()
 
-## A FILL batter deeper than this, metres, becomes a vertical retaining wall: the fan of fill down a
-## mountainside stops at the wall. 0 = never.
-@export_range(0.0, 60.0, 0.5, "or_greater", "suffix:m") var fill_wall_height: float = 0.0:
+## The retaining wall that holds the road up where it FILLS across falling ground. Empty = no wall.
+@export var fill_wall: Pasture3DRoadWall = null:
 	set(v):
-		fill_wall_height = maxf(v, 0.0)
-		emit_changed()
-
-## Material for the retaining walls. Empty uses a plain concrete grey.
-@export var wall_material: Material = null:
-	set(v):
-		wall_material = v
+		_rewatch(fill_wall, v)
+		fill_wall = v
 		emit_changed()
 
 ## Kerb-return radius where this road meets another, metres. The sweep a vehicle turns through at an
@@ -461,7 +456,8 @@ func grading_signature() -> Array:
 	return [
 		lane_width, lane_count, shoulder_width, crown, crown_mode, verge_width,
 		cut_batter, fill_batter,
-		toe_rounding, hinge_rounding, cut_wall_height, fill_wall_height, sharp_point_radius,
+		toe_rounding, hinge_rounding, sharp_point_radius,
+		wall_terrain_signature(cut_wall), wall_terrain_signature(fill_wall),
 		max_grade, max_superelevation, design_speed,
 		vertical_crest_accel_limit, vertical_sag_accel_limit,
 		# IN, despite being a junction setting rather than a cross-section one: the kerb return is paid
@@ -470,3 +466,17 @@ func grading_signature() -> Array:
 		# key that could not see it would serve a cached bake of the old footprint.
 		corner_radius,
 	]
+
+
+## A wall's ground-moving fields, or an empty list for no wall. Static so the modifier and the segments
+## sign their overrides the same way.
+static func wall_terrain_signature(p_wall: Pasture3DRoadWall) -> Array:
+	return p_wall.terrain_signature() if p_wall != null else []
+
+
+## Follow a wall resource's `changed`, so editing a shared wall reaches every road of this type.
+func _rewatch(p_old: Resource, p_new: Resource) -> void:
+	if p_old != null and p_old.changed.is_connected(emit_changed):
+		p_old.changed.disconnect(emit_changed)
+	if p_new != null and not p_new.changed.is_connected(emit_changed):
+		p_new.changed.connect(emit_changed)

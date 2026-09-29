@@ -99,8 +99,8 @@ static func surface_height(p_centre: float, p_bank: float, p_crown: float, p_u: 
 ##                  `p_hinge` > 0
 ##   p_toe          metres either side of the toe the batter is filleted into the ground; 0 = crease
 ##   p_hinge        metres over which the edge rolls over into the batter (the curve spans 2x this)
-##   p_cut_wall     a cut batter taller than this becomes a vertical face; 0 = never
-##   p_fill_wall    the same for fill
+##
+## Retaining walls are not here: `walled_height` wraps this with a wall plan record.
 ##
 ## ---- WHY THE HINGE STARTS AT THE EDGE ----
 ##
@@ -116,16 +116,12 @@ static func surface_height(p_centre: float, p_bank: float, p_crown: float, p_u: 
 ## other. Right at the edge, on ground just below the road, that is a lip standing proud of the formation.
 ## Capping k by the run so far makes the blend vanish at the edge, where the batter starts.
 static func batter_height(p_ground: float, p_z_edge: float, p_edge_slope: float, p_beyond: float,
-		p_cut_batter: float, p_fill_batter: float, p_toe: float = 0.0, p_hinge: float = 0.0,
-		p_cut_wall: float = 0.0, p_fill_wall: float = 0.0) -> float:
+		p_cut_batter: float, p_fill_batter: float, p_toe: float = 0.0, p_hinge: float = 0.0) -> float:
 	var fill := p_z_edge > p_ground
 	var batter := p_fill_batter if fill else p_cut_batter
 	var g2 := -batter if fill else batter
 	var x := maxf(p_beyond, 0.0)
 	var line := batter_line(p_z_edge, p_edge_slope, g2, x, p_hinge)
-	var wall := p_fill_wall if fill else p_cut_wall
-	if wall > 0.0 and ((p_z_edge - line) if fill else (line - p_z_edge)) > wall:
-		return p_ground
 	var k := batter * minf(maxf(p_toe, 0.0), x)
 	if k > 1e-9:
 		var hk := maxf(k - absf(line - p_ground), 0.0) / k
@@ -146,7 +142,7 @@ static func batter_line(p_z_edge: float, p_g1: float, p_g2: float, p_x: float, p
 
 
 ## Metres past the edge at which a batter has climbed (`p_g2` > 0) or fallen (`p_g2` < 0) `p_height` from
-## the edge: where a retaining wall of that height stands. INF when it never does.
+## the edge: where a BATTER_TOP retaining wall of that height stands. INF when it never does.
 static func wall_run(p_height: float, p_g1: float, p_g2: float, p_hinge: float) -> float:
 	if p_height <= 0.0 or absf(p_g2) < 1e-6:
 		return INF
@@ -176,6 +172,409 @@ static func edge_slope(p_z_ref: float, p_bank: float, p_crown: float, p_edge_d: 
 	var z_in := surface_height(p_z_ref, p_bank, p_crown, (p_edge_d - step) * side, p_half, p_crown_mode,
 			p_max_bank)
 	return (z_edge - z_in) / step
+
+
+## ---- RETAINING WALLS (PASTURE3D_ROAD_WALL_SPEC.md) ----------------------------------------------------
+
+## Stride of one record in a wall plan: `[mode, kind, W, alpha, o, x_s, beyond]`. Sample i, side k (0 the
+## left, side -1; 1 the right, +1) starts at `(i * 2 + k) * WALL_STRIDE`.
+const WALL_STRIDE: int = 7
+const WALL_NONE: int = 0
+const WALL_ROAD_SIDE: int = 1
+const WALL_BATTER_TOP: int = 2
+## A ROAD_SIDE wall that would hold back less than this, metres, is not built.
+const WALL_MIN_HELD: float = 0.05
+
+
+## The wall record at arc length `p_s` on side `p_side`, or an empty array where the plan has none.
+## Interpolated LINEARLY between the two bracketing samples when both carry the same mode and kind, so a
+## tapering wall has no stair along the road; the nearest record otherwise, which is where a square end
+## falls. Native `road_wall_record_at`, line for line.
+static func wall_record_at(p_plan: PackedFloat32Array, p_s: float, p_ds: float, p_s0: float,
+		p_side: float) -> PackedFloat32Array:
+	var n := p_plan.size() / (2 * WALL_STRIDE)
+	if n <= 0:
+		return PackedFloat32Array()
+	var k := 0 if p_side < 0.0 else 1
+	var i0 := 0
+	var f := 0.0
+	if n > 1:
+		var t := (p_s - p_s0) / maxf(p_ds, 1e-6)
+		i0 = clampi(int(floor(t)), 0, n - 2)
+		f = clampf(t - float(i0), 0.0, 1.0)
+	var a := (i0 * 2 + k) * WALL_STRIDE
+	var b := (mini(i0 + 1, n - 1) * 2 + k) * WALL_STRIDE
+	var out := PackedFloat32Array()
+	out.resize(WALL_STRIDE)
+	if p_plan[a] == p_plan[b] and p_plan[a + 1] == p_plan[b + 1]:
+		out[0] = p_plan[a]
+		out[1] = p_plan[a + 1]
+		for j in range(2, WALL_STRIDE):
+			out[j] = lerpf(p_plan[a + j], p_plan[b + j], f)
+	else:
+		var c := a if f < 0.5 else b
+		for j in WALL_STRIDE:
+			out[j] = p_plan[c + j]
+	return out
+
+
+## How far past the edge of formation a walled batter can reach, for `p_rise` metres between road and
+## ground, over the two samples bracketing `p_s` on both sides. 0 where neither has a ROAD_SIDE wall. The
+## walled batter is `x_s` of flat ground and then a batter at `beyond`, which can reach further than the
+## plain one when `beyond` is the shallower. Native `road_wall_reach`, line for line.
+static func wall_reach(p_plan: PackedFloat32Array, p_s: float, p_ds: float, p_s0: float,
+		p_rise: float) -> float:
+	var n := p_plan.size() / (2 * WALL_STRIDE)
+	if n <= 0:
+		return 0.0
+	var i0 := clampi(int(floor((p_s - p_s0) / maxf(p_ds, 1e-6))), 0, n - 1)
+	var best := 0.0
+	for i in [i0, mini(i0 + 1, n - 1)]:
+		for k in 2:
+			var a: int = (i * 2 + k) * WALL_STRIDE
+			if int(p_plan[a]) == WALL_ROAD_SIDE:
+				best = maxf(best, p_plan[a + 5] + p_rise / maxf(p_plan[a + 6], 0.01))
+	return best
+
+
+## The ground `p_beyond` metres past the edge of formation with the wall record `p_rec` (from
+## `wall_record_at`) standing there. `batter_height` exactly where there is no wall, or where the cell is
+## not the kind the wall was planned for. Native `road_wall_height`, line for line. See spec §5.
+static func walled_height(p_ground: float, p_z_edge: float, p_edge_slope: float, p_beyond: float,
+		p_cut_batter: float, p_fill_batter: float, p_toe: float, p_hinge: float,
+		p_rec: PackedFloat32Array) -> float:
+	var plain := batter_height(p_ground, p_z_edge, p_edge_slope, p_beyond, p_cut_batter, p_fill_batter,
+			p_toe, p_hinge)
+	if p_rec.size() < WALL_STRIDE:
+		return plain
+	var mode := int(p_rec[0])
+	var w: float = p_rec[2]
+	if mode == WALL_NONE or w <= 0.0:
+		return plain
+	var fill := p_z_edge > p_ground
+	# A cut wall's record on a cell the road fills (or the reverse): the plain batter, not a wall.
+	if fill == (p_rec[1] > 0.0):
+		return plain
+	var x := maxf(p_beyond, 0.0)
+	var batter := p_fill_batter if fill else p_cut_batter
+	var g2 := -batter if fill else batter
+	var l_plain := batter_line(p_z_edge, p_edge_slope, g2, x, p_hinge)
+	if mode == WALL_BATTER_TOP:
+		# The batter up to the wall's height, and the ground left standing past it.
+		if ((p_z_edge - l_plain) if fill else (l_plain - p_z_edge)) > w:
+			return p_ground
+		return plain
+	# ROAD_SIDE. Flat at the edge's height out to the step at x_s, where the wall holds the ground `w`
+	# above (cut) or below (fill); past it a batter at `beyond`. `alpha` blends from the plain batter,
+	# which is how a run's end tapers into the earthwork it replaces.
+	var alpha := clampf(p_rec[3], 0.0, 1.0)
+	var xs: float = p_rec[5]
+	var beyond := maxf(p_rec[6], 0.01)
+	var sgn := -1.0 if fill else 1.0
+	var l_wall := p_z_edge if x < xs else p_z_edge + sgn * (w + beyond * (x - xs))
+	var line := lerpf(l_plain, l_wall, alpha)
+	# The toe fillet, as in `batter_height`, but measured from the step rather than the edge: behind a
+	# full wall the ground is flat up to x_s, and a fillet reaching back into it would lift the ditch.
+	var slope := lerpf(batter, beyond, alpha)
+	var k := slope * minf(maxf(p_toe, 0.0), maxf(x - alpha * xs, 0.0))
+	if k > 1e-9:
+		var hk := maxf(k - absf(line - p_ground), 0.0) / k
+		var bump := hk * hk * k * 0.25
+		return (maxf(p_ground, line) + bump) if fill else (minf(p_ground, line) - bump)
+	return maxf(p_ground, line) if fill else minf(p_ground, line)
+
+
+## The wall plan for a solved road (spec §4): one record per alignment sample and side, stored on the
+## alignment and read by the grader and the wall mesh alike, so neither can drift from the other.
+##
+##   p_plan, p_cum  the plan polyline and its arc lengths
+##   p_alignment    the solved alignment
+##   p_prof         a `grading_profile`: half, shoulder, suppress, skip, walls, cut_wall_idx,
+##                  fill_wall_idx, crown, cut_batter, fill_batter, hinge_rounding
+##   p_opts         crown_mode, max_bank
+##   p_sampler      Callable(PackedVector2Array) -> PackedFloat32Array: the ground at each point, NaN where
+##                  there is none. Called once per lateral step for every sample at once.
+##   p_step         lateral march step, metres
+##
+## Returns an empty array when no sample has a wall, which every consumer reads as "no walls".
+static func build_wall_plan(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
+		p_alignment: Pasture3DRoadAlignment, p_prof: Dictionary, p_opts: Dictionary,
+		p_sampler: Callable, p_step: float) -> PackedFloat32Array:
+	var walls: Array = p_prof.get("walls", [])
+	if walls.is_empty() or p_alignment == null or p_alignment.count() < 2 or p_plan.size() < 2:
+		return PackedFloat32Array()
+	var n := p_alignment.count()
+	var ds := maxf(p_alignment.ds, 1e-3)
+	var total: float = p_cum[p_cum.size() - 1]
+	var half: PackedFloat32Array = p_prof.get("half", PackedFloat32Array())
+	var shoulder: PackedFloat32Array = p_prof.get("shoulder", PackedFloat32Array())
+	var suppress: PackedByteArray = p_prof.get("suppress", PackedByteArray())
+	var skip: PackedByteArray = p_prof.get("skip", PackedByteArray())
+	var cut_idx: PackedInt32Array = p_prof.get("cut_wall_idx", PackedInt32Array())
+	var fill_idx: PackedInt32Array = p_prof.get("fill_wall_idx", PackedInt32Array())
+	var crown := float(p_prof.get("crown", 0.05))
+	var cut_b := maxf(float(p_prof.get("cut_batter", 1.0)), 0.01)
+	var fill_b := maxf(float(p_prof.get("fill_batter", 0.6)), 0.01)
+	var hinge := maxf(float(p_prof.get("hinge_rounding", 0.0)), 0.0)
+	var crown_mode := int(p_opts.get("crown_mode", 0))
+	var max_bank := float(p_opts.get("max_bank", 0.0))
+	var step := maxf(p_step, 0.1)
+
+	# ---- 1. THE ENTRIES: every sample and side that could carry a wall ----
+	var e_i := PackedInt32Array()
+	var e_side := PackedFloat32Array()
+	var e_edge := PackedFloat32Array()
+	var e_zedge := PackedFloat32Array()
+	var e_g1 := PackedFloat32Array()
+	var e_c := PackedVector2Array()
+	var e_across := PackedVector2Array()
+	for i in n:
+		if (i < suppress.size() and suppress[i] != 0) or (i < skip.size() and skip[i] != 0):
+			continue
+		if _at_i(cut_idx, i) < 0 and _at_i(fill_idx, i) < 0:
+			continue
+		var s := p_alignment.s0 + float(i) * ds
+		if s > total + 1e-3:
+			continue
+		var hw := _at(half, i, 3.5)
+		var edge_d := hw + _at(shoulder, i, 0.5)
+		var z_ref := p_alignment.height_at(s)
+		var bank: float = p_alignment.bank[i] if i < p_alignment.bank.size() else 0.0
+		var c := plan_point_at(p_plan, p_cum, minf(s, total))
+		var t2 := _segment_dir_at(p_plan, p_cum, minf(s, total), false)
+		for side in [-1.0, 1.0]:
+			e_i.append(i)
+			e_side.append(side)
+			e_edge.append(edge_d)
+			e_zedge.append(surface_height(z_ref, bank, crown, edge_d * side, hw, crown_mode, max_bank))
+			e_g1.append(edge_slope(z_ref, bank, crown, edge_d, side, hw, crown_mode, max_bank) \
+					if hinge > 0.0 else 0.0)
+			e_c.append(c)
+			e_across.append(Vector2(-t2.y, t2.x) * side)
+	var m := e_i.size()
+	if m == 0:
+		return PackedFloat32Array()
+
+	# ---- 2. THE MARCH: the plain batter's catch height at every entry, batched per lateral step ----
+	var e_kind := PackedFloat32Array() # +1 cut, -1 fill, 0 no wall for its kind
+	var e_widx := PackedInt32Array()
+	var e_hc := PackedFloat32Array()
+	var e_prev := PackedFloat32Array() # the batter line at the previous step
+	var e_pdiff := PackedFloat32Array() # kind * (ground - line) at the previous step
+	var e_cap := PackedFloat32Array()
+	var live := PackedByteArray()
+	e_kind.resize(m); e_widx.resize(m); e_hc.resize(m); e_prev.resize(m); e_pdiff.resize(m)
+	e_cap.resize(m); live.resize(m)
+	e_hc.fill(0.0)
+	live.fill(1)
+	var min_b := minf(cut_b, fill_b)
+	var cap_all := 0.0
+	for w: Pasture3DRoadWall in walls:
+		cap_all = maxf(cap_all, maxf(w.max_height, w.trigger_height))
+		if w.beyond_batter > 0.0:
+			min_b = minf(min_b, w.beyond_batter)
+	var steps := clampi(int(ceil((2.0 * hinge + (cap_all + step) / min_b) / step)) + 1, 1, 2000)
+	var pts := PackedVector2Array()
+	pts.resize(m)
+	for mm in range(1, steps + 1):
+		var x := float(mm) * step
+		var any := false
+		for e in m:
+			if live[e] != 0:
+				pts[e] = e_c[e] + e_across[e] * (e_edge[e] + x)
+				any = true
+		if not any:
+			break
+		var g: PackedFloat32Array = p_sampler.call(pts)
+		for e in m:
+			if live[e] == 0:
+				continue
+			var ge: float = g[e] if e < g.size() else NAN
+			var z_edge: float = e_zedge[e]
+			if mm == 1:
+				# The kind is set by the ground one step past the edge: above the edge is a cut.
+				if not is_finite(ge):
+					live[e] = 0
+					continue
+				var kind := 1.0 if ge > z_edge else -1.0
+				var widx := _at_i(cut_idx if kind > 0.0 else fill_idx, e_i[e])
+				e_kind[e] = kind
+				e_widx[e] = widx
+				if widx < 0:
+					live[e] = 0
+					continue
+				var wr: Pasture3DRoadWall = walls[widx]
+				e_cap[e] = maxf(wr.max_height, wr.trigger_height) + step
+				e_prev[e] = z_edge
+				e_pdiff[e] = kind * (ge - z_edge)
+			var kd: float = e_kind[e]
+			var line := batter_line(z_edge, e_g1[e], kd * (cut_b if kd > 0.0 else fill_b), x, hinge)
+			if not is_finite(ge):
+				e_hc[e] = kd * (e_prev[e] - z_edge)
+				live[e] = 0
+				continue
+			var diff := kd * (ge - line)
+			if diff <= 0.0:
+				# Caught between the last step and this one: the crossing, linearly.
+				var pd: float = e_pdiff[e]
+				var tt := clampf(pd / maxf(pd - diff, 1e-9), 0.0, 1.0)
+				e_hc[e] = kd * (lerpf(e_prev[e], line, tt) - z_edge)
+				live[e] = 0
+				continue
+			if kd * (line - z_edge) >= e_cap[e]:
+				e_hc[e] = kd * (line - z_edge) # still climbing past anything a wall could use
+				live[e] = 0
+				continue
+			e_prev[e] = line
+			e_pdiff[e] = diff
+
+	# ---- 3. NEED, per sample and side ----
+	#
+	# The catch height decides WHETHER a wall stands (the batter it replaces would be taller than the
+	# trigger), but not how tall. A ROAD_SIDE wall retains the ground at its own back face, x_s past the
+	# edge, and nothing more: sizing it by the catch height put the top of a wall on a 1:2 hillside 1.7 m
+	# above the ground behind it. So the need is read again, at x_s, in one more batched call.
+	var need := PackedFloat32Array()
+	var key := PackedInt32Array() # widx * 2 + (kind > 0), or -1
+	need.resize(n * 2)
+	key.resize(n * 2)
+	need.fill(0.0)
+	key.fill(-1)
+	var back_e := PackedInt32Array()
+	var back_pts := PackedVector2Array()
+	for e in m:
+		var widx := e_widx[e]
+		if e_kind[e] == 0.0 or widx < 0:
+			continue
+		var wr: Pasture3DRoadWall = walls[widx]
+		if e_hc[e] <= wr.trigger_height:
+			continue
+		var slot := e_i[e] * 2 + (0 if e_side[e] < 0.0 else 1)
+		if wr.placement == Pasture3DRoadWall.Placement.BATTER_TOP:
+			need[slot] = wr.trigger_height
+			key[slot] = widx * 2 + (1 if e_kind[e] > 0.0 else 0)
+			continue
+		back_e.append(e)
+		back_pts.append(e_c[e] + e_across[e] * (e_edge[e] + wr.offset + wr.thickness))
+	if not back_e.is_empty():
+		var gb: PackedFloat32Array = p_sampler.call(back_pts)
+		for q in back_e.size():
+			var e := back_e[q]
+			var gq: float = gb[q] if q < gb.size() else NAN
+			var held := e_kind[e] * (gq - e_zedge[e])
+			if not is_finite(held) or held <= WALL_MIN_HELD:
+				continue
+			var wr: Pasture3DRoadWall = walls[e_widx[e]]
+			var slot := e_i[e] * 2 + (0 if e_side[e] < 0.0 else 1)
+			need[slot] = minf(wr.max_height, held)
+			key[slot] = e_widx[e] * 2 + (1 if e_kind[e] > 0.0 else 0)
+
+	var out := PackedFloat32Array()
+	out.resize(n * 2 * WALL_STRIDE)
+	out.fill(0.0)
+	var any_wall := false
+	for k in 2:
+		# ---- 4. RUNS: bridge short gaps, then drop short runs ----
+		var runs: Array = [] # [start, end, key]
+		var i := 0
+		while i < n:
+			var ky := key[i * 2 + k]
+			if ky < 0:
+				i += 1
+				continue
+			var j := i
+			while j + 1 < n and key[(j + 1) * 2 + k] == ky:
+				j += 1
+			runs.append([i, j, ky])
+			i = j + 1
+		var merged: Array = []
+		for r in runs:
+			if not merged.is_empty():
+				var last: Array = merged[merged.size() - 1]
+				var wr: Pasture3DRoadWall = walls[int(r[2]) / 2]
+				var gap := int(r[0]) - int(last[1]) - 1
+				if int(last[2]) == int(r[2]) and float(gap) * ds < wr.gap_bridge \
+						and not _any_blocked(suppress, skip, int(last[1]) + 1, int(r[0]) - 1):
+					var a_need := need[int(last[1]) * 2 + k]
+					var b_need := need[int(r[0]) * 2 + k]
+					for g in range(int(last[1]) + 1, int(r[0])):
+						var f := float(g - int(last[1])) / float(gap + 1)
+						need[g * 2 + k] = lerpf(a_need, b_need, f)
+						key[g * 2 + k] = int(r[2])
+					last[1] = r[1]
+					continue
+			merged.append(r.duplicate())
+		for r in merged:
+			var r0 := int(r[0])
+			var r1 := int(r[1])
+			var widx := int(r[2]) / 2
+			var cut := int(r[2]) % 2 == 1
+			var wr: Pasture3DRoadWall = walls[widx]
+			if float(r1 - r0 + 1) * ds < wr.min_length:
+				continue
+			# ---- 5. THE TOP ----
+			var tops := PackedFloat32Array()
+			tops.resize(r1 - r0 + 1)
+			if wr.top_mode == Pasture3DRoadWall.TopMode.FOLLOW_ROAD:
+				var mx := 0.0
+				for g in range(r0, r1 + 1):
+					mx = maxf(mx, need[g * 2 + k])
+				tops.fill(mx)
+			elif wr.top_mode == Pasture3DRoadWall.TopMode.STEPPED:
+				var blk := maxi(int(round(wr.step_length / ds)), 1)
+				var b0 := r0
+				while b0 <= r1:
+					var b1 := mini(b0 + blk - 1, r1)
+					var mx := 0.0
+					for g in range(b0, b1 + 1):
+						mx = maxf(mx, need[g * 2 + k])
+					var q := ceilf(mx / wr.step_height - 1e-6) * wr.step_height
+					for g in range(b0, b1 + 1):
+						tops[g - r0] = q
+					b0 = b1 + 1
+			else:
+				var win := int(round(wr.top_smoothing / (2.0 * ds)))
+				for g in range(r0, r1 + 1):
+					var acc := 0.0
+					var cnt := 0
+					for h in range(maxi(g - win, r0), mini(g + win, r1) + 1):
+						acc += need[h * 2 + k]
+						cnt += 1
+					tops[g - r0] = acc / float(maxi(cnt, 1))
+			var beyond := wr.beyond_batter if wr.beyond_batter > 0.0 else (cut_b if cut else fill_b)
+			var mode := WALL_ROAD_SIDE if wr.placement == Pasture3DRoadWall.Placement.ROAD_SIDE \
+					else WALL_BATTER_TOP
+			for g in range(r0, r1 + 1):
+				# ---- 6. THE ENDS ----
+				var alpha := 1.0
+				if wr.end_treatment == Pasture3DRoadWall.EndTreatment.TAPER:
+					var d := float(mini(g - r0, r1 - g)) * ds
+					var u := clampf(d / wr.end_taper_length, 0.0, 1.0)
+					alpha = u * u * (3.0 - 2.0 * u)
+				var a := (g * 2 + k) * WALL_STRIDE
+				out[a] = mode
+				out[a + 1] = 1.0 if cut else -1.0
+				# BATTER_TOP is the old cap: the wall stands where the batter has climbed the trigger.
+				out[a + 2] = wr.trigger_height if mode == WALL_BATTER_TOP else minf(tops[g - r0], wr.max_height)
+				out[a + 3] = alpha
+				out[a + 4] = wr.offset
+				out[a + 5] = wr.offset + wr.thickness
+				out[a + 6] = beyond
+				any_wall = true
+	return out if any_wall else PackedFloat32Array()
+
+
+static func _at_i(p_arr: PackedInt32Array, p_i: int) -> int:
+	if p_arr.is_empty():
+		return -1
+	return p_arr[clampi(p_i, 0, p_arr.size() - 1)]
+
+
+static func _any_blocked(p_suppress: PackedByteArray, p_skip: PackedByteArray, p_a: int, p_b: int) -> bool:
+	for i in range(p_a, p_b + 1):
+		if (i < p_suppress.size() and p_suppress[i] != 0) or (i < p_skip.size() and p_skip[i] != 0):
+			return true
+	return false
 
 
 ## A turn sharper than this at a spline point, in radians, is a kink to be rounded. Well under what anyone
@@ -587,8 +986,8 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 	var fill_batter: float = maxf(float(p_opts.get("fill_batter", 0.6)), 0.01)
 	var toe_round: float = maxf(float(p_opts.get("toe_rounding", 0.0)), 0.0)
 	var hinge_round: float = maxf(float(p_opts.get("hinge_rounding", 0.0)), 0.0)
-	var cut_wall: float = float(p_opts.get("cut_wall_height", 0.0))
-	var fill_wall: float = float(p_opts.get("fill_wall_height", 0.0))
+	# The retaining walls, one record per alignment sample and side (`build_wall_plan`). Empty = none.
+	var wall_plan: PackedFloat32Array = p_opts.get("wall_plan", PackedFloat32Array())
 	# `skip` is NOT `p_suppress`. Suppress means "a structure carries the road here", and says so in the
 	# structure mask. Skip means "this arc length belongs to something else" — a junction footprint the
 	# approach was trimmed back from (§6) — and must leave no trace at all: marking it as a bridge deck
@@ -687,6 +1086,10 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 			# Plus the rounding, which reaches past the unrounded toe: the hinge pushes the batter out by
 			# about its radius, and the toe fillet spreads its own width beyond that.
 			var reach := edge_d + rise / slope + verge + toe_round + 2.0 * hinge_round
+			# A wall's flat ground and the batter past it can reach further than the plain batter.
+			if not wall_plan.is_empty():
+				reach = maxf(reach, edge_d + wall_reach(wall_plan, s, p_alignment.ds, p_alignment.s0, rise)
+						+ verge + toe_round)
 			if d > reach:
 				continue
 			# Another road's formation. Refused before the suppress branch so a protected cell reports
@@ -719,8 +1122,12 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 				var z_edge := surface_height(z_road, bank, crown, edge_d * side, half, crown_mode, max_bank)
 				var g1 := edge_slope(z_road, bank, crown, edge_d, side, half, crown_mode, max_bank) \
 						if hinge_round > 0.0 else 0.0
-				h = batter_height(ground, z_edge, g1, d - edge_d, cut_batter, fill_batter, toe_round,
-						hinge_round, cut_wall, fill_wall)
+				if wall_plan.is_empty():
+					h = batter_height(ground, z_edge, g1, d - edge_d, cut_batter, fill_batter, toe_round,
+							hinge_round)
+				else:
+					h = walled_height(ground, z_edge, g1, d - edge_d, cut_batter, fill_batter, toe_round,
+							hinge_round, wall_record_at(wall_plan, s, p_alignment.ds, p_alignment.s0, side))
 
 			graded[idx] = h
 			# Coverage masks. `roadbed` is the carriageway ONLY — the shoulder is not driving surface and

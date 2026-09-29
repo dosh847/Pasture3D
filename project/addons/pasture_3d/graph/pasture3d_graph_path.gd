@@ -127,8 +127,8 @@ extends Resource
 ## Batter shaping, metres (Pasture3DRoadGrader.batter_height). 0 is the unshaped batter.
 @export var toe_rounding: float = 0.0
 @export var hinge_rounding: float = 0.0
-@export var cut_wall_height: float = 0.0
-@export var fill_wall_height: float = 0.0
+# The retaining walls ride on `alignment.wall_plan`: they are indexed by alignment sample, so a path that
+# drops its alignment (a reshape that moves the line) drops its walls with it, which is right.
 
 
 ## The grader options this path's cross-section scalars stand for, so every consumer passes the same set.
@@ -139,8 +139,7 @@ func grade_opts() -> Dictionary:
 		"fill_batter": fill_batter,
 		"toe_rounding": toe_rounding,
 		"hinge_rounding": hinge_rounding,
-		"cut_wall_height": cut_wall_height,
-		"fill_wall_height": fill_wall_height,
+		"wall_plan": alignment.wall_plan if alignment != null else PackedFloat32Array(),
 		"skip": sample_skip,
 	}
 
@@ -175,7 +174,7 @@ func content_digest() -> int:
 		points, half_widths, heights, closed,
 		alignment.content_digest() if alignment != null else 0,
 		sample_half_widths, sample_shoulders, sample_verges, sample_suppress, sample_skip,
-		crown, cut_batter, fill_batter, toe_rounding, hinge_rounding, cut_wall_height, fill_wall_height,
+		crown, cut_batter, fill_batter, toe_rounding, hinge_rounding,
 	])
 
 

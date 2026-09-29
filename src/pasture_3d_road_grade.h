@@ -107,11 +107,28 @@ inline double road_surface_height(double p_centre, double p_bank, double p_crown
 //                  p_hinge_round > 0
 //   p_toe_round    metres either side of the toe the batter is filleted into the ground; 0 = hard crease
 //   p_hinge_round  metres over which the edge rolls over into the batter (the curve spans 2x this)
-//   p_cut_wall     a cut batter taller than this becomes a vertical face; 0 = never
-//   p_fill_wall    the same for fill
+// Retaining walls are not here: road_wall_height wraps this with a wall plan record.
 double road_batter_height(double p_ground, double p_z_edge, double p_edge_slope, double p_beyond,
-		double p_cut_batter, double p_fill_batter, double p_toe_round, double p_hinge_round,
-		double p_cut_wall, double p_fill_wall);
+		double p_cut_batter, double p_fill_batter, double p_toe_round, double p_hinge_round);
+
+// ---- Retaining walls (PASTURE3D_ROAD_WALL_SPEC.md) ----
+// A wall plan is one record per alignment sample and side: [mode, kind, W, alpha, o, x_s, beyond], sample
+// i side k (0 = side -1, 1 = side +1) at (i * 2 + k) * ROAD_WALL_STRIDE. Built in GDScript
+// (Pasture3DRoadGrader.build_wall_plan); these three are Pasture3DRoadGrader.wall_record_at, wall_reach and
+// walled_height, line for line.
+constexpr int ROAD_WALL_STRIDE = 7;
+constexpr int ROAD_WALL_NONE = 0;
+constexpr int ROAD_WALL_ROAD_SIDE = 1;
+constexpr int ROAD_WALL_BATTER_TOP = 2;
+
+// The record at arc length p_s on side p_side into r_rec. False (and r_rec untouched) when the plan is empty.
+bool road_wall_record_at(const float *p_plan, int p_size, double p_s, double p_ds, double p_s0, double p_side,
+		float *r_rec);
+// How far past the edge a ROAD_SIDE wall bracketing p_s can reach for p_rise metres; 0 where none.
+double road_wall_reach(const float *p_plan, int p_size, double p_s, double p_ds, double p_s0, double p_rise);
+// The ground p_beyond past the edge with the wall record p_rec standing there.
+double road_wall_height(double p_ground, double p_z_edge, double p_edge_slope, double p_beyond,
+		double p_cut_batter, double p_fill_batter, double p_toe_round, double p_hinge_round, const float *p_rec);
 
 // Outward slope of the finished road surface at the formation edge `p_edge_d` on side `p_side`.
 double road_edge_slope(double p_z_ref, double p_bank, double p_crown, double p_edge_d, double p_side,
@@ -130,7 +147,7 @@ double road_edge_slope(double p_z_ref, double p_bank, double p_crown, double p_e
 // crossroads.
 //
 // p_opts: crown, cut_batter, fill_batter, surface_fade, skip (PackedByteArray), toe_rounding,
-// hinge_rounding, cut_wall_height, fill_wall_height (see road_batter_height).
+// hinge_rounding (see road_batter_height), wall_plan (PackedFloat32Array, see road_wall_height).
 // Returns { ok, height, roadbed, cut, fill, verge, structure, surface }.
 Dictionary road_grade_grid(const PackedFloat32Array &p_height, int p_gw, int p_gh, double p_min_x,
 		double p_min_z, double p_vs, const PackedVector2Array &p_plan, double p_align_ds,

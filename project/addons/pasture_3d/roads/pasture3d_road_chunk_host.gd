@@ -114,19 +114,18 @@ var _pick_digest: String = ""
 var _apron_chunks: Dictionary = {}
 var _apron_digests: Dictionary = {}
 
-## The retaining walls a batter height cap leaves standing (Pasture3DRoadType.cut_wall_height /
-## fill_wall_height). One node for the whole road, OUTSIDE `_chunks`: a wall is built from the graded
-## TERRAIN as well as the alignment, so it has its own digest, and a ribbon rebuild must not drop it.
+## The retaining walls from the road's wall plan (Pasture3DRoadWall, `alignment.wall_plan`). One node for
+## the whole road, OUTSIDE `_chunks`: a wall is built from the graded TERRAIN as well as the alignment, so
+## it has its own digest, and a ribbon rebuild must not drop it.
 var _walls: MeshInstance3D = null
 var _walls_digest: int = 0
 ## How many wall faces and caps the last build emitted, as quads. What a gate reads.
 var wall_quads: int = 0
+## How many collision triangles the last build gave the walls. What a gate reads.
+var wall_collision_faces: int = 0
 
-## Metres a wall face is sunk below the ground it stands on, so a grid step or a later bake of the ground
-## beside it never shows a gap under the wall.
-const WALL_EMBED: float = 1.0
-## Height a wall must actually stand before one is drawn. The grader leaves ground alone past the wall
-## run; where that ground happens to sit within this of the wall top there is no face to build.
+## Height a wall must actually stand before one is drawn: where the ground either side of the step sits
+## within this of the wall top there is no face to build.
 const WALL_MIN_FACE: float = 0.05
 
 
@@ -704,180 +703,332 @@ func _clear_walls() -> void:
 	_walls = null
 	_walls_digest = 0
 	wall_quads = 0
+	wall_collision_faces = 0
 
 
-## Build the retaining walls where the grader capped a batter, as one mesh.
+## Build the retaining walls from the road's wall plan, as one mesh with a surface per material.
 ##
-## ---- WHERE A WALL STANDS ----
+## ---- ONE PLAN, READ TWICE ----
 ##
-## The grader (`Pasture3DRoadGrader.batter_height`) runs the batter out from the formation edge until it
-## has climbed or fallen the wall height, and past that run leaves the ground ALONE. So the terrain holds
-## a batter up to `wall_run` and raw hillside beyond, and the step between them is the wall. This reads
-## both halves back rather than recomputing the grade: the batter line from the same definition the
-## grader used, the hillside from the baked terrain just past the run. Where that hillside sits within
-## WALL_MIN_FACE of the batter's end there is no step, and no wall is drawn.
+## The grader shaped the terrain from `alignment.wall_plan`, and this reads the SAME records with the same
+## profile functions (`Pasture3DRoadGrader.batter_line`), so the mesh stands exactly on the step the
+## terrain holds. Only the ground BEHIND and BELOW a wall is read back from the baked terrain, because that
+## is the one height the plan does not decide. See PASTURE3D_ROAD_WALL_SPEC.md §6.
 ##
-## ---- WHICH SIDE OF THE STEP ----
+## ---- WHY THE MESH REACHES PAST THE STEP ----
 ##
-## The heightfield cannot draw a vertical face: between the last graded vertex and the first untouched
-## one it draws a steep triangle a vertex apart. The wall is put on the side of that triangle that HIDES
-## it -- a fill wall out past it, on the low ground, facing away from the road; a cut wall in front of it,
-## on the batter, facing the road -- and a cap spans the band between the face and the run at the wall's
-## top, so the steep triangle is covered from both sides.
+## The heightfield cannot draw a vertical face: between the last vertex in front of the step and the first
+## behind it, it draws a steep ramp a vertex apart. The cap runs `band` past the step for a cut wall and
+## the face stands `band` past it for a fill wall, so that ramp is always inside the wall.
 func _rebuild_walls(p_brush: Pasture3DRoadBrush, p_run: Dictionary, p_type: Pasture3DRoadType) -> void:
 	var alignment: Pasture3DRoadAlignment = p_run["alignment"]
 	var plan: PackedVector2Array = p_run["plan"]
 	var cum: PackedFloat32Array = p_run["cum"]
 	var terrain: Variant = p_brush.terrain
-	if alignment == null or alignment.count() < 2 or plan.size() < 2 or terrain == null or terrain.data == null:
+	if alignment == null or alignment.count() < 2 or alignment.wall_plan.is_empty() or plan.size() < 2 \
+			or terrain == null or terrain.data == null:
 		_clear_walls()
 		return
+	var wp := alignment.wall_plan
+	var n := mini(alignment.count(), wp.size() / (2 * Pasture3DRoadGrader.WALL_STRIDE))
 	var prof := p_brush.grading_profile(p_brush.road_modifier(), alignment.ds, alignment.count())
-	var cut_wall := float(prof.get("cut_wall_height", 0.0))
-	var fill_wall := float(prof.get("fill_wall_height", 0.0))
-	if cut_wall <= 0.0 and fill_wall <= 0.0:
-		_clear_walls()
-		return
-	var half: PackedFloat32Array = prof["half"]
-	var shoulder: PackedFloat32Array = prof["shoulder"]
-	var suppress: PackedByteArray = prof["suppress"]
-	var skip: PackedByteArray = prof["skip"]
-	var crown := float(prof.get("crown", 0.05))
-	var cut_b := maxf(float(prof.get("cut_batter", 1.0)), 0.01)
-	var fill_b := maxf(float(prof.get("fill_batter", 0.6)), 0.01)
-	var hinge := maxf(float(prof.get("hinge_rounding", 0.0)), 0.0)
-	var crown_mode: int = p_type.crown_mode
-	var max_bank: float = p_type.max_superelevation
-	var band := 1.5 * float(terrain.vertex_spacing)
+	var walls: Array = prof["walls"]
+	var cut_idx: PackedInt32Array = prof["cut_wall_idx"]
+	var fill_idx: PackedInt32Array = prof["fill_wall_idx"]
+	var ctx := {
+		"al": alignment, "plan": plan, "cum": cum, "terrain": terrain,
+		"half": prof["half"], "shoulder": prof["shoulder"],
+		"crown": float(prof.get("crown", 0.05)),
+		"cut_b": maxf(float(prof.get("cut_batter", 1.0)), 0.01),
+		"fill_b": maxf(float(prof.get("fill_batter", 0.6)), 0.01),
+		"hinge": maxf(float(prof.get("hinge_rounding", 0.0)), 0.0),
+		"crown_mode": p_type.crown_mode, "max_bank": p_type.max_superelevation,
+		"band": 1.5 * float(terrain.vertex_spacing),
+	}
 
-	# Each side's walls as rows of [position along the road, the four heights/offsets], split wherever a
-	# sample has no wall so a strip never bridges a gap.
+	# Strips: consecutive samples on one side with the same mode, kind and wall. A strip never bridges a
+	# sample with no wall, and a change of wall design starts a new one.
 	var strips: Array = []
 	var digest := PackedFloat32Array()
-	for side in [-1.0, 1.0]:
-		for kind in [0, 1]: # 0 fill, 1 cut
-			var height := fill_wall if kind == 0 else cut_wall
-			if height <= 0.0:
+	for k in 2:
+		var side := -1.0 if k == 0 else 1.0
+		var cur: Array = []
+		var cur_key := ""
+		for i in n:
+			var a := (i * 2 + k) * Pasture3DRoadGrader.WALL_STRIDE
+			var mode := int(wp[a])
+			var row := {}
+			var key := ""
+			if mode != Pasture3DRoadGrader.WALL_NONE:
+				var cut := wp[a + 1] > 0.0
+				var widx := Pasture3DRoadGrader._at_i(cut_idx if cut else fill_idx, i)
+				if widx >= 0 and widx < walls.size():
+					row = _wall_row(ctx, i, side, wp.slice(a, a + Pasture3DRoadGrader.WALL_STRIDE), walls[widx])
+					key = "%d/%d/%d" % [mode, 1 if cut else -1, widx]
+			if row.is_empty() or key != cur_key:
+				if cur.size() >= 2:
+					strips.append({"rows": cur, "wall": walls[int(cur_key.get_slice("/", 2))]})
+				cur = []
+				cur_key = key
+			if row.is_empty():
 				continue
-			var cur: Array = []
-			for i in alignment.count():
-				var row := _wall_row(alignment, plan, cum, i, side, kind, height, half, shoulder, crown,
-						crown_mode, max_bank, cut_b, fill_b, hinge, band, suppress, skip, terrain)
-				if row.is_empty():
-					if cur.size() >= 2:
-						strips.append({"side": side, "kind": kind, "rows": cur})
-					cur = []
-					continue
-				cur.append(row)
-				for v in row:
-					if v is Vector3:
-						digest.append_array([v.x, v.y, v.z])
-			if cur.size() >= 2:
-				strips.append({"side": side, "kind": kind, "rows": cur})
-	var h := hash(digest) ^ hash(p_type.wall_material.get_instance_id() if p_type.wall_material != null else 0)
+			cur.append(row)
+			for v in row["pts"]:
+				digest.append_array([v.x, v.y, v.z])
+		if cur.size() >= 2:
+			strips.append({"rows": cur, "wall": walls[int(cur_key.get_slice("/", 2))]})
+
+	var sig: Array = []
+	for w: Pasture3DRoadWall in walls:
+		sig.append(w.mesh_signature())
+	var h := hash([digest, sig])
 	if h == _walls_digest and (_walls != null or strips.is_empty()):
 		return
 	_clear_walls()
 	_walls_digest = h
 	if strips.is_empty():
 		return
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	# One SurfaceTool per material, so a road with a stone lane wall and a concrete motorway wall is one
+	# node with two surfaces.
+	var tools := {}
+	var mats := {}
+	var faces: Array = [] # Vector3 triangles, for the walls that want collision
+	var discard: Array = []
+	var layers := 0
 	var quads := 0
 	for strip in strips:
+		var wall: Pasture3DRoadWall = strip["wall"]
+		var mkey := wall.material.get_instance_id() if wall.material != null else 0
+		if not tools.has(mkey):
+			var nst := SurfaceTool.new()
+			nst.begin(Mesh.PRIMITIVE_TRIANGLES)
+			tools[mkey] = nst
+			mats[mkey] = wall.material
+		var st: SurfaceTool = tools[mkey]
+		var col: Array = faces if wall.collision else discard
+		var before := faces.size()
 		var rows: Array = strip["rows"]
 		for r in range(rows.size() - 1):
-			var a: Array = rows[r]
-			var b: Array = rows[r + 1]
-			# a/b: [face_top, face_bottom, cap_back, outward_normal]
-			var n_face: Vector3 = (a[3] + b[3]).normalized()
-			_quad(st, a[0], b[0], b[1], a[1], n_face)
-			_quad(st, a[2], b[2], b[0], a[0], Vector3.UP)
-			quads += 2
-	var mesh := st.commit()
+			quads += _wall_span(st, rows[r], rows[r + 1], wall.uv_scale_m, col)
+		quads += _wall_end(st, rows[0], rows[1], wall.uv_scale_m, col)
+		quads += _wall_end(st, rows[rows.size() - 1], rows[rows.size() - 2], wall.uv_scale_m, col)
+		discard.clear()
+		if wall.collision and faces.size() > before:
+			layers |= wall.collision_layer
+	var mesh := ArrayMesh.new()
+	for mkey in tools:
+		var st: SurfaceTool = tools[mkey]
+		st.commit(mesh)
+		var mat: Material = mats[mkey]
+		if mat == null:
+			var sm := StandardMaterial3D.new()
+			sm.albedo_color = Color(0.55, 0.54, 0.5)
+			sm.roughness = 0.95
+			sm.cull_mode = BaseMaterial3D.CULL_DISABLED
+			mat = sm
+		mesh.surface_set_material(mesh.get_surface_count() - 1, mat)
 	_walls = MeshInstance3D.new()
 	_walls.name = "RetainingWalls"
 	_walls.top_level = true
 	_walls.mesh = mesh
-	var mat: Material = p_type.wall_material
-	if mat == null:
-		var sm := StandardMaterial3D.new()
-		sm.albedo_color = Color(0.55, 0.54, 0.5)
-		sm.roughness = 0.95
-		sm.cull_mode = BaseMaterial3D.CULL_DISABLED
-		mat = sm
-	_walls.material_override = mat
+	if not faces.is_empty():
+		var body := StaticBody3D.new()
+		body.name = "WallCollision"
+		body.collision_layer = layers
+		var shape := ConcavePolygonShape3D.new()
+		shape.backface_collision = true
+		shape.set_faces(PackedVector3Array(faces))
+		var cs := CollisionShape3D.new()
+		cs.shape = shape
+		body.add_child(cs)
+		_walls.add_child(body)
 	add_child(_walls)
 	wall_quads = quads
+	wall_collision_faces = faces.size() / 3
 
 
-## One wall cross-section at alignment sample `p_i`, or [] where no wall stands there:
-## [face top, face bottom, cap back edge, face normal], world space. See `_rebuild_walls`.
-func _wall_row(p_al: Pasture3DRoadAlignment, p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
-		p_i: int, p_side: float, p_kind: int, p_height: float, p_half: PackedFloat32Array,
-		p_shoulder: PackedFloat32Array, p_crown: float, p_crown_mode: int, p_max_bank: float,
-		p_cut_b: float, p_fill_b: float, p_hinge: float, p_band: float, p_suppress: PackedByteArray,
-		p_skip: PackedByteArray, p_terrain: Variant) -> Array:
-	# A bridge grades nothing and a junction's ground is the junction's: no batter, so no wall.
-	if (p_i < p_suppress.size() and p_suppress[p_i] != 0) or (p_i < p_skip.size() and p_skip[p_i] != 0):
-		return []
-	var s := float(p_i) * p_al.ds
-	var total: float = p_cum[p_cum.size() - 1]
-	if s > total:
-		return []
-	var half: float = p_half[p_i] if p_i < p_half.size() else 3.5
-	var shoulder: float = p_shoulder[p_i] if p_i < p_shoulder.size() else 0.5
-	var edge_d := half + shoulder
-	var z_ref := p_al.height_at(s)
-	var bank: float = p_al.bank[p_i] if p_i < p_al.bank.size() else 0.0
-	var z_edge := Pasture3DRoadGrader.surface_height(z_ref, bank, p_crown, edge_d * p_side, half, p_crown_mode,
-			p_max_bank)
-	var g1 := Pasture3DRoadGrader.edge_slope(z_ref, bank, p_crown, edge_d, p_side, half, p_crown_mode,
-			p_max_bank) if p_hinge > 0.0 else 0.0
-	var g2 := -p_fill_b if p_kind == 0 else p_cut_b
-	var run := Pasture3DRoadGrader.wall_run(p_height, g1, g2, p_hinge)
-	if not is_finite(run):
-		return []
-	var c := Pasture3DRoadGrader.plan_point_at(p_plan, p_cum, s)
-	var tan2 := Pasture3DRoadGrader._segment_dir_at(p_plan, p_cum, s, false)
+## One wall cross-section at alignment sample `p_i` on side `p_side`, or {} where none stands, from the
+## wall record `p_rec` and its resource. World space. Keys:
+##   s          arc length, for the UVs
+##   ft, fb     face top and bottom (the face the road sees)
+##   ci, co     cap inner and outer edge, at the cap's height
+##   bt, bb     back face top and bottom; equal when the ground behind stands to the top
+##   n          the face's outward normal (towards the road for a cut wall, away from it for a fill)
+##   t          the road tangent, for the end caps
+##   pts        every point, for the digest
+func _wall_row(p_ctx: Dictionary, p_i: int, p_side: float, p_rec: PackedFloat32Array,
+		p_wall: Pasture3DRoadWall) -> Dictionary:
+	var al: Pasture3DRoadAlignment = p_ctx["al"]
+	var plan: PackedVector2Array = p_ctx["plan"]
+	var cum: PackedFloat32Array = p_ctx["cum"]
+	var s := al.s0 + float(p_i) * al.ds
+	var total: float = cum[cum.size() - 1]
+	if s > total + 1e-3:
+		return {}
+	s = minf(s, total)
+	var half_arr: PackedFloat32Array = p_ctx["half"]
+	var sh_arr: PackedFloat32Array = p_ctx["shoulder"]
+	var half: float = half_arr[p_i] if p_i < half_arr.size() else 3.5
+	var edge_d: float = half + (sh_arr[p_i] if p_i < sh_arr.size() else 0.5)
+	var crown: float = p_ctx["crown"]
+	var crown_mode: int = p_ctx["crown_mode"]
+	var max_bank: float = p_ctx["max_bank"]
+	var hinge: float = p_ctx["hinge"]
+	var band: float = p_ctx["band"]
+	var z_ref := al.height_at(s)
+	var bank: float = al.bank[p_i] if p_i < al.bank.size() else 0.0
+	var z_edge := Pasture3DRoadGrader.surface_height(z_ref, bank, crown, edge_d * p_side, half, crown_mode, max_bank)
+	var g1 := Pasture3DRoadGrader.edge_slope(z_ref, bank, crown, edge_d, p_side, half, crown_mode, max_bank) \
+			if hinge > 0.0 else 0.0
+	var c := Pasture3DRoadGrader.plan_point_at(plan, cum, s)
+	var tan2 := Pasture3DRoadGrader._segment_dir_at(plan, cum, s, false)
 	var across := Vector2(-tan2.y, tan2.x) * p_side # the grader's positive side is this across
-	var at := func(p_d: float) -> Vector2: return c + across * p_d
-	# The hillside the grader left alone, just past the run.
-	var out_xz: Vector2 = at.call(edge_d + run + p_band)
-	var ground: float = p_terrain.data.get_height(Vector3(out_xz.x, 0.0, out_xz.y))
-	if not is_finite(ground):
-		return []
-	var top_line := Pasture3DRoadGrader.batter_line(z_edge, g1, g2, run, p_hinge)
+	var terrain: Variant = p_ctx["terrain"]
+	var at := func(p_x: float) -> Vector2: return c + across * (edge_d + p_x)
+	var ground_at := func(p_x: float) -> float:
+		var q: Vector2 = at.call(p_x)
+		return float(terrain.data.get_height(Vector3(q.x, 0.0, q.y)))
+	var v3 := func(p_x: float, p_y: float) -> Vector3:
+		var q: Vector2 = at.call(p_x)
+		return Vector3(q.x, p_y, q.y)
 	var n3 := Vector3(across.x, 0.0, across.y)
-	if p_kind == 0:
-		# FILL: the batter stops `p_height` below the edge and the hillside is further down still.
-		if ground > top_line - WALL_MIN_FACE:
-			return []
-		var face: Vector2 = at.call(edge_d + run + p_band)
-		var back: Vector2 = at.call(edge_d + run)
-		return [Vector3(face.x, top_line, face.y), Vector3(face.x, ground - WALL_EMBED, face.y),
-				Vector3(back.x, top_line, back.y), n3]
-	# CUT: the batter stops `p_height` above the edge and the hillside stands higher.
-	if ground < top_line + WALL_MIN_FACE:
-		return []
-	var face_d := maxf(edge_d + run - p_band, edge_d)
-	var face_c: Vector2 = at.call(face_d)
-	var low := Pasture3DRoadGrader.batter_line(z_edge, g1, g2, face_d - edge_d, p_hinge)
-	var back_c: Vector2 = at.call(edge_d + run)
-	return [Vector3(face_c.x, ground, face_c.y), Vector3(face_c.x, low - WALL_EMBED, face_c.y),
-			Vector3(back_c.x, ground, back_c.y), -n3]
+	var t3 := Vector3(tan2.x, 0.0, tan2.y)
+
+	var mode := int(p_rec[0])
+	var cut := p_rec[1] > 0.0
+	var w: float = p_rec[2]
+	var alpha := clampf(p_rec[3], 0.0, 1.0)
+	var o: float = p_rec[4]
+	var xs: float = p_rec[5]
+	var cut_b: float = p_ctx["cut_b"]
+	var fill_b: float = p_ctx["fill_b"]
+	var g2 := cut_b if cut else -fill_b
+	var embed := p_wall.embed_depth
+	var cop := p_wall.coping_height
+	var over := p_wall.coping_overhang
+
+	if mode == Pasture3DRoadGrader.WALL_BATTER_TOP:
+		# The old cap: the batter runs up (or down) to `w`, and the hillside the grader left alone stands
+		# past it. The face goes on the side of the step's ramp that hides it.
+		var run := Pasture3DRoadGrader.wall_run(w, g1, g2, hinge)
+		if not is_finite(run):
+			return {}
+		var top_line := Pasture3DRoadGrader.batter_line(z_edge, g1, g2, run, hinge)
+		var hill: float = ground_at.call(run + band)
+		if not is_finite(hill):
+			return {}
+		if cut:
+			if hill < top_line + WALL_MIN_FACE:
+				return {}
+			var fx := maxf(run - band, 0.0)
+			var low := Pasture3DRoadGrader.batter_line(z_edge, g1, g2, fx, hinge)
+			return _row(s, v3.call(fx, hill + cop), v3.call(fx, low - embed), v3.call(fx - over, hill + cop),
+					v3.call(run + band, hill + cop), v3.call(run + band, hill + cop), v3.call(run + band, hill + cop),
+					-n3, t3, v3.call(run + band, low - embed), true)
+		if hill > top_line - WALL_MIN_FACE:
+			return {}
+		return _row(s, v3.call(run + band, top_line + cop), v3.call(run + band, hill - embed),
+				v3.call(run, top_line + cop), v3.call(run + band + over, top_line + cop),
+				v3.call(run, top_line + cop), v3.call(run, top_line + cop), n3, t3, v3.call(run, hill - embed), false)
+
+	# ROAD_SIDE, from the grader's own profile (`Pasture3DRoadGrader.walled_height`).
+	var l_plain_s := Pasture3DRoadGrader.batter_line(z_edge, g1, g2, xs, hinge)
+	if cut:
+		var front := lerpf(Pasture3DRoadGrader.batter_line(z_edge, g1, g2, o, hinge), z_edge, alpha)
+		var top := lerpf(l_plain_s, z_edge + w, alpha)
+		var behind: float = ground_at.call(xs + band)
+		if not is_finite(behind):
+			behind = top
+		if p_wall.top_mode == Pasture3DRoadWall.TopMode.FOLLOW_GROUND:
+			top = minf(top, maxf(behind, front))
+		if top - front < WALL_MIN_FACE:
+			return {}
+		var fx := o + p_wall.lean * (top - front)
+		return _row(s, v3.call(fx, top + cop), v3.call(o, front - embed), v3.call(fx - over, top + cop),
+				v3.call(xs + band, top + cop), v3.call(xs + band, top + cop),
+				v3.call(xs + band, minf(behind, top + cop) - (embed if behind < top else 0.0)), -n3, t3,
+				v3.call(xs + band, front - embed), true)
+	# FILL: the shelf at the edge's height out to the step, the wall's outer face `band` past it.
+	var top_f := lerpf(l_plain_s, z_edge, alpha)
+	var below: float = ground_at.call(xs + band)
+	if not is_finite(below):
+		return {}
+	if top_f - below < WALL_MIN_FACE:
+		return {}
+	var ox := xs + band
+	var fx_f := ox - p_wall.lean * (top_f - below)
+	return _row(s, v3.call(fx_f, top_f + cop), v3.call(ox, below - embed), v3.call(o, top_f + cop),
+			v3.call(fx_f + over, top_f + cop), v3.call(o, top_f + cop), v3.call(o, top_f), n3, t3,
+			v3.call(o, below - embed), false)
 
 
-## One quad a-b-c-d (in order around it) facing `p_n`. Godot's front face winds CLOCKWISE seen from the
-## front, which is the opposite of the right-hand rule, so the order is chosen by testing the geometric
-## normal against `p_n` rather than assumed.
-static func _quad(p_st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3, p_n: Vector3) -> void:
+## `p_foot` is the fourth corner of the end cap, below the far side of the cap; `p_cap_out` says which
+## cap edge that far side is (the outer for a cut wall, whose body runs back into the hill; the inner for a
+## fill wall, whose body runs back under the shelf).
+static func _row(p_s: float, p_ft: Vector3, p_fb: Vector3, p_ci: Vector3, p_co: Vector3, p_bt: Vector3,
+		p_bb: Vector3, p_n: Vector3, p_t: Vector3, p_foot: Vector3, p_cap_out: bool) -> Dictionary:
+	return {
+		"s": p_s, "ft": p_ft, "fb": p_fb, "ci": p_ci, "co": p_co, "bt": p_bt, "bb": p_bb, "n": p_n, "t": p_t,
+		"e": [p_fb, p_ft, p_co if p_cap_out else p_ci, p_foot],
+		"pts": [p_ft, p_fb, p_ci, p_co, p_bt, p_bb],
+	}
+
+
+## The wall between two consecutive rows: face, cap, back. Returns the quads emitted.
+func _wall_span(p_st: SurfaceTool, a: Dictionary, b: Dictionary, p_uv: float, r_col: Array) -> int:
+	var q := 0
+	var n_face: Vector3 = (a["n"] + b["n"]).normalized()
+	var ua: float = float(a["s"]) / p_uv
+	var ub: float = float(b["s"]) / p_uv
+	# Face: v up the face in metres.
+	_quad_uv(p_st, [a["ft"], b["ft"], b["fb"], a["fb"]],
+			[Vector2(ua, 0.0), Vector2(ub, 0.0), Vector2(ub, (b["ft"].y - b["fb"].y) / p_uv),
+			Vector2(ua, (a["ft"].y - a["fb"].y) / p_uv)], n_face, r_col)
+	q += 1
+	# Cap: v across it.
+	_quad_uv(p_st, [a["ci"], b["ci"], b["co"], a["co"]],
+			[Vector2(ua, 0.0), Vector2(ub, 0.0), Vector2(ub, a["ci"].distance_to(a["co"]) / p_uv),
+			Vector2(ua, a["ci"].distance_to(a["co"]) / p_uv)], Vector3.UP, r_col)
+	q += 1
+	# Back: only where the ground behind stands below the top, so a freestanding stretch is closed.
+	if a["bt"].y - a["bb"].y > 1e-3 or b["bt"].y - b["bb"].y > 1e-3:
+		_quad_uv(p_st, [a["bt"], b["bt"], b["bb"], a["bb"]],
+				[Vector2(ua, 0.0), Vector2(ub, 0.0), Vector2(ub, (b["bt"].y - b["bb"].y) / p_uv),
+				Vector2(ua, (a["bt"].y - a["bb"].y) / p_uv)], -n_face, r_col)
+		q += 1
+	return q
+
+
+## Close the end of a strip at row `p_end`, facing away from its neighbour `p_next`.
+func _wall_end(p_st: SurfaceTool, p_end: Dictionary, p_next: Dictionary, p_uv: float,
+		r_col: Array) -> int:
+	var out: Vector3 = (p_end["ft"] - p_next["ft"])
+	out.y = 0.0
+	if out.length() < 1e-6:
+		return 0
+	out = out.normalized()
+	var h: float = maxf(p_end["ft"].y - p_end["fb"].y, 0.0)
+	_quad_uv(p_st, p_end["e"],
+			[Vector2(0.0, 0.0), Vector2(0.0, h / p_uv), Vector2(1.0, h / p_uv), Vector2(1.0, 0.0)], out, r_col)
+	return 1
+
+
+## One quad a-b-c-d (in order around it) facing `p_n`, with UVs, appended to `r_col` as two triangles when
+## that array is being collected. Godot's front face winds CLOCKWISE seen from the front, the opposite of the right-hand rule, so
+## the order is chosen by testing the geometric normal against `p_n` rather than assumed.
+static func _quad_uv(p_st: SurfaceTool, p_v: Array, p_uvs: Array, p_n: Vector3, r_col: Array) -> void:
+	var a: Vector3 = p_v[0]
+	var b: Vector3 = p_v[1]
+	var c: Vector3 = p_v[2]
 	var geo := (b - a).cross(c - a)
-	var tris: Array = [[a, b, c], [a, c, d]] if geo.dot(p_n) < 0.0 else [[a, c, b], [a, d, c]]
-	for tri in tris:
-		for v in tri:
+	var order: Array = [[0, 1, 2], [0, 2, 3]] if geo.dot(p_n) < 0.0 else [[0, 2, 1], [0, 3, 2]]
+	for tri in order:
+		for idx in tri:
 			p_st.set_normal(p_n)
-			p_st.add_vertex(v)
+			p_st.set_uv(p_uvs[idx])
+			p_st.add_vertex(p_v[idx])
+			r_col.append(p_v[idx])
 
 
 ## World metres across one terrain region — the unit chunk cuts snap to, so a chunk's lifetime matches

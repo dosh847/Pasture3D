@@ -100,6 +100,30 @@ extends Pasture3DRoadOverrides
 		allow_airborne_jump = v
 		emit_changed()
 
+@export_group("Walls")
+## The retaining wall for cuts over this range. Empty inherits from the road; a wall with `enabled` off
+## switches walls off here. See Pasture3DRoadWall.
+@export var cut_wall: Pasture3DRoadWall = null:
+	set(v):
+		_rewatch_wall(cut_wall, v)
+		cut_wall = v
+		emit_changed()
+
+## The retaining wall for fills over this range. Empty inherits.
+@export var fill_wall: Pasture3DRoadWall = null:
+	set(v):
+		_rewatch_wall(fill_wall, v)
+		fill_wall = v
+		emit_changed()
+
+
+## Follow a wall resource's `changed`: a shared wall edited in the inspector moves this range's ground.
+func _rewatch_wall(p_old: Resource, p_new: Resource) -> void:
+	if p_old != null and p_old.changed.is_connected(emit_changed):
+		p_old.changed.disconnect(emit_changed)
+	if p_new != null and not p_new.changed.is_connected(emit_changed):
+		p_new.changed.connect(emit_changed)
+
 
 ## The road this segment belongs to, which is what a picked point is resolved against. Set by the brush
 ## whenever it takes the segment; runtime only. Weak, because the brush holds the segment.
@@ -214,4 +238,5 @@ func range_warnings(p_spline_length: float = NAN) -> PackedStringArray:
 func signature() -> Array:
 	# The RESOLVED ends: a picked point that moves changes no field of this resource and moves the range.
 	return [super.signature(), start(), end(), from_point, to_point, is_bridge, suppress_paint,
-			allow_airborne_jump]
+			allow_airborne_jump, Pasture3DRoadType.wall_terrain_signature(cut_wall),
+			Pasture3DRoadType.wall_terrain_signature(fill_wall)]

@@ -59,8 +59,7 @@ PackedFloat32Array zeros(int p_n) {
 } // namespace
 
 double godot::road_batter_height(double p_ground, double p_z_edge, double p_edge_slope, double p_beyond,
-		double p_cut_batter, double p_fill_batter, double p_toe_round, double p_hinge_round,
-		double p_cut_wall, double p_fill_wall) {
+		double p_cut_batter, double p_fill_batter, double p_toe_round, double p_hinge_round) {
 	const bool fill = p_z_edge > p_ground;
 	const double batter = fill ? p_fill_batter : p_cut_batter;
 	const double g2 = fill ? -batter : batter;
@@ -79,14 +78,6 @@ double godot::road_batter_height(double p_ground, double p_z_edge, double p_edge
 	} else {
 		line = p_z_edge + g2 * x;
 	}
-	// THE WALL. A batter taller than this stops being earth and becomes a vertical face: past the run at
-	// which it has climbed (cut) or fallen (fill) `wall` metres from the edge, the ground is left alone.
-	// That is a retaining wall on a mountain road -- the fan of fill down the hillside stops at the wall
-	// instead of running on until it meets the slope.
-	const double wall = fill ? p_fill_wall : p_cut_wall;
-	if (wall > 0.0 && (fill ? p_z_edge - line : line - p_z_edge) > wall) {
-		return p_ground;
-	}
 	// THE TOE. A polynomial smooth-max (fill) or smooth-min (cut) of the batter against the ground: the
 	// concave crease where they meet becomes a fillet about `toe_round` metres wide either side. `k` is that
 	// width in HEIGHT -- how fast batter and ground part company -- and it is capped by the run so far, so
@@ -95,6 +86,111 @@ double godot::road_batter_height(double p_ground, double p_z_edge, double p_edge
 	if (k > 1e-9) {
 		const double diff = std::abs(line - p_ground);
 		const double hk = std::max(k - diff, 0.0) / k;
+		const double bump = hk * hk * k * 0.25;
+		return fill ? std::max(p_ground, line) + bump : std::min(p_ground, line) - bump;
+	}
+	return fill ? std::max(p_ground, line) : std::min(p_ground, line);
+}
+
+bool godot::road_wall_record_at(const float *p_plan, int p_size, double p_s, double p_ds, double p_s0,
+		double p_side, float *r_rec) {
+	const int n = p_size / (2 * ROAD_WALL_STRIDE);
+	if (n <= 0) {
+		return false;
+	}
+	const int k = p_side < 0.0 ? 0 : 1;
+	int i0 = 0;
+	double f = 0.0;
+	if (n > 1) {
+		const double t = (p_s - p_s0) / std::max(p_ds, 1e-6);
+		i0 = std::clamp((int)std::floor(t), 0, n - 2);
+		f = std::clamp(t - (double)i0, 0.0, 1.0);
+	}
+	const int a = (i0 * 2 + k) * ROAD_WALL_STRIDE;
+	const int b = (std::min(i0 + 1, n - 1) * 2 + k) * ROAD_WALL_STRIDE;
+	// Linear between the two bracketing samples when they share mode and kind, so a taper has no stair;
+	// the nearest record otherwise. Rounded through float32 like the GDScript PackedFloat32Array it mirrors.
+	if (p_plan[a] == p_plan[b] && p_plan[a + 1] == p_plan[b + 1]) {
+		r_rec[0] = p_plan[a];
+		r_rec[1] = p_plan[a + 1];
+		for (int j = 2; j < ROAD_WALL_STRIDE; j++) {
+			r_rec[j] = (float)((double)p_plan[a + j] + ((double)p_plan[b + j] - (double)p_plan[a + j]) * f);
+		}
+	} else {
+		const int c = f < 0.5 ? a : b;
+		for (int j = 0; j < ROAD_WALL_STRIDE; j++) {
+			r_rec[j] = p_plan[c + j];
+		}
+	}
+	return true;
+}
+
+double godot::road_wall_reach(const float *p_plan, int p_size, double p_s, double p_ds, double p_s0,
+		double p_rise) {
+	const int n = p_size / (2 * ROAD_WALL_STRIDE);
+	if (n <= 0) {
+		return 0.0;
+	}
+	const int i0 = std::clamp((int)std::floor((p_s - p_s0) / std::max(p_ds, 1e-6)), 0, n - 1);
+	const int is[2] = { i0, std::min(i0 + 1, n - 1) };
+	double best = 0.0;
+	for (int q = 0; q < 2; q++) {
+		for (int k = 0; k < 2; k++) {
+			const int a = (is[q] * 2 + k) * ROAD_WALL_STRIDE;
+			if ((int)p_plan[a] == ROAD_WALL_ROAD_SIDE) {
+				best = std::max(best, (double)p_plan[a + 5] + p_rise / std::max((double)p_plan[a + 6], 0.01));
+			}
+		}
+	}
+	return best;
+}
+
+double godot::road_wall_height(double p_ground, double p_z_edge, double p_edge_slope, double p_beyond,
+		double p_cut_batter, double p_fill_batter, double p_toe_round, double p_hinge_round, const float *p_rec) {
+	const double plain = road_batter_height(p_ground, p_z_edge, p_edge_slope, p_beyond, p_cut_batter,
+			p_fill_batter, p_toe_round, p_hinge_round);
+	const int mode = (int)p_rec[0];
+	const double w = p_rec[2];
+	if (mode == ROAD_WALL_NONE || w <= 0.0) {
+		return plain;
+	}
+	const bool fill = p_z_edge > p_ground;
+	// A cut wall's record on a cell the road fills (or the reverse): the plain batter, not a wall.
+	if (fill == (p_rec[1] > 0.0f)) {
+		return plain;
+	}
+	const double x = std::max(p_beyond, 0.0);
+	const double batter = fill ? p_fill_batter : p_cut_batter;
+	const double g2 = fill ? -batter : batter;
+	// batter_line, as in road_batter_height.
+	double l_plain;
+	const double r = std::max(p_hinge_round, 0.0);
+	if (r > 1e-6) {
+		const double g1 = p_edge_slope;
+		l_plain = x < 2.0 * r ? p_z_edge + g1 * x + (g2 - g1) * x * x / (4.0 * r)
+							  : p_z_edge + (g1 + g2) * r + g2 * (x - 2.0 * r);
+	} else {
+		l_plain = p_z_edge + g2 * x;
+	}
+	if (mode == ROAD_WALL_BATTER_TOP) {
+		// The batter up to the wall's height, and the ground left standing past it.
+		if ((fill ? p_z_edge - l_plain : l_plain - p_z_edge) > w) {
+			return p_ground;
+		}
+		return plain;
+	}
+	// ROAD_SIDE: flat at the edge's height out to the step at x_s, the wall holding the ground `w` above
+	// (cut) or below (fill), then a batter at `beyond`. `alpha` blends in from the plain batter.
+	const double alpha = std::clamp((double)p_rec[3], 0.0, 1.0);
+	const double xs = p_rec[5];
+	const double beyond = std::max((double)p_rec[6], 0.01);
+	const double sgn = fill ? -1.0 : 1.0;
+	const double l_wall = x < xs ? p_z_edge : p_z_edge + sgn * (w + beyond * (x - xs));
+	const double line = l_plain + (l_wall - l_plain) * alpha;
+	const double slope = batter + (beyond - batter) * alpha;
+	const double k = slope * std::min(std::max(p_toe_round, 0.0), std::max(x - alpha * xs, 0.0));
+	if (k > 1e-9) {
+		const double hk = std::max(k - std::abs(line - p_ground), 0.0) / k;
 		const double bump = hk * hk * k * 0.25;
 		return fill ? std::max(p_ground, line) + bump : std::min(p_ground, line) - bump;
 	}
@@ -158,8 +254,11 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 	// grades exactly as before. See `road_batter_height`.
 	const double toe_round = std::max(p_opts.has("toe_rounding") ? (double)p_opts["toe_rounding"] : 0.0, 0.0);
 	const double hinge_round = std::max(p_opts.has("hinge_rounding") ? (double)p_opts["hinge_rounding"] : 0.0, 0.0);
-	const double cut_wall = p_opts.has("cut_wall_height") ? (double)p_opts["cut_wall_height"] : 0.0;
-	const double fill_wall = p_opts.has("fill_wall_height") ? (double)p_opts["fill_wall_height"] : 0.0;
+	// The retaining walls: one record per alignment sample and side. Empty = none. See road_wall_height.
+	PackedFloat32Array wall_plan;
+	if (p_opts.has("wall_plan")) {
+		wall_plan = p_opts["wall_plan"];
+	}
 	PackedByteArray skip;
 	if (p_opts.has("skip")) {
 		skip = p_opts["skip"];
@@ -206,6 +305,8 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 	const int n_protect = protect.size();
 	const uint8_t *exclude_ptr = exclude.ptr();
 	const int n_exclude = exclude.size();
+	const float *wall_ptr = wall_plan.ptr();
+	const int n_wall = wall_plan.size();
 
 	Pasture3DThreadPool::parallel_for_rows(p_gh, 8, [&](int z0, int z1) {
 		std::vector<int> scratch;
@@ -248,7 +349,13 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 				const double slope = z_ref < ground ? cut_batter : fill_batter;
 				// The rounding reaches past the unrounded toe: the hinge pushes the batter out by about its
 				// radius, and the toe fillet spreads its own width beyond that.
-				if (d > edge_d + rise / slope + verge + toe_round + 2.0 * hinge_round) {
+				double reach = edge_d + rise / slope + verge + toe_round + 2.0 * hinge_round;
+				// A wall's flat ground and the batter past it can reach further than the plain batter.
+				if (n_wall > 0) {
+					reach = std::max(reach, edge_d + road_wall_reach(wall_ptr, n_wall, s, p_align_ds, p_align_s0, rise)
+									+ verge + toe_round);
+				}
+				if (d > reach) {
 					continue;
 				}
 				// Another road's formation. Refused before the suppress branch so a protected cell reports
@@ -291,8 +398,14 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 					const double g1 = hinge_round > 0.0
 							? road_edge_slope(z_ref, bank, crown, edge_d, side, hw, crown_mode, max_bank)
 							: 0.0;
-					h = road_batter_height(ground, z_edge, g1, d - edge_d, cut_batter, fill_batter, toe_round,
-							hinge_round, cut_wall, fill_wall);
+					float rec[ROAD_WALL_STRIDE];
+					if (n_wall > 0 && road_wall_record_at(wall_ptr, n_wall, s, p_align_ds, p_align_s0, side, rec)) {
+						h = road_wall_height(ground, z_edge, g1, d - edge_d, cut_batter, fill_batter, toe_round,
+								hinge_round, rec);
+					} else {
+						h = road_batter_height(ground, z_edge, g1, d - edge_d, cut_batter, fill_batter, toe_round,
+								hinge_round);
+					}
 				}
 				graded[idx] = (float)h;
 

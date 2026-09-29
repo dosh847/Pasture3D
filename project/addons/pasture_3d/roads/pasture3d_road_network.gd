@@ -797,11 +797,9 @@ func _junction_batters(p_junction: Pasture3DRoadJunction) -> Dictionary:
 	var cut := INF
 	var fill := INF
 	var verge := 0.0
-	# Shaping: the roundest toe of any road meeting here, and the lowest wall any of them asks for (0, no
-	# wall, only when none does), so an intersection is never squarer or taller than its approaches.
+	# Shaping: the roundest toe of any road meeting here, so an intersection is never squarer than its
+	# approaches. No walls: a footprint has no wall plan, so its batter is the plain one.
 	var toe := 0.0
-	var cut_wall := INF
-	var fill_wall := INF
 	for key in p_junction.road_keys:
 		var b: Pasture3DRoadBrush = by_key.get(key)
 		if b == null:
@@ -813,10 +811,6 @@ func _junction_batters(p_junction: Pasture3DRoadJunction) -> Dictionary:
 		fill = minf(fill, t.fill_batter)
 		verge = maxf(verge, t.verge_width)
 		toe = maxf(toe, t.toe_rounding)
-		if t.cut_wall_height > 0.0:
-			cut_wall = minf(cut_wall, t.cut_wall_height)
-		if t.fill_wall_height > 0.0:
-			fill_wall = minf(fill_wall, t.fill_wall_height)
 	if not is_finite(cut):
 		return {"cut_batter": 1.0, "fill_batter": 0.6, "verge": 4.0}
 	return {
@@ -824,8 +818,6 @@ func _junction_batters(p_junction: Pasture3DRoadJunction) -> Dictionary:
 		"fill_batter": maxf(fill, 0.01),
 		"verge": maxf(verge, 0.0),
 		"toe_rounding": toe,
-		"cut_wall_height": cut_wall if is_finite(cut_wall) else 0.0,
-		"fill_wall_height": fill_wall if is_finite(fill_wall) else 0.0,
 	}
 
 

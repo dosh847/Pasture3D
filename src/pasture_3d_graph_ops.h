@@ -166,8 +166,8 @@ struct GraphGeomEntry {
 	// Batter shaping (road_batter_height). Zero is the unshaped batter.
 	double toe_rounding = 0.0;
 	double hinge_rounding = 0.0;
-	double cut_wall_height = 0.0;
-	double fill_wall_height = 0.0;
+	// The retaining walls, per alignment sample and side (road_wall_height). Empty = none.
+	PackedFloat32Array wall_plan;
 };
 
 // An input source that reads a defined 0 rather than an earlier slot — an unwired port, exactly as the

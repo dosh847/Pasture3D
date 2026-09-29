@@ -1973,8 +1973,7 @@ func _geom_entry(p_path: Pasture3DGraphPath) -> Dictionary:
 			"fill_batter": p_path.fill_batter,
 			"toe_rounding": p_path.toe_rounding,
 			"hinge_rounding": p_path.hinge_rounding,
-			"cut_wall_height": p_path.cut_wall_height,
-			"fill_wall_height": p_path.fill_wall_height,
+			"wall_plan": p_path.alignment.wall_plan,
 		}
 	return d
 
