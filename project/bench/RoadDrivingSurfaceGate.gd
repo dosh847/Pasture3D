@@ -93,8 +93,7 @@ func _make_brush_fixture(p_type: Pasture3DRoadType, p_bridge: bool = false) -> D
 
 	if p_bridge:
 		var seg := Pasture3DRoadSegment.new()
-		seg.from_distance = 0.0
-		seg.to_distance = 250.0
+		seg.from_point = 0 # to the road's end
 		seg.is_bridge = true
 		brush.segments = [seg]
 

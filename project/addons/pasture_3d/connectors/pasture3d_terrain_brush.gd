@@ -1033,6 +1033,7 @@ func _get_property_list() -> Array[Dictionary]:
 	props.append({"name": "Brush Stats", "type": TYPE_NIL, "usage": PROPERTY_USAGE_GROUP,
 			"hint_string": STATS_PREFIX})
 	var stats_closed := _is_closed()
+	_stats_listed_closed = stats_closed
 	var stat_names := [
 		"stats_splines",
 		"stats_perimeter" if stats_closed else "stats_length",
@@ -7802,10 +7803,10 @@ func _spline_basename() -> String:
 ## A read-only category answering "how big is the thing I just drew?" in world units, so the scale of an
 ## edit is legible from the inspector rather than inferred from the viewport zoom.
 ##
-## Every figure is DERIVED at read time from the live curves — nothing here is stored, so a stat can never
-## disagree with the shape it describes. The cost is that the inspector only re-reads them when the
-## property list is rebuilt, which `_refresh_stats_display` does off the bake (see there for why the bake
-## and not the curve's `changed`).
+## Every figure is DERIVED from the live curves — nothing is authored, so a stat can never disagree with
+## the shape it describes. The inspector shows a snapshot taken on the first read after each bake
+## (`_stats_shown`, dropped by `_refresh_stats_display`; see there for why the bake and not the curve's
+## `changed`), and re-reads it on its own auto-refresh without rebuilding the property list.
 ##
 ## ---- WHY LENGTH AND AREA CHANGE MEANING WITH `_is_closed()` ----
 ##
@@ -7828,6 +7829,10 @@ const STATS_PREFIX: String = "stats_"
 ## added), and the one nobody remembers is the one that silently reports last week's number. A frame key
 ## cannot go stale — the worst it can do is recompute.
 var _stats_frame: int = -1
+## What the inspector shows: `_brush_stats()` as of the first read after the last bake. See `_get_stat`.
+var _stats_shown: Dictionary = {}
+## `_is_closed()` when the stat rows were last listed, which decides their names.
+var _stats_listed_closed: bool = false
 var _stats_cache: Dictionary = {}
 
 
@@ -8026,7 +8031,12 @@ func _fmt_count(p_n: float) -> String:
 func _get_stat(p_property: StringName) -> Variant:
 	if not String(p_property).begins_with(STATS_PREFIX):
 		return null
-	var s := _brush_stats()
+	# The snapshot from the last bake, not `_brush_stats()` live: the inspector re-reads every visible
+	# property on its auto-refresh interval, several times a second, and the elevation figures sample the
+	# terrain. Taken on the first read after a bake, so the readout still changes on the bake's beat.
+	if _stats_shown.is_empty():
+		_stats_shown = _brush_stats()
+	var s := _stats_shown
 	if int(s["splines"]) == 0:
 		return "—"
 	var fp: Vector2 = s["footprint"]
@@ -8056,6 +8066,11 @@ func _get_stat(p_property: StringName) -> Variant:
 	return null
 
 
+## Whether the Brush Stats ROWS differ from the ones last listed, which only a rebuild can show.
+func _stats_rows_changed() -> bool:
+	return _is_closed() != _stats_listed_closed
+
+
 ## Re-read the Brush Stats fields in the inspector.
 ##
 ## Driven off the BAKE rather than off each curve `changed`, for two reasons. It is a property-list rebuild,
@@ -8070,7 +8085,15 @@ func _refresh_stats_display() -> void:
 	# costs a single recompute and removes the window. It runs outside the editor check because the cache is
 	# not an editor concern; only the notify below is.
 	_stats_frame = -1
+	_stats_shown = {}
 	if not Engine.is_editor_hint() or not is_inside_tree():
+		return
+	# NOT an unconditional notify_property_list_changed(). The inspector re-reads property VALUES on its
+	# own auto-refresh; a rebuild is needed only when the ROWS change, which here means Length/Perimeter
+	# and Corridor Area/Area swapping with `_is_closed()`. A rebuild after every bake collapsed every
+	# expanded sub-resource -- a road segment, a modifier -- and took the focus from the text field being
+	# typed into, since the edit itself had scheduled the bake.
+	if not _stats_rows_changed():
 		return
 	var inspector := EditorInterface.get_inspector()
 	if inspector != null and inspector.get_edited_object() == self:

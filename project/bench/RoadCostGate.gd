@@ -658,16 +658,16 @@ func _ce_the_cross_section_resolves_per_segment() -> void:
 	# what lets a short bridge sit inside a long gravel stretch. Filling per segment instead of testing per
 	# sample preserves that only because the fill runs in array order, and nothing else says so.
 	var inner: Pasture3DRoadSegment = fx["inner"]
-	var at_inner := int(((inner.from_distance + inner.to_distance) * 0.5) / ds)
+	var at_inner := int(((inner.start() + inner.end()) * 0.5) / ds)
 	_check("[CE] last wins", shaped["suppress"][at_inner] == 1,
 			"the later, overlapping bridge segment governs its own range")
 
 	# `covers` is half-open [from, to), so two abutting segments must not both claim the boundary. A
 	# range fill is exactly where an off-by-one would land, and it would be invisible: one sample wide.
 	var outer: Pasture3DRoadSegment = fx["outer"]
-	var past := int(outer.to_distance / ds)
+	var past := int(ceilf(outer.end() / ds))
 	_check("[CE] half open", shaped["half"][past] == plain["half"][past],
-			"the sample exactly at a segment's to_distance is outside it")
+			"the first sample at or past a segment's end is outside it")
 	fx["terrain"].queue_free()
 
 
@@ -712,7 +712,7 @@ func _same_profile(p_got: Dictionary, p_want: Dictionary) -> String:
 
 
 ## A road with two OVERLAPPING segments: a long one that widens the road, and a short bridge inside it.
-## The overlap is what makes `[CE] last wins` a real case, and the long one's `to_distance` is what
+## The overlap is what makes `[CE] last wins` a real case, and the long one's end is what
 ## `[CE] half open` lands on.
 func _profile_fixture() -> Dictionary:
 	var terrain := Pasture3D.new()
@@ -748,19 +748,22 @@ func _profile_fixture() -> Dictionary:
 	# `[CE] graph_path` — a loop over plan VERTICES — would then be asserted over three of them, which is
 	# a criterion that passes whatever the loop does.
 	var c := Curve3D.new()
-	c.add_point(Vector3(20.0, 0.0, 60.0), Vector3.ZERO, Vector3(40.0, 0.0, 0.0))
-	c.add_point(Vector3(120.0, 0.0, 150.0), Vector3(-40.0, 0.0, -30.0), Vector3(40.0, 0.0, 30.0))
-	c.add_point(Vector3(230.0, 0.0, 70.0), Vector3(-40.0, 0.0, 30.0), Vector3.ZERO)
+	c.add_point(Vector3(20.0, 0.0, 60.0), Vector3.ZERO, Vector3(20.0, 0.0, 0.0))
+	c.add_point(Vector3(60.0, 0.0, 110.0), Vector3(-20.0, 0.0, -20.0), Vector3(20.0, 0.0, 20.0))
+	c.add_point(Vector3(100.0, 0.0, 145.0), Vector3(-20.0, 0.0, -10.0), Vector3(20.0, 0.0, 10.0))
+	c.add_point(Vector3(140.0, 0.0, 150.0), Vector3(-20.0, 0.0, 0.0), Vector3(20.0, 0.0, 0.0))
+	c.add_point(Vector3(180.0, 0.0, 115.0), Vector3(-20.0, 0.0, 15.0), Vector3(20.0, 0.0, -15.0))
+	c.add_point(Vector3(230.0, 0.0, 70.0), Vector3(-20.0, 0.0, 20.0), Vector3.ZERO)
 	path.curve = c
 	brush.add_child(path)
 
 	var outer := Pasture3DRoadSegment.new()
-	outer.from_distance = 40.0
-	outer.to_distance = 160.0
+	outer.from_point = 1
+	outer.to_point = 4
 	outer.lane_count = 6            # a different cross-section over its range
 	var inner := Pasture3DRoadSegment.new()
-	inner.from_distance = 80.0      # INSIDE outer, and later in the array, so it wins there
-	inner.to_distance = 110.0
+	inner.from_point = 2            # INSIDE outer, and later in the array, so it wins there
+	inner.to_point = 3
 	inner.is_bridge = true
 	var typed: Array[Pasture3DRoadSegment] = [outer, inner]
 	brush.segments = typed

@@ -30,7 +30,6 @@ func _ready() -> void:
 	_a_resolves_from_nearest_level()
 	_b_clearing_re_inherits()
 	_c_segments_override_by_arc_length()
-	_d_inserting_a_point_does_not_move_an_override()
 	_e_exclusion_survives_a_reorder()
 	_f_group_edit_moves_only_the_undisagreeing()
 	_g_inspector_proxies_are_the_same_override()
@@ -60,6 +59,17 @@ func _build(p_lanes_on_type: int = 2) -> Dictionary:
 	return { "net": net, "group": grp, "brush": brush, "type": rt }
 
 
+## A straight spline along x through `p_xs` under `p_brush`, so a segment can be picked on the points at
+## those distances: a segment's range is two spline points, and point i sits at arc length p_xs[i].
+func _straight(p_brush: Pasture3DRoadBrush, p_xs: Array) -> void:
+	var path := Path3D.new()
+	var c := Curve3D.new()
+	for x in p_xs:
+		c.add_point(Vector3(float(x), 0.0, 0.0))
+	path.curve = c
+	p_brush.add_child(path)
+
+
 func _teardown(p_fx: Dictionary) -> void:
 	var net: Node = p_fx["net"]
 	if is_instance_valid(net):
@@ -87,9 +97,10 @@ func _a_resolves_from_nearest_level() -> void:
 	brush.road_defaults.lane_count = 5
 	var from_brush := brush.resolved_lane_count()
 	# A segment outranks the brush, but only inside its range.
+	_straight(brush, [0, 100, 200, 300])
 	var seg := Pasture3DRoadSegment.new()
-	seg.from_distance = 100.0
-	seg.to_distance = 200.0
+	seg.from_point = 1 # 100 m
+	seg.to_point = 2 # 200 m
 	seg.lane_count = 6
 	brush.segments = [seg]
 	var inside := brush.resolved_lane_count(150.0)
@@ -153,16 +164,17 @@ func _c_segments_override_by_arc_length() -> void:
 	var fx := _build(2)
 	var brush: Pasture3DRoadBrush = fx["brush"]
 
+	_straight(brush, [0, 400, 1000, 1080, 2400, 3200])
 	var gravel := Pasture3DRoadSegment.new()
 	gravel.label = "Gravel"
-	gravel.from_distance = 400.0
-	gravel.to_distance = 2400.0
+	gravel.from_point = 1 # 400 m
+	gravel.to_point = 4 # 2400 m
 	gravel.surface_id = &"gravel"
 
 	var bridge := Pasture3DRoadSegment.new()
 	bridge.label = "Bridge"
-	bridge.from_distance = 1000.0
-	bridge.to_distance = 1080.0
+	bridge.from_point = 2 # 1000 m
+	bridge.to_point = 3 # 1080 m
 	bridge.is_bridge = true
 
 	brush.segments = [gravel, bridge] # the bridge sits INSIDE the gravel stretch
@@ -188,60 +200,6 @@ func _c_segments_override_by_arc_length() -> void:
 	print("    control: covers(from)=%s covers(to)=%s (want true, false)" % [at_start, at_end])
 	if not at_start or at_end:
 		_fail += 1; print("    !! the range is not half-open [from, to)")
-	_teardown(fx)
-
-
-# ---- D ------------------------------------------------------------------------------------------
-
-func _d_inserting_a_point_does_not_move_an_override() -> void:
-	print("[D] inserting a spline point does not disturb a segment override")
-	var fx := _build(2)
-	var brush: Pasture3DRoadBrush = fx["brush"]
-
-	# A straight 300 m run as three collinear points, so inserting a fourth changes the point COUNT and
-	# the interval indices while leaving the geometry — and therefore every arc length — identical.
-	var path := Path3D.new()
-	var c := Curve3D.new()
-	c.add_point(Vector3(0, 0, 0))
-	c.add_point(Vector3(0, 0, 150))
-	c.add_point(Vector3(0, 0, 300))
-	path.curve = c
-	brush.add_child(path)
-
-	var seg := Pasture3DRoadSegment.new()
-	seg.from_distance = 100.0
-	seg.to_distance = 200.0
-	seg.surface_id = &"gravel"
-	brush.segments = [seg]
-
-	var len_before := c.get_baked_length()
-	var at_150_before := brush.resolved_surface_id(150.0)
-	var at_50_before := brush.resolved_surface_id(50.0)
-
-	# Insert a point in the MIDDLE of the run. Under a per-interval segment model this splits the
-	# interval the override lived on and the override lands somewhere else; under arc length it is inert.
-	c.add_point(Vector3(0, 0, 75), Vector3.ZERO, Vector3.ZERO, 1)
-
-	var len_after := c.get_baked_length()
-	var at_150_after := brush.resolved_surface_id(150.0)
-	var at_50_after := brush.resolved_surface_id(50.0)
-
-	print("    points 3->%d, length %.1f->%.1f, @150 %s->%s, @50 %s->%s"
-			% [c.point_count, len_before, len_after, at_150_before, at_150_after, at_50_before, at_50_after])
-	var ok := c.point_count == 4 and absf(len_after - len_before) < 0.01 \
-			and at_150_after == &"gravel" and at_150_before == &"gravel" \
-			and at_50_after == &"tarmac" and at_50_before == &"tarmac"
-	if not ok:
-		_fail += 1; print("    !! a spline point insertion moved a segment override")
-
-	# CONTROL: the override is not simply inert — moving its RANGE does change the answer, so the test
-	# above is measuring stability and not a dead lookup.
-	seg.from_distance = 0.0
-	seg.to_distance = 60.0
-	var moved := brush.resolved_surface_id(50.0)
-	print("    control: range moved to [0,60) -> @50 is %s (want gravel)" % moved)
-	if moved != &"gravel":
-		_fail += 1; print("    !! the segment lookup is dead — moving the range changed nothing")
 	_teardown(fx)
 
 

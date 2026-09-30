@@ -65,14 +65,15 @@ func _layer_brush_refusal_reason() -> String:
 @export var segments: Array[Pasture3DRoadSegment] = []:
 	set(v):
 		for s: Pasture3DRoadSegment in segments:
-			if s != null and s.changed.is_connected(_on_road_changed):
-				s.changed.disconnect(_on_road_changed)
+			if s != null and s.changed.is_connected(_on_segment_changed):
+				s.changed.disconnect(_on_segment_changed)
 		segments = v
 		for s: Pasture3DRoadSegment in segments:
-			if s != null and not s.changed.is_connected(_on_road_changed):
-				s.changed.connect(_on_road_changed)
+			if s != null and not s.changed.is_connected(_on_segment_changed):
+				s.changed.connect(_on_segment_changed)
 			if s != null:
 				s.bind_road(self)
+		_segment_names_cache = _segment_names()
 		_on_road_changed()
 
 ## Close the spline into a loop. Roads are usually open runs; a ring road or a closed test circuit is
@@ -250,6 +251,12 @@ var ground_gaps_unfilled: bool = false
 ## touched, and a connection to the old one would go on firing while the new one stayed silent.
 var _content_sources: Array[Object] = []
 
+## Each segment's `label` as of its last `changed`. See `_on_segment_changed`.
+var _segment_names_cache: PackedStringArray = PackedStringArray()
+## How many times `_on_road_changed` has run. Read by RoadSegmentInspectorGate, which cannot see the
+## editor-only refresh it schedules.
+var road_change_count: int = 0
+
 
 func _init() -> void:
 	super()
@@ -263,8 +270,9 @@ func _ready() -> void:
 	if road_defaults != null and not road_defaults.changed.is_connected(_on_road_changed):
 		road_defaults.changed.connect(_on_road_changed)
 	for s: Pasture3DRoadSegment in segments:
-		if s != null and not s.changed.is_connected(_on_road_changed):
-			s.changed.connect(_on_road_changed)
+		if s != null and not s.changed.is_connected(_on_segment_changed):
+			s.changed.connect(_on_segment_changed)
+	_segment_names_cache = _segment_names()
 	_rewire_content_sources()
 	# A scene saved before the setter wrote through, or saved by a build where it did not, has
 	# `closed == true` on the brush and `closed == false` on every curve. Reconcile on load rather than
@@ -346,10 +354,31 @@ func _disconnect_content(p_src: Object) -> void:
 ## that switched types has to stop listening to the old resource and start listening to the new one, and
 ## doing it after the refresh would leave one edit's worth of silence.
 func _on_road_changed() -> void:
+	road_change_count += 1
 	_rewire_content_sources()
 	_refresh_sharp_radius()
 	update_configuration_warnings()
 	_schedule_refresh()
+
+
+## A segment's `changed`. A RENAME IS NOT A CHANGE TO THE ROAD, and it arrives one keystroke at a time:
+## `label` writes `resource_name`, and `Resource.set_name` emits `changed`. Treated as a road change, every
+## character re-baked the road, and the bake's inspector refresh collapsed the segment being typed into
+## after the first key. `Pasture3DTerrainBrush._on_modifier_changed` answers the same thing for modifiers.
+func _on_segment_changed() -> void:
+	var names := _segment_names()
+	if names != _segment_names_cache:
+		_segment_names_cache = names
+		update_configuration_warnings() # range warnings name the segment
+		return
+	_on_road_changed()
+
+
+func _segment_names() -> PackedStringArray:
+	var out := PackedStringArray()
+	for s: Pasture3DRoadSegment in segments:
+		out.append("" if s == null else s.resource_name)
+	return out
 
 
 # ---- The resolve chain (§5.3) -------------------------------------------------------------------
@@ -534,38 +563,37 @@ func set_segment_point(p_seg: Pasture3DRoadSegment, p_end: bool, p_gpi: int) -> 
 
 
 ## Keep every segment's picked points on the SAME points when one is inserted or removed before them.
-## A removed point that a segment was picked on falls back to the distance it resolved to, so the range
-## stays where it was rather than jumping to the next point.
+## A removed point that a segment was picked on moves to its neighbour INSIDE the range -- the next point
+## for the nearer end, the previous one for the further end -- so the segment shrinks by the removed
+## stretch rather than growing over the road beyond it.
 func _editor_points_shifted(p_ur: EditorUndoRedoManager, p_gpi: int, p_delta: int) -> void:
 	if p_gpi < 0:
 		return
 	for seg: Pasture3DRoadSegment in _live_segments():
-		for pair in [[&"from_point", &"from_distance", seg.from_point], [&"to_point", &"to_distance", seg.to_point]]:
-			var cur: int = pair[2]
+		var picks := [[&"from_point", seg.from_point, seg.to_point], [&"to_point", seg.to_point, seg.from_point]]
+		for k in picks.size():
+			var cur: int = picks[k][1]
 			if cur < 0:
 				continue
+			# The other end's point number; an unpicked end is the road's first (from) or last (to) point.
+			var other: int = picks[k][2]
+			if other < 0:
+				other = 0 if k == 1 else 1 << 30
 			var nxt := cur
-			var dist_prop: StringName = pair[1]
-			var fallback := NAN
 			if p_delta > 0 and cur >= p_gpi:
 				nxt = cur + 1
 			elif p_delta < 0 and cur > p_gpi:
 				nxt = cur - 1
 			elif p_delta < 0 and cur == p_gpi:
-				nxt = -1
-				fallback = point_arc_length(cur)
+				# After the removal the next point has THIS number, the previous one `cur - 1`.
+				nxt = maxi(cur - 1, 0) if cur > other else cur
 			if nxt == cur:
 				continue
 			if p_ur != null:
-				p_ur.add_do_property(seg, pair[0], nxt)
-				p_ur.add_undo_property(seg, pair[0], cur)
-				if is_finite(fallback):
-					p_ur.add_do_property(seg, dist_prop, fallback)
-					p_ur.add_undo_property(seg, dist_prop, seg.get(dist_prop))
+				p_ur.add_do_property(seg, picks[k][0], nxt)
+				p_ur.add_undo_property(seg, picks[k][0], cur)
 			else:
-				seg.set(pair[0], nxt)
-				if is_finite(fallback):
-					seg.set(dist_prop, fallback)
+				seg.set(picks[k][0], nxt)
 
 
 ## Which segment governs each distance in `p_at`, as an index into `p_segs`, or -1 for none.
@@ -3404,14 +3432,11 @@ func road_length() -> float:
 	return float(mod.last_alignment.count() - 1) * mod.last_alignment.ds
 
 
-## Reversing the spline flips arc length (s -> L - s), so every segment range is mirrored to stay on
-## the same stretch of road. The length does not change, and the map is its own inverse, as undo needs.
-## A picked point is renumbered the way `reverse_splines` renumbers it -- each spline reversed in place --
-## and the start and end swap, because the old end is now the nearer one.
+## Reversing the spline flips arc length (s -> L - s), so every segment's picks are renumbered to stay on
+## the same points, the way `reverse_splines` renumbers them -- each spline reversed in place -- and the
+## start and end swap, because the old end is now the nearer one and an unpicked end means the road's
+## start (from) or end (to). The map is its own inverse, as undo needs.
 func _on_splines_reversed() -> void:
-	var total := total_arc_length()
-	if total <= 0.0:
-		return
 	var rev := PackedInt32Array()
 	for path: Path3D in _get_splines():
 		if path == null or path.curve == null:
@@ -3423,12 +3448,8 @@ func _on_splines_reversed() -> void:
 	for sg: Pasture3DRoadSegment in segments:
 		if sg == null:
 			continue
-		var a := total - sg.to_distance
-		var b := total - sg.from_distance
 		var pa := rev[sg.to_point] if sg.to_point >= 0 and sg.to_point < rev.size() else -1
 		var pb := rev[sg.from_point] if sg.from_point >= 0 and sg.from_point < rev.size() else -1
-		sg.from_distance = a
-		sg.to_distance = b
 		sg.from_point = pa
 		sg.to_point = pb
 

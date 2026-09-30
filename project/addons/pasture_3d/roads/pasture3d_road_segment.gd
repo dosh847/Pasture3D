@@ -1,23 +1,25 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
-# Pasture3DRoadSegment — an override applied to a RANGE OF ARC LENGTH along a road brush's spline:
-# "from 400 m to 2400 m this is gravel, and the last 80 m of that is a bridge".
-# See PASTURE3D_ROAD_SYSTEM_PROPOSAL.md §4.2.
+# Pasture3DRoadSegment — an override applied to the stretch of road BETWEEN TWO SPLINE POINTS: "from point
+# 5 to point 27 this is a dirt road". See PASTURE3D_ROAD_SYSTEM_PROPOSAL.md §4.2.
 #
-# ---- WHY ARC LENGTH, AND WHY A RESOURCE ----
+# ---- WHY POINTS, WHY STILL ARC LENGTH UNDERNEATH, AND WHY A RESOURCE ----
 #
-# The natural-looking design is one segment per spline INTERVAL, as a scene node — which is what
-# godot-road-generator does. Both halves of that were changed here, for four reasons:
+# The range is AUTHORED as two picked points and RESOLVED to arc length every time it is read (`start` /
+# `end`), so everything downstream still works in metres along the plan. It used to be authored in metres
+# too (`from_distance` / `to_distance`); those were removed, because a number of metres does not follow the
+# road when a point is dragged and nobody can see where 400 m is. Points are picked in the viewport and
+# follow their point. The earlier objection to point ranges -- inserting a point orphans the override --
+# is answered by renumbering the picks on every insert and remove (`_editor_points_shifted`).
 #
-#   1. Spline point spacing is an authoring convenience, not a geometric unit. A 2 km straight is one
-#      point-to-point interval; a fussy corner is six. Nothing about the road agrees with that split.
-#   2. Inserting a point SPLITS a segment and orphans whatever was overridden on it — and users insert
-#      points constantly. Under arc length, inserting a point in the middle of a gravel stretch leaves
-#      the gravel stretch alone, which is the only behaviour anyone expects.
-#   3. Mesh chunking has to be free to align to terrain REGIONS (§10) so a road chunk's lifetime matches
+# It is not one segment per spline INTERVAL, as a scene node, which is what godot-road-generator does:
+#
+#   1. Spline point spacing is an authoring convenience, not a geometric unit. A segment spans as many
+#      intervals as it needs, and several can overlap.
+#   2. Mesh chunking has to be free to align to terrain REGIONS (§10) so a road chunk's lifetime matches
 #      a region's. If a segment were the chunk, chunk length would be decided by where the artist
 #      happened to click.
-#   4. Scene nodes do not scale. Hundreds of kilometres of road is thousands of nodes in the tree and in
+#   3. Scene nodes do not scale. Hundreds of kilometres of road is thousands of nodes in the tree and in
 #      the .tscn. Resources in an array cost a row in the inspector.
 #
 # So a segment is a Resource in `Pasture3DRoadBrush.segments`, mirroring how the brush already holds its
@@ -39,37 +41,23 @@ extends Pasture3DRoadOverrides
 		return resource_name
 
 @export_group("Range")
-## Start this override AT a spline point, by its number along the road (the order the gizmo numbers
-## them, across every spline under the brush). -1 = start at `from_distance` instead.
+## One end of this override: a spline point, by its number along the road (the order the gizmo numbers
+## them, across every spline under the brush). -1 = the START of the road.
 ##
-## A picked point FOLLOWS its point: drag it and the range moves with it, round a corner and it still
-## starts at the corner. Inserting or removing a point before it renumbers it for you (as one undo).
+## The segment covers the road BETWEEN its two points, whichever comes first, so picking the end before
+## the start is fine. A picked point FOLLOWS its point: drag it and the range moves with it, round a corner
+## and it still starts at the corner. Inserting or removing a point renumbers it for you (as one undo).
 ## Pick one with the "Start at Selected Point" button, after clicking the point in the viewport.
 @export var from_point: int = -1:
 	set(v):
 		from_point = maxi(v, -1)
-		notify_property_list_changed()
 		emit_changed()
 
-## End this override at a spline point. -1 = end at `to_distance`. See `from_point`.
+## The other end: a spline point. -1 = the END of the road. See `from_point`. With neither picked the
+## segment covers nothing, so a freshly added one changes no road until it is given a point.
 @export var to_point: int = -1:
 	set(v):
 		to_point = maxi(v, -1)
-		notify_property_list_changed()
-		emit_changed()
-
-## Where this override starts, metres along the spline from its beginning. Read-only while `from_point`
-## picks the start; it then shows nothing useful, and `start()` is the answer.
-@export var from_distance: float = 0.0:
-	set(v):
-		from_distance = maxf(v, 0.0)
-		emit_changed()
-
-## Where it ends, metres along the spline. A range that ends at or before it starts covers nothing and
-## is reported by `range_warnings()` rather than silently doing nothing.
-@export var to_distance: float = 100.0:
-	set(v):
-		to_distance = maxf(v, 0.0)
 		emit_changed()
 
 ## Start the range at the point selected in the viewport on this segment's road.
@@ -147,23 +135,30 @@ func _point_s(p_point: int) -> float:
 	return float(road.call(&"point_arc_length", p_point))
 
 
-## Where the range starts, metres along the road: the picked point's arc length when one is picked and
-## resolves, else `from_distance`. EVERY reader of the range goes through this pair, never the fields.
+## Where the range starts, metres along the road: the nearer of the two ends. EVERY reader of the range
+## goes through `start` / `end`, never the fields.
 func start() -> float:
-	if from_point >= 0:
-		var s := _point_s(from_point)
-		if is_finite(s):
-			return s
-	return from_distance
+	return _range().x
 
 
-## Where the range ends. See `start`.
+## Where the range ends: the further of the two ends. See `start`.
 func end() -> float:
-	if to_point >= 0:
-		var s := _point_s(to_point)
-		if is_finite(s):
-			return s
-	return to_distance
+	return _range().y
+
+
+## The covered range, ordered. (0, 0) -- covering nothing -- when no point is picked, when a pick names
+## no point on the road, or when the segment is on no road yet. Not NaN: every consumer bsearches it.
+func _range() -> Vector2:
+	if from_point < 0 and to_point < 0:
+		return Vector2.ZERO
+	var road := _bound_road()
+	if road == null or not road.has_method(&"total_arc_length"):
+		return Vector2.ZERO
+	var a := 0.0 if from_point < 0 else _point_s(from_point)
+	var b := float(road.call(&"total_arc_length")) if to_point < 0 else _point_s(to_point)
+	if not is_finite(a) or not is_finite(b):
+		return Vector2.ZERO
+	return Vector2(minf(a, b), maxf(a, b))
 
 
 ## Metres this override covers. Zero for a range that ends where it starts.
@@ -187,13 +182,6 @@ func overlaps(p_other: Pasture3DRoadSegment) -> bool:
 	return start() < p_other.end() and p_other.start() < end()
 
 
-## A distance field is read-only while a point picks that end: editing it would do nothing, silently.
-func _validate_property(p_property: Dictionary) -> void:
-	var name := String(p_property["name"])
-	if (name == "from_distance" and from_point >= 0) or (name == "to_distance" and to_point >= 0):
-		p_property["usage"] = int(p_property["usage"]) | PROPERTY_USAGE_READ_ONLY
-
-
 func _pick_start() -> void:
 	_pick_selected(false)
 
@@ -215,12 +203,16 @@ func _pick_selected(p_end: bool) -> void:
 func range_warnings(p_spline_length: float = NAN) -> PackedStringArray:
 	var out := PackedStringArray()
 	var nm := resource_name if not resource_name.is_empty() else "Segment"
+	if from_point < 0 and to_point < 0:
+		out.append("Segment '%s' has no points picked, so it covers nothing." % nm)
+		return out
+	var unresolved := false
 	for pick in [["from_point", from_point], ["to_point", to_point]]:
 		if int(pick[1]) >= 0 and _bound_road() != null and not is_finite(_point_s(int(pick[1]))):
-			out.append("Segment '%s' %s %d names no spline point; using the distance instead."
-					% [nm, pick[0], pick[1]])
-	if length() <= 0.0:
-		out.append("Segment '%s' covers no distance (from %.1f m, to %.1f m)." % [nm, start(), end()])
+			out.append("Segment '%s' %s %d names no spline point, so it covers nothing." % [nm, pick[0], pick[1]])
+			unresolved = true
+	if not unresolved and _bound_road() != null and length() <= 0.0:
+		out.append("Segment '%s' starts and ends at the same place, so it covers nothing." % nm)
 	if is_finite(p_spline_length) and start() >= p_spline_length:
 		out.append("Segment '%s' starts at %.1f m, past the end of the spline (%.1f m)."
 				% [nm, start(), p_spline_length])

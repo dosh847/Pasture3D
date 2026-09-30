@@ -124,7 +124,7 @@ A racetrack designer authors apex and exit kerbs over specific arc-length interv
 @export var left_kerb: KerbType = KerbType.NONE
 @export var right_kerb: KerbType = KerbType.NONE
 ```
-If set to a value other than `NONE`, the segment overrides the road type's default over its `[from_distance, to_distance]` span.
+If set to a value other than `NONE`, the segment overrides the road type's default over its `[start(), end())` span.
 
 #### 3.3.3 Kerb Cross-Section Vertex Math
 When a kerb is present on side $k \in \{-1, +1\}$ (left/right), the mesher replaces the single shoulder vertex with a 4-vertex kerb cross-section:

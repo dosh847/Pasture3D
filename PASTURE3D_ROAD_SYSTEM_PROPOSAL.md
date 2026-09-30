@@ -135,8 +135,9 @@ halves, for four reasons:
 4. **Scene nodes do not scale.** Hundreds of kilometres of road is thousands of nodes in the tree and in
    the `.tscn`. This is the cost godot-road-generator pays.
 
-So: a segment is a **Resource in an array on the brush, addressing a range of spline arc length**
-(`from_distance` / `to_distance` in metres). It carries only what it *overrides* — road type, lane count,
+So: a segment is a **Resource in an array on the brush, addressing the stretch between two spline points**
+(`from_point` / `to_point`, in either order; resolved to arc length on every read so it follows the points.
+The original metre fields `from_distance` / `to_distance` were removed 2026-09-30). It carries only what it *overrides* — road type, lane count,
 `is_bridge`, banking override, paint suppression. Everything unset resolves up the chain.
 
 This keeps the user's intent (per-stretch control, exposed in the inspector, easy) while decoupling it from

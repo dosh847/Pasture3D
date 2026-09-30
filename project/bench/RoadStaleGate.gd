@@ -334,13 +334,14 @@ func _chained_fixture() -> Dictionary:
 	var path := Path3D.new()
 	var curve := Curve3D.new()
 	curve.add_point(Vector3(40.0, 0.0, 128.0))
+	curve.add_point(Vector3(100.0, 0.0, 128.0)) # collinear: a point for the segment to end on
 	curve.add_point(Vector3(200.0, 0.0, 128.0))
 	path.curve = curve
 	brush.add_child(path)
 
 	var seg := Pasture3DRoadSegment.new()
-	seg.from_distance = 20.0
-	seg.to_distance = 60.0
+	seg.from_point = 0
+	seg.to_point = 1 # 0..60 m
 	brush.segments = [seg]
 
 	var road_mod := Pasture3DNodeRoad.new()
