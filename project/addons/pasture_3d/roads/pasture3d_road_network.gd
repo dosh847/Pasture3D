@@ -1314,14 +1314,18 @@ func _paint_layer_key(p_brush) -> String:
 ## those layers. A twenty-road network with each group on its own layer pays for one group; a twenty-road
 ## network sharing one layer pays for all twenty, correctly, and gains nothing — which is the honest
 ## answer for that scene rather than a faster wrong one.
-func _paint_dirty_set(p_ordered: Array) -> Array:
+func _paint_dirty_set(p_ordered: Array, p_sigs: Dictionary = {}) -> Array:
 	var dirty_layers := {}
 	var live := {}
 	for b in p_ordered:
 		var key: String = b.road_key()
 		live[key] = true
+		# Once per road per pass: the signature hashes the road's whole surface mask, and `paint_roads`
+		# records the same value after painting.
+		var sig: int = b.paint_signature()
+		p_sigs[key] = sig
 		var prev: Dictionary = _painted.get(key, {})
-		if prev.is_empty() or int(prev["sig"]) != b.paint_signature() 				or String(prev["layer"]) != _paint_layer_key(b):
+		if prev.is_empty() or int(prev["sig"]) != sig 				or String(prev["layer"]) != _paint_layer_key(b):
 			dirty_layers[_paint_layer_key(b)] = true
 			# A road that MOVED between layers leaves cells behind on the old one, so that layer is dirty
 			# too even if nothing else on it changed.
@@ -1347,7 +1351,8 @@ func _paint_dirty_set(p_ordered: Array) -> Array:
 ## is computed from the roads that ARE here, so nothing ever covered the one that left. The full repaint
 ## did not fix this either — it is a pre-existing hole that only becomes reachable once the clear is
 ## scoped, so it is closed here rather than inherited.
-func _clear_departed_roads(p_terrains: Dictionary) -> void:
+func _clear_departed_roads(p_terrains: Dictionary) -> AABB:
+	var cleared := AABB()
 	var live := {}
 	for b in road_brushes():
 		if b != null:
@@ -1363,7 +1368,9 @@ func _clear_departed_roads(p_terrains: Dictionary) -> void:
 			if t is Pasture3D and t.data != null and t.data.has_method("clear_layer_in_area") 					and int(bits[1]) >= 0:
 				t.data.clear_layer_in_area(int(bits[1]), box, false)
 				p_terrains[t.get_instance_id()] = t
+				cleared = box if cleared.size == Vector3.ZERO else cleared.merge(box)
 		_painted.erase(key)
+	return cleared
 
 
 ## Paint every road's surface into its reserved layer, LOWEST PRIORITY FIRST.
@@ -1376,17 +1383,20 @@ func _clear_departed_roads(p_terrains: Dictionary) -> void:
 ## Returns the number of cells written across every road.
 func paint_roads(p_brushes: Array = []) -> int:
 	var brushes: Array = p_brushes if not p_brushes.is_empty() else road_brushes()
+	var terrains := {}
+	# BEFORE BOTH early returns. A road that was the only one on its layer leaves an empty repaint set and
+	# a painted carriageway behind it, so the departure clear cannot sit on the repainting path; and the
+	# LAST road in the network leaves no brushes at all, so it cannot sit behind that check either.
+	var departed := _clear_departed_roads(terrains)
 	if brushes.is_empty():
+		_composite(terrains, [], departed)
 		return 0
 	var ordered := paint_order(brushes)
-	var repaint := _paint_dirty_set(ordered)
+	var sigs := {}
+	var repaint := _paint_dirty_set(ordered, sigs)
 	var written := 0
-	var terrains := {}
-	# BEFORE the early return. A road that was the only one on its layer leaves an empty repaint set and
-	# a painted carriageway behind it, so the departure clear cannot sit on the repainting path.
-	_clear_departed_roads(terrains)
 	if repaint.is_empty():
-		_composite(terrains)
+		_composite(terrains, [], departed)
 		return 0
 	# CLEAR BEFORE PAINTING. Nothing else does it: the height layer is reconciled by the terrain brush on
 	# every bake, but the paint layer is written here and would otherwise keep every cell any road has ever
@@ -1399,20 +1409,23 @@ func paint_roads(p_brushes: Array = []) -> int:
 	for b in repaint:
 		written += b.paint_surface()
 		_painted[b.road_key()] = {
-			"sig": b.paint_signature(), "layer": _paint_layer_key(b), "box": b.paint_bounds(),
+			"sig": int(sigs[b.road_key()]), "layer": _paint_layer_key(b), "box": b.paint_bounds(),
 		}
 		if b.terrain != null:
 			terrains[b.terrain.get_instance_id()] = b.terrain
 	# One composite for the whole pass. Each road painted with `composite` off, so an overlap is
 	# composited once rather than once per road that touched it.
-	_composite(terrains, repaint)
+	_composite(terrains, repaint, departed)
 	return written
 
 
 ## Push every terrain this pass touched. Separate because a pass that only CLEARED — every road on a
 ## layer deleted — wrote no cells and still has to composite, or the cleared paint stays on screen.
-func _composite(p_terrains: Dictionary, p_repaint: Array = []) -> void:
-	var dirty_box := AABB()
+##
+## `p_cleared` is the box a departed road's paint was cleared from. Without it a pass that only deleted a
+## road had no dirty box and composited every region of the terrain.
+func _composite(p_terrains: Dictionary, p_repaint: Array = [], p_cleared: AABB = AABB()) -> void:
+	var dirty_box := p_cleared
 	for b in p_repaint:
 		if b is Pasture3DRoadBrush:
 			var box: AABB = b.paint_bounds()

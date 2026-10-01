@@ -2080,6 +2080,11 @@ PackedFloat32Array Pasture3DUtil::road_plan_curvature(const PackedVector2Array &
 	return godot::road_plan_curvature(p_plan);
 }
 
+PackedFloat32Array Pasture3DUtil::road_plan_curvature_along(const PackedVector2Array &p_plan,
+		const PackedFloat32Array &p_cum, const double p_ds, const int p_n) {
+	return godot::road_plan_curvature_along(p_plan, p_cum, p_ds, p_n);
+}
+
 PackedFloat32Array Pasture3DUtil::road_superelevation(const PackedFloat32Array &p_curvature,
 		const double p_design_speed, const double p_max_superelevation, const double p_ds,
 		const double p_transition_length, const double p_mountain_banking_cap) {
@@ -2104,10 +2109,12 @@ Array Pasture3DUtil::road_mesh_build_chunk(const PackedVector2Array &p_plan, con
 		const double p_crown, const int p_lod, const double p_lift, const double p_align_s0,
 		const int p_crown_mode, const double p_max_bank,
 		const int p_left_kerb, const int p_right_kerb, const double p_kerb_width,
-		const double p_kerb_height, const double p_kerb_rumble_pitch, const double p_kerb_rumble_depth) {
+		const double p_kerb_height, const double p_kerb_rumble_pitch, const double p_kerb_rumble_depth,
+		const Dictionary &p_section) {
 	return godot::road_mesh_build_chunk(p_plan, p_cum, p_align_ds, p_align_z, p_align_bank,
 			p_from, p_to, p_half, p_shoulder, p_crown, p_lod, p_lift, p_align_s0, p_crown_mode, p_max_bank,
-			p_left_kerb, p_right_kerb, p_kerb_width, p_kerb_height, p_kerb_rumble_pitch, p_kerb_rumble_depth);
+			p_left_kerb, p_right_kerb, p_kerb_width, p_kerb_height, p_kerb_rumble_pitch, p_kerb_rumble_depth,
+			p_section);
 }
 
 Array Pasture3DUtil::road_mesh_build_apron(const Vector2 &p_center, const double p_radius,
@@ -3186,6 +3193,9 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("road_plan_curvature", "plan"),
 			&Pasture3DUtil::road_plan_curvature);
 	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("road_plan_curvature_along", "plan", "cum", "ds", "n"),
+			&Pasture3DUtil::road_plan_curvature_along);
+	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("road_superelevation", "curvature", "design_speed", "max_superelevation", "ds", "transition_length", "mountain_banking_cap"),
 			&Pasture3DUtil::road_superelevation, DEFVAL(25.0), DEFVAL(-1.0));
 	ClassDB::bind_static_method("Pasture3DUtil",
@@ -3198,8 +3208,8 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("resample_plan", "plan", "cum", "ds", "n_s"),
 			&Pasture3DUtil::resample_plan);
 	ClassDB::bind_static_method("Pasture3DUtil",
-			D_METHOD("road_mesh_build_chunk", "plan", "cum", "align_ds", "align_z", "align_bank", "from", "to", "half", "shoulder", "crown", "lod", "lift", "align_s0", "crown_mode", "max_bank", "left_kerb", "right_kerb", "kerb_width", "kerb_height", "kerb_rumble_pitch", "kerb_rumble_depth"),
-			&Pasture3DUtil::road_mesh_build_chunk, DEFVAL(0), DEFVAL(0.02), DEFVAL(0.0), DEFVAL(0), DEFVAL(0.0), DEFVAL(0), DEFVAL(0), DEFVAL(0.8), DEFVAL(0.08), DEFVAL(0.4), DEFVAL(0.02));
+			D_METHOD("road_mesh_build_chunk", "plan", "cum", "align_ds", "align_z", "align_bank", "from", "to", "half", "shoulder", "crown", "lod", "lift", "align_s0", "crown_mode", "max_bank", "left_kerb", "right_kerb", "kerb_width", "kerb_height", "kerb_rumble_pitch", "kerb_rumble_depth", "section"),
+			&Pasture3DUtil::road_mesh_build_chunk, DEFVAL(0), DEFVAL(0.02), DEFVAL(0.0), DEFVAL(0), DEFVAL(0.0), DEFVAL(0), DEFVAL(0), DEFVAL(0.8), DEFVAL(0.08), DEFVAL(0.4), DEFVAL(0.02), DEFVAL(Dictionary()));
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("road_mesh_build_apron", "center", "radius", "plan", "cum", "align_ds", "align_z", "align_bank", "crown", "segments", "lift", "align_s0"),
 			&Pasture3DUtil::road_mesh_build_apron, DEFVAL(24), DEFVAL(0.02), DEFVAL(0.0));

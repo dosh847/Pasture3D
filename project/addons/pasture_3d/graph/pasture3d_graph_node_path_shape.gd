@@ -141,6 +141,7 @@ func eval_path(p_inputs: Array) -> Pasture3DGraphPath:
 		_out.sample_verges = PackedFloat32Array()
 		_out.sample_suppress = PackedByteArray()
 		_out.sample_skip = PackedByteArray()
+		_out.sample_section = {}
 	else:
 		_out.alignment = src.alignment
 		_out.sample_half_widths = src.sample_half_widths
@@ -148,6 +149,7 @@ func eval_path(p_inputs: Array) -> Pasture3DGraphPath:
 		_out.sample_verges = src.sample_verges
 		_out.sample_suppress = src.sample_suppress
 		_out.sample_skip = src.sample_skip
+		_out.sample_section = src.sample_section
 	reshape(src, _out)
 	return _out
 

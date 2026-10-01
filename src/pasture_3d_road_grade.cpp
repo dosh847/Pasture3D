@@ -49,6 +49,68 @@ inline double align_height_at(double p_s, double p_ds, double p_s0, const float 
 	return (double)p_z[i] + ((double)p_z[i + 1] - (double)p_z[i]) * f;
 }
 
+// A per-sample option: `p_opts[p_key]` when it is a float array exactly `p_n` long, else empty. The road's
+// segments vary a limit along it this way (Pasture3DRoadSections); absent, the scalar is the answer.
+std::vector<double> per_sample(const Dictionary &p_opts, const char *p_key, int p_n) {
+	std::vector<double> out;
+	if (!p_opts.has(p_key)) {
+		return out;
+	}
+	const Variant v = p_opts[p_key];
+	if (v.get_type() != Variant::PACKED_FLOAT32_ARRAY) {
+		return out;
+	}
+	const PackedFloat32Array a = v;
+	if (a.size() != p_n) {
+		return out;
+	}
+	out.resize((size_t)p_n);
+	for (int i = 0; i < p_n; i++) {
+		out[i] = (double)a[i];
+	}
+	return out;
+}
+
+// One per-sample grading value from a road's `section` dictionary: a float or byte array, read clamped at
+// the ends, or absent and then the scalar. See Pasture3DRoadGrader.section_value.
+struct RoadSectionArray {
+	PackedFloat32Array f;
+	PackedByteArray b;
+	double at(int p_i, double p_scalar) const {
+		if (!f.is_empty()) {
+			return (double)f[std::clamp(p_i, 0, (int)f.size() - 1)];
+		}
+		if (!b.is_empty()) {
+			return (double)b[std::clamp(p_i, 0, (int)b.size() - 1)];
+		}
+		return p_scalar;
+	}
+	RoadSectionArray() = default;
+	RoadSectionArray(const Dictionary &p_sec, const char *p_key) {
+		if (!p_sec.has(p_key)) {
+			return;
+		}
+		const Variant v = p_sec[p_key];
+		if (v.get_type() == Variant::PACKED_FLOAT32_ARRAY) {
+			f = v;
+		} else if (v.get_type() == Variant::PACKED_BYTE_ARRAY) {
+			b = v;
+		}
+	}
+};
+
+struct RoadSectionArrays {
+	RoadSectionArray crown, crown_mode, max_bank, cut_batter, fill_batter, toe_rounding, hinge_rounding;
+	explicit RoadSectionArrays(const Dictionary &p_sec) :
+			crown(p_sec, "crown"),
+			crown_mode(p_sec, "crown_mode"),
+			max_bank(p_sec, "max_bank"),
+			cut_batter(p_sec, "cut_batter"),
+			fill_batter(p_sec, "fill_batter"),
+			toe_rounding(p_sec, "toe_rounding"),
+			hinge_rounding(p_sec, "hinge_rounding") {}
+};
+
 PackedFloat32Array zeros(int p_n) {
 	PackedFloat32Array a;
 	a.resize(p_n);
@@ -224,7 +286,8 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 		int p_gw, int p_gh, double p_min_x, double p_min_z, double p_vs, double p_align_ds,
 		double p_align_s0, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
 		const PackedFloat32Array &p_half_width, const PackedFloat32Array &p_shoulder,
-		const PackedFloat32Array &p_verge, const PackedByteArray &p_suppress, const Dictionary &p_opts) {
+		const PackedFloat32Array &p_verge, const PackedByteArray &p_suppress, const Dictionary &p_opts,
+		const Pasture3DPathHit *p_hits) {
 	Dictionary out;
 	const int n = p_gw * p_gh;
 	const int n_align = p_align_z.size();
@@ -244,16 +307,28 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 		return out;
 	}
 
-	const double crown = p_opts.has("crown") ? (double)p_opts["crown"] : 0.05;
-	const int crown_mode = p_opts.has("crown_mode") ? (int)p_opts["crown_mode"] : 0;
-	const double max_bank = p_opts.has("max_bank") ? (double)p_opts["max_bank"] : 0.0;
-	const double cut_batter = std::max(p_opts.has("cut_batter") ? (double)p_opts["cut_batter"] : 1.0, 0.01);
-	const double fill_batter = std::max(p_opts.has("fill_batter") ? (double)p_opts["fill_batter"] : 0.6, 0.01);
+	const double crown_0 = p_opts.has("crown") ? (double)p_opts["crown"] : 0.05;
+	const int crown_mode_0 = p_opts.has("crown_mode") ? (int)p_opts["crown_mode"] : 0;
+	const double max_bank_0 = p_opts.has("max_bank") ? (double)p_opts["max_bank"] : 0.0;
+	const double cut_batter_0 = std::max(p_opts.has("cut_batter") ? (double)p_opts["cut_batter"] : 1.0, 0.01);
+	const double fill_batter_0 = std::max(p_opts.has("fill_batter") ? (double)p_opts["fill_batter"] : 0.6, 0.01);
 	const double fade = std::max(p_opts.has("surface_fade") ? (double)p_opts["surface_fade"] : 1.0, 0.0);
 	// Batter shaping. Every one defaults to the unshaped batter, so a caller that never heard of them
 	// grades exactly as before. See `road_batter_height`.
-	const double toe_round = std::max(p_opts.has("toe_rounding") ? (double)p_opts["toe_rounding"] : 0.0, 0.0);
-	const double hinge_round = std::max(p_opts.has("hinge_rounding") ? (double)p_opts["hinge_rounding"] : 0.0, 0.0);
+	const double toe_round_0 = std::max(p_opts.has("toe_rounding") ? (double)p_opts["toe_rounding"] : 0.0, 0.0);
+	const double hinge_round_0 = std::max(p_opts.has("hinge_rounding") ? (double)p_opts["hinge_rounding"] : 0.0, 0.0);
+	// The same seven PER ALIGNMENT SAMPLE, where the road's segments vary them (Pasture3DRoadSections).
+	// Absent on a road whose segments change none of them, and then the scalars above are the answer.
+	// Pasture3DRoadGrader.section_value reads them the same way: clamped at the ends.
+	const RoadSectionArrays sec(p_opts.has("section") ? (Dictionary)p_opts["section"] : Dictionary());
+	// Where along the road each surface cell is, for a paint that changes texture along it.
+	const bool want_s = p_opts.has("want_s") && (bool)p_opts["want_s"];
+	PackedFloat32Array a_s;
+	if (want_s) {
+		a_s.resize(n);
+		a_s.fill(NAN);
+	}
+	float *m_s = want_s ? a_s.ptrw() : nullptr;
 	// The retaining walls: one record per alignment sample and side. Empty = none. See road_wall_height.
 	PackedFloat32Array wall_plan;
 	if (p_opts.has("wall_plan")) {
@@ -327,7 +402,7 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 				}
 				const double wx = p_min_x + (double)ix * p_vs;
 
-				const Pasture3DPathHit hit = p_geom.nearest(wx, wz, scratch);
+				const Pasture3DPathHit hit = p_hits ? p_hits[idx] : p_geom.nearest(wx, wz, scratch);
 				const double d = hit.distance;
 				const double s = hit.s;
 
@@ -339,6 +414,13 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 				const double shoulder = at_or(sh_ptr, n_sh, si, 0.5);
 				const double verge = at_or(vg_ptr, n_vg, si, 4.0);
 				const double edge_d = half + shoulder;
+				const double crown = sec.crown.at(si, crown_0);
+				const int crown_mode = (int)sec.crown_mode.at(si, crown_mode_0);
+				const double max_bank = sec.max_bank.at(si, max_bank_0);
+				const double cut_batter = std::max(sec.cut_batter.at(si, cut_batter_0), 0.01);
+				const double fill_batter = std::max(sec.fill_batter.at(si, fill_batter_0), 0.01);
+				const double toe_round = std::max(sec.toe_rounding.at(si, toe_round_0), 0.0);
+				const double hinge_round = std::max(sec.hinge_rounding.at(si, hinge_round_0), 0.0);
 
 				// THE CORRIDOR IS AS WIDE AS THE BATTER NEEDS, plus the verge. Capping the reach at
 				// edge_d + verge silently CLIPS the batter: a 20 m cut at 1:1 needs 20 m of run, and with
@@ -419,6 +501,9 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 					const double uf = std::clamp((fade_end - d) / (fade_end - edge_d), 0.0, 1.0);
 					m_surface[idx] = (float)(uf * uf * (3.0 - 2.0 * uf));
 				}
+				if (m_s && m_surface[idx] > 0.0f) {
+					m_s[idx] = (float)s;
+				}
 				if (d <= half) {
 					m_bed[idx] = 1.0f;
 				} else if (d > edge_d) {
@@ -445,6 +530,9 @@ Dictionary godot::road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const Pa
 	out["verge"] = a_verge;
 	out["structure"] = a_struct;
 	out["surface"] = a_surface;
+	if (want_s) {
+		out["surface_s"] = a_s;
+	}
 	return out;
 }
 
@@ -518,6 +606,27 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 		k_sag = (a_sag_g * 9.81) / (v_design * v_design);
 	}
 
+	// The curvature limits per sample where the segments vary them; `any_crest` / `any_sag` say whether the
+	// projection has anything to do at all.
+	const std::vector<double> k_crest_s = per_sample(p_opts, "k_crest_s", n);
+	const std::vector<double> k_sag_s = per_sample(p_opts, "k_sag_s", n);
+	auto kc_at = [&](int i) -> double { return k_crest_s.empty() ? k_crest : k_crest_s[i]; };
+	auto ks_at = [&](int i) -> double { return k_sag_s.empty() ? k_sag : k_sag_s[i]; };
+	bool any_crest = k_crest > 1e-7;
+	bool any_sag = k_sag > 1e-7;
+	if (!k_crest_s.empty()) {
+		any_crest = false;
+		for (const double k : k_crest_s) {
+			any_crest = any_crest || k > 1e-7;
+		}
+	}
+	if (!k_sag_s.empty()) {
+		any_sag = false;
+		for (const double k : k_sag_s) {
+			any_sag = any_sag || k > 1e-7;
+		}
+	}
+
 	std::vector<uint8_t> jump_mask((size_t)n, 0);
 	if (p_opts.has("allow_airborne_jump")) {
 		Variant jump_var = p_opts["allow_airborne_jump"];
@@ -559,14 +668,20 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 
 	const double hairpin_comp = (double)p_opts.get("hairpin_grade_compensation", 0.0);
 	PackedFloat32Array curv_arr = p_opts.get("curvature", PackedFloat32Array());
+	// The grade limit and the hairpin compensation PER SAMPLE where the road's segments vary them.
+	const std::vector<double> grade_s = per_sample(p_opts, "max_grade_s", n);
+	const std::vector<double> hairpin_s = per_sample(p_opts, "hairpin_s", n);
+	auto grade_at = [&](int i) -> double { return grade_s.empty() ? p_max_grade : grade_s[i]; };
 	std::vector<double> step_limits(n, p_max_grade * p_ds);
-	if (hairpin_comp > 0.0 && curv_arr.size() == n) {
-		const float *k_ptr = curv_arr.ptr();
-		for (int i = 0; i < n; i++) {
-			const double abs_k = (double)std::abs(k_ptr[i]);
-			const double reduction = std::clamp((abs_k - 0.02) / 0.06, 0.0, 1.0) * hairpin_comp;
-			step_limits[i] = p_max_grade * (1.0 - reduction) * p_ds;
+	const bool has_curv = curv_arr.size() == n;
+	for (int i = 0; i < n; i++) {
+		const double hp = hairpin_s.empty() ? hairpin_comp : hairpin_s[i];
+		double reduction = 0.0;
+		if (hp > 0.0 && has_curv) {
+			const double abs_k = (double)std::abs(curv_arr[i]);
+			reduction = std::clamp((abs_k - 0.02) / 0.06, 0.0, 1.0) * hp;
 		}
+		step_limits[i] = grade_at(i) * (1.0 - reduction) * p_ds;
 	}
 
 	auto relax_toward_pin = [&](std::vector<float> &pz, int at, int dir, double p_step) {
@@ -586,36 +701,32 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 		if (n < 3) {
 			return;
 		}
-		const bool has_crest = k_crest > 1e-7;
-		const bool has_sag = k_sag > 1e-7;
-		if (!has_crest && !has_sag) {
+		if (!any_crest && !any_sag) {
 			return;
 		}
 		const double ds2 = ds * ds;
-		const double kc = k_crest * ds2;
-		const double ks = k_sag * ds2;
 		const float inf_f = std::numeric_limits<float>::infinity();
+		// A limit of zero at one sample means "no limit there", as the scalar's did for the whole road.
+		auto clamp_at = [&](int i) {
+			const double kc = kc_at(i);
+			const double ks = ks_at(i);
+			const bool allow_jump = (jump_mask[i] != 0);
+			const double z_mid = 0.5 * ((double)pz[i - 1] + (double)pz[i + 1]);
+			const float z_min = ks > 1e-7 ? (float)(z_mid - 0.5 * ks * ds2) : -inf_f;
+			const float z_max = (kc > 1e-7 && !allow_jump) ? (float)(z_mid + 0.5 * kc * ds2) : inf_f;
+			pz[i] = std::clamp(pz[i], z_min, z_max);
+		};
 
 		for (int sw = 0; sw < sweeps; sw++) {
 			for (int i = 1; i < n - 1; i++) {
-				if (has_pin[i]) {
-					continue;
+				if (!has_pin[i]) {
+					clamp_at(i);
 				}
-				const bool allow_jump = (jump_mask[i] != 0);
-				const double z_mid = 0.5 * ((double)pz[i - 1] + (double)pz[i + 1]);
-				const float z_min = has_sag ? (float)(z_mid - 0.5 * ks) : -inf_f;
-				const float z_max = (has_crest && !allow_jump) ? (float)(z_mid + 0.5 * kc) : inf_f;
-				pz[i] = std::clamp(pz[i], z_min, z_max);
 			}
 			for (int i = n - 2; i >= 1; i--) {
-				if (has_pin[i]) {
-					continue;
+				if (!has_pin[i]) {
+					clamp_at(i);
 				}
-				const bool allow_jump = (jump_mask[i] != 0);
-				const double z_mid = 0.5 * ((double)pz[i - 1] + (double)pz[i + 1]);
-				const float z_min = has_sag ? (float)(z_mid - 0.5 * ks) : -inf_f;
-				const float z_max = (has_crest && !allow_jump) ? (float)(z_mid + 0.5 * kc) : inf_f;
-				pz[i] = std::clamp(pz[i], z_min, z_max);
 			}
 		}
 	};
@@ -676,7 +787,7 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 		}
 	};
 
-	if (k_crest > 1e-7 || k_sag > 1e-7) {
+	if (any_crest || any_sag) {
 		project_vertical_curvature(z, 4);
 	}
 	project_grade(z);
@@ -703,7 +814,7 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 				z[i] = pin_val[i];
 			}
 		}
-		if (k_crest > 1e-7 || k_sag > 1e-7) {
+		if (any_crest || any_sag) {
 			project_vertical_curvature(z, 4);
 		}
 		project_grade(z);
@@ -780,7 +891,7 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 		project_grade(z);
 	}
 
-	if (k_crest > 1e-7 || k_sag > 1e-7) {
+	if (any_crest || any_sag) {
 		project_vertical_curvature(z, 16);
 		project_grade(z);
 	}
@@ -793,8 +904,14 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 	}
 
 	double peak = 0.0;
+	// Against each step's OWN limit (the looser of its two samples), so a steep segment's grade does not
+	// read as a breach of the road's gentler one.
+	double excess = 0.0;
 	for (int i = 1; i < n; i++) {
-		peak = std::max(peak, (double)std::abs(z[i] - z[i - 1]) / ds);
+		const double g = (double)std::abs(z[i] - z[i - 1]) / ds;
+		peak = std::max(peak, g);
+		const double lim = grade_s.empty() ? g_max : std::max(std::max(grade_s[i - 1], grade_s[i]), 1e-4);
+		excess = std::max(excess, g - lim);
 	}
 	double cut = 0.0;
 	double fill = 0.0;
@@ -812,7 +929,7 @@ Dictionary godot::road_align_solve(const PackedFloat32Array &p_ground, double p_
 			pin_err = std::max(pin_err, (double)std::abs(z[i] - pin_val[i]));
 		}
 	}
-	const bool feasible = (peak <= g_max + 1e-5) && (pin_err <= 1e-3);
+	const bool feasible = (excess <= 1e-5) && (pin_err <= 1e-3);
 
 	double peak_curv_crest = 0.0;
 	double peak_curv_sag = 0.0;
@@ -874,8 +991,68 @@ PackedFloat32Array godot::road_plan_curvature(const PackedVector2Array &p_plan) 
 	return out;
 }
 
-PackedFloat32Array godot::road_superelevation(const PackedFloat32Array &p_curvature, double p_design_speed,
-		double p_max_superelevation, double p_ds, double p_transition_length, double p_mountain_banking_cap) {
+PackedFloat32Array godot::road_plan_curvature_along(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
+		double p_ds, int p_n) {
+	PackedFloat32Array out;
+	const int n = std::max(p_n, 0);
+	out.resize(n);
+	float *o_ptr = out.ptrw();
+	for (int i = 0; i < n; i++) {
+		o_ptr[i] = 0.0f;
+	}
+	const int m = p_plan.size();
+	if (m < 3 || n == 0 || p_cum.size() != m || p_ds <= 0.0) {
+		return out;
+	}
+	const Vector2 *p = p_plan.ptr();
+	const float *cum = p_cum.ptr();
+	const double total = (double)cum[m - 1];
+	// The cumulative turning Θ(s) is piecewise linear: flat to the first chord's midpoint, then rising by
+	// vertex j's angle across [mid(j-1), mid(j)], flat after the last. `brk[k]` / `theta[k]` are its knots.
+	std::vector<double> brk(m - 1), theta(m - 1);
+	brk[0] = 0.5 * ((double)cum[0] + (double)cum[1]);
+	theta[0] = 0.0;
+	for (int j = 1; j < m - 1; j++) {
+		const double v1x = (double)p[j].x - (double)p[j - 1].x, v1z = (double)p[j].y - (double)p[j - 1].y;
+		const double v2x = (double)p[j + 1].x - (double)p[j].x, v2z = (double)p[j + 1].y - (double)p[j].y;
+		double angle = 0.0;
+		if ((v1x * v1x + v1z * v1z) > 1e-12 && (v2x * v2x + v2z * v2z) > 1e-12) {
+			angle = std::atan2(v1x * v2z - v1z * v2x, v1x * v2x + v1z * v2z);
+		}
+		brk[j] = 0.5 * ((double)cum[j] + (double)cum[j + 1]);
+		theta[j] = theta[j - 1] + angle;
+	}
+	// Θ at s. A zero-length span is a step, which the difference below still integrates exactly.
+	auto theta_at = [&](double s) -> double {
+		if (s <= brk[0]) {
+			return 0.0;
+		}
+		if (s >= brk[m - 2]) {
+			return theta[m - 2];
+		}
+		const int k = (int)(std::upper_bound(brk.begin(), brk.end(), s) - brk.begin()); // brk[k-1] <= s < brk[k]
+		const double span = brk[k] - brk[k - 1];
+		const double f = span > 1e-12 ? (s - brk[k - 1]) / span : 1.0;
+		return theta[k - 1] + (theta[k] - theta[k - 1]) * f;
+	};
+	for (int i = 0; i < n; i++) {
+		const double s = (double)i * p_ds;
+		const double lo = std::clamp(s - 0.5 * p_ds, 0.0, total);
+		const double hi = std::clamp(s + 0.5 * p_ds, 0.0, total);
+		if (hi - lo <= 1e-9) {
+			continue;
+		}
+		o_ptr[i] = (float)((theta_at(hi) - theta_at(lo)) / (hi - lo));
+	}
+	return out;
+}
+
+namespace {
+
+// road_superelevation with the design speed and the cap optionally PER SAMPLE (null = the scalar). The cap
+// passed here is already the mountain-capped one.
+PackedFloat32Array superelevation_sampled(const PackedFloat32Array &p_curvature, double p_design_speed,
+		const double *p_speed_s, double p_cap, const double *p_cap_s, double p_ds, double p_transition_length) {
 	const int n = p_curvature.size();
 	PackedFloat32Array out;
 	out.resize(n);
@@ -884,13 +1061,13 @@ PackedFloat32Array godot::road_superelevation(const PackedFloat32Array &p_curvat
 	}
 	float *o_ptr = out.ptrw();
 	const float *k_ptr = p_curvature.ptr();
-	const double v2 = p_design_speed * p_design_speed;
-	const double base_cap = std::max(p_max_superelevation, 0.0);
-	const double cap = (p_mountain_banking_cap > 0.0) ? std::min(p_mountain_banking_cap, base_cap) : base_cap;
+	auto cap_at = [&](int i) -> double { return p_cap_s ? std::max(p_cap_s[i], 0.0) : p_cap; };
 
 	for (int i = 0; i < n; i++) {
+		const double v = p_speed_s ? p_speed_s[i] : p_design_speed;
 		const double k_val = (double)k_ptr[i];
-		o_ptr[i] = (float)std::clamp(-v2 * k_val / 9.81, -cap, cap);
+		const double cap = cap_at(i);
+		o_ptr[i] = (float)std::clamp(-v * v * k_val / 9.81, -cap, cap);
 	}
 
 	const double max_trans = std::max(p_transition_length, 0.0);
@@ -920,16 +1097,33 @@ PackedFloat32Array godot::road_superelevation(const PackedFloat32Array &p_curvat
 			acc += (double)o_ptr[ki];
 			cnt += 1.0;
 		}
+		const double cap = cap_at(i);
 		s_ptr[i] = (float)std::clamp(acc / cnt, -cap, cap);
 	}
 
 	return smoothed;
 }
 
+} // namespace
+
+PackedFloat32Array godot::road_superelevation(const PackedFloat32Array &p_curvature, double p_design_speed,
+		double p_max_superelevation, double p_ds, double p_transition_length, double p_mountain_banking_cap) {
+	const double base_cap = std::max(p_max_superelevation, 0.0);
+	const double cap = (p_mountain_banking_cap > 0.0) ? std::min(p_mountain_banking_cap, base_cap) : base_cap;
+	return superelevation_sampled(p_curvature, p_design_speed, nullptr, cap, nullptr, p_ds, p_transition_length);
+}
+
 Dictionary godot::road_align_solve_with_plan(const PackedVector2Array &p_plan, const PackedFloat32Array &p_ground,
 		double p_ds, double p_max_grade, double p_design_speed, double p_max_superelevation,
 		const Dictionary &p_opts) {
-	PackedFloat32Array curv = road_plan_curvature(p_plan);
+	// The caller's curvature from the plan's own vertices (`plan_curvature_along`) where it has one: a
+	// resampled plan's triples read every tessellation joint as a one-sample spike.
+	PackedFloat32Array curv;
+	if (p_opts.has("plan_curvature") && ((PackedFloat32Array)p_opts["plan_curvature"]).size() == p_ground.size()) {
+		curv = p_opts["plan_curvature"];
+	} else {
+		curv = road_plan_curvature(p_plan);
+	}
 	Dictionary solve_opts = p_opts.duplicate();
 	solve_opts["curvature"] = curv;
 	if (!solve_opts.has("design_speed")) {
@@ -938,7 +1132,13 @@ Dictionary godot::road_align_solve_with_plan(const PackedVector2Array &p_plan, c
 	Dictionary out = road_align_solve(p_ground, p_ds, p_max_grade, solve_opts);
 	const double trans_len = (double)p_opts.get("bank_transition_length", 25.0);
 	const double mtn_cap = (double)p_opts.get("mountain_banking_cap", -1.0);
-	PackedFloat32Array bank = road_superelevation(curv, p_design_speed, p_max_superelevation, p_ds, trans_len, mtn_cap);
+	// The design speed and the (already mountain-capped) bank cap per sample, where the segments vary them.
+	const std::vector<double> speed_s = per_sample(p_opts, "design_speed_s", curv.size());
+	const std::vector<double> cap_s = per_sample(p_opts, "bank_cap_s", curv.size());
+	const double base_cap = std::max(p_max_superelevation, 0.0);
+	const double cap = (mtn_cap > 0.0) ? std::min(mtn_cap, base_cap) : base_cap;
+	PackedFloat32Array bank = superelevation_sampled(curv, p_design_speed, speed_s.empty() ? nullptr : speed_s.data(),
+			cap, cap_s.empty() ? nullptr : cap_s.data(), p_ds, trans_len);
 	out["curvature"] = curv;
 	out["bank"] = bank;
 	return out;
@@ -1095,7 +1295,7 @@ Array godot::road_mesh_build_chunk(const PackedVector2Array &p_plan, const Packe
 		double p_from, double p_to, double p_half, double p_shoulder, double p_crown,
 		int p_lod, double p_lift, double p_align_s0, int p_crown_mode, double p_max_bank,
 		int p_left_kerb, int p_right_kerb, double p_kerb_width, double p_kerb_height,
-		double p_kerb_rumble_pitch, double p_kerb_rumble_depth) {
+		double p_kerb_rumble_pitch, double p_kerb_rumble_depth, const Dictionary &p_section) {
 	const int plan_n = p_plan.size();
 	const int cum_n = p_cum.size();
 	const int z_n = p_align_z.size();
@@ -1109,39 +1309,58 @@ Array godot::road_mesh_build_chunk(const PackedVector2Array &p_plan, const Packe
 	const float *z_ptr = p_align_z.ptr();
 	const float *bank_ptr = p_align_bank.ptr();
 
-	const double half = std::max(p_half, 0.01);
-	const double shoulder = std::max(p_shoulder, 0.0);
+	double half = std::max(p_half, 0.01);
 	const double kw = std::max(p_kerb_width, 0.1);
 
+	// Pasture3DRoadMesher.cross_offsets, rebuilt per ring where a section varies the width.
 	std::vector<double> offsets;
-	if (p_lod >= 2) {
-		offsets = { -half, half };
-	} else {
-		// Left side
-		if (p_left_kerb > 0) {
-			offsets.push_back(-(half + kw));
-			offsets.push_back(-(half + kw * 0.7));
-			offsets.push_back(-(half + kw * 0.2));
-		} else {
-			offsets.push_back(-(half + shoulder));
+	auto build_offsets = [&](double p_h, double p_sh) {
+		const double h = std::max(p_h, 0.01);
+		const double sh = std::max(p_sh, 0.0);
+		offsets.clear();
+		if (p_lod >= 2) {
+			offsets = { -h, h };
+			return;
 		}
-
-		offsets.push_back(-half);
+		if (p_left_kerb > 0) {
+			offsets.push_back(-(h + kw));
+			offsets.push_back(-(h + kw * 0.7));
+			offsets.push_back(-(h + kw * 0.2));
+		} else {
+			offsets.push_back(-(h + sh));
+		}
+		offsets.push_back(-h);
 		if (p_lod == 0) {
 			offsets.push_back(0.0);
 		}
-		offsets.push_back(half);
-
-		// Right side
+		offsets.push_back(h);
 		if (p_right_kerb > 0) {
-			offsets.push_back(half + kw * 0.2);
-			offsets.push_back(half + kw * 0.7);
-			offsets.push_back(half + kw);
+			offsets.push_back(h + kw * 0.2);
+			offsets.push_back(h + kw * 0.7);
+			offsets.push_back(h + kw);
 		} else {
-			offsets.push_back(half + shoulder);
+			offsets.push_back(h + sh);
 		}
-	}
+	};
+	build_offsets(half, p_shoulder);
 	const int across_count = (int)offsets.size();
+
+	// THE CROSS-SECTION PER RING where the road's segments vary it; see Pasture3DRoadMesher.section_at,
+	// which this mirrors: linear between samples, and a pure function of `s` so the seam holds.
+	const bool has_section = !p_section.is_empty();
+	const double sec_ds = has_section && p_section.has("ds") ? (double)p_section["ds"] : 1.0;
+	const double sec_s0 = has_section && p_section.has("s0") ? (double)p_section["s0"] : 0.0;
+	auto sec_arr = [&](const char *p_key) -> PackedFloat32Array {
+		return has_section && p_section.has(p_key) ? (PackedFloat32Array)p_section[p_key] : PackedFloat32Array();
+	};
+	const PackedFloat32Array sec_half = sec_arr("half"), sec_shoulder = sec_arr("shoulder");
+	const PackedFloat32Array sec_crown = sec_arr("crown"), sec_max_bank = sec_arr("max_bank"), sec_sink = sec_arr("sink");
+	auto sec_at = [&](const PackedFloat32Array &p_a, double p_s, double p_default) -> double {
+		if (p_a.is_empty()) {
+			return p_default;
+		}
+		return road_mesh_align_height_at(p_a.ptr(), p_a.size(), sec_ds, sec_s0, p_s);
+	};
 	if (across_count < 2) {
 		return Array();
 	}
@@ -1175,11 +1394,21 @@ Array godot::road_mesh_build_chunk(const PackedVector2Array &p_plan, const Packe
 		const Vector2 across(-tangent.y, tangent.x);
 		const double centre = road_mesh_align_height_at(z_ptr, z_n, p_align_ds, p_align_s0, s);
 		const double bank = road_mesh_align_bank_at(bank_ptr, bank_n, p_align_ds, p_align_s0, s);
+		double crown = p_crown;
+		double max_bank = p_max_bank;
+		double lift = p_lift;
+		if (has_section) {
+			half = std::max(sec_at(sec_half, s, p_half), 0.01);
+			crown = sec_at(sec_crown, s, p_crown);
+			max_bank = sec_at(sec_max_bank, s, p_max_bank);
+			lift = p_lift - sec_at(sec_sink, s, 0.0);
+			build_offsets(half, sec_at(sec_shoulder, s, p_shoulder));
+		}
 
 		for (int c = 0; c < across_count; c++) {
 			const double u = offsets[c];
 			const Vector2 xz = at + across * (float)u;
-			const double base_y = road_mesh_surface_height(centre, bank, p_crown, u, half, p_crown_mode, p_max_bank);
+			const double base_y = road_mesh_surface_height(centre, bank, crown, u, half, p_crown_mode, max_bank);
 			double dy = 0.0;
 			if (u < -half && p_left_kerb > 0) {
 				const double xi = std::clamp((-u - half) / kw, 0.0, 1.0);
@@ -1188,7 +1417,7 @@ Array godot::road_mesh_build_chunk(const PackedVector2Array &p_plan, const Packe
 				const double xi = std::clamp((u - half) / kw, 0.0, 1.0);
 				dy = kerb_displacement(p_right_kerb, xi, s, p_kerb_height, p_kerb_rumble_pitch, p_kerb_rumble_depth);
 			}
-			const double y = base_y + dy + p_lift;
+			const double y = base_y + dy + lift;
 			v_ptr[vi] = Vector3(xz.x, (float)y, xz.y);
 			uv_ptr[vi] = Vector2((float)(u / half * 0.5 + 0.5), (float)s);
 			n_ptr[vi] = Vector3(0.0f, 1.0f, 0.0f);

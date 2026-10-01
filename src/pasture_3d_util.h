@@ -456,6 +456,8 @@ public:
 			const double p_design_speed, const double p_max_superelevation,
 			const Dictionary &p_opts);
 	static PackedFloat32Array road_plan_curvature(const PackedVector2Array &p_plan);
+	static PackedFloat32Array road_plan_curvature_along(const PackedVector2Array &p_plan,
+			const PackedFloat32Array &p_cum, const double p_ds, const int p_n);
 	static PackedFloat32Array road_superelevation(const PackedFloat32Array &p_curvature,
 			const double p_design_speed, const double p_max_superelevation, const double p_ds,
 			const double p_transition_length = 25.0, const double p_mountain_banking_cap = -1.0);
@@ -471,7 +473,7 @@ public:
 			const double p_align_s0 = 0.0, const int p_crown_mode = 0, const double p_max_bank = 0.0,
 			const int p_left_kerb = 0, const int p_right_kerb = 0, const double p_kerb_width = 0.8,
 			const double p_kerb_height = 0.08, const double p_kerb_rumble_pitch = 0.4,
-			const double p_kerb_rumble_depth = 0.02);
+			const double p_kerb_rumble_depth = 0.02, const Dictionary &p_section = Dictionary());
 
 	static Array road_mesh_build_apron(const Vector2 &p_center, const double p_radius,
 			const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,

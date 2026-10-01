@@ -319,6 +319,18 @@ static func build_wall_plan(p_plan: PackedVector2Array, p_cum: PackedFloat32Arra
 	var crown_mode := int(p_opts.get("crown_mode", 0))
 	var max_bank := float(p_opts.get("max_bank", 0.0))
 	var step := maxf(p_step, 0.1)
+	# Per sample where the road's segments vary them; see `section_value`.
+	var sec: Dictionary = p_prof.get("section", {})
+	var s_cut := PackedFloat32Array()
+	var s_fill := PackedFloat32Array()
+	var s_hinge := PackedFloat32Array()
+	s_cut.resize(n)
+	s_fill.resize(n)
+	s_hinge.resize(n)
+	for i in n:
+		s_cut[i] = maxf(section_value(sec, "cut_batter", i, cut_b), 0.01)
+		s_fill[i] = maxf(section_value(sec, "fill_batter", i, fill_b), 0.01)
+		s_hinge[i] = maxf(section_value(sec, "hinge_rounding", i, hinge), 0.0)
 
 	# ---- 1. THE ENTRIES: every sample and side that could carry a wall ----
 	var e_i := PackedInt32Array()
@@ -342,13 +354,16 @@ static func build_wall_plan(p_plan: PackedVector2Array, p_cum: PackedFloat32Arra
 		var bank: float = p_alignment.bank[i] if i < p_alignment.bank.size() else 0.0
 		var c := plan_point_at(p_plan, p_cum, minf(s, total))
 		var t2 := _segment_dir_at(p_plan, p_cum, minf(s, total), false)
+		var cr := section_value(sec, "crown", i, crown)
+		var cm := int(section_value(sec, "crown_mode", i, crown_mode))
+		var mb := section_value(sec, "max_bank", i, max_bank)
 		for side in [-1.0, 1.0]:
 			e_i.append(i)
 			e_side.append(side)
 			e_edge.append(edge_d)
-			e_zedge.append(surface_height(z_ref, bank, crown, edge_d * side, hw, crown_mode, max_bank))
-			e_g1.append(edge_slope(z_ref, bank, crown, edge_d, side, hw, crown_mode, max_bank) \
-					if hinge > 0.0 else 0.0)
+			e_zedge.append(surface_height(z_ref, bank, cr, edge_d * side, hw, cm, mb))
+			e_g1.append(edge_slope(z_ref, bank, cr, edge_d, side, hw, cm, mb) \
+					if s_hinge[i] > 0.0 else 0.0)
 			e_c.append(c)
 			e_across.append(Vector2(-t2.y, t2.x) * side)
 	var m := e_i.size()
@@ -368,12 +383,16 @@ static func build_wall_plan(p_plan: PackedVector2Array, p_cum: PackedFloat32Arra
 	e_hc.fill(0.0)
 	live.fill(1)
 	var min_b := minf(cut_b, fill_b)
+	var max_hinge := hinge
+	for i in n:
+		min_b = minf(min_b, minf(s_cut[i], s_fill[i]))
+		max_hinge = maxf(max_hinge, s_hinge[i])
 	var cap_all := 0.0
 	for w: Pasture3DRoadWall in walls:
 		cap_all = maxf(cap_all, maxf(w.max_height, w.trigger_height))
 		if w.beyond_batter > 0.0:
 			min_b = minf(min_b, w.beyond_batter)
-	var steps := clampi(int(ceil((2.0 * hinge + (cap_all + step) / min_b) / step)) + 1, 1, 2000)
+	var steps := clampi(int(ceil((2.0 * max_hinge + (cap_all + step) / min_b) / step)) + 1, 1, 2000)
 	var pts := PackedVector2Array()
 	pts.resize(m)
 	for mm in range(1, steps + 1):
@@ -408,7 +427,8 @@ static func build_wall_plan(p_plan: PackedVector2Array, p_cum: PackedFloat32Arra
 				e_prev[e] = z_edge
 				e_pdiff[e] = kind * (ge - z_edge)
 			var kd: float = e_kind[e]
-			var line := batter_line(z_edge, e_g1[e], kd * (cut_b if kd > 0.0 else fill_b), x, hinge)
+			var ie := e_i[e]
+			var line := batter_line(z_edge, e_g1[e], kd * (s_cut[ie] if kd > 0.0 else s_fill[ie]), x, s_hinge[ie])
 			if not is_finite(ge):
 				e_hc[e] = kd * (e_prev[e] - z_edge)
 				live[e] = 0
@@ -541,7 +561,6 @@ static func build_wall_plan(p_plan: PackedVector2Array, p_cum: PackedFloat32Arra
 						acc += need[h * 2 + k]
 						cnt += 1
 					tops[g - r0] = acc / float(maxi(cnt, 1))
-			var beyond := wr.beyond_batter if wr.beyond_batter > 0.0 else (cut_b if cut else fill_b)
 			var mode := WALL_ROAD_SIDE if wr.placement == Pasture3DRoadWall.Placement.ROAD_SIDE \
 					else WALL_BATTER_TOP
 			for g in range(r0, r1 + 1):
@@ -552,6 +571,7 @@ static func build_wall_plan(p_plan: PackedVector2Array, p_cum: PackedFloat32Arra
 					var u := clampf(d / wr.end_taper_length, 0.0, 1.0)
 					alpha = u * u * (3.0 - 2.0 * u)
 				var a := (g * 2 + k) * WALL_STRIDE
+				var beyond := wr.beyond_batter if wr.beyond_batter > 0.0 else (s_cut[g] if cut else s_fill[g])
 				out[a] = mode
 				out[a + 1] = 1.0 if cut else -1.0
 				# BATTER_TOP is the old cap: the wall stands where the batter has climbed the trigger.
@@ -986,6 +1006,14 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 	var fill_batter: float = maxf(float(p_opts.get("fill_batter", 0.6)), 0.01)
 	var toe_round: float = maxf(float(p_opts.get("toe_rounding", 0.0)), 0.0)
 	var hinge_round: float = maxf(float(p_opts.get("hinge_rounding", 0.0)), 0.0)
+	# The same seven per ALIGNMENT SAMPLE, where the road's segments vary them (`Pasture3DRoadSections`).
+	# Absent on a road whose segments change none of them, and then the scalars above are the answer.
+	var sec: Dictionary = p_opts.get("section", {})
+	var want_s := bool(p_opts.get("want_s", false))
+	var m_s := PackedFloat32Array()
+	if want_s:
+		m_s.resize(n)
+		m_s.fill(NAN)
 	# The retaining walls, one record per alignment sample and side (`build_wall_plan`). Empty = none.
 	var wall_plan: PackedFloat32Array = p_opts.get("wall_plan", PackedFloat32Array())
 	# `skip` is NOT `p_suppress`. Suppress means "a structure carries the road here", and says so in the
@@ -1070,6 +1098,14 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 			var shoulder: float = _at(p_shoulder, si, 0.5)
 			var verge: float = _at(p_verge, si, 4.0)
 			var edge_d := half + shoulder
+			if not sec.is_empty():
+				crown = section_value(sec, "crown", si, crown)
+				crown_mode = int(section_value(sec, "crown_mode", si, crown_mode))
+				max_bank = section_value(sec, "max_bank", si, max_bank)
+				cut_batter = maxf(section_value(sec, "cut_batter", si, cut_batter), 0.01)
+				fill_batter = maxf(section_value(sec, "fill_batter", si, fill_batter), 0.01)
+				toe_round = maxf(section_value(sec, "toe_rounding", si, toe_round), 0.0)
+				hinge_round = maxf(section_value(sec, "hinge_rounding", si, hinge_round), 0.0)
 			# THE CORRIDOR IS AS WIDE AS THE BATTER NEEDS, plus the verge.
 			#
 			# It used to be `edge_d + verge`, which silently CLIPPED the batter: a 20 m cut with a 1:1
@@ -1147,6 +1183,9 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 			elif fade_end > edge_d:
 				var u_fade := clampf((fade_end - d) / (fade_end - edge_d), 0.0, 1.0)
 				m_surface[idx] = u_fade * u_fade * (3.0 - 2.0 * u_fade)
+			# Where along the road this cell is, for a paint that changes texture along it (spec §4).
+			if want_s and m_surface[idx] > 0.0:
+				m_s[idx] = s
 			if d <= half:
 				m_bed[idx] = 1.0
 			elif d > edge_d:
@@ -1160,7 +1199,23 @@ static func grade_reference(p_height: PackedFloat32Array, p_gw: int, p_gh: int, 
 				m_cut[idx] = 1.0
 
 	out["height"] = graded
+	if want_s:
+		out["surface_s"] = m_s
 	return out
+
+
+## One grading value at alignment sample `p_i`: the per-sample array `p_sec[p_key]` when the road's
+## segments vary it, else `p_scalar`, the road's own. Clamped at the ends like `_at`. The native grader
+## reads `section` the same way.
+static func section_value(p_sec: Dictionary, p_key: String, p_i: int, p_scalar: float) -> float:
+	var arr: Variant = p_sec.get(p_key)
+	if arr == null:
+		return p_scalar
+	if arr is PackedByteArray:
+		var b: PackedByteArray = arr
+		return float(b[clampi(p_i, 0, b.size() - 1)]) if not b.is_empty() else p_scalar
+	var f: PackedFloat32Array = arr
+	return f[clampi(p_i, 0, f.size() - 1)] if not f.is_empty() else p_scalar
 
 
 static func _at(p_arr: PackedFloat32Array, p_i: int, p_default: float) -> float:

@@ -127,6 +127,11 @@ extends Resource
 ## Batter shaping, metres (Pasture3DRoadGrader.batter_height). 0 is the unshaped batter.
 @export var toe_rounding: float = 0.0
 @export var hinge_rounding: float = 0.0
+## The same cross-section values PER ALIGNMENT SAMPLE, where the road's segments vary them: `crown`,
+## `crown_mode`, `max_bank`, the batters and the rounding, as `Pasture3DRoadBrush.grading_profile`'s
+## `section`. Empty when nothing varies, and then the scalars above are the answer. Indexed by alignment
+## sample like the `sample_*` arrays, so it travels and drops with them.
+@export var sample_section: Dictionary = {}
 # The retaining walls ride on `alignment.wall_plan`: they are indexed by alignment sample, so a path that
 # drops its alignment (a reshape that moves the line) drops its walls with it, which is right.
 
@@ -141,6 +146,7 @@ func grade_opts() -> Dictionary:
 		"hinge_rounding": hinge_rounding,
 		"wall_plan": alignment.wall_plan if alignment != null else PackedFloat32Array(),
 		"skip": sample_skip,
+		"section": sample_section,
 	}
 
 
@@ -174,7 +180,7 @@ func content_digest() -> int:
 		points, half_widths, heights, closed,
 		alignment.content_digest() if alignment != null else 0,
 		sample_half_widths, sample_shoulders, sample_verges, sample_suppress, sample_skip,
-		crown, cut_batter, fill_batter, toe_rounding, hinge_rounding,
+		crown, cut_batter, fill_batter, toe_rounding, hinge_rounding, sample_section,
 	])
 
 

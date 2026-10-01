@@ -123,20 +123,20 @@ static func find_crossings(p_runs: Array, p_opts: Dictionary = {}) -> Array:
 					var pt_b: Vector2 = tb_info["p"]
 					# Two ends lying within the narrower road's half-width of each other overlap on the
 					# ground, so they are one join however loosely the author snapped them.
-					var tol_pair := maxf(endpoint_tol, minf(float(ra.get("half_width", 0.0)),
-							float(rb.get("half_width", 0.0))))
-					if pt_a.distance_to(pt_b) > tol_pair:
-						continue
 					var sa_t: float = float(ta_info["s"])
 					var sb_t: float = float(tb_info["s"])
+					var tol_pair := maxf(endpoint_tol, minf(float(_run_at(ra, "half_width", sa_t, 0.0)),
+							float(_run_at(rb, "half_width", sb_t, 0.0))))
+					if pt_a.distance_to(pt_b) > tol_pair:
+						continue
 					if _is_bridged(ra, sa_t) or _is_bridged(rb, sb_t):
 						continue
 					var za_t := _height_of(ra, sa_t)
 					var zb_t := _height_of(rb, sb_t)
 					if is_finite(za_t) and is_finite(zb_t) and absf(za_t - zb_t) > clearance:
 						continue
-					var pa_prio: int = int(ra.get("priority", 0))
-					var pb_prio: int = int(rb.get("priority", 0))
+					var pa_prio: int = int(_run_at(ra, "priority", sa_t, 0))
+					var pb_prio: int = int(_run_at(rb, "priority", sb_t, 0))
 					var p_meet: Vector2
 					if pa_prio > pb_prio:
 						p_meet = pt_a
@@ -411,8 +411,8 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 		var r0: Dictionary = p_runs[idx[0]]
 		var r1: Dictionary = p_runs[idx[1]]
 		var phi := e2e_phi
-		var w0: float = float(r0.get("half_width", 4.0))
-		var w1: float = float(r1.get("half_width", 4.0))
+		var w0: float = float(_run_at(r0, "half_width", arcs[0], 4.0))
+		var w1: float = float(_run_at(r1, "half_width", arcs[1], 4.0))
 		if phi < MIN_CROSSING_ANGLE:
 			if absf(w0 - w1) < 0.01:
 				trims[0] = 0.0
@@ -435,7 +435,7 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 				if gi == gj:
 					continue
 				var ang := _angle_between(p_crossings, p_group, idx[gi], idx[gj], p_runs, arcs[gi], arcs[gj])
-				var other_w: float = float((p_runs[idx[gj]] as Dictionary).get("half_width", 4.0))
+				var other_w: float = float(_run_at(p_runs[idx[gj]], "half_width", arcs[gj], 4.0))
 				var s: float = sin(maxf(ang, MIN_CROSSING_ANGLE))
 				trims[gi] = maxf(trims[gi], other_w / s)
 	# PRIORITY DECIDES ELEVATION (§5.2). The junction sits at the major road's own solved height, so the
@@ -447,7 +447,7 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 	var best := 0
 	var best_priority := -2147483648
 	for gi in range(idx.size()):
-		var pr := int((p_runs[idx[gi]] as Dictionary).get("priority", 0))
+		var pr := int(_run_at(p_runs[idx[gi]], "priority", arcs[gi], 0))
 		if pr > best_priority:
 			best_priority = pr
 			best = gi
@@ -479,10 +479,10 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 		var tang := _tangent_at(run, arcs[gi])
 		if tang.length_squared() < 0.5:
 			continue
-		var c_half: float = float(run.get("half_width", 4.0))
-		var s_width: float = float(run.get("shoulder_width", 0.0))
-		var c_mode: int = int(run.get("crown_mode", 0))
-		var m_bank: float = float(run.get("max_bank", 0.0))
+		var c_half: float = float(_run_at(run, "half_width", arcs[gi], 4.0))
+		var s_width: float = float(_run_at(run, "shoulder_width", arcs[gi], 0.0))
+		var c_mode: int = int(_run_at(run, "crown_mode", arcs[gi], 0))
+		var m_bank: float = float(_run_at(run, "max_bank", arcs[gi], 0.0))
 		var hw: float = c_half + s_width
 		var total := _run_length(run)
 		if total - arcs[gi] > ARM_MIN_LENGTH:
@@ -516,7 +516,7 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 	#
 	# Calculate decoupled per-arm trims: each arm only clears its immediate angular neighbors in the junction.
 	# The clearance trim along arm a to clear neighbor b at angle phi is (w_b + w_a*cos(phi))/sin(phi) + R/tan(phi/2).
-	j.corner_radius = _corner_radius_for(p_runs, idx, best_priority, p_opts)
+	j.corner_radius = _corner_radius_for(p_runs, idx, best_priority, p_opts, arcs)
 	var r_eff: float = j.effective_corner_radius()
 	var n_arms := dirs.size()
 	var arm_trims := PackedFloat32Array()
@@ -630,7 +630,7 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 			arm_z.append(alignment.height_at(s_face))
 			arm_banks.append(alignment.bank[si] if si < alignment.bank.size() else 0.0)
 			arm_grades.append(alignment.grade_at(si) * arm_signs[ai])
-		arm_crowns.append(float(run.get("crown", 0.05)))
+		arm_crowns.append(float(_run_at(run, "crown", s_face, 0.05)))
 	j.arm_z = arm_z
 	j.arm_banks = arm_banks
 	j.arm_crowns = arm_crowns
@@ -652,15 +652,42 @@ static func _resolve_group(p_runs: Array, p_crossings: Array, p_group: Array,
 ## the choice is invisible, and not for a corner radius, where it would give the intersection a visibly
 ## different shape depending on node order and change it silently when an unrelated road is reparented.
 ## A tie is answered by a value the author set, or not at all.
+## One of a run's cross-section values AT arc length `p_s`: where the road's segments vary it
+## (`run["sections"]`), the value there -- blended for a width, the owning stretch's for a mode or a
+## type's priority -- else the run's own. A junction on a two-lane segment of a four-lane road is a
+## two-lane junction. NaN `p_s` reads the run's own.
+static func _run_at(p_run: Dictionary, p_key: String, p_s: float, p_default: Variant) -> Variant:
+	var sec: Pasture3DRoadSections = p_run.get("sections")
+	if sec == null or sec.is_uniform() or is_nan(p_s):
+		return p_run.get(p_key, p_default)
+	match p_key:
+		"half_width":
+			return sec.number_at(&"half", p_s)
+		"shoulder_width":
+			return sec.number_at(&"shoulder", p_s)
+		"crown":
+			return sec.number_at(&"crown", p_s)
+		"max_bank":
+			return sec.number_at(&"max_bank", p_s)
+		"crown_mode":
+			return int(sec.values_at(p_s)["crown_mode"])
+		"priority", "corner_radius":
+			var tt: Pasture3DRoadType = sec.values_at(p_s)["type"]
+			if tt != null:
+				return tt.priority if p_key == "priority" else tt.corner_radius
+	return p_run.get(p_key, p_default)
+
+
 static func _corner_radius_for(p_runs: Array, p_idx: Array, p_best_priority: int,
-		p_opts: Dictionary) -> float:
+		p_opts: Dictionary, p_arcs: PackedFloat32Array = PackedFloat32Array()) -> float:
 	var fallback: float = float(p_opts.get("default_corner_radius", 6.0))
 	var first := NAN
 	for gi in range(p_idx.size()):
 		var run: Dictionary = p_runs[p_idx[gi]]
-		if int(run.get("priority", 0)) != p_best_priority:
+		var s: float = p_arcs[gi] if gi < p_arcs.size() else NAN
+		if int(_run_at(run, "priority", s, 0)) != p_best_priority:
 			continue
-		var v: float = float(run.get("corner_radius", fallback))
+		var v: float = float(_run_at(run, "corner_radius", s, fallback))
 		if is_nan(first):
 			first = v
 		elif not is_equal_approx(first, v):

@@ -57,6 +57,10 @@ const LOD_LEVELS: int = 4
 ##
 ## 2 cm: below what a camera can see at any driving distance, above what depth precision loses.
 const DEPTH_LIFT: float = 0.02
+## How far below the ground a ribbon ends where the road gives way to a DRAPED stretch, metres. Sinking it
+## over the transition slides the ribbon's end under the painted terrain instead of leaving a step the
+## height of DEPTH_LIFT plus the crown. See `Pasture3DRoadBrush.ribbon_section`.
+const RIBBON_SINK: float = 0.05
 
 ## Arc lengths closer together than this are the same cut. Region boundaries and junction footprints
 ## land near each other constantly — a road entering a junction just inside a region edge would
@@ -300,7 +304,8 @@ static func build_chunk(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 		p_crown_mode: int = 0, p_max_bank: float = 0.0,
 		p_left_kerb: int = 0, p_right_kerb: int = 0,
 		p_kerb_width: float = 0.8, p_kerb_height: float = 0.08,
-		p_kerb_rumble_pitch: float = 0.4, p_kerb_rumble_depth: float = 0.02) -> Array:
+		p_kerb_rumble_pitch: float = 0.4, p_kerb_rumble_depth: float = 0.02,
+		p_section: Dictionary = {}) -> Array:
 	if p_alignment == null or p_plan.size() < 2 or p_to - p_from <= 1e-4:
 		return []
 	if not p_force_gdscript and ClassDB.class_has_method("Pasture3DUtil", "road_mesh_build_chunk"):
@@ -308,7 +313,7 @@ static func build_chunk(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 				p_alignment.z, p_alignment.bank, p_from, p_to, p_half, p_shoulder,
 				p_crown, p_lod, p_lift, p_alignment.s0, p_crown_mode, p_max_bank,
 				p_left_kerb, p_right_kerb, p_kerb_width, p_kerb_height,
-				p_kerb_rumble_pitch, p_kerb_rumble_depth)
+				p_kerb_rumble_pitch, p_kerb_rumble_depth, p_section)
 
 	var offsets := cross_offsets(p_half, p_shoulder, cross_for_lod(p_lod),
 			p_left_kerb, p_right_kerb, p_kerb_width)
@@ -331,8 +336,21 @@ static func build_chunk(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 		# The last row is `p_to` itself, not `p_from + r * step`. Rounding the final ring to the nearest
 		# sample is exactly how a seam opens.
 		var s: float = p_to if r == rows - 1 else minf(p_from + float(r) * step, p_to)
-		var line := ring(p_plan, p_cum, p_alignment, s, offsets, p_crown, p_lift, half,
-				p_crown_mode, p_max_bank, p_left_kerb, p_right_kerb,
+		# THE CROSS-SECTION PER RING where the road's segments vary it (`p_section`): the width, shoulder,
+		# crown and bank limit read at `s` itself, and the ribbon sunk where it gives way to a draped
+		# stretch. Still a pure function of `s`, so the seam contract holds across a transition.
+		var crown := p_crown
+		var max_bank := p_max_bank
+		var lift := p_lift
+		if not p_section.is_empty():
+			half = maxf(section_at(p_section, "half", s, p_half), 0.01)
+			crown = section_at(p_section, "crown", s, p_crown)
+			max_bank = section_at(p_section, "max_bank", s, p_max_bank)
+			lift = p_lift - section_at(p_section, "sink", s, 0.0)
+			offsets = cross_offsets(half, section_at(p_section, "shoulder", s, p_shoulder),
+					cross_for_lod(p_lod), p_left_kerb, p_right_kerb, p_kerb_width)
+		var line := ring(p_plan, p_cum, p_alignment, s, offsets, crown, lift, half,
+				p_crown_mode, max_bank, p_left_kerb, p_right_kerb,
 				p_kerb_width, p_kerb_height, p_kerb_rumble_pitch, p_kerb_rumble_depth)
 		if line.size() != across_count:
 			return []
@@ -402,6 +420,25 @@ static func build_chunk(p_plan: PackedVector2Array, p_cum: PackedFloat32Array,
 	out[Mesh.ARRAY_TEX_UV] = uvs
 	out[Mesh.ARRAY_INDEX] = indices
 	return out
+
+
+## One per-sample cross-section value of a ribbon `p_section` at arc length `p_s`: LINEAR between the
+## samples, like the alignment's height, so a width easing across a transition has no steps. `p_default`
+## when the section does not carry `p_key`. `p_section` is `{ds, s0, half, shoulder, crown, max_bank,
+## sink}`, the arrays sampled every `ds` from `s0`; see `Pasture3DRoadBrush.ribbon_section`. The native
+## mesher reads it the same way.
+static func section_at(p_section: Dictionary, p_key: String, p_s: float, p_default: float) -> float:
+	var arr: PackedFloat32Array = p_section.get(p_key, PackedFloat32Array())
+	var n := arr.size()
+	if n == 0:
+		return p_default
+	if n == 1:
+		return arr[0]
+	var fi := (p_s - float(p_section.get("s0", 0.0))) / maxf(float(p_section.get("ds", 1.0)), 1e-4)
+	var i0 := clampi(int(floor(fi)), 0, n - 1)
+	var i1 := clampi(i0 + 1, 0, n - 1)
+	var t := clampf(fi - float(i0), 0.0, 1.0)
+	return arr[i0] * (1.0 - t) + arr[i1] * t
 
 
 ## The junction apron: the disc of surface inside a junction footprint, as a triangle fan.

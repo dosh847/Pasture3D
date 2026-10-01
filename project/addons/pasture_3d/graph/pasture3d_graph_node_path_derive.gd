@@ -208,6 +208,7 @@ func _derive_path(p_inputs: Array) -> Pasture3DGraphPath:
 		_out.sample_verges = src.sample_verges
 		_out.sample_suppress = src.sample_suppress
 		_out.sample_skip = src.sample_skip
+		_out.sample_section = src.sample_section
 	derive(src, _out)
 	return _out
 

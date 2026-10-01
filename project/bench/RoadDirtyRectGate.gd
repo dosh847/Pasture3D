@@ -10,7 +10,7 @@
 @tool
 extends Node
 
-const CRITERIA: Array[String] = ["A", "B", "C", "D"]
+const CRITERIA: Array[String] = ["A", "B", "C", "D", "E"]
 
 var _fail: int = 0
 var _reported: Dictionary = {}
@@ -22,6 +22,7 @@ func _ready() -> void:
 	_b_stamp_cache_preservation_on_clipped_bake()
 	_c_disjoint_dirty_rect_early_return()
 	_d_scoped_network_composite_area()
+	_e_departed_road_clears_its_own_box()
 	_account_for_silent_criteria()
 	print("\n=== %s (%d failures) ===\n" % ["ROAD DIRTY RECT PASS" if _fail == 0 else "ROAD DIRTY RECT FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
@@ -215,6 +216,43 @@ func _c_disjoint_dirty_rect_early_return() -> void:
 	var neg_ok := ov_x1 > ov_x0
 	if not neg_ok:
 		_check("C_neg", false, "negative control failed: overlapping box considered disjoint")
+
+
+## [E] A road deleted from the network has its paint cleared, and the pass composites the box it was
+## cleared from rather than the whole terrain; this holds when it was the network's LAST road too.
+## Control: while the road is still in the network nothing is departed and the box is empty.
+func _e_departed_road_clears_its_own_box() -> void:
+	print("[E] a departed road clears and composites its own box")
+	var f := _make_long_road()
+	var brush: Pasture3DRoadBrush = f["brush"]
+	var terrain: Pasture3D = f["terrain"]
+	var net: Pasture3DRoadNetwork = f["net"]
+	var layer := net.ensure_paint_layer(terrain)
+	var box := brush.paint_bounds()
+	var key := brush.road_key()
+	# The record a paint pass leaves, written here because the fixture never bakes an alignment to paint.
+	net._painted[key] = {
+		"sig": 0, "layer": "%d:%d" % [terrain.get_instance_id(), layer], "box": box,
+	}
+	var live_box := net._clear_departed_roads({})
+	var kept := net._painted.has(key)
+	net.remove_child(brush)
+	brush.free()
+	net.paint_roads([])
+	var gone := not net._painted.has(key)
+	# The return value itself, on a fresh record for a road that is not there.
+	net._painted["departed"] = {
+		"sig": 0, "layer": "%d:%d" % [terrain.get_instance_id(), layer], "box": box,
+	}
+	var touched := {}
+	var cleared := net._clear_departed_roads(touched)
+	print("    layer %d, road box %s; returned %s; control while live %s (record kept: %s); last-road record cleared: %s"
+			% [layer, box, cleared, live_box, kept, gone])
+	_check("E", layer >= 0 and box.size != Vector3.ZERO and cleared.is_equal_approx(box)
+			and touched.has(terrain.get_instance_id()) and gone
+			and live_box.size == Vector3.ZERO and kept,
+			"the departed road's own box comes back to composite; the network's last road is cleared too; control: a live road departs nothing")
+	terrain.queue_free()
 
 
 func _d_scoped_network_composite_area() -> void:

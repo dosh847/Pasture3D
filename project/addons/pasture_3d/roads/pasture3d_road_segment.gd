@@ -65,6 +65,15 @@ extends Pasture3DRoadOverrides
 ## End the range at the point selected in the viewport on this segment's road.
 @export_tool_button("End at Selected Point") var _end_at_sel_btn = _pick_end
 
+## Metres over which this segment blends into the road, or into the next segment, at each end. Centred on
+## the end, and never more than half of either stretch it joins. Widths, crown, batters and the grade and
+## banking limits ease across it; a bridge, a kerb, the ribbon switching on or off and the paint texture
+## change at the end itself. 0 is a hard step. See PASTURE3D_ROAD_SEGMENT_SECTIONS_SPEC.md.
+@export_range(0.0, 100.0, 0.5, "or_greater", "suffix:m") var transition_length: float = 10.0:
+	set(v):
+		transition_length = maxf(v, 0.0)
+		emit_changed()
+
 @export_group("Structure")
 ## This stretch is carried on a bridge: the terrain is NOT graded under it, and the alignment is free of
 ## the ground. It also does more work than it looks — a bridge segment is excluded from intersection
@@ -229,6 +238,6 @@ func range_warnings(p_spline_length: float = NAN) -> PackedStringArray:
 ## moves no vertex and including it would invalidate every cached block on a rename.
 func signature() -> Array:
 	# The RESOLVED ends: a picked point that moves changes no field of this resource and moves the range.
-	return [super.signature(), start(), end(), from_point, to_point, is_bridge, suppress_paint,
+	return [super.signature(), start(), end(), from_point, to_point, transition_length, is_bridge, suppress_paint,
 			allow_airborne_jump, Pasture3DRoadType.wall_terrain_signature(cut_wall),
 			Pasture3DRoadType.wall_terrain_signature(fill_wall)]

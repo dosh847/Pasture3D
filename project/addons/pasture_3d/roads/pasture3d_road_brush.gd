@@ -237,6 +237,12 @@ var _sharp_radius: float = 0.0
 ## curvature solve over the same unmoved plan.
 var _curv_cache: PackedFloat32Array = PackedFloat32Array()
 var _curv_key: Array = []
+var _curv_along_cache: PackedFloat32Array = PackedFloat32Array()
+var _curv_along_key: Array = []
+## Junctions whose pins landed on the same alignment sample, as warnings: see `_junction_pins_and_skip`.
+var _pin_clashes: PackedStringArray = PackedStringArray()
+var _plan_rect := Rect2()
+var _plan_rect_key: int = -1
 
 ## How many times the plan has actually been tessellated. Read by RoadCostGate [CA]; a counter rather
 ## than a timer, so the criterion is deterministic and does not depend on what else the machine is doing.
@@ -596,29 +602,6 @@ func _editor_points_shifted(p_ur: EditorUndoRedoManager, p_gpi: int, p_delta: in
 				seg.set(picks[k][0], nxt)
 
 
-## Which segment governs each distance in `p_at`, as an index into `p_segs`, or -1 for none.
-##
-## Replaces calling `segment_at` once per sample, which re-scanned the whole segment list every time. The
-## distances must be ASCENDING, which both callers' are — `i * ds` by construction and `cum` because it is
-## a cumulative length.
-##
-## Exactly `segment_at`'s answer, not an approximation of it. `covers` is half-open `[from, to)`, so the
-## governed indices are precisely `bsearch(from) .. bsearch(to)` with both searches taken before equal
-## elements; and filling in ARRAY ORDER reproduces "the last matching segment wins", which is the rule an
-## overlapping short bridge inside a long gravel stretch depends on.
-func _segment_owners(p_at: PackedFloat32Array, p_segs: Array) -> PackedInt32Array:
-	var owner := PackedInt32Array()
-	owner.resize(p_at.size())
-	owner.fill(-1)
-	for k in p_segs.size():
-		var seg: Pasture3DRoadSegment = p_segs[k]
-		var lo: int = p_at.bsearch(seg.start(), true)
-		var hi: int = mini(p_at.bsearch(seg.end(), true), owner.size())
-		for i in range(lo, hi):
-			owner[i] = k
-	return owner
-
-
 ## True when `p_distance` is carried on a bridge. Read by P2's grader (do not cut the terrain here) and
 ## by P4's intersection resolver (an overpass overlaps without meeting, §6.3).
 func is_bridge_at(p_distance: float) -> bool:
@@ -626,26 +609,100 @@ func is_bridge_at(p_distance: float) -> bool:
 	return s != null and s.is_bridge
 
 
-## Left kerb profile at arc length `p_distance`, resolved through Segment -> Brush -> Group -> RoadType.
+## Left kerb profile at arc length `p_distance`: the owning stretch's, so a segment naming its own road
+## type takes that type's kerb when it does not set one (`sections`).
 func left_kerb_at(p_distance: float) -> int:
-	var s := segment_at(p_distance)
-	if s != null and s.left_kerb != Pasture3DRoadType.KerbType.INHERIT:
-		return s.left_kerb
-	if road_defaults != null and road_defaults.left_kerb != Pasture3DRoadType.KerbType.INHERIT:
-		return road_defaults.left_kerb
-	var t := resolved_road_type()
-	return t.default_left_kerb if t != null else Pasture3DRoadType.KerbType.NONE
+	return int(sections().values_at(p_distance)["left_kerb"])
 
 
-## Right kerb profile at arc length `p_distance`, resolved through Segment -> Brush -> Group -> RoadType.
+## Right kerb profile at arc length `p_distance`; see `left_kerb_at`.
 func right_kerb_at(p_distance: float) -> int:
-	var s := segment_at(p_distance)
-	if s != null and s.right_kerb != Pasture3DRoadType.KerbType.INHERIT:
-		return s.right_kerb
-	if road_defaults != null and road_defaults.right_kerb != Pasture3DRoadType.KerbType.INHERIT:
-		return road_defaults.right_kerb
-	var t := resolved_road_type()
-	return t.default_right_kerb if t != null else Pasture3DRoadType.KerbType.NONE
+	return int(sections().values_at(p_distance)["right_kerb"])
+
+
+# ---- Sections (PASTURE3D_ROAD_SEGMENT_SECTIONS_SPEC.md) --------------------------------------------
+
+## This road cut into stretches by its segments, with every level's values resolved and the transitions
+## laid out. EVERY consumer of a road setting reads through this, so the grader, the solver, the ribbon
+## and the paint agree about what the road is at every arc length. `p_mod` is the road modifier whose
+## overrides apply; null finds it.
+func sections(p_mod: Pasture3DNodeRoad = null) -> Pasture3DRoadSections:
+	var mod: Pasture3DNodeRoad = p_mod if p_mod != null else road_modifier()
+	var grp := road_group()
+	var net := road_network()
+	var tail := _chain_tail(grp, net)
+	var t := _type_in(tail, grp, net)
+	var levels: Array = [_section_level(null, tail, t, mod, grp, net)]
+	var ranges: Array = []
+	for seg: Pasture3DRoadSegment in _live_segments():
+		var chain: Array = [seg] + tail
+		var tt := _type_in(chain, grp, net)
+		levels.append(_section_level(seg, chain, tt if tt != null else t, mod, grp, net))
+		ranges.append([seg.start(), seg.end(), seg.transition_length])
+	return Pasture3DRoadSections.build(levels, ranges, total_arc_length())
+
+
+## One level's values: the road's (`p_seg` null) or one segment's. A segment that names its own road type
+## takes that type's earthworks over the modifier's overrides (spec §2.1); anywhere else the modifier's
+## overrides apply over the type.
+func _section_level(p_seg: Pasture3DRoadSegment, p_chain: Array, p_type: Pasture3DRoadType,
+		p_mod: Pasture3DNodeRoad, p_grp: Pasture3DRoadGroup, p_net: Pasture3DRoadNetwork) -> Dictionary:
+	var t := p_type
+	var own_type := p_seg != null and p_seg.road_type != null
+	var mod: Pasture3DNodeRoad = null if own_type else p_mod
+	var num := func(p_override: float, p_value: float) -> float:
+		return mod.resolved_number(p_override, p_value) if mod != null else p_value
+	var lanes := _lanes_in(p_chain, p_grp, p_net)
+	var v: Variant = Pasture3DRoadOverrides.resolve(p_chain, &"traffic_flow")
+	var one_way := v != null and int(v) == int(Pasture3DRoadOverrides.TrafficFlow.ONE_WAY)
+	v = Pasture3DRoadOverrides.resolve(p_chain, &"follow_terrain")
+	var drape := v != null and int(v) == int(Pasture3DRoadOverrides.Tri.ON)
+	v = Pasture3DRoadOverrides.resolve(p_chain, &"surface_id")
+	var surface_id: StringName = StringName(v) if v != null else (t.surface_id if t != null else &"")
+	v = Pasture3DRoadOverrides.resolve(p_chain, &"left_kerb")
+	var l_kerb: int = int(v) if v != null else (t.default_left_kerb if t != null else 0)
+	v = Pasture3DRoadOverrides.resolve(p_chain, &"right_kerb")
+	var r_kerb: int = int(v) if v != null else (t.default_right_kerb if t != null else 0)
+	var speed := t.design_speed if t != null else 25.0
+	var v2 := maxf(speed * speed, 1e-4)
+	var max_super := t.max_superelevation if t != null else 0.06
+	var mtn := t.mountain_banking_cap if t != null else -1.0
+	var widen := t != null and t.curve_widening_enabled
+	return {
+		"type": t,
+		"segment": p_seg,
+		"lanes": lanes,
+		"one_way": one_way,
+		"half": t.half_width(lanes) if t != null else 3.5,
+		"shoulder": t.shoulder_width if t != null else 0.5,
+		"verge": num.call(p_mod.verge_override if mod != null else -1.0, t.verge_width if t != null else 4.0),
+		"crown": num.call(p_mod.crown_override if mod != null else -1.0, t.crown if t != null else 0.05),
+		"crown_mode": t.crown_mode if t != null else 0,
+		"max_bank": max_super,
+		"cut_batter": num.call(p_mod.cut_batter_override if mod != null else -1.0, t.cut_batter if t != null else 1.0),
+		"fill_batter": num.call(p_mod.fill_batter_override if mod != null else -1.0, t.fill_batter if t != null else 0.6),
+		"toe_rounding": num.call(p_mod.toe_rounding_override if mod != null else -1.0, t.toe_rounding if t != null else 0.0),
+		"hinge_rounding": num.call(p_mod.hinge_rounding_override if mod != null else -1.0, t.hinge_rounding if t != null else 0.0),
+		"widen_factor": t.curve_widening_factor if widen else 0.0,
+		"widen_max": t.curve_widening_max if widen else 0.0,
+		"max_grade": t.max_grade if t != null else 0.15,
+		"k_crest": (t.vertical_crest_accel_limit if t != null else 0.4) * 9.81 / v2,
+		"k_sag": (t.vertical_sag_accel_limit if t != null else 0.6) * 9.81 / v2,
+		"design_speed": speed,
+		"bank_cap": minf(mtn, max_super) if mtn > 0.0 else max_super,
+		"hairpin": t.hairpin_grade_compensation if t != null else 0.0,
+		"drape": 1.0 if drape else 0.0,
+		"bridge": p_seg != null and p_seg.is_bridge,
+		"suppress_paint": p_seg != null and p_seg.suppress_paint,
+		"jump": p_seg != null and p_seg.allow_airborne_jump,
+		"cut_wall": _resolved_wall(p_seg, p_mod, t, true),
+		"fill_wall": _resolved_wall(p_seg, p_mod, t, false),
+		"left_kerb": maxi(l_kerb, 0),
+		"right_kerb": maxi(r_kerb, 0),
+		"surface_id": surface_id,
+		"draped": t != null and t.surface_mode == Pasture3DRoadType.SurfaceMode.TERRAIN_DRAPED,
+		"texture": -1 if (t == null or (p_seg != null and p_seg.suppress_paint)) else t.surface_layer_id,
+	}
 
 
 # ---- Brush base hooks ---------------------------------------------------------------------------
@@ -723,12 +780,29 @@ func corridor_half_width() -> float:
 			wall_out = maxf(wall_out, w.step_offset())
 			if w.beyond_batter > 0.0:
 				batter = minf(batter, w.beyond_batter)
-	return t.disturbed_width(resolved_lane_count()) * 0.5 + widen + allowance / maxf(batter, 0.05) \
+	var out := t.disturbed_width(resolved_lane_count()) * 0.5 + widen + allowance / maxf(batter, 0.05) \
 			+ toe + 2.0 * hinge + wall_out
+	# A SEGMENT MAY BE WIDER than the road, or batter shallower: the corridor is the widest any stretch
+	# needs, or the bake box clips that stretch's batter.
+	var sec := sections()
+	for k in range(1, sec.levels.size()):
+		var lv: Dictionary = sec.levels[k]
+		var lt: Pasture3DRoadType = lv["type"]
+		if lt == null:
+			continue
+		var lb := minf(batter, minf(float(lv["cut_batter"]), float(lv["fill_batter"])))
+		out = maxf(out, lt.disturbed_width(int(lv["lanes"])) * 0.5 + float(lv["widen_max"])
+				+ allowance / maxf(lb, 0.05) + float(lv["toe_rounding"]) + 2.0 * float(lv["hinge_rounding"])
+				+ wall_out)
+	return out
+
+
+## The bake box's pad past the corridor: room for the grid's own edge cells.
+const PADDING_MARGIN: float = 4.0
 
 
 func _padding() -> float:
-	return corridor_half_width() + 4.0
+	return corridor_half_width() + PADDING_MARGIN
 
 
 ## Starter shape: a straight run, matching Ridge's.
@@ -766,8 +840,10 @@ func _paint_flat_footprint(path: Path3D) -> void:
 	if plan.size() < 2:
 		return
 	# The corridor this bake is ABOUT to commit to, captured before the grid is snapped and before the
-	# solve replaces `last_alignment`. `_rebake_if_corridor_outgrew` compares against it afterwards.
-	var used_pad := _padding()
+	# solve replaces `last_alignment`. `_rebake_if_corridor_outgrew` compares against it afterwards. Built
+	# from `reach` rather than by calling `_padding()`, which would walk the modifiers and sections again.
+	var reach := corridor_half_width()
+	var used_pad := reach + PADDING_MARGIN
 	var vs: float = terrain.vertex_spacing
 	var full_fp := _spline_footprint_aabb(path)
 	var active_box: AABB = full_fp
@@ -800,8 +876,6 @@ func _paint_flat_footprint(path: Path3D) -> void:
 		return
 	var n := gw * gh
 
-	var reach := corridor_half_width()
-
 	# Native rasteriser: when available, solve alignment and grade directly in C++
 	var road_mod := road_modifier()
 	if _native_raster("stamp_road_line") and road_mod != null and _road_native_is_complete():
@@ -823,39 +897,14 @@ func _paint_flat_footprint(path: Path3D) -> void:
 			ground = _fill_ground_gaps(ground)
 
 		var t := resolved_road_type()
-		var max_grade := t.max_grade if t != null else 0.15
-		var design_speed := t.design_speed if t != null else 16.67
-		var max_superelevation := t.max_superelevation if t != null else 0.06
 		var prof := grading_profile(road_mod, ds, n_s)
-		var pins: Dictionary = prof["pins"]
-		var alignment: Pasture3DRoadAlignment
-		if resolved_follow_terrain():
-			alignment = Pasture3DRoadAlignment.new()
-			alignment.ds = ds
-			alignment.z = ground.duplicate()
-			alignment.ground = ground.duplicate()
-			alignment.bank = Pasture3DRoadGrader._zeros(n_s)
-			alignment.curvature = Pasture3DRoadGrader._zeros(n_s)
-		else:
-			var mtn_cap: float = t.mountain_banking_cap if t != null else -1.0
-			var hairpin_comp: float = t.hairpin_grade_compensation if t != null else 0.0
-			alignment = Pasture3DRoadAlignmentSolver.solve_with_plan(_resample_plan(plan, cum, ds, n_s),
-					ground, ds, max_grade, design_speed, max_superelevation,
-					{
-						"pins": pins,
-						"smooth_radius": road_mod.smooth_radius,
-						"mountain_banking_cap": mtn_cap,
-						"hairpin_grade_compensation": hairpin_comp,
-						"vertical_crest_accel_limit": t.vertical_crest_accel_limit if t != null else 0.4,
-						"vertical_sag_accel_limit": t.vertical_sag_accel_limit if t != null else 0.6,
-						"allow_airborne_jump": prof.get("allow_airborne_jump", PackedByteArray()),
-					})
+		var pts := _resample_plan(plan, cum, ds, n_s)
+		var alignment := _solve_alignment(road_mod, pts, ground, ds, n_s, prof)
 		alignment.input_digest = alignment_digest(road_mod)
 		road_mod.last_alignment = alignment
-		_after_alignment_solve(_resample_plan(plan, cum, ds, n_s), ds, alignment)
-		# The walls from the ground this route grades: the layers below, throughout. No max_bank, because
-		# this route's grader is not given one either.
-		_plan_walls(alignment, plan, cum, prof, 0.0)
+		_after_alignment_solve(pts, ds, alignment)
+		# The walls from the ground this route grades: the layers below, throughout.
+		_plan_walls(alignment, plan, cum, prof, t.max_superelevation if t != null else 0.0)
 
 		_rebake_if_corridor_outgrew(used_pad)
 
@@ -872,6 +921,10 @@ func _paint_flat_footprint(path: Path3D) -> void:
 			"opts": _with_batter_shape({
 				"crown": prof["crown"],
 				"crown_mode": t.crown_mode if t != null else 0,
+				# The same attenuation `grade_surface` and the ribbon apply. Missing here, the kernel read 0,
+				# so in a banked turn the editor graded the full crown under a ribbon that had faded it out
+				# -- and only on a road whose segments did not vary max_bank, which pass it per sample.
+				"max_bank": t.max_superelevation if t != null else 0.0,
 				"cut_batter": prof["cut_batter"],
 				"fill_batter": prof["fill_batter"],
 				"wall_plan": alignment.wall_plan,
@@ -945,6 +998,7 @@ func _paint_flat_footprint(path: Path3D) -> void:
 				"verge": out.get("verge", PackedFloat32Array()),
 				"structure": out.get("structure", PackedFloat32Array()),
 				"surface": out.get("surface", PackedFloat32Array()),
+				"surface_s": out.get("surface_s", PackedFloat32Array()),
 				"gw": gw, "gh": gh, "min_x": min_x, "min_z": min_z, "vs": vs,
 			}
 		else:
@@ -1106,6 +1160,129 @@ func _mark_corridor(r_amp: PackedFloat64Array, r_profile: PackedFloat64Array,
 
 # ---- Grading (P2) -------------------------------------------------------------------------------
 
+## The vertical alignment for one bake: the road's profile, solved against `p_ground` under the limits
+## its SECTIONS set (`p_prof` from `grading_profile`). Both bake routes call this, so the native stamp and
+## the GDScript grader solve the same road.
+##
+## Where a segment varies the grade limit, the curvature limits, the design speed, the bank cap or the
+## hairpin compensation, they go to the solver PER SAMPLE, blended across the transitions. Where a
+## stretch drapes (`follow_terrain` ON), the solved profile is blended onto the ground by the `drape`
+## weight after the solve and its banking faded out; a road that drapes everywhere is not solved at all.
+## A draped road is a deliberate choice, not a fallback: the grader still crowns, banks and batters.
+func _solve_alignment(p_mod: Pasture3DNodeRoad, p_plan: PackedVector2Array, p_ground: PackedFloat32Array,
+		p_ds: float, p_n_s: int, p_prof: Dictionary) -> Pasture3DRoadAlignment:
+	var sec: Pasture3DRoadSections = p_prof["sections"]
+	var smp: Dictionary = p_prof["sampled"]
+	var drape := sec.numbers(&"drape", smp)
+	var all_drape := true
+	var any_drape := false
+	for d in drape:
+		all_drape = all_drape and d >= 1.0
+		any_drape = any_drape or d > 0.0
+	var alignment: Pasture3DRoadAlignment
+	if all_drape:
+		alignment = Pasture3DRoadAlignment.new()
+		alignment.ds = p_ds
+		alignment.z = p_ground.duplicate()
+		alignment.ground = p_ground.duplicate()
+		alignment.bank = Pasture3DRoadGrader._zeros(p_n_s)
+		alignment.curvature = Pasture3DRoadGrader._zeros(p_n_s)
+		return alignment
+	# The scalars are the ROAD's, read from its type as they always were, so a road without segments
+	# solves bit for bit as before.
+	var t := resolved_road_type()
+	var opts := {
+		"pins": p_prof["pins"],
+		# From the plan's own vertices, not the resampled plan: see `plan_curvature_along`.
+		"plan_curvature": _plan_curvature_along(p_ds, p_n_s),
+		"smooth_radius": p_mod.smooth_radius,
+		"mountain_banking_cap": t.mountain_banking_cap if t != null else -1.0,
+		"hairpin_grade_compensation": t.hairpin_grade_compensation if t != null else 0.0,
+		"vertical_crest_accel_limit": t.vertical_crest_accel_limit if t != null else 0.4,
+		"vertical_sag_accel_limit": t.vertical_sag_accel_limit if t != null else 0.6,
+		"allow_airborne_jump": p_prof.get("allow_airborne_jump", PackedByteArray()),
+	}
+	if not sec.is_uniform():
+		opts["max_grade_s"] = sec.numbers(&"max_grade", smp)
+		opts["hairpin_s"] = sec.numbers(&"hairpin", smp)
+		opts["k_crest_s"] = sec.numbers(&"k_crest", smp)
+		opts["k_sag_s"] = sec.numbers(&"k_sag", smp)
+		opts["design_speed_s"] = sec.numbers(&"design_speed", smp)
+		opts["bank_cap_s"] = sec.numbers(&"bank_cap", smp)
+	alignment = Pasture3DRoadAlignmentSolver.solve_with_plan(p_plan, p_ground, p_ds,
+			t.max_grade if t != null else 0.15, t.design_speed if t != null else 16.67,
+			t.max_superelevation if t != null else 0.06, opts)
+	if any_drape:
+		var z := alignment.z
+		var bank := alignment.bank
+		var n := mini(z.size(), p_ground.size())
+		for i in n:
+			z[i] = lerpf(z[i], p_ground[i], drape[i])
+			if i < bank.size():
+				bank[i] *= 1.0 - drape[i]
+		alignment.z = z
+		alignment.bank = bank
+	return alignment
+
+
+## Curve widening into `p_half`, per sample, from each level's own type: 0 where a level has it off. One
+## definition for the grader and the ribbon, so the ribbon is as wide as the ground graded for it.
+func _widen(p_half: PackedFloat32Array, p_sec: Pasture3DRoadSections, p_smp: Dictionary, p_ds: float,
+		p_n_s: int) -> void:
+	var any_widen := false
+	for lv: Dictionary in p_sec.levels:
+		any_widen = any_widen or float(lv["widen_factor"]) > 0.0
+	if not any_widen:
+		return
+	var widen_f := p_sec.numbers(&"widen_factor", p_smp)
+	var widen_m := p_sec.numbers(&"widen_max", p_smp)
+	var curv := _plan_curvature_along(p_ds, p_n_s)
+	for i in mini(curv.size(), p_n_s):
+		p_half[i] += clampf(widen_f[i] * absf(curv[i]), 0.0, widen_m[i])
+
+
+## The ribbon's cross-section per alignment sample, for `Pasture3DRoadMesher.build_chunk`'s `p_section`:
+## `{ds, s0, half, shoulder, crown, max_bank, sink}`. The same widths the grader cuts (`_widen` included),
+## so the ribbon lies exactly on its formation through a transition.
+##
+## `sink` lowers the ribbon where it gives way to a DRAPED stretch (spec §3): over the half of the
+## transition on the ribbon's side it eases from 0 to `p_sink` metres, so the ribbon's end slides under
+## the painted ground instead of standing on it as a step. Empty `{}` when nothing along the road varies
+## and curve widening is off, and then the mesher's scalars are the whole answer.
+func ribbon_section(p_sec: Pasture3DRoadSections, p_ds: float, p_n: int, p_sink: float) -> Dictionary:
+	var widens := false
+	for lv: Dictionary in p_sec.levels:
+		widens = widens or float(lv["widen_factor"]) > 0.0
+	if p_sec.is_uniform() and not widens:
+		return {}
+	var smp := p_sec.sample(p_ds, p_n)
+	var half := p_sec.numbers(&"half", smp)
+	_widen(half, p_sec, smp, p_ds, p_n)
+	var sink := PackedFloat32Array()
+	sink.resize(p_n)
+	sink.fill(0.0)
+	for j in range(1, p_sec.level.size()):
+		var draped_a := bool(p_sec.levels[p_sec.level[j - 1]]["draped"])
+		var draped_b := bool(p_sec.levels[p_sec.level[j]]["draped"])
+		var h: float = p_sec.half_at[j]
+		if draped_a == draped_b or h <= 0.0:
+			continue
+		var b: float = p_sec.from_s[j]
+		for i in range(maxi(int(floor((b - h) / p_ds)), 0), mini(int(ceil((b + h) / p_ds)) + 1, p_n)):
+			var s := float(i) * p_ds
+			# 0 at the far end of the ribbon's half of the transition, 1 at the boundary and beyond it.
+			var t := clampf(((s - (b - h)) if not draped_a else ((b + h) - s)) / h, 0.0, 1.0)
+			sink[i] = maxf(sink[i], t * t * (3.0 - 2.0 * t) * p_sink)
+	return {
+		"ds": p_ds, "s0": 0.0,
+		"half": half,
+		"shoulder": p_sec.numbers(&"shoulder", smp),
+		"crown": p_sec.numbers(&"crown", smp),
+		"max_bank": p_sec.numbers(&"max_bank", smp),
+		"sink": sink,
+	}
+
+
 ## The road's cross-section and the junctions' demands at every alignment sample: widths, batters,
 ## bridging and trim-back. Everything `Pasture3DRoadGrader.grade` needs about this road except the solved
 ## profile itself.
@@ -1124,103 +1301,50 @@ func _mark_corridor(r_amp: PackedFloat64Array, r_profile: PackedFloat64Array,
 ## Returns `pins` alongside, because the junctions are walked once to produce both and they are the same
 ## walk — but they go to different places: the pin into the alignment SOLVE, the trim into the GRADING.
 func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dictionary:
-	var t := resolved_road_type()
-	var def_half: float = t.half_width(resolved_lane_count(0.0)) if t != null else 3.5
-	var def_shoulder: float = t.shoulder_width if t != null else 0.5
-	var def_verge: float = p_mod.verge_override if (p_mod != null and p_mod.verge_override >= 0.0) else (t.verge_width if t != null else 4.0)
-
-	var half := PackedFloat32Array()
-	var shoulder := PackedFloat32Array()
-	var verge := PackedFloat32Array()
-	var suppress := PackedByteArray()
-	var jump_mask := PackedByteArray()
-	half.resize(p_n_s); half.fill(def_half)
-	shoulder.resize(p_n_s); shoulder.fill(def_shoulder)
-	verge.resize(p_n_s); verge.fill(def_verge)
-	suppress.resize(p_n_s); suppress.fill(0)
-	jump_mask.resize(p_n_s); jump_mask.fill(0)
+	# ---- EVERY VALUE COMES FROM THE SECTIONS ----------------------------------------------------------
+	#
+	# Resolved once per LEVEL (the road and each segment), then blended per sample across the transitions
+	# at the segment edges. This used to resolve per segment too, but only the widths, the bridge flag, the
+	# jump mask and the walls; the crown, the batters and the rounding were one number for the whole road,
+	# so a dirt-track segment on a paved road kept the paved road's earthworks. See
+	# PASTURE3D_ROAD_SEGMENT_SECTIONS_SPEC.md.
+	var sec := sections(p_mod)
+	var smp := sec.sample(p_ds, p_n_s)
+	var half := sec.numbers(&"half", smp)
+	var shoulder := sec.numbers(&"shoulder", smp)
+	var verge := sec.numbers(&"verge", smp)
+	var suppress := sec.bytes(&"bridge", smp)
+	var jump_mask := sec.bytes(&"jump", smp)
 	# THE WALLS, as an index per sample into `walls` (-1 = none), so a segment can change the wall design
-	# over its range while the plan and the grader see only numbers. Most specific first: the segment,
-	# then this road's modifier, then the type.
+	# over its range while the plan and the grader see only numbers. A wall design cannot blend, so it
+	# switches at the segment edge.
 	var walls: Array = []
+	var lv_cut := PackedInt32Array()
+	var lv_fill := PackedInt32Array()
+	for lv: Dictionary in sec.levels:
+		lv_cut.append(_wall_slot(walls, lv["cut_wall"]))
+		lv_fill.append(_wall_slot(walls, lv["fill_wall"]))
+	var owner: PackedInt32Array = smp["owner"]
 	var cut_idx := PackedInt32Array()
 	var fill_idx := PackedInt32Array()
 	cut_idx.resize(p_n_s)
 	fill_idx.resize(p_n_s)
-	cut_idx.fill(_wall_slot(walls, _resolved_wall(null, p_mod, t, true)))
-	fill_idx.fill(_wall_slot(walls, _resolved_wall(null, p_mod, t, false)))
+	for i in p_n_s:
+		cut_idx[i] = lv_cut[owner[i]]
+		fill_idx[i] = lv_fill[owner[i]]
 
-	# ---- WHY THE UNIFORM FILL ABOVE IS USUALLY THE WHOLE ANSWER -------------------------------------
-	#
-	# The guard here used to read `not segments.is_empty() or road_defaults != null`, and `_init` creates a
-	# `Pasture3DRoadOverrides` unconditionally — so `road_defaults` is NEVER null, the fast path was dead,
-	# and every road ran the loop. The correct question is not "does this road have overrides" but "does
-	# anything in the chain VARY along it", and the segment is the only term that can: the brush, group and
-	# network levels are constant over one call, and `verge_override` is one number. So the test is
-	# `segments`, and a road without any takes the fill and stops.
-	var segs := _live_segments()
-	if not segs.is_empty():
-		# Resolved ONCE PER SEGMENT, not once per sample. Each sample used to call `resolved_road_type`,
-		# `resolved_lane_count` (which calls `resolved_road_type` again) and `is_bridge_at`, each of which
-		# allocated a chain Array and walked the parent list to the scene root through `find_for` — about
-		# six ancestor walks and three allocations per sample, five thousand times on a 5 km road.
-		var at := PackedFloat32Array()
-		at.resize(p_n_s)
-		for i in p_n_s:
-			at[i] = float(i) * p_ds
-		var owner := _segment_owners(at, segs)
-		var grp := road_group()
-		var net := road_network()
-		var tail := _chain_tail(grp, net)
-		var seg_half := PackedFloat32Array()
-		var seg_shoulder := PackedFloat32Array()
-		var seg_verge := PackedFloat32Array()
-		var seg_bridge := PackedByteArray()
-		var seg_jump := PackedByteArray()
-		var seg_cut := PackedInt32Array()
-		var seg_fill := PackedInt32Array()
-		seg_cut.resize(segs.size())
-		seg_fill.resize(segs.size())
-		seg_half.resize(segs.size())
-		seg_shoulder.resize(segs.size())
-		seg_verge.resize(segs.size())
-		seg_bridge.resize(segs.size())
-		seg_jump.resize(segs.size())
-		for k in segs.size():
-			var seg: Pasture3DRoadSegment = segs[k]
-			var chain: Array = [seg] + tail
-			var tt: Pasture3DRoadType = _type_in(chain, grp, net)
-			if tt == null:
-				tt = t
-			seg_half[k] = tt.half_width(_lanes_in(chain, grp, net)) if tt != null else 3.5
-			seg_shoulder[k] = tt.shoulder_width if tt != null else 0.5
-			if p_mod != null and p_mod.verge_override >= 0.0:
-				seg_verge[k] = p_mod.verge_override
-			else:
-				seg_verge[k] = tt.verge_width if tt != null else 4.0
-			seg_bridge[k] = 1 if seg.is_bridge else 0
-			seg_jump[k] = 1 if seg.allow_airborne_jump else 0
-			seg_cut[k] = _wall_slot(walls, _resolved_wall(seg, p_mod, tt, true))
-			seg_fill[k] = _wall_slot(walls, _resolved_wall(seg, p_mod, tt, false))
-		for i in p_n_s:
-			var k := owner[i]
-			# -1 is "no segment here", and the uniform fill is already exactly right for those samples.
-			if k < 0:
-				continue
-			half[i] = seg_half[k]
-			shoulder[i] = seg_shoulder[k]
-			verge[i] = seg_verge[k]
-			suppress[i] = seg_bridge[k]
-			jump_mask[i] = seg_jump[k]
-			cut_idx[i] = seg_cut[k]
-			fill_idx[i] = seg_fill[k]
+	_widen(half, sec, smp, p_ds, p_n_s)
 
-	if t != null and t.curve_widening_enabled:
-		var curv := _plan_curvature_at(p_ds, p_n_s)
-		var c_size := mini(curv.size(), p_n_s)
-		for i in c_size:
-			var extra := clampf(t.curve_widening_factor * absf(curv[i]), 0.0, t.curve_widening_max)
-			half[i] += extra
+	# The per-sample grading values the grader reads where the segments vary them (`section_value`). The
+	# scalar keys below stay the ROAD's own, so a consumer that never heard of sections grades the road
+	# as it did.
+	var section := {}
+	if not sec.is_uniform():
+		for f: StringName in [&"crown", &"max_bank", &"cut_batter", &"fill_batter", &"toe_rounding",
+				&"hinge_rounding"]:
+			section[String(f)] = sec.numbers(f, smp)
+		section["crown_mode"] = sec.bytes(&"crown_mode", smp)
+	var road: Dictionary = sec.levels[0]
 
 	# ---- WHAT THE JUNCTIONS ASK OF THIS ROAD (§6) ---------------------------------------------------
 	#
@@ -1245,7 +1369,37 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 	# `grade_junction_footprints` writes the ground inside a footprint from the JUNCTION's own surface.
 	# Priority keeps what priority is for — it sets `elevation`, the height the intersection sits at, and
 	# the material it is made of. It no longer decides the SHAPE, so a tie stops being visible at all.
+	var junc := _junction_pins_and_skip(p_ds, p_n_s)
+	var pins: Dictionary = junc[0]
+	var skip: PackedByteArray = junc[1]
+	return {
+		"half": half, "shoulder": shoulder, "verge": verge, "suppress": suppress,
+		"allow_airborne_jump": jump_mask,
+		"pins": pins, "skip": skip,
+		"crown": float(road["crown"]),
+		"cut_batter": float(road["cut_batter"]),
+		"fill_batter": float(road["fill_batter"]),
+		"toe_rounding": float(road["toe_rounding"]),
+		"hinge_rounding": float(road["hinge_rounding"]),
+		"walls": walls, "cut_wall_idx": cut_idx, "fill_wall_idx": fill_idx,
+		"section": section,
+		"want_s": _paint_varies(sec),
+		# The sections themselves, for the solver and the ribbon, which read more than the grader does.
+		"sections": sec, "sampled": smp,
+	}
+
+
+## `[pins, skip]` for `p_n_s` samples `p_ds` apart: each junction's pin by sample index, and 1 across each
+## junction's trim-back. Its own function because `_formation_mask` needs the skip of every OTHER road and
+## nothing else, and building their whole `grading_profile` for it cost a full sections pass per road.
+##
+## TWO PINS ON ONE SAMPLE: two junctions within one sample of each other along this road round to the same
+## index, and the later overwrites the earlier, so only its height reaches the profile. Not merged — no
+## single height is right for both — but reported, in the configuration warnings and the bake trace.
+func _junction_pins_and_skip(p_ds: float, p_n_s: int) -> Array:
 	var pins := {}
+	var pin_owner := {}
+	var clashes := PackedStringArray()
 	var skip := PackedByteArray()
 	skip.resize(p_n_s)
 	var jnet := road_network()
@@ -1258,29 +1412,42 @@ func grading_profile(p_mod: Pasture3DNodeRoad, p_ds: float, p_n_s: int) -> Dicti
 			var jpin: float = j.pin_for(jkey)
 			var ji := clampi(int(round(js / p_ds)), 0, p_n_s - 1)
 			if is_finite(jpin):
+				if pin_owner.has(ji):
+					var prev: Pasture3DRoadJunction = pin_owner[ji]
+					clashes.append(("Junctions '%s' and '%s' are %.2f m apart along this road, inside one %.1f m "
+							+ "alignment sample: only '%s' pins the road's height (%.2f m, not %.2f m). Move them "
+							+ "further apart.") % [prev.id, j.id, absf(js - prev.arc_length_for(jkey)), p_ds, j.id,
+							jpin, float(pins[ji])])
 				pins[ji] = jpin
+				pin_owner[ji] = j
 			var trim: float = j.trim_back_for(jkey)
 			if trim > 0.0:
 				var lo := clampi(int(floor((js - trim) / p_ds)), 0, p_n_s - 1)
 				var hi := clampi(int(ceil((js + trim) / p_ds)), 0, p_n_s - 1)
 				for i in range(lo, hi + 1):
 					skip[i] = 1
-	return {
-		"half": half, "shoulder": shoulder, "verge": verge, "suppress": suppress,
-		"allow_airborne_jump": jump_mask,
-		"pins": pins, "skip": skip,
-		"crown": p_mod.resolved_number(p_mod.crown_override, t.crown) if p_mod != null and t != null \
-				else 0.05,
-		"cut_batter": p_mod.resolved_number(p_mod.cut_batter_override, t.cut_batter) \
-				if p_mod != null and t != null else 1.0,
-		"fill_batter": p_mod.resolved_number(p_mod.fill_batter_override, t.fill_batter) \
-				if p_mod != null and t != null else 0.6,
-		"toe_rounding": p_mod.resolved_number(p_mod.toe_rounding_override, t.toe_rounding) \
-				if p_mod != null and t != null else 0.0,
-		"hinge_rounding": p_mod.resolved_number(p_mod.hinge_rounding_override, t.hinge_rounding) \
-				if p_mod != null and t != null else 0.0,
-		"walls": walls, "cut_wall_idx": cut_idx, "fill_wall_idx": fill_idx,
-	}
+	# Reported only when the set changes: this runs for every other road's formation mask too.
+	if clashes != _pin_clashes:
+		_pin_clashes = clashes
+		for c in clashes:
+			push_warning("Pasture3D road '%s': %s" % [name, c])
+			Pasture3DBakeTrace.mark("%s %s" % [name, c])
+		# Deferred: a Live solve reaches here off the main thread.
+		update_configuration_warnings.call_deferred()
+	return [pins, skip]
+
+
+## The plan's XZ bounds, cached with the plan (keyed on `plan_builds`, which every rebuild bumps).
+func plan_rect() -> Rect2:
+	var plan := _plan_points()
+	if _plan_rect_key == plan_builds:
+		return _plan_rect
+	var r := Rect2(plan[0], Vector2.ZERO) if plan.size() > 0 else Rect2()
+	for p in plan:
+		r = r.expand(p)
+	_plan_rect = r
+	_plan_rect_key = plan_builds
+	return r
 
 
 ## The wall one level of the chain resolves to, or null for none: the segment's own, then the modifier's
@@ -1316,6 +1483,13 @@ static func _wall_slot(p_walls: Array, p_wall: Pasture3DRoadWall) -> int:
 static func _with_batter_shape(p_opts: Dictionary, p_prof: Dictionary) -> Dictionary:
 	for k in ["toe_rounding", "hinge_rounding"]:
 		p_opts[k] = float(p_prof.get(k, 0.0))
+	# The per-sample values where the segments vary them. The same three routes, the same reason.
+	var sec: Dictionary = p_prof.get("section", {})
+	if not sec.is_empty():
+		p_opts["section"] = sec
+	# The arc length of every surface cell, only where the paint needs it to pick a texture per cell.
+	if bool(p_prof.get("want_s", false)):
+		p_opts["want_s"] = true
 	return p_opts
 
 
@@ -1463,7 +1637,6 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	var shoulder: PackedFloat32Array = prof["shoulder"]
 	var verge: PackedFloat32Array = prof["verge"]
 	var suppress: PackedByteArray = prof["suppress"]
-	var pins: Dictionary = prof["pins"]
 	# Recorded HERE and not in `grading_profile`, because it is a statement about a bake: "the pins this
 	# road last built itself with". `graph_path` asks for the same profile without baking anything, and
 	# crediting it with a rebake it did not do would stop the resolve loop asking for the one it needs.
@@ -1471,30 +1644,7 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	if jnet != null:
 		_record_junction_bake()
 
-	var alignment: Pasture3DRoadAlignment
-	if resolved_follow_terrain():
-		# A draped road is a deliberate choice, not a fallback: the alignment is the ground, so the
-		# grader still crowns, banks and batters — it just does not solve a profile.
-		alignment = Pasture3DRoadAlignment.new()
-		alignment.ds = ds
-		alignment.z = ground.duplicate()
-		alignment.ground = ground.duplicate()
-		alignment.bank = Pasture3DRoadGrader._zeros(n_s)
-		alignment.curvature = Pasture3DRoadGrader._zeros(n_s)
-	else:
-		var mtn_cap: float = t.mountain_banking_cap if t != null else -1.0
-		var hairpin_comp: float = t.hairpin_grade_compensation if t != null else 0.0
-		alignment = Pasture3DRoadAlignmentSolver.solve_with_plan(_resample_plan(plan, cum, ds, n_s),
-				ground, ds, t.max_grade, t.design_speed, t.max_superelevation,
-				{
-					"pins": pins,
-					"smooth_radius": p_mod.smooth_radius,
-					"mountain_banking_cap": mtn_cap,
-					"hairpin_grade_compensation": hairpin_comp,
-					"vertical_crest_accel_limit": t.vertical_crest_accel_limit if t != null else 0.4,
-					"vertical_sag_accel_limit": t.vertical_sag_accel_limit if t != null else 0.6,
-					"allow_airborne_jump": prof.get("allow_airborne_jump", PackedByteArray()),
-				})
+	var alignment := _solve_alignment(p_mod, pts, ground, ds, n_s, prof)
 	alignment.input_digest = alignment_digest(p_mod)
 	p_mod.last_alignment = alignment
 	_after_alignment_solve(pts, ds, alignment)
@@ -1539,6 +1689,7 @@ func grade_surface(p_mod: Pasture3DNodeRoad, p_z: PackedFloat32Array, p_gw: int,
 	p_mod.last_masks = {} if not p_mod.publish_masks else {
 		"roadbed": res["roadbed"], "cut": res["cut"], "fill": res["fill"],
 		"verge": res["verge"], "structure": res["structure"], "surface": res["surface"],
+		"surface_s": res.get("surface_s", PackedFloat32Array()),
 		# The grid ORIGIN travels with the masks. Without it a mask is a rectangle of numbers with no
 		# place in the world, and every consumer has to be told separately where the bake happened —
 		# which is how a road ends up painted half a region from the road.
@@ -1601,12 +1752,18 @@ func _formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: float, p_vs:
 	if others.is_empty():
 		return out
 	out.resize(p_gw * p_gh)
+	# The grid's own rect, in the same vertex-centred convention the stamp below indexes with.
+	var grid := Rect2(p_min_x, p_min_z, float(p_gw - 1) * p_vs, float(p_gh - 1) * p_vs)
 	for b in others:
 		var radius := b.formation_half_width()
 		if radius <= 0.0:
 			continue
 		var plan := b._plan_points()
 		if plan.size() < 2:
+			continue
+		# A road whose formation cannot reach this grid protects nothing in it. Without this every bake walked
+		# every road in the network end to end, and built each one's skip, to stamp no cells at all.
+		if not b.plan_rect().grow(radius + p_vs).intersects(grid):
 			continue
 		# ---- A SKIPPED STRETCH IS NOT A FORMATION ----
 		#
@@ -1617,14 +1774,26 @@ func _formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: float, p_vs:
 		var b_cum := b._plan_cum()
 		var b_total: float = b_cum[b_cum.size() - 1]
 		var b_ds := 1.0
-		var b_skip: PackedByteArray = b.grading_profile(null, b_ds,
-				maxi(int(ceil(b_total / b_ds)) + 1, 2))["skip"]
-		var r_cells := int(ceil(radius / p_vs))
-		var r2 := radius * radius
-		var step_dist: float = maxf(PROTECT_STEP, radius * 0.4)
+		var b_n := maxi(int(ceil(b_total / b_ds)) + 1, 2)
+		var b_skip: PackedByteArray = b._junction_pins_and_skip(b_ds, b_n)[1]
+		# EACH STRETCH'S OWN FORMATION, not the widest: a segment that widens the road is road only where it
+		# is, and protecting the whole road out to its width stopped this road's batter short beside every
+		# narrower stretch. `radius` (the widest) stays the bound for the rejections above and below.
+		var b_sec := b.sections()
+		var b_smp := b_sec.sample(b_ds, b_n)
+		var b_half := b_sec.numbers(&"half", b_smp)
+		var b_shoulder := b_sec.numbers(&"shoulder", b_smp)
+		var r_min := radius
+		for k in b_n:
+			r_min = minf(r_min, b_half[k] + b_shoulder[k])
+		var reach := grid.grow(radius + p_vs)
+		# The stamp spacing follows the NARROWEST disc, or a narrow stretch's discs leave gaps between them.
+		var step_dist: float = maxf(PROTECT_STEP, r_min * 0.4)
 		for i in range(plan.size() - 1):
 			var a := plan[i]
 			var c := plan[i + 1]
+			if not reach.intersects(Rect2(a, Vector2.ZERO).expand(c)):
+				continue
 			var seg := a.distance_to(c)
 			var s0: float = b_cum[i]
 			var steps := maxi(int(ceil(seg / step_dist)), 1)
@@ -1633,6 +1802,11 @@ func _formation_mask(p_gw: int, p_gh: int, p_min_x: float, p_min_z: float, p_vs:
 				var si := clampi(int(round((s0 + seg * f) / b_ds)), 0, b_skip.size() - 1)
 				if not b_skip.is_empty() and b_skip[si] != 0:
 					continue
+				var r_here := b_half[si] + b_shoulder[si]
+				if r_here <= 0.0:
+					continue
+				var r_cells := int(ceil(r_here / p_vs))
+				var r2 := r_here * r_here
 				var at := a.lerp(c, f)
 				var cx := int(round((at.x - p_min_x) / p_vs))
 				var cz := int(round((at.y - p_min_z) / p_vs))
@@ -1741,6 +1915,10 @@ func _merge_junction_earthwork(p_out: PackedFloat32Array, p_ground: PackedFloat3
 
 		# Restrict foreign grade and merge strictly to the localized intersection conflict zone
 		const CONFLICT_MARGIN: float = 30.0
+		# A conflict zone off this grid (a rect bake elsewhere on the road) has nothing to merge; the clamps
+		# below would otherwise shrink it to an edge strip and grade the partner over that for nothing.
+		if conflict_hi.x + CONFLICT_MARGIN < p_min_x or conflict_hi.y + CONFLICT_MARGIN < p_min_z 				or conflict_lo.x - CONFLICT_MARGIN > p_min_x + float(p_gw - 1) * p_vs 				or conflict_lo.y - CONFLICT_MARGIN > p_min_z + float(p_gh - 1) * p_vs:
+			continue
 		var c_ix0 := clampi(int(floor((conflict_lo.x - CONFLICT_MARGIN - p_min_x) / p_vs)), 0, p_gw - 1)
 		var c_ix1 := clampi(int(ceil((conflict_hi.x + CONFLICT_MARGIN - p_min_x) / p_vs)), 0, p_gw - 1)
 		var c_iz0 := clampi(int(floor((conflict_lo.y - CONFLICT_MARGIN - p_min_z) / p_vs)), 0, p_gh - 1)
@@ -1845,8 +2023,6 @@ func grade_junction_footprints(p_z: PackedFloat32Array, p_gw: int, p_gh: int, p_
 		var surf := net.junction_surface(j)
 		if surf.is_empty():
 			continue
-		if formation.is_empty():
-			formation = _all_formation_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs)
 		var boundary: PackedVector2Array = surf["boundary"]
 		var heights: PackedFloat32Array = surf["heights"]
 		var centre: Vector2 = surf["center"]
@@ -1856,6 +2032,13 @@ func grade_junction_footprints(p_z: PackedFloat32Array, p_gw: int, p_gh: int, p_
 		for at in boundary:
 			lo = Vector2(minf(lo.x, at.x), minf(lo.y, at.y))
 			hi = Vector2(maxf(hi.x, at.x), maxf(hi.y, at.y))
+		# A footprint whose batter cannot reach this grid writes nothing in it. Checked BEFORE the formation
+		# mask, which stamps every road in the network and was built for a rect bake nowhere near the junction.
+		var batter_reach := MAX_LOCAL_BATTER_RADIUS + p_vs
+		if hi.x + batter_reach < p_min_x or hi.y + batter_reach < p_min_z 				or lo.x - batter_reach > p_min_x + float(p_gw - 1) * p_vs 				or lo.y - batter_reach > p_min_z + float(p_gh - 1) * p_vs:
+			continue
+		if formation.is_empty():
+			formation = _all_formation_mask(p_gw, p_gh, p_min_x, p_min_z, p_vs)
 		var ix0 := clampi(int(floor((lo.x - p_min_x) / p_vs)), 0, p_gw - 1)
 		var ix1 := clampi(int(ceil((hi.x - p_min_x) / p_vs)), 0, p_gw - 1)
 		var iz0 := clampi(int(floor((lo.y - p_min_z) / p_vs)), 0, p_gh - 1)
@@ -1923,6 +2106,11 @@ func _log_junction_datum(p_j: Pasture3DRoadJunction, p_surf: Dictionary, p_z: Pa
 					p_j.arm_dirs.size(), trim])
 
 
+## The furthest a junction footprint's batter reaches past its polygon. `_batter_junction_footprint` caps
+## its reach at it, and `grade_junction_footprints` skips a footprint further than it from the grid.
+const MAX_LOCAL_BATTER_RADIUS: float = 35.0
+
+
 ## The junction's own batter: the ground OUTSIDE the footprint, falling away from the polygon's edge.
 ##
 ## ---- WHAT WAS LEFT STANDING ----
@@ -1971,7 +2159,6 @@ func _batter_junction_footprint(p_z: PackedFloat32Array, p_surf: Dictionary, p_g
 
 	# Localize the rise scan to the junction's local footprint neighborhood instead of scanning
 	# all 187k+ cells across the entire terrain grid in GDScript.
-	const MAX_LOCAL_BATTER_RADIUS: float = 35.0
 	var local_ix0 := clampi(int(floor((lo.x - MAX_LOCAL_BATTER_RADIUS - p_min_x) / p_vs)), 0, p_gw - 1)
 	var local_ix1 := clampi(int(ceil((hi.x + MAX_LOCAL_BATTER_RADIUS - p_min_x) / p_vs)), 0, p_gw - 1)
 	var local_iz0 := clampi(int(floor((lo.y - MAX_LOCAL_BATTER_RADIUS - p_min_z) / p_vs)), 0, p_gh - 1)
@@ -2088,6 +2275,10 @@ func _stamp_footprints(p_into: PackedByteArray, p_net: Pasture3DRoadNetwork, p_g
 		for at in boundary:
 			lo = Vector2(minf(lo.x, at.x), minf(lo.y, at.y))
 			hi = Vector2(maxf(hi.x, at.x), maxf(hi.y, at.y))
+		# Off the grid: the clamps below would otherwise collapse onto an edge row and point-test it.
+		if hi.x < p_min_x or hi.y < p_min_z or lo.x > p_min_x + float(p_gw - 1) * p_vs \
+				or lo.y > p_min_z + float(p_gh - 1) * p_vs:
+			continue
 		for iz in range(clampi(int(floor((lo.y - p_min_z) / p_vs)), 0, p_gh - 1),
 				clampi(int(ceil((hi.y - p_min_z) / p_vs)), 0, p_gh - 1) + 1):
 			var row := iz * p_gw
@@ -2105,7 +2296,12 @@ func formation_half_width() -> float:
 	var t := resolved_road_type()
 	if t == null:
 		return 0.0
-	return t.half_width(resolved_lane_count()) + t.shoulder_width
+	# The widest stretch's: a segment wider than its road is built road too.
+	var out := t.half_width(resolved_lane_count()) + t.shoulder_width
+	var sec := sections()
+	for k in range(1, sec.levels.size()):
+		out = maxf(out, float(sec.levels[k]["half"]) + float(sec.levels[k]["shoulder"]))
+	return out
 
 
 # ---- TIER FAR: the carriageway paints itself (P5, §10) -----------------------------------------------
@@ -2127,12 +2323,17 @@ func paint_surface() -> int:
 	var cover: PackedFloat32Array = masks.get("surface", PackedFloat32Array())
 	if cover.is_empty():
 		return 0
-	# The road type is asked FIRST, before a layer is reserved. `surface_layer_id` is -1 by default and
+	# The textures are asked FIRST, before a layer is reserved. `surface_layer_id` is -1 by default and
 	# -1 means "do not paint" (§4.4), so a project that has not chosen a road texture yet must end up
 	# with no layer rather than an empty one — and must not paint texture 31, which is what -1 becomes
-	# the moment it reaches a 5-bit field.
-	var t := resolved_road_type()
-	if t == null or t.surface_layer_id < 0:
+	# the moment it reaches a 5-bit field. A segment's own type, or `suppress_paint`, gives its stretch its
+	# own texture or none (PASTURE3D_ROAD_SEGMENT_SECTIONS_SPEC.md §4).
+	var sec := sections(mod)
+	var textures := _level_textures(sec)
+	var any_tex := false
+	for tid in textures:
+		any_tex = any_tex or tid >= 0
+	if not any_tex:
 		return 0
 	var layer_id := paint_layer_id()
 	if layer_id < 0:
@@ -2144,33 +2345,99 @@ func paint_surface() -> int:
 	var min_z := float(masks.get("min_z", 0.0))
 	var vs := float(masks.get("vs", 1.0))
 
+	if not _paint_varies(sec):
+		return _paint_cover(layer_id, cover, gw, gh, min_x, min_z, vs, textures[0])
+	# THE TEXTURE PER CELL, split into one cover per texture and each painted as the one-texture road is.
+	# A cell's texture is its stretch's; across a transition it is dithered between the two by a hash of
+	# the cell's WORLD position, weighted by the same smoothstep the widths blend with, so the change reads
+	# as a mottled blend and two overlapping bakes agree about every cell.
+	var s_at: PackedFloat32Array = masks.get("surface_s", PackedFloat32Array())
+	# Chosen into a flat per-cell array, then one cover built per texture. Writing a cell through an inline
+	# cast, `(covers[tid] as PackedFloat32Array)[i] = c`, writes a temporary and painted nothing.
+	var tid_at := PackedInt32Array()
+	tid_at.resize(cover.size())
+	tid_at.fill(-1)
+	var used := {}
+	for i in cover.size():
+		var c := cover[i]
+		if not is_finite(c) or c < Pasture3DRoadPaint.MIN_COVERAGE:
+			continue
+		var s := s_at[i] if i < s_at.size() else NAN
+		var tid := textures[0]
+		if is_finite(s):
+			var bl := sec.blend_at(s)
+			var at := Pasture3DRoadPaint.cell_position(i, gw, min_x, min_z, vs)
+			var key := Vector2i(roundi(at.x / vs), roundi(at.z / vs))
+			tid = textures[bl[1]] if float(hash(key) & 0xFFFF) / 65536.0 < float(bl[2]) else textures[bl[0]]
+		tid_at[i] = tid
+		if tid >= 0:
+			used[tid] = true
+	var written := 0
+	for tid: int in used:
+		var one := PackedFloat32Array()
+		one.resize(cover.size())
+		one.fill(0.0)
+		for i in cover.size():
+			if tid_at[i] == tid:
+				one[i] = cover[i]
+		written += _paint_cover(layer_id, one, gw, gh, min_x, min_z, vs, tid)
+	return written
+
+
+## Each level's paint texture, -1 where it paints nothing: no road type, `suppress_paint`, or a type whose
+## `surface_layer_id` is unset.
+func _level_textures(p_sec: Pasture3DRoadSections) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	for lv: Dictionary in p_sec.levels:
+		out.append(int(lv["texture"]))
+	return out
+
+
+## True when the road's stretches paint different textures, so the paint needs every surface cell's arc
+## length (`want_s`) to choose one.
+func _paint_varies(p_sec: Pasture3DRoadSections) -> bool:
+	if p_sec.is_uniform():
+		return false
+	var tex := _level_textures(p_sec)
+	for lv in p_sec.level:
+		if tex[lv] != tex[p_sec.level[0]]:
+			return true
+	# One texture throughout, but not level 0's: the road itself may be covered entirely by a segment.
+	return tex[p_sec.level[0]] != tex[0]
+
+
+## Paint one texture's cover into the layer: the native stamp where it is bound, else cell by cell.
+func _paint_cover(p_layer_id: int, p_cover: PackedFloat32Array, p_gw: int, p_gh: int, p_min_x: float,
+		p_min_z: float, p_vs: float, p_texture: int) -> int:
+	if p_texture < 0:
+		return 0
 	if terrain.data.has_method("stamp_road_surface_control"):
-		return terrain.data.stamp_road_surface_control(layer_id, cover, gw, gh, min_x, min_z, vs,
-				t.surface_layer_id, true, Pasture3DRoadPaint.MIN_COVERAGE)
+		return terrain.data.stamp_road_surface_control(p_layer_id, p_cover, p_gw, p_gh, p_min_x, p_min_z, p_vs,
+				p_texture, true, Pasture3DRoadPaint.MIN_COVERAGE)
 
 	# Read back what is already there so the paint keeps the base texture and any hole somebody carved.
 	# One read per covered cell: the corridor is a thin strip of the bake grid, not the whole of it.
 	var existing := PackedInt32Array()
-	existing.resize(cover.size())
-	for i in cover.size():
-		if cover[i] < Pasture3DRoadPaint.MIN_COVERAGE:
+	existing.resize(p_cover.size())
+	for i in p_cover.size():
+		if p_cover[i] < Pasture3DRoadPaint.MIN_COVERAGE:
 			continue
-		var at := Pasture3DRoadPaint.cell_position(i, gw, min_x, min_z, vs)
+		var at := Pasture3DRoadPaint.cell_position(i, p_gw, p_min_x, p_min_z, p_vs)
 		var c: int = terrain.data.get_control(at)
 		existing[i] = 0 if c == -1 else c
 
-	var plan := Pasture3DRoadPaint.surface_control(cover, existing, {
-		"texture_id": t.surface_layer_id,
+	var plan := Pasture3DRoadPaint.surface_control(p_cover, existing, {
+		"texture_id": p_texture,
 		"preserve_base": true,
 	})
 	var cells: PackedInt32Array = plan["cells"]
 	var control: PackedInt32Array = plan["control"]
 	var weight: PackedFloat32Array = plan["weight"]
 	for k in cells.size():
-		var at := Pasture3DRoadPaint.cell_position(cells[k], gw, min_x, min_z, vs)
+		var at := Pasture3DRoadPaint.cell_position(cells[k], p_gw, p_min_x, p_min_z, p_vs)
 		# Composite deferred: the network composites once when every road has painted, rather than each
 		# road compositing its own cells and the overlaps being composited as many times as they overlap.
-		terrain.data.set_control_on_layer(layer_id, at, control[k], weight[k], false)
+		terrain.data.set_control_on_layer(p_layer_id, at, control[k], weight[k], false)
 	return cells.size()
 
 
@@ -2195,14 +2462,27 @@ func paint_signature() -> int:
 	var cover: PackedFloat32Array = masks.get("surface", PackedFloat32Array())
 	if cover.is_empty():
 		return 0
-	var t := resolved_road_type()
-	if t == null or t.surface_layer_id < 0:
+	var sec := sections(mod)
+	var textures := _level_textures(sec)
+	var any_tex := false
+	for tid in textures:
+		any_tex = any_tex or tid >= 0
+	if not any_tex:
 		return 0
+	# A road painting one texture signs as it always did, so its paint is not redone for nothing.
+	if not _paint_varies(sec):
+		return hash([
+			cover,
+			masks.get("gw", 0), masks.get("gh", 0),
+			masks.get("min_x", 0.0), masks.get("min_z", 0.0), masks.get("vs", 1.0),
+			textures[0], paint_layer_id(),
+		])
+	# Where the texture varies the paint also reads each cell's arc length and the stretch layout.
 	return hash([
 		cover,
 		masks.get("gw", 0), masks.get("gh", 0),
 		masks.get("min_x", 0.0), masks.get("min_z", 0.0), masks.get("vs", 1.0),
-		t.surface_layer_id, paint_layer_id(),
+		paint_layer_id(), masks.get("surface_s", PackedFloat32Array()), sec.signature([&"texture"]),
 	])
 
 
@@ -2398,6 +2678,9 @@ func point_count_total() -> int:
 
 ## Curvature of the plan resampled at `p_ds` over `p_n_s` samples. Empty when the plan cannot bend.
 ##
+## The RESAMPLED plan's, so a joint between two straight chords is a spike: what the sharp-corner pass
+## looks for. Banking and widening read `_plan_curvature_along` instead, which spreads it.
+##
 ## Keyed on `plan_builds`, which `_ensure_plan` bumps exactly when the tessellation is rebuilt, so the
 ## cache follows the same invalidation the plan itself already has and cannot outlive a moved spline.
 func _plan_curvature_at(p_ds: float, p_n_s: int) -> PackedFloat32Array:
@@ -2414,6 +2697,21 @@ func _plan_curvature_at(p_ds: float, p_n_s: int) -> PackedFloat32Array:
 		_curv_cache = Pasture3DRoadAlignmentSolver.plan_curvature(r_plan)
 	_curv_key = key
 	return _curv_cache
+
+
+## Curvature at `p_ds` over `p_n_s` samples from the plan's own vertices
+## (`Pasture3DRoadAlignmentSolver.plan_curvature_along`): what banking and curve widening read. Cached
+## like `_plan_curvature_at`.
+func _plan_curvature_along(p_ds: float, p_n_s: int) -> PackedFloat32Array:
+	var plan := _plan_points()
+	if plan.size() < 3:
+		return PackedFloat32Array()
+	var key: Array = [plan_builds, p_ds, p_n_s]
+	if key == _curv_along_key:
+		return _curv_along_cache
+	_curv_along_cache = Pasture3DRoadAlignmentSolver.plan_curvature_along(plan, _plan_cum(), p_ds, p_n_s)
+	_curv_along_key = key
+	return _curv_along_cache
 
 
 func _plan_token() -> Array:
@@ -2497,13 +2795,26 @@ func _sample_grid(p_z: PackedFloat32Array, p_gw: int, p_gh: int, p_min_x: float,
 	var v10 := p_z[z0 * p_gw + x1]
 	var v01 := p_z[z1 * p_gw + x0]
 	var v11 := p_z[z1 * p_gw + x1]
+	# Written out, not looped over [[v, w], ...]: this runs once per alignment sample, and the literal
+	# built five arrays per call.
 	var acc := 0.0
 	var wsum := 0.0
-	for pair in [[v00, (1.0 - tx) * (1.0 - tz)], [v10, tx * (1.0 - tz)],
-			[v01, (1.0 - tx) * tz], [v11, tx * tz]]:
-		if is_finite(pair[0]):
-			acc += float(pair[0]) * float(pair[1])
-			wsum += float(pair[1])
+	var w := (1.0 - tx) * (1.0 - tz)
+	if is_finite(v00):
+		acc += v00 * w
+		wsum += w
+	w = tx * (1.0 - tz)
+	if is_finite(v10):
+		acc += v10 * w
+		wsum += w
+	w = (1.0 - tx) * tz
+	if is_finite(v01):
+		acc += v01 * w
+		wsum += w
+	w = tx * tz
+	if is_finite(v11):
+		acc += v11 * w
+		wsum += w
 	# NaN, not 0.0, when no corner has ground: flat zero is a height the solve would grade toward, and the
 	# native route (get_height_below_along_plan) already answers NaN there. `_fill_ground_gaps` repairs both.
 	return (acc / wsum) if wsum > 0.0 else NAN
@@ -2555,6 +2866,7 @@ func _get_configuration_warnings() -> PackedStringArray:
 	var total := _spline_length()
 	for s: Pasture3DRoadSegment in _live_segments():
 		out.append_array(s.range_warnings(total))
+	out.append_array(_pin_clashes)
 	return out
 
 
@@ -2617,10 +2929,11 @@ func build_run() -> Dictionary:
 	if t == null:
 		return {}
 	var alignment: Pasture3DRoadAlignment = mod.last_alignment
-	var bridge := PackedByteArray()
-	bridge.resize(alignment.count())
-	for i in alignment.count():
-		bridge[i] = 1 if is_bridge_at(float(i) * alignment.ds) else 0
+	# One pass over the sections, not `is_bridge_at` per sample: each of those re-read every segment's
+	# picked points through `_ensure_plan`, so a 5 km road paid tens of thousands of plan-token builds per
+	# resolve, for every road, to answer a question the sections already hold per stretch.
+	var sec := sections(mod)
+	var bridge := sec.bytes(&"bridge", sec.sample(alignment.ds, alignment.count()))
 	return {
 		"key": road_key(),
 		"plan": plan,
@@ -2638,6 +2951,9 @@ func build_run() -> Dictionary:
 		"crown": t.crown,
 		"crown_mode": t.crown_mode,
 		"max_bank": t.max_superelevation,
+		# The road's segments. Every value above is the ROAD's; where a segment varies one, the junction
+		# solver reads it at the junction's own arc length through these (`_run_at`).
+		"sections": sec,
 	}
 
 
@@ -2659,6 +2975,11 @@ func alignment_digest(p_mod: Pasture3DNodeRoad = null) -> String:
 		return ""
 	var plan := _plan_points()
 	var t := resolved_road_type()
+	# The segments' solver limits, where they vary any. Absent on a uniform road, so a road without
+	# segments keeps the digest its stored profile was written with.
+	var sec := sections(mod)
+	var sec_sig: Array = [] if sec.is_uniform() else sec.signature([&"max_grade", &"k_crest", &"k_sag",
+			&"design_speed", &"bank_cap", &"hairpin", &"drape", &"jump"])
 	# Hashed as a packed array, not formatted point by point. A 5 km road tessellates to ~25 000 points,
 	# and the previous derivation did 25 000 `String` formats, a 25 000-element join and a hash of the
 	# ~500 KB result — per call, from four call sites, one of which (`Pasture3DRoadChunkHost.rebuild`)
@@ -2679,12 +3000,18 @@ func alignment_digest(p_mod: Pasture3DNodeRoad = null) -> String:
 		t.max_grade if t != null else -1.0,
 		t.design_speed if t != null else -1.0,
 		t.mountain_banking_cap if t != null else -1.0,
+		# The other three type scalars `_solve_alignment` hands the solver. Missing, an edit to any of them
+		# left a saved profile "restorable" on the next load: crest and sag limits shape z, and
+		# max_superelevation caps the bank.
+		t.vertical_crest_accel_limit if t != null else -1.0,
+		t.vertical_sag_accel_limit if t != null else -1.0,
+		t.max_superelevation if t != null else -1.0,
 		t.hairpin_grade_compensation if t != null else 0.0,
 		t.curve_widening_enabled if t != null else false,
 		t.curve_widening_factor if t != null else 0.0,
 		t.curve_widening_max if t != null else 0.0,
 		junction_digest(),
-	]))
+	] + ([sec_sig] if not sec_sig.is_empty() else [])))
 
 
 ## This road's stored profile if it is still an answer to the road as it stands now, else null.
@@ -2728,26 +3055,11 @@ func graph_path() -> Pasture3DGraphPath:
 	var heights := PackedFloat32Array()
 	halves.resize(plan.size())
 	heights.resize(plan.size())
-	# The same per-segment resolve `grading_profile` uses, for the same reason and over up to 25 000 plan
-	# vertices rather than 5 000 alignment samples. Fixing the grader and leaving this loop walking the
-	# parent chain per vertex is the asymmetry `grading_profile` was factored out to prevent.
-	var grp := road_group()
-	var net := road_network()
-	var segs := _live_segments()
-	var owner := _segment_owners(cum, segs)
-	var seg_half := PackedFloat32Array()
-	seg_half.resize(segs.size())
-	var tail := _chain_tail(grp, net)
-	for k in segs.size():
-		var chain: Array = [segs[k]] + tail
-		var tt: Pasture3DRoadType = _type_in(chain, grp, net)
-		if tt == null:
-			tt = t
-		seg_half[k] = tt.half_width(_lanes_in(chain, grp, net)) if tt != null else 1.0
-	var def_half: float = t.half_width(_lanes_in(tail, grp, net)) if t != null else 1.0
+	# From the same sections `grading_profile` reads, blended across the transitions the same way, so the
+	# query half of the path and the grading half describe one road.
+	var sec := sections()
 	for i in plan.size():
-		var k := owner[i]
-		halves[i] = seg_half[k] if k >= 0 else def_half
+		halves[i] = sec.number_at(&"half", cum[i])
 		heights[i] = alignment.height_at(cum[i])
 	path.points = plan
 	path.half_widths = halves
@@ -2787,6 +3099,7 @@ func graph_path() -> Pasture3DGraphPath:
 		path.fill_batter = prof["fill_batter"]
 		path.toe_rounding = prof["toe_rounding"]
 		path.hinge_rounding = prof["hinge_rounding"]
+		path.sample_section = prof["section"]
 	return path
 
 
@@ -2836,20 +3149,10 @@ func surface_intervals() -> Array:
 ## shoulder and the corridor is the brush's own statement of how far it reaches. Y is a wide nominal span
 ## — `clear_layer_in_area` uses XZ only, the same convention as the terrain brush's footprints.
 func paint_bounds() -> AABB:
-	var plan := _plan_points()
-	if plan.size() < 2:
+	if _plan_points().size() < 2:
 		return AABB()
-	var mn := plan[0]
-	var mx := plan[0]
-	for p in plan:
-		mn.x = minf(mn.x, p.x)
-		mn.y = minf(mn.y, p.y)
-		mx.x = maxf(mx.x, p.x)
-		mx.y = maxf(mx.y, p.y)
-	var pad := corridor_half_width()
-	mn -= Vector2(pad, pad)
-	mx += Vector2(pad, pad)
-	return AABB(Vector3(mn.x, -10000.0, mn.y), Vector3(mx.x - mn.x, 20000.0, mx.y - mn.y))
+	var r := plan_rect().grow(corridor_half_width())
+	return AABB(Vector3(r.position.x, -10000.0, r.position.y), Vector3(r.size.x, 20000.0, r.size.y))
 
 
 ## This road's chunk host, created on first use.

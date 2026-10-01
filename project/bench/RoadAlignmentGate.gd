@@ -14,6 +14,9 @@
 #   E  a pinned height is honoured exactly, and an impossible pair of pins is REPORTED, not smoothed away
 #   F  the solved profile's second derivative signs a crest and a dip — the pace-note claim (P6) that a
 #      draped road could not support
+#   G  a TESSELLATED arc (Curve3D.tessellate, the road's own plan) reads 1/R along its length from
+#      `plan_curvature_along`, both routes agree, total turning is kept, and the solver banks it to
+#      v²/(gR). Control: the resampled plan's triples bank the same arc to under half of that
 #
 # House discipline: every criterion carries a CONTROL that must move if the path is dead.
 extends Node
@@ -31,6 +34,8 @@ func _ready() -> void:
 	_d_banking_matches_physics()
 	_e_pins_are_honoured_and_conflicts_reported()
 	_f_profile_signs_crest_and_dip()
+	_g_tessellated_arc_banks_fully(70.0, 24, PI)
+	_g_tessellated_arc_banks_fully(400.0, 8, PI * 0.5)
 	print("\n=== %s (%d failures) ===\n" % ["ROAD ALIGNMENT PASS" if _fail == 0 else "ROAD ALIGNMENT FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -72,6 +77,75 @@ func _rms_delta(p_a: PackedFloat32Array, p_b: PackedFloat32Array) -> float:
 		var d := p_a[i] - p_b[i]
 		acc += d * d
 	return sqrt(acc / float(n))
+
+
+# ---- G ------------------------------------------------------------------------------------------
+
+## An arc of radius `p_r` through `p_segs` Bezier segments with circular handles, tessellated the way a
+## road's plan is, then banked at 25 m/s with no cap in the way.
+func _g_tessellated_arc_banks_fully(p_r: float, p_segs: int, p_sweep: float) -> void:
+	print("[G] a tessellated arc of radius %.0f banks to v²/(gR)" % p_r)
+	var c := Curve3D.new()
+	var step := p_sweep / float(p_segs)
+	var handle := 4.0 / 3.0 * tan(step / 4.0) * p_r
+	for i in p_segs + 1:
+		var a := step * float(i)
+		var tan_dir := Vector3(-sin(a), 0.0, cos(a)) * handle
+		c.add_point(Vector3(1000.0 + cos(a) * p_r, 0.0, 1000.0 + sin(a) * p_r), -tan_dir, tan_dir)
+	var plan := PackedVector2Array()
+	for q in c.tessellate():
+		plan.append(Vector2(q.x, q.z))
+	var cum := PackedFloat32Array([0.0])
+	for i in range(1, plan.size()):
+		cum.append(cum[i - 1] + plan[i - 1].distance_to(plan[i]))
+	var total: float = cum[cum.size() - 1]
+	var n := int(ceil(total / DS)) + 1
+	var r_plan := PackedVector2Array()
+	for i in n:
+		r_plan.append(Pasture3DRoadGrader.plan_point_at(plan, cum, float(i) * DS))
+	var ground := PackedFloat32Array()
+	ground.resize(n)
+	var along := Pasture3DRoadAlignmentSolver.plan_curvature_along(plan, cum, DS, n)
+	var along_gd := Pasture3DRoadAlignmentSolver.plan_curvature_along(plan, cum, DS, n, true)
+	var speed := 25.0
+	var due := speed * speed / (9.81 * p_r)
+	var fixed := Pasture3DRoadAlignmentSolver.solve_with_plan(r_plan, ground, DS, 0.08, speed, 1.0,
+			{"plan_curvature": along})
+	var old := Pasture3DRoadAlignmentSolver.solve_with_plan(r_plan, ground, DS, 0.08, speed, 1.0)
+	# The middle 60%, clear of the transitions at the ends.
+	var i0 := int(n * 0.2)
+	var i1 := int(n * 0.8)
+	var worst_k := 0.0
+	var worst_bank := 0.0
+	var par := 0.0
+	var old_mean := 0.0
+	for i in range(i0, i1):
+		worst_k = maxf(worst_k, absf(along[i] * p_r - 1.0))
+		worst_bank = maxf(worst_bank, absf(absf(fixed.bank[i]) / due - 1.0))
+		old_mean += absf(old.bank[i])
+	old_mean /= float(i1 - i0)
+	# The POLYLINE's turning, which is what there is to keep: its equal chords turn at the interior vertices
+	# only, so it is the sweep less one chord's angle.
+	var chords := plan.size() - 1
+	var want_turn := p_sweep * (1.0 - 1.0 / float(chords))
+	var turning := 0.0
+	for i in n:
+		turning += along[i] * DS
+		par = maxf(par, absf(along[i] - along_gd[i]))
+	print("    %d plan points over %.0f m; κ·R off 1 by at most %.4f; bank off %.3f by at most %.4f (relative); native vs GDScript %.8f; turning %.4f of %.4f; control: resampled triples bank %.4f on average"
+			% [plan.size(), total, worst_k, due, worst_bank, par, turning, want_turn, old_mean])
+	if worst_k > 0.02:
+		_fail += 1; print("    !! the tessellated arc does not read 1/R")
+	if worst_bank > 0.03:
+		_fail += 1; print("    !! the solver did not bank the arc to v²/(gR)")
+	if par > 1e-6:
+		_fail += 1; print("    !! plan_curvature_along: native and GDScript disagree")
+	if absf(turning - want_turn) > 1e-3 * want_turn:
+		_fail += 1; print("    !! total turning was not preserved")
+	if old_mean > 0.5 * due:
+		_fail += 1; print("    !! control: the resampled triples banked the arc fully, so this fixture cannot see the bug")
+	if fixed.bank[(i0 + i1) / 2] > 0.0:
+		_fail += 1; print("    !! a right turn banked the wrong way")
 
 
 # ---- A ------------------------------------------------------------------------------------------

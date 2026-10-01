@@ -36,6 +36,7 @@ func _ready() -> void:
 	_g_every_chunk_host_setting_is_reachable_from_the_inspector()
 	_h_turning_collision_on_actually_builds_colliders()
 	_i_a_saved_and_reloaded_scene_still_has_its_roads()
+	_j_two_pins_on_one_sample_warn()
 	print("\n=== %s (%d failures) ===\n" % ["ROAD NETWORK PASS" if _fail == 0 else "ROAD NETWORK FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -623,6 +624,50 @@ func _own(p_at: Node, p_root: Node) -> void:
 ## Driven through a REAL PackedScene round trip rather than by clearing the fields by hand. The whole
 ## question is which state survives serialisation, and a fixture that decides that for itself would
 ## answer it whichever way it was written.
+## [J] Two junctions inside one alignment sample along a road keep only the later pin, and the brush says
+## so in its configuration warnings. Control: the same two junctions 3 m apart keep both pins and warn
+## nothing; moving them apart again clears the warning.
+func _j_two_pins_on_one_sample_warn() -> void:
+	print("[J] two junction pins on one sample are reported")
+	var net := Pasture3DRoadNetwork.new()
+	add_child(net)
+	var t := _road_type("minor", 0, 2)
+	net.road_types = [t]
+	var b := _brush(net, "Approach", Vector2(-50.0, 0.0), Vector2(50.0, 0.0), t)
+	var key := b.road_key()
+	var make := func(p_id: StringName, p_s: float, p_h: float) -> Pasture3DRoadJunction:
+		var j := Pasture3DRoadJunction.new()
+		j.id = p_id
+		j.road_keys = PackedStringArray(["Major", key])
+		j.arc_lengths = PackedFloat32Array([0.0, p_s])
+		j.trim_backs = PackedFloat32Array([0.0, 0.0])
+		j.major_index = 0
+		j.elevation = p_h
+		return j
+	var n := 101
+	net.junctions = [make.call(&"near_a", 50.2, 3.0), make.call(&"near_b", 49.9, 5.0)]
+	var close: Dictionary = b._junction_pins_and_skip(1.0, n)[0]
+	var close_warn := b._get_configuration_warnings()
+	net.junctions = [make.call(&"near_a", 47.0, 3.0), make.call(&"near_b", 50.0, 5.0)]
+	var apart: Dictionary = b._junction_pins_and_skip(1.0, n)[0]
+	var apart_warn := b._get_configuration_warnings()
+	var clash_text := ""
+	for w in close_warn:
+		if "near_a" in w and "near_b" in w:
+			clash_text = w
+	var apart_clash := false
+	for w in apart_warn:
+		if "inside one" in w:
+			apart_clash = true
+	print("    close: %d pin(s) %s; warning: %s" % [close.size(), close, clash_text])
+	print("    control 3 m apart: %d pin(s) %s; clash warning still present: %s" % [apart.size(), apart, apart_clash])
+	var ok := close.size() == 1 and clash_text != "" and apart.size() == 2 and not apart_clash
+	if not ok:
+		_fail += 1
+		print("    !! a pin collision went unreported, or the control warned")
+	net.queue_free()
+
+
 func _i_a_saved_and_reloaded_scene_still_has_its_roads() -> void:
 	print("[I] a saved and reloaded scene still has its roads")
 	var f := _crossroads()

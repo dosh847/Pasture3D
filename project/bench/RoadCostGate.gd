@@ -505,6 +505,9 @@ func _cd_the_alignment_digest_is_cheap_and_complete() -> void:
 		["follow_terrain", func() -> void: brush.road_follow_terrain = 1],
 		["max_grade", func() -> void: t.max_grade = 0.11],
 		["design_speed", func() -> void: t.design_speed = 31.0],
+		["vertical_crest_accel_limit", func() -> void: t.vertical_crest_accel_limit = 0.05],
+		["vertical_sag_accel_limit", func() -> void: t.vertical_sag_accel_limit = 0.07],
+		["max_superelevation", func() -> void: t.max_superelevation = 0.12],
 	]
 	for c in cases:
 		var before := brush.alignment_digest()
@@ -765,6 +768,9 @@ func _profile_fixture() -> Dictionary:
 	inner.from_point = 2            # INSIDE outer, and later in the array, so it wins there
 	inner.to_point = 3
 	inner.is_bridge = true
+	# Hard switches: this oracle is the per-sample, pre-transition resolution. The blend has its own gate.
+	outer.transition_length = 0.0
+	inner.transition_length = 0.0
 	var typed: Array[Pasture3DRoadSegment] = [outer, inner]
 	brush.segments = typed
 

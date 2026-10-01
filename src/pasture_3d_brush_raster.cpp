@@ -2428,27 +2428,42 @@ void Pasture3DData::stamp_road_line(const int p_layer_id, const PackedVector2Arr
 	Pasture3DPathGeom geom;
 	geom.build(p_plan, PackedFloat32Array());
 
-	// One scratch buffer for the whole pre-pass, not one per cell. `nearest` takes it as an out-parameter
-	// precisely so the caller can hoist it; declared inside the innermost loop it allocated and freed
-	// once per cell, which on a road footprint is hundreds of thousands of malloc/free pairs doing
-	// nothing. Single-threaded here, so one buffer is safe — the parallel callers in
-	// pasture_3d_road_grade.cpp keep theirs per row range for the same reason.
-	std::vector<int> scratch;
-	scratch.reserve(32);
-	for (int iz = iz0; iz < iz1; iz++) {
-		const double z = min_z + (double)iz * vs;
-		const int row = iz * gw;
-		for (int ix = ix0; ix < ix1; ix++) {
-			const double x = min_x + (double)ix * vs;
-			const Pasture3DPathHit hit = geom.nearest(x, z, scratch);
-			if (hit.distance <= reach) {
-				b_ptr[row + ix] = (float)get_height_below(p_layer_id, Vector3(x, 0.0, z));
+	// THE GROUND IN ONE BATCHED READ, over the clip window. It was `get_height_below` per cell, which
+	// resolves every lower layer's tile through a Ref<Image> per cell, single-threaded; the batched read
+	// resolves each tile once. Same lattice, same blend: the grid is vertex-aligned (`_snapped_bounds`).
+	const int cw = ix1 - ix0;
+	const int ch = iz1 - iz0;
+	PackedFloat32Array below;
+	if (cw > 0 && ch > 0) {
+		below = composite_height_below(p_layer_id, min_x + (double)ix0 * vs, min_z + (double)iz0 * vs, vs, cw, ch);
+	}
+	const float *below_ptr = below.size() == cw * ch ? below.ptr() : nullptr;
+
+	// The nearest point on the road for every cell, ONCE, in parallel, and handed to the grader -- which
+	// used to ask `nearest` again for the same cells. Rows are disjoint, so each range writes its own.
+	std::vector<Pasture3DPathHit> hits((size_t)n);
+	if (below_ptr) {
+		Pasture3DThreadPool::parallel_for_rows(ch, 8, [&](int r0, int r1) {
+			std::vector<int> scratch;
+			scratch.reserve(32);
+			for (int r = r0; r < r1; r++) {
+				const int iz = iz0 + r;
+				const double z = min_z + (double)iz * vs;
+				const int row = iz * gw;
+				for (int ix = ix0; ix < ix1; ix++) {
+					const double x = min_x + (double)ix * vs;
+					const Pasture3DPathHit hit = geom.nearest(x, z, scratch);
+					hits[(size_t)(row + ix)] = hit;
+					if (hit.distance <= reach) {
+						b_ptr[row + ix] = below_ptr[r * cw + (ix - ix0)];
+					}
+				}
 			}
-		}
+		});
 	}
 
 	Dictionary res = road_grade_grid_geom(geom, base_height, gw, gh, min_x, min_z, vs,
-			align_ds, align_s0, align_z, align_bank, half_width, shoulder, verge, suppress, opts);
+			align_ds, align_s0, align_z, align_bank, half_width, shoulder, verge, suppress, opts, hits.data());
 	if (res.is_empty()) {
 		return;
 	}
@@ -2514,6 +2529,11 @@ void Pasture3DData::stamp_road_line(const int p_layer_id, const PackedVector2Arr
 		out["verge"] = res.get("verge", PackedFloat32Array());
 		out["structure"] = res.get("structure", PackedFloat32Array());
 		out["surface"] = res.get("surface", PackedFloat32Array());
+		// Where along the road each surface cell is, when the caller asked (`want_s`): the paint picks a
+		// texture per cell from it where the road's segments change the surface.
+		if (res.has("surface_s")) {
+			out["surface_s"] = res["surface_s"];
+		}
 		out["gw"] = gw;
 		out["gh"] = gh;
 		out["min_x"] = min_x;

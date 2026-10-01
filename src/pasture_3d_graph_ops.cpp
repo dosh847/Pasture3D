@@ -395,6 +395,7 @@ bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 				if (pr.has("toe_rounding")) e.toe_rounding = (double)pr["toe_rounding"];
 				if (pr.has("hinge_rounding")) e.hinge_rounding = (double)pr["hinge_rounding"];
 				if (pr.has("wall_plan")) e.wall_plan = pr["wall_plan"];
+				if (pr.has("section")) e.section = pr["section"];
 				// A profile with no solved heights cannot grade. Marked here rather than checked in the
 				// op, so "can this road be cut" is decided in one place for every consumer.
 				if (e.align_z.is_empty()) e.has_profile = false;
@@ -1469,6 +1470,7 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				opts["hinge_rounding"] = geo->hinge_rounding;
 				opts["wall_plan"] = geo->wall_plan;
 				opts["skip"] = geo->skip;
+				opts["section"] = geo->section;
 				Dictionary res = road_grade_grid_geom(geo->geom, in_arr, p_gw, p_gh,
 						(double)p_rect.position.x + 0.5 * dx, (double)p_rect.position.y + 0.5 * dz, vs,
 						geo->align_ds, geo->align_s0, geo->align_z, geo->align_bank, geo->half_width,

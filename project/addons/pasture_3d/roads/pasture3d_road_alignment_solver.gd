@@ -128,13 +128,20 @@ static func solve(p_ground: PackedFloat32Array, p_ds: float, p_max_grade: float,
 
 	var hairpin_comp := float(p_opts.get("hairpin_grade_compensation", 0.0))
 	var curv: PackedFloat32Array = p_opts.get("curvature", PackedFloat32Array())
+	# The grade limit and the hairpin compensation PER SAMPLE where the road's segments vary them
+	# (Pasture3DRoadSections). Mirrors the native `step_limits`, which always fills the array.
+	var grade_s := _per_sample(p_opts, "max_grade_s", n)
+	var hairpin_s := _per_sample(p_opts, "hairpin_s", n)
 	var step_limits := PackedFloat32Array()
-	if hairpin_comp > 0.0 and curv.size() == n:
+	if (hairpin_comp > 0.0 or not hairpin_s.is_empty()) and curv.size() == n or not grade_s.is_empty():
 		step_limits.resize(n)
 		for i in n:
-			var abs_k := absf(curv[i])
-			var reduction := clampf((abs_k - 0.02) / 0.06, 0.0, 1.0) * hairpin_comp
-			step_limits[i] = g_max * (1.0 - reduction) * ds
+			var hp := hairpin_s[i] if not hairpin_s.is_empty() else hairpin_comp
+			var reduction := 0.0
+			if hp > 0.0 and curv.size() == n:
+				reduction = clampf((absf(curv[i]) - 0.02) / 0.06, 0.0, 1.0) * hp
+			var g := grade_s[i] if not grade_s.is_empty() else g_max
+			step_limits[i] = g * (1.0 - reduction) * ds
 
 	var v_design := float(p_opts.get("design_speed", 0.0))
 	var a_crest_g := float(p_opts.get("vertical_crest_accel_limit", 0.4))
@@ -152,6 +159,20 @@ static func solve(p_ground: PackedFloat32Array, p_ds: float, p_max_grade: float,
 	elif v_design > 0.0 and a_sag_g > 0.0:
 		k_sag = (a_sag_g * 9.81) / (v_design * v_design)
 
+	# The curvature limits per sample where the segments vary them. Arrays even for a uniform road from
+	# here on, so the projection has one shape; `any_curv` says whether it has anything to do.
+	var kc_s := _per_sample(p_opts, "k_crest_s", n)
+	var ks_s := _per_sample(p_opts, "k_sag_s", n)
+	if kc_s.is_empty():
+		kc_s.resize(n)
+		kc_s.fill(k_crest)
+	if ks_s.is_empty():
+		ks_s.resize(n)
+		ks_s.fill(k_sag)
+	var any_curv := false
+	for i in n:
+		any_curv = any_curv or kc_s[i] > 1e-7 or ks_s[i] > 1e-7
+
 	var jump_mask := PackedByteArray()
 	if p_opts.has("allow_airborne_jump"):
 		var v_jump: Variant = p_opts["allow_airborne_jump"]
@@ -164,8 +185,8 @@ static func solve(p_ground: PackedFloat32Array, p_ds: float, p_max_grade: float,
 	# Start from the ground: the feasible-ish starting point closest to the earth term's optimum.
 	var z := p_ground.duplicate()
 	_apply_pins(z, pins)
-	if k_crest > 1e-7 or k_sag > 1e-7:
-		_project_vertical_curvature(z, ds, k_crest, k_sag, pins, jump_mask, GRADE_SWEEPS)
+	if any_curv:
+		_project_vertical_curvature(z, ds, kc_s, ks_s, pins, jump_mask, GRADE_SWEEPS)
 	_project_grade(z, ds, g_max, pins, step_limits)
 
 	var z_prev := PackedFloat32Array()
@@ -198,8 +219,8 @@ static func solve(p_ground: PackedFloat32Array, p_ds: float, p_max_grade: float,
 
 		# --- projections: pins, then curvature, then the hard gradient limit -----------------------
 		_apply_pins(z, pins)
-		if k_crest > 1e-7 or k_sag > 1e-7:
-			_project_vertical_curvature(z, ds, k_crest, k_sag, pins, jump_mask, GRADE_SWEEPS)
+		if any_curv:
+			_project_vertical_curvature(z, ds, kc_s, ks_s, pins, jump_mask, GRADE_SWEEPS)
 		_project_grade(z, ds, g_max, pins, step_limits)
 
 		var moved := 0.0
@@ -209,13 +230,13 @@ static func solve(p_ground: PackedFloat32Array, p_ds: float, p_max_grade: float,
 			break
 
 	_smooth_profile(z, ds, g_max, pins, smooth_radius, step_limits)
-	if k_crest > 1e-7 or k_sag > 1e-7:
-		_project_vertical_curvature(z, ds, k_crest, k_sag, pins, jump_mask, 16)
+	if any_curv:
+		_project_vertical_curvature(z, ds, kc_s, ks_s, pins, jump_mask, 16)
 		_project_grade(z, ds, g_max, pins, step_limits)
 
 	out.z = z
 	out.pinned = _pin_indices(pins)
-	_fill_diagnostics(out, pins, ds, g_max, v_design)
+	_fill_diagnostics(out, pins, ds, g_max, v_design, grade_s)
 	# No plan geometry was supplied, so there is no curvature and therefore no banking. A caller that
 	# wants banking hands the centreline to `solve_with_plan`.
 	out.curvature = _zeros(n)
@@ -255,7 +276,9 @@ static func solve_with_plan(p_plan: PackedVector2Array, p_ground: PackedFloat32A
 		out.pinned = res.get("pinned", PackedInt32Array())
 		return out
 
-	var curv := plan_curvature(p_plan, p_force_gdscript)
+	# The caller's curvature from the plan's own vertices where it has one (`plan_curvature_along`).
+	var given: PackedFloat32Array = p_opts.get("plan_curvature", PackedFloat32Array())
+	var curv := given if given.size() == p_ground.size() else plan_curvature(p_plan, p_force_gdscript)
 	var solve_opts := p_opts.duplicate()
 	solve_opts["curvature"] = curv
 	if not solve_opts.has("design_speed"):
@@ -264,9 +287,61 @@ static func solve_with_plan(p_plan: PackedVector2Array, p_ground: PackedFloat32A
 	out.curvature = curv
 	var trans_len := float(p_opts.get("bank_transition_length", 25.0))
 	var mtn_cap := float(p_opts.get("mountain_banking_cap", -1.0))
-	out.bank = superelevation(out.curvature, p_design_speed, p_max_superelevation, p_ds,
-			trans_len, mtn_cap, p_force_gdscript)
+	# The design speed and the mountain-capped bank cap per sample, where the segments vary them.
+	var speed_s := _per_sample(p_opts, "design_speed_s", curv.size())
+	var cap_s := _per_sample(p_opts, "bank_cap_s", curv.size())
+	if speed_s.is_empty() and cap_s.is_empty():
+		out.bank = superelevation(out.curvature, p_design_speed, p_max_superelevation, p_ds,
+				trans_len, mtn_cap, p_force_gdscript)
+	else:
+		var base_cap := maxf(p_max_superelevation, 0.0)
+		out.bank = _superelevation_sampled(out.curvature, p_design_speed, speed_s,
+				minf(mtn_cap, base_cap) if mtn_cap > 0.0 else base_cap, cap_s, p_ds, trans_len)
 	return out
+
+
+## A per-sample option: `p_opts[p_key]` when it is a float array exactly `p_n` long, else empty. Mirrors
+## the native `per_sample`.
+static func _per_sample(p_opts: Dictionary, p_key: String, p_n: int) -> PackedFloat32Array:
+	var v: Variant = p_opts.get(p_key)
+	if v is PackedFloat32Array and (v as PackedFloat32Array).size() == p_n:
+		return v
+	return PackedFloat32Array()
+
+
+## `superelevation` with the design speed and the cap optionally per sample (empty = the scalar). Mirrors
+## the native `superelevation_sampled`, INCLUDING its clamped-end smoothing window -- which differs from
+## the scalar GDScript `superelevation`'s truncated one, and the native answer is the one the plugin runs.
+static func _superelevation_sampled(p_curvature: PackedFloat32Array, p_design_speed: float,
+		p_speed_s: PackedFloat32Array, p_cap: float, p_cap_s: PackedFloat32Array, p_ds: float,
+		p_transition_length: float) -> PackedFloat32Array:
+	var n := p_curvature.size()
+	var out := _zeros(n)
+	if n == 0:
+		return out
+	var caps := _zeros(n)
+	for i in n:
+		caps[i] = maxf(p_cap_s[i], 0.0) if not p_cap_s.is_empty() else p_cap
+		var v := p_speed_s[i] if not p_speed_s.is_empty() else p_design_speed
+		out[i] = clampf(-v * v * p_curvature[i] / 9.81, -caps[i], caps[i])
+	var max_trans := maxf(p_transition_length, 0.0)
+	if max_trans <= 1e-4:
+		return out
+	var smoothed := _zeros(n)
+	for i in n:
+		var abs_k := absf(p_curvature[i])
+		var local_trans := max_trans
+		if abs_k > 1e-4:
+			local_trans = minf(max_trans, maxf(4.0, 0.35 / abs_k))
+		var half := int(round(local_trans / maxf(p_ds, 1e-4) * 0.5))
+		if half <= 0:
+			smoothed[i] = out[i]
+			continue
+		var acc := 0.0
+		for k in range(i - half, i + half + 1):
+			acc += out[clampi(k, 0, n - 1)]
+		smoothed[i] = clampf(acc / float(2 * half + 1), -caps[i], caps[i])
+	return smoothed
 
 
 ## Signed plan curvature at each point, 1/metres, POSITIVE TURNING RIGHT — toward +u, the same side the
@@ -309,6 +384,68 @@ static func plan_curvature(p_plan: PackedVector2Array,
 	out[0] = out[1]
 	out[n - 1] = out[n - 2]
 	return out
+
+
+## Plan curvature at `p_n` samples `p_ds` apart, read from the PLAN'S OWN VERTICES (`p_cum` their arc
+## lengths) rather than from a resampling of it. What banking and curve widening read.
+##
+## ---- WHY NOT `plan_curvature` OF THE RESAMPLED PLAN ----
+##
+## The plan is `Curve3D.tessellate()`, whose 4-degree tolerance turns a smooth arc into chords several
+## metres long that meet at a kink. Resampled at 1 m, the triple straddling each kink reads the whole turn
+## as one spike and the samples between read 0. The bank is clamped per sample and then averaged, so each
+## spike clamps to the cap and the straights dilute it: a 70 m arc due 0.04 banked to 0.009.
+##
+## Here each vertex's turning angle is spread over the half-chords either side of it, and each sample is
+## the mean over its own [s - ds/2, s + ds/2). Total turning is preserved exactly, and a polyline inscribed
+## in a circle of radius R reads 1/R (within 0.1% at a 7.5-degree chord) along its whole length. Positive
+## turning RIGHT, as `plan_curvature`. The native twin is `road_plan_curvature_along`, line for line.
+static func plan_curvature_along(p_plan: PackedVector2Array, p_cum: PackedFloat32Array, p_ds: float,
+		p_n: int, p_force_gdscript: bool = false) -> PackedFloat32Array:
+	if not p_force_gdscript and ClassDB.class_has_method("Pasture3DUtil", "road_plan_curvature_along"):
+		return Pasture3DUtil.road_plan_curvature_along(p_plan, p_cum, p_ds, p_n)
+	var out := _zeros(maxi(p_n, 0))
+	var m := p_plan.size()
+	if m < 3 or p_n <= 0 or p_cum.size() != m or p_ds <= 0.0:
+		return out
+	var total: float = p_cum[m - 1]
+	# Θ(s), the cumulative turning, is piecewise linear with knots at the chord midpoints.
+	var brk := PackedFloat64Array()
+	var theta := PackedFloat64Array()
+	brk.resize(m - 1)
+	theta.resize(m - 1)
+	brk[0] = 0.5 * (float(p_cum[0]) + float(p_cum[1]))
+	theta[0] = 0.0
+	for j in range(1, m - 1):
+		var v1x := float(p_plan[j].x) - float(p_plan[j - 1].x)
+		var v1z := float(p_plan[j].y) - float(p_plan[j - 1].y)
+		var v2x := float(p_plan[j + 1].x) - float(p_plan[j].x)
+		var v2z := float(p_plan[j + 1].y) - float(p_plan[j].y)
+		var angle := 0.0
+		if v1x * v1x + v1z * v1z > 1e-12 and v2x * v2x + v2z * v2z > 1e-12:
+			angle = atan2(v1x * v2z - v1z * v2x, v1x * v2x + v1z * v2z)
+		brk[j] = 0.5 * (float(p_cum[j]) + float(p_cum[j + 1]))
+		theta[j] = theta[j - 1] + angle
+	for i in p_n:
+		var s := float(i) * p_ds
+		var lo := clampf(s - 0.5 * p_ds, 0.0, total)
+		var hi := clampf(s + 0.5 * p_ds, 0.0, total)
+		if hi - lo <= 1e-9:
+			continue
+		out[i] = (_theta_at(brk, theta, hi) - _theta_at(brk, theta, lo)) / (hi - lo)
+	return out
+
+
+static func _theta_at(p_brk: PackedFloat64Array, p_theta: PackedFloat64Array, p_s: float) -> float:
+	var last := p_brk.size() - 1
+	if p_s <= p_brk[0]:
+		return 0.0
+	if p_s >= p_brk[last]:
+		return p_theta[last]
+	var k := p_brk.bsearch(p_s, false) # p_brk[k-1] <= s < p_brk[k]
+	var span := p_brk[k] - p_brk[k - 1]
+	var f := (p_s - p_brk[k - 1]) / span if span > 1e-12 else 1.0
+	return p_theta[k - 1] + (p_theta[k] - p_theta[k - 1]) * f
 
 
 ## Superelevation from curvature: bank = clamp(-v²·κ/g, ±max), smoothed over local transition length
@@ -365,42 +502,35 @@ static func superelevation(p_curvature: PackedFloat32Array, p_design_speed: floa
 ##   Δ²z_i = (z[i-1] - 2*z[i] + z[i+1]) / ds² ∈ [-κ_{crest}, κ_{sag}]
 ## where κ = a_max / v_design². Prevents vehicle airborne launch over crests and bump-stop bottoming in sags.
 ## Intentional jumps (allow_airborne_jump) bypass the crest clamp.
+##
+## The limits are PER SAMPLE (`p_k_crest[i]`, `p_k_sag[i]`), so a segment can carry its own design speed;
+## a limit of zero at a sample means no limit there.
 static func _project_vertical_curvature(p_z: PackedFloat32Array, p_ds: float,
-		p_k_crest: float, p_k_sag: float, p_pins: Dictionary,
+		p_k_crest: PackedFloat32Array, p_k_sag: PackedFloat32Array, p_pins: Dictionary,
 		p_jump_mask: PackedByteArray = PackedByteArray(), p_sweeps: int = 4) -> void:
 	var n := p_z.size()
 	if n < 3:
 		return
-	var has_crest := p_k_crest > 1e-7
-	var has_sag := p_k_sag > 1e-7
-	if not has_crest and not has_sag:
-		return
-
 	var ds2 := p_ds * p_ds
-	var kc := p_k_crest * ds2
-	var ks := p_k_sag * ds2
 	var has_jump := p_jump_mask.size() == n
 
 	for _sw in p_sweeps:
 		# Forward pass: i from 1 to n-2
 		for i in range(1, n - 1):
-			if p_pins.has(i):
-				continue
-			var allow_jump := has_jump and p_jump_mask[i] != 0
-			var z_mid := 0.5 * (p_z[i - 1] + p_z[i + 1])
-			var z_min := (z_mid - 0.5 * ks) if has_sag else -INF
-			var z_max := (z_mid + 0.5 * kc) if (has_crest and not allow_jump) else INF
-			p_z[i] = clampf(p_z[i], z_min, z_max)
-
+			if not p_pins.has(i):
+				_clamp_curvature_at(p_z, i, p_k_crest[i], p_k_sag[i], ds2, has_jump and p_jump_mask[i] != 0)
 		# Backward pass: i from n-2 down to 1
 		for i in range(n - 2, 0, -1):
-			if p_pins.has(i):
-				continue
-			var allow_jump := has_jump and p_jump_mask[i] != 0
-			var z_mid := 0.5 * (p_z[i - 1] + p_z[i + 1])
-			var z_min := (z_mid - 0.5 * ks) if has_sag else -INF
-			var z_max := (z_mid + 0.5 * kc) if (has_crest and not allow_jump) else INF
-			p_z[i] = clampf(p_z[i], z_min, z_max)
+			if not p_pins.has(i):
+				_clamp_curvature_at(p_z, i, p_k_crest[i], p_k_sag[i], ds2, has_jump and p_jump_mask[i] != 0)
+
+
+static func _clamp_curvature_at(p_z: PackedFloat32Array, p_i: int, p_kc: float, p_ks: float, p_ds2: float,
+		p_allow_jump: bool) -> void:
+	var z_mid := 0.5 * (p_z[p_i - 1] + p_z[p_i + 1])
+	var z_min := (z_mid - 0.5 * p_ks * p_ds2) if p_ks > 1e-7 else -INF
+	var z_max := (z_mid + 0.5 * p_kc * p_ds2) if (p_kc > 1e-7 and not p_allow_jump) else INF
+	p_z[p_i] = clampf(p_z[p_i], z_min, z_max)
 
 
 ## Bring the profile inside the gradient limit, WITHOUT a direction bias.
@@ -512,13 +642,20 @@ static func _pin_indices(p_pins: Dictionary) -> PackedInt32Array:
 
 
 static func _fill_diagnostics(p_out: Pasture3DRoadAlignment, p_pins: Dictionary, p_ds: float,
-		p_max_grade: float, p_design_speed: float = 0.0) -> void:
+		p_max_grade: float, p_design_speed: float = 0.0,
+		p_grade_s: PackedFloat32Array = PackedFloat32Array()) -> void:
 	var n := p_out.z.size()
 	var peak := 0.0
+	# Feasibility against each step's OWN limit, the looser of its two samples, where the segments vary it.
+	var excess := 0.0
+	var per := p_grade_s.size() == n
 	for i in range(1, n):
-		peak = maxf(peak, absf(p_out.z[i] - p_out.z[i - 1]) / p_ds)
+		var g := absf(p_out.z[i] - p_out.z[i - 1]) / p_ds
+		peak = maxf(peak, g)
+		var lim := maxf(maxf(p_grade_s[i - 1], p_grade_s[i]), 1e-4) if per else p_max_grade
+		excess = maxf(excess, g - lim)
 	p_out.peak_grade = peak
-	p_out.feasible = peak <= p_max_grade + GRADE_EPSILON
+	p_out.feasible = excess <= GRADE_EPSILON
 
 	var cut := 0.0
 	var fill := 0.0

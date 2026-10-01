@@ -159,17 +159,27 @@ Dictionary road_grade_grid(const PackedFloat32Array &p_height, int p_gw, int p_g
 // for the whole bake and hands the same Pasture3DPathGeom to every slot that names it; the entry point
 // above is this function with a build in front of it. An empty geometry passes the surface through, which
 // is the §4.3 answer and the only safe one — zeros would flatten the terrain to sea level.
+// `p_hits`, when given, is `p_geom.nearest` already answered for every cell (gw*gh, row-major), by a
+// caller that needed it first; it is read only where `p_height` is finite.
 Dictionary road_grade_grid_geom(const Pasture3DPathGeom &p_geom, const PackedFloat32Array &p_height,
 		int p_gw, int p_gh, double p_min_x, double p_min_z, double p_vs, double p_align_ds,
 		double p_align_s0, const PackedFloat32Array &p_align_z, const PackedFloat32Array &p_align_bank,
 		const PackedFloat32Array &p_half_width, const PackedFloat32Array &p_shoulder,
-		const PackedFloat32Array &p_verge, const PackedByteArray &p_suppress, const Dictionary &p_opts);
+		const PackedFloat32Array &p_verge, const PackedByteArray &p_suppress, const Dictionary &p_opts,
+		const Pasture3DPathHit *p_hits = nullptr);
 
 // ---- Pasture3DRoadAlignmentSolver in C++ ----
 Dictionary road_align_solve(const PackedFloat32Array &p_ground, double p_ds, double p_max_grade,
 		const Dictionary &p_opts);
 
 PackedFloat32Array road_plan_curvature(const PackedVector2Array &p_plan);
+
+// Plan curvature at `p_n` samples `p_ds` apart, from the PLAN'S OWN VERTICES (`p_cum` their arc lengths):
+// each vertex's turning angle spread over the half-chords either side of it, and each sample the mean
+// over its own [s - ds/2, s + ds/2). Total turning is preserved exactly, and a polyline inscribed in a
+// circle of radius R reads 1/R along its whole length. See Pasture3DRoadAlignmentSolver.plan_curvature_along.
+PackedFloat32Array road_plan_curvature_along(const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
+		double p_ds, int p_n);
 
 Vector2 road_plan_point_at(const Vector2 *p_plan, const float *p_cum, int n, double p_s);
 
@@ -192,7 +202,7 @@ Array road_mesh_build_chunk(const PackedVector2Array &p_plan, const PackedFloat3
 		double p_from, double p_to, double p_half, double p_shoulder, double p_crown,
 		int p_lod = 0, double p_lift = 0.02, double p_align_s0 = 0.0, int p_crown_mode = 0, double p_max_bank = 0.0,
 		int p_left_kerb = 0, int p_right_kerb = 0, double p_kerb_width = 0.8, double p_kerb_height = 0.08,
-		double p_kerb_rumble_pitch = 0.4, double p_kerb_rumble_depth = 0.02);
+		double p_kerb_rumble_pitch = 0.4, double p_kerb_rumble_depth = 0.02, const Dictionary &p_section = Dictionary());
 
 Array road_mesh_build_apron(const Vector2 &p_center, double p_radius,
 		const PackedVector2Array &p_plan, const PackedFloat32Array &p_cum,
