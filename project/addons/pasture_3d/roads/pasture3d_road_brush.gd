@@ -239,6 +239,8 @@ var _curv_cache: PackedFloat32Array = PackedFloat32Array()
 var _curv_key: Array = []
 var _curv_along_cache: PackedFloat32Array = PackedFloat32Array()
 var _curv_along_key: Array = []
+## This brush's network as it left the tree, for the deferred delete check.
+var _exit_net: Pasture3DRoadNetwork = null
 ## Junctions whose pins landed on the same alignment sample, as warnings: see `_junction_pins_and_skip`.
 var _pin_clashes: PackedStringArray = PackedStringArray()
 var _plan_rect := Rect2()
@@ -294,6 +296,17 @@ func _notification(p_what: int) -> void:
 	if p_what == NOTIFICATION_ENTER_TREE:
 		_rewire_content_sources()
 		_refresh_sharp_radius()
+	elif p_what == NOTIFICATION_EXIT_TREE:
+		# Held for `_on_deleted_from_scene`: a frame later this brush has no parents to walk.
+		_exit_net = road_network()
+
+
+## Deleted: the network re-resolves without this road, which clears its paint (`_clear_departed_roads`)
+## and lets the junctions it formed go. Nothing else asks the network to run.
+func _on_deleted_from_scene() -> void:
+	if is_instance_valid(_exit_net) and _exit_net.is_inside_tree():
+		_exit_net.request_resolve()
+	_exit_net = null
 
 
 ## Attach `_on_road_changed` to the levels of the resolve chain this brush does not own.

@@ -371,7 +371,12 @@ var _junction_surface_cache: Dictionary = {}
 ## Ask for a junction resolve at the end of the frame. Coalesced, so ten brushes finishing their bakes in
 ## one refresh produce one resolve rather than ten.
 ## Re-grade every road brush in this network. Returns how many were baked.
+##
+## FROM SCRATCH: the roads' height layers and paint layers are wiped first. Paint and fill left by a road
+## that was deleted or moved before anything tracked it (an older build, or a session since closed) is
+## nobody's footprint, so no incremental bake can ever find it; this button is the one place it goes.
 func bake_all_roads() -> int:
+	wipe_road_layers()
 	var n := 0
 	var missing := 0
 	for b in road_brushes():
@@ -387,6 +392,54 @@ func bake_all_roads() -> int:
 	print("[Pasture3D] baked %d road(s)%s" % [n,
 			"" if missing == 0 else "; %d had no Road modifier and were left alone" % missing])
 	return n
+
+
+## Clear every height and paint layer this network's roads write, over every loaded region, and forget
+## what was painted so the next pass repaints every road. Only what `bake_all_roads` re-bakes straight
+## after: the height layers are the roads' own owners, and any other tool on one is repainted by the
+## same full-owner bake.
+func wipe_road_layers() -> void:
+	var done := {}
+	var touched := {}
+	for b in road_brushes():
+		if b == null or not is_instance_valid(b.terrain) or b.terrain.data == null:
+			continue
+		var t: Pasture3D = b.terrain
+		var box := _loaded_box(t)
+		if box.size == Vector3.ZERO:
+			continue
+		var ids := PackedInt32Array()
+		var pid: int = b.paint_layer_id()
+		if pid >= 0:
+			ids.append(pid)
+		ids.append_array(b._clearable_layers_for_owner(b._layer_owner))
+		for id in ids:
+			var key := "%d:%d" % [t.get_instance_id(), id]
+			if done.has(key):
+				continue
+			done[key] = true
+			t.data.clear_layer_in_area(id, box, false)
+		touched[t.get_instance_id()] = t
+	for t in touched.values():
+		t.data.composite_regions()
+		t.data.update_maps()
+	_painted.clear()
+
+
+## The world box over a terrain's loaded regions. Not a huge nominal box: `clear_layer_in_area` walks
+## every region LOCATION inside its box, loaded or not.
+static func _loaded_box(p_terrain: Pasture3D) -> AABB:
+	var locs: Array = p_terrain.data.get_region_locations()
+	if locs.is_empty():
+		return AABB()
+	var mn: Vector2i = locs[0]
+	var mx: Vector2i = locs[0]
+	for l: Vector2i in locs:
+		mn = Vector2i(mini(mn.x, l.x), mini(mn.y, l.y))
+		mx = Vector2i(maxi(mx.x, l.x), maxi(mx.y, l.y))
+	var size := float(p_terrain.region_size) * p_terrain.vertex_spacing
+	return AABB(Vector3(float(mn.x) * size, -10000.0, float(mn.y) * size),
+			Vector3(float(mx.x - mn.x + 1) * size, 20000.0, float(mx.y - mn.y + 1) * size))
 
 
 func request_resolve() -> void:
@@ -1042,7 +1095,8 @@ func ensure_junction_host() -> Pasture3DRoadChunkHost:
 ##
 ## Grouped by layer AND by terrain: two groups paint into two different layers, and clearing one over the
 ## other's roads would erase a surface nobody was asking to repaint.
-func _clear_paint_layers(p_brushes: Array) -> void:
+func _clear_paint_layers(p_brushes: Array) -> AABB:
+	var cleared := AABB()
 	var boxes := {}
 	for b in p_brushes:
 		if b.terrain == null or b.terrain.data == null:
@@ -1053,9 +1107,17 @@ func _clear_paint_layers(p_brushes: Array) -> void:
 		if layer_id < 0:
 			continue
 		var box: AABB = b.paint_bounds()
+		# WHERE IT WAS PAINTED LAST, as well as where it is now. Only the new box used to be cleared, so a road
+		# moved clear of its old footprint left its old carriageway painted behind it. Same layer only: a road
+		# that changed layers is the old layer's departure, and `_paint_dirty_set` has that layer dirty.
+		var key := "%d:%d" % [b.terrain.get_instance_id(), layer_id]
+		var prev: Dictionary = _painted.get(b.road_key(), {})
+		if not prev.is_empty() and String(prev["layer"]) == key:
+			var was: AABB = prev["box"]
+			if was.size != Vector3.ZERO:
+				box = was if box.size == Vector3.ZERO else box.merge(was)
 		if box.size == Vector3.ZERO:
 			continue
-		var key := "%d:%d" % [b.terrain.get_instance_id(), layer_id]
 		if boxes.has(key):
 			boxes[key]["box"] = (boxes[key]["box"] as AABB).merge(box)
 		else:
@@ -1064,6 +1126,9 @@ func _clear_paint_layers(p_brushes: Array) -> void:
 		# Composite deferred: the paint pass composites once at the end, so a clear that composited here
 		# would push every touched region twice.
 		entry["terrain"].data.clear_layer_in_area(int(entry["layer"]), entry["box"], false)
+		cleared = entry["box"] if cleared.size == Vector3.ZERO else cleared.merge(entry["box"])
+	# Returned for the composite: a road's OLD box is cleared here and no repaint reaches it.
+	return cleared
 
 
 ## Stable run ids, keyed by `road_key()`. Held so an id survives a re-resolve: a route names runs by id
@@ -1405,7 +1470,9 @@ func paint_roads(p_brushes: Array = []) -> int:
 	# because the whole pass repaints all of them: clearing per road would drop a neighbour's cells at a
 	# shared tile boundary (clear_layer_in_area drops WHOLE tiles) and only the road painted afterwards
 	# would put them back.
-	_clear_paint_layers(repaint)
+	var cleared := _clear_paint_layers(repaint)
+	if cleared.size != Vector3.ZERO:
+		departed = cleared if departed.size == Vector3.ZERO else departed.merge(cleared)
 	for b in repaint:
 		written += b.paint_surface()
 		_painted[b.road_key()] = {

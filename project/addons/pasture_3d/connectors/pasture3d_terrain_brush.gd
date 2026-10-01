@@ -209,6 +209,11 @@ var _ready_done: bool = false   # True once _ready ran — gates re-parent auto-
 var reseat_keeps_layer_id: bool = false
 var _exit_host: Node = null # The Layer brush this member left, between EXIT_TREE and its deferred delete check
 var _left_host: Node = null # The Layer brush a delete took this member out of, so its undo can rebuild it
+var _exit_boxes: Array = [] # A standalone brush's footprints, between EXIT_TREE and its deferred delete check
+var _deleted_from_scene: bool = false # A delete lifted this brush's footprint; its undo bakes it again
+## Standalone delete detection is editor-only, like the Layer's: at runtime a brush leaving the tree is a
+## scene being unloaded. Gates turn this on.
+var detect_brush_delete_headless: bool = false
 var _membership_transition: bool = false # A tree-driven Layer brush join/leave is under way; §5's refusal lets it through
 var _last_layer_refusal: String = ""      # The last layer assignment this brush refused, for its configuration warnings
 var _tree_settling: bool = false # True during the node's own tree enter/exit churn (tab switch) — suppresses no-op child-refresh
@@ -607,6 +612,12 @@ func _notification(what: int) -> void:
 		if is_instance_valid(_left_host):
 			_left_host.rebuild_layer.call_deferred()
 		_left_host = null
+		# Undoing a standalone delete: the footprint was lifted, so bake it back.
+		if _deleted_from_scene:
+			_deleted_from_scene = false
+			_stamp_cache.clear()
+			refresh.call_deferred(false)
+			_on_restored_to_scene.call_deferred()
 	elif what == NOTIFICATION_EXIT_TREE:
 		# A member deleted in the editor is kept for undo and never freed, so PREDELETE's detach cannot lift its
 		# stamp. Remember the host now, while the tree still says who it is; a frame later tells delete from move.
@@ -616,6 +627,17 @@ func _notification(what: int) -> void:
 			if host != null and (Engine.is_editor_hint() or host.detect_delete_headless):
 				_exit_host = host
 				_check_member_deleted.call_deferred()
+			# Not a Layer member: the same delete, with no host to rebuild the layer. The boxes are what the
+			# last bake PAINTED: the child splines have already left the tree by now, so their footprints
+			# cannot be measured, and what was painted is exactly what has to come off.
+			elif host == null and _paints() and is_configured() \
+					and not _layer_owner.begins_with(LAYER_BRUSH_OWNER_PREFIX) \
+					and (Engine.is_editor_hint() or detect_brush_delete_headless):
+				_exit_boxes = []
+				for box: AABB in _last_paint_aabb.values():
+					if box.size != Vector3.ZERO:
+						_exit_boxes.append(box)
+				_check_standalone_deleted.call_deferred()
 		remove_from_group(BRUSH_GROUP)
 		# Before anything else: the task is holding this node's arrays.
 		_join_worker()
@@ -649,6 +671,46 @@ func _check_member_deleted() -> void:
 		return
 	_left_host = host
 	host.rebuild_layer()
+
+
+## Deferred from EXIT_TREE for a brush outside any Layer. An editor delete keeps the node for undo and never
+## frees it, so PREDELETE's detach never runs and the footprint used to stay on the terrain until the layer
+## was cleared by hand. Back in the tree means a move; a terrain out of the tree too means a tab switch or
+## the scene closing. What is left is a delete: clear the footprint and repaint the layer-mates under it.
+func _check_standalone_deleted() -> void:
+	var boxes := _exit_boxes
+	_exit_boxes = []
+	if is_inside_tree() or not is_instance_valid(terrain) or not terrain.is_inside_tree() or terrain.data == null:
+		return
+	var owner := _layer_owner
+	var mate: Pasture3DTerrainBrush = null
+	for n in terrain.get_tree().get_nodes_in_group(BRUSH_GROUP):
+		if (n != self and n is Pasture3DTerrainBrush and is_instance_valid(n) and n.terrain == terrain
+				and n._layer_owner == owner and n._paints()):
+			mate = n
+			break
+	if mate != null:
+		# The mate's full bake clears these boxes on every layer of the owner and repaints every tool still on it.
+		mate._refresh_owner(owner, false, boxes)
+	else:
+		# The last tool on its layer: clear and repaint nobody. Blanking the owner keeps this brush out of
+		# its own sibling set, as `_detach_from_current` does.
+		_layer_owner = ""
+		_refresh_owner(owner, false, boxes)
+		_layer_owner = owner
+	_last_paint_aabb.clear()
+	_stamp_cache.clear()
+	_deleted_from_scene = true
+	_on_deleted_from_scene()
+
+
+## Hooks for a subclass with work of its own outside the layer (a road's network). Both run deferred.
+func _on_deleted_from_scene() -> void:
+	pass
+
+
+func _on_restored_to_scene() -> void:
+	pass
 
 
 ## Follow a reparent: bind to the nearest Pasture3D ancestor (the setter detaches from the old one).
