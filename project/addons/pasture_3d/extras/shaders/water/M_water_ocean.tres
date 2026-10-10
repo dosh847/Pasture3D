@@ -59,5 +59,4 @@ shader_parameter/foam_crest_softness = 0.1
 shader_parameter/foam_crest_amount = 0.476
 shader_parameter/foam_shore_depth = 1.2
 shader_parameter/foam_shore_amount = 0.381
-shader_parameter/scatter_color = Color(0.06, 0.35, 0.28, 1)
-shader_parameter/scatter_strength = 3.5
+shader_parameter/wave_peak_scatter = 1.0

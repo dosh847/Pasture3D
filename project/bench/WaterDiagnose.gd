@@ -123,9 +123,9 @@ func _ready() -> void:
 	_mat.set_shader_parameter("foam_crest_amount", 1.0)
 
 	# 6. Scattering, the other additive term.
-	_mat.set_shader_parameter("scatter_strength", 0.0)
+	_mat.set_shader_parameter("wave_peak_scatter", 0.0)
 	await _shot("06_no_scatter")
-	_mat.set_shader_parameter("scatter_strength", 3.5)
+	_mat.set_shader_parameter("wave_peak_scatter", 1.0)
 
 	# 7. Geometry only, no shading at all: says whether the WAVES are right,
 	#    independent of everything above.

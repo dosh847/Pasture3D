@@ -28,5 +28,4 @@ shader_parameter/foam_scale = 0.406000019285
 shader_parameter/foam_roughness = 0.28999999351792
 shader_parameter/foam_shore_depth = 4.65000006929058
 shader_parameter/foam_shore_amount = 0.55999998748288
-shader_parameter/scatter_color = Color(0.09, 0.3, 0.18, 1)
-shader_parameter/scatter_strength = 2.5
+shader_parameter/wave_peak_scatter = 1.0

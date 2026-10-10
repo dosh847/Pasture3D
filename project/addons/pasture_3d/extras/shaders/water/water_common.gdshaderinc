@@ -26,6 +26,14 @@
 #define WATER_MODEL_GERSTNER 0
 #define WATER_MODEL_FFT 1
 
+// Garrett's lighting in light() (FFT spec §3.1). Every lit surface variant except rivers, which keep
+// Godot's built-in lambert/GGX and the look they were tuned under. Off for the debug readouts, which write
+// EMISSION with zero SPECULAR and rely on the light loop contributing nothing -- a custom light() adds
+// SPECULAR_LIGHT whatever SPECULAR says.
+#if !defined(WATER_STREAM_WAVES) && !defined(WATER_PLAIN_DOMAIN_ORIGIN) && !defined(WATER_DEBUG_SURFACE) && !defined(WATER_DEBUG_GLOBALS) && !defined(WATER_NO_PBR)
+#define WATER_PBR
+#endif
+
 // Upper bound on WATER_WAVE_COUNT. Fixes the size of the uploaded wave table so
 // every variant takes the same one. Raising it costs 16 bytes per slot in every
 // water material and requires a matching change in water_waves.cpp.
@@ -443,13 +451,30 @@ uniform float foam_shore_amount : hint_range(0.0, 2.0, 0.01) = 0.8;
 group_uniforms;
 #endif
 
+#ifdef WATER_PBR
+// ---------------------------------------------------------------------------
+// Sun lighting (FFT spec §3.1), Garrett's NEW_LIGHTING terms evaluated per light in light().
+//
+// The water's own colour is ALBEDO -- deep_color through the absorption solve -- so it plays the role of
+// the reference's _ScatterColor and there is no separate one. The defaults are the reference's
+// SampleScene values.
+// ---------------------------------------------------------------------------
+group_uniforms sun;
+// Beckmann alpha (rms microfacet slope) of the SUN lobe. Not the perceptual ROUGHNESS Godot squares for
+// its environment reflection: that one is still base_roughness above.
+uniform float sun_roughness : hint_range(0.01, 0.5, 0.001) = 0.075;
+// k2: light scattered back out of the body toward a viewer looking into the water.
+uniform float view_scatter : hint_range(0.0, 4.0, 0.01) = 1.0;
+// k3: body scatter that follows the sun's incidence on the surface.
+uniform float shadow_scatter : hint_range(0.0, 4.0, 0.01) = 0.5;
+// k4: a constant in-scatter from bubbles, in its own colour.
+uniform vec3 bubble_color : source_color = vec3(0.0, 0.02, 0.016);
+uniform float bubble_density : hint_range(0.0, 4.0, 0.01) = 1.0;
 #ifdef WATER_SCATTER
-group_uniforms scatter;
-uniform vec3 scatter_color : source_color = vec3(0.06, 0.35, 0.28);
-// Gated on the raw crest signal, which peaks at wave_steepness rather than 1.0,
-// so this default is roughly 3x what it would be against a normalised signal.
-// The upside is that scattering strengthens with the sea state on its own.
-uniform float scatter_strength : hint_range(0.0, 8.0, 0.01) = 3.5;
+// k1: sun shining THROUGH a crest toward the viewer, per metre of crest height above the rest level. The
+// reference's _WavePeakScatterStrength times its _HeightModifier, which only ever appear as a product.
+uniform float wave_peak_scatter : hint_range(0.0, 8.0, 0.01) = 1.0;
+#endif
 group_uniforms;
 #endif
 
@@ -572,6 +597,11 @@ varying float v_base_y;
 // sheet, so the fragment stage samples slope and foam where this vertex CAME FROM; sampling at the
 // displaced position would shear every crest sideways by the choppiness.
 varying vec2 v_fft_domain;
+#endif
+
+#ifdef WATER_PBR
+// Fragment -> light(): x = foam coverage, y = crest height above the rest level in metres (k1's H).
+varying vec2 v_pbr;
 #endif
 
 #ifdef WATER_SHORE_MASK

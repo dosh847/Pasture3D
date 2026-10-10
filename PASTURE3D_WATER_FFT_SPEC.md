@@ -1,8 +1,9 @@
 # Pasture3D Water — FFT Ocean, fBm Fallback, Microfacet Lighting
 
 Status: **spec written 2026-10-09. Phase 1 built, gated (`WaterFFTGate` 6/6, §6.1) and committed
-(52212cbc). Phase 2 built and gated 2026-10-09 (`WaterFFTWiringGate` 4/4, §6.2). Phases 3–6 unbuilt.
-Until Phase 4 the fallback is GERSTNER, not fBm.**
+(52212cbc). Phase 2 built, gated (`WaterFFTWiringGate` 4/4, §6.2) and committed (84923526). Phase 3
+built and gated 2026-10-09 (`WaterPBRGate` 3/3, §6.3). Phases 4–6 unbuilt. Until Phase 4 the fallback
+is GERSTNER, not fBm.**
 
 Ports Garrett Gunnell's water (https://github.com/GarrettGunnell/Water, MIT-style reference code, last
 commit 2023-12-30) onto Pasture3D's ocean, lake and pond. The reference is a Unity project. Two parts of it
@@ -194,6 +195,51 @@ The reference's `NEW_LIGHTING` block, split across Godot's stages:
 `water_sun_direction`/`water_sun_color` stay. The fragment stage still needs the sun for k1 when the
 scene has no light in range (unshaded previews).
 
+**As built (Phase 3).** Where it departs from the plan above, the plan was wrong or untested:
+
+- **The engine contract, measured.** `bench/WaterPBRGate` [E] pins it on Godot 4.7 Forward+:
+  - `LIGHT_COLOR` is colour × energy × π.
+  - `DIFFUSE_LIGHT` is multiplied by `ALBEDO` after the loop.
+  - `SPECULAR_LIGHT` is added untouched, whatever `SPECULAR` says.
+  - So the reference's irradiance is `LIGHT_COLOR · ATTENUATION / π`. A white `DirectionalLight3D` at
+    energy 1 and colour (1, 0.694, 0.32) is the reference's `_SunIrradiance`.
+- **`WATER_PBR`** is defined in `water_common.gdshaderinc` for every lit variant except rivers
+  (`WATER_STREAM_WAVES`), the canvas_item probe and the two debug readouts. Rivers keep Godot's built-in
+  lights and the look they were tuned under. `WATER_NO_PBR` opts a custom variant out, which is also how
+  the A/B captures make their "before".
+- **There is no separate scatter colour.** The water's own `ALBEDO` (`deep_color` through the absorption
+  solve) is the reference's `_ScatterColor`.
+  - `light()` assembles its target per colour: the body terms on the water's share of `ALBEDO`, bubbles
+    in `bubble_color`, foam as Lambert on `foam_color`. It then divides by `ALBEDO` so that Godot's
+    multiply lands it exactly.
+  - The water's share needs no varying: it is `ALBEDO − foam · foam_color`.
+- **Every term takes `ATTENUATION`**, not only k3. The reference has no shadows, so it cannot say which
+  terms a shadow dims. Dimming them all is the only answer that leaves a shadowed patch lit by the sky
+  alone. `WaterPBRGate` [A] checks it.
+- **Foam** scales the specular by (1 − foam) and the body terms by (1 − foam), which reproduces the
+  reference's lerp. The foam itself is LIT (Lambert × `foam_color`), not the reference's constant colour,
+  so foam in shadow takes only the sky's light.
+- **The environment reflection and alpha are unchanged.**
+  - The reflection is Godot's sky radiance through `ROUGHNESS` = `base_roughness` and `SPECULAR` =
+    `specular_amount`. The reference's cubemap is sampled at mip 0, so a near-mirror is the faithful
+    reading. `environment_light_strength` was not ported: a `SPECULAR` scale cannot reach Godot's
+    grazing term, and the knob would have claimed more than it did.
+  - Alpha still uses `water_fresnel()`, which goes to 1 at grazing like Godot's environment Fresnel. The
+    reference's roughness-flattened F tops out near 0.69 at a = 0.075, and putting that in alpha would
+    let the horizon go translucent again (shader spec §8.3).
+- **Two roughnesses.** `sun_roughness` (0.075) is the Beckmann α of the sun lobe. `base_roughness` is
+  still the perceptual roughness Godot squares for the sky. The reference's `_FoamRoughnessModifier`
+  defaults to 0 and was not ported.
+- **k1's crest height H.** Under FFT it is the per-pixel cascade sum of displacement y (the reference's
+  own H, from the taps the fragment already makes). Under Gerstner it is the vertex height above
+  `v_base_y`. `wave_peak_scatter` is the product of the reference's `_WavePeakScatterStrength` and
+  `_HeightModifier`, which only ever appear multiplied. k1 is compiled only under `WATER_SCATTER`, so the
+  low tiers skip it, as they skipped the old backlight.
+- **Deleted:** `scatter_color`, `scatter_strength` and the `BACKLIGHT` term they drove. k1 replaces them.
+  The ocean and lake presets now set `wave_peak_scatter`.
+- The reference's normal depth attenuation and `_NormalStrength` were not ported. The slope taps are
+  mip-filtered (Phase 2), which is the job the depth fade did.
+
 ## 4. Settings and profiles
 
 `Pasture3DWaveProfile` gains an FFT group and an fBm group. The Gerstner knobs (`wave_count`,
@@ -321,6 +367,37 @@ Existing gates, run windowed after the change:
 Visual check (ocean / lake / pond on a plain sheet, FFT vs Gerstner): all three draw a broadband sea with
 per-pixel slope detail. The thin dark streaks on back slopes near the horizon are the same in the
 Gerstner shots. They come from the empty fixture, which has nothing under the sheet.
+
+### 6.3 Phase 3 result (2026-10-09, `WaterPBRGate`, windowed Forward+)
+
+The fixture is a flat sheet of `water_body.gdshader` under one white sun. The world is black: no sky, no
+ambient, no reflections. The tonemap is linear and the readback is float. `_predict()` is `light()`'s
+arithmetic in GDScript.
+
+| | Criterion | Result | Control |
+|---|---|---|---|
+| E | sun lobe (sun and camera overhead) and body terms (sun 35°, camera 60° opposite) match the prediction | rel. error 0.0008 and 0.0005; 2× energy gives 2.0000× | the prediction without the π divide misses by 0.682 (= 1 − 1/π) |
+| K | k1 at a Gerstner crest of known height (2 m, normal exactly up): `wave_peak_scatter` 0 and 8 each match | 0.0004 and 0.0002 | the k1-free prediction misses the k = 8 render by 0.832 |
+| A | a box's shadow on the body geometry | shadowed pixel 0.0000 of predicted | the same frame with the light's shadows off matches to 0.0005 |
+
+[K]'s first geometry sat near the mirror direction. The glint swamped k1 and its control margin was 0.06,
+so the geometry moved off the lobe.
+
+Existing gates, run windowed after the change, all pass: `WaterFFTGate`, `WaterFFTWiringGate`,
+`WaterPhase1Gate`, `WaterBodiesPhase1/3/4/5/7Gate`, `WaterPresetCheck`, `WaterVariantWarningCheck`,
+`WaterTwoLakesGate`, `WaterBodyLateManagerCheck` and `GraphWaterNodesGate`. The timing gates were not
+run. The status of §6.2's red gates is unchanged.
+
+A/B captures (ocean, a backlit ocean, lake and pond, against a `WATER_NO_PBR` build of the same
+material):
+
+- The body colour is close to the "before".
+- The sun path is broader and brighter, because the lobe is Beckmann α 0.075 rather than Godot's GGX at
+  `base_roughness`².
+- On the pond, that width spreads into one large blown-out streak. The reference's 0.075 is an ocean
+  value, and still water wants a smaller `sun_roughness`. That is a preset decision, left for Phase 6.
+- k1 is hard to see by eye at the ocean's very dark `deep_color`, because it rides on `ALBEDO`. [K] is
+  what shows it is there.
 
 ## 7. Risks
 

@@ -63,12 +63,15 @@ void fragment() {
 	// they come back. Implicit-derivative sampling is valid here because _wave_model is uniform.
 	bool fft = _wave_model == WATER_MODEL_FFT;
 	float fft_foam = 0.0;
+	float fft_height = 0.0;
 	if (fft) {
 		slope = vec2(0.0);
 		for (int i = 0; i < 4; i++) {
 			vec3 uvw = vec3(v_fft_domain / _fft_lengths[i], float(i));
 			slope += texture(_fft_slope, uvw).xy;
-			fft_foam += texture(_fft_displacement, uvw).w;
+			vec4 disp = texture(_fft_displacement, uvw);
+			fft_foam += disp.w;
+			fft_height += disp.y;
 		}
 	}
 #endif
@@ -252,24 +255,19 @@ void fragment() {
 	ROUGHNESS = roughness;
 	ALPHA = alpha;
 
-#ifdef WATER_SCATTER
-	// One backlight term, against the legacy shader's three pow() calls and a
-	// three-term accumulation for an effect the specular largely swamps.
-	//
-	// water_sun_direction points toward the sun, so light travelling into the
-	// camera -- the sun on the far side of the wave -- is a negative dot. Squared
-	// to tighten it to the near-into-the-sun view where the effect actually
-	// exists. Gated on the crest signal because that is where the water is thin
-	// enough to transmit, and because that signal carries the sea state: raw
-	// v_jacobian peaks at wave_steepness, so calm water scatters less on its own.
-	vec3 to_camera = normalize(CAMERA_POSITION_WORLD - v_world_pos);
-	float backlit = clamp(-dot(water_sun_direction, to_camera), 0.0, 1.0);
-	float scatter_gate = clamp(v_jacobian, 0.0, 1.0);
+#ifdef WATER_PBR
+	// What light() needs that it cannot read itself. The crest height is the displaced surface above the
+	// rest level: the per-pixel cascade sum under FFT (the reference's own H), the vertex-stage height
+	// under Gerstner, where the vertex sum is the only one there is.
+	float crest_height = v_world_pos.y - v_base_y;
 #ifdef WATER_FFT
-	scatter_gate = fft ? clamp(fft_foam, 0.0, 1.0) : scatter_gate;
+	crest_height = fft ? fft_height : crest_height;
 #endif
-	BACKLIGHT = scatter_color *
-		(scatter_strength * scatter_gate * backlit * backlit);
+	float pbr_foam = 0.0;
+#if defined(WATER_FOAM_CREST) || defined(WATER_FOAM_SHORE)
+	pbr_foam = foam;
+#endif
+	v_pbr = vec2(pbr_foam, max(crest_height, 0.0));
 #endif
 
 #endif // WATER_DEBUG_GLOBALS
@@ -285,5 +283,85 @@ void fragment() {
 	ALPHA *= water_shore_alpha(v_shore_xz);
 #endif
 }
+
+#ifdef WATER_PBR
+// ---------------------------------------------------------------------------
+// Sun lighting: GarrettGunnell/Water's NEW_LIGHTING, per light (FFT spec §3.1).
+//
+// The reference evaluates one hardcoded sun and writes the final colour. Godot calls this once per light
+// and owns everything else, so the port is the reference's sun terms and nothing more:
+//   - the environment reflection stays Godot's (sky radiance through ROUGHNESS/SPECULAR); the reference's
+//     cubemap sample stood in for exactly that;
+//   - ambient light stays Godot's, on ALBEDO;
+//   - shadows arrive through ATTENUATION, which every term here takes. The reference has no shadows, so
+//     nothing in it says which terms a shadow should dim; all of them is the only answer that leaves a
+//     shadowed patch of water lit by nothing but the sky.
+// ---------------------------------------------------------------------------
+
+// Smith masking for a Beckmann distribution, Walter et al.'s rational fit. The reference's form,
+// including its use of the HALF vector where the textbook has the normal. The sqrt argument is floored so
+// a viewer exactly on the half vector reads "unmasked" (a -> inf, 0) and not NaN.
+float water_smith_beckmann(vec3 p_h, vec3 p_s, float p_alpha) {
+	float h_dot_s = max(0.001, clamp(dot(p_h, p_s), 0.0, 1.0));
+	float a = h_dot_s / (p_alpha * sqrt(max(1.0 - h_dot_s * h_dot_s, 1e-12)));
+	return a < 1.6 ? (1.0 - 1.259 * a + 0.396 * a * a) / (3.535 * a + 2.181 * a * a) : 0.0;
+}
+
+float water_beckmann(float p_n_dot_h, float p_alpha) {
+	float n2 = p_n_dot_h * p_n_dot_h;
+	float a2 = p_alpha * p_alpha;
+	return exp((n2 - 1.0) / (a2 * n2)) / (PI * a2 * n2 * n2);
+}
+
+void light() {
+	// The reference's _SunIrradiance, in the reference's units. Godot hands light() its colour times
+	// energy times PI -- measured, not assumed: WaterPBRGate [E] renders a flat sheet against this
+	// arithmetic, and the same prediction without the divide is its control. Getting it wrong is a silent
+	// 3x on every term below.
+	vec3 irr = LIGHT_COLOR * (ATTENUATION / PI);
+
+	vec3 h = normalize(LIGHT + VIEW);
+	float n_dot_l = clamp(dot(NORMAL, LIGHT), 0.0, 1.0);
+	float alpha = sun_roughness;
+	float light_mask = water_smith_beckmann(h, LIGHT, alpha);
+	float g = 1.0 / (1.0 + water_smith_beckmann(h, VIEW, alpha) + light_mask);
+	// Fresnel for eta 1.33, flattened with roughness the way the reference does: R = (0.33 / 2.33)^2.
+	float f = 0.020059 + 0.979941 * pow(max(1.0 - dot(NORMAL, VIEW), 0.0), 5.0 * exp(-2.69 * alpha))
+		/ (1.0 + 22.7 * pow(alpha, 1.5));
+	f = clamp(f, 0.0, 1.0);
+
+	// The reference divides by the MACRO normal's incidence -- world up -- not the textbook 4 (n.l)(n.v).
+	vec3 up = VIEW_MATRIX[1].xyz;
+	float up_dot_l = max(0.001, clamp(dot(up, LIGHT), 0.0, 1.0));
+	float d = water_beckmann(max(1e-4, dot(NORMAL, h)), alpha);
+
+	float foam = v_pbr.x;
+	// The reference lerps its whole output, specular included, toward the foam colour.
+	SPECULAR_LIGHT += irr * (f * g * d / (4.0 * up_dot_l) * n_dot_l * (1.0 - foam));
+
+	float v_dot_n = clamp(dot(VIEW, NORMAL), 0.0, 1.0);
+	float k = view_scatter * v_dot_n * v_dot_n;
+#ifdef WATER_SCATTER
+	float into_sun = clamp(dot(LIGHT, -VIEW), 0.0, 1.0);
+	float away = 0.5 - 0.5 * dot(LIGHT, NORMAL);
+	k += wave_peak_scatter * v_pbr.y * (into_sun * into_sun) * (into_sun * into_sun) * (away * away * away);
+#endif
+	float body = k / (1.0 + light_mask) + shadow_scatter * n_dot_l;
+
+	// Godot multiplies DIFFUSE_LIGHT by ALBEDO after the loop (measured, [E]), and ALBEDO here is already
+	// the foam mix of two colours that need different light: the water's body terms and the foam's
+	// lambert. So the target is assembled per colour and divided back out by ALBEDO. Exact per channel,
+	// and the water's share of ALBEDO is recoverable without a varying: it is ALBEDO - foam * foam_color.
+#if defined(WATER_FOAM_CREST) || defined(WATER_FOAM_SHORE)
+	vec3 foam_albedo = foam * foam_color;
+#else
+	vec3 foam_albedo = vec3(0.0);
+#endif
+	vec3 water_albedo = max(ALBEDO - foam_albedo, vec3(0.0));
+	vec3 lit = irr * ((1.0 - f) * (body * water_albedo + (1.0 - foam) * bubble_density * bubble_color)
+		+ n_dot_l * foam_albedo);
+	DIFFUSE_LIGHT += lit / max(ALBEDO, vec3(1e-4));
+}
+#endif
 
 #endif // WATER_SHADING_INC
