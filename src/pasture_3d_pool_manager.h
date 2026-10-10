@@ -51,17 +51,25 @@ class Pasture3DPoolManager : public Node3D {
 	CLASS_NAME();
 
 public: // Constants
-	// Which wave model the materials draw (PASTURE3D_WATER_FFT_SPEC.md §4). FFT is the default and falls
-	// back to Gerstner where there is no RenderingDevice (Compatibility, headless). Phase 4 replaces that
-	// fallback with fBm and Phase 6 deletes GERSTNER.
+	// Which wave model the materials draw (PASTURE3D_WATER_FFT_SPEC.md §4). PROJECT, the default, reads
+	// SETTING_WAVE_MODEL, so a game's options menu can switch every scene without a node reference. FFT
+	// falls back to fBm where there is no RenderingDevice (Compatibility, headless), and says so once.
+	// Phase 6 deletes GERSTNER; its value stays 1 until then so saved scenes keep their meaning.
 	enum WaveModel {
 		WAVE_MODEL_FFT = 0,
 		WAVE_MODEL_GERSTNER = 1,
+		WAVE_MODEL_FBM = 2,
+		WAVE_MODEL_PROJECT = 3,
 	};
 	// The values the shader's `_wave_model` uniform takes, from water_common.gdshaderinc. Spelled out
 	// rather than reusing the enum: 0 has to stay the bare-mesh default, which the enum's order is not.
-	static constexpr int SHADER_MODEL_GERSTNER = 0;
-	static constexpr int SHADER_MODEL_FFT = 1;
+	static constexpr int SHADER_MODEL_GERSTNER = Pasture3DWaveProfile::MODEL_GERSTNER;
+	static constexpr int SHADER_MODEL_FFT = Pasture3DWaveProfile::MODEL_FFT;
+	static constexpr int SHADER_MODEL_FBM = Pasture3DWaveProfile::MODEL_FBM;
+
+	// Project settings behind WAVE_MODEL_PROJECT and fft_resolution 0. wave_model is 0 = FFT, 1 = fBm.
+	static constexpr const char *SETTING_WAVE_MODEL = "pasture_3d/water/wave_model";
+	static constexpr const char *SETTING_FFT_RESOLUTION = "pasture_3d/water/fft_resolution";
 
 	// Bodies find their manager by group. Matches WATER_MANAGER_GROUP in the spec.
 	//
@@ -117,8 +125,15 @@ private:
 
 	TypedArray<Pasture3DWaveProfile> _profiles;
 	real_t _loop_period = 120.f;
-	WaveModel _wave_model = WAVE_MODEL_FFT;
-	int _fft_resolution = 256;
+	WaveModel _wave_model = WAVE_MODEL_PROJECT;
+	// 0 = the project setting.
+	int _fft_resolution = 0;
+	// What _apply_model_to_profiles() last applied, so a project-settings change that moves neither costs
+	// nothing: settings_changed fires for every setting in the project.
+	int _applied_model = -1;
+	int _applied_resolution = -1;
+	// The no-device warning is about the machine, not the scene: once per process.
+	static inline bool _fallback_warned = false;
 	// Simulations some material samples, in first-upload order. Only these are ticked: a profile no body
 	// selects costs nothing. Unique by pointer, so a simulation two profiles share is ticked once.
 	Vector<Ref<Pasture3DWaterFFT>> _live_ffts;
@@ -178,6 +193,9 @@ private:
 	void _apply_model_to_profiles();
 	void _reupload_cache();
 	void _tick_ffts(const double p_delta);
+	void _on_project_settings_changed();
+	// The requested model with PROJECT resolved, before the no-device fallback.
+	WaveModel _requested_wave_model() const;
 
 protected:
 	static void _bind_methods();
@@ -206,6 +224,8 @@ public:
 	// warn that a global "was removed at some point" and render it black until it
 	// recompiles. Moved here from Pasture3D in Phase 2.
 	static void register_water_globals();
+	// Declares SETTING_WAVE_MODEL and SETTING_FFT_RESOLUTION with their hints, if absent. Idempotent.
+	static void register_water_settings();
 
 	// Copies p_base's ART parameters into p_target, leaving p_target's RID alone.
 	// Returns true if anything was written.
@@ -246,10 +266,19 @@ public:
 	Node3D *get_sun_light() const { return _sun_light.ptr(); }
 	void set_wave_model(const WaveModel p_model);
 	WaveModel get_wave_model() const { return _wave_model; }
-	// What the materials actually draw: the setting, unless the renderer cannot run it.
-	bool is_fft_effective() const;
+	// What the materials actually draw: FFT, FBM or GERSTNER. PROJECT resolved, and FFT -> FBM where the
+	// renderer has no RenderingDevice.
+	WaveModel get_effective_wave_model() const;
+	bool is_fft_effective() const { return get_effective_wave_model() == WAVE_MODEL_FFT; }
+	// True when the FFT was asked for and the fBm is drawn instead because there is no device.
+	bool is_wave_model_fallback() const;
 	void set_fft_resolution(const int p_resolution);
 	int get_fft_resolution() const { return _fft_resolution; }
+	// The resolution the simulations run at: the property, or the project setting when it is 0.
+	int get_effective_fft_resolution() const;
+	// Re-reads the project settings and re-applies the model if the answer moved. Connected to
+	// ProjectSettings.settings_changed; bound so a game that writes the settings can apply them at once.
+	void refresh_project_settings() { _on_project_settings_changed(); }
 	int get_live_fft_count() const { return _live_ffts.size(); }
 	// Simulation dispatches since this manager was made. A gate's witness that the tick runs.
 	int get_fft_tick_count() const { return _fft_tick_count; }

@@ -32,14 +32,25 @@ Pasture3DWaveProfile::Pasture3DWaveProfile() {
 	Ref<Pasture3DWaterFFT> fft;
 	fft.instantiate();
 	set_fft(fft);
-	// The default simulation is not an authored one: it follows the Gerstner knobs until edited.
+	Ref<Pasture3DWaterFBM> fbm;
+	fbm.instantiate();
+	set_fbm(fbm);
+	// The defaults are not authored ones: they follow the Gerstner knobs until edited.
 	_fft_authored = false;
-	_derive_fft();
+	_fbm_authored = false;
+	_derive_models();
 }
 
 void Pasture3DWaveProfile::_on_fft_changed() {
 	if (!_deriving) {
 		_fft_authored = true;
+	}
+	emit_changed();
+}
+
+void Pasture3DWaveProfile::_on_fbm_changed() {
+	if (!_deriving) {
+		_fbm_authored = true;
 	}
 	emit_changed();
 }
@@ -89,6 +100,60 @@ void Pasture3DWaveProfile::_derive_fft() {
 	_deriving = false;
 }
 
+/**
+ * Fits the fBm to the Gerstner knobs, for a profile whose fBm nobody has authored.
+ *
+ * The reference's knobs are its look; this keeps all of them except the four that say WHERE and HOW BIG:
+ *
+ *   DIRECTION. The first octave runs along direction_deg (`seed` is that angle in radians).
+ *   SIZE. `frequency` is 2 pi / length_max, so the first octave is the longest Gerstner wave. The rest of the
+ *     series is relative to it (Pasture3DWaterFBM's class comment), so the shape scales with it.
+ *   SPEED. The reference runs 2 rad/s at 1 rad/m, which is 0.64 of deep-water dispersion sqrt(g k). Kept as
+ *     that fraction: speed = 2 sqrt(k), so a pond's ripples do not crawl and an ocean's swell does not race.
+ *   HEIGHT. The same target as the FFT's: sigma = 0.176 x the Gerstner amplitude sum, from the closed-form
+ *     sigma of the vertex set. The fragment set is then scaled so its first octaves are the SAME metres as
+ *     the vertex set's -- the reference normalises each set by its own amplitude sum, so equal `height`
+ *     knobs would draw normals for a sea 25% shallower than the geometry.
+ */
+void Pasture3DWaveProfile::_derive_fbm() {
+	if (_fbm_authored || _fbm.is_null()) {
+		return;
+	}
+	_ensure_built();
+	const float ref_sigma_per_amp = 0.176f;
+	const float k0 = (float)Math_TAU / MAX(_waves.get_length_max(), 0.01f);
+	_deriving = true;
+	for (int i = 0; i < 2; i++) {
+		_fbm->set_knob(i, "seed", Math::deg_to_rad(_waves.get_direction_deg()));
+		_fbm->set_knob(i, "frequency", k0);
+		_fbm->set_knob(i, "speed", 2.f * std::sqrt(k0));
+	}
+	const float unit_sigma = _fbm->get_unit_sigma(Pasture3DWaterFBM::SET_VERTEX);
+	const float height = unit_sigma > 1e-6f ? ref_sigma_per_amp * (float)_waves.get_amplitude_sum() / unit_sigma : 0.f;
+	const float sum_v = _fbm->get_amplitude_sum(Pasture3DWaterFBM::SET_VERTEX);
+	const float sum_f = _fbm->get_amplitude_sum(Pasture3DWaterFBM::SET_FRAGMENT);
+	_fbm->set_knob(Pasture3DWaterFBM::SET_VERTEX, "height", height);
+	_fbm->set_knob(Pasture3DWaterFBM::SET_FRAGMENT, "height", sum_v > 1e-6f ? height * sum_f / sum_v : height);
+	_deriving = false;
+}
+
+void Pasture3DWaveProfile::set_fbm(const Ref<Pasture3DWaterFBM> &p_fbm) {
+	if (_fbm == p_fbm) {
+		return;
+	}
+	// As set_fft(): whatever arrives here was chosen.
+	_fbm_authored = true;
+	Callable cb = callable_mp(this, &Pasture3DWaveProfile::_on_fbm_changed);
+	if (_fbm.is_valid() && _fbm->is_connected("changed", cb)) {
+		_fbm->disconnect("changed", cb);
+	}
+	_fbm = p_fbm;
+	if (_fbm.is_valid()) {
+		_fbm->connect("changed", cb);
+	}
+	emit_changed();
+}
+
 void Pasture3DWaveProfile::set_fft(const Ref<Pasture3DWaterFFT> &p_fft) {
 	if (_fft == p_fft) {
 		return;
@@ -107,11 +172,12 @@ void Pasture3DWaveProfile::set_fft(const Ref<Pasture3DWaterFFT> &p_fft) {
 	emit_changed();
 }
 
-void Pasture3DWaveProfile::set_fft_active(const bool p_active) {
-	if (_fft_active == p_active) {
+void Pasture3DWaveProfile::set_active_model(const int p_model) {
+	const int model = CLAMP(p_model, (int)MODEL_GERSTNER, (int)MODEL_FBM);
+	if (_active_model == model) {
 		return;
 	}
-	_fft_active = p_active;
+	_active_model = model;
 	emit_changed();
 }
 
@@ -129,7 +195,7 @@ void Pasture3DWaveProfile::set_wave_count(const int p_count) {
 	if (_waves.get_count() == before) {
 		return;
 	}
-	_derive_fft();
+	_derive_models();
 	emit_changed();
 }
 
@@ -139,7 +205,7 @@ void Pasture3DWaveProfile::set_direction_deg(const real_t p_deg) {
 	if (_waves.get_direction_deg() == before) {
 		return;
 	}
-	_derive_fft();
+	_derive_models();
 	emit_changed();
 }
 
@@ -149,7 +215,7 @@ void Pasture3DWaveProfile::set_spread_deg(const real_t p_deg) {
 	if (_waves.get_spread_deg() == before) {
 		return;
 	}
-	_derive_fft();
+	_derive_models();
 	emit_changed();
 }
 
@@ -159,7 +225,7 @@ void Pasture3DWaveProfile::set_amplitude(const real_t p_metres) {
 	if (_waves.get_amplitude() == before) {
 		return;
 	}
-	_derive_fft();
+	_derive_models();
 	emit_changed();
 }
 
@@ -169,7 +235,7 @@ void Pasture3DWaveProfile::set_length_max(const real_t p_metres) {
 	if (_waves.get_length_max() == before) {
 		return;
 	}
-	_derive_fft();
+	_derive_models();
 	emit_changed();
 }
 
@@ -179,7 +245,7 @@ void Pasture3DWaveProfile::set_steepness(const real_t p_steepness) {
 	if (_waves.get_steepness() == before) {
 		return;
 	}
-	_derive_fft();
+	_derive_models();
 	emit_changed();
 }
 
@@ -203,6 +269,9 @@ PackedVector4Array Pasture3DWaveProfile::get_shader_table() {
 real_t Pasture3DWaveProfile::get_amplitude_sum() {
 	if (is_fft_active()) {
 		return (real_t)_fft->get_displacement_bound();
+	}
+	if (is_fbm_active()) {
+		return (real_t)_fbm->get_displacement_bound();
 	}
 	_ensure_built();
 	return (real_t)_waves.get_amplitude_sum();
@@ -281,8 +350,17 @@ void Pasture3DWaveProfile::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_steepness"), &Pasture3DWaveProfile::get_steepness);
 	ClassDB::bind_method(D_METHOD("set_fft", "fft"), &Pasture3DWaveProfile::set_fft);
 	ClassDB::bind_method(D_METHOD("get_fft"), &Pasture3DWaveProfile::get_fft);
-	ClassDB::bind_method(D_METHOD("set_fft_active", "active"), &Pasture3DWaveProfile::set_fft_active);
+	ClassDB::bind_method(D_METHOD("set_fbm", "fbm"), &Pasture3DWaveProfile::set_fbm);
+	ClassDB::bind_method(D_METHOD("get_fbm"), &Pasture3DWaveProfile::get_fbm);
+	ClassDB::bind_method(D_METHOD("is_fft_authored"), &Pasture3DWaveProfile::is_fft_authored);
+	ClassDB::bind_method(D_METHOD("is_fbm_authored"), &Pasture3DWaveProfile::is_fbm_authored);
+	BIND_ENUM_CONSTANT(MODEL_GERSTNER);
+	BIND_ENUM_CONSTANT(MODEL_FFT);
+	BIND_ENUM_CONSTANT(MODEL_FBM);
+	ClassDB::bind_method(D_METHOD("set_active_model", "model"), &Pasture3DWaveProfile::set_active_model);
+	ClassDB::bind_method(D_METHOD("get_active_model"), &Pasture3DWaveProfile::get_active_model);
 	ClassDB::bind_method(D_METHOD("is_fft_active"), &Pasture3DWaveProfile::is_fft_active);
+	ClassDB::bind_method(D_METHOD("is_fbm_active"), &Pasture3DWaveProfile::is_fbm_active);
 	ClassDB::bind_method(D_METHOD("set_loop_period", "seconds"), &Pasture3DWaveProfile::set_loop_period);
 	ClassDB::bind_method(D_METHOD("get_loop_period"), &Pasture3DWaveProfile::get_loop_period);
 
@@ -297,6 +375,7 @@ void Pasture3DWaveProfile::_bind_methods() {
 
 	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "profile_name"), "set_profile_name", "get_profile_name");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "fft", PROPERTY_HINT_RESOURCE_TYPE, "Pasture3DWaterFFT"), "set_fft", "get_fft");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "fbm", PROPERTY_HINT_RESOURCE_TYPE, "Pasture3DWaterFBM"), "set_fbm", "get_fbm");
 	ADD_GROUP("Gerstner", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "wave_count", PROPERTY_HINT_RANGE, "1,8,1"), "set_wave_count", "get_wave_count");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "direction_deg", PROPERTY_HINT_RANGE, "-360,360,0.5"), "set_direction_deg", "get_direction_deg");

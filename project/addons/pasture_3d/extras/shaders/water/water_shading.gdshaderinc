@@ -74,6 +74,17 @@ void fragment() {
 			fft_height += disp.y;
 		}
 	}
+	// The fBm fallback's normals: the fragment set, summed per pixel at the rest position like the cascades,
+	// down to the octave this pixel can still resolve (two samples a wavelength). Its height is light()'s
+	// crest height. The footprint is taken outside the branch, where derivatives are always defined.
+	bool fbm = _wave_model == WATER_MODEL_FBM;
+	float fbm_footprint = max(length(dFdx(v_fft_domain)), length(dFdy(v_fft_domain)));
+	float fbm_height = 0.0;
+	if (fbm) {
+		vec3 s = water_fbm(v_fft_domain, _fbm_f0, _fbm_f1, _fbm_f2, _fbm_f3, fbm_footprint, 2.0, true);
+		slope = s.yz;
+		fbm_height = s.x;
+	}
 #endif
 
 	// Detail amplitude the distance fade removed. Fed to roughness below so the
@@ -127,9 +138,9 @@ void fragment() {
 	float detail_gain = detail_strength;
 #ifdef WATER_FFT
 	// The detail texture stood in for wavelengths the Gerstner table could not reach; the FFT's 4 m
-	// cascade reaches them (FFT spec §3). The fetches above still run -- a uniform branch around them
+	// cascade reaches them (FFT spec §3), and so do the fBm's fragment octaves. The fetches above still run -- a uniform branch around them
 	// would save them, and Phase 6 decides whether WATER_DETAIL survives at all.
-	detail_gain = fft ? 0.0 : detail_gain;
+	detail_gain = (fft || fbm) ? 0.0 : detail_gain;
 #endif
 	slope += detail * (detail_gain * detail_fade);
 	detail_lost = detail_gain * (1.0 - detail_fade);
@@ -225,6 +236,8 @@ void fragment() {
 	// The simulation's foam is already coverage in [0, 1+]: the threshold above is in Gerstner fold-limit
 	// units and means nothing here.
 	crest = fft ? clamp(fft_foam, 0.0, 1.0) : crest;
+	// The fBm has no breaking signal at all (the reference draws no foam); its jacobian is 0.
+	crest = fbm ? 0.0 : crest;
 #endif
 	foam += crest * foam_crest_amount;
 #endif
@@ -262,6 +275,7 @@ void fragment() {
 	float crest_height = v_world_pos.y - v_base_y;
 #ifdef WATER_FFT
 	crest_height = fft ? fft_height : crest_height;
+	crest_height = fbm ? fbm_height : crest_height;
 #endif
 	float pbr_foam = 0.0;
 #if defined(WATER_FOAM_CREST) || defined(WATER_FOAM_SHORE)

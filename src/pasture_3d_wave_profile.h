@@ -8,6 +8,7 @@
 #include <godot_cpp/classes/resource.hpp>
 
 #include "constants.h"
+#include "pasture_3d_water_fbm.h"
 #include "pasture_3d_water_fft.h"
 #include "water_waves.h"
 
@@ -30,14 +31,23 @@ using namespace godot;
  * and pushes it in with set_loop_period() before building the table.
  *
  * `fft` is the FFT sea for this profile (PASTURE3D_WATER_FFT_SPEC.md §4): the simulation AND its knobs,
- * as a sub-resource so the scene saves them. Which of the two models a material draws is the manager's
- * call, not the profile's -- it depends on the renderer and the user's setting -- and the manager says
- * which with set_fft_active(). The Gerstner knobs stay until Phase 6 retires them; until Phase 5, CPU
- * height queries still answer from Gerstner even while the FFT is what is drawn.
+ * as a sub-resource so the scene saves them. `fbm` is the fallback's knobs, the same way. Which model a
+ * material draws is the manager's call, not the profile's -- it depends on the renderer and the user's
+ * setting -- and the manager says which with set_active_model(). The Gerstner knobs stay until Phase 6
+ * retires them; until Phase 5, CPU height queries still answer from Gerstner whichever model is drawn.
  */
 class Pasture3DWaveProfile : public Resource {
 	GDCLASS(Pasture3DWaveProfile, Resource);
 	CLASS_NAME();
+
+public: // Constants
+	// What the materials on this profile draw. The values are the shader's `_wave_model` uniform
+	// (water_common.gdshaderinc), and 0 is GERSTNER because 0 is what an unset uniform reads.
+	enum ActiveModel {
+		MODEL_GERSTNER = 0,
+		MODEL_FFT = 1,
+		MODEL_FBM = 2,
+	};
 
 private:
 	// Resource already has name/set_name (the resource's own name), so the
@@ -45,15 +55,24 @@ private:
 	StringName _profile_name = "profile";
 	WaterWaves _waves;
 	Ref<Pasture3DWaterFFT> _fft;
-	bool _fft_active = false;
+	Ref<Pasture3DWaterFBM> _fbm;
+	int _active_model = MODEL_GERSTNER;
 	// False until an artist (or a loaded scene) supplies the FFT's knobs. Until then they are DERIVED from
 	// the Gerstner knobs, so a lake or pond profile saved before the FFT existed loads as a lake or a pond
 	// and not as the simulation's ocean defaults. See _derive_fft().
 	bool _fft_authored = false;
+	// The same for the fBm knobs: derived from the Gerstner knobs until edited. See _derive_fbm().
+	bool _fbm_authored = false;
 	bool _deriving = false;
 
 	void _on_fft_changed();
+	void _on_fbm_changed();
 	void _derive_fft();
+	void _derive_fbm();
+	void _derive_models() {
+		_derive_fft();
+		_derive_fbm();
+	}
 
 	// WaterWaves::update() is lazy behind a dirty flag and every read below needs
 	// the table built, so this is the one place that forces it.
@@ -86,10 +105,17 @@ public:
 	Ref<Pasture3DWaterFFT> get_fft() const { return _fft; }
 	bool is_fft_authored() const { return _fft_authored; }
 
-	// Manager-driven, not exported. See the class comment.
-	void set_fft_active(const bool p_active);
+	void set_fbm(const Ref<Pasture3DWaterFBM> &p_fbm);
+	Ref<Pasture3DWaterFBM> get_fbm() const { return _fbm; }
+	bool is_fbm_authored() const { return _fbm_authored; }
+
+	// Manager-driven, not exported. See the class comment. An ActiveModel value.
+	void set_active_model(const int p_model);
+	int get_active_model() const { return _active_model; }
 	// True when materials on this profile draw the FFT: the manager chose it AND there is a simulation.
-	bool is_fft_active() const { return _fft_active && _fft.is_valid(); }
+	bool is_fft_active() const { return _active_model == MODEL_FFT && _fft.is_valid(); }
+	// True when they draw the fBm: the manager chose it (or fell back to it) AND there are knobs.
+	bool is_fbm_active() const { return _active_model == MODEL_FBM && _fbm.is_valid(); }
 	void set_loop_period(const real_t p_seconds);
 	real_t get_loop_period() const { return _waves.get_loop_period(); }
 
@@ -97,7 +123,7 @@ public:
 	PackedVector4Array get_shader_table();
 	// What the surface ACTUALLY reaches, which is the sum over the table and not
 	// the amplitude knob. Cull margins and clearance checks want this one. Under the FFT it is
-	// the simulation's displacement bound, from the spectrum.
+	// the simulation's displacement bound, from the spectrum; under the fBm, the octaves' reach.
 	real_t get_amplitude_sum();
 	// Shortest wavelength in the built table. Pasture3DPool sizes its mesh from this
 	// (spec §7.3: vertex spacing is a wavelength/8 rule, not a taste). Under the FFT, a quarter of
@@ -119,5 +145,7 @@ public:
 		return _waves;
 	}
 };
+
+VARIANT_ENUM_CAST(Pasture3DWaveProfile::ActiveModel);
 
 #endif // PASTURE3D_WAVE_PROFILE_CLASS_H

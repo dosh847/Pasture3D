@@ -2,8 +2,9 @@
 
 Status: **spec written 2026-10-09. Phase 1 built, gated (`WaterFFTGate` 6/6, §6.1) and committed
 (52212cbc). Phase 2 built, gated (`WaterFFTWiringGate` 4/4, §6.2) and committed (84923526). Phase 3
-built and gated 2026-10-09 (`WaterPBRGate` 3/3, §6.3). Phases 4–6 unbuilt. Until Phase 4 the fallback
-is GERSTNER, not fBm.**
+built, gated and committed (47a3b43e, `WaterPBRGate` 3/3, §6.3). Phase 4 built and gated 2026-10-09
+(`WaterFBMGate` on Forward+, headless and Compatibility, §6.4); its uniform-branch timing is not measured
+yet. Phases 5–6 unbuilt.**
 
 Ports Garrett Gunnell's water (https://github.com/GarrettGunnell/Water, MIT-style reference code, last
 commit 2023-12-30) onto Pasture3D's ocean, lake and pond. The reference is a Unity project. Two parts of it
@@ -240,6 +241,35 @@ scene has no light in range (unshaded previews).
 - The reference's normal depth attenuation and `_NormalStrength` were not ported. The slope taps are
   mip-filtered (Phase 2), which is the job the depth fade did.
 
+**As built (Phase 4).**
+
+- `_wave_model` 2 is fBm (`WATER_MODEL_FBM`). It rides the same `WATER_FFT` define as the FFT, because it
+  shares the FFT's vertex spacing (`_fft_vertex_spacing`, or the clipmap ring scale) and its rest-domain
+  varying (`v_fft_domain`). Rivers and the canvas probe have neither.
+- `water_fbm()` in `water_waves.gdshaderinc` is the reference's `vertexFBM` and `fragmentFBM` in one
+  function. The flag `p_drag_by_frequency` is their only difference: the fragment's drag carries `f`, the
+  vertex's does not.
+- **The domain is scaled by `frequency` first.** The first octave runs at 1 rad per unit, and every other
+  knob, drag included, is relative to it.
+  - At 1 rad/m this is the reference exactly.
+  - Elsewhere, the reference's drag is a displacement in absolute metres. It would vanish on an ocean and
+    dominate on a pond.
+- **The DC offset is removed.** `exp(sin)` averages e^(−offset)·I0(max_peak) per unit amplitude, which
+  is 0.466 at the defaults. The reference's surface floats that fraction of `height` above its rest level.
+  - The mean is subtracted per octave, so a fading octave takes its mean with it.
+  - `WaterFBMGate` [D]: the corrected mean is −0.002 m and the uncorrected one is 0.93 m.
+- **Each octave's speed is quantised** to `water_time_period` in the shader, as `water_scroll()` does, so
+  the clock's wrap is seamless (`WaterFBMGate` [L]).
+- **Per-octave fades.**
+  - The vertex set fades from full weight at 8 samples per wavelength to nothing at 4. That is the FFT's
+    mip rule, applied to the mesh spacing.
+  - The fragment set fades from 4 samples to 2 over the pixel footprint, `max(|dFdx|, |dFdy|)` of the rest
+    domain. Its loop stops at the first octave with nothing left, so distant pixels run few of the 40
+    octaves.
+- **The fragment stage.** The fragment set's slope REPLACES the vertex normal, as the FFT's cascades do.
+  Its height is `light()`'s crest height. The detail texture's gain is zeroed, and crest foam is 0, because
+  the reference has no breaking signal and draws no foam.
+
 ## 4. Settings and profiles
 
 `Pasture3DWaveProfile` gains an FFT group and an fBm group. The Gerstner knobs (`wave_count`,
@@ -289,6 +319,46 @@ standing rule that superseded code is removed rather than shimmed.
   - The signal is not `profiles_changed`, because water bodies with auto spacing re-mesh on that.
   - Masked pools now also re-upload on `profiles_changed`. Their duplicate used to snapshot the plugin
     uniforms once, so a knob edit or a model switch never reached it.
+
+**As built (Phase 4).**
+
+- **`Pasture3DWaterFBM`** (`src/pasture_3d_water_fbm.h/.cpp`) is the profile's `fbm` sub-resource. It holds
+  two knob sets as `vertex/<knob>` and `fragment/<knob>`, the FFT spectrum's dynamic-property pattern.
+  - Defaults are the reference's, with 8 vertex octaves and 40 fragment octaves.
+  - `get_shader_pack(set)` is the four vec4s `_fbm_v0..3` / `_fbm_f0..3` take. The fourth carries the
+    amplitude sum, the unit mean and the octave count, so the shader needs no pre-pass.
+  - Closed forms: `get_unit_sigma()` = e^(−o)·√(I0(2m) − I0(m)²)·√Σa²/Σa, treating the octaves as
+    independent and ignoring drag. `get_displacement_bound()` is the vertex set at its all-crest or
+    all-trough extreme about the corrected mean. It is a true bound: the fBm has no rare-crest tail.
+- **Derived until authored**, like `fft`.
+  - `seed` is `direction_deg` and `frequency` is 2π / `length_max`.
+  - `speed` is 2·√k, the reference's 0.64 of deep-water dispersion.
+  - The vertex `height` gives σ = 0.176 × the Gerstner amplitude sum, the FFT's target.
+  - The fragment `height` is that × Σa_frag / Σa_vert, so both sets' first octaves are the same metres.
+    The reference normalises each set by its own sum, so equal `height` knobs draw normals for a sea 25%
+    shallower than the geometry.
+  - For the default profile: k 0.0459 rad/m, speed 0.428 rad/s, height 7.34 m, σ 0.859 m, bound 3.92 m.
+- **The profile's model is now `set_active_model()`.** It takes `MODEL_GERSTNER` / `MODEL_FFT` /
+  `MODEL_FBM`, which are the shader's values. It replaces `set_fft_active()`. `is_fbm_active()` sits beside
+  `is_fft_active()`, and `get_amplitude_sum()` answers the fBm's bound under fBm.
+- **The manager.**
+  - `wave_model` is FFT, GERSTNER, FBM or PROJECT, and PROJECT is the default. GERSTNER keeps its value 1
+    until Phase 6.
+  - `fft_resolution` 0 means the project setting, and 0 is the default.
+  - `get_effective_wave_model()` resolves PROJECT and then falls back from FFT to FBM where
+    `Pasture3DWaterFFT.is_supported()` is false. It warns once per process.
+  - `is_wave_model_fallback()` is true only for that fallback.
+  - `is_fft_effective()` is now `get_effective_wave_model() == FFT`.
+- **Project settings.** `pasture_3d/water/wave_model` (FFT, fBm) and `pasture_3d/water/fft_resolution`
+  (128/256/512, default 256).
+  - Spelled `pasture_3d/`, not the spec's `pasture3d/`, to match the existing `pasture_3d/performance/*`.
+  - Registered with their initial values on the manager's ENTER_TREE, so project.godot stores them only
+    once moved.
+  - The manager listens to `ProjectSettings.settings_changed` and re-applies only when the effective
+    answer moved. A runtime `set_setting()` reaches it, measured by `WaterFBMGate` [P], so a game's options
+    menu needs no node reference. `refresh_project_settings()` is bound for a game that wants the switch
+    in the same frame.
+- **CPU queries** still answer from Gerstner under every model, until Phase 5.
 
 Presets (Phase 6) give ocean, lake and pond profiles. Pond defaults to N=128-equivalent cascades
 (short lengths).
@@ -398,6 +468,46 @@ material):
   value, and still water wants a smaller `sun_roughness`. That is a preset decision, left for Phase 6.
 - k1 is hard to see by eye at the ocean's very dark `deep_color`, because it rides on `ALBEDO`. [K] is
   what shows it is there.
+
+### 6.4 Phase 4 result (2026-10-09, `WaterFBMGate`)
+
+The gate runs three ways, and each mode runs what its renderer can see:
+
+- windowed Forward+: F, D, L, N, P
+- headless: H
+- windowed `--rendering-method gl_compatibility`: H, F, N
+
+The shape fixture is a sheet meshed every 0.25 m, seen straight down through `WATER_DEBUG_SURFACE`, with
+every pixel centre on a vertex. The material is filled by the manager's own `upload_profile_into()`.
+`_fbm()` is `water_fbm()`'s arithmetic in GDScript.
+
+| | Criterion | Forward+ | Compatibility / headless | Control |
+|---|---|---|---|---|
+| H | default manager (PROJECT asks FFT) with no device draws fBm: effective FBM, fallback flag, `_wave_model` 2 and the pack in the material | — | pass, both | explicit GERSTNER and explicit FBM managers are not fallbacks (0 and 2 uploaded) |
+| F | per-pixel height and vertex normal match the prediction (rel. RMS) | 0.0099 and 0.0064 (tol 0.03) | 0.029 and 0.015 (tol 0.12) | prediction without drag misses by 0.361; without speed quantisation by 0.782 |
+| D | mean height over the frame and four instants | −0.0024 m (tol 0.16) | — | the pack's mean zeroed (the reference) sits at 0.929 m; closed form 0.932 |
+| L | t = 0 and t = period render the same surface | rel. RMS 0.0005 | — | the same instants with `water_time_period` 97 s differ by 1.47 |
+| N | the lit shipped shader: luminance spread, fBm over a flat table | 35.9× | 25.0× (the lit variant compiles on GL) | the flat table's own spread |
+| P | a manager on PROJECT follows a runtime write of `pasture_3d/water/wave_model`, 0 → 1 → 0 | FFT → fBm → FFT in the effective model, the profile and a cached material | — | the first state (FFT) is the control the switch must leave |
+
+No shader errors were logged on Forward+ or Compatibility.
+
+N's first framing tilted the orthographic camera 60°. That ran the view off the sheet, and both arms
+measured the background edge (ratio 1.0). The camera now stays straight down.
+
+**Not measured: the uniform-branch cost.** It needs the user's go-ahead (§6). The concern to measure: 40
+fragment octaves of `exp`, `sin` and `cos` near the camera can cost more per pixel than the FFT's eight
+texture taps. The footprint fade stops the loop early at distance only. If it measures badly, the levers
+are the fragment octave count, and the twin-variant route of §3.
+
+Existing gates, run windowed after the change, all pass: `WaterPBRGate`, `WaterFFTGate`,
+`WaterFFTWiringGate`, `WaterPhase1Gate`, `WaterBodiesPhase1/3/4/5/7Gate`, `WaterPresetCheck`,
+`WaterVariantWarningCheck`, `WaterTwoLakesGate`, `WaterBodyLateManagerCheck` and `GraphWaterNodesGate`.
+
+- `GraphWaterNodesGate` printed PASS every time. It exited 127 on two of three runs, each time after a
+  Vulkan `vkEndCommandBuffer: Invalid commandBuffer` at quit, and 0 on the third. It creates no water
+  manager or profile, so this is a teardown flake and not this phase.
+- The timing gates were not run.
 
 ## 7. Risks
 

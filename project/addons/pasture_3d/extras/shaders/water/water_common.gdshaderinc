@@ -15,9 +15,10 @@
 #define WATER_WAVE_COUNT 4
 #endif
 
-// The FFT wave path (PASTURE3D_WATER_FFT_SPEC.md §3). On by default for every surface variant; a river
-// replaces the wave model outright (water_stream.gdshaderinc), and the canvas_item parity probe has no
-// instance uniforms. WATER_NO_FFT opts a custom variant out.
+// The FFT wave path (PASTURE3D_WATER_FFT_SPEC.md §3), and with it the fBm fallback, which shares its
+// vertex spacing and rest-domain varying. On by default for every surface variant; a river replaces the
+// wave model outright (water_stream.gdshaderinc), and the canvas_item parity probe has no instance
+// uniforms. WATER_NO_FFT opts a custom variant out of both.
 #if !defined(WATER_STREAM_WAVES) && !defined(WATER_PLAIN_DOMAIN_ORIGIN) && !defined(WATER_NO_FFT)
 #define WATER_FFT
 #endif
@@ -25,6 +26,7 @@
 // bare mesh, with no manager to upload anything, still makes waves from its compile-time table.
 #define WATER_MODEL_GERSTNER 0
 #define WATER_MODEL_FFT 1
+#define WATER_MODEL_FBM 2
 
 // Garrett's lighting in light() (FFT spec §3.1). Every lit surface variant except rivers, which keep
 // Godot's built-in lambert/GGX and the look they were tuned under. Off for the debug readouts, which write
@@ -170,6 +172,19 @@ uniform int _wave_model = WATER_MODEL_GERSTNER;
 uniform sampler2DArray _fft_displacement : filter_linear_mipmap, repeat_enable, hint_default_black;
 uniform sampler2DArray _fft_slope : filter_linear_mipmap_anisotropic, repeat_enable, hint_default_black;
 uniform vec4 _fft_lengths = vec4(500.0, 85.0, 16.0, 4.0);
+// The profile's Pasture3DWaterFBM, one set for the geometry (_fbm_v*) and one for the normals (_fbm_f*),
+// packed as Pasture3DWaterFBM::get_shader_pack() documents:
+//   0 = (seed, seed_iter, frequency, frequency_mult)   1 = (amplitude, amplitude_mult, speed, speed_ramp)
+//   2 = (drag, height, max_peak, peak_offset)           3 = (amplitude_sum, unit_mean, octaves, 0)
+// Defaults are GarrettGunnell/Water's, so a material switched to fBm by hand still makes waves.
+uniform vec4 _fbm_v0 = vec4(0.0, 1253.2131, 1.0, 1.18);
+uniform vec4 _fbm_v1 = vec4(1.0, 0.82, 2.0, 1.07);
+uniform vec4 _fbm_v2 = vec4(1.0, 1.0, 1.0, 1.0);
+uniform vec4 _fbm_v3 = vec4(4.4199217, 0.4657596, 8.0, 0.0);
+uniform vec4 _fbm_f0 = vec4(0.0, 1253.2131, 1.0, 1.18);
+uniform vec4 _fbm_f1 = vec4(1.0, 0.82, 2.0, 1.07);
+uniform vec4 _fbm_f2 = vec4(1.0, 1.0, 1.0, 1.0);
+uniform vec4 _fbm_f3 = vec4(5.5535727, 0.4657596, 40.0, 0.0);
 #ifndef WATER_CLIPMAP
 // The mesh's vertex spacing in metres, which picks the vertex stage's mip per cascade. A clipmap knows its
 // own (the ring scale); a plain mesh cannot, so its body writes this. PER INSTANCE because ten ponds on

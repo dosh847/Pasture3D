@@ -20,6 +20,7 @@
 #include "pasture_3d_wave_profile.h"
 #include "pasture_3d_pool_manager.h"
 #include "pasture_3d_water_clipmap.h"
+#include "pasture_3d_water_fbm.h"
 #include "pasture_3d_water_fft.h"
 #include "pasture_3d_thread_pool.h"
 
@@ -51,6 +52,7 @@ void initialize_pasture_3d_module(ModuleInitializationLevel p_level) {
 	ClassDB::register_class<Pasture3DOcean>();
 	ClassDB::register_class<Pasture3DWaterClipmap>();
 	ClassDB::register_class<Pasture3DWaterFFT>();
+	ClassDB::register_class<Pasture3DWaterFBM>();
 	ClassDB::register_class<Pasture3DBuoy>();
 
 	// Backward-compat: keep legacy Terrain3D* resource names loadable (see pasture_3d_compat.h).

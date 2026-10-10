@@ -52,7 +52,18 @@ void Pasture3DPoolManager::_upload_into(const Ref<Material> &p_material, const R
 	// The model is a uniform branch, not a variant (FFT spec §3), so switching costs a write here and no
 	// shader swap on any cached material.
 	Ref<Pasture3DWaterFFT> fft = p_profile->get_fft();
-	if (p_profile->is_fft_active()) {
+	Ref<Pasture3DWaterFBM> fbm = p_profile->get_fbm();
+	if (p_profile->is_fbm_active()) {
+		mat->set_shader_parameter("_wave_model", SHADER_MODEL_FBM);
+		static const char *names[2][4] = { { "_fbm_v0", "_fbm_v1", "_fbm_v2", "_fbm_v3" },
+			{ "_fbm_f0", "_fbm_f1", "_fbm_f2", "_fbm_f3" } };
+		for (int set = 0; set < 2; set++) {
+			PackedVector4Array pack = fbm->get_shader_pack(set);
+			for (int i = 0; i < 4; i++) {
+				mat->set_shader_parameter(names[set][i], pack[i]);
+			}
+		}
+	} else if (p_profile->is_fft_active()) {
 		mat->set_shader_parameter("_wave_model", SHADER_MODEL_FFT);
 		// The Texture2DArrayRD wrappers, not their RIDs: the simulation builds its GPU textures lazily on
 		// the render thread, and a wrapper hands the material a placeholder until then that
@@ -77,17 +88,48 @@ void Pasture3DPoolManager::_upload_into(const Ref<Material> &p_material, const R
  * Called whenever the answer could have moved: the setting, the resolution, or the profile set itself.
  */
 void Pasture3DPoolManager::_apply_model_to_profiles() {
-	const bool fft = is_fft_effective();
+	const WaveModel model = get_effective_wave_model();
+	const int resolution = get_effective_fft_resolution();
+	if (is_wave_model_fallback() && !_fallback_warned) {
+		_fallback_warned = true;
+		LOG(WARN, "FFT waves need a RenderingDevice (Forward+ or Mobile) and this renderer has none; ",
+				"drawing the fBm fallback instead");
+	}
+	const int shader_model = model == WAVE_MODEL_FFT ? SHADER_MODEL_FFT
+			: (model == WAVE_MODEL_FBM ? SHADER_MODEL_FBM : SHADER_MODEL_GERSTNER);
 	for (int i = 0; i < _profiles.size(); i++) {
 		Ref<Pasture3DWaveProfile> profile = _profiles[i];
 		if (profile.is_null()) {
 			continue;
 		}
 		if (profile->get_fft().is_valid()) {
-			profile->get_fft()->set_resolution(_fft_resolution);
+			profile->get_fft()->set_resolution(resolution);
 		}
-		profile->set_fft_active(fft);
+		profile->set_active_model(shader_model);
 	}
+	_applied_model = model;
+	_applied_resolution = resolution;
+}
+
+/**
+ * ProjectSettings.settings_changed. Fires for ANY setting, deferred, so this only acts when the effective
+ * answer moved. WaterFBMGate [P] checks that a runtime set_setting() reaches here.
+ */
+void Pasture3DPoolManager::_on_project_settings_changed() {
+	const int model = get_effective_wave_model();
+	const int resolution = get_effective_fft_resolution();
+	if (model == _applied_model && resolution == _applied_resolution) {
+		return;
+	}
+	const bool model_moved = model != _applied_model;
+	_apply_model_to_profiles();
+	if (model_moved) {
+		rebuild_tables();
+	} else {
+		// As set_fft_resolution(): the simulations rebuild in place, only the cull bounds move.
+		emit_signal("profiles_changed");
+	}
+	update_configuration_warnings();
 }
 
 /**
@@ -184,6 +226,40 @@ void Pasture3DPoolManager::register_water_globals() {
 		// No LOG here: this is a static member and the LOG macro reaches for the
 		// instance's __class__.
 		RS->global_shader_parameter_add(decl.name, decl.type, decl.initial);
+	}
+}
+
+/**
+ * The two water settings a game's options menu writes (FFT spec §4).
+ *
+ * Registered with their initial values so the Project Settings UI shows them and project.godot only
+ * stores them once someone moves them -- Pasture3DData::_register_threshold's pattern.
+ */
+void Pasture3DPoolManager::register_water_settings() {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	if (!ps) {
+		return;
+	}
+	struct SettingDecl {
+		const char *name;
+		int initial;
+		const char *hint;
+	};
+	const SettingDecl decls[] = {
+		{ SETTING_WAVE_MODEL, 0, "FFT,fBm" },
+		{ SETTING_FFT_RESOLUTION, 256, "128:128,256:256,512:512" },
+	};
+	for (const SettingDecl &decl : decls) {
+		if (!ps->has_setting(decl.name)) {
+			ps->set_setting(decl.name, decl.initial);
+		}
+		ps->set_initial_value(decl.name, decl.initial);
+		Dictionary info;
+		info["name"] = decl.name;
+		info["type"] = Variant::INT;
+		info["hint"] = PROPERTY_HINT_ENUM;
+		info["hint_string"] = decl.hint;
+		ps->add_property_info(info);
 	}
 }
 
@@ -453,8 +529,34 @@ void Pasture3DPoolManager::set_sun_light(Node3D *p_light) {
 	update_configuration_warnings();
 }
 
-bool Pasture3DPoolManager::is_fft_effective() const {
-	return _wave_model == WAVE_MODEL_FFT && Pasture3DWaterFFT::is_supported();
+Pasture3DPoolManager::WaveModel Pasture3DPoolManager::_requested_wave_model() const {
+	if (_wave_model != WAVE_MODEL_PROJECT) {
+		return _wave_model;
+	}
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	const int setting = ps ? (int)ps->get_setting(SETTING_WAVE_MODEL, 0) : 0;
+	return setting == 1 ? WAVE_MODEL_FBM : WAVE_MODEL_FFT;
+}
+
+Pasture3DPoolManager::WaveModel Pasture3DPoolManager::get_effective_wave_model() const {
+	const WaveModel model = _requested_wave_model();
+	if (model == WAVE_MODEL_FFT && !Pasture3DWaterFFT::is_supported()) {
+		return WAVE_MODEL_FBM;
+	}
+	return model;
+}
+
+bool Pasture3DPoolManager::is_wave_model_fallback() const {
+	return _requested_wave_model() == WAVE_MODEL_FFT && !Pasture3DWaterFFT::is_supported();
+}
+
+int Pasture3DPoolManager::get_effective_fft_resolution() const {
+	int r = _fft_resolution;
+	if (r <= 0) {
+		ProjectSettings *ps = ProjectSettings::get_singleton();
+		r = ps ? (int)ps->get_setting(SETTING_FFT_RESOLUTION, 256) : 256;
+	}
+	return r <= 128 ? 128 : (r <= 256 ? 256 : 512);
 }
 
 void Pasture3DPoolManager::set_wave_model(const WaveModel p_model) {
@@ -468,7 +570,7 @@ void Pasture3DPoolManager::set_wave_model(const WaveModel p_model) {
 }
 
 void Pasture3DPoolManager::set_fft_resolution(const int p_resolution) {
-	int r = p_resolution <= 128 ? 128 : (p_resolution <= 256 ? 256 : 512);
+	int r = p_resolution <= 0 ? 0 : (p_resolution <= 128 ? 128 : (p_resolution <= 256 ? 256 : 512));
 	if (_fft_resolution == r) {
 		return;
 	}
@@ -703,6 +805,14 @@ void Pasture3DPoolManager::_notification(int p_what) {
 		case NOTIFICATION_ENTER_TREE: {
 			LOG(INFO, "NOTIFICATION_ENTER_TREE");
 			register_water_globals();
+			register_water_settings();
+			{
+				Callable cb = callable_mp(this, &Pasture3DPoolManager::_on_project_settings_changed);
+				ProjectSettings *ps = ProjectSettings::get_singleton();
+				if (ps && !ps->is_connected("settings_changed", cb)) {
+					ps->connect("settings_changed", cb);
+				}
+			}
 			if (!_managers.has(this)) {
 				_managers.push_back(this);
 			}
@@ -723,6 +833,13 @@ void Pasture3DPoolManager::_notification(int p_what) {
 		case NOTIFICATION_EXIT_TREE: {
 			LOG(INFO, "NOTIFICATION_EXIT_TREE");
 			_managers.erase(this);
+			{
+				Callable cb = callable_mp(this, &Pasture3DPoolManager::_on_project_settings_changed);
+				ProjectSettings *ps = ProjectSettings::get_singleton();
+				if (ps && ps->is_connected("settings_changed", cb)) {
+					ps->disconnect("settings_changed", cb);
+				}
+			}
 			remove_from_group(MANAGER_GROUP);
 			remove_from_group(Pasture3D::CAMERA_USER_GROUP);
 			set_physics_process(false);
@@ -876,9 +993,17 @@ void Pasture3DPoolManager::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_sun_light"), &Pasture3DPoolManager::get_sun_light);
 	BIND_ENUM_CONSTANT(WAVE_MODEL_FFT);
 	BIND_ENUM_CONSTANT(WAVE_MODEL_GERSTNER);
+	BIND_ENUM_CONSTANT(WAVE_MODEL_FBM);
+	BIND_ENUM_CONSTANT(WAVE_MODEL_PROJECT);
 	ClassDB::bind_method(D_METHOD("set_wave_model", "model"), &Pasture3DPoolManager::set_wave_model);
 	ClassDB::bind_method(D_METHOD("get_wave_model"), &Pasture3DPoolManager::get_wave_model);
 	ClassDB::bind_method(D_METHOD("is_fft_effective"), &Pasture3DPoolManager::is_fft_effective);
+	ClassDB::bind_method(D_METHOD("get_effective_wave_model"), &Pasture3DPoolManager::get_effective_wave_model);
+	ClassDB::bind_method(D_METHOD("is_wave_model_fallback"), &Pasture3DPoolManager::is_wave_model_fallback);
+	ClassDB::bind_method(D_METHOD("get_effective_fft_resolution"), &Pasture3DPoolManager::get_effective_fft_resolution);
+	ClassDB::bind_method(D_METHOD("refresh_project_settings"), &Pasture3DPoolManager::refresh_project_settings);
+	ClassDB::bind_static_method("Pasture3DPoolManager", D_METHOD("register_water_settings"),
+			&Pasture3DPoolManager::register_water_settings);
 	ClassDB::bind_method(D_METHOD("set_fft_resolution", "resolution"), &Pasture3DPoolManager::set_fft_resolution);
 	ClassDB::bind_method(D_METHOD("get_fft_resolution"), &Pasture3DPoolManager::get_fft_resolution);
 	ClassDB::bind_method(D_METHOD("get_live_fft_count"), &Pasture3DPoolManager::get_live_fft_count);
@@ -937,7 +1062,7 @@ void Pasture3DPoolManager::_bind_methods() {
 			"set_sun_light", "get_sun_light");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "paused"), "set_paused", "is_paused");
 	ADD_GROUP("Waves", "");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "wave_model", PROPERTY_HINT_ENUM, "FFT,Gerstner"), "set_wave_model", "get_wave_model");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "fft_resolution", PROPERTY_HINT_ENUM, "128:128,256:256,512:512"),
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "wave_model", PROPERTY_HINT_ENUM, "FFT,Gerstner,fBm,Project Setting"), "set_wave_model", "get_wave_model");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "fft_resolution", PROPERTY_HINT_ENUM, "Project Setting:0,128:128,256:256,512:512"),
 			"set_fft_resolution", "get_fft_resolution");
 }
