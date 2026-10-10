@@ -54,7 +54,7 @@ const BENCH_RES := Vector2i(1280, 800)
 const LOOP_PERIOD := 120.0
 const PHYSICS_HZ := 60
 
-# Matches WaterPhase5Gate so the two documents' numbers are comparable.
+# Matched the shader work's WaterPhase5Gate (deleted with Gerstner) so the two documents' numbers are comparable.
 const PITCHES := [-4.0, -20.0, -60.0]
 const PERF_WARMUP := 60
 const PERF_FRAMES := 150
@@ -322,7 +322,7 @@ func _b_probe_set() -> void:
 # It matters here specifically because Phase 2 deletes the IS_DATA_INIT guard from
 # update_aabbs() (§6.2). If that edit is wrong, this is the number that moves.
 #
-# The camera sits below the water looking up, for the reason WaterPhase4Gate's gate
+# The camera sits below the water looking up, for the reason the shader work's (deleted) WaterPhase4Gate
 # E documents: a stale AABB left below a downward-looking camera is still inside the
 # frustum and changes nothing measurable. Looking up, it is outside it.
 func _d_cull_vs_sea_level() -> void:
@@ -709,7 +709,7 @@ func _make_world(p_cam_pos: Vector3, p_pitch: float) -> Node3D:
 
 
 # Ocean only: the terrain itself is pushed onto layer 5, which the camera does not
-# see, so what is measured is water and sky. Matches WaterPhase5Gate exactly.
+# see, so what is measured is water and sky. Matched the deleted WaterPhase5Gate exactly.
 func _make_ocean(p_root: Node3D) -> Pasture3D:
 	var terrain := Pasture3D.new()
 	terrain.ocean_material = load(OCEAN_HIGH)

@@ -6,6 +6,13 @@ complete), [PASTURE3D_WATER_GUIDE.md](PASTURE3D_WATER_GUIDE.md),
 [PASTURE3D_LANDSCAPE_TOOLS_SPEC.md](PASTURE3D_LANDSCAPE_TOOLS_SPEC.md) and the
 `Pasture3DTerrainBrush` base in [connectors/pasture3d_terrain_brush.gd](project/addons/pasture_3d/connectors/pasture3d_terrain_brush.gd).
 
+> **Wave model superseded (2026-10-09).** Everywhere below that a profile is a Gerstner table
+> (`wave_count`, `get_shader_table()`, `_waves`, `water_waves.cpp`, `WavePresetTables`), read
+> [PASTURE3D_WATER_FFT_SPEC.md](PASTURE3D_WATER_FFT_SPEC.md): profiles now own an FFT simulation and
+> an fBm fallback, W3's "two implementations" became the shader plus a readback (FFT) or a
+> transcription (fBm), and old scenes migrate on load (§6.6 there). The bodies, the manager, the
+> pools, streams and buoys are as specified here.
+
 ---
 
 ## 1. Goal

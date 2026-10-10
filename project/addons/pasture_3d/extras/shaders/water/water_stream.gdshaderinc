@@ -5,7 +5,8 @@
 // Any change here must be mirrored there, in the same operation order. The
 // stream gate's criterion E drives the two against each other.
 //
-// WHY A RIVER CANNOT USE THE GERSTNER TABLE. A wave in _waves[] carries one
+// WHY A RIVER CANNOT USE A SEA'S WAVES. Every wave in a sea model (the Gerstner
+// table this was written against; the FFT and the fBm now) carries a fixed
 // world-space heading. A river bends. So on any reach heading against that
 // heading, the crests travel UPSTREAM -- correctly, for the model, and absurdly,
 // for the thing being drawn. There is no amplitude, steepness or direction that
@@ -66,7 +67,7 @@
 //   and the surface aliases into noise. The integral moves smoothly because it
 //   accumulates the local wavenumber instead of re-deriving a global one.
 //
-// WHAT IS NOT MODELLED. No horizontal (Gerstner) shear: river ripples at this
+// WHAT IS NOT MODELLED. No horizontal (choppy) shear: river ripples at this
 // scale are close enough to vertical, and the shear term is what makes crests
 // sharp on an ocean, which a creek does not want. No obstacle wakes -- a rock in
 // the stream is not in the mesh, so there is nothing to wake from. No breaking:
@@ -238,8 +239,7 @@ WaveSample water_eval_stream_waves(vec3 p_pos, float p_tau, vec3 p_flow, float p
 	vec2 grad = dh_ds * p_flow.xy + dh_dlat * side;
 	o.normal = normalize(vec3(-grad.x, 1.0, -grad.y));
 
-	// Surface slope as the crest-steepness signal, in the same spirit as the
-	// Gerstner jacobian: ~1 where the surface is as steep as it gets. The LENGTH of
+	// Surface slope as the crest-steepness signal: ~1 where the surface is as steep as it gets. The LENGTH of
 	// the gradient and not the along-flow part alone, so that chop -- whose whole
 	// contribution is across the channel -- is visible to it. The river variant
 	// compiles no crest foam, so nothing reads this today; it is filled in rather

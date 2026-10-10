@@ -13,11 +13,13 @@ ground, and which of them you get is decided by the curve — you do not choose.
 class, `Pasture3DWaterBody`, so buoys (§5) and the query API (§6) work the same on both, and so do
 the material, underwater and level controls in §4.
 
-Waves are analytic Gerstner waves generated from a small table, plus one tiling derivative texture
-for the detail below the shortest wave. Total texture cost is ~384 KB, shared by every water body in
-the scene.
+Waves are an **FFT ocean simulation** (Tessendorf, four cascades, after Garrett Gunnell's Water) run
+on the GPU once per wave profile per frame, with an **fBm** fallback for renderers without a
+RenderingDevice or machines without the GPU time to spare. Rivers have their own channel model (§4).
+The sun is lit by Garrett's microfacet model inside `light()`.
 
 Design rationale, measurements and the phase history live in
+[PASTURE3D_WATER_FFT_SPEC.md](PASTURE3D_WATER_FFT_SPEC.md),
 [PASTURE3D_WATER_SHADER_SPEC.md](PASTURE3D_WATER_SHADER_SPEC.md) and
 [PASTURE3D_WATER_BODIES_SPEC.md](PASTURE3D_WATER_BODIES_SPEC.md). This file is how to use it.
 
@@ -78,7 +80,8 @@ loop but its own sun-dependent terms (specular tint, scattering) sit at their de
 
 Put `M_water_lake.tres` or `M_water_pond.tres` on any `MeshInstance3D`. Give the mesh subdivisions —
 the waves are a **vertex** effect, so a two-triangle plane will not move. This path needs no manager
-and no terrain, but nothing drives its clock either; see §6.
+and no terrain, but nothing drives its clock either (§7), and with no manager there is no FFT
+simulation: the material draws the fBm at its default knobs, a reference sea about a metre high.
 
 ---
 
@@ -88,11 +91,14 @@ All five live in `addons/pasture_3d/extras/shaders/water/`.
 
 | Preset | Shader | Waves | Crest foam | Shore foam | Scattering | Flow | Receives shadows |
 |---|---|---|---|---|---|---|---|
-| `M_water_ocean.tres` | `water_ocean` | 8 | yes | yes | yes | no | yes |
-| `M_water_ocean_low.tres` | `water_ocean_low` | 4 | no | yes | no | no | no |
-| `M_water_lake.tres` | `water_body` | 4 | no | yes | yes | no | yes |
-| `M_water_pond.tres` | `water_body_low` | 2 | no | yes | no | no | no |
-| `M_water_river.tres` | `water_river` | 3 | no | yes | no | **yes** | no |
+| `M_water_ocean.tres` | `water_ocean` | profile | yes | yes | yes | no | yes |
+| `M_water_ocean_low.tres` | `water_ocean_low` | profile | no | yes | no | no | no |
+| `M_water_lake.tres` | `water_body` | profile | no | yes | yes | no | yes |
+| `M_water_pond.tres` | `water_body_low` | profile | no | yes | no | no | no |
+| `M_water_river.tres` | `water_river` | channel | no | yes | no | **yes** | no |
+
+"Profile" means the waves come from the body's wave profile (§3), FFT or fBm, the same on every
+tier. "Channel" is the river's own model (§4).
 
 **The low tiers are different shaders, not the same shader turned down.** The features they drop are
 `#define`-d out at compile time, so they are not branched over at runtime. A pond is genuinely
@@ -105,9 +111,10 @@ colours read white and `UV2` reads zero — a full-speed diagonal with every ver
 so the whole surface bobs in unison. On a `Pasture3DPool` it is harmless but inert: pools write a
 neutral colour that decodes to no flow at all.
 
-Measured at 1280×800 with the water filling the frame: ocean high tier 0.295 ms, low tier 0.235 ms,
-against 0.452 ms for the shader these replaced. River costs **+7%** over lake (0.155 vs 0.145 ms) for
-the two extra texture fetches its flow cross-fade needs.
+Measured at 1280×800 with the water filling the frame, before the FFT port: ocean high tier
+0.295 ms, low tier 0.235 ms, against 0.452 ms for the shader these replaced. River costs **+7%** over
+lake (0.155 vs 0.145 ms) for the two extra texture fetches its flow cross-fade needs. The FFT tiers
+have not been re-timed; see §10.
 
 **Press "Make Unique" before editing a preset.** They are plugin files and a plugin update will
 overwrite them. The button is on every water body; "Save Unique Material" then writes your version out
@@ -121,55 +128,69 @@ editor strips `.tres` comments when it re-saves.
 Every body selects a **profile by name** from the scene's `Pasture3DPoolManager`. A fresh manager
 ships four:
 
-| Profile | Waves | Longest | Amplitude sum | Intended for |
-|---|---|---|---|---|
-| `ocean_default` | 8 | 137 m | 4.88 m | `Pasture3DOcean` |
-| `lake_calm` | 4 | 25 m | 0.669 m | Lakes over ~40 m across |
-| `pond_still` | 2 | 12 m | 0.076 m | Ponds under ~40 m across |
-| `river_flow` | 3 | 10 m | 0.134 m | Nothing, since the stream ripples landed — see §4 |
+| Profile | Heading | Longest wave | Height σ | Shortest wave meshed | Intended for |
+|---|---|---|---|---|---|
+| `ocean_default` | 20° | 137 m | 0.86 m | 10.2 m | `Pasture3DOcean` |
+| `lake_calm` | 35° | 25 m | 0.12 m | 10.2 m | Lakes over ~40 m across |
+| `pond_still` | 55° | 12 m | 0.013 m | 6.0 m | Ponds under ~40 m across |
+| `river_flow` | 0° | 10 m | 0.024 m | 5.0 m | A stream's buoyancy and mesh density only — see §4 |
 
-`lake_calm` and `pond_still` generate exactly the tables inside `M_water_lake.tres` and
-`M_water_pond.tres` — the build checks that every run, so a profile and the preset named after it
-cannot drift into being two different lakes.
+These are the Gerstner presets the plugin shipped until 2026-10-09, carried through the same fit an
+old scene gets on load (below), so a lake still loads as that lake.
+
+### Which model draws: `wave_model`
+
+| Setting | Where | Meaning |
+|---|---|---|
+| `wave_model` | `Pasture3DPoolManager` | **Project Setting** (default), **FFT** or **fBm**. |
+| `pasture_3d/water/wave_model` | Project Settings | FFT (default) or fBm, for every manager left on Project Setting. A game's options menu can write it at runtime with `ProjectSettings.set_setting()`; the managers follow without a node reference. |
+| `fft_resolution` | `Pasture3DPoolManager` | 0 = the project setting. Otherwise 128, 256 or 512 texels per cascade. |
+| `pasture_3d/water/fft_resolution` | Project Settings | 256 by default. 128 is a quarter of the work. |
+
+**FFT needs a RenderingDevice** — Forward+ or Mobile. On Compatibility, or headless, a manager that
+asks for FFT draws fBm instead, warns once, and `is_wave_model_fallback()` says so.
+
+**fBm is the cheap model,** not a lesser one: a sum of `exp(sin)` octaves evaluated in the shader, no
+textures and no compute. It has no breaking signal, so it draws no crest foam.
 
 ### The knobs, on `Pasture3DWaveProfile`
 
 | Property | Meaning |
 |---|---|
 | `profile_name` | The selection key. Bodies name it in `wave_profile`. |
-| `wave_count` | 1–8. How many Gerstner waves. |
-| `direction_deg` | Where the sea is running. |
-| `spread_deg` | How far the individual waves fan out around that heading. 0 gives a corduroy sea. |
-| `amplitude` | Metres — **of the longest wave only.** See the warning below. |
-| `length_max` | Metres. The longest wavelength; the rest follow a geometric series down from it. |
-| `steepness` | 0–1. How peaked the crests are. Also drives whitecap coverage and scattering. |
+| `fft` | A `Pasture3DWaterFFT`: the simulation and its knobs. `seed`, `depth`, `choppiness`, `cascade_lengths`, and two spectra, `wind/*` and `swell/*` — `scale`, `wind_speed`, `direction_deg`, `fetch`, `spread_blend`, `swell`, `peak_enhancement`, `short_waves_fade`. Foam: `foam_bias`, `foam_threshold`, `foam_add`, `foam_decay`. |
+| `fbm` | A `Pasture3DWaterFBM`: the fallback's knobs, a `vertex/*` set for the geometry and a `fragment/*` set for the normals. `seed` is the heading in radians, `frequency` the first octave's wavenumber, `height` the metres the normalised sum is scaled to. |
+| `min_wavelength` | Metres. The shortest wave the mesh must resolve: water bodies mesh at an eighth of it. A **cost** knob — the FFT picks its mip from the mesh spacing and the fBm drops octaves it cannot draw, so a coarser mesh loses short waves from the geometry while the fragment stage still draws them as slope. |
 
-The loop period is **not** on the profile. It is `loop_period` on the manager, because the frequency
-quantisation that makes the clock wrap seamless is computed against a single period for the whole
-scene.
+**Sizing a sea from three numbers.** `fit_sea(direction_deg, length_max, sigma)` sets both models to
+a sea whose longest wave is `length_max` metres, running along `direction_deg`, with a height standard
+deviation of `sigma` metres. That is how the presets are made; start there and tune.
 
-> ⚠️ **`amplitude` is not the wave height.** It is the amplitude of the *longest* wave, and the
-> geometric series adds all the others on top. At the ocean defaults the knob reads 1.6 m and the
-> surface actually reaches **4.9 m**. If you are sizing a cull margin, a boat's clearance, or a
-> camera height, that is the number you want — `get_amplitude_sum()` on the profile reports it.
+The loop period is **not** on the profile. It is `loop_period` on the manager, because the
+quantisation that makes the clock wrap seamlessly — the FFT's dispersion and the fBm's speeds — is
+computed against a single period for the whole scene.
 
-Do **not** set `_waves` on a material driven by a manager. It is regenerated and re-uploaded whenever
-a knob changes, so anything written there is overwritten, and until it is, the CPU height query and
-the drawn surface disagree. Materials on bare meshes are the exception: they carry their own table
-because nothing runs in C++ for them. To regenerate one, run `bench/WavePresetTables.tscn` rather
-than hand-editing 32 floats.
+> ⚠️ **Height σ is not the wave height.** Crests reach several σ. If you are sizing a cull margin, a
+> boat's clearance, or a camera height, use `get_amplitude_sum()` on the profile: 6σ under the FFT,
+> the octaves' true reach under the fBm.
 
-### The 10 m floor
+Do **not** set `_wave_model`, `_fft_*` or `_fbm_*` on a material driven by a manager. They are
+re-uploaded whenever a knob changes, so anything written there is overwritten, and until it is, the
+CPU height query and the drawn surface disagree.
 
-The generator will not put a wavelength below 10 m into a large body. Shorter waves lose too much
-float precision once you are kilometres from the world origin, and detail at that scale is the
-texture's job.
+Waves are evaluated relative to `_water_domain_origin`, which every water body sets from its own
+position, so a pond kilometres from the world origin keeps its float precision. A **bare mesh** does
+not get one and needs that instance uniform set by hand.
 
-The exception is small bodies: below `length_max` 20 m the series continues to `length_max / 2`, so
-`pond_still` legitimately has a 6 m wave and `river_flow` a 5 m one. Those sit near their own origin
-and are not in the precision regime the floor describes. Every water body sets `_water_domain_origin`
-from its own position, so a pond placed kilometres out is still fine; a **bare mesh** is not, and
-needs that instance uniform set by hand.
+### Scenes saved before 2026-10-09
+
+Profiles used to carry Gerstner knobs (`wave_count`, `direction_deg`, `spread_deg`, `amplitude`,
+`length_max`, `steepness`). A scene that still has them loads fine: the profile reads them once and
+fits the FFT and the fBm to them — the longest wave, the heading, and a height σ of 0.176 × the old
+table's amplitude sum — and sets `min_wavelength` to the old table's shortest wave. It does that only
+where the scene did not also store the model itself. Nothing writes the old knobs back, so the next
+save stores the fitted models instead. `spread_deg` and `steepness` have no counterpart and are
+dropped.
 
 ---
 
@@ -231,8 +252,8 @@ with its node in both.
 
 `wave_profile` is greyed out on a stream, and that is the interesting part.
 
-**A river does not use the Gerstner wave table at all.** A wave in that table carries one
-world-space heading; a river bends; so on every reach that heads against it, the crests travel
+**A river does not use the profile's waves at all.** A sea's crests carry fixed world-space
+headings; a river bends; so on every reach that heads against them, the crests travel
 *upstream*. There is no amplitude, steepness or direction that fixes it — the model has one
 direction and a river has many — and the only setting that hides it is amplitude 0, which is what
 this plugin's own demo scene had to ship before this was solved.
@@ -417,13 +438,18 @@ know which kind of water it is standing in.
 | `get_water_depth(global_xz)` | stream | How deep the channel is here, in metres. 0 off the stream. **A centreline depth** — the bed is only known along the spline, so this is the depth of the middle of the channel at the nearest row, not the depth under the caller's feet. Good enough to decide whether a reach can be waded; not good enough to place a footstep. |
 | `body_at(global_pos)` | manager | The innermost body containing a point. Finite bodies first, ocean as the fallback. |
 | `get_water_time()` | manager | The wrapped clock both CPU and GPU use. Not `Time.get_ticks_msec()`, and not Godot's `TIME`. |
-| `evaluate_height(profile, domain_xz)` | manager | Raw Gerstner evaluation for a named profile, before the inversion. Mostly of interest to tests. |
+| `evaluate_height(profile, domain_xz)` | manager | The named profile's height at a rest-domain point, before the inversion. Mostly of interest to tests. |
 
-`get_water_height()` agrees with the drawn surface to within 1 cm anywhere, at any time — that is a
-gate the build is tested against, not an aspiration. It is not a cheap function: Gerstner waves
-displace sideways as well as up, so the surface is not a heightfield and the query solves that
-inversion iteratively (4 steps on calm water, 8 at the ocean defaults). Fine for a few dozen floating
-objects per frame; do not call it per particle.
+`get_water_height()` answers from the model the materials draw:
+
+- **fBm:** the shader's own sum, transcribed. It agrees with the drawn surface to about 1% RMS of the
+  wave height (`WaterBuoyGate` [B]). The fBm moves vertically only, so there is no inversion.
+- **FFT:** a readback of the simulation, one to three frames behind the picture. The first query on a
+  quiet sea starts the readback and answers a flat surface until a frame lands; every query keeps it
+  running. The FFT displaces sideways as well as up, so the query inverts that iteratively (up to 16
+  steps). Within the latency it agrees with the drawn surface to 0.5% RMS (`WaterBuoyGate` [A]).
+
+Fine for a few dozen floating objects per frame; do not call it per particle.
 
 Containment is cheap, though — it reads the mesher's own inside mask, so it is a bounds check and an
 array lookup for all but the cells the shoreline crosses.
@@ -464,17 +490,23 @@ drives the underwater fog and the underwater screen tint, so those follow the su
 
 **`deep_color`** is what you see once absorption is total.
 
-**`detail_strength`** scales the ripple texture's slope. The shipped values are calibrated — 0.25 on
-the ocean applies about 0.10 m/m rms slope. Pushing it much past 0.5 tilts normals far enough that
-reflections start finding the ground below the horizon, which reads as coloured speckle.
+**`sun_roughness`** is the width of the sun's highlight (Beckmann α). The ocean's 0.075 is the
+reference's; still water wants less, which is why the pond ships at 0.035. Raising it spreads the sun
+path into a broad blown-out streak.
 
-**`base_roughness`** and **`variance_to_roughness`**. If distant water shimmers, *raise*
-`variance_to_roughness`, do not lower roughness. Detail that the distance fade removes is converted
-into roughness so the specular lobe widens by as much as the geometry it stood for was smoothed away.
-Lowering roughness to sharpen distant water is what causes the shimmer.
+**`view_scatter`, `shadow_scatter`, `wave_peak_scatter`, `bubble_color`/`bubble_density`** are the
+reference's subsurface terms: light through the body toward the viewer, light on the sun-facing side,
+light through a crest per metre of crest height, and a flat bubble term.
 
-**`foam_crest_threshold`** is a fraction of the breaking limit, so it interacts with `steepness` on
-purpose: calm water gets no whitecaps and a rough sea gets many, without touching this value.
+**`foam_crest_amount`** scales the FFT's own foam, which comes from the wave Jacobian — whitecaps
+where the surface folds. The simulation's `foam_*` knobs on the profile shape it; the fBm draws none.
+
+**River only — `detail_strength`** scales the ripple texture's slope (0.25 applies about 0.10 m/m rms
+slope; much past 0.5 tilts reflections below the horizon, which reads as coloured speckle).
+**`variance_to_roughness`**: if a distant river shimmers, *raise* it, do not lower roughness — detail
+the distance fade removes is converted into roughness. **`foam_crest_threshold`** is a slope, the
+river's whitecap onset. The other presets have none of these: the FFT's cascades reach ~12 cm and
+filter their own mips.
 
 **`flow_period`** (river only) is how long the surface texture advects before the cross-fade hands
 over to a fresh copy. Longer is more coherent motion but more visible smearing at the end of each
@@ -509,12 +541,7 @@ re-saving without migrating loses them — migrate first.
 | `ocean_gi_mode` | `Pasture3DOcean.gi_mode` |
 | `ocean_render_layers` | `Pasture3DOcean.render_layers` |
 | `ocean_domain_origin` | `Pasture3DOcean.domain_origin` |
-| `ocean_wave_count` | `Pasture3DWaveProfile.wave_count`, on the manager's profile |
-| `ocean_wave_direction` | `Pasture3DWaveProfile.direction_deg` |
-| `ocean_wave_spread` | `Pasture3DWaveProfile.spread_deg` |
-| `ocean_wave_amplitude` | `Pasture3DWaveProfile.amplitude` |
-| `ocean_wave_length_max` | `Pasture3DWaveProfile.length_max` |
-| `ocean_wave_steepness` | `Pasture3DWaveProfile.steepness` |
+| `ocean_wave_count`, `ocean_wave_direction`, `ocean_wave_spread`, `ocean_wave_amplitude`, `ocean_wave_length_max`, `ocean_wave_steepness` | The manager's profile, fitted from them as in §3 (*Scenes saved before 2026-10-09*) |
 | `ocean_wave_loop_period` | `Pasture3DPoolManager.loop_period` |
 
 Two things moved rather than being renamed:
@@ -524,33 +551,34 @@ Two things moved rather than being renamed:
 - **`get_water_height()` and friends** were on `Pasture3D`. They are on the bodies now, and
   `Pasture3DPoolManager.body_at()` is how you find the right one. See §6.
 
-### The bench gates that still use the old properties
+### The bench gate that still uses the old properties
 
-`WaterPhase2Gate`, `WaterPhase3Gate`, `WaterPhase4Gate`, `WaterPhase5Gate` and
-`WaterBodiesPhase0Baseline` build their fixtures the pre-extraction way — `terrain.ocean_material`,
+`WaterBodiesPhase0Baseline` builds its fixture the pre-extraction way — `terrain.ocean_material`,
 `terrain.ocean_wave_count`, `terrain.get_water_time()`. Those properties are now only `_legacy_ocean`,
-the migration capture, so the fixtures build no ocean and render an empty frame; everything the gates
-then report is a control refusing that frame ("there is no water on screen at sea level 0", "the preset
-drew (almost) nothing", "an empty frame costs as much as water does"). **A red result from these five
-says nothing about the water code.** They are to be rewritten against `Pasture3DOcean` as part of the
-water-brush refactor rather than ported onto it twice; each file's header carries the same note.
-Everything else in the family — `WaterPhase1Gate`, `WaterBodiesPhase1/2/3/5/7`,
-`WaterVariantWarningCheck` — is current and green (windowed; most of them await
-`RenderingServer.frame_post_draw`, which never emits headless).
+the migration capture, so the fixture builds no ocean and renders an empty frame; everything the gate
+then reports is a control refusing that frame. **A red result from it says nothing about the water
+code.** (`WaterPhase2Gate`..`WaterPhase5Gate` shared the problem and measured Gerstner; they were
+deleted with it.) Everything else in the family — `WaterPhase1Gate`, `WaterBodiesPhase1..7`,
+`WaterFFTGate`, `WaterFFTWiringGate`, `WaterPBRGate`, `WaterFBMGate`, `WaterBuoyGate`,
+`WaterRetireGerstnerGate`, `WaterVariantWarningCheck` — is current and green (windowed; most of them
+await `RenderingServer.frame_post_draw`, which never emits headless).
 
 ---
 
 ## 10. Performance notes
 
+- **The FFT costs one simulation per profile in use,** every frame, whatever the screen covers: an
+  ocean, a lake and a pond on three profiles run three. `fft_resolution` 128 is a quarter of 256's
+  work. Not yet timed on this plugin's hardware; the fBm fallback costs no compute at all.
 - **Geometry is nearly free; fragments are not.** Measured clipmap geometry cost is inside the noise
   floor. If you need the water cheaper, use the low tier or reduce how much screen it covers — do not
   reduce `mesh_lods`.
 - **`vertex_spacing` and `mesh_lods` move together** on the ocean. The clipmap is scale-invariant:
   halving the spacing halves the ocean's reach, and one more LOD buys it back. Half-extent is
   `2 × mesh_size × vertex_spacing × 2^(mesh_lods − 1)` — 8192 m at the defaults.
-- **Vertex spacing should be about an eighth of the shortest wavelength.** Below that the drawn
-  surface visibly cuts the corners off crests and drifts away from what `get_water_height()` reports.
-  The pool and the stream do this for you when `vertex_spacing` is 0.
+- **Vertex spacing should be about an eighth of `min_wavelength`.** The pool and the stream do this
+  for you when `vertex_spacing` is 0. Coarser loses the short waves from the geometry (the FFT's mip
+  and the fBm's octave fade drop them cleanly) while the fragment stage still draws them as slope.
 - **Water-body rebuilds are debounced and off the interaction path.** A 500 m lake at automatic spacing is
   169 k vertices in about 120 ms. Rebuilds happen when the curve changes, when the brush moves, when a
   stream's *baked* material uniforms change (see below), or on demand.
@@ -614,10 +642,18 @@ proportionally bigger number before you notice it.
 **The pool's water did not move when I moved the brush.** It should — check `source_spline` is set
 rather than `curve`. A raw `Curve3D` carries no transform and does not track anything.
 
-**Distant water shimmers or crawls.** Raise `variance_to_roughness`. See §8.
+**Distant water shimmers or crawls.** On a river, raise `variance_to_roughness` (§8). Elsewhere,
+check `fft_resolution` is not above what the mesh and the screen can carry.
 
-**Coloured speckle on the surface.** `detail_strength` is too high for the texture in use; normals
-are tilting past the horizon.
+**Coloured speckle on a river.** `detail_strength` is too high for the texture in use; normals are
+tilting past the horizon.
+
+**The water is flat in the first frame, or a buoy starts flat.** Under the FFT the CPU answer is a
+readback, and the first query on a quiet sea answers flat until one lands (§6). It is one to three
+frames.
+
+**My sea looks different on Compatibility.** It is the fBm, not the FFT: that renderer has no
+RenderingDevice (§3). Set `wave_model` to fBm on Forward+ to preview it there.
 
 **The ocean vanishes when the camera moves.** Its cull volume is sized from the node's Y and the wave
 amplitude sum. Raise `cull_margin`.
@@ -625,9 +661,9 @@ amplitude sum. Raise `cull_margin`.
 **Water disappears at a distance you did not expect.** Check the half-extent formula in §10 — the
 ocean is finite, and `mesh_lods` is what sets how far it goes.
 
-**A boat floats above or below the surface.** `get_water_height()` describes the *analytic* surface;
-the drawn mesh chords between vertices and sits slightly below it at cell centres. At the defaults
-that gap is 1.7 cm.
+**A boat floats above or below the surface.** Under the FFT, `get_water_height()` is one to three
+frames behind the picture (§6); a fast sea moves visibly in that time. Under either model the drawn
+mesh chords between vertices and sits slightly below the true surface at cell centres.
 
 **A boat sinks.** Read the buoy's configuration warning: it quotes the displacement the body has and
 the displacement it needs. See §5.

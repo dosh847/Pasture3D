@@ -43,7 +43,6 @@ extends Node
 
 const WATER_DIR := "res://addons/pasture_3d/extras/shaders/water/"
 const LAKE_MAT := WATER_DIR + "M_water_lake.tres"
-const POND_MAT := WATER_DIR + "M_water_pond.tres"
 
 ## Blend mode ints, matching Pasture3DTerrainBrush's constants and every subclass's BlendMode enum.
 const B_REPLACE := 0
@@ -594,39 +593,9 @@ func _gate_f_manager() -> void:
 		_fail += 1
 		print("    !! control did NOT fire: %d managers" % _find_managers().size())
 
-	# The defaults are the shipped materials. Generated table vs the .tres on disk, exactly.
-	for pair in [["lake_calm", LAKE_MAT], ["pond_still", POND_MAT]]:
-		var profile = manager.get_profile(pair[0])
-		var mat: ShaderMaterial = load(pair[1])
-		var shipped: PackedVector4Array = mat.get_shader_parameter("_waves")
-		var generated: PackedVector4Array = profile.get_shader_table()
-		var worst := 0.0
-		var n: int = mini(shipped.size(), generated.size())
-		for i in n:
-			var d: Vector4 = shipped[i] - generated[i]
-			worst = maxf(worst, maxf(maxf(absf(d.x), absf(d.y)), maxf(absf(d.z), absf(d.w))))
-		# The .tres stores 5 decimals, so anything at that scale is the file format and not a
-		# different sea state.
-		if n == 0 or shipped.size() != generated.size() or worst > 1e-5:
-			_fail += 1
-			print("    !! '%s' does not match %s: %d vs %d entries, worst delta %.8f" % [
-				pair[0], pair[1].get_file(), shipped.size(), generated.size(), worst])
-		else:
-			print("    '%s' == %s across %d waves (worst delta %.8f)" % [
-				pair[0], pair[1].get_file(), n, worst])
-		# Control for that comparison: the OTHER profile must not match, or the test would pass
-		# on any two tables of the same length.
-		var other = manager.get_profile("pond_still" if pair[0] == "lake_calm" else "lake_calm")
-		var other_table: PackedVector4Array = other.get_shader_table()
-		var other_worst := 0.0
-		for i in mini(shipped.size(), other_table.size()):
-			var d: Vector4 = shipped[i] - other_table[i]
-			other_worst = maxf(other_worst, maxf(maxf(absf(d.x), absf(d.y)),
-				maxf(absf(d.z), absf(d.w))))
-		if other_worst <= 1e-5:
-			_fail += 1
-			print("    !! the wrong profile ALSO matches %s — the comparison is vacuous"
-				% pair[1].get_file())
+	# The shipped profiles used to be checked against the wave tables in the preset .tres files. Those
+	# tables went with Gerstner (FFT spec Phase 6); WaterRetireGerstnerGate [P] checks the shipped profiles
+	# against a migration of the knobs that generated them.
 	root.queue_free()
 	manager.queue_free() # created at the scene root, so it does not go with the fixture
 	await _settle()
@@ -794,7 +763,7 @@ func _new_brush(p_class: String) -> Node3D:
 	return null
 
 
-## A DETACHED manager carrying exactly the named profiles at the given length_max values, for
+## A DETACHED manager carrying exactly the named profiles with the given longest waves, for
 ## testing the profile fallback against a manager someone has re-profiled. Parented so it is freed
 ## with the fixture, but never added to the water-manager group's active slot the pools use.
 func _make_manager_with(p_root: Node3D, p_specs: Dictionary) -> Pasture3DPoolManager:
@@ -803,7 +772,7 @@ func _make_manager_with(p_root: Node3D, p_specs: Dictionary) -> Pasture3DPoolMan
 	for n in p_specs:
 		var profile := Pasture3DWaveProfile.new()
 		profile.profile_name = n
-		profile.length_max = p_specs[n]
+		profile.fit_sea(0.0, p_specs[n], 0.1) # only the longest wave matters to the fallback
 		profiles.append(profile)
 	m.profiles = profiles
 	p_root.add_child(m)

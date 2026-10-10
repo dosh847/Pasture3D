@@ -23,17 +23,19 @@ const DIR := "res://addons/pasture_3d/extras/shaders/water/"
 # preset, and the uniforms its variant MUST declare, as a check that the .tres is
 # pointing at the shader its parameters were written for.
 const PRESETS := [
-	["M_water_ocean.tres", ["sea_level", "foam_crest_threshold", "wave_peak_scatter", "detail_scale1"]],
-	["M_water_ocean_low.tres", ["sea_level", "foam_shore_depth"]],
-	["M_water_lake.tres", ["wave_peak_scatter", "detail_scale1", "foam_shore_depth"]],
-	["M_water_pond.tres", ["foam_shore_depth"]],
+	["M_water_ocean.tres", ["sea_level", "foam_crest_amount", "wave_peak_scatter", "_fft_lengths"]],
+	["M_water_ocean_low.tres", ["sea_level", "foam_shore_depth", "_fft_lengths"]],
+	["M_water_lake.tres", ["wave_peak_scatter", "_fft_lengths", "foam_shore_depth"]],
+	["M_water_pond.tres", ["foam_shore_depth", "_fft_lengths", "sun_roughness"]],
 ]
 # Uniforms a variant must NOT declare, so a low tier that quietly compiled the
-# high tier's work is caught rather than merely looking correct.
+# high tier's work is caught rather than merely looking correct. detail_deriv is
+# river-only since FFT spec Phase 6, and foam_crest_threshold is a stream's.
 const ABSENT := {
-	"M_water_ocean_low.tres": ["wave_peak_scatter", "foam_crest_threshold"],
-	"M_water_lake.tres": ["sea_level"],
-	"M_water_pond.tres": ["wave_peak_scatter", "foam_crest_threshold", "sea_level"],
+	"M_water_ocean.tres": ["detail_deriv", "foam_crest_threshold"],
+	"M_water_ocean_low.tres": ["wave_peak_scatter", "foam_crest_amount", "detail_deriv"],
+	"M_water_lake.tres": ["sea_level", "detail_deriv"],
+	"M_water_pond.tres": ["wave_peak_scatter", "foam_crest_amount", "sea_level", "detail_deriv"],
 }
 
 var _fail := 0
@@ -124,18 +126,3 @@ func _check(p_file: String, p_required: Array) -> void:
 			_fail += 1
 			print("  !! declares %s, which this tier is supposed to compile out" % ", ".join(present))
 
-	# The amplitude sum, for anyone sizing a cull margin.
-	var table = mat.get_shader_parameter("_waves")
-	if table is PackedVector4Array and not table.is_empty():
-		var sum_amp := 0.0
-		var l_min := INF
-		var n := 0
-		for w in table:
-			if w.z > 0.0:
-				sum_amp += w.z
-				l_min = minf(l_min, w.w)
-				n += 1
-		print("  ships a table: %d waves, shortest %.2f m, amplitude sum %.3f m" % [
-			n, l_min, sum_amp])
-	else:
-		print("  ships no table (waves come from the Pasture3D node)")

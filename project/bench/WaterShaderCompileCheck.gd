@@ -5,7 +5,7 @@
 # broken include shows up here in about four seconds instead of after a full gate
 # run -- and without a Godot window that has to be killed when a scene fails.
 #
-# RUN IT WINDOWED if you care about the waves= column. Shader PARSING works headless, so
+# RUN IT WINDOWED if you care about the profile= column. Shader PARSING works headless, so
 # the uniform list and any parse error show up either way -- but the dummy renderer returns
 # nil from shader_get_parameter_default() for every uniform however the shader was written,
 # so every variant reports "-" and the column tells you nothing. Pasture3DOcean reads the
@@ -42,13 +42,13 @@ func _initialize() -> void:
 		for u: Dictionary in uniforms:
 			names.append(u["name"])
 		names.sort()
-		# The wave count this variant compiles, read the way Pasture3DOcean reads it. Printed
-		# because it is the one uniform whose VALUE is an interface rather than a knob: the
-		# ocean's configuration warning is built on it, and a variant that reports the wrong
-		# number here invents that warning or hides it. "-" means the shader does not declare
+		# Whether this variant draws the wave profile, read the way Pasture3DOcean reads it.
+		# Printed because it is the one uniform whose VALUE is an interface rather than a knob:
+		# the ocean's configuration warning is built on it, and a variant that reports the wrong
+		# value here invents that warning or hides it. "-" means the shader does not declare
 		# it, which is correct for water_underwater and a bug for anything else in this list.
 		var declared: Variant = RenderingServer.shader_get_parameter_default(
-			sh.get_rid(), &"_wave_variant_count")
-		var count := "-" if typeof(declared) != TYPE_INT else str(declared)
-		print("  %-24s waves=%-2s %2d uniforms: %s" % [name, count, names.size(), ", ".join(names)])
+			sh.get_rid(), &"_draws_wave_profile")
+		var draws := "-" if typeof(declared) != TYPE_BOOL else str(declared)
+		print("  %-24s profile=%-5s %2d uniforms: %s" % [name, draws, names.size(), ", ".join(names)])
 	quit()

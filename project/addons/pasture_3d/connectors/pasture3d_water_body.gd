@@ -1085,10 +1085,10 @@ func get_water_normal(p_global_xz: Vector2) -> Vector3:
 ## Wave displacement above the still surface, in metres.
 ##
 ## Split out of get_water_height as a hook because the two kinds of water do not
-## make waves the same way. A pool takes the manager's Gerstner table, which is
-## the transcription of water_eval_waves() the whole parity apparatus is built
-## around; a Pasture3DStream cannot use that table at all -- see
-## water_stream.gdshaderinc -- and overrides this with its own transcription.
+## make waves the same way. A pool asks the manager's wave profile, which answers
+## from the model its material draws (an FFT readback or an fBm transcription); a
+## Pasture3DStream cannot use a sea's waves at all -- see water_stream.gdshaderinc
+## -- and overrides this with its own transcription.
 ##
 ## Whatever answers it, it has to agree with the SHADER, because a buoy floats on
 ## what this returns and a player sees what the shader drew. Phase 7 criterion D

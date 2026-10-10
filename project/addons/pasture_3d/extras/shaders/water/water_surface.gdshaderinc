@@ -71,35 +71,27 @@ void vertex() {
 #elif defined(WATER_FFT)
 	WaveSample wave;
 #ifdef WATER_CLIPMAP
-	// The ring's own cell size, as the shore margin below uses it.
-	float fft_spacing = MODEL_MATRIX[0][0];
+	// The ring's cell size, carried across the geomorph: at a ring's outer edge (vertex_lerp 1) the
+	// vertices already sit on the next ring's grid, and must also read the next ring's mip -- the
+	// shared edge is the same point on both sides only if it is displaced by the same filtered
+	// texture. With the ring's own size the two sides sampled mips one level apart and the seam
+	// opened into pinholes (WaterTwoLakesGate [C], once its readout drew the FFT).
+	float fft_spacing = MODEL_MATRIX[0][0] * (1.0 + vertex_lerp);
 #else
 	float fft_spacing = _fft_vertex_spacing;
 #endif
 	if (_wave_model == WATER_MODEL_FFT) {
 		wave = water_eval_fft(world_pos, fft_spacing);
-	} else if (_wave_model == WATER_MODEL_FBM) {
-		wave = water_eval_fbm(world_pos, fft_spacing);
 	} else {
-		wave = water_eval_waves(world_pos);
+		wave = water_eval_fbm(world_pos, fft_spacing);
 	}
 	v_fft_domain = world_pos.xz - _water_domain_origin.xz;
-#else
-	WaveSample wave = water_eval_waves(world_pos);
 #endif
 
 	v_world_pos = wave.position;
 	v_wave_normal = wave.normal;
-	// Passed through RAW, in fold-limit units: sum(Q*w*A*sin) reaches 1.0 exactly
-	// where the Gerstner surface would begin to self-intersect, so the signal
-	// spans [-wave_steepness, +wave_steepness] and its scale is physical.
-	//
-	// An earlier version divided by wave_steepness so a threshold would sit at a
-	// fixed point in the distribution whatever the knob. That was wrong for the
-	// thing it feeds: it made whitecap coverage identical on a millpond and a
-	// gale, which is precisely the correlation foam exists to express. Keeping the
-	// raw value means the steepness knob drives foam and scattering for free, and
-	// the threshold means "this fraction of the breaking limit".
+	// Passed through RAW. A stream's crest foam thresholds it; the FFT's fragment stage re-samples its
+	// foam per pixel instead.
 	v_jacobian = wave.jacobian;
 	v_view_dist = length(wave.position - CAMERA_POSITION_WORLD);
 

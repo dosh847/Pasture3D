@@ -30,7 +30,7 @@ String Pasture3DPoolManager::_cache_key(const Ref<Material> &p_base, const Strin
 }
 
 /**
- * Writes a profile's table into one material.
+ * Writes a profile's model into one material.
  *
  * Only ShaderMaterial carries the uniforms; anything else is left alone rather than
  * refused. A user is allowed to put a StandardMaterial3D on a pool -- it will not be
@@ -42,13 +42,9 @@ void Pasture3DPoolManager::_upload_into(const Ref<Material> &p_material, const R
 	if (!mat || p_profile.is_null()) {
 		return;
 	}
-	// The period is the manager's, not the profile's (§5.3), and it has to be in
-	// place before the table is built: WaterWaves quantises every frequency to a
-	// whole number of cycles in the period, which is what makes the clock's wrap
-	// seamless. Setting it after would upload a table quantised to the old one.
+	// The period is the manager's, not the profile's (§5.3). The FFT quantises its dispersion and the fBm
+	// its speeds to a whole number of cycles in it, which is what makes the clock's wrap seamless.
 	p_profile->set_loop_period(_loop_period);
-	mat->set_shader_parameter("_waves", p_profile->get_shader_table());
-	mat->set_shader_parameter("wave_steepness", p_profile->get_steepness());
 	// The model is a uniform branch, not a variant (FFT spec §3), so switching costs a write here and no
 	// shader swap on any cached material.
 	Ref<Pasture3DWaterFFT> fft = p_profile->get_fft();
@@ -77,7 +73,10 @@ void Pasture3DPoolManager::_upload_into(const Ref<Material> &p_material, const R
 			_live_fft_generations.push_back(fft->get_texture_generation());
 		}
 	} else {
-		mat->set_shader_parameter("_wave_model", SHADER_MODEL_GERSTNER);
+		// No knobs for either model: the FFT branch over unbound textures, which read black, is flat.
+		mat->set_shader_parameter("_wave_model", SHADER_MODEL_FFT);
+		mat->set_shader_parameter("_fft_displacement", Variant());
+		mat->set_shader_parameter("_fft_slope", Variant());
 	}
 	_upload_count++;
 }
@@ -95,8 +94,7 @@ void Pasture3DPoolManager::_apply_model_to_profiles() {
 		LOG(WARN, "FFT waves need a RenderingDevice (Forward+ or Mobile) and this renderer has none; ",
 				"drawing the fBm fallback instead");
 	}
-	const int shader_model = model == WAVE_MODEL_FFT ? SHADER_MODEL_FFT
-			: (model == WAVE_MODEL_FBM ? SHADER_MODEL_FBM : SHADER_MODEL_GERSTNER);
+	const int shader_model = model == WAVE_MODEL_FFT ? SHADER_MODEL_FFT : SHADER_MODEL_FBM;
 	for (int i = 0; i < _profiles.size(); i++) {
 		Ref<Pasture3DWaveProfile> profile = _profiles[i];
 		if (profile.is_null()) {
@@ -265,12 +263,11 @@ void Pasture3DPoolManager::register_water_settings() {
 
 bool Pasture3DPoolManager::is_plugin_written_param(const StringName &p_name) {
 	// The `_` prefix is this codebase's existing marker for a uniform the plugin fills
-	// in rather than one the artist sets -- _waves, _mesh_size, _subdiv,
+	// in rather than one the artist sets -- _wave_model, _fft_lengths, _mesh_size, _subdiv,
 	// _vertex_spacing, _target_pos, _water_domain_origin all carry it, in the water
-	// shaders and in the legacy one alike. The two exceptions are named as art knobs
-	// because they read as art knobs, but the profile and the ocean own them.
-	return String(p_name).begins_with("_") || p_name == StringName("sea_level") ||
-			p_name == StringName("wave_steepness");
+	// shaders and in the legacy one alike. The exception is named as an art knob
+	// because it reads as one, but the ocean owns it.
+	return String(p_name).begins_with("_") || p_name == StringName("sea_level");
 }
 
 bool Pasture3DPoolManager::sync_material_params(const Ref<Material> &p_base, const Ref<Material> &p_target) {
@@ -424,15 +421,18 @@ void Pasture3DPoolManager::_update_sun() {
  * Fills _profiles with the four shipped sea states (spec §5.2).
  *
  * A manager with no profiles is a manager that answers every question with "no such
- * profile", so a freshly added one carries the same four shapes the materials on disk
- * already use -- `ocean_default`, `lake_calm` and `pond_still` are the exact knobs
- * bench/WavePresetTables.gd generated M_water_ocean/lake/pond's `_waves` arrays from,
- * which is what makes a preset material and the profile driving it the same water.
+ * profile", so a freshly added one carries four. Each is fit_sea() of a direction, a
+ * longest wave and a height sigma, plus the shortest wave its mesh must resolve.
  *
- * `river_flow` has no material yet (Phase 7 ships M_water_river.tres): it is pond
- * chop aligned to a flow direction, narrow-spread so the crests run with the channel
- * instead of across it. Its numbers are a starting point in the same sense the other
- * three are -- generator-produced tables from chosen knobs, not measurements.
+ * The numbers are the Gerstner presets these profiles shipped as until Phase 6 of the FFT
+ * port, carried through the same fit a migrated scene gets: sigma is 0.176 x the old
+ * table's amplitude sum, and min_wavelength is the old table's shortest wave
+ * (Pasture3DWaveProfile::legacy_series at the default 120 s period). WaterRetireGerstnerGate
+ * [P] checks each against a migration of the old knobs, so the two cannot drift apart.
+ *
+ * `river_flow` is chop aligned to a flow direction. A river's material does not draw it
+ * (water_stream.gdshaderinc replaces the wave model); a Pasture3DStream reads it for its
+ * buoyancy and its mesh density.
  *
  * Seeded in the CONSTRUCTOR rather than on entering the tree, because that is what
  * makes it a property default: a scene stores `profiles` as edited and set_profiles()
@@ -444,35 +444,23 @@ void Pasture3DPoolManager::_update_sun() {
 void Pasture3DPoolManager::_seed_default_profiles() {
 	struct Preset {
 		const char *name;
-		int count;
 		real_t direction_deg;
-		real_t spread_deg;
-		real_t amplitude;
-		real_t length_max;
-		real_t steepness;
+		real_t length_max; // metres
+		real_t sigma; // height sigma, metres
+		real_t min_wavelength; // metres
 	};
 	const Preset presets[] = {
-		{ "ocean_default", 8, 20.f, 28.f, 1.6f, 137.f, 0.35f },
-		{ "lake_calm", 4, 35.f, 40.f, 0.25f, 25.f, 0.25f },
-		{ "pond_still", 2, 55.f, 50.f, 0.05f, 12.f, 0.15f },
-		// length_max is the generator's floor (WaterWaves::MIN_WAVELENGTH) and is spelled
-		// as such: anything smaller is silently raised to it, so asking for 6 m would
-		// document a wave this can never produce. The series still runs BELOW the floor
-		// on its way down -- 10.2 / 7.2 / 5.0 m -- which is the branch water_waves.cpp
-		// added for ponds, and carries the same caveat: a river placed kilometres from
-		// the world origin needs its domain origin set, which Pasture3DPool does.
-		{ "river_flow", 3, 0.f, 10.f, 0.06f, 10.f, 0.12f },
+		{ "ocean_default", 20.f, 137.f, 0.859467f, 10.1778f },
+		{ "lake_calm", 35.f, 25.f, 0.117721f, 10.1778f },
+		{ "pond_still", 55.f, 12.f, 0.0133478f, 6.0422f },
+		{ "river_flow", 0.f, 10.f, 0.0236074f, 5.0084f },
 	};
 	for (const Preset &p : presets) {
 		Ref<Pasture3DWaveProfile> profile;
 		profile.instantiate();
 		profile->set_profile_name(p.name);
-		profile->set_wave_count(p.count);
-		profile->set_direction_deg(p.direction_deg);
-		profile->set_spread_deg(p.spread_deg);
-		profile->set_amplitude(p.amplitude);
-		profile->set_length_max(p.length_max);
-		profile->set_steepness(p.steepness);
+		profile->fit_sea(p.direction_deg, p.length_max, p.sigma);
+		profile->set_min_wavelength(p.min_wavelength);
 		_profiles.push_back(profile);
 	}
 	_connect_profiles();
@@ -560,10 +548,13 @@ int Pasture3DPoolManager::get_effective_fft_resolution() const {
 }
 
 void Pasture3DPoolManager::set_wave_model(const WaveModel p_model) {
-	if (_wave_model == p_model) {
+	// 1 was Gerstner, retired in Phase 6 of the FFT port. A scene that asked for it gets the project's
+	// choice, which is what a scene that asked for nothing gets.
+	const WaveModel model = (p_model == WAVE_MODEL_FFT || p_model == WAVE_MODEL_FBM) ? p_model : WAVE_MODEL_PROJECT;
+	if (_wave_model == model) {
 		return;
 	}
-	_wave_model = p_model;
+	_wave_model = model;
 	_apply_model_to_profiles();
 	rebuild_tables();
 	update_configuration_warnings();
@@ -715,8 +706,8 @@ Node *Pasture3DPoolManager::body_at(const Vector3 &p_global_pos) const {
 	// above the surface -- so it is returned without being asked whether it contains the
 	// point. It used to be asked, and the answer was discarded: both the guarded branch
 	// and the fallthrough returned `ocean`, so a full Pasture3DOcean::contains_point() --
-	// which compares against the WAVE surface and therefore runs solve_domain(), 16
-	// Gerstner iterations -- was spent choosing between returning the ocean and returning
+	// which compares against the WAVE surface and therefore runs solve_domain(), up to 16
+	// iterations of the inverse -- was spent choosing between returning the ocean and returning
 	// the ocean. On the buoy resolve path that ran per buoy per physics tick.
 	//
 	// Returning it unconditionally is also the behaviour a buoy wants: a hull lifted clear
@@ -992,7 +983,6 @@ void Pasture3DPoolManager::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_sun_light", "light"), &Pasture3DPoolManager::set_sun_light);
 	ClassDB::bind_method(D_METHOD("get_sun_light"), &Pasture3DPoolManager::get_sun_light);
 	BIND_ENUM_CONSTANT(WAVE_MODEL_FFT);
-	BIND_ENUM_CONSTANT(WAVE_MODEL_GERSTNER);
 	BIND_ENUM_CONSTANT(WAVE_MODEL_FBM);
 	BIND_ENUM_CONSTANT(WAVE_MODEL_PROJECT);
 	ClassDB::bind_method(D_METHOD("set_wave_model", "model"), &Pasture3DPoolManager::set_wave_model);
@@ -1062,7 +1052,7 @@ void Pasture3DPoolManager::_bind_methods() {
 			"set_sun_light", "get_sun_light");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "paused"), "set_paused", "is_paused");
 	ADD_GROUP("Waves", "");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "wave_model", PROPERTY_HINT_ENUM, "FFT,Gerstner,fBm,Project Setting"), "set_wave_model", "get_wave_model");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "wave_model", PROPERTY_HINT_ENUM, "FFT:0,fBm:2,Project Setting:3"), "set_wave_model", "get_wave_model");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "fft_resolution", PROPERTY_HINT_ENUM, "Project Setting:0,128:128,256:256,512:512"),
 			"set_fft_resolution", "get_fft_resolution");
 }

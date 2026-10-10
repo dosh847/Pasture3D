@@ -4,7 +4,7 @@ extends Node
 # Run windowed under Forward+:
 #   Godot_v4.7-stable_win64_console.exe --path project res://bench/WaterPBRGate.tscn
 #
-# A flat sheet of water_body.gdshader (a wave table of zero amplitude, detail and foam off, absorption so
+# A flat sheet of water_body.gdshader (an fBm of zero height, detail and foam off, absorption so
 # high the depth fade is opaque) under one white DirectionalLight3D, in a world with no sky, no ambient
 # and no reflections, linear tonemap, float readback. The only light on the pixel is light()'s, so the
 # pixel can be predicted exactly: _predict() is the shader's arithmetic in GDScript.
@@ -19,8 +19,9 @@ extends Node
 #       Anti-null: doubling the light's energy doubles the pixel to within TOL, so what is being
 #       predicted is the light's contribution and not a constant that happens to land near it.
 #   [K] Crest scatter (k1). The only term [E] cannot see, because it scales with crest height and a flat
-#       sheet has none. One Gerstner wave of CREST_WAVELENGTH, sampled at its quarter-wavelength crest:
-#       height exactly CREST_HEIGHT, normal exactly up, slope zero. Low sun ahead, camera 40 deg up:
+#       sheet has none. One fBm octave of CREST_WAVELENGTH (drag and speed zero, both sets alike), sampled
+#       at its quarter-wavelength crest: height exactly CREST_HEIGHT once the unit mean is scaled out, normal
+#       exactly up, slope zero. Low sun ahead, camera 40 deg up:
 #       backlit, but far enough off the mirror direction that the sun lobe is ~0 and k1 is a large share
 #       of the pixel. (Nearer the mirror the glint swamps k1, and the control margin went to 0.06.)
 #       At wave_peak_scatter
@@ -118,12 +119,8 @@ func _build() -> void:
 	var mat := ShaderMaterial.new()
 	_mat = mat
 	mat.shader = load(SHADER)
-	# w > 0 keeps the shader off its compile-time fallback table; zero amplitude keeps the sheet flat.
-	var waves := PackedVector4Array()
-	for i in 8:
-		waves.append(Vector4(1.0, 0.0, 0.0, 100.0))
-	mat.set_shader_parameter("_waves", waves)
-	mat.set_shader_parameter("wave_steepness", 0.0)
+	# The fBm branch at zero height: flat, slope zero, crest height zero.
+	_set_fbm(mat, 0.0)
 	mat.set_shader_parameter("detail_strength", 0.0)
 	mat.set_shader_parameter("foam_shore_amount", 0.0)
 	mat.set_shader_parameter("absorption", Vector3(100.0, 100.0, 100.0))
@@ -145,6 +142,27 @@ func _build() -> void:
 	_box.mesh = box
 	_box.visible = false
 	_vp.add_child(_box)
+
+
+# One octave along +x of CREST_WAVELENGTH, still and undragged, in both sets, whose crest stands p_crest
+# metres above rest: the octave peaks at exp(0) = 1 and its mean exp(-1) I0(1) is subtracted, so the
+# normalised peak is 1 - unit_mean and `height` scales it to p_crest.
+func _set_fbm(p_mat: ShaderMaterial, p_crest: float) -> void:
+	var fbm := Pasture3DWaterFBM.new()
+	for s in 2:
+		fbm.set_knob(s, &"octaves", 1.0)
+		fbm.set_knob(s, &"seed", 0.0)
+		fbm.set_knob(s, &"frequency", TAU / CREST_WAVELENGTH)
+		fbm.set_knob(s, &"speed", 0.0)
+		fbm.set_knob(s, &"drag", 0.0)
+		fbm.set_knob(s, &"max_peak", 1.0)
+		fbm.set_knob(s, &"peak_offset", 1.0)
+		fbm.set_knob(s, &"height", p_crest / (1.0 - fbm.get_unit_mean(s)))
+	p_mat.set_shader_parameter("_wave_model", 2)
+	for s in 2:
+		var pack := fbm.get_shader_pack(s)
+		for i in 4:
+			p_mat.set_shader_parameter("_fbm_%s%d" % ["v" if s == Pasture3DWaterFBM.SET_VERTEX else "f", i], pack[i])
 
 
 func _dir(p_elevation_deg: float, p_azimuth_deg: float) -> Vector3:
@@ -253,11 +271,7 @@ func _criterion_k() -> void:
 	var to_sun := _dir(5.0, 0.0)
 	var to_cam := _dir(40.0, 180.0)
 	var crest_x := CREST_WAVELENGTH * 0.25
-	var waves := PackedVector4Array()
-	waves.append(Vector4(1.0, 0.0, CREST_HEIGHT, CREST_WAVELENGTH))
-	for i in 7:
-		waves.append(Vector4(1.0, 0.0, 0.0, 100.0))
-	_mat.set_shader_parameter("_waves", waves)
+	_set_fbm(_mat, CREST_HEIGHT)
 	_sheet.position = Vector3(crest_x, 0.0, 0.0)
 	_pose(to_sun, to_cam, Vector3(crest_x, CREST_HEIGHT, 0.0))
 	_sun.light_energy = 0.25
@@ -266,10 +280,7 @@ func _criterion_k() -> void:
 		_mat.set_shader_parameter("wave_peak_scatter", strength)
 		results.append(await _sample())
 	_mat.set_shader_parameter("wave_peak_scatter", 1.0)
-	var flat := PackedVector4Array()
-	for i in 8:
-		flat.append(Vector4(1.0, 0.0, 0.0, 100.0))
-	_mat.set_shader_parameter("_waves", flat)
+	_set_fbm(_mat, 0.0)
 	_sheet.position = Vector3.ZERO
 
 	var want0 := _predict(to_sun, to_cam, 0.25, true)

@@ -920,10 +920,10 @@ func _apply_material() -> void:
 ## This body's own copy of the resolved material, on a shader that declares the shore uniforms.
 ##
 ## The parameters are carried across EXPLICITLY rather than trusted to survive assigning a new
-## shader to a duplicate. The one that matters is `_waves`: the manager uploads the profile's table
-## into the resolved material, and a duplicate that lost it falls back to the shader's compile-time
-## table -- which is not obviously broken, it is a lake with slightly wrong waves whose CPU height
-## query no longer matches what is drawn.
+## shader to a duplicate. The ones that matter are the wave model's (`_wave_model`, `_fft_*`,
+## `_fbm_*`): the manager uploads the profile into the resolved material, and a duplicate that lost
+## them falls back to the shader's default fBm -- which is not obviously broken, it is a lake with
+## the wrong waves whose CPU height query no longer matches what is drawn.
 func _masked_material(p_base: Material) -> ShaderMaterial:
 	var src := p_base as ShaderMaterial
 	if src == null or src.shader == null:

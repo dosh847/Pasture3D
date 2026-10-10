@@ -54,16 +54,14 @@ public: // Constants
 	// Which wave model the materials draw (PASTURE3D_WATER_FFT_SPEC.md §4). PROJECT, the default, reads
 	// SETTING_WAVE_MODEL, so a game's options menu can switch every scene without a node reference. FFT
 	// falls back to fBm where there is no RenderingDevice (Compatibility, headless), and says so once.
-	// Phase 6 deletes GERSTNER; its value stays 1 until then so saved scenes keep their meaning.
+	// 1 was GERSTNER, retired in Phase 6; the others keep their values so saved scenes keep their meaning.
 	enum WaveModel {
 		WAVE_MODEL_FFT = 0,
-		WAVE_MODEL_GERSTNER = 1,
 		WAVE_MODEL_FBM = 2,
 		WAVE_MODEL_PROJECT = 3,
 	};
 	// The values the shader's `_wave_model` uniform takes, from water_common.gdshaderinc. Spelled out
-	// rather than reusing the enum: 0 has to stay the bare-mesh default, which the enum's order is not.
-	static constexpr int SHADER_MODEL_GERSTNER = Pasture3DWaveProfile::MODEL_GERSTNER;
+	// rather than reusing the enum, whose values are the saved scenes' and not the shader's.
 	static constexpr int SHADER_MODEL_FFT = Pasture3DWaveProfile::MODEL_FFT;
 	static constexpr int SHADER_MODEL_FBM = Pasture3DWaveProfile::MODEL_FBM;
 
@@ -165,14 +163,14 @@ private:
 	};
 	// (base material instance id, profile name) -> the shared duplicate handed out.
 	HashMap<String, CachedMaterial> _material_cache;
-	// Cumulative count of _waves uploads. The Phase 1 gate asserts ten pools on one
+	// Cumulative count of profile uploads. The Phase 1 gate asserts ten pools on one
 	// profile produce exactly one; it is kept afterwards because "how many uploads
 	// did that inspector drag cost" is the question this class exists to answer.
 	int _upload_count = 0;
 	// Cumulative count of solve_domain() solves. The same instrument as _upload_count, for
 	// the other expensive thing this class does.
 	//
-	// A Gerstner inverse is 16 iterations over the whole wave table and it is the entire cost
+	// An FFT inverse is up to 16 iterations over the readback and it is the entire cost
 	// of every CPU water query -- so "how many did that tick cost" is the only question worth
 	// asking about buoy performance, and it is an INTEGER. The buoy budget used to be stated
 	// in milliseconds and verified on whatever machine was free, which is how a doubling on
@@ -249,11 +247,11 @@ public:
 	// writes, and a poll over an untouched material costs reads and no RenderingServer
 	// traffic.
 	//
-	// PLUGIN-WRITTEN UNIFORMS ARE SKIPPED -- `_`-prefixed ones (`_waves`, `_mesh_size`,
-	// `_subdiv`, `_vertex_spacing`, `_target_pos`), plus `sea_level` and
-	// `wave_steepness`. They are owned by the profile, the ocean or the clipmap, and a
-	// base that does not store them yields nil; copying that would erase the table every
-	// frame and the poll would fight whoever re-applied it.
+	// PLUGIN-WRITTEN UNIFORMS ARE SKIPPED -- `_`-prefixed ones (`_wave_model`, `_fft_*`,
+	// `_fbm_*`, `_mesh_size`, `_subdiv`, `_vertex_spacing`, `_target_pos`), plus `sea_level`.
+	// They are owned by the profile, the ocean or the clipmap, and a base that does not
+	// store them yields nil; copying that would erase the model every frame and the poll
+	// would fight whoever re-applied it.
 	static bool sync_material_params(const Ref<Material> &p_base, const Ref<Material> &p_target);
 	// True for a uniform the plugin writes and the base material does not own.
 	static bool is_plugin_written_param(const StringName &p_name);
@@ -266,7 +264,7 @@ public:
 	Node3D *get_sun_light() const { return _sun_light.ptr(); }
 	void set_wave_model(const WaveModel p_model);
 	WaveModel get_wave_model() const { return _wave_model; }
-	// What the materials actually draw: FFT, FBM or GERSTNER. PROJECT resolved, and FFT -> FBM where the
+	// What the materials actually draw: FFT or FBM. PROJECT resolved, and FFT -> FBM where the
 	// renderer has no RenderingDevice.
 	WaveModel get_effective_wave_model() const;
 	bool is_fft_effective() const { return get_effective_wave_model() == WAVE_MODEL_FFT; }

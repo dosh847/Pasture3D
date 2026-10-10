@@ -633,8 +633,10 @@ bench/RoadSmoothGate.tscn
 #                        detect DisplayServer.get_name() == "headless", print SKIPPED and quit 0. The
 #                        guard still fires on a windowed run that measures nothing.
 #
-#   WaterPhase2Gate, WaterPhase3Gate, WaterPhase4Gate, WaterPhase5Gate, WaterBodiesPhase0Baseline -
-#                        RED FOR A KNOWN REASON. Their fixtures predate the ocean extraction and build
+#   WaterBodiesPhase0Baseline -
+#                        RED FOR A KNOWN REASON. (WaterPhase2Gate..WaterPhase5Gate shared it and are
+#                        deleted: Phase 6 of the FFT port retired the Gerstner model they measured.)
+#                        Its fixture predates the ocean extraction and builds
 #                        the world as `terrain.ocean_material` / `terrain.get_water_time()`, which is
 #                        now only _legacy_ocean. They render an empty frame and their controls refuse
 #                        it, correctly. To be rewritten against Pasture3DOcean with the water-brush

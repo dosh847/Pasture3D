@@ -13,12 +13,12 @@ extends Node
 #       reaches that binding. Only re-setting the parameter does.
 #   [W] Wiring. A manager in the FFT model gives its profile a live simulation, and upload_profile_into()
 #       writes _wave_model = 1, the simulation's own texture wrappers and its cascade lengths. Control:
-#       switched to GERSTNER, the same upload writes _wave_model = 0 and the profile reports inactive.
+#       switched to FBM, the same upload writes _wave_model = 2 and the profile reports inactive.
 #   [T] Tick. Over TICK_FRAMES rendered frames the manager dispatches the simulation at least once a
-#       frame and the simulation's own update count agrees. Control: in GERSTNER nothing is dispatched.
+#       frame and the simulation's own update count agrees. Control: in FBM nothing is dispatched.
 #   [R] Render. An unlit top-down render of water_body_debug (EMISSION.b = height / 8 + 0.5) correlates
 #       with the height the gate rebuilds from the simulation's readback, bilinear, at the shader's own
-#       texel convention (domain * N / L - 0.5). Control: the same surface drawn by the GERSTNER branch,
+#       texel convention (domain * N / L - 0.5). Control: the same surface drawn by the fBm branch,
 #       against the same prediction, must not correlate. The regression slope is printed, not gated:
 #       correlation is what says the field is THIS field; the slope says the encoding survived the
 #       viewport, which is the viewport's business.
@@ -199,7 +199,7 @@ func _criterion_w() -> void:
 	var active: bool = _profile.is_fft_active()
 	var res_ok: bool = fft.resolution == RES
 
-	_manager.wave_model = Pasture3DPoolManager.WAVE_MODEL_GERSTNER
+	_manager.wave_model = Pasture3DPoolManager.WAVE_MODEL_FBM
 	_manager.upload_profile_into(_mat, &"gate")
 	var model_ctl: int = _mat.get_shader_parameter("_wave_model")
 	var active_ctl: bool = _profile.is_fft_active()
@@ -207,8 +207,8 @@ func _criterion_w() -> void:
 	_manager.upload_profile_into(_mat, &"gate")
 
 	var ok := _manager.is_fft_effective() and active and model_fft == 1 and disp_ok and slope_ok \
-			and lengths == fft.cascade_lengths and live == 1 and res_ok and model_ctl == 0 and not active_ctl
-	_check("W", ok, "FFT: active %s, _wave_model %d, textures %s/%s, lengths %s, live %d, resolution %d; control GERSTNER: _wave_model %d, active %s" % [
+			and lengths == fft.cascade_lengths and live == 1 and res_ok and model_ctl == 2 and not active_ctl
+	_check("W", ok, "FFT: active %s, _wave_model %d, textures %s/%s, lengths %s, live %d, resolution %d; control FBM: _wave_model %d, active %s" % [
 			active, model_fft, disp_ok, slope_ok, lengths, live, fft.resolution, model_ctl, active_ctl])
 
 
@@ -222,7 +222,7 @@ func _criterion_t() -> void:
 	var ticks := _manager.get_fft_tick_count() - ticks0
 	var updates := fft.get_update_count() - updates0
 
-	_manager.wave_model = Pasture3DPoolManager.WAVE_MODEL_GERSTNER
+	_manager.wave_model = Pasture3DPoolManager.WAVE_MODEL_FBM
 	var ctl0 := _manager.get_fft_tick_count()
 	await _frames(TICK_FRAMES)
 	var ctl := _manager.get_fft_tick_count() - ctl0
@@ -230,7 +230,7 @@ func _criterion_t() -> void:
 	_manager.upload_profile_into(_mat, &"gate")
 
 	var ok := ticks >= TICK_FRAMES - 1 and updates >= ticks and ctl == 0
-	_check("T", ok, "%d frames: %d manager ticks, %d simulation updates (both must reach %d); control GERSTNER: %d ticks (must be 0)" % [
+	_check("T", ok, "%d frames: %d manager ticks, %d simulation updates (both must reach %d); control FBM: %d ticks (must be 0)" % [
 			TICK_FRAMES, ticks, updates, TICK_FRAMES - 1, ctl])
 
 
@@ -322,7 +322,7 @@ func _criterion_r() -> void:
 	var pred := _predict()
 	var fit := _fit(pred, got)
 
-	_manager.wave_model = Pasture3DPoolManager.WAVE_MODEL_GERSTNER
+	_manager.wave_model = Pasture3DPoolManager.WAVE_MODEL_FBM
 	_manager.upload_profile_into(_mat, &"gate")
 	await _frames(4)
 	var ctl := _fit(pred, _rendered())
@@ -331,7 +331,7 @@ func _criterion_r() -> void:
 
 	var pred_sd := sqrt(_variance(pred))
 	var ok: bool = pred_sd > 0.05 and fit[2] > 0.05 and fit[0] > 0.95 and absf(ctl[0]) < 0.5
-	_check("R", ok, "%d px: correlation %.4f (must exceed 0.95), slope %.3f, rendered sd %s m vs predicted %s m; control GERSTNER correlation %.4f (must stay under 0.5), sd %s m" % [
+	_check("R", ok, "%d px: correlation %.4f (must exceed 0.95), slope %.3f, rendered sd %s m vs predicted %s m; control FBM correlation %.4f (must stay under 0.5), sd %s m" % [
 			got.size(), fit[0], fit[1], _g(fit[2]), _g(pred_sd), ctl[0], _g(ctl[2])])
 
 

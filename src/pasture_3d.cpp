@@ -1074,8 +1074,6 @@ void Pasture3D::set_render_layers(const uint32_t p_layers) {
 
 
 
-// Wave knobs. Each rebuilds the table and re-uploads; WaterWaves change-detects
-// internally, so setting a knob to its current value costs nothing.
 
 
 
@@ -1402,23 +1400,20 @@ Node *Pasture3D::migrate_ocean() {
 	Ref<Pasture3DWaveProfile> profile;
 	profile.instantiate();
 	profile->set_profile_name(StringName(String(get_name()) + "_ocean"));
-	if (_legacy_ocean.has("ocean_wave_count")) {
-		profile->set_wave_count((int)_legacy_ocean["ocean_wave_count"]);
-	}
-	if (_legacy_ocean.has("ocean_wave_direction")) {
-		profile->set_direction_deg((real_t)_legacy_ocean["ocean_wave_direction"]);
-	}
-	if (_legacy_ocean.has("ocean_wave_spread")) {
-		profile->set_spread_deg((real_t)_legacy_ocean["ocean_wave_spread"]);
-	}
-	if (_legacy_ocean.has("ocean_wave_amplitude")) {
-		profile->set_amplitude((real_t)_legacy_ocean["ocean_wave_amplitude"]);
-	}
-	if (_legacy_ocean.has("ocean_wave_length_max")) {
-		profile->set_length_max((real_t)_legacy_ocean["ocean_wave_length_max"]);
-	}
-	if (_legacy_ocean.has("ocean_wave_steepness")) {
-		profile->set_steepness((real_t)_legacy_ocean["ocean_wave_steepness"]);
+	// The ocean's wave knobs are an older spelling of the profile's retired Gerstner keys, so they take the
+	// profile's own load-time migration: one fit, wherever the old knobs come from.
+	static const char *wave_keys[][2] = {
+		{ "ocean_wave_count", "wave_count" },
+		{ "ocean_wave_direction", "direction_deg" },
+		{ "ocean_wave_spread", "spread_deg" },
+		{ "ocean_wave_amplitude", "amplitude" },
+		{ "ocean_wave_length_max", "length_max" },
+		{ "ocean_wave_steepness", "steepness" },
+	};
+	for (const auto &key : wave_keys) {
+		if (_legacy_ocean.has(key[0])) {
+			profile->migrate_legacy_key(StringName(key[1]), _legacy_ocean[key[0]]);
+		}
 	}
 	// The wave loop period was the ocean's and is now the manager's, so it moves
 	// rather than transferring: a scene that had one keeps its timing.
@@ -1612,17 +1607,6 @@ void Pasture3D::_notification(const int p_what) {
 			//test_layer_subtiling();
 			//test_layer_control_color();
 			//test_layer_region_size_change();
-
-			// Opt-in runner, so a suite can be run without editing and rebuilding the
-			// extension. `PASTURE3D_UNIT_TESTS=water` selects the water parity suite;
-			// unset (the normal case) runs nothing. The water suite is a gate for
-			// spec §4.3, and a gate is only worth anything if it is reproducible.
-			{
-				const String suites = OS::get_singleton()->get_environment("PASTURE3D_UNIT_TESTS");
-				if (suites.contains("water")) {
-					test_water_waves();
-				}
-			}
 
 			// Clear editor textures - also see ENTER_TREE
 			if (_free_editor_textures && !IS_EDITOR && _assets.is_valid()) {

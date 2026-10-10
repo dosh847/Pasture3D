@@ -11,20 +11,14 @@
 // ---------------------------------------------------------------------------
 // Feature defaults. Wrappers override by #define-ing before the include.
 // ---------------------------------------------------------------------------
-#ifndef WATER_WAVE_COUNT
-#define WATER_WAVE_COUNT 4
-#endif
-
-// The FFT wave path (PASTURE3D_WATER_FFT_SPEC.md §3), and with it the fBm fallback, which shares its
-// vertex spacing and rest-domain varying. On by default for every surface variant; a river replaces the
-// wave model outright (water_stream.gdshaderinc), and the canvas_item parity probe has no instance
-// uniforms. WATER_NO_FFT opts a custom variant out of both.
-#if !defined(WATER_STREAM_WAVES) && !defined(WATER_PLAIN_DOMAIN_ORIGIN) && !defined(WATER_NO_FFT)
+// The wave model (PASTURE3D_WATER_FFT_SPEC.md §3): the FFT, and the fBm fallback, which shares its vertex
+// spacing and rest-domain varying. Every surface variant draws it except a river, which replaces the wave
+// model outright with its channel model (water_stream.gdshaderinc).
+#ifndef WATER_STREAM_WAVES
 #define WATER_FFT
 #endif
-// Values of _wave_model. 0 is Gerstner because 0 is what an unset uniform reads: a material dropped on a
-// bare mesh, with no manager to upload anything, still makes waves from its compile-time table.
-#define WATER_MODEL_GERSTNER 0
+// Values of _wave_model. 0 was the Gerstner table, retired in Phase 6 of the FFT port; it now draws the
+// fBm, like any value but FFT.
 #define WATER_MODEL_FFT 1
 #define WATER_MODEL_FBM 2
 
@@ -32,14 +26,15 @@
 // Godot's built-in lambert/GGX and the look they were tuned under. Off for the debug readouts, which write
 // EMISSION with zero SPECULAR and rely on the light loop contributing nothing -- a custom light() adds
 // SPECULAR_LIGHT whatever SPECULAR says.
-#if !defined(WATER_STREAM_WAVES) && !defined(WATER_PLAIN_DOMAIN_ORIGIN) && !defined(WATER_DEBUG_SURFACE) && !defined(WATER_DEBUG_GLOBALS) && !defined(WATER_NO_PBR)
+#if !defined(WATER_STREAM_WAVES) && !defined(WATER_DEBUG_SURFACE) && !defined(WATER_DEBUG_GLOBALS) && !defined(WATER_NO_PBR)
 #define WATER_PBR
 #endif
 
-// Upper bound on WATER_WAVE_COUNT. Fixes the size of the uploaded wave table so
-// every variant takes the same one. Raising it costs 16 bytes per slot in every
-// water material and requires a matching change in water_waves.cpp.
-#define WATER_MAX_WAVES 8
+// The detail texture stood in for wavelengths a wave table could not reach. The FFT's short cascades and
+// the fBm's fragment octaves reach them, so it is a river feature only (FFT spec §6.6).
+#if defined(WATER_DETAIL) && defined(WATER_FFT)
+#error "WATER_DETAIL is for stream variants: the FFT and the fBm draw the short waves it stood in for"
+#endif
 
 // ---------------------------------------------------------------------------
 // Globals, owned by the plugin (spec §2.3).
@@ -79,91 +74,23 @@ uniform float sea_level : hint_range(-500.0, 500.0, 0.01) = 0.0;
 group_uniforms;
 
 group_uniforms waves;
-// (dir.x, dir.z, amplitude, wavelength) per wave. Generated in C++ so the CPU
-// height query reads the identical table (spec §4.2, §4.3).
-//
-//
-// Always declared at WATER_MAX_WAVES regardless of how many the variant reads.
-// The C++ generator then has exactly one upload shape to produce and never has
-// to discover a variant's array size to match it -- a negotiation with no good
-// answer, since Godot gives no clean way to read a shader's declared array
-// length back. Costs 128 bytes of uniform buffer in the worst case.
-uniform vec4 _waves[WATER_MAX_WAVES];
-
-// How many entries of _waves this variant actually EVALUATES.
-//
-// Nothing in the shader reads this; it exists to be read back from C++, and it is the
-// clean way the comment above says Godot does not give you. The array length cannot
-// answer the question -- _waves is WATER_MAX_WAVES on every variant by design -- so the
-// count has to be published separately or guessed. Pasture3DOcean used to guess, from
-// substrings of the shader's FILE PATH ("_low" meant 4, "water_body" meant 4 or 2),
-// which was wrong for water_river.gdshader and wrong for any shader an author renamed.
-// The warning it drives says "your profile has more waves than this shader compiles",
-// so guessing it wrong either invents that warning or hides it.
-//
-// A uniform default rather than a #define the C++ mirrors, because a mirrored constant
-// is two places to change and one of them gets forgotten; this way the shader that
-// compiles the loop is the thing that reports the number.
-//
-// ZERO on a stream variant, and that is not WATER_WAVE_COUNT being unset. A river
-// replaces the Gerstner table outright (see water_stream.gdshaderinc) and evaluates
-// none of it, while still defining WATER_WAVE_COUNT 3 to size the array the manager
-// uploads into. "Three" would be a true statement about the array and a false one about
-// the surface; the honest answer to "how many of these waves will I see" is none.
-#ifdef WATER_STREAM_WAVES
-uniform int _wave_variant_count = 0;
+// Whether this variant draws the manager's wave profile at all. Nothing in the shader reads it; it is
+// read back from C++ (Pasture3DOcean's configuration warning), so the shader that compiles the model is
+// the thing that reports it instead of a guess from the file name. False on a stream variant, which
+// replaces the wave model with its own channel model.
+#ifdef WATER_FFT
+uniform bool _draws_wave_profile = true;
 #else
-uniform int _wave_variant_count = WATER_WAVE_COUNT;
+uniform bool _draws_wave_profile = false;
 #endif
-
-// Compile-time fallback table, used when nothing has uploaded one (detected as
-// a zero amplitude sum). G6 says the material must work dropped on a bare
-// MeshInstance3D, and in that case no C++ ever runs -- without this the user
-// gets a flat plane and no indication why.
-//
-// It has to be a `const` array and not a uniform default, because Godot rejects
-// default values on uniform arrays outright ("Setting default values to uniform
-// arrays is not supported"). An initialiser must name exactly WATER_WAVE_COUNT
-// entries, hence one block per supported count. The amplitude sums are
-// #define-d rather than summed at runtime because they are compile-time
-// constants and folding them saves a loop.
-//
-// Directions are scattered around +X; wavelengths follow a geometric series;
-// amplitudes are proportional to wavelength, which is what keeps steepness
-// roughly uniform across the series.
-#if WATER_WAVE_COUNT == 8
-const vec4 _wave_defaults[8] = vec4[8]( // ocean
-	vec4(1.000, 0.000, 1.64, 137.0),
-	vec4(0.951, -0.309, 1.16, 97.0),
-	vec4(0.978, 0.208, 0.82, 68.0),
-	vec4(0.906, -0.423, 0.58, 48.0),
-	vec4(0.927, 0.375, 0.41, 34.0),
-	vec4(0.990, -0.139, 0.29, 24.0),
-	vec4(0.883, 0.469, 0.20, 17.0),
-	vec4(0.966, -0.259, 0.14, 12.0));
-#define WATER_DEFAULT_SUM_AMP 5.24
-#elif WATER_WAVE_COUNT == 4
-const vec4 _wave_defaults[4] = vec4[4]( // lake
-	vec4(1.000, 0.000, 0.42, 60.0),
-	vec4(0.951, -0.309, 0.25, 36.0),
-	vec4(0.970, 0.242, 0.15, 21.0),
-	vec4(0.899, -0.438, 0.09, 13.0));
-#define WATER_DEFAULT_SUM_AMP 0.91
-#elif WATER_WAVE_COUNT == 2
-const vec4 _wave_defaults[2] = vec4[2]( // pond
-	vec4(1.000, 0.000, 0.090, 18.0),
-	vec4(0.940, 0.342, 0.050, 11.0));
-#define WATER_DEFAULT_SUM_AMP 0.14
-#else
-#define WATER_NO_DEFAULT_WAVES
-#endif
-uniform float wave_steepness : hint_range(0.0, 0.6, 0.01) = 0.35;
 
 #ifdef WATER_FFT
 // Which model this material draws, written by Pasture3DPoolManager per profile. A UNIFORM BRANCH rather
 // than a variant, so the fallback can switch at runtime without swapping the shader on every cached
-// material; uniform across a draw, so it costs a branch and no divergence (FFT spec §3).
-uniform int _wave_model = WATER_MODEL_GERSTNER;
+// material; uniform across a draw, so it costs a branch and no divergence (FFT spec §3). The default is
+// the fBm, whose uniform defaults below are the reference's waves: a material dropped on a bare mesh, with
+// no manager to upload anything, still makes waves (spec G6).
+uniform int _wave_model = WATER_MODEL_FBM;
 // The profile's Pasture3DWaterFFT outputs: 4 layers, one per cascade, full mip chains.
 //   _fft_displacement  xyz = displacement in metres, a = foam
 //   _fft_slope         xy  = dh/dx, dh/dz;  z = the cascade's own Jacobian
@@ -198,44 +125,37 @@ instance uniform float _fft_vertex_spacing = 1.0;
 //
 // PER INSTANCE, not per material (WATER_BODIES_SPEC §5.4). Pasture3DPoolManager hands the
 // same material to every body sharing a (base material, wave profile) pair, so ten
-// ponds cost one material and one _waves upload -- but each of those ponds sits
+// ponds cost one material and one profile upload -- but each of those ponds sits
 // somewhere different, and a domain origin stored on the material would force them
 // all to share one. An instance uniform is the only per-body channel Godot offers
-// that a shared material survives; it is also the ONLY thing here that can be one,
-// since instance uniforms take scalars and vectors and not arrays, which is why
-// _waves above can never be one and why the material cache is keyed on the profile
-// at all.
+// that a shared material survives; samplers cannot be one, which is why the
+// material cache is keyed on the profile at all.
 //
 // Written with MeshInstance3D.set_instance_shader_parameter(), or
 // RenderingServer.instance_geometry_set_shader_parameter() for the ocean clipmap's
 // instances. material.set_shader_parameter() no longer reaches it -- anything that
 // used to set it that way now sets nothing and silently gets vec3(0).
-//
-// Instance uniforms are a spatial-shader feature. bench/water_parity_probe.gdshader
-// includes this file from a canvas_item shader, where the declaration is a compile
-// error, so it opts out and drives the origin as an ordinary uniform instead. That
-// probe tests the wave arithmetic, which the origin only shifts the input of.
-#ifdef WATER_PLAIN_DOMAIN_ORIGIN
-uniform vec3 _water_domain_origin = vec3(0.0, 0.0, 0.0);
-#else
 instance uniform vec3 _water_domain_origin = vec3(0.0, 0.0, 0.0);
-#endif
 group_uniforms;
 
 group_uniforms surface;
 uniform float base_roughness : hint_range(0.0, 1.0, 0.001) = 0.06;
 uniform float specular_amount : hint_range(0.0, 1.0, 0.01) = 0.5;
+#ifdef WATER_DETAIL
 // Toksvig in spirit (§3.4): normal detail the distance fade removed is converted
 // into roughness rather than discarded, so the specular lobe widens by exactly
 // as much as the geometry it stood for was smoothed away. Lowering roughness to
 // make distant water look sharper is what CAUSES the shimmer, not what fixes it.
+// With the detail texture, river-only (FFT spec §6.6); the FFT's mips and the
+// fBm's octave fade filter their own slope.
 uniform float variance_to_roughness : hint_range(0.0, 2.0, 0.01) = 0.55;
+#endif
 group_uniforms;
 
 #ifdef WATER_DETAIL
 group_uniforms detail;
 // (dh/dx, dh/dz) in RG, NOT a normal map -- derivatives compose by addition, so
-// two scrolled layers and the Gerstner slope combine with two adds and need no
+// two scrolled layers and the wave slope combine with two adds and need no
 // TBN, no whiteout blend and no cross products (§3.3).
 //
 // hint_normal is a lie about the content and deliberate: it is the only hint
@@ -283,8 +203,8 @@ uniform sampler2D detail_deriv : hint_normal, filter_linear_mipmap_anisotropic, 
 // out as flat grey slabs. One uniform, wrong at both ends of the distance range.
 //
 // 0.25 gives ~0.10 rms slope over both layers, which is the right order for
-// wind-ruffled water at the sub-10 m scale the Gerstner table does not cover
-// (§3.1 floors it at 10 m). Pinned by Phase 5 gate E, which asserts the composed
+// wind-ruffled water at the sub-10 m scale a river's channel model does not cover.
+// Pinned by Phase 5 gate E, which asserts the composed
 // slope numerically and uses 1.0 as the control that must fail.
 uniform float detail_strength : hint_range(0.0, 4.0, 0.01) = 0.25;
 // Tiles per metre. The two are deliberately non-harmonic: at a simple ratio the
@@ -338,9 +258,9 @@ group_uniforms;
 
 #ifdef WATER_STREAM_WAVES
 // ---------------------------------------------------------------------------
-// Stream ripples (spec §10.2). Replaces the Gerstner table on a river.
+// Stream ripples (spec §10.2). Replace the wave model on a river.
 //
-// See water_stream.gdshaderinc for why a river cannot use _waves[] at all. These
+// See water_stream.gdshaderinc for why a river cannot use a sea's waves at all. These
 // four are the whole surface: everything that varies BETWEEN reaches -- how fast
 // the water is running, how steep, how near the bank -- is already per-vertex in
 // the mesh, so the material only has to say how much ripple a given speed earns.
@@ -440,22 +360,22 @@ group_uniforms foam;
 uniform sampler2D foam_tex : hint_default_white, filter_linear_mipmap, repeat_enable;
 uniform vec3 foam_color : source_color = vec3(0.85, 0.89, 0.92);
 uniform float foam_scale : hint_range(0.001, 1.0, 0.001) = 0.07;
+#ifndef WATER_FLOW
+// Foam drift in metres per second, world space. Until Phase 6 of the FFT port the foam rode
+// detail_flow0, which went river-only with WATER_DETAIL; a river's foam rides its flow instead.
+uniform vec2 foam_flow = vec2(0.32, 0.11);
+#endif
 // Foam is a scattering layer sitting on the water, so it must raise roughness.
 // The legacy shader tinted albedo only, which gives you mirror-smooth foam.
 uniform float foam_roughness : hint_range(0.0, 1.0, 0.01) = 0.8;
 #ifdef WATER_FOAM_CREST
-// Fraction of the breaking limit at which whitecaps start. v_jacobian is in
-// fold-limit units and therefore never exceeds wave_steepness, so a threshold
-// above that value means no foam at all -- which is the correct answer for calm
-// water and the reason this is not normalised (see water_surface.gdshaderinc).
-// 0.2 against the default steepness of 0.35 puts the onset near 2 sigma of the
-// crest distribution: a few percent of the surface, which is what a moderate sea
-// looks like.
+#ifndef WATER_FFT
+// A stream's crest signal is its surface slope, ~1 where the channel model is as steep as it gets
+// (water_stream.gdshaderinc). Whitecaps start at this slope and reach full cover `softness` above it.
+// The FFT needs neither: its simulation's foam is already coverage.
 uniform float foam_crest_threshold : hint_range(0.0, 1.0, 0.01) = 0.2;
-// Width of the ramp from first foam to full foam, in the same units. Without it
-// the ramp would have to end at 1.0 -- unreachable at any usable steepness, so
-// foam could never reach full opacity anywhere.
 uniform float foam_crest_softness : hint_range(0.01, 1.0, 0.01) = 0.1;
+#endif
 uniform float foam_crest_amount : hint_range(0.0, 2.0, 0.01) = 1.0;
 #endif
 #ifdef WATER_FOAM_SHORE
@@ -591,8 +511,8 @@ group_uniforms;
 // Varyings
 // ---------------------------------------------------------------------------
 varying vec3 v_world_pos;
-varying vec3 v_wave_normal; // world space, from the analytic Gerstner sum
-varying float v_jacobian;   // crest-steepness signal, drives whitecaps (§3.1)
+varying vec3 v_wave_normal; // world space, from the vertex stage's wave model
+varying float v_jacobian;   // crest signal: FFT foam, or a stream's slope; drives whitecaps
 varying float v_view_dist;
 // The UNDISPLACED height of the sheet: sea_level for the clipmap, the mesh's own
 // y for a plain MeshInstance3D. Carried so the fragment stage can ask "is the

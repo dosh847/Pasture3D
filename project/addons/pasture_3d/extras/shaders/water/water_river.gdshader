@@ -11,10 +11,10 @@
 //   WATER_STREAM_WAVES — the VERTEX displacement comes from channel coordinates
 //                     the mesh carries -- flow travel time (UV2.x), signed
 //                     lateral offset and the stationary phase (CUSTOM0) --
-//                     rather than from the Gerstner table, so crests run
+//                     rather than from a sea's wave model, so crests run
 //                     downstream on every reach, chop varies across the channel,
 //                     and rapids stand still over a ford. See
-//                     water_stream.gdshaderinc for why the table cannot do any of
+//                     water_stream.gdshaderinc for why a sea's waves cannot do any of
 //                     it, and what the demo scene had to do about it before.
 //
 // NOT DROP-ANYWHERE, unlike the other four (G6). It needs five things only a
@@ -29,15 +29,11 @@
 // Costs two extra texture() calls in the fragment stage against water_body: the
 // cross-fade needs a second copy of each layer. Priced at the Phase 7 gate. The
 // water spec's four-fetch budget becomes six for rivers, and this says so rather
-// than quietly exceeding it. The vertex stage is still CHEAPER than the lake's:
-// five sine octaves against three full Gerstner waves, and no horizontal shear.
+// than quietly exceeding it. The vertex stage is five sine octaves and no texture
+// fetch, against the lake's four cascade fetches.
 shader_type spatial;
 render_mode cull_disabled, depth_draw_never, diffuse_lambert, specular_schlick_ggx, skip_vertex_transform;
 
-// Still 3, though nothing evaluates the table now: it sizes the uniform array the
-// manager uploads into, and a mismatch there is a silently truncated write rather
-// than an error. The table is inert on this variant; ripple_* is the surface.
-#define WATER_WAVE_COUNT 3
 #define WATER_DETAIL
 #define WATER_FLOW
 #define WATER_STREAM_WAVES
@@ -45,9 +41,8 @@ render_mode cull_disabled, depth_draw_never, diffuse_lambert, specular_schlick_g
 #define WATER_FOAM_SHORE
 
 #include "res://addons/pasture_3d/extras/shaders/water/water_common.gdshaderinc"
-// water_waves is still included for the WaveSample struct and WATER_TAU, both of
-// which water_stream builds on. water_eval_waves() itself goes unreferenced and
-// is dead-code-eliminated.
+// water_waves is included for the WaveSample struct and WATER_TAU, both of which
+// water_stream builds on. Its wave models are compiled out (no WATER_FFT here).
 #include "res://addons/pasture_3d/extras/shaders/water/water_waves.gdshaderinc"
 #include "res://addons/pasture_3d/extras/shaders/water/water_stream.gdshaderinc"
 #include "res://addons/pasture_3d/extras/shaders/water/water_surface.gdshaderinc"

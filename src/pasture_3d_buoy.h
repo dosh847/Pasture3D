@@ -30,7 +30,7 @@ using namespace godot;
  * puzzle with no way in.
  *
  * C++ rather than GDScript (§4.3) because this runs per physics tick over potentially dozens of
- * instances, and because the wave query underneath it is not cheap: Gerstner and FFT waves displace
+ * instances, and because the wave query underneath it is not cheap: FFT waves displace
  * sideways as well as up, so the surface is not a heightfield and get_water_height() solves that
  * inversion iteratively. §9.3 budgets 64 buoys at 0.5 ms per tick and the Phase 6 gate measures it.
  *

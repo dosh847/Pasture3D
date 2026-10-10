@@ -1092,7 +1092,7 @@ func _ribbon_surface_at(p_local_xz: Vector2) -> Array:
 #
 # *** THE CPU HALF OF A PARITY CONTRACT. ***
 # water_eval_stream_waves() in water_stream.gdshaderinc is the other half, and it
-# carries the argument for why a river cannot use the Gerstner table. This is a
+# carries the argument for why a river cannot use a sea's waves. This is a
 # transcription of it: same octaves, same quantisation, same order. A buoy floats
 # on what these return and the player sees what the shader drew, so a difference
 # here is a boat sitting in the air.
@@ -1330,8 +1330,8 @@ func _forget_surface() -> void:
 ## Vertex spacing from the RIPPLE wavelength, not from a wave profile.
 ##
 ## The base class asks the manager's profile for its shortest wavelength, which is
-## the right question for a pool and a meaningless one here: the Gerstner table no
-## longer displaces this surface at all. What the mesh has to resolve is the
+## the right question for a pool and a meaningless one here: the profile's model
+## does not displace this surface at all. What the mesh has to resolve is the
 ## ripple, and its wavelength is speed / frequency -- so a slow creek, whose crests
 ## pack together, gets a finer mesh than a fast river.
 ##
@@ -1368,8 +1368,8 @@ func _validate_property(property: Dictionary) -> void:
 		# it is clear the A/B switch exists on water bodies and simply has nothing to do here.
 		property.usage |= PROPERTY_USAGE_READ_ONLY
 	elif property.name == "wave_profile":
-		# A stream's surface comes from ripple_* on its material, not from the manager's Gerstner
-		# table -- a table has one world heading and a river has many, which is the whole of
+		# A stream's surface comes from ripple_* on its material, not from the manager's wave
+		# profile -- a sea's waves have fixed world headings and a river has many, which is the whole of
 		# water_stream.gdshaderinc's argument. The property still does ONE thing, so it is greyed
 		# and explained rather than hidden: it keys the manager's shared-material cache, so two
 		# streams naming the same profile share one material.

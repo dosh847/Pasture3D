@@ -15,9 +15,7 @@
 shader_type spatial;
 render_mode cull_disabled, depth_draw_never, diffuse_lambert, specular_schlick_ggx, skip_vertex_transform;
 
-#define WATER_WAVE_COUNT 4
 #define WATER_SHORE_MASK
-#define WATER_DETAIL
 #define WATER_DEPTH_FADE
 #define WATER_FOAM_SHORE
 #define WATER_SCATTER

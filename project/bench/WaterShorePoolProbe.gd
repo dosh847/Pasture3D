@@ -21,10 +21,10 @@
 #      sum, never the mesh, so switching how the water is DRAWN must not move where the water IS.
 #      Control: a deliberately displaced query set, which must disagree.
 #
-#   D. the wave table survives the shader swap. MASKED mode copies the manager's resolved material
-#      onto a different shader, and a copy that lost `_waves` is not obviously broken -- it is a
-#      lake with the shader's compile-time waves, drawn out of step with what get_water_height()
-#      reports. Control: compare against the resolved material's own table.
+#   D. the wave model survives the shader swap. MASKED mode copies the manager's resolved material
+#      onto a different shader, and a copy that lost the model's uniforms is not obviously broken --
+#      it is a lake with the shader's default fBm, drawn out of step with what get_water_height()
+#      reports. Control: compare against the resolved material's own upload.
 #
 # Run: Godot_v4.7-stable_win64_console.exe --path project bench/WaterShorePoolProbe.tscn
 #      BENCH_OUT=<dir> for the captures.
@@ -341,21 +341,19 @@ func _criterion_d_wave_table() -> void:
 		_completed += 1
 		return
 
-	var a = src.get_shader_parameter("_waves")
-	var b = rt.get_shader_parameter("_waves")
-	var amp_a := _amp_sum(a)
-	var amp_b := _amp_sum(b)
+	var sig_a := _wave_signature(src)
+	var sig_b := _wave_signature(rt)
 	print("    resolved shader: %s" % src.shader.resource_path.get_file())
 	print("    runtime shader:  %s" % rt.shader.resource_path.get_file())
-	print("    _waves amplitude sum: resolved %.4f, runtime %.4f" % [amp_a, amp_b])
-	if amp_a <= 0.0:
+	print("    wave model: resolved %s, runtime %s" % [sig_a, sig_b])
+	if sig_a == "":
 		_fail += 1
-		print("    !! the RESOLVED material has no wave table, so this comparison is vacuous")
+		print("    !! the RESOLVED material has no wave model uploaded, so this comparison is vacuous")
 		print("       (is there a Pasture3DPoolManager in the scene, with a lake_calm profile?)")
-	elif absf(amp_a - amp_b) > 1e-4:
+	elif sig_a != sig_b:
 		_fail += 1
-		print("    !! the table did not survive the copy. The lake would draw the shader's")
-		print("       compile-time waves, out of step with get_water_height().")
+		print("    !! the model did not survive the copy. The lake would draw the shader's")
+		print("       default fBm, out of step with get_water_height().")
 	else:
 		print("    -> carried across intact")
 	if rt.shader == src.shader:
@@ -366,13 +364,19 @@ func _criterion_d_wave_table() -> void:
 	_completed += 1
 
 
-func _amp_sum(p_waves) -> float:
-	if p_waves == null:
-		return 0.0
-	var total := 0.0
-	for v in (p_waves as Array):
-		total += absf((v as Vector4).z)
-	return total
+# What the manager uploaded, as one comparable string: the model, then the FFT's textures and lengths
+# or the fBm's vertex pack. Empty when nothing was uploaded (the uniform reads back null).
+func _wave_signature(p_mat: ShaderMaterial) -> String:
+	var model = p_mat.get_shader_parameter("_wave_model")
+	if model == null:
+		return ""
+	if int(model) == 1:
+		return "FFT %s %s %s" % [str(p_mat.get_shader_parameter("_fft_displacement")),
+				str(p_mat.get_shader_parameter("_fft_slope")), str(p_mat.get_shader_parameter("_fft_lengths"))]
+	var pack := PackedStringArray()
+	for i in 4:
+		pack.append(str(p_mat.get_shader_parameter("_fbm_v%d" % i)))
+	return "fBm " + " ".join(pack)
 
 
 # ---- E: the clipmap's count does not know how large the lake is --------------
@@ -786,8 +790,12 @@ func _criterion_h_coarse_rings() -> void:
 			continue
 		var cover := ShaderMaterial.new()
 		cover.shader = _coverage_shader(not case[1])
+		# The wave model too, selector included: the shipped vertex stage displaces by it, and left
+		# unset it draws the shader's default fBm -- a metre-high sea that is not this pool's.
 		for nm in ["_shore_sdf", "_shore_rect", "_shore_texels", "_shore_range",
-				"_shore_feather", "_shore_offset", "_shore_kill_margin", "sea_level"]:
+				"_shore_feather", "_shore_offset", "_shore_kill_margin", "sea_level",
+				"_wave_model", "_fft_displacement", "_fft_slope", "_fft_lengths",
+				"_fbm_v0", "_fbm_v1", "_fbm_v2", "_fbm_v3"]:
 			cover.set_shader_parameter(nm, rt.get_shader_parameter(nm))
 		var clip: Node = pool.get_node_or_null("Clipmap")
 		var surface: MeshInstance3D = pool.get_node_or_null("Surface")
@@ -1056,7 +1064,6 @@ func _coverage_shader(p_clipmap: bool = false) -> Shader:
 		"shader_type spatial;",
 		"render_mode unshaded, cull_disabled, depth_draw_never, skip_vertex_transform;",
 		"#define WATER_SHORE_MASK",
-		"#define WATER_WAVE_COUNT 4",
 	]
 	if p_clipmap:
 		lines.append("#define WATER_CLIPMAP")

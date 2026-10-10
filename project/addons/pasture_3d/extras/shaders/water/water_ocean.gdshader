@@ -5,8 +5,6 @@ render_mode cull_disabled, depth_draw_never, diffuse_lambert, specular_schlick_g
 
 #define WATER_CLIPMAP
 #define WATER_TERRAIN_CHECK
-#define WATER_WAVE_COUNT 8
-#define WATER_DETAIL
 #define WATER_DEPTH_FADE
 #define WATER_FOAM_CREST
 #define WATER_FOAM_SHORE

@@ -2,9 +2,10 @@
 #
 # Two claims, checked headless.
 #
-# A. THE ROOT CAUSE. A water body only receives a wave table if its shader DECLARES
-#    `_waves`. ShaderMaterial accepts a parameter its shader never heard of and the
-#    RenderingServer discards it silently, so "the upload ran" is not evidence the table
+# A. THE ROOT CAUSE. A water body only receives a wave model if its shader DECLARES
+#    `_wave_model` (and the model's uniforms; until Phase 6 of the FFT port, `_waves`).
+#    ShaderMaterial accepts a parameter its shader never heard of and the
+#    RenderingServer discards it silently, so "the upload ran" is not evidence the model
 #    arrived -- which is how sculpting_2.tscn's ocean sat on bench/legacy/M_ocean.tres
 #    ignoring the PoolManager while the pools next to it worked.
 #
@@ -22,6 +23,9 @@ extends SceneTree
 const OCEAN_MAT := "res://addons/pasture_3d/extras/shaders/water/M_water_ocean.tres"
 const LAKE_MAT := "res://addons/pasture_3d/extras/shaders/water/M_water_lake.tres"
 const LEGACY_MAT := "res://bench/legacy/M_ocean.tres"
+# The one preset that still compiles WATER_DETAIL (water_common.gdshaderinc: the FFT's
+# cascades replaced it everywhere else), so the one D can test the Detail group on.
+const RIVER_MAT := "res://addons/pasture_3d/extras/shaders/water/M_water_river.tres"
 
 var _fail := 0
 
@@ -41,37 +45,37 @@ func _initialize() -> void:
 	quit(0 if _fail == 0 else 1)
 
 
-## Does the shader actually declare `_waves`?
-func _declares_waves(p_path: String) -> bool:
+## Does the shader actually declare `_wave_model`?
+func _declares_model(p_path: String) -> bool:
 	var mat := load(p_path) as ShaderMaterial
 	if mat == null or mat.shader == null:
 		print("    !! %s did not load as a ShaderMaterial" % p_path)
 		_fail += 1
 		return false
 	for u in mat.shader.get_shader_uniform_list():
-		if u.get("name", "") == "_waves":
+		if u.get("name", "") == "_wave_model":
 			return true
 	return false
 
 
 # ---- A: the root cause --------------------------------------------------------
 # The control is the legacy material. Without it this check could only report "the
-# ocean preset has _waves", which is true of every material that never had the bug and
+# ocean preset has _wave_model", which is true of every material that never had the bug and
 # says nothing about how the bug was diagnosed.
 func _check_a_uniform_declared() -> void:
-	print("A. `_waves` is declared by the shader, not merely set on the material")
-	var ocean_ok := _declares_waves(OCEAN_MAT)
-	var lake_ok := _declares_waves(LAKE_MAT)
-	var legacy_ok := _declares_waves(LEGACY_MAT)
-	print("    M_water_ocean.tres declares _waves: %s (must be true)" % ocean_ok)
-	print("    M_water_lake.tres  declares _waves: %s (must be true)" % lake_ok)
+	print("A. `_wave_model` is declared by the shader, not merely set on the material")
+	var ocean_ok := _declares_model(OCEAN_MAT)
+	var lake_ok := _declares_model(LAKE_MAT)
+	var legacy_ok := _declares_model(LEGACY_MAT)
+	print("    M_water_ocean.tres declares _wave_model: %s (must be true)" % ocean_ok)
+	print("    M_water_lake.tres  declares _wave_model: %s (must be true)" % lake_ok)
 	print("    CONTROL, legacy M_ocean.tres       : %s (must be FALSE -- this is the bug)" % legacy_ok)
 	if not ocean_ok or not lake_ok:
 		_fail += 1
-		print("    !! a shipped water preset does not declare _waves")
+		print("    !! a shipped water preset does not declare _wave_model")
 	if legacy_ok:
 		_fail += 1
-		print("    !! the legacy material declares _waves, so it was never the explanation")
+		print("    !! the legacy material declares _wave_model, so it was never the explanation")
 
 	# And the upload is accepted regardless, which is why nothing warned.
 	var manager := Pasture3DPoolManager.new()
@@ -106,7 +110,8 @@ func _check_b_base_edits_propagate() -> void:
 	var rid_before := shared.get_rid()
 	var old_scale: float = base.get_shader_parameter("foam_scale")
 	var new_scale := old_scale + 0.25
-	var table_before: PackedVector4Array = shared.get_shader_parameter("_waves")
+	# Headless, the manager draws the fBm (no RenderingDevice), so its vertex pack is the upload.
+	var table_before: Variant = shared.get_shader_parameter("_fbm_v2")
 
 	# The premise of the poll: no signal exists to connect to. Both write paths, both
 	# candidate signals. If this ever starts firing, the poll can be retired -- so it is
@@ -137,15 +142,15 @@ func _check_b_base_edits_propagate() -> void:
 		print("    !! CONTROL: the value did not actually change; the check proves nothing")
 
 	# CONTROL 2 -- the sync walks every uniform the shader declares, and the base stores
-	# no wave table. Copying that nil would erase the table and drop the shader onto its
-	# compile-time default, which is the bug in A wearing a different hat.
-	var table_after: PackedVector4Array = shared.get_shader_parameter("_waves")
-	var table_kept := table_after == table_before and not table_after.is_empty()
-	print("    CONTROL, wave table survived the sync: %s (must be true, %d entries)" % [
-			table_kept, table_after.size()])
+	# no wave model. Copying that nil would erase the upload and drop the shader onto its
+	# default pack, which is the bug in A wearing a different hat.
+	var table_after: Variant = shared.get_shader_parameter("_fbm_v2")
+	var table_kept: bool = table_before != null and table_after == table_before
+	print("    CONTROL, uploaded fBm pack survived the sync: %s (must be true, %s)" % [
+			table_kept, str(table_after)])
 	if not table_kept:
 		_fail += 1
-		print("    !! the sync erased the wave table it was supposed to leave alone")
+		print("    !! the sync erased the wave model it was supposed to leave alone")
 
 	# CONTROL 3 -- the RID must be stable. Re-duplicating would also pass the test above
 	# while forcing Pasture3DMesher to rebuild the clipmap on every keystroke, because the
@@ -158,7 +163,7 @@ func _check_b_base_edits_propagate() -> void:
 
 	# CONTROL 4 -- the poll must be idle on an untouched material. A sync that reported
 	# work every frame would be fighting whoever writes the plugin-owned uniforms, and on
-	# the ocean that means re-uploading the wave table sixty times a second.
+	# the ocean that means re-uploading the wave model sixty times a second.
 	var idle: bool = not Pasture3DPoolManager.sync_material_params(base, shared)
 	print("    CONTROL, second sync wrote nothing: %s (must be true)" % idle)
 	if not idle:
@@ -169,9 +174,9 @@ func _check_b_base_edits_propagate() -> void:
 
 
 # ---- C: the ocean's own uniforms survive the poll -----------------------------
-# The sharpest way this fix could go wrong. M_water_ocean.tres STORES sea_level = 0.0
-# and wave_steepness = 0.35, and Pasture3DOcean's duplicate carries this ocean's sea level
-# (the node's Y) and the profile's steepness instead. A sync that copied them would reset
+# The sharpest way this fix could go wrong. M_water_ocean.tres STORES sea_level = 0.0,
+# and Pasture3DOcean's duplicate carries this ocean's sea level (the node's Y) and the
+# profile's model instead. A sync that copied them would reset
 # the water to y = 0 every editor frame while the node kept writing it back -- the ocean
 # would sit at the wrong height, or flicker between two.
 #
@@ -187,16 +192,15 @@ func _check_c_ocean_uniforms_survive() -> void:
 	const MESH_SIZE := 16.0
 	runtime.set_shader_parameter("sea_level", SEA_LEVEL)
 	runtime.set_shader_parameter("_mesh_size", MESH_SIZE)
-	runtime.set_shader_parameter("wave_steepness", 0.52)
-	runtime.set_shader_parameter("_waves", PackedVector4Array([Vector4(1.0, 0.0, 1.6, 137.0)]))
+	const PACK := Vector4(0.25, 3.5, 1.0, 1.0)
+	runtime.set_shader_parameter("_fbm_v2", PACK)
 
 	var wrote: bool = Pasture3DPoolManager.sync_material_params(base, runtime)
 
 	var kept := {
 		"sea_level": is_equal_approx(runtime.get_shader_parameter("sea_level"), SEA_LEVEL),
 		"_mesh_size": is_equal_approx(runtime.get_shader_parameter("_mesh_size"), MESH_SIZE),
-		"wave_steepness": is_equal_approx(runtime.get_shader_parameter("wave_steepness"), 0.52),
-		"_waves": (runtime.get_shader_parameter("_waves") as PackedVector4Array).size() == 1,
+		"_fbm_v2": runtime.get_shader_parameter("_fbm_v2") == PACK,
 	}
 	for name in kept:
 		print("    %-15s survived: %s (base stores %s)" % [
@@ -214,7 +218,7 @@ func _check_c_ocean_uniforms_survive() -> void:
 	# which would make B pass for the wrong reason.
 	var art_ok := not Pasture3DPoolManager.is_plugin_written_param("foam_scale") \
 			and not Pasture3DPoolManager.is_plugin_written_param("deep_color") \
-			and Pasture3DPoolManager.is_plugin_written_param("_waves") \
+			and Pasture3DPoolManager.is_plugin_written_param("_wave_model") \
 			and Pasture3DPoolManager.is_plugin_written_param("sea_level")
 	print("    CONTROL, classifier splits art knobs from plugin ones: %s (must be true)" % art_ok)
 	if not art_ok:
@@ -229,7 +233,7 @@ func _check_c_ocean_uniforms_survive() -> void:
 # object reference, and get_shader_parameter() is the only route the sync has to it.
 func _check_d_detail_group_propagates() -> void:
 	print("\nD. the whole Detail group reaches the duplicate")
-	var base := (load(OCEAN_MAT) as ShaderMaterial).duplicate()
+	var base := (load(RIVER_MAT) as ShaderMaterial).duplicate()
 	var runtime := base.duplicate() as ShaderMaterial
 
 	var edits := {

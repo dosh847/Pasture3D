@@ -4877,7 +4877,7 @@ func _closest_profile_for(p_span: float, p_manager: Node, p_want: StringName) ->
 		var profile = p_manager.get_profile(n)
 		if profile == null:
 			continue
-		var l: float = profile.length_max
+		var l: float = profile.get_length_max()
 		if l < shortest_len:
 			shortest_len = l
 			shortest = n

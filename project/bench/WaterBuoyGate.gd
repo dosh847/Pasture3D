@@ -14,7 +14,7 @@ extends Node
 #       t = period agree within H_LOOP x height; control, the second instant at 97 s misses. Then the
 #       routing: a profile on an FBM manager answers get_height_at() with exactly evaluate()'s vertex set and
 #       solve_domain() with its input. Controls: the oracle without drag misses by over H_CTRL x height; the
-#       same profile on a GERSTNER manager answers differently.
+#       same profile with its fbm removed answers differently (flat).
 #   [B] fBm buoy against the drawn surface (Forward+, Compatibility). A paused manager in the tree, the sheet
 #       of WaterFBMGate seen through WATER_DEBUG_SURFACE: each pixel's height against the manager's
 #       evaluate_height(solve_domain(xz)) -- the call path of every body. Relative RMS under B_TOL. Control:
@@ -197,15 +197,16 @@ func _criterion_h() -> void:
 	var fbm_h := profile.get_height_at(dom, t)
 	var exact: float = fbm.evaluate(Pasture3DWaterFBM.SET_VERTEX, dom, t, PERIOD).x
 	var solved := profile.solve_domain(dom, t)
+	var kept: Pasture3DWaterFBM = profile.fbm
+	profile.fbm = null
+	var flat_h := profile.get_height_at(dom, t)
+	profile.fbm = kept
 	m.free()
-	var g := _make_manager(Pasture3DPoolManager.WAVE_MODEL_GERSTNER, [profile])
-	var gerstner_h := profile.get_height_at(dom, t)
-	g.free()
-	var routed := fbm_h == exact and solved == dom and absf(gerstner_h - fbm_h) > 1e-3
+	var routed := fbm_h == exact and solved == dom and absf(flat_h - fbm_h) > 1e-3
 	_check("H", transcribed and routed, ("max |evaluate - oracle| %.7f m (tol %.7f) within %.0f m/s, %.4f m over +-300 m and the period (float32, reported); " +
 			"oracle without drag misses by %.3f m (ctrl > %.3f); t=0 vs t=period %.5f m (tol %.3f), vs t=97 s %.3f m (ctrl > %.3f); " +
-			"FBM profile height %.5f == evaluate %.5f: %s, solve_domain identity: %s; GERSTNER answers %.5f (must differ)") % [
-			err, H_TOL * HEIGHT, H_RANGE, far, ctrl, H_CTRL * HEIGHT, loop, H_LOOP * HEIGHT, loop_ctrl, H_CTRL * HEIGHT, fbm_h, exact, fbm_h == exact, solved == dom, gerstner_h])
+			"FBM profile height %.5f == evaluate %.5f: %s, solve_domain identity: %s; without its fbm %.5f (must differ)") % [
+			err, H_TOL * HEIGHT, H_RANGE, far, ctrl, H_CTRL * HEIGHT, loop, H_LOOP * HEIGHT, loop_ctrl, H_CTRL * HEIGHT, fbm_h, exact, fbm_h == exact, solved == dom, flat_h])
 
 
 func _build_view() -> void:
@@ -251,7 +252,7 @@ func _build_view() -> void:
 
 	var code := "shader_type spatial;\n"
 	code += "render_mode cull_disabled, depth_draw_never, diffuse_lambert, specular_schlick_ggx, skip_vertex_transform;\n"
-	code += "#define WATER_WAVE_COUNT 4\n#define WATER_DEBUG_SURFACE\n"
+	code += "#define WATER_DEBUG_SURFACE\n"
 	for f in ["water_common", "water_waves", "water_surface", "water_shading"]:
 		code += "#include \"%s%s.gdshaderinc\"\n" % [INC, f]
 	_debug_shader = Shader.new()

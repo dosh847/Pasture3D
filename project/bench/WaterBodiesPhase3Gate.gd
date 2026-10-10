@@ -552,17 +552,14 @@ func _make_manager(p_root: Node3D) -> Pasture3DPoolManager:
 
 	var lake := Pasture3DWaveProfile.new()
 	lake.profile_name = "lake_calm"
-	lake.wave_count = 4
-	lake.amplitude = 0.42
-	lake.length_max = 60.0
-	lake.steepness = 0.35
+	# The seas the retired Gerstner knobs this gate was written against migrate to: 4 waves, 0.42 m,
+	# 60 m (sigma = 0.176 x the old amplitude sum), and 2 waves, 0.09 m, 18 m.
+	lake.fit_sea(0.0, 60.0, 0.152854)
 
 	var pond := Pasture3DWaveProfile.new()
 	pond.profile_name = "pond_still"
-	pond.wave_count = 2
-	pond.amplitude = 0.09
-	pond.length_max = 18.0
-	pond.steepness = 0.20
+	pond.fit_sea(0.0, 18.0, 0.024065)
+	pond.min_wavelength = 8.9931
 
 	var profiles: Array[Pasture3DWaveProfile] = [lake, pond]
 	m.profiles = profiles

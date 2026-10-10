@@ -6,6 +6,13 @@ lower-spec GPU either, was ever available, so every Deck figure in this document
 one desktop part and none of it is validated (§11 q7). Phase 3 changed two design decisions and
 retired one target (§8.4); Phase 4 corrected §4.3 (§8.5); Phase 5 found two shading defects that had
 been shipping since Phase 3 (§8.6).**
+
+> **Superseded for the sea, lakes and ponds (2026-10-09).** The Gerstner wave table, its C++ mirror
+> (`water_waves.cpp`), `_waves`, `WATER_MAX_WAVES`, the parity probe and the `WaterPhase2..5Gate`
+> harnesses this document describes were deleted in Phase 6 of
+> [PASTURE3D_WATER_FFT_SPEC.md](PASTURE3D_WATER_FFT_SPEC.md); those variants now draw an FFT
+> simulation or its fBm fallback, and the detail texture (`WATER_DETAIL`) is river-only. What follows
+> is kept as the design record. Its clipmap, shore, depth and tier decisions still stand.
 Replaces the example ocean shader (now retired to
 [bench/legacy/ocean_shader.gdshader](project/bench/legacy/ocean_shader.gdshader)) with a water
 system that is (a) fast enough that a Steam Deck renders full-screen water without breaking frame, (b)

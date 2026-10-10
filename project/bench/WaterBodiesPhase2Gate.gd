@@ -394,7 +394,12 @@ func _gate_b_no_terrain() -> void:
 		_fail += 1
 		print("    !! the ocean does not draw without a terrain; W4 is not met")
 
-	# It must also answer the CPU query, which now goes through the manager.
+	# It must also answer the CPU query, which now goes through the manager. Asked twice: under the
+	# FFT the answer is a readback, and the first query on a quiet sea starts it and answers flat
+	# (FFT spec §5), which is the very answer this checks for. The second is a few frames later.
+	ocean.get_water_height(Vector2(123.0, -456.0))
+	for i in 6:
+		await get_tree().process_frame
 	var h: float = ocean.get_water_height(Vector2(123.0, -456.0))
 	var n: Vector3 = ocean.get_water_normal(Vector2(123.0, -456.0))
 	print("    get_water_height(123,-456) = %.6f | normal = (%.4f, %.4f, %.4f)" % [
@@ -586,13 +591,22 @@ func _gate_d_migration() -> void:
 				ocean.wave_profile))
 		else:
 			var pbad := 0
+			# The knobs are Gerstner's, retired in Phase 6 of the FFT port: they arrive as a fit of
+			# the FFT and the fBm, so the reference is a fresh profile handed the same legacy keys.
+			# The unmigrated default is the control: a migration that dropped the keys would match it.
+			var ref := Pasture3DWaveProfile.new()
+			for kv in [["wave_count", 6], ["direction_deg", 55.0], ["spread_deg", 33.0],
+					["amplitude", 2.25], ["length_max", 180.0], ["steepness", 0.42]]:
+				ref.set(kv[0], kv[1])
+			var unmigrated := Pasture3DWaveProfile.new()
 			var pchecks := [
-				["wave_count", profile.wave_count, 6],
-				["direction_deg", profile.direction_deg, 55.0],
-				["spread_deg", profile.spread_deg, 33.0],
-				["amplitude", profile.amplitude, 2.25],
-				["length_max", profile.length_max, 180.0],
-				["steepness", profile.steepness, 0.42],
+				["length_max", profile.get_length_max(), 180.0],
+				["fbm direction", profile.fbm.get_knob(0, &"seed"), deg_to_rad(55.0)],
+				["fbm height", profile.fbm.get_knob(0, &"height"), ref.fbm.get_knob(0, &"height")],
+				["fft scale", profile.fft.get_spectrum_knob(0, &"scale"), ref.fft.get_spectrum_knob(0, &"scale")],
+				["min_wavelength", profile.min_wavelength, ref.min_wavelength],
+				["fbm height differs from the unmigrated default", absf(profile.fbm.get_knob(0, &"height")
+						- unmigrated.fbm.get_knob(0, &"height")) > 1e-3, true],
 			]
 			for c in pchecks:
 				var got = c[1]
@@ -693,12 +707,9 @@ func _make_ocean(p_root: Node3D, p_material: String) -> Pasture3DOcean:
 	manager.loop_period = LOOP_PERIOD
 	var profile := Pasture3DWaveProfile.new()
 	profile.profile_name = &"ocean_default"
-	profile.wave_count = 8
-	profile.direction_deg = 20.0
-	profile.spread_deg = 28.0
-	profile.amplitude = 1.6
-	profile.length_max = 137.0
-	profile.steepness = 0.35
+	# ocean_default: the shipped preset's fit (Pasture3DPoolManager::_seed_default_profiles).
+	profile.fit_sea(20.0, 137.0, 0.859467)
+	profile.min_wavelength = 10.1778
 	var profiles: Array[Pasture3DWaveProfile] = [profile]
 	manager.profiles = profiles
 	p_root.add_child(manager)

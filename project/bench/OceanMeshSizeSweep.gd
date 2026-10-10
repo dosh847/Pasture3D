@@ -310,12 +310,9 @@ func _make_ocean(p_root: Node3D) -> Pasture3DOcean:
 	manager.loop_period = LOOP_PERIOD
 	var profile := Pasture3DWaveProfile.new()
 	profile.profile_name = &"ocean_default"
-	profile.wave_count = 8
-	profile.direction_deg = 20.0
-	profile.spread_deg = 28.0
-	profile.amplitude = 1.6
-	profile.length_max = 137.0
-	profile.steepness = 0.35
+	# ocean_default: the shipped preset's fit (Pasture3DPoolManager::_seed_default_profiles).
+	profile.fit_sea(20.0, 137.0, 0.859467)
+	profile.min_wavelength = 10.1778
 	var profiles: Array[Pasture3DWaveProfile] = [profile]
 	manager.profiles = profiles
 	p_root.add_child(manager)

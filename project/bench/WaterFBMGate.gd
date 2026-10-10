@@ -9,9 +9,9 @@ extends Node
 #
 #   [H] Fallback (no RenderingDevice: headless, Compatibility). A manager left on its default (PROJECT, which
 #       asks for FFT) draws fBm: effective model FBM, is_wave_model_fallback(), the profile's fBm active,
-#       and a material it uploads into carries _wave_model 2 and the profile's pack. Controls: an explicit
-#       GERSTNER manager is not a fallback and uploads 0; an explicit FBM manager draws fBm and is not a
-#       fallback either -- so the flag means "the device was missing", not "fBm is drawn".
+#       and a material it uploads into carries _wave_model 2 and the profile's pack. A manager saved as the
+#       retired GERSTNER (1) reads as PROJECT and behaves the same. Control: an explicit FBM manager draws
+#       fBm and is not a fallback -- so the flag means "the device was missing", not "fBm is drawn".
 #   [F] Shape. A sheet meshed every 0.25 m, seen straight down through WATER_DEBUG_SURFACE (blue = height,
 #       red = the vertex normal's x), every pixel centre on a vertex, the material filled by the manager's
 #       own upload. Each pixel is predicted by _fbm(), the shader's arithmetic in GDScript. The relative RMS
@@ -23,8 +23,8 @@ extends Node
 #   [L] Loop. water_time 0 and water_time = period render the same surface (relative RMS < L_TOL).
 #       Control: the same two instants with water_time_period set to 97 s -- the speeds quantise to the
 #       wrong loop -- differ by over L_CTRL.
-#   [N] Normals reach the lit surface. The shipped water_body shader, lit by one sun, fBm vs a flat Gerstner
-#       table: the fBm frame's luminance spread is over N_RATIO x the flat one's. This is the fragment set
+#   [N] Normals reach the lit surface. The shipped water_body shader, lit by one sun, fBm vs a flat sea (the
+#       FFT branch over unbound textures, which is what the manager uploads for a profile with no model): the fBm frame's luminance spread is over N_RATIO x the flat one's. This is the fragment set
 #       (water_fbm with p_drag_by_frequency), which [F] cannot see, and on Compatibility it is the only proof
 #       that the lit variant compiles.
 #   [P] Project setting (Forward+ only: elsewhere FFT is not reachable to switch from). A manager in the
@@ -141,7 +141,7 @@ func _criterion_h() -> void:
 	var ok := true
 	var rows := [
 		["PROJECT (asks FFT)", Pasture3DPoolManager.WAVE_MODEL_PROJECT, Pasture3DPoolManager.WAVE_MODEL_FBM, true, 2],
-		["GERSTNER control", Pasture3DPoolManager.WAVE_MODEL_GERSTNER, Pasture3DPoolManager.WAVE_MODEL_GERSTNER, false, 0],
+		["retired GERSTNER (1) reads as PROJECT", 1, Pasture3DPoolManager.WAVE_MODEL_FBM, true, 2],
 		["FBM control", Pasture3DPoolManager.WAVE_MODEL_FBM, Pasture3DPoolManager.WAVE_MODEL_FBM, false, 2],
 	]
 	for row in rows:
@@ -162,21 +162,14 @@ func _criterion_h() -> void:
 				row[0], eff, fb, uploaded, pack_ok, fbm_active, _profile.get_amplitude_sum(),
 				"ok" if row_ok else "WRONG"])
 		m.free()
-	# Information, not a criterion: what an UNAUTHORED profile derives from the Gerstner defaults.
+	# Information, not a criterion: what an UNAUTHORED profile fits itself to (the migrated Gerstner defaults).
 	var derived := Pasture3DWaveProfile.new()
 	var dfbm := derived.fbm
-	details.append("derived from Gerstner defaults (amplitude sum %.3f m, length_max %.1f m): frequency %.4f rad/m, speed %.3f rad/s, vertex height %.3f m, sigma %.3f m (target %.3f), bound %.3f m" % [
-			_gerstner_sum(derived), derived.length_max,
+	details.append("unauthored default (length_max %.1f m): frequency %.4f rad/m, speed %.3f rad/s, vertex height %.3f m, sigma %.3f m, bound %.3f m" % [
+			derived.get_length_max(),
 			dfbm.get_knob(0, &"frequency"), dfbm.get_knob(0, &"speed"), dfbm.get_knob(0, &"height"),
-			dfbm.get_height_sigma(), 0.176 * _gerstner_sum(derived), dfbm.get_displacement_bound()])
+			dfbm.get_height_sigma(), dfbm.get_displacement_bound()])
 	_check("H", ok, "\n      " + "\n      ".join(details))
-
-
-func _gerstner_sum(p_profile: Pasture3DWaveProfile) -> float:
-	var sum := 0.0
-	for w in p_profile.get_shader_table():
-		sum += w.z
-	return sum
 
 
 func _build_view() -> void:
@@ -228,7 +221,7 @@ func _build_view() -> void:
 
 	var code := "shader_type spatial;\n"
 	code += "render_mode cull_disabled, depth_draw_never, diffuse_lambert, specular_schlick_ggx, skip_vertex_transform;\n"
-	code += "#define WATER_WAVE_COUNT 4\n#define WATER_DEBUG_SURFACE\n"
+	code += "#define WATER_DEBUG_SURFACE\n"
 	for f in ["water_common", "water_waves", "water_surface", "water_shading"]:
 		code += "#include \"%s%s.gdshaderinc\"\n" % [INC, f]
 	_debug_shader = Shader.new()
@@ -404,11 +397,9 @@ func _lit_material(p_model: int) -> ShaderMaterial:
 	if p_model == Pasture3DPoolManager.WAVE_MODEL_FBM:
 		_manager.upload_profile_into(mat, &"fbm_gate")
 	else:
-		var flat := PackedVector4Array()
-		for i in 8:
-			flat.append(Vector4(1.0, 0.0, 0.0, 100.0))
-		mat.set_shader_parameter("_waves", flat)
-		mat.set_shader_parameter("wave_steepness", 0.0)
+		mat.set_shader_parameter("_wave_model", 1)
+		mat.set_shader_parameter("_fft_displacement", null)
+		mat.set_shader_parameter("_fft_slope", null)
 	return mat
 
 
@@ -429,7 +420,7 @@ func _criterion_n() -> void:
 	# The camera stays straight down: a tilted orthographic view runs off the sheet, and the background's
 	# edge then IS the spread, in both arms alike.
 	var fbm := _luma_spread(await _render(_lit_material(Pasture3DPoolManager.WAVE_MODEL_FBM), T_SHAPE))
-	var flat := _luma_spread(await _render(_lit_material(Pasture3DPoolManager.WAVE_MODEL_GERSTNER), T_SHAPE))
+	var flat := _luma_spread(await _render(_lit_material(Pasture3DPoolManager.WAVE_MODEL_FFT), T_SHAPE))
 	_sun.visible = false
 	var ratio: float = fbm[1] / maxf(flat[1], 1e-6)
 	_check("N", fbm[0] > 1e-3 and ratio > N_RATIO,

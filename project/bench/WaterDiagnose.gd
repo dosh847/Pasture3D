@@ -148,7 +148,7 @@ func _ready() -> void:
 		var back := _variant(
 			"cull_back, depth_draw_never, diffuse_lambert, specular_schlick_ggx,"
 			+ " skip_vertex_transform",
-			["WATER_DETAIL", "WATER_DEPTH_FADE", "WATER_FOAM_CREST", "WATER_FOAM_SHORE",
+			["WATER_DEPTH_FADE", "WATER_FOAM_CREST", "WATER_FOAM_SHORE",
 			"WATER_SCATTER"])
 		back.set_shader_parameter("detail_strength", s)
 		_terrain.ocean_material = back
@@ -157,7 +157,7 @@ func _ready() -> void:
 		var both := _variant(
 			"cull_disabled, depth_draw_never, diffuse_lambert, specular_schlick_ggx,"
 			+ " skip_vertex_transform",
-			["WATER_DETAIL", "WATER_DEPTH_FADE", "WATER_FOAM_CREST", "WATER_FOAM_SHORE",
+			["WATER_DEPTH_FADE", "WATER_FOAM_CREST", "WATER_FOAM_SHORE",
 			"WATER_SCATTER"])
 		both.set_shader_parameter("detail_strength", s)
 		_terrain.ocean_material = both
@@ -171,7 +171,7 @@ func _ready() -> void:
 # a feature define can be moved without editing a .gdshader on disk.
 func _variant(p_modes: String, p_defines: PackedStringArray) -> ShaderMaterial:
 	var code := "shader_type spatial;\nrender_mode " + p_modes + ";\n"
-	code += "#define WATER_CLIPMAP\n#define WATER_WAVE_COUNT 8\n"
+	code += "#define WATER_CLIPMAP\n"
 	for d in p_defines:
 		code += "#define " + d + "\n"
 	for inc in ["common", "waves", "surface", "shading"]:

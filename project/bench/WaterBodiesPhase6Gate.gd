@@ -1547,10 +1547,8 @@ func _make_manager(p_root: Node3D, p_amplitude: float) -> Pasture3DPoolManager:
 	m.wave_model = Pasture3DPoolManager.WAVE_MODEL_FBM
 	var profile := Pasture3DWaveProfile.new()
 	profile.profile_name = "flat_test"
-	profile.wave_count = 2
-	profile.amplitude = p_amplitude
-	profile.length_max = 60.0
-	profile.steepness = 0.2
+	# The sea the retired knobs (2 waves of amplitude p_amplitude, 60 m) migrate to: sigma is linear in it.
+	profile.fit_sea(0.0, 60.0, p_amplitude * 0.212541)
 	var profiles: Array[Pasture3DWaveProfile] = [profile]
 	m.profiles = profiles
 	p_root.add_child(m)

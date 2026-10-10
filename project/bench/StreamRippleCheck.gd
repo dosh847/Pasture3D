@@ -2,14 +2,16 @@
 #
 # River motion: crests that run downstream on every reach. Spec §10.2.
 #
-# THE BUG THIS GATES. A Gerstner wave carries one world-space heading. A river
-# bends. So on any reach heading against that heading, the crests travel
-# UPSTREAM. No amplitude, steepness or direction setting fixes it -- the model has
-# one direction and the river has many -- and the only setting that hides it is
-# amplitude 0, which is what sculpting_2.tscn shipped and why this work exists.
+# THE BUG THIS GATES. A wave model's crests carry fixed world-space headings (the
+# Gerstner table this was written against had one; the FFT and fBm that replaced
+# it have a dominant one). A river bends. So on any reach heading against that
+# heading, the crests travel UPSTREAM. No amplitude or direction setting fixes it
+# -- the model has one direction and the river has many -- and the only setting
+# that hides it is amplitude 0, which is what sculpting_2.tscn shipped and why
+# this work exists.
 #
 # Criterion A's CONTROL IS THAT BUG, reproduced: the same geometry, the same
-# clock, evaluated through the manager's Gerstner table exactly as
+# clock, evaluated through the manager's wave profile exactly as
 # Pasture3DWaterBody._wave_offset still does for a lake. It must show upstream
 # travel on the returning leg. If it does not, the fixture is not asking the
 # question and A proves nothing.
@@ -109,9 +111,9 @@ func _a_downstream_on_every_reach() -> void:
 	var before := {}
 	for name in ["out", "back"]:
 		before[name] = _heights(stream, legs[name])
-	var gerstner_before := {}
+	var profile_before := {}
 	for name in ["out", "back"]:
-		gerstner_before[name] = _gerstner(stream, legs[name])
+		profile_before[name] = _profile_heights(stream, legs[name])
 	await _settle(SETTLE_FRAMES)
 
 	var ok := true
@@ -124,10 +126,10 @@ func _a_downstream_on_every_reach() -> void:
 		_fail += 1
 		print("    !! crests do not run downstream on every reach")
 
-	# CONTROL: the Gerstner path on the identical points and the identical clock.
+	# CONTROL: the wave-profile path on the identical points and the identical clock.
 	var upstream_legs := PackedStringArray()
 	for name in ["out", "back"]:
-		var glag := _lag(gerstner_before[name], _gerstner(stream, legs[name]))
+		var glag := _lag(profile_before[name], _profile_heights(stream, legs[name]))
 		print("    CONTROL %-5s leg, the wave table: %+d rows" % [name, glag])
 		if glag < 0:
 			upstream_legs.append(name)
@@ -786,9 +788,9 @@ func _heights(p_stream: Node, p_rows: PackedInt32Array) -> PackedFloat32Array:
 	return out
 
 
-## The same points through the manager's Gerstner table -- the pre-fix behaviour,
+## The same points through the manager's wave profile -- the pre-fix behaviour,
 ## and criterion A's control. This is Pasture3DWaterBody._wave_offset verbatim.
-func _gerstner(p_stream: Node, p_rows: PackedInt32Array) -> PackedFloat32Array:
+func _profile_heights(p_stream: Node, p_rows: PackedInt32Array) -> PackedFloat32Array:
 	var rows: PackedVector3Array = p_stream.get_centreline()
 	var m = p_stream._resolve_manager()
 	var out := PackedFloat32Array()

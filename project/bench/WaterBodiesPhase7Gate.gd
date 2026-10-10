@@ -458,9 +458,8 @@ func _make_manager(p_root: Node3D) -> Pasture3DPoolManager:
 	m.loop_period = LOOP_PERIOD
 	var profile := Pasture3DWaveProfile.new()
 	profile.profile_name = "river_flow"
-	profile.wave_count = 2
-	profile.amplitude = 0.001 # near-flat, so heights are the geometry rather than the sea state
-	profile.length_max = 30.0
+	# Near-flat, so heights are the geometry rather than the sea state.
+	profile.fit_sea(0.0, 30.0, 0.00024)
 	var profiles: Array[Pasture3DWaveProfile] = [profile]
 	m.profiles = profiles
 	p_root.add_child(m)

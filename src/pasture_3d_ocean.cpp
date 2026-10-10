@@ -484,65 +484,37 @@ PackedStringArray Pasture3DOcean::_get_configuration_warnings() const {
 	Pasture3DPoolManager *manager = _find_manager();
 	if (!manager) {
 		warnings.push_back(
-				"No Pasture3DPoolManager in the scene. The ocean will draw with whatever wave table its "
-				"material's shader variant compiles in, and nothing will drive water_time, so it "
+				"No Pasture3DPoolManager in the scene. The ocean will draw the fBm reference waves its "
+				"material defaults to, and nothing will drive water_time, so it "
 				"will not move.");
 	} else if (!manager->has_profile(_wave_profile)) {
 		warnings.push_back("No wave profile named '" + String(_wave_profile) +
 				"' on the Pasture3DPoolManager. Available: " + String(", ").join(manager->get_profile_names()));
 	} else {
-		// The failure Pasture3D used to warn about, carried over: a profile with
-		// more waves than the material's variant compiles is invisible on screen
-		// but present in the CPU query, so get_water_height() describes a surface
-		// nobody drew.
+		// A stream variant on an ocean. The river shader replaces the wave model with its own channel model,
+		// so the profile describes a surface this material will not draw while get_water_height() on THIS
+		// node still answers from it.
 		//
-		// The count is READ OFF THE SHADER, via the _wave_variant_count uniform
-		// water_common.gdshaderinc declares for exactly this. It used to be inferred
-		// from substrings of the shader's file path, which got water_river.gdshader
-		// wrong (reported 8; it evaluates none) and got any renamed shader wrong in
-		// whichever direction the name happened to fall -- inventing this warning or
-		// hiding it, both silently.
+		// READ OFF THE SHADER, via the _draws_wave_profile uniform water_common.gdshaderinc declares for
+		// exactly this; it used to be inferred from substrings of the shader's file path, which was wrong
+		// for any shader an author renamed. A shader that does not declare it is not a water shader this
+		// node can reason about, and gets silence rather than a guess. HEADLESS takes the same branch: the
+		// dummy renderer returns nil for every parameter default, so bench/WaterVariantWarningCheck.gd has
+		// to run windowed.
 		Ref<Pasture3DWaveProfile> profile = manager->get_profile(_wave_profile);
 		ShaderMaterial *mat = Object::cast_to<ShaderMaterial>(_material.ptr());
 		if (profile.is_valid() && mat) {
 			Ref<Shader> shader = mat->get_shader();
 			if (shader.is_valid()) {
 				Variant declared = RS->shader_get_parameter_default(shader->get_rid(),
-						StringName("_wave_variant_count"));
-				String file = shader->get_path().get_file();
-				// A shader that does not declare it is not a water shader this node
-				// can reason about -- a custom one, or one that includes none of the
-				// water headers. Say nothing rather than guess, which is the whole
-				// point of the change: silence is a correct answer here and a wrong
-				// number is not.
-				//
-				// The same branch also covers HEADLESS, where the dummy renderer
-				// returns nil for every parameter default however the shader was
-				// written. Harmless for the thing this drives -- configuration
-				// warnings are read in the editor, which always has a real renderer --
-				// but it does mean a --headless gate cannot assert on this warning,
-				// and would see it silently absent rather than failing. See
-				// bench/WaterShaderCompileCheck.gd, which prints the count and has to
-				// be run windowed for the same reason.
-				if (declared.get_type() == Variant::INT) {
-					int variant_waves = (int)declared;
-					if (variant_waves <= 0) {
-						// A stream variant. The table is inert, so wave_count says
-						// nothing about what is drawn -- but get_water_height() on THIS
-						// node still reads it, which is the disagreement worth naming.
-						warnings.push_back(String(file) +
-								" evaluates no Gerstner waves at all -- it is a stream variant, "
-								"which replaces the wave table with its own channel model. Profile '" +
-								String(_wave_profile) +
-								"' therefore describes a surface this material will not draw. Use an "
-								"ocean or body variant here, or put this material on a Pasture3DStream.");
-					} else if (profile->get_wave_count() > variant_waves) {
-						warnings.push_back("Profile '" + String(_wave_profile) + "' has " +
-								String::num_int64(profile->get_wave_count()) + " waves but " + file +
-								" compiles " + String::num_int64(variant_waves) +
-								", so the extra waves are invisible on screen while get_water_height() "
-								"still counts them. Lower the profile's wave_count or use a higher tier.");
-					}
+						StringName("_draws_wave_profile"));
+				if (declared.get_type() == Variant::BOOL && !(bool)declared) {
+					warnings.push_back(shader->get_path().get_file() +
+							" draws no wave profile -- it is a stream variant, which replaces the wave model "
+							"with its own channel model. Profile '" +
+							String(_wave_profile) +
+							"' therefore describes a surface this material will not draw. Use an "
+							"ocean or body variant here, or put this material on a Pasture3DStream.");
 				}
 			}
 		}

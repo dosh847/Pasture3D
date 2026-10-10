@@ -357,9 +357,9 @@ func _criterion_c_waterline_in_company() -> void:
 	_save(img, "twolakes_rim_alone.png")
 	scores["alone"] = SDF.score(img, truth, pa, view_min, mpp, IMG, area)
 
-	# A READING, not an assertion: the same lake with the wave table left OUT of the readout, so the
+	# A READING, not an assertion: the same lake with the waves left OUT of the readout, so the
 	# residual is decomposed rather than reported as one unexplained number. The shore is tested
-	# against the UNDISPLACED xz but the vertex is drawn displaced, so a Gerstner crest carries its
+	# against the UNDISPLACED xz but the vertex is drawn displaced, so a crest carries its
 	# own shore value sideways -- which is where the water's edge really is, and is also why this
 	# number is not the static sheet's. Whatever is left over after this is the geomorph.
 	_carry_waves = false
@@ -682,7 +682,7 @@ func _criterion_g_per_view_culling() -> void:
 		var c := Camera3D.new()
 		# Camera 1 sits 40 m off its lake's centre where camera 0 sits on it. Centred on both, the two
 		# views were CONGRUENT -- same outline, same body-relative waves -- and the anti-null below read
-		# 0.00093 under Gerstner only because the wave sum at x = +-400 m rounds differently; the FFT's
+		# 0.00093 under the retired Gerstner table only because the wave sum at x = +-400 m rounds differently; the FFT's
 		# texture lookup does not, and it read exactly 0. The offset keeps camera 1 well inside B's
 		# radius and 840 m from A.
 		c.position = Vector3(-400.0 + i * 840.0, 34.0, 90.0)
@@ -1168,8 +1168,8 @@ func _capture(p_pools: Array, p_vp: SubViewport) -> Image:
 ## A flat readout material carrying ONE body's field.
 ##
 ## Copied off the node's own runtime material, so what is measured is the field that body baked and
-## framed. `_waves` comes along too: the clipmap's vertex stage displaces by the wave sum, and a
-## readout on the shader's compile-time table would put the rim a few centimetres from where the
+## framed. The wave model comes along too: the clipmap's vertex stage displaces by it, and a
+## readout on the shader's default fBm pack would put the rim a few centimetres from where the
 ## real surface puts it.
 func _cover_for(p_pool) -> ShaderMaterial:
 	var rt: ShaderMaterial = p_pool._runtime_material
@@ -1185,28 +1185,18 @@ func _cover_for(p_pool) -> ShaderMaterial:
 			"_shore_offset", "_shore_kill_margin", "sea_level"]:
 		cover.set_shader_parameter(nm, rt.get_shader_parameter(nm))
 	if _carry_waves:
-		for nm in ["_waves", "wave_steepness"]:
+		for nm in ["_wave_model", "_fft_displacement", "_fft_slope", "_fft_lengths",
+				"_fbm_v0", "_fbm_v1", "_fbm_v2", "_fbm_v3"]:
 			cover.set_shader_parameter(nm, rt.get_shader_parameter(nm))
 	else:
-		# Explicitly flat, not "left at the shader's default": the compile-time table is a real
-		# wave set, so an unset uniform would be a DIFFERENT displacement rather than none.
-		cover.set_shader_parameter("_waves", _flat_waves())
-		cover.set_shader_parameter("wave_steepness", 0.0)
+		# Explicitly flat, not "left at the shader's default": the default fBm pack is a real
+		# wave set, so an unset uniform would be a DIFFERENT displacement rather than none. The FFT
+		# branch over unbound textures, which read black, is the flat one -- the same thing the
+		# manager uploads for a profile with no model.
+		cover.set_shader_parameter("_wave_model", 1)
+		cover.set_shader_parameter("_fft_displacement", null)
+		cover.set_shader_parameter("_fft_slope", null)
 	return cover
-
-
-## A four-wave table with every amplitude at zero, which is the only way to ask the shipped vertex
-## stage for an undisplaced surface without editing it.
-##
-## The WAVELENGTH has to be non-zero. water_waves.gdshaderinc uses `_waves[0].w <= 0.0` as its
-## "nothing was uploaded" sentinel and substitutes the compile-time table -- so the obvious all-zero
-## array is the one input that produces the shipped waves at full amplitude, which is the opposite
-## of what this is for. Layout is (dir.x, dir.y, amplitude, wavelength).
-func _flat_waves() -> Array:
-	var out := []
-	for i in 4:
-		out.append(Vector4(1.0, 0.0, 0.0, 20.0))
-	return out
 
 
 ## Unlit flat coverage over the shore mask, on the clipmap's own vertex stage.
@@ -1220,7 +1210,6 @@ func _coverage_shader() -> Shader:
 		"render_mode unshaded, cull_disabled, depth_draw_never, skip_vertex_transform;",
 		"#define WATER_SHORE_MASK",
 		"#define WATER_CLIPMAP",
-		"#define WATER_WAVE_COUNT 4",
 		'#include "%swater_common.gdshaderinc"' % WATER_DIR,
 		'#include "%swater_waves.gdshaderinc"' % WATER_DIR,
 		'#include "%swater_surface.gdshaderinc"' % WATER_DIR,

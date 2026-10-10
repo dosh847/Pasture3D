@@ -233,7 +233,7 @@ func _water_at(p_img: Image, p_xz: Vector2) -> bool:
 func _set_shader(p_check: bool, p_reach: float) -> void:
 	var code := "shader_type spatial;\n"
 	code += "render_mode unshaded, cull_disabled, depth_draw_never, skip_vertex_transform;\n"
-	code += "#define WATER_CLIPMAP\n#define WATER_WAVE_COUNT 1\n"
+	code += "#define WATER_CLIPMAP\n"
 	if p_check:
 		code += "#define WATER_TERRAIN_CHECK\n#define WATER_TERRAIN_REACH %s\n" % String.num(p_reach, 2)
 	for inc in ["water_common", "water_waves", "water_surface"]:
@@ -251,8 +251,9 @@ func _make_ocean() -> Pasture3DOcean:
 	var manager := Pasture3DPoolManager.new()
 	var profile := Pasture3DWaveProfile.new()
 	profile.profile_name = &"flat"
-	profile.wave_count = 1
-	profile.amplitude = 0.0
+	# Flat: height sigma zero in both models. The mesh is sized as the one-wave table this used to be.
+	profile.fit_sea(0.0, 137.0, 0.0)
+	profile.min_wavelength = 137.0
 	var profiles: Array[Pasture3DWaveProfile] = [profile]
 	manager.profiles = profiles
 	add_child(manager)

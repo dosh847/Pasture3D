@@ -21,7 +21,6 @@ const VARIANTS: Array[String] = [
 const DEBUG_VARIANT_CODE := """
 shader_type spatial;
 render_mode cull_disabled, depth_draw_never, diffuse_lambert, skip_vertex_transform;
-#define WATER_WAVE_COUNT 2
 #define WATER_DEBUG_GLOBALS
 #include "res://addons/pasture_3d/extras/shaders/water/water_common.gdshaderinc"
 #include "res://addons/pasture_3d/extras/shaders/water/water_waves.gdshaderinc"
@@ -98,7 +97,7 @@ func _gate_a_compile() -> void:
 		var names: Array[String] = []
 		for u in uniforms:
 			names.append(String(u["name"]))
-		var has_core: bool = names.has("absorption") and names.has("_waves")
+		var has_core: bool = names.has("absorption") and names.has("_wave_model")
 		# `_mesh_size`, not `_target_pos`. Both are declared inside the same `#ifdef WATER_CLIPMAP`, so
 		# either one answers "did the preprocessor keep the clipmap block", but `_target_pos` became an
 		# `instance uniform` when water got the split-screen clipmaps the terrain has always had (commit

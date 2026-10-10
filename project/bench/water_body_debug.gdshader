@@ -11,11 +11,9 @@
 // shader work's Phase 2 and the rule not to repeat it is written down in
 // PASTURE3D_WATER_SHADER_SPEC.md §8.3.
 //
-// Four waves, matching M_water_lake, because that is the tier a pool uses.
 shader_type spatial;
 render_mode cull_disabled, depth_draw_never, diffuse_lambert, specular_schlick_ggx, skip_vertex_transform;
 
-#define WATER_WAVE_COUNT 4
 #define WATER_DEBUG_SURFACE
 
 #include "res://addons/pasture_3d/extras/shaders/water/water_common.gdshaderinc"

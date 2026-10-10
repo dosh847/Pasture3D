@@ -154,10 +154,7 @@ func _make_manager(p_root: Node3D) -> Pasture3DPoolManager:
 	m.name = "Pasture3DPoolManager"
 	var profile := Pasture3DWaveProfile.new()
 	profile.profile_name = "flat_test"
-	profile.wave_count = 2
-	profile.amplitude = 0.05
-	profile.length_max = 60.0
-	profile.steepness = 0.2
+	profile.fit_sea(0.0, 60.0, 0.010627)
 	var profiles: Array[Pasture3DWaveProfile] = [profile]
 	m.profiles = profiles
 	p_root.add_child(m)

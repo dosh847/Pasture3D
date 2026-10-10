@@ -4,7 +4,9 @@ Status: **spec written 2026-10-09. Phase 1 built, gated (`WaterFFTGate` 6/6, §6
 (52212cbc). Phase 2 built, gated (`WaterFFTWiringGate` 4/4, §6.2) and committed (84923526). Phase 3
 built, gated and committed (47a3b43e, `WaterPBRGate` 3/3, §6.3). Phase 4 built, gated and committed
 (11a9a069, `WaterFBMGate`, §6.4); its uniform-branch timing is not measured yet. Phase 5 built and gated
-2026-10-09 (`WaterBuoyGate` on Forward+, headless and Compatibility, §6.5). Phase 6 unbuilt.**
+2026-10-09 (`WaterBuoyGate` on Forward+, headless and Compatibility, §6.5) and committed (70647d40).
+Phase 6 built and gated 2026-10-09 (`WaterRetireGerstnerGate` 4/4, §6.6), not committed. Gerstner is
+gone.**
 
 Ports Garrett Gunnell's water (https://github.com/GarrettGunnell/Water, MIT-style reference code, last
 commit 2023-12-30) onto Pasture3D's ocean, lake and pond. The reference is a Unity project. Two parts of it
@@ -151,16 +153,17 @@ principle (§6), and Phase 4 measures it, with the user's go-ahead. If it costs,
 is: the manager swaps `shader` on the cached duplicate.
 
 The **detail derivative texture** (`WATER_DETAIL`) existed to break up analytic waves at 10 m and finer.
-FFT cascades down to ~12 cm make it redundant on the FFT path. It stays compiled for fBm until Phase 6
-decides.
+FFT cascades down to ~12 cm make it redundant on the FFT path, and the fBm's 40 fragment octaves reach
+the same scale. **Decided in Phase 6: it is a river feature only.** `water_river` defines it; every
+variant that defines `WATER_FFT` (all but `WATER_STREAM_WAVES`) refuses it with an `#error`.
 
 **As built (Phase 2).**
 
 - `WATER_FFT` is defined by `water_common.gdshaderinc` for every variant except rivers
-  (`WATER_STREAM_WAVES`), the canvas_item parity probe (`WATER_PLAIN_DOMAIN_ORIGIN`, no instance uniforms)
-  and anything defining `WATER_NO_FFT`.
-- `_wave_model` 0 is GERSTNER, because 0 is what an unset uniform reads: a material on a bare mesh with no
-  manager still makes waves from its compile-time table.
+  (`WATER_STREAM_WAVES`). Until Phase 6 the canvas_item parity probe (`WATER_PLAIN_DOMAIN_ORIGIN`) and
+  `WATER_NO_FFT` also opted out; both went with Gerstner.
+- `_wave_model` 0 was GERSTNER, because 0 is what an unset uniform reads. Since Phase 6 every value but
+  FFT draws the fBm, and the uniform defaults to FBM, so a bare mesh draws the fBm at its default knobs.
 - The vertex stage computes the mip per cascade as `max(log2(2 · spacing · N / L), 0)`: the texel is twice
   the vertex spacing, so nothing shorter than four samples a wavelength reaches the geometry.
   - On a clipmap, the spacing is the ring scale.
@@ -169,9 +172,9 @@ decides.
 - The vertex normal comes from the filtered slope taps. The fragment stage then REPLACES it: it samples
   slope and foam at the rest position (`v_fft_domain`), not the displaced one. Sampling at the displaced
   position would shear every crest sideways by the choppiness.
-- In FFT mode the detail texture's gain is zeroed. Its fetches still run until Phase 6 decides.
+- In FFT mode the detail texture's gain was zeroed; since Phase 6 these variants do not compile it.
 - Crest foam and the scatter gate read the simulation's foam channel directly. The Gerstner
-  `foam_crest_threshold` is in fold-limit units and means nothing here.
+  `foam_crest_threshold` was in fold-limit units and means nothing here; only streams keep it.
 - **Texel convention.** The shader samples cascade `i` at continuous texel `domain · N / L_i − 0.5`, so
   texel `j` sits at `(j + 0.5) · L / N`. That is half a texel from the oracle's `j · L / N` grid. The CPU
   readback (Phase 5) must use the shader's convention. `WaterFFTWiringGate` [R] does.
@@ -274,7 +277,8 @@ scene has no light in range (unshaded previews).
 
 `Pasture3DWaveProfile` gains an FFT group and an fBm group. The Gerstner knobs (`wave_count`,
 `direction_deg`, `spread_deg`, `amplitude`, `length_max`, `steepness`) are deleted in Phase 6, per the
-standing rule that superseded code is removed rather than shimmed.
+standing rule that superseded code is removed rather than shimmed. The one exception, chosen by the user:
+a scene that still stores them is migrated on load (§6.6).
 
 - **FFT:** `seed`, `depth`, `choppiness` (λ), four `cascade_length` values, and per spectrum (`wind`,
   `swell`): `scale`, `wind_speed`, `wind_direction_deg`, `fetch`, `spread_blend`, `swell`,
@@ -300,7 +304,8 @@ standing rule that superseded code is removed rather than shimmed.
   `changed`, so they neither mark the profile authored nor re-upload every material.
 - `get_amplitude_sum()` returns 6σ of the FFT (`get_displacement_bound()`) while the FFT draws.
 - `get_min_wavelength()` STAYS Gerstner. Its only consumer is mesh spacing, which is a cost knob for the
-  FFT (the vertex mip adapts to it).
+  FFT (the vertex mip adapts to it). Since Phase 6 it is a stored `min_wavelength` property, seeded from
+  the retired table's shortest wave.
   - An FFT answer (¼ of cascade 1) meshed `lake_calm` at 0.48 m instead of 1.27 m.
   - The clipmap's reach shrank 2.6×, and the lake stopped covering its own outline (`WaterTwoLakesGate`
     [B] 0.72).
@@ -405,7 +410,7 @@ Presets (Phase 6) give ocean, lake and pond profiles. Pond defaults to N=128-equ
   - The speeds quantise to the profile's loop period, which the manager pushes and which is
     `water_time_period`.
   - The fBm is vertical only, so `solve_domain()` is the identity.
-- **Gerstner** is unchanged until Phase 6 deletes it.
+- **Gerstner** was deleted in Phase 6. A profile with no model answers flat.
 
 ## 6. Phases
 
@@ -587,6 +592,84 @@ Existing gates, run windowed after the change, all pass: `WaterFBMGate`, `WaterP
 `SKIP_TIMING`. `WaterBodiesPhase3Gate` therefore ran its timing criterion A (a 500 m lake rebuilds in
 ≤ 500 ms) each time, and it passed. The runner now exports `SKIP_TIMING=1`, so Phase 5's runs are
 correctness only.
+
+### 6.6 Phase 6 result (2026-10-09, `WaterRetireGerstnerGate`)
+
+**Deleted.**
+
+- `src/water_waves.h/.cpp` (the table and its CPU mirror) and its unit tests in `unit_testing.cpp`.
+- The profile's Gerstner knobs and `get_shader_table()`, `get_steepness()`, `_wave_defaults`.
+- The manager's `WAVE_MODEL_GERSTNER` (1) and the profile's `MODEL_GERSTNER` (0). A stored manager
+  `wave_model` of 1 reads as PROJECT.
+- In the shaders: the table uniform `_waves`, `wave_steepness`, `WATER_WAVE_COUNT`, `WATER_MAX_WAVES`,
+  `WATER_NO_FFT`, `WATER_PLAIN_DOMAIN_ORIGIN`, and the Gerstner branch of `water_waves.gdshaderinc`.
+  `_wave_variant_count` went from the pool and stream warnings, which now ask `_draws_wave_profile`.
+- Bench: `WaterPhase2Gate`..`WaterPhase5Gate` (already red, building no ocean, and measuring Gerstner),
+  `WavePresetTables`, `water_parity_probe.gdshader`, `water_depth_probe.gdshader`.
+
+**Migration** (the user's choice). `Pasture3DWaveProfile::_set` takes the six legacy keys, and
+`_apply_legacy()` fits whichever model the scene did not also store: `fit_sea(direction_deg, length_max,
+0.176 × Σa)` over the retired series at the default 120 s period, and `min_wavelength` = the series'
+shortest wave. `set_fft` / `set_fbm` mark a model authored, so a stored `fbm` survives keys loaded before
+or after it. A new profile runs the same fit from the retired defaults: one path for both.
+
+**Presets.** `_seed_default_profiles()` is a table of `fit_sea` arguments (direction, length, σ,
+min_wavelength) equal to the migration of the old presets, so a shipped lake and a migrated lake are the
+same lake. The `M_water_*.tres` presets lost their `_waves` and `wave_steepness`. **Taste call:** the pond
+ships `sun_roughness` 0.035, not the ocean's 0.075, which smeared a millpond's highlight; the user has not
+looked at it yet.
+
+**Bug the new gate found.** `water_shading.gdshaderinc` scrolled foam by `detail_flow0`, which is declared
+only under `WATER_DETAIL`. Making that river-only broke compilation of every other variant. Foam now
+scrolls by a new `foam_flow` uniform (m/s, default the ocean's old `detail_flow0`, 0.32/0.11; the lake
+preset stores its own 0.14/0.05). Rivers' foam still rides their flow.
+
+| | Criterion | Result | Control |
+|---|---|---|---|
+| G | no deleted symbol in addons, bench, demo (data excluded) or src, comments excluded | 0 hits over 1034 res files, 151 src files | a fixture line holding a symbol matches; file-count floors (200 / 50) |
+| L | every `M_water_*.tres` stores only parameters its shader declares | 5 presets ok | `_waves` on the ocean is undeclared |
+| P | each shipped profile equals a migration of its old Gerstner knobs, 1e-4 relative | errors 4.6e-6 .. 9e-6 | against the NEXT preset's migration: misses by 0.92 .. 1.0 |
+| M | saved `.tres` with legacy keys loads refitted; a stored `fbm` (before or after the keys) is kept; the FFT is refitted | refit error 0, authored height 3.25 kept | a plain profile differs from the migrated one by 1.0 |
+
+**Gates rescoped, with reasons.**
+
+- `WaterBodiesPhase1Gate` [A]: G4's Gerstner CPU/GPU probe is gone. A now checks that two profiles in one
+  scene each reach their own material (FFT textures and lengths, or the fBm pack), with the other profile
+  as the control. Parity is `WaterBuoyGate`'s.
+- `WaterBuoyGate` [H]: the control is the same profile with `fbm` null answering flat.
+- `WaterFBMGate` [H]: a stored GERSTNER (1) must read as PROJECT. [N]'s flat control is `_wave_model` 1
+  with no FFT textures.
+- `WaterPBRGate` [K]: the crest of known height is a one-octave fBm (drag 0, speed 0, max_peak 1,
+  peak_offset 1); at x = λ/4 its height is `height·(1 − unit_mean)` with zero slope.
+- `WaterFFTWiringGate`: its GERSTNER controls are FBM.
+- `WaterVariantWarningCheck`, `WaterTwoLakesGate`, `WaterShorePoolProbe` [D], and
+  `WaterMaterialPropagationCheck` (D moves to the river, the only `WATER_DETAIL` left) now read the
+  profile's model instead of `_waves`.
+- `WaterBodiesPhase2Gate`'s legacy-ocean checks compare against a profile migrated from the same keys.
+- Ocean fixtures in the bench call `fit_sea` with `ocean_default`'s numbers.
+- `WaterBodiesPhase2Gate` [B] asks `get_water_height()` twice, frames apart: the first FFT query answers
+  flat by contract, which is the answer [B] refuses. Red since Phase 5, unnoticed because the gate is
+  red by design on [A]'s image baseline (§6.2), which it still is.
+
+**Clipmap seam, found by the rescoped `WaterTwoLakesGate` [C].** Its readout used to copy `_waves` but
+not `_wave_model`, so since Phase 2 it had measured the Gerstner rim while the lake drew the FFT. Carrying
+the real model, A's rim read p99 2.47 m against 0.21 m with no waves, though lake_calm's FFT moves a
+point at most 0.48 m sideways (readback, p99 0.31 m). The capture showed pinholes on the ring
+boundaries: each clipmap ring picked its FFT mip from its own cell size, so a ring's morphed outer edge
+and the next ring's inner edge sampled mips a level apart and the shared vertices separated.
+`water_surface.gdshaderinc` now scales the spacing by `1 + vertex_lerp`, so the morphed edge reads the
+coarse ring's mip. After: p99 0.169 m, and the 8 m-texel control still degrades to 2.92 m. This shipped
+from Phase 2 to here; the fBm's octave fade had the same one-level step, now also continuous.
+`WaterShorePoolProbe`'s clipmap readout had the same blind spot, copying no wave uniforms at all; it
+now carries the pool's model and passes (clipmap rim p99 0.11 m, the static-sheet control alike).
+
+**Sweep after the fix** (windowed Forward+, `SKIP_TIMING=1`): `WaterBuoyGate`, `WaterFBMGate`,
+`WaterPBRGate`, `WaterFFTGate`, `WaterFFTWiringGate`, `WaterPhase1Gate`, `WaterBodiesPhase1/3/4/5/6/7Gate`,
+`WaterPresetCheck`, `WaterVariantWarningCheck`, `WaterTwoLakesGate`, `WaterBodyLateManagerCheck`,
+`GraphWaterNodesGate`, `WaterRetireGerstnerGate` and `WaterShorePoolProbe` pass; `StreamRippleCheck`
+and `WaterMaterialPropagationCheck` pass headless; `WaterShaderCompileCheck` compiles every variant.
+`WaterBodiesPhase2Gate` fails only [A], the stale image baseline. `GraphWaterNodesGate` once exited 127
+after its PASS line on a Vulkan loader error at quit; the rerun exited 0.
 
 ## 7. Risks
 
