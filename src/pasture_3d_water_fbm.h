@@ -14,9 +14,9 @@ using namespace godot;
  * The fBm wave fallback's knobs: GarrettGunnell/Water's "Euler wave" sum of exp(sin) octaves with domain
  * drag (Water.shader, USE_FBM). Spec: PASTURE3D_WATER_FFT_SPEC.md §3, §4.
  *
- * Pure data and closed-form statistics. The waves themselves are evaluated by water_waves.gdshaderinc
- * (water_eval_fbm, water_fbm_fragment); this class only packs the knobs for it and answers what the cull
- * bounds and the profile's height fit need to know without running the sum.
+ * Knobs, closed-form statistics, and the CPU's copy of the sum. The waves are drawn by water_waves.gdshaderinc
+ * (water_fbm); this class packs the knobs for it, answers what the cull bounds and the profile's height fit
+ * need to know without running the sum, and runs the sum for the buoys (evaluate()).
  *
  * Two octave SETS, as in the reference: VERTEX displaces the geometry with a few long octaves, FRAGMENT
  * draws the normals with many more. The reference evaluates both in world metres; here the domain is
@@ -99,6 +99,16 @@ public:
 	// The vertex set's reach about its (zero) mean, metres: every octave at its crest, or every one at its
 	// trough, whichever is further. A bound, not an estimate -- the fBm has no rare-crest tail to cover.
 	float get_displacement_bound() const;
+
+	// water_fbm() in water_waves.gdshaderinc, transcribed in float from the same pack the shader gets, for
+	// the CPU queries (buoys; PASTURE3D_WATER_FFT_SPEC.md §5). Returns (height, dh/dx, dh/dz) in metres at a
+	// rest-domain point. p_time is the water clock and p_period its loop (water_time_period), which the
+	// speeds quantise to. p_spacing 0 runs every octave at full weight: what the vertex set draws wherever
+	// the mesh is fine enough to carry its shortest octave at full weight -- at the default eight octaves,
+	// any mesh finer than about a twenty-fifth of the first wavelength. Parity with the GPU is a tolerance, not bit equality: exp, sin
+	// and cos are not correctly rounded on either side (WaterBuoyGate [B]).
+	Vector3 evaluate(const int p_set, const Vector2 &p_domain_xz, const float p_time, const float p_period,
+			const float p_spacing = 0.f, const float p_min_samples = 4.f) const;
 
 	// Modified Bessel function of the first kind, order 0. Public for the gate's CPU prediction.
 	static double bessel_i0(const double p_x);

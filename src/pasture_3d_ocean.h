@@ -89,7 +89,7 @@ private:
 	// open water paid for it. Pasture3DBuoy asks this question twice per buoy per tick at one
 	// position: _resolve_body() calls contains_point(), which is a vertical test against
 	// get_water_height(), and apply_buoyancy() then calls get_water_height() directly. Each
-	// pass is a solve_domain(), a 16-iteration Gerstner inverse, so the ocean cost twice what
+	// pass is a solve_domain(), up to 16 evaluations of the wave model, so the ocean cost twice what
 	// §9.3's budget was written against. The pool memoised and the ocean did not, and the
 	// Phase 6 gate measured a pool.
 	//

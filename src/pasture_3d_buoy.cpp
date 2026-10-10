@@ -46,7 +46,7 @@ Node *Pasture3DBuoy::_resolve_body() {
 		// RESOLVE_INTERVAL later.
 		//
 		// It is NOT cheap on its own: contains_point() bottoms out in get_water_height(), so it
-		// runs the same 16-iteration Gerstner inverse the height sample below does. The two are
+		// runs the same up-to-16-iteration inverse the height sample below does. The two are
 		// the same query at the same position in the same frame, and BOTH body implementations
 		// memoise exactly that pair -- Pasture3DWaterBody.get_water_height() in GDScript, and
 		// Pasture3DOcean::get_water_height() in C++ -- so the second one is free.

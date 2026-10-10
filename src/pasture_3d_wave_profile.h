@@ -34,7 +34,7 @@ using namespace godot;
  * as a sub-resource so the scene saves them. `fbm` is the fallback's knobs, the same way. Which model a
  * material draws is the manager's call, not the profile's -- it depends on the renderer and the user's
  * setting -- and the manager says which with set_active_model(). The Gerstner knobs stay until Phase 6
- * retires them; until Phase 5, CPU height queries still answer from Gerstner whichever model is drawn.
+ * retires them. The CPU queries answer from whichever model is drawn (see the evaluation section).
  */
 class Pasture3DWaveProfile : public Resource {
 	GDCLASS(Pasture3DWaveProfile, Resource);
@@ -64,6 +64,19 @@ private:
 	// The same for the fBm knobs: derived from the Gerstner knobs until edited. See _derive_fbm().
 	bool _fbm_authored = false;
 	bool _deriving = false;
+
+	// The FFT normal's half-step, metres. A quarter of the shortest default tile's 4 m wave would be 1 m;
+	// this keeps the ripples a buoy should tilt on and smooths the ones its hull would average away.
+	static constexpr real_t FFT_NORMAL_STEP = 0.25f;
+	// The horizontal inverse's bound and tolerance. WaterWaves's, for the same iteration.
+	static constexpr int SOLVE_ITERATIONS = 16;
+	static constexpr real_t SOLVE_EPSILON = 1e-4f;
+
+	// The FFT's displaced point for a rest-domain point, off one readback.
+	static Vector3 _fft_point(const Pasture3DWaterFFT::CpuSurface &p_surface, const Vector2 &p_domain_xz);
+	// The readback, with the request that keeps the next ones coming.
+	Pasture3DWaterFFT::CpuSurface _fft_surface();
+	Vector3 _fbm_vertex(const Vector2 &p_domain_xz, const real_t p_time) const;
 
 	void _on_fft_changed();
 	void _on_fbm_changed();
@@ -134,6 +147,16 @@ public:
 	// --- Evaluation, in DOMAIN space ----------------------------------------
 	// World-space queries live on the bodies, which add their own surface height
 	// and subtract their own domain origin. These are the primitives underneath.
+	//
+	// They answer from the model the materials draw (PASTURE3D_WATER_FFT_SPEC.md §5):
+	//   GERSTNER  the table, at p_time.
+	//   FBM       the vertex set, at p_time, every octave at full weight. Vertical only, so solve_domain()
+	//             is the identity.
+	//   FFT       the simulation's latest readback, and p_time is IGNORED: the answer is the surface as of
+	//             the readback, one to three frames behind the clock (Pasture3DWaterFFT::get_cpu_surface).
+	//             Every query keeps the readback running; the first one on a quiet sea starts it and
+	//             answers a flat surface (height 0, normal up) until a frame lands.
+	// The FFT normal is the displaced surface's, by central differences FFT_NORMAL_STEP either side.
 	Vector3 get_surface_point(const Vector2 &p_domain_xz, const real_t p_time);
 	real_t get_height_at(const Vector2 &p_domain_xz, const real_t p_time);
 	Vector3 get_normal_at(const Vector2 &p_domain_xz, const real_t p_time);

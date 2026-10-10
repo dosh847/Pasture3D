@@ -14,6 +14,7 @@
 #include <godot_cpp/variant/vector4.hpp>
 
 #include <atomic>
+#include <mutex>
 
 #include "constants.h"
 
@@ -39,6 +40,9 @@ using namespace godot;
  *   displacement  xyz = displacement in metres (x/z scaled by choppiness), a = foam in [0, 1+]
  *   slope         xy  = height slope d(y)/dx, d(y)/dz, z = Jacobian of the horizontal displacement
  * Cascade i tiles every cascade_lengths[i] metres.
+ *
+ * The CPU's copy of the surface (buoys, PASTURE3D_WATER_FFT_SPEC.md §5) is a readback of the displacement's
+ * mip 0, taken only while something asks for it: see request_cpu_surface() and get_cpu_surface().
  */
 class Pasture3DWaterFFT : public Resource {
 	GDCLASS(Pasture3DWaterFFT, Resource);
@@ -53,6 +57,30 @@ public:
 		OUTPUT_SPECTRUM = 1,
 		OUTPUT_DISPLACEMENT = 2,
 		OUTPUT_SLOPE = 3,
+	};
+
+	// How many updates the readback keeps running after the last CPU query: two seconds at 60 fps. A sea
+	// nobody floats anything on reads nothing back, and one a buoy left a moment ago has not lost its copy.
+	static constexpr int READBACK_KEEPALIVE = 120;
+	// Readbacks in flight before the oldest is abandoned. A callback that never comes (a device lost
+	// mid-frame) would otherwise grow the list for as long as the demand lasts.
+	static constexpr int READBACK_MAX_PENDING = 8;
+
+	// One frame of the displacement output, on the CPU: mip 0 of each layer as the GPU wrote it (rgba16f,
+	// rows of N texels) and what it was dispatched with. Copying one is cheap -- the arrays are
+	// copy-on-write -- so a query takes one copy and reads it for every tap it makes.
+	struct CpuSurface {
+		PackedByteArray layers[CASCADES];
+		int resolution = 0;
+		Vector4 lengths;
+		float time = 0.f; // the water clock this frame was dispatched at
+		int update = -1; // get_update_count() after that dispatch
+
+		bool is_valid() const { return resolution > 0; }
+		// The summed displacement (x, y, z) in metres at a rest-domain point, with the vertex shader's
+		// texel convention (water_eval_fft): uv = domain / length, repeat-wrapped, bilinear between texel
+		// centres at (i + 0.5) / N. Mip 0, so every cascade at full detail. Zero when invalid.
+		Vector3 sample(const Vector2 &p_domain_xz) const;
 	};
 
 	// One JONSWAP spectrum's art knobs (the reference's DisplaySpectrumSettings).
@@ -123,6 +151,21 @@ private:
 	// Output textures kept alive across a resolution rebuild until the wrappers point at the new ones.
 	Vector<RID> _retired_textures;
 
+	// --- CPU readback. See request_cpu_surface(). ---
+	// update() calls on the main thread, which the demand window counts in (_update_count is the render
+	// thread's, and lags it when the renderer is threaded).
+	int _main_updates = 0;
+	int _cpu_demand_at = -(READBACK_KEEPALIVE + 1);
+	struct PendingReadback {
+		CpuSurface surface;
+		int received = 0; // bit per layer
+	};
+	// The mutex covers both: callbacks arrive on the render thread, queries read on the main one.
+	mutable std::mutex _readback_mutex;
+	Vector<PendingReadback> _pending;
+	CpuSurface _cpu_surface;
+	int _readback_count = 0;
+
 	// CPU estimate of the height standard deviation, from the spectrum integral. Cached: it is a few
 	// thousand pow() calls and the cull bounds ask for it on every profile change.
 	mutable float _sigma = 0.f;
@@ -140,7 +183,8 @@ private:
 	void _free_kernels();
 	RID _make_set(const Kernel p_kernel, const TypedArray<RDUniform> &p_uniforms);
 	void _write_params();
-	void _render_update(const float p_time, const float p_dt);
+	void _render_update(const float p_time, const float p_dt, const bool p_readback);
+	void _on_readback(const PackedByteArray &p_data, const int p_layer, const int p_update);
 	PackedByteArray _render_read(const int p_output, const int p_layer, const int p_mip);
 
 	void _knob_changed(const bool p_respectrum, const bool p_emit = true);
@@ -178,6 +222,20 @@ public:
 
 	// Synchronous readback of one layer at one mip level. Stalls the GPU: gates and debugging only.
 	PackedByteArray read_layer(const int p_output, const int p_layer, const int p_mip = 0);
+
+	// --- The CPU's surface (buoys) ---
+	// Asks for the readback to run for the next READBACK_KEEPALIVE updates. Every CPU query calls it, so
+	// the first query on a quiet sea starts the readback and answers from nothing: until the first frame
+	// lands (one to three frames later) get_cpu_surface() is invalid.
+	void request_cpu_surface() { _cpu_demand_at = _main_updates; }
+	// The latest COMPLETE readback: all four layers of one dispatch. It describes the surface as of its
+	// `time`, which is one to three frames behind the clock -- the GPU finishes a frame that long after it
+	// was issued. A buoy reads a surface that recent, not the one being drawn.
+	CpuSurface get_cpu_surface() const;
+	int get_readback_count() const;
+	int get_readback_update() const;
+	float get_readback_time() const;
+	Vector3 sample_cpu_displacement(const Vector2 &p_domain_xz) const { return get_cpu_surface().sample(p_domain_xz); }
 
 	// --- Knobs ---
 	void set_resolution(const int p_resolution);

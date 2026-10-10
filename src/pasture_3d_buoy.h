@@ -30,9 +30,12 @@ using namespace godot;
  * puzzle with no way in.
  *
  * C++ rather than GDScript (§4.3) because this runs per physics tick over potentially dozens of
- * instances, and because the wave query underneath it is not cheap: Gerstner waves displace
+ * instances, and because the wave query underneath it is not cheap: Gerstner and FFT waves displace
  * sideways as well as up, so the surface is not a heightfield and get_water_height() solves that
  * inversion iteratively. §9.3 budgets 64 buoys at 0.5 ms per tick and the Phase 6 gate measures it.
+ *
+ * Under the FFT the surface a buoy reads is the simulation's last readback, one to three frames behind
+ * the one drawn (PASTURE3D_WATER_FFT_SPEC.md §5; WaterBuoyGate [R] measured one with uncapped frames).
  */
 class Pasture3DBuoy : public Node3D {
 	GDCLASS(Pasture3DBuoy, Node3D);

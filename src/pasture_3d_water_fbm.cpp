@@ -44,6 +44,60 @@ int Pasture3DWaterFBM::get_octaves(const int p_set) const {
 	return (int)_sets[p_set].octaves;
 }
 
+/**
+ * Line for line with water_fbm() and water_fbm_speed(). The pack is read back as float, so both sides start
+ * from the same numbers; the shader's vec2 arithmetic is spelled out per component in the same order.
+ */
+Vector3 Pasture3DWaterFBM::evaluate(const int p_set, const Vector2 &p_domain_xz, const float p_time,
+		const float p_period, const float p_spacing, const float p_min_samples) const {
+	ERR_FAIL_INDEX_V(p_set, 2, Vector3());
+	const PackedVector4Array pack = get_shader_pack(p_set);
+	const float p0x = (float)pack[0].x, p0y = (float)pack[0].y, p0z = (float)pack[0].z, p0w = (float)pack[0].w;
+	const float p1x = (float)pack[1].x, p1y = (float)pack[1].y, p1z = (float)pack[1].z, p1w = (float)pack[1].w;
+	const float p2x = (float)pack[2].x, p2y = (float)pack[2].y, p2z = (float)pack[2].z, p2w = (float)pack[2].w;
+	const float p3x = (float)pack[3].x, p3y = (float)pack[3].y, p3z = (float)pack[3].z;
+	const bool drag_by_frequency = p_set == SET_FRAGMENT;
+	constexpr float TAU = 6.283185307179586f;
+
+	const float period = MAX(p_period, 1e-3f);
+	float seed = p0x;
+	const float k0 = MAX(p0z, 1e-6f);
+	float f = 1.f;
+	float a = p1x;
+	float speed = p1z;
+	float qx = (float)p_domain_xz.x * k0;
+	float qz = (float)p_domain_xz.y * k0;
+	float h = 0.f;
+	float nx = 0.f;
+	float nz = 0.f;
+	const int octaves = (int)p3z;
+	const float min_length = MAX(p_spacing, 1e-6f) * p_min_samples;
+	for (int i = 0; i < octaves; i++) {
+		const float w = CLAMP(TAU / (k0 * f * min_length) - 1.f, 0.f, 1.f);
+		if (w <= 0.f && p0w >= 1.f) {
+			break;
+		}
+		const float dx = std::cos(seed);
+		const float dz = std::sin(seed);
+		const float rate = std::round(speed * period / TAU) * (TAU / period);
+		const float x = (dx * qx + dz * qz) * f + p_time * rate;
+		const float wave = a * std::exp(p2z * std::sin(x) - p2w);
+		const float dwave = p2z * wave * std::cos(x);
+		h += w * (wave - a * p3y);
+		nx += (w * f * dwave) * dx;
+		nz += (w * f * dwave) * dz;
+		const float drag = w * dwave * a * p2x * (drag_by_frequency ? f : 1.f);
+		qx -= dx * drag;
+		qz -= dz * drag;
+		f *= p0w;
+		a *= p1y;
+		speed *= p1w;
+		seed += p0y;
+	}
+	const float scale = p2y / MAX(p3x, 1e-6f);
+	return Vector3(h * scale, nx * (scale * k0), nz * (scale * k0));
+}
+
 PackedVector4Array Pasture3DWaterFBM::get_shader_pack(const int p_set) const {
 	PackedVector4Array pack;
 	ERR_FAIL_INDEX_V(p_set, 2, pack);
@@ -216,6 +270,8 @@ void Pasture3DWaterFBM::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_knob", "set", "knob"), &Pasture3DWaterFBM::get_knob);
 	ClassDB::bind_method(D_METHOD("get_octaves", "set"), &Pasture3DWaterFBM::get_octaves);
 	ClassDB::bind_method(D_METHOD("get_shader_pack", "set"), &Pasture3DWaterFBM::get_shader_pack);
+	ClassDB::bind_method(D_METHOD("evaluate", "set", "domain_xz", "time", "period", "spacing", "min_samples"),
+			&Pasture3DWaterFBM::evaluate, DEFVAL(0.f), DEFVAL(4.f));
 	ClassDB::bind_method(D_METHOD("get_amplitude_sum", "set"), &Pasture3DWaterFBM::get_amplitude_sum);
 	ClassDB::bind_method(D_METHOD("get_unit_mean", "set"), &Pasture3DWaterFBM::get_unit_mean);
 	ClassDB::bind_method(D_METHOD("get_unit_sigma", "set"), &Pasture3DWaterFBM::get_unit_sigma);

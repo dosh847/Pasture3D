@@ -309,22 +309,80 @@ real_t Pasture3DWaveProfile::get_min_wavelength() {
 	return shortest;
 }
 
+Vector3 Pasture3DWaveProfile::_fft_point(const Pasture3DWaterFFT::CpuSurface &p_surface, const Vector2 &p_domain_xz) {
+	const Vector3 d = p_surface.sample(p_domain_xz);
+	return Vector3(p_domain_xz.x + d.x, d.y, p_domain_xz.y + d.z);
+}
+
+Pasture3DWaterFFT::CpuSurface Pasture3DWaveProfile::_fft_surface() {
+	_fft->request_cpu_surface();
+	return _fft->get_cpu_surface();
+}
+
+Vector3 Pasture3DWaveProfile::_fbm_vertex(const Vector2 &p_domain_xz, const real_t p_time) const {
+	// The clock's period is the one the manager pushed in (set_loop_period), which is water_time_period.
+	return _fbm->evaluate(Pasture3DWaterFBM::SET_VERTEX, p_domain_xz, (float)p_time, (float)get_loop_period());
+}
+
 Vector3 Pasture3DWaveProfile::get_surface_point(const Vector2 &p_domain_xz, const real_t p_time) {
+	if (is_fft_active()) {
+		return _fft_point(_fft_surface(), p_domain_xz);
+	}
+	if (is_fbm_active()) {
+		return Vector3(p_domain_xz.x, _fbm_vertex(p_domain_xz, p_time).x, p_domain_xz.y);
+	}
 	_ensure_built();
 	return _waves.get_position(p_domain_xz, (float)p_time);
 }
 
 real_t Pasture3DWaveProfile::get_height_at(const Vector2 &p_domain_xz, const real_t p_time) {
+	if (is_fft_active()) {
+		return _fft_surface().sample(p_domain_xz).y;
+	}
+	if (is_fbm_active()) {
+		return _fbm_vertex(p_domain_xz, p_time).x;
+	}
 	_ensure_built();
 	return (real_t)_waves.get_height(p_domain_xz, (float)p_time);
 }
 
 Vector3 Pasture3DWaveProfile::get_normal_at(const Vector2 &p_domain_xz, const real_t p_time) {
+	if (is_fft_active()) {
+		const Pasture3DWaterFFT::CpuSurface surface = _fft_surface();
+		const Vector2 hx(FFT_NORMAL_STEP, 0.f);
+		const Vector2 hz(0.f, FFT_NORMAL_STEP);
+		const Vector3 tx = _fft_point(surface, p_domain_xz + hx) - _fft_point(surface, p_domain_xz - hx);
+		const Vector3 tz = _fft_point(surface, p_domain_xz + hz) - _fft_point(surface, p_domain_xz - hz);
+		const Vector3 n = tz.cross(tx);
+		return n.length_squared() > 0.f ? n.normalized() : Vector3(0.f, 1.f, 0.f);
+	}
+	if (is_fbm_active()) {
+		const Vector3 s = _fbm_vertex(p_domain_xz, p_time);
+		return Vector3(-s.y, 1.f, -s.z).normalized();
+	}
 	_ensure_built();
 	return _waves.get_normal(p_domain_xz, (float)p_time);
 }
 
 Vector2 Pasture3DWaveProfile::solve_domain(const Vector2 &p_target_xz, const real_t p_time) {
+	if (is_fft_active()) {
+		// The Gerstner inverse, over the readback: u += target - P(u).xz. One copy of the surface for
+		// every iteration, so the solve cannot straddle two frames.
+		const Pasture3DWaterFFT::CpuSurface surface = _fft_surface();
+		Vector2 u = p_target_xz;
+		for (int k = 0; k < SOLVE_ITERATIONS; k++) {
+			const Vector3 p = _fft_point(surface, u);
+			const Vector2 step(p_target_xz.x - p.x, p_target_xz.y - p.z);
+			u += step;
+			if (step.length_squared() <= SOLVE_EPSILON * SOLVE_EPSILON) {
+				break;
+			}
+		}
+		return u;
+	}
+	if (is_fbm_active()) {
+		return p_target_xz; // the fBm moves the surface vertically only
+	}
 	_ensure_built();
 	return _waves.solve_domain(p_target_xz, (float)p_time);
 }

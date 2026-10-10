@@ -1058,8 +1058,8 @@ func _drop_overlay() -> void:
 ## same position, and the second ask is invisible from here: _resolve_body() calls
 ## contains_point() to check the buoy has not left the body, contains_point() is
 ## is_point_underwater(), and its last line is this function. apply_buoyancy() then calls it
-## directly. Each pass runs solve_domain() -- a 16-iteration Gerstner inverse over the whole
-## wave table -- so the pair cost twice what the physics budget was written against, and
+## directly. Each pass runs solve_domain() -- up to 16 iterations inverting the surface's
+## horizontal displacement, each a full evaluation of the wave model -- so the pair cost twice what the physics budget was written against, and
 ## `sample_interval`, the knob documented for relieving crowds of buoys, throttled only the
 ## second of them.
 ##

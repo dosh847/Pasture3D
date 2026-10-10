@@ -347,7 +347,7 @@ static PackedByteArray push_bytes(const float p_a, const float p_b) {
 	return bytes;
 }
 
-void Pasture3DWaterFFT::_render_update(const float p_time, const float p_dt) {
+void Pasture3DWaterFFT::_render_update(const float p_time, const float p_dt, const bool p_readback) {
 	if (!_ensure_device()) {
 		return;
 	}
@@ -404,6 +404,59 @@ void Pasture3DWaterFFT::_render_update(const float p_time, const float p_dt) {
 		dispatch(K_DOWNSAMPLE, _downsample_sets[m - 1], bytes, (size + 7) / 8, (size + 7) / 8);
 	}
 	_update_count++;
+
+	if (p_readback) {
+		// Queued after AssembleMaps (and the mips, which the copy does not need but cannot skip: a layer's
+		// download carries its whole chain). The device delivers each layer when the frame completes.
+		PendingReadback pending;
+		pending.surface.resolution = n;
+		pending.surface.lengths = _cascade_lengths;
+		pending.surface.time = p_time;
+		pending.surface.update = _update_count;
+		{
+			std::lock_guard<std::mutex> lock(_readback_mutex);
+			if (_pending.size() >= READBACK_MAX_PENDING) {
+				_pending.remove_at(0);
+			}
+			_pending.push_back(pending);
+		}
+		for (int c = 0; c < CASCADES; c++) {
+			_rd->texture_get_data_async(_disp_tex, c,
+					callable_mp(this, &Pasture3DWaterFFT::_on_readback).bind(c, _update_count));
+		}
+	}
+}
+
+void Pasture3DWaterFFT::_on_readback(const PackedByteArray &p_data, const int p_layer, const int p_update) {
+	std::lock_guard<std::mutex> lock(_readback_mutex);
+	int index = -1;
+	for (int i = 0; i < _pending.size(); i++) {
+		if (_pending[i].surface.update == p_update) {
+			index = i;
+			break;
+		}
+	}
+	if (index < 0 || p_layer < 0 || p_layer >= CASCADES) {
+		return; // abandoned, or superseded by a newer complete frame
+	}
+	PendingReadback &pending = _pending.write[index];
+	const int64_t bytes = (int64_t)pending.surface.resolution * pending.surface.resolution * 8;
+	if (p_data.size() < bytes) {
+		_pending.remove_at(index);
+		return;
+	}
+	// Mip 0 leads the layer's chain.
+	pending.surface.layers[p_layer] = p_data.size() == bytes ? p_data : p_data.slice(0, bytes);
+	pending.received |= 1 << p_layer;
+	if (pending.received != (1 << CASCADES) - 1) {
+		return;
+	}
+	if (pending.surface.update > _cpu_surface.update) {
+		_cpu_surface = pending.surface;
+		_readback_count++;
+	}
+	// This frame and everything older is done with: an older one still pending would only be discarded.
+	_pending = _pending.slice(index + 1);
 }
 
 PackedByteArray Pasture3DWaterFFT::_render_read(const int p_output, const int p_layer, const int p_mip) {
@@ -494,7 +547,91 @@ void Pasture3DWaterFFT::update(const float p_time, const float p_dt) {
 	if (!is_available()) {
 		return;
 	}
-	RS->call_on_render_thread(callable_mp(this, &Pasture3DWaterFFT::_render_update).bind(p_time, p_dt));
+	const bool readback = _main_updates - _cpu_demand_at <= READBACK_KEEPALIVE;
+	_main_updates++;
+	RS->call_on_render_thread(callable_mp(this, &Pasture3DWaterFFT::_render_update).bind(p_time, p_dt, readback));
+}
+
+Pasture3DWaterFFT::CpuSurface Pasture3DWaterFFT::get_cpu_surface() const {
+	std::lock_guard<std::mutex> lock(_readback_mutex);
+	return _cpu_surface;
+}
+
+int Pasture3DWaterFFT::get_readback_count() const {
+	std::lock_guard<std::mutex> lock(_readback_mutex);
+	return _readback_count;
+}
+
+int Pasture3DWaterFFT::get_readback_update() const {
+	std::lock_guard<std::mutex> lock(_readback_mutex);
+	return _cpu_surface.update;
+}
+
+float Pasture3DWaterFFT::get_readback_time() const {
+	std::lock_guard<std::mutex> lock(_readback_mutex);
+	return _cpu_surface.time;
+}
+
+// IEEE 754 binary16 to float, subnormals included. The output is rgba16f and godot-cpp has no decoder.
+static inline float half_to_float(const uint16_t p_h) {
+	const uint32_t sign = (uint32_t)(p_h & 0x8000u) << 16;
+	uint32_t exponent = (p_h >> 10) & 0x1fu;
+	uint32_t mantissa = p_h & 0x3ffu;
+	uint32_t bits;
+	if (exponent == 0) {
+		if (mantissa == 0) {
+			bits = sign;
+		} else {
+			// Subnormal: shift the mantissa up until its leading one is the implicit bit.
+			exponent = 127 - 15 + 1;
+			while (!(mantissa & 0x400u)) {
+				mantissa <<= 1;
+				exponent--;
+			}
+			bits = sign | (exponent << 23) | ((mantissa & 0x3ffu) << 13);
+		}
+	} else if (exponent == 0x1f) {
+		bits = sign | 0x7f800000u | (mantissa << 13);
+	} else {
+		bits = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
+	}
+	float f;
+	memcpy(&f, &bits, 4);
+	return f;
+}
+
+Vector3 Pasture3DWaterFFT::CpuSurface::sample(const Vector2 &p_domain_xz) const {
+	Vector3 sum;
+	if (!is_valid()) {
+		return sum;
+	}
+	const int n = resolution;
+	const int64_t bytes = (int64_t)n * n * 8;
+	for (int c = 0; c < CASCADES; c++) {
+		if (layers[c].size() < bytes || lengths[c] <= 0.f) {
+			continue;
+		}
+		const uint16_t *texels = reinterpret_cast<const uint16_t *>(layers[c].ptr());
+		// In double: a domain kilometres from the origin over a 4 m tile is a large texel coordinate.
+		const double x = (double)p_domain_xz.x / lengths[c] * n - 0.5;
+		const double z = (double)p_domain_xz.y / lengths[c] * n - 0.5;
+		const double fx = std::floor(x);
+		const double fz = std::floor(z);
+		const float tx = (float)(x - fx);
+		const float tz = (float)(z - fz);
+		const int i0 = (int)(((int64_t)fx % n + n) % n);
+		const int j0 = (int)(((int64_t)fz % n + n) % n);
+		const int i1 = (i0 + 1) % n;
+		const int j1 = (j0 + 1) % n;
+		auto tap = [&](const int p_i, const int p_j) {
+			const uint16_t *t = texels + ((int64_t)p_j * n + p_i) * 4;
+			return Vector3(half_to_float(t[0]), half_to_float(t[1]), half_to_float(t[2]));
+		};
+		const Vector3 top = tap(i0, j0).lerp(tap(i1, j0), tx);
+		const Vector3 bottom = tap(i0, j1).lerp(tap(i1, j1), tx);
+		sum += top.lerp(bottom, tz);
+	}
+	return sum;
 }
 
 PackedByteArray Pasture3DWaterFFT::read_layer(const int p_output, const int p_layer, const int p_mip) {
@@ -809,6 +946,7 @@ void Pasture3DWaterFFT::_bind_methods() {
 	BIND_ENUM_CONSTANT(OUTPUT_SPECTRUM);
 	BIND_ENUM_CONSTANT(OUTPUT_DISPLACEMENT);
 	BIND_ENUM_CONSTANT(OUTPUT_SLOPE);
+	BIND_CONSTANT(READBACK_KEEPALIVE);
 
 	ClassDB::bind_static_method("Pasture3DWaterFFT", D_METHOD("is_supported"), &Pasture3DWaterFFT::is_supported);
 	ClassDB::bind_method(D_METHOD("is_available"), &Pasture3DWaterFFT::is_available);
@@ -820,6 +958,11 @@ void Pasture3DWaterFFT::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_band_low"), &Pasture3DWaterFFT::get_band_low);
 	ClassDB::bind_method(D_METHOD("get_band_high"), &Pasture3DWaterFFT::get_band_high);
 	ClassDB::bind_method(D_METHOD("read_layer", "output", "layer", "mip"), &Pasture3DWaterFFT::read_layer, DEFVAL(0));
+	ClassDB::bind_method(D_METHOD("request_cpu_surface"), &Pasture3DWaterFFT::request_cpu_surface);
+	ClassDB::bind_method(D_METHOD("get_readback_count"), &Pasture3DWaterFFT::get_readback_count);
+	ClassDB::bind_method(D_METHOD("get_readback_update"), &Pasture3DWaterFFT::get_readback_update);
+	ClassDB::bind_method(D_METHOD("get_readback_time"), &Pasture3DWaterFFT::get_readback_time);
+	ClassDB::bind_method(D_METHOD("sample_cpu_displacement", "domain_xz"), &Pasture3DWaterFFT::sample_cpu_displacement);
 	ClassDB::bind_method(D_METHOD("get_spectrum_params", "spectrum"), &Pasture3DWaterFFT::get_spectrum_params);
 	ClassDB::bind_method(D_METHOD("set_spectrum_knob", "spectrum", "knob", "value"), &Pasture3DWaterFFT::set_spectrum_knob);
 	ClassDB::bind_method(D_METHOD("get_spectrum_knob", "spectrum", "knob"), &Pasture3DWaterFFT::get_spectrum_knob);

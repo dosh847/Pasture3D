@@ -1541,6 +1541,10 @@ func _make_manager(p_root: Node3D, p_amplitude: float) -> Pasture3DPoolManager:
 	var m := Pasture3DPoolManager.new()
 	m.name = "Pasture3DPoolManager"
 	m.loop_period = LOOP_PERIOD
+	# fBm: an analytic CPU surface that scales with `amplitude` and exists on the first query. Under the FFT
+	# (the Forward+ default) the CPU reads a readback one to three frames behind and flat until the first
+	# lands (FFT spec §5), and [H]'s control moves the ocean and asks again within the frame.
+	m.wave_model = Pasture3DPoolManager.WAVE_MODEL_FBM
 	var profile := Pasture3DWaveProfile.new()
 	profile.profile_name = "flat_test"
 	profile.wave_count = 2

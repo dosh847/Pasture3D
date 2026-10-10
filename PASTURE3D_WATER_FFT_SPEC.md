@@ -2,9 +2,9 @@
 
 Status: **spec written 2026-10-09. Phase 1 built, gated (`WaterFFTGate` 6/6, §6.1) and committed
 (52212cbc). Phase 2 built, gated (`WaterFFTWiringGate` 4/4, §6.2) and committed (84923526). Phase 3
-built, gated and committed (47a3b43e, `WaterPBRGate` 3/3, §6.3). Phase 4 built and gated 2026-10-09
-(`WaterFBMGate` on Forward+, headless and Compatibility, §6.4); its uniform-branch timing is not measured
-yet. Phases 5–6 unbuilt.**
+built, gated and committed (47a3b43e, `WaterPBRGate` 3/3, §6.3). Phase 4 built, gated and committed
+(11a9a069, `WaterFBMGate`, §6.4); its uniform-branch timing is not measured yet. Phase 5 built and gated
+2026-10-09 (`WaterBuoyGate` on Forward+, headless and Compatibility, §6.5). Phase 6 unbuilt.**
 
 Ports Garrett Gunnell's water (https://github.com/GarrettGunnell/Water, MIT-style reference code, last
 commit 2023-12-30) onto Pasture3D's ocean, lake and pond. The reference is a Unity project. Two parts of it
@@ -358,7 +358,7 @@ standing rule that superseded code is removed rather than shimmed.
     answer moved. A runtime `set_setting()` reaches it, measured by `WaterFBMGate` [P], so a game's options
     menu needs no node reference. `refresh_project_settings()` is bound for a game that wants the switch
     in the same frame.
-- **CPU queries** still answer from Gerstner under every model, until Phase 5.
+- **CPU queries** answer from the model drawn since Phase 5 (§5).
 
 Presets (Phase 6) give ocean, lake and pond profiles. Pond defaults to N=128-equivalent cascades
 (short lengths).
@@ -376,6 +376,36 @@ Presets (Phase 6) give ocean, lake and pond profiles. Pond defaults to N=128-equ
   that breaks it.
 - **Headless / no device:** fBm is selected (G3), so gates and dedicated servers get a deterministic
   surface.
+
+**As built (Phase 5).**
+
+- **The profile's four queries** (`get_height_at`, `get_surface_point`, `get_normal_at`, `solve_domain`)
+  branch on the active model. Everything above them is unchanged: the manager's `evaluate_*` and
+  `solve_domain`, the ocean's and the GDScript body's `get_water_height`, and `Pasture3DBuoy`.
+- **FFT readback.** `Pasture3DWaterFFT` queues `texture_get_data_async` for the four displacement layers
+  right after the mips are built, in the same render-thread update.
+  - It keeps mip 0 of each layer as raw rgba16f, about 0.5 MB at N=256, and decodes only the taps it reads.
+  - A frame is published only when all four layers of one dispatch have arrived. A newer complete frame
+    drops any older one still pending, and at most 8 can be in flight.
+  - `CpuSurface::sample()` is the vertex shader's convention: uv = domain / length, repeat-wrapped,
+    bilinear between texel centres, summed over the cascades. The texel coordinate is formed in double.
+- **On demand.** Every FFT query calls `request_cpu_surface()`, and the readback runs for
+  `READBACK_KEEPALIVE` (120) updates after the last one. A sea nobody floats anything on reads nothing
+  back. The cost: the first query on a quiet sea answers flat (height 0, normal up) until a frame lands.
+- **`p_time` is ignored under the FFT.** The answer is the surface as of `get_readback_time()`.
+  `get_readback_update()` against `get_update_count()` is the lag in updates.
+- **One copy per query.** A query takes one copy of the surface (the arrays are copy-on-write) and reads
+  it for every tap, so a 16-iteration solve cannot straddle two frames.
+- **The FFT normal** comes from central differences of the displaced point, 0.25 m either side. The slope
+  output is not read back, so the cost stays at one output.
+- **fBm.** `Pasture3DWaterFBM::evaluate()` is `water_fbm()` transcribed in float, reading the same pack the
+  shader gets.
+  - The profile evaluates the vertex set with spacing 0, so every octave runs at full weight. That is what
+    the mesh draws wherever it is finer than about λ0 / 25 at the default eight octaves.
+  - The speeds quantise to the profile's loop period, which the manager pushes and which is
+    `water_time_period`.
+  - The fBm is vertical only, so `solve_domain()` is the identity.
+- **Gerstner** is unchanged until Phase 6 deletes it.
 
 ## 6. Phases
 
@@ -508,6 +538,55 @@ Existing gates, run windowed after the change, all pass: `WaterPBRGate`, `WaterF
   Vulkan `vkEndCommandBuffer: Invalid commandBuffer` at quit, and 0 on the third. It creates no water
   manager or profile, so this is a teardown flake and not this phase.
 - The timing gates were not run.
+
+### 6.5 Phase 5 result (2026-10-09, `WaterBuoyGate`)
+
+Run three ways, as `WaterFBMGate`: headless runs H; Compatibility runs H and B; Forward+ runs H, B, R, S
+and A. The drawn surface is the same debug sheet as §6.4: WATER_DEBUG_SURFACE, straight down, with every
+pixel centre on a rest vertex. Under the FFT the sheet's `_fft_vertex_spacing` is 0.001, so every cascade
+samples mip 0. The CPU side is always the bodies' call path: the manager's
+`evaluate_height(solve_domain(xz))`.
+
+| | Criterion | Result | Control |
+|---|---|---|---|
+| H | `evaluate()` against water_fbm() in GDScript double, 200 points within 10 m and 10 s | 5.6e-4 m (tol 2e-3) | the oracle without drag misses by 0.547 m |
+| H | loop: t = 0 against t = period | 1e-5 m (tol 0.02) | t = 97 s misses by 0.646 m |
+| H | routing: an FBM profile answers `evaluate()` exactly, and `solve_domain` is the identity | pass | the same profile on GERSTNER answers 0.903 against −0.085 |
+| B | fBm buoy against the drawn surface, rel. RMS | 0.0091 Forward+, 0.028 Compatibility (tol 0.03 / 0.12) | the CPU 0.25 s early: 0.68 |
+| R | readback on demand; lag after warm-up | first frame after 1 update; lag 1 on 119 of 119 frames (bound 3); 119 readbacks in 120 frames | a profile never queried read back 0; after the keepalive the count stopped (240 then 240) |
+| S | the readback against a synchronous `read_layer()` of the same frame, decoded independently, at 64 points | 0.0 m (tol 1e-5) | the kept answers of one second earlier miss by 3.6 m |
+| A | FFT buoy against the drawn surface, rel. RMS (surface RMS 1.16 m, σ 0.91 m, N=128) | 0.0050 (tol 0.02) | the stale buffer of one second earlier: 0.91 |
+
+Reported, not asserted:
+
+- Without the horizontal solve, the FFT buoy misses by 0.175. The inverse is what puts a buoy on the drawn
+  surface.
+- Float32 phase precision. `evaluate()` moves away from the double oracle as the phase grows: 1e-4 m
+  within ±1 m, 1.2e-2 m over ±300 m and the whole period. The shader has the same float32 limit, so H
+  asserts on the small domain, and B is the parity that counts.
+- The lag of 1 was measured with uncapped frames. At a capped frame rate the GPU can be two or three frames
+  behind; the API says one to three.
+
+**Gates rescoped, with reasons.** These three gates now pin their manager's model. The cause: CPU queries
+answer from the model drawn, and on Forward+ the default draws FFT.
+
+- `WaterBodiesPhase1Gate` is pinned to GERSTNER. Its G4 is the Gerstner parity contract, probed by a
+  canvas_item shader that can only draw Gerstner. Phase 6 deletes or rewrites it with the rest of
+  Gerstner.
+- `WaterBodiesPhase5Gate` is pinned to fBm. Its probes ask once, and the FFT answers a first query flat.
+- `WaterBodiesPhase6Gate` (bodies) is pinned to fBm. Its fixtures are amplitude-tuned analytic seas, and
+  [H]'s control moves the ocean and asks again within the frame.
+
+Existing gates, run windowed after the change, all pass: `WaterFBMGate`, `WaterPBRGate`, `WaterFFTGate`,
+`WaterFFTWiringGate`, `WaterPhase1Gate`, `WaterBodiesPhase1Gate`, `WaterBodiesPhase3Gate`,
+`WaterBodiesPhase4Gate`, `WaterBodiesPhase5Gate`, `WaterBodiesPhase6Gate`, `WaterBodiesPhase7Gate`,
+`WaterPresetCheck`, `WaterVariantWarningCheck`, `WaterTwoLakesGate`, `WaterBodyLateManagerCheck` and
+`GraphWaterNodesGate`. `StreamRippleCheck` passes headless.
+
+**Correction to §6.3 and §6.4's "the timing gates were not run".** The runner behind those phases did not set
+`SKIP_TIMING`. `WaterBodiesPhase3Gate` therefore ran its timing criterion A (a 500 m lake rebuilds in
+≤ 500 ms) each time, and it passed. The runner now exports `SKIP_TIMING=1`, so Phase 5's runs are
+correctness only.
 
 ## 7. Risks
 

@@ -451,6 +451,10 @@ func _make_manager(p_root: Node3D) -> Pasture3DPoolManager:
 	var m := Pasture3DPoolManager.new()
 	m.name = "Pasture3DPoolManager"
 	m.loop_period = LOOP_PERIOD
+	# fBm: a CPU surface that exists on the first query. Under the FFT (the default on Forward+) the CPU reads
+	# a readback that starts with the first query and lands one to three frames later (FFT spec §5), and
+	# these probes ask once.
+	m.wave_model = Pasture3DPoolManager.WAVE_MODEL_FBM
 	p_root.add_child(m)
 	m.sun_light = p_root.get_node("Sun")
 	return m

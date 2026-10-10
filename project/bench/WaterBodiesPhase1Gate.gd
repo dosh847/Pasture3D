@@ -467,6 +467,9 @@ func _make_manager(p_root: Node3D) -> Pasture3DPoolManager:
 	var manager := Pasture3DPoolManager.new()
 	manager.name = "Pasture3DPoolManager"
 	manager.loop_period = LOOP_PERIOD
+	# G4 is the Gerstner parity contract, probed by a canvas_item shader that can only draw Gerstner. Since
+	# FFT spec Phase 5 the CPU answers from whichever model the manager draws, so pin the one probed.
+	manager.wave_model = Pasture3DPoolManager.WAVE_MODEL_GERSTNER
 
 	var lake := Pasture3DWaveProfile.new()
 	lake.profile_name = "lake_calm"
