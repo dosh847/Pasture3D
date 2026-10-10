@@ -211,21 +211,45 @@ bool Pasture3DWaterFFT::_build_resources() {
 
 	_disp_texture->set_texture_rd_rid(_disp_tex);
 	_slope_texture->set_texture_rd_rid(_slope_tex);
+	_free_retired();
 	_built_resolution = n;
+	_texture_generation.fetch_add(1);
 	return true;
 }
 
-void Pasture3DWaterFFT::_free_resources() {
+void Pasture3DWaterFFT::_free_retired() {
+	for (const RID &t : _retired_textures) {
+		if (_rd && t.is_valid() && _rd->texture_is_valid(t)) {
+			_rd->free_rid(t);
+		}
+	}
+	_retired_textures.clear();
+}
+
+void Pasture3DWaterFFT::_free_resources(const bool p_keep_outputs) {
 	if (!_rd) {
 		return;
 	}
-	// Detach the wrappers first: a material may still hold them, and an RS texture over a freed RD
-	// texture is an error on every draw rather than an empty sample.
-	if (_disp_texture.is_valid()) {
-		_disp_texture->set_texture_rd_rid(RID());
-	}
-	if (_slope_texture.is_valid()) {
-		_slope_texture->set_texture_rd_rid(RID());
+	if (p_keep_outputs) {
+		// A RESOLUTION CHANGE, with materials still holding the wrappers. Detaching would free the RS
+		// texture whose RID those materials stored when the profile was uploaded, and every one of them
+		// would then draw a dead RID until something re-uploaded. So the output textures outlive this
+		// free: _build_resources() points the wrappers at the new ones (set_texture_rd_rid replaces in
+		// place and keeps the RS RID), and only then are these released.
+		_retired_textures.push_back(_disp_tex);
+		_retired_textures.push_back(_slope_tex);
+		_disp_tex = RID();
+		_slope_tex = RID();
+	} else {
+		// Detach the wrappers first: a material may still hold them, and an RS texture over a freed RD
+		// texture is an error on every draw rather than an empty sample.
+		if (_disp_texture.is_valid()) {
+			_disp_texture->set_texture_rd_rid(RID());
+		}
+		if (_slope_texture.is_valid()) {
+			_slope_texture->set_texture_rd_rid(RID());
+		}
+		_free_retired();
 	}
 	// Sets before views before textures. Freeing a texture also frees whatever depends on it, so each
 	// free is guarded by a validity check rather than relying on the order alone.
@@ -328,7 +352,8 @@ void Pasture3DWaterFFT::_render_update(const float p_time, const float p_dt) {
 		return;
 	}
 	if (_built_resolution != _resolution) {
-		_free_resources();
+		// Kernels are compiled per N (it is a #define), so they go too.
+		_free_resources(_built_resolution != 0);
 		_free_kernels();
 		if (!_compile_kernels() || !_build_resources()) {
 			_free_resources();
@@ -421,10 +446,18 @@ PackedByteArray Pasture3DWaterFFT::_render_read(const int p_output, const int p_
 	return all.slice(offset, offset + len);
 }
 
-void Pasture3DWaterFFT::_knob_changed(const bool p_respectrum) {
+void Pasture3DWaterFFT::_knob_changed(const bool p_respectrum, const bool p_emit) {
 	_params_dirty = true;
 	if (p_respectrum) {
 		_spectrum_dirty = true;
+		_sigma_dirty = true;
+	}
+	// A profile listens for this and re-uploads, which is how an inspector drag reaches the materials.
+	// The manager-driven knobs (resolution, loop period) do not emit: neither changes what a material
+	// holds -- a rebuild keeps the texture RIDs -- and a profile reads `changed` as "an artist edited the
+	// sea", which a manager push is not.
+	if (p_emit) {
+		emit_changed();
 	}
 }
 
@@ -528,7 +561,7 @@ void Pasture3DWaterFFT::set_resolution(const int p_resolution) {
 		return;
 	}
 	_resolution = r;
-	_knob_changed(true);
+	_knob_changed(true, false);
 }
 
 void Pasture3DWaterFFT::set_seed(const int p_seed) {
@@ -562,7 +595,7 @@ void Pasture3DWaterFFT::set_loop_period(const float p_seconds) {
 		return;
 	}
 	_loop_period = s;
-	_knob_changed(false);
+	_knob_changed(false, false);
 }
 
 void Pasture3DWaterFFT::set_cascade_lengths(const Vector4 &p_lengths) {
@@ -615,6 +648,62 @@ static float *knob_ptr(Pasture3DWaterFFT::SpectrumKnobs &p_k, const StringName &
 	return nullptr;
 }
 
+/**
+ * The spectrum's variance, integrated in 1D on the CPU.
+ *
+ * The same terms the INIT kernel multiplies -- JONSWAP, TMA, short-wave fade, dw/dk -- with the directional
+ * spread integrated out analytically: cosine-2s integrates to 1 over the circle, and the reference's cos^2
+ * half to 2, so a spectrum at spread_blend b carries (2 - b) of its energy. Integrated from half the longest
+ * tile's fundamental to the shortest tile's Nyquist, which is the range the cascades hold. The Nyquist row
+ * the kernel leaves empty is a sliver of the shortest cascade and is ignored.
+ */
+float Pasture3DWaterFFT::get_height_sigma() const {
+	if (!_sigma_dirty) {
+		return _sigma;
+	}
+	const double g = GRAVITY;
+	const double depth = MAX(_depth, 0.01f);
+	const double k0 = 0.5 * Math_TAU / MAX(_cascade_lengths[0], 0.01f);
+	const double k1 = Math_PI * (double)_resolution / MAX(_cascade_lengths[CASCADES - 1], 0.01f);
+	PackedFloat32Array sp[2] = { get_spectrum_params(0), get_spectrum_params(1) };
+	const int steps = 4000;
+	double total = 0.0;
+	double prev_k = k0;
+	double prev_f = 0.0;
+	for (int i = 0; i <= steps; i++) {
+		double k = k0 * std::pow(k1 / k0, (double)i / steps);
+		double kd = MIN(k * depth, 20.0);
+		double th = std::tanh(kd);
+		double omega = std::sqrt(g * k * th);
+		double ch = std::cosh(kd);
+		double domega = g * (depth * k / ch / ch + th) / omega / 2.0;
+		double oh = omega * std::sqrt(depth / g);
+		double tma = oh <= 1.0 ? 0.5 * oh * oh : (oh < 2.0 ? 1.0 - 0.5 * (2.0 - oh) * (2.0 - oh) : 1.0);
+		double f = 0.0;
+		for (int si = 0; si < 2; si++) {
+			const float *p = sp[si].ptr();
+			if (si == 1 && p[0] <= 0.f) {
+				continue;
+			}
+			double peak = p[5];
+			double sigma = omega <= peak ? 0.07 : 0.09;
+			double r = std::exp(-(omega - peak) * (omega - peak) / 2.0 / sigma / sigma / peak / peak);
+			double s = p[0] * tma * p[4] * g * g / std::pow(omega, 5.0) * std::exp(-1.25 * std::pow(peak / omega, 4.0)) *
+					std::pow(std::abs((double)p[6]), r);
+			double spread = 2.0 - CLAMP((double)p[2], 0.0, 1.0);
+			f += s * spread * std::exp(-(double)p[7] * p[7] * k * k) * domega;
+		}
+		if (i > 0) {
+			total += 0.5 * (f + prev_f) * (k - prev_k);
+		}
+		prev_k = k;
+		prev_f = f;
+	}
+	_sigma = (float)std::sqrt(MAX(total, 0.0));
+	_sigma_dirty = false;
+	return _sigma;
+}
+
 void Pasture3DWaterFFT::set_spectrum_knob(const int p_spectrum, const StringName &p_knob, const float p_value) {
 	ERR_FAIL_INDEX(p_spectrum, 2);
 	float *v = knob_ptr(_spectra[p_spectrum], p_knob);
@@ -665,6 +754,56 @@ void Pasture3DWaterFFT::set_foam_decay(const float p_value) {
 // Protected Functions
 ///////////////////////////
 
+// The two spectra's knobs as "wind/<knob>" and "swell/<knob>". Dynamic rather than sixteen bound
+// setters, because they are one struct twice and the knob names are already the API (set_spectrum_knob).
+static const char *SPECTRUM_PREFIX[2] = { "wind/", "swell/" };
+static const char *SPECTRUM_KNOBS[] = { "scale", "wind_speed", "direction_deg", "fetch", "spread_blend", "swell",
+	"peak_enhancement", "short_waves_fade" };
+static const char *SPECTRUM_HINTS[] = { "0,4,0.01,or_greater", "0.1,40,0.1,suffix:m/s", "-180,180,0.5,degrees",
+	"10,1000000,10,exp,suffix:m", "0,1,0.01", "0.01,1,0.01", "1,10,0.01", "0,1,0.001,suffix:m" };
+
+static bool split_spectrum_name(const StringName &p_name, int &r_spectrum, StringName &r_knob) {
+	String n = p_name;
+	for (int i = 0; i < 2; i++) {
+		if (n.begins_with(SPECTRUM_PREFIX[i])) {
+			r_spectrum = i;
+			r_knob = n.substr(String(SPECTRUM_PREFIX[i]).length());
+			return true;
+		}
+	}
+	return false;
+}
+
+bool Pasture3DWaterFFT::_set(const StringName &p_name, const Variant &p_value) {
+	int spectrum;
+	StringName knob;
+	if (!split_spectrum_name(p_name, spectrum, knob) || !knob_ptr(_spectra[spectrum], knob)) {
+		return false;
+	}
+	set_spectrum_knob(spectrum, knob, (float)p_value);
+	return true;
+}
+
+bool Pasture3DWaterFFT::_get(const StringName &p_name, Variant &r_ret) const {
+	int spectrum;
+	StringName knob;
+	if (!split_spectrum_name(p_name, spectrum, knob) ||
+			!knob_ptr(const_cast<SpectrumKnobs &>(_spectra[spectrum]), knob)) {
+		return false;
+	}
+	r_ret = get_spectrum_knob(spectrum, knob);
+	return true;
+}
+
+void Pasture3DWaterFFT::_get_property_list(List<PropertyInfo> *p_list) const {
+	for (int i = 0; i < 2; i++) {
+		for (int k = 0; k < 8; k++) {
+			p_list->push_back(PropertyInfo(Variant::FLOAT, String(SPECTRUM_PREFIX[i]) + SPECTRUM_KNOBS[k],
+					PROPERTY_HINT_RANGE, SPECTRUM_HINTS[k]));
+		}
+	}
+}
+
 void Pasture3DWaterFFT::_bind_methods() {
 	BIND_ENUM_CONSTANT(OUTPUT_INITIAL_SPECTRUM);
 	BIND_ENUM_CONSTANT(OUTPUT_SPECTRUM);
@@ -675,6 +814,7 @@ void Pasture3DWaterFFT::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_available"), &Pasture3DWaterFFT::is_available);
 	ClassDB::bind_method(D_METHOD("update", "time", "delta"), &Pasture3DWaterFFT::update);
 	ClassDB::bind_method(D_METHOD("get_update_count"), &Pasture3DWaterFFT::get_update_count);
+	ClassDB::bind_method(D_METHOD("get_texture_generation"), &Pasture3DWaterFFT::get_texture_generation);
 	ClassDB::bind_method(D_METHOD("get_displacement_texture"), &Pasture3DWaterFFT::get_displacement_texture);
 	ClassDB::bind_method(D_METHOD("get_slope_texture"), &Pasture3DWaterFFT::get_slope_texture);
 	ClassDB::bind_method(D_METHOD("get_band_low"), &Pasture3DWaterFFT::get_band_low);
@@ -707,11 +847,15 @@ void Pasture3DWaterFFT::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_foam_decay", "per_second"), &Pasture3DWaterFFT::set_foam_decay);
 	ClassDB::bind_method(D_METHOD("get_foam_decay"), &Pasture3DWaterFFT::get_foam_decay);
 
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "resolution", PROPERTY_HINT_ENUM, "128:128,256:256,512:512"), "set_resolution", "get_resolution");
+	ClassDB::bind_method(D_METHOD("get_height_sigma"), &Pasture3DWaterFFT::get_height_sigma);
+	ClassDB::bind_method(D_METHOD("get_displacement_bound"), &Pasture3DWaterFFT::get_displacement_bound);
+
+	// Manager-driven: bound so a gate can drive a standalone simulation, never stored.
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "resolution", PROPERTY_HINT_ENUM, "128:128,256:256,512:512", PROPERTY_USAGE_NONE), "set_resolution", "get_resolution");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "seed"), "set_seed", "get_seed");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "depth", PROPERTY_HINT_RANGE, "0.1,500.0,0.1,or_greater,suffix:m"), "set_depth", "get_depth");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "choppiness", PROPERTY_HINT_RANGE, "0.0,3.0,0.01"), "set_choppiness", "get_choppiness");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "loop_period", PROPERTY_HINT_RANGE, "1.0,600.0,0.1,suffix:s"), "set_loop_period", "get_loop_period");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "loop_period", PROPERTY_HINT_RANGE, "1.0,600.0,0.1,suffix:s", PROPERTY_USAGE_NONE), "set_loop_period", "get_loop_period");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR4, "cascade_lengths", PROPERTY_HINT_NONE, "suffix:m"), "set_cascade_lengths", "get_cascade_lengths");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "band_limited"), "set_band_limited", "get_band_limited");
 	ADD_GROUP("Foam", "foam_");

@@ -436,6 +436,9 @@ func _criterion_d_split_screen() -> void:
 	var manager := Pasture3DPoolManager.new()
 	terrain.add_child(manager)
 	manager.set_physics_process(false)
+	# And paused: the FFT ticks per rendered frame from NOTIFICATION_PROCESS, and its foam integrates
+	# dt even with the clock stopped. Paused, dt is 0 and two captures see the same surface.
+	manager.paused = true
 
 	# Big bodies, for the same reason the split-screen gate uses one: two cameras inside LOD0 would
 	# geomorph identically and the comparison would have nothing to find.
@@ -665,6 +668,9 @@ func _criterion_g_per_view_culling() -> void:
 	var manager := Pasture3DPoolManager.new()
 	terrain.add_child(manager)
 	manager.set_physics_process(false)
+	# And paused: the FFT ticks per rendered frame from NOTIFICATION_PROCESS, and its foam integrates
+	# dt even with the clock stopped. Paused, dt is 0 and two captures see the same surface.
+	manager.paused = true
 
 	# 800 m apart, which is what it takes for each camera to be outside the OTHER body's radius on
 	# this fixture: the bodies are ~104 m across and the radius comes out near 173 m, so anything
@@ -674,7 +680,12 @@ func _criterion_g_per_view_culling() -> void:
 	var cams: Array[Camera3D] = []
 	for i in 2:
 		var c := Camera3D.new()
-		c.position = Vector3(-400.0 + i * 800.0, 34.0, 90.0)
+		# Camera 1 sits 40 m off its lake's centre where camera 0 sits on it. Centred on both, the two
+		# views were CONGRUENT -- same outline, same body-relative waves -- and the anti-null below read
+		# 0.00093 under Gerstner only because the wave sum at x = +-400 m rounds differently; the FFT's
+		# texture lookup does not, and it read exactly 0. The offset keeps camera 1 well inside B's
+		# radius and 840 m from A.
+		c.position = Vector3(-400.0 + i * 840.0, 34.0, 90.0)
 		c.rotation_degrees = Vector3(-22.0, 0.0, 0.0)
 		c.cull_mask = 0xFFFF | (1 << (19 - i))
 		root.add_child(c)
@@ -928,6 +939,9 @@ func _lit_root() -> Node3D:
 	root.add_child(m)
 	m.sun_light = sun
 	m.set_physics_process(false)
+	# And paused: the FFT ticks per rendered frame from NOTIFICATION_PROCESS, and its foam integrates
+	# dt even with the clock stopped. Paused, dt is 0 and two captures see the same surface.
+	m.paused = true
 	RenderingServer.global_shader_parameter_set("water_time", 0.0)
 	return root
 
@@ -1040,6 +1054,9 @@ func _scene() -> Node3D:
 	# FROZEN. The manager writes water_time every physics tick, and two captures taken across a
 	# tick differ by the waves rather than by anything under test.
 	m.set_physics_process(false)
+	# And paused: the FFT ticks per rendered frame from NOTIFICATION_PROCESS, and its foam integrates
+	# dt even with the clock stopped. Paused, dt is 0 and two captures see the same surface.
+	m.paused = true
 	RenderingServer.global_shader_parameter_set("water_time", 0.0)
 	return root
 

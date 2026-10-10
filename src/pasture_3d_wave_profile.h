@@ -8,6 +8,7 @@
 #include <godot_cpp/classes/resource.hpp>
 
 #include "constants.h"
+#include "pasture_3d_water_fft.h"
 #include "water_waves.h"
 
 using namespace godot;
@@ -27,6 +28,12 @@ using namespace godot;
  * that makes the clock wrap seamless (water spec §3.2) is computed against a single
  * period, so the period belongs to whatever owns the clock. Pasture3DPoolManager owns it
  * and pushes it in with set_loop_period() before building the table.
+ *
+ * `fft` is the FFT sea for this profile (PASTURE3D_WATER_FFT_SPEC.md §4): the simulation AND its knobs,
+ * as a sub-resource so the scene saves them. Which of the two models a material draws is the manager's
+ * call, not the profile's -- it depends on the renderer and the user's setting -- and the manager says
+ * which with set_fft_active(). The Gerstner knobs stay until Phase 6 retires them; until Phase 5, CPU
+ * height queries still answer from Gerstner even while the FFT is what is drawn.
  */
 class Pasture3DWaveProfile : public Resource {
 	GDCLASS(Pasture3DWaveProfile, Resource);
@@ -37,6 +44,16 @@ private:
 	// selection key is spelled out rather than overloading that.
 	StringName _profile_name = "profile";
 	WaterWaves _waves;
+	Ref<Pasture3DWaterFFT> _fft;
+	bool _fft_active = false;
+	// False until an artist (or a loaded scene) supplies the FFT's knobs. Until then they are DERIVED from
+	// the Gerstner knobs, so a lake or pond profile saved before the FFT existed loads as a lake or a pond
+	// and not as the simulation's ocean defaults. See _derive_fft().
+	bool _fft_authored = false;
+	bool _deriving = false;
+
+	void _on_fft_changed();
+	void _derive_fft();
 
 	// WaterWaves::update() is lazy behind a dirty flag and every read below needs
 	// the table built, so this is the one place that forces it.
@@ -46,7 +63,7 @@ protected:
 	static void _bind_methods();
 
 public:
-	Pasture3DWaveProfile() {}
+	Pasture3DWaveProfile();
 	~Pasture3DWaveProfile() {}
 
 	void set_profile_name(const StringName &p_name);
@@ -65,17 +82,27 @@ public:
 	void set_steepness(const real_t p_steepness);
 	real_t get_steepness() const { return _waves.get_steepness(); }
 
+	void set_fft(const Ref<Pasture3DWaterFFT> &p_fft);
+	Ref<Pasture3DWaterFFT> get_fft() const { return _fft; }
+	bool is_fft_authored() const { return _fft_authored; }
+
 	// Manager-driven, not exported. See the class comment.
+	void set_fft_active(const bool p_active);
+	// True when materials on this profile draw the FFT: the manager chose it AND there is a simulation.
+	bool is_fft_active() const { return _fft_active && _fft.is_valid(); }
 	void set_loop_period(const real_t p_seconds);
 	real_t get_loop_period() const { return _waves.get_loop_period(); }
 
 	// --- Derived, read-only -------------------------------------------------
 	PackedVector4Array get_shader_table();
 	// What the surface ACTUALLY reaches, which is the sum over the table and not
-	// the amplitude knob. Cull margins and clearance checks want this one.
+	// the amplitude knob. Cull margins and clearance checks want this one. Under the FFT it is
+	// the simulation's displacement bound, from the spectrum.
 	real_t get_amplitude_sum();
 	// Shortest wavelength in the built table. Pasture3DPool sizes its mesh from this
-	// (spec §7.3: vertex spacing is a wavelength/8 rule, not a taste).
+	// (spec §7.3: vertex spacing is a wavelength/8 rule, not a taste). Under the FFT, a quarter of
+	// the second cascade: geometry carries the two long cascades, and the two short ones reach the
+	// surface only as slope in the fragment stage, so meshing for them would buy nothing visible.
 	real_t get_min_wavelength();
 
 	// --- Evaluation, in DOMAIN space ----------------------------------------

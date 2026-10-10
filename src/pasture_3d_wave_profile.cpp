@@ -2,6 +2,8 @@
 
 #include <godot_cpp/core/class_db.hpp>
 
+#include <cmath>
+
 #include "logger.h"
 #include "pasture_3d_wave_profile.h"
 
@@ -26,6 +28,93 @@
 // there clamps, so set_spread_deg(200) stores 90, and comparing against the argument would
 // make that emit forever.
 
+Pasture3DWaveProfile::Pasture3DWaveProfile() {
+	Ref<Pasture3DWaterFFT> fft;
+	fft.instantiate();
+	set_fft(fft);
+	// The default simulation is not an authored one: it follows the Gerstner knobs until edited.
+	_fft_authored = false;
+	_derive_fft();
+}
+
+void Pasture3DWaveProfile::_on_fft_changed() {
+	if (!_deriving) {
+		_fft_authored = true;
+	}
+	emit_changed();
+}
+
+/**
+ * Fits the FFT sea to the Gerstner knobs, for a profile whose FFT nobody has authored.
+ *
+ * The simulation's defaults are an ocean (WaterFFTGate's sea: Hs 3.7 m, peaks near 57 m and 133 m). This
+ * keeps that sea's SHAPE and rescales it twice, which is the least that turns it into the body the
+ * Gerstner knobs describe:
+ *
+ *   SIZE by r = length_max / 137 m, the ocean preset's longest wave. Every cascade length scales by r, and
+ *   so does each spectrum's peak wavelength -- by scaling fetch, since at fixed wind the JONSWAP peak goes
+ *   as (U F)^0.66, so F scales as r^(1/0.66). A pond's tiles shrink with its waves, and the peak stays
+ *   inside the longest tile.
+ *
+ *   HEIGHT by the Gerstner amplitude sum. The ocean preset sums to 5.24 m against the FFT ocean's sigma
+ *   of 0.92 m, so the target sigma is 0.176 x the sum, and `scale` (variance, so squared) moves both
+ *   spectra together to reach it.
+ *
+ * Depth is left deep (100 m): a TMA-limited shallow sea is a choice a body's author makes, not one the
+ * Gerstner knobs encode. Wind speed is left alone because scale and fetch already carry both axes.
+ */
+void Pasture3DWaveProfile::_derive_fft() {
+	if (_fft_authored || _fft.is_null()) {
+		return;
+	}
+	_ensure_built();
+	const float ref_length = 137.f;
+	const float ref_sigma_per_amp = 0.176f;
+	const Vector4 ref_lengths(500.f, 85.f, 16.f, 4.f);
+	const float ref_fetch[2] = { 100000.f, 300000.f };
+	const float ref_scale[2] = { 1.f, 0.5f };
+	float r = CLAMP(_waves.get_length_max() / ref_length, 0.01f, 20.f);
+	_deriving = true;
+	_fft->set_cascade_lengths(ref_lengths * r);
+	for (int i = 0; i < 2; i++) {
+		_fft->set_spectrum_knob(i, "fetch", ref_fetch[i] * std::pow(r, 1.f / 0.66f));
+		_fft->set_spectrum_knob(i, "scale", ref_scale[i]);
+	}
+	float target = ref_sigma_per_amp * (float)_waves.get_amplitude_sum();
+	float sigma = _fft->get_height_sigma();
+	float gain = sigma > 1e-6f ? (target / sigma) * (target / sigma) : 0.f;
+	for (int i = 0; i < 2; i++) {
+		_fft->set_spectrum_knob(i, "scale", ref_scale[i] * gain);
+	}
+	_deriving = false;
+}
+
+void Pasture3DWaveProfile::set_fft(const Ref<Pasture3DWaterFFT> &p_fft) {
+	if (_fft == p_fft) {
+		return;
+	}
+	// Whatever arrives here was chosen: loaded from a scene, or assigned in the inspector.
+	_fft_authored = true;
+	Callable cb = callable_mp(this, &Pasture3DWaveProfile::_on_fft_changed);
+	if (_fft.is_valid() && _fft->is_connected("changed", cb)) {
+		_fft->disconnect("changed", cb);
+	}
+	_fft = p_fft;
+	if (_fft.is_valid()) {
+		_fft->set_loop_period((float)_waves.get_loop_period());
+		_fft->connect("changed", cb);
+	}
+	emit_changed();
+}
+
+void Pasture3DWaveProfile::set_fft_active(const bool p_active) {
+	if (_fft_active == p_active) {
+		return;
+	}
+	_fft_active = p_active;
+	emit_changed();
+}
+
 void Pasture3DWaveProfile::set_profile_name(const StringName &p_name) {
 	if (_profile_name == p_name) {
 		return;
@@ -40,6 +129,7 @@ void Pasture3DWaveProfile::set_wave_count(const int p_count) {
 	if (_waves.get_count() == before) {
 		return;
 	}
+	_derive_fft();
 	emit_changed();
 }
 
@@ -49,6 +139,7 @@ void Pasture3DWaveProfile::set_direction_deg(const real_t p_deg) {
 	if (_waves.get_direction_deg() == before) {
 		return;
 	}
+	_derive_fft();
 	emit_changed();
 }
 
@@ -58,6 +149,7 @@ void Pasture3DWaveProfile::set_spread_deg(const real_t p_deg) {
 	if (_waves.get_spread_deg() == before) {
 		return;
 	}
+	_derive_fft();
 	emit_changed();
 }
 
@@ -67,6 +159,7 @@ void Pasture3DWaveProfile::set_amplitude(const real_t p_metres) {
 	if (_waves.get_amplitude() == before) {
 		return;
 	}
+	_derive_fft();
 	emit_changed();
 }
 
@@ -76,6 +169,7 @@ void Pasture3DWaveProfile::set_length_max(const real_t p_metres) {
 	if (_waves.get_length_max() == before) {
 		return;
 	}
+	_derive_fft();
 	emit_changed();
 }
 
@@ -85,6 +179,7 @@ void Pasture3DWaveProfile::set_steepness(const real_t p_steepness) {
 	if (_waves.get_steepness() == before) {
 		return;
 	}
+	_derive_fft();
 	emit_changed();
 }
 
@@ -93,6 +188,10 @@ void Pasture3DWaveProfile::set_loop_period(const real_t p_seconds) {
 		return;
 	}
 	_waves.set_loop_period((float)p_seconds);
+	if (_fft.is_valid()) {
+		// The FFT quantises its dispersion to the same period, for the same seamless wrap.
+		_fft->set_loop_period((float)p_seconds);
+	}
 	emit_changed();
 }
 
@@ -102,6 +201,9 @@ PackedVector4Array Pasture3DWaveProfile::get_shader_table() {
 }
 
 real_t Pasture3DWaveProfile::get_amplitude_sum() {
+	if (is_fft_active()) {
+		return (real_t)_fft->get_displacement_bound();
+	}
 	_ensure_built();
 	return (real_t)_waves.get_amplitude_sum();
 }
@@ -114,6 +216,12 @@ real_t Pasture3DWaveProfile::get_amplitude_sum() {
  * bodies but continues to length_max/2 for small ones (the pond case). Deriving it
  * would reproduce that rule in a second place and get it wrong the first time the
  * rule changed.
+ *
+ * Read off the Gerstner table EVEN WHEN THE FFT DRAWS. Its only consumer is mesh spacing, and the FFT
+ * vertex stage picks its mip from whatever spacing it is given (water_eval_fft), so the spacing is a
+ * cost knob there rather than a correctness one. Phase 2 first answered with a quarter of cascade 1;
+ * that meshed lake_calm at 0.48 m instead of 1.27 m, the clipmap's reach shrank 2.6x and stopped
+ * covering the lake's outline (WaterTwoLakesGate [B] 0.72). PASTURE3D_WATER_FFT_SPEC.md §4.
  */
 real_t Pasture3DWaveProfile::get_min_wavelength() {
 	_ensure_built();
@@ -171,6 +279,10 @@ void Pasture3DWaveProfile::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_length_max"), &Pasture3DWaveProfile::get_length_max);
 	ClassDB::bind_method(D_METHOD("set_steepness", "steepness"), &Pasture3DWaveProfile::set_steepness);
 	ClassDB::bind_method(D_METHOD("get_steepness"), &Pasture3DWaveProfile::get_steepness);
+	ClassDB::bind_method(D_METHOD("set_fft", "fft"), &Pasture3DWaveProfile::set_fft);
+	ClassDB::bind_method(D_METHOD("get_fft"), &Pasture3DWaveProfile::get_fft);
+	ClassDB::bind_method(D_METHOD("set_fft_active", "active"), &Pasture3DWaveProfile::set_fft_active);
+	ClassDB::bind_method(D_METHOD("is_fft_active"), &Pasture3DWaveProfile::is_fft_active);
 	ClassDB::bind_method(D_METHOD("set_loop_period", "seconds"), &Pasture3DWaveProfile::set_loop_period);
 	ClassDB::bind_method(D_METHOD("get_loop_period"), &Pasture3DWaveProfile::get_loop_period);
 
@@ -184,6 +296,8 @@ void Pasture3DWaveProfile::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("solve_domain", "target_xz", "time"), &Pasture3DWaveProfile::solve_domain);
 
 	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "profile_name"), "set_profile_name", "get_profile_name");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "fft", PROPERTY_HINT_RESOURCE_TYPE, "Pasture3DWaterFFT"), "set_fft", "get_fft");
+	ADD_GROUP("Gerstner", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "wave_count", PROPERTY_HINT_RANGE, "1,8,1"), "set_wave_count", "get_wave_count");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "direction_deg", PROPERTY_HINT_RANGE, "-360,360,0.5"), "set_direction_deg", "get_direction_deg");
 	// 0..90, matching WaterWaves::set_spread_deg's clamp. The hint said 0..180, so the

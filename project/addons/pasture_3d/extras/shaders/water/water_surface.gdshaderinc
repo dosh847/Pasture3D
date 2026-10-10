@@ -68,6 +68,20 @@ void vertex() {
 	// we want: chop and standing waves fall out and the ripples are untouched, so a
 	// river material dropped on a bare plane still runs rather than going wild.
 	WaveSample wave = water_eval_stream_waves(world_pos, UV2.x, v_flow, v_shore, CUSTOM0);
+#elif defined(WATER_FFT)
+	WaveSample wave;
+	if (_wave_model == WATER_MODEL_FFT) {
+#ifdef WATER_CLIPMAP
+		// The ring's own cell size, as the shore margin below uses it.
+		float fft_spacing = MODEL_MATRIX[0][0];
+#else
+		float fft_spacing = _fft_vertex_spacing;
+#endif
+		wave = water_eval_fft(world_pos, fft_spacing);
+	} else {
+		wave = water_eval_waves(world_pos);
+	}
+	v_fft_domain = world_pos.xz - _water_domain_origin.xz;
 #else
 	WaveSample wave = water_eval_waves(world_pos);
 #endif

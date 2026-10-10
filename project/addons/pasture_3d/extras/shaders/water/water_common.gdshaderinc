@@ -15,6 +15,17 @@
 #define WATER_WAVE_COUNT 4
 #endif
 
+// The FFT wave path (PASTURE3D_WATER_FFT_SPEC.md §3). On by default for every surface variant; a river
+// replaces the wave model outright (water_stream.gdshaderinc), and the canvas_item parity probe has no
+// instance uniforms. WATER_NO_FFT opts a custom variant out.
+#if !defined(WATER_STREAM_WAVES) && !defined(WATER_PLAIN_DOMAIN_ORIGIN) && !defined(WATER_NO_FFT)
+#define WATER_FFT
+#endif
+// Values of _wave_model. 0 is Gerstner because 0 is what an unset uniform reads: a material dropped on a
+// bare mesh, with no manager to upload anything, still makes waves from its compile-time table.
+#define WATER_MODEL_GERSTNER 0
+#define WATER_MODEL_FFT 1
+
 // Upper bound on WATER_WAVE_COUNT. Fixes the size of the uploaded wave table so
 // every variant takes the same one. Raising it costs 16 bytes per slot in every
 // water material and requires a matching change in water_waves.cpp.
@@ -137,6 +148,28 @@ const vec4 _wave_defaults[2] = vec4[2]( // pond
 #define WATER_NO_DEFAULT_WAVES
 #endif
 uniform float wave_steepness : hint_range(0.0, 0.6, 0.01) = 0.35;
+
+#ifdef WATER_FFT
+// Which model this material draws, written by Pasture3DPoolManager per profile. A UNIFORM BRANCH rather
+// than a variant, so the fallback can switch at runtime without swapping the shader on every cached
+// material; uniform across a draw, so it costs a branch and no divergence (FFT spec §3).
+uniform int _wave_model = WATER_MODEL_GERSTNER;
+// The profile's Pasture3DWaterFFT outputs: 4 layers, one per cascade, full mip chains.
+//   _fft_displacement  xyz = displacement in metres, a = foam
+//   _fft_slope         xy  = dh/dx, dh/dz;  z = the cascade's own Jacobian
+// Cascade i tiles every _fft_lengths[i] metres of DOMAIN space. The mips are the simulation's own 2x2
+// box chain (WaterFFTGate [M]); the sampler's job is only to pick and blend them.
+uniform sampler2DArray _fft_displacement : filter_linear_mipmap, repeat_enable, hint_default_black;
+uniform sampler2DArray _fft_slope : filter_linear_mipmap_anisotropic, repeat_enable, hint_default_black;
+uniform vec4 _fft_lengths = vec4(500.0, 85.0, 16.0, 4.0);
+#ifndef WATER_CLIPMAP
+// The mesh's vertex spacing in metres, which picks the vertex stage's mip per cascade. A clipmap knows its
+// own (the ring scale); a plain mesh cannot, so its body writes this. PER INSTANCE because ten ponds on
+// one material are meshed at ten spacings. Left at 1 m, a mesh finer than that aliases nothing and a
+// coarser one aliases the short cascades in its geometry -- the slope maps still draw them correctly.
+instance uniform float _fft_vertex_spacing = 1.0;
+#endif
+#endif
 
 // Keeps phase arguments small and precise for bodies far from the origin (§3.1).
 //
@@ -533,6 +566,13 @@ varying float v_view_dist;
 // right when the VIEWER is underneath, which is a property of the camera, not of
 // the triangle.
 varying float v_base_y;
+
+#ifdef WATER_FFT
+// The REST domain position, before the FFT displaced it. The cascades are textures over the undisplaced
+// sheet, so the fragment stage samples slope and foam where this vertex CAME FROM; sampling at the
+// displaced position would shear every crest sideways by the choppiness.
+varying vec2 v_fft_domain;
+#endif
 
 #ifdef WATER_SHORE_MASK
 // The sheet's REST xz, before the waves displace it. The shore is a fixed line in

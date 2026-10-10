@@ -567,6 +567,9 @@ func _register() -> void:
 		# list the manager holds right now. Left cold, the very first `profiles_changed` — whatever
 		# caused it — would read as "the names moved" and rebuild the inspector once for nothing.
 		_profile_names_moved()
+	if m.has_signal("wave_textures_changed") \
+			and not m.wave_textures_changed.is_connected(_on_wave_textures_changed):
+		m.wave_textures_changed.connect(_on_wave_textures_changed)
 	_manager_registered = true
 	# A body that built before the manager existed chose its vertex spacing from the 1.0
 	# fallback and its cull box from an assumed amplitude, because both read the profile
@@ -601,6 +604,13 @@ func _on_profiles_changed() -> void:
 	# from it — so the MESH may now be too coarse for the waves it carries.
 	if vertex_spacing <= 0.0:
 		_schedule_rebuild()
+
+
+## An FFT simulation built new output textures (Pasture3DPoolManager.wave_textures_changed). Nothing to
+## do here: the sheet draws the manager's shared material, which the manager has already re-uploaded.
+## Pasture3DPool overrides this for its private masked duplicate.
+func _on_wave_textures_changed() -> void:
+	pass
 
 
 ## True when the manager's profile NAME list differs from the one the current hint was built from,
@@ -791,6 +801,8 @@ func _apply_material() -> void:
 func _update_domain_origin() -> void:
 	if _surface != null and is_instance_valid(_surface):
 		_surface.set_instance_shader_parameter("_water_domain_origin", global_position)
+		# Picks the FFT's vertex-stage mip (water_common.gdshaderinc). Per instance, for the same reason.
+		_surface.set_instance_shader_parameter("_fft_vertex_spacing", _effective_spacing())
 
 
 # ---- the underwater volume (spec §8) -----------------------------------------

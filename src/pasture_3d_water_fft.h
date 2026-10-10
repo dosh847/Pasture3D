@@ -4,7 +4,7 @@
 #define PASTURE3D_WATER_FFT_CLASS_H
 
 #include <godot_cpp/classes/rd_uniform.hpp>
-#include <godot_cpp/classes/ref_counted.hpp>
+#include <godot_cpp/classes/resource.hpp>
 #include <godot_cpp/classes/rendering_device.hpp>
 #include <godot_cpp/classes/texture2d_array_rd.hpp>
 #include <godot_cpp/templates/vector.hpp>
@@ -12,6 +12,8 @@
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/typed_array.hpp>
 #include <godot_cpp/variant/vector4.hpp>
+
+#include <atomic>
 
 #include "constants.h"
 
@@ -25,6 +27,11 @@ using namespace godot;
  * one calls update() once per frame with the shared water clock and hands the two Texture2DArrayRD
  * outputs to the materials that sample them.
  *
+ * A RESOURCE so a Pasture3DWaveProfile can carry one as its `fft` sub-resource and the scene saves the
+ * knobs. The GPU state is not a property and is never saved or duplicated; a duplicate builds its own.
+ * `resolution` and `loop_period` are bound but not stored: Pasture3DPoolManager owns both and pushes
+ * them in, as it does the Gerstner loop period.
+ *
  * Runs on the MAIN rendering device, not a local one like the graph GPU's, because spatial materials have
  * to sample the outputs. Every RenderingDevice call therefore goes through call_on_render_thread().
  *
@@ -33,8 +40,8 @@ using namespace godot;
  *   slope         xy  = height slope d(y)/dx, d(y)/dz, z = Jacobian of the horizontal displacement
  * Cascade i tiles every cascade_lengths[i] metres.
  */
-class Pasture3DWaterFFT : public RefCounted {
-	GDCLASS(Pasture3DWaterFFT, RefCounted);
+class Pasture3DWaterFFT : public Resource {
+	GDCLASS(Pasture3DWaterFFT, Resource);
 	CLASS_NAME();
 
 public:
@@ -110,6 +117,16 @@ private:
 	RID _sets[K_DOWNSAMPLE]; // one uniform set per kernel, except the downsample's
 	Vector<RID> _downsample_sets; // one per destination mip level (1..mips-1)
 	int _update_count = 0;
+	// Bumped on the render thread each time the wrappers are pointed at new GPU textures; read on the main
+	// thread by the manager, which re-uploads every material when it moves. See get_texture_generation().
+	std::atomic<int> _texture_generation{ 0 };
+	// Output textures kept alive across a resolution rebuild until the wrappers point at the new ones.
+	Vector<RID> _retired_textures;
+
+	// CPU estimate of the height standard deviation, from the spectrum integral. Cached: it is a few
+	// thousand pow() calls and the cull bounds ask for it on every profile change.
+	mutable float _sigma = 0.f;
+	mutable bool _sigma_dirty = true;
 
 	// --- Outputs. Resource wrappers that survive a resolution change: only their RID moves. ---
 	Ref<Texture2DArrayRD> _disp_texture;
@@ -118,17 +135,21 @@ private:
 	bool _ensure_device();
 	bool _compile_kernels();
 	bool _build_resources();
-	void _free_resources();
+	void _free_resources(const bool p_keep_outputs = false);
+	void _free_retired();
 	void _free_kernels();
 	RID _make_set(const Kernel p_kernel, const TypedArray<RDUniform> &p_uniforms);
 	void _write_params();
 	void _render_update(const float p_time, const float p_dt);
 	PackedByteArray _render_read(const int p_output, const int p_layer, const int p_mip);
 
-	void _knob_changed(const bool p_respectrum);
+	void _knob_changed(const bool p_respectrum, const bool p_emit = true);
 
 protected:
 	static void _bind_methods();
+	bool _set(const StringName &p_name, const Variant &p_value);
+	bool _get(const StringName &p_name, Variant &r_ret) const;
+	void _get_property_list(List<PropertyInfo> *p_list) const;
 
 public:
 	Pasture3DWaterFFT();
@@ -140,6 +161,13 @@ public:
 
 	void update(const float p_time, const float p_dt);
 	int get_update_count() const { return _update_count; }
+	// How many times the output textures have been (re)built. A material DRAWN before the first build
+	// holds the shader's default black array, not the wrapper: Texture2DArrayRD::get_rid() lazily makes a
+	// plain 2D placeholder, a sampler2DArray uniform refuses that type and binds its default instead, and
+	// the later texture_replace() never reaches a binding that does not reference the placeholder. (One
+	// first drawn after the build binds correctly whenever it was uploaded.) Re-setting the parameter
+	// after the build is what binds the real texture -- hence this count. WaterFFTWiringGate [B].
+	int get_texture_generation() const { return _texture_generation.load(); }
 
 	Ref<Texture2DArrayRD> get_displacement_texture() const { return _disp_texture; }
 	Ref<Texture2DArrayRD> get_slope_texture() const { return _slope_texture; }
@@ -182,6 +210,14 @@ public:
 	// The derived JONSWAP parameters the kernel receives, for the gate's CPU oracle:
 	// [scale, angle_rad, spread_blend, swell, alpha, peak_omega, gamma, short_waves_fade].
 	PackedFloat32Array get_spectrum_params(const int p_spectrum) const;
+
+	// Standard deviation of surface height in metres: the square root of the spectrum's integral over the
+	// wavenumbers the cascades hold. CPU, independent of the GPU, and what the realised sea measures
+	// against (WaterFFTGate [P]). Significant wave height is 4x this.
+	float get_height_sigma() const;
+	// Vertical reach for cull volumes: 1.5 significant wave heights. The largest crest in a field of a
+	// few thousand waves is about that, and a cull box that clips a rare crest pops it out of view.
+	float get_displacement_bound() const { return 6.f * get_height_sigma(); }
 };
 
 VARIANT_ENUM_CAST(Pasture3DWaterFFT::Output);

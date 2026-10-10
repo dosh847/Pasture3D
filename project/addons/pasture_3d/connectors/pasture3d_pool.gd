@@ -867,6 +867,26 @@ func _push_sea_level() -> void:
 		_runtime_material.set_shader_parameter("sea_level", global_position.y)
 
 
+## The masked duplicate is a SNAPSHOT of the plugin-written uniforms (_masked_material), so a profile
+## edit, a wave-model switch and an FFT texture build all reach the shared material and stop there.
+## Re-uploading the profile into the duplicate is what carries them across.
+func _on_profiles_changed() -> void:
+	super()
+	_reupload_runtime_material()
+
+
+func _on_wave_textures_changed() -> void:
+	_reupload_runtime_material()
+
+
+func _reupload_runtime_material() -> void:
+	if _runtime_material == null:
+		return
+	var m := _resolve_manager()
+	if m != null and m.has_method("upload_profile_into"):
+		m.upload_profile_into(_runtime_material, wave_profile)
+
+
 ## Extended for MASKED mode: the shared material the base class resolves cannot carry this body's
 ## field, so a private duplicate is put in front of it.
 ##

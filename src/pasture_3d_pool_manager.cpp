@@ -49,7 +49,88 @@ void Pasture3DPoolManager::_upload_into(const Ref<Material> &p_material, const R
 	p_profile->set_loop_period(_loop_period);
 	mat->set_shader_parameter("_waves", p_profile->get_shader_table());
 	mat->set_shader_parameter("wave_steepness", p_profile->get_steepness());
+	// The model is a uniform branch, not a variant (FFT spec §3), so switching costs a write here and no
+	// shader swap on any cached material.
+	Ref<Pasture3DWaterFFT> fft = p_profile->get_fft();
+	if (p_profile->is_fft_active()) {
+		mat->set_shader_parameter("_wave_model", SHADER_MODEL_FFT);
+		// The Texture2DArrayRD wrappers, not their RIDs: the simulation builds its GPU textures lazily on
+		// the render thread, and a wrapper hands the material a placeholder until then that
+		// set_texture_rd_rid() later replaces in place. Uploading before the first tick is therefore fine.
+		mat->set_shader_parameter("_fft_displacement", fft->get_displacement_texture());
+		mat->set_shader_parameter("_fft_slope", fft->get_slope_texture());
+		mat->set_shader_parameter("_fft_lengths", fft->get_cascade_lengths());
+		const int at = _live_ffts.find(fft);
+		if (at < 0) {
+			_live_ffts.push_back(fft);
+			_live_fft_generations.push_back(fft->get_texture_generation());
+		}
+	} else {
+		mat->set_shader_parameter("_wave_model", SHADER_MODEL_GERSTNER);
+	}
 	_upload_count++;
+}
+
+/**
+ * Tells every profile which model its materials draw, and at what resolution.
+ *
+ * Called whenever the answer could have moved: the setting, the resolution, or the profile set itself.
+ */
+void Pasture3DPoolManager::_apply_model_to_profiles() {
+	const bool fft = is_fft_effective();
+	for (int i = 0; i < _profiles.size(); i++) {
+		Ref<Pasture3DWaveProfile> profile = _profiles[i];
+		if (profile.is_null()) {
+			continue;
+		}
+		if (profile->get_fft().is_valid()) {
+			profile->get_fft()->set_resolution(_fft_resolution);
+		}
+		profile->set_fft_active(fft);
+	}
+}
+
+/**
+ * Advances every live simulation to the shared clock.
+ *
+ * Per RENDERED frame, from NOTIFICATION_PROCESS, not per physics tick: the result is a texture the next
+ * draw samples, so ticking at the physics rate would compute frames nobody sees at 30 fps, and repeat
+ * one at 144. The clock itself still advances at the physics rate, and this reads whatever it reached.
+ *
+ * Paused, the surface holds still and the foam stops decaying with it: dt is 0, not the frame time.
+ */
+void Pasture3DPoolManager::_tick_ffts(const double p_delta) {
+	if (_live_ffts.is_empty() || !is_fft_effective()) {
+		return;
+	}
+	const float dt = _paused ? 0.f : (float)p_delta;
+	// A simulation that built new textures since the last look (its first build, or a resolution change)
+	// leaves every material bound before it holding the default black array: see
+	// Pasture3DWaterFFT::get_texture_generation(). Re-uploading re-sets the parameter, which binds the real
+	// texture. NOT profiles_changed: a body with auto spacing re-meshes on that, and nothing about the
+	// geometry moved. wave_textures_changed tells the holders of private duplicates (the ocean, a masked
+	// pool) to re-upload theirs. Checked BEFORE this frame's dispatch, so a build queued last frame on the
+	// render thread has landed.
+	bool rebind = false;
+	for (int i = 0; i < _live_ffts.size(); i++) {
+		const Ref<Pasture3DWaterFFT> &fft = _live_ffts[i];
+		if (fft.is_valid() && fft->get_texture_generation() != _live_fft_generations[i]) {
+			_live_fft_generations.write[i] = fft->get_texture_generation();
+			rebind = true;
+		}
+	}
+	if (rebind) {
+		_rebind_count++;
+		_reupload_cache();
+		emit_signal("wave_textures_changed");
+	}
+	for (const Ref<Pasture3DWaterFFT> &fft : _live_ffts) {
+		if (fft.is_valid()) {
+			fft->set_loop_period((float)_loop_period);
+			fft->update((float)_water_time, dt);
+			_fft_tick_count++;
+		}
+	}
 }
 
 /**
@@ -187,20 +268,25 @@ void Pasture3DPoolManager::_poll_base_materials() {
 	}
 }
 
+void Pasture3DPoolManager::_reupload_cache() {
+	for (const KeyValue<String, CachedMaterial> &kv : _material_cache) {
+		_upload_into(kv.value.shared, get_profile(kv.value.profile));
+	}
+}
+
 void Pasture3DPoolManager::_on_profile_changed() {
 	// A knob moved. Every cached material carrying that profile is now stale --
 	// and rather than work out which, re-upload all of them: the cache holds one
 	// material per pair, so this is bounded by the number of distinct pairs in the
 	// scene, not by the number of bodies. Ten ponds is still one upload.
-	for (const KeyValue<String, CachedMaterial> &kv : _material_cache) {
-		_upload_into(kv.value.shared, get_profile(kv.value.profile));
-	}
+	_reupload_cache();
 	// Bodies outside the cache (Pasture3DOcean holds a private material, §6) have no other
 	// way to learn a knob moved.
 	emit_signal("profiles_changed");
 }
 
 void Pasture3DPoolManager::_connect_profiles() {
+	_apply_model_to_profiles();
 	Callable cb = callable_mp(this, &Pasture3DPoolManager::_on_profile_changed);
 	for (int i = 0; i < _profiles.size(); i++) {
 		Ref<Pasture3DWaveProfile> profile = _profiles[i];
@@ -339,6 +425,9 @@ void Pasture3DPoolManager::set_profiles(const TypedArray<Pasture3DWaveProfile> &
 		}
 	}
 	_profiles = p_profiles;
+	// Simulations of profiles that are gone would otherwise be ticked forever.
+	_live_ffts.clear();
+	_live_fft_generations.clear();
 	_connect_profiles();
 	// The set changed, so a cached material may now be carrying a table from a
 	// profile that is gone. Rebuild rather than reason about it.
@@ -362,6 +451,32 @@ void Pasture3DPoolManager::set_sun_light(Node3D *p_light) {
 	_sun_dir_sent = V3_MAX;
 	_sun_color_sent = V3_MAX;
 	update_configuration_warnings();
+}
+
+bool Pasture3DPoolManager::is_fft_effective() const {
+	return _wave_model == WAVE_MODEL_FFT && Pasture3DWaterFFT::is_supported();
+}
+
+void Pasture3DPoolManager::set_wave_model(const WaveModel p_model) {
+	if (_wave_model == p_model) {
+		return;
+	}
+	_wave_model = p_model;
+	_apply_model_to_profiles();
+	rebuild_tables();
+	update_configuration_warnings();
+}
+
+void Pasture3DPoolManager::set_fft_resolution(const int p_resolution) {
+	int r = p_resolution <= 128 ? 128 : (p_resolution <= 256 ? 256 : 512);
+	if (_fft_resolution == r) {
+		return;
+	}
+	_fft_resolution = r;
+	// The simulations rebuild in place on their next tick and keep their texture RIDs, so no material
+	// needs a re-upload; only the cull bounds, which read the spectrum's band, are refreshed.
+	_apply_model_to_profiles();
+	emit_signal("profiles_changed");
 }
 
 void Pasture3DPoolManager::set_paused(const bool p_paused) {
@@ -600,6 +715,7 @@ void Pasture3DPoolManager::_notification(int p_what) {
 			_resolve_cameras();
 			_connect_profiles();
 			set_physics_process(true);
+			set_process(true);
 			update_configuration_warnings();
 			break;
 		}
@@ -610,6 +726,12 @@ void Pasture3DPoolManager::_notification(int p_what) {
 			remove_from_group(MANAGER_GROUP);
 			remove_from_group(Pasture3D::CAMERA_USER_GROUP);
 			set_physics_process(false);
+			set_process(false);
+			break;
+		}
+
+		case NOTIFICATION_PROCESS: {
+			_tick_ffts(get_process_delta_time());
 			break;
 		}
 
@@ -752,6 +874,16 @@ void Pasture3DPoolManager::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_loop_period"), &Pasture3DPoolManager::get_loop_period);
 	ClassDB::bind_method(D_METHOD("set_sun_light", "light"), &Pasture3DPoolManager::set_sun_light);
 	ClassDB::bind_method(D_METHOD("get_sun_light"), &Pasture3DPoolManager::get_sun_light);
+	BIND_ENUM_CONSTANT(WAVE_MODEL_FFT);
+	BIND_ENUM_CONSTANT(WAVE_MODEL_GERSTNER);
+	ClassDB::bind_method(D_METHOD("set_wave_model", "model"), &Pasture3DPoolManager::set_wave_model);
+	ClassDB::bind_method(D_METHOD("get_wave_model"), &Pasture3DPoolManager::get_wave_model);
+	ClassDB::bind_method(D_METHOD("is_fft_effective"), &Pasture3DPoolManager::is_fft_effective);
+	ClassDB::bind_method(D_METHOD("set_fft_resolution", "resolution"), &Pasture3DPoolManager::set_fft_resolution);
+	ClassDB::bind_method(D_METHOD("get_fft_resolution"), &Pasture3DPoolManager::get_fft_resolution);
+	ClassDB::bind_method(D_METHOD("get_live_fft_count"), &Pasture3DPoolManager::get_live_fft_count);
+	ClassDB::bind_method(D_METHOD("get_fft_tick_count"), &Pasture3DPoolManager::get_fft_tick_count);
+	ClassDB::bind_method(D_METHOD("get_fft_rebind_count"), &Pasture3DPoolManager::get_fft_rebind_count);
 	ClassDB::bind_method(D_METHOD("set_paused", "paused"), &Pasture3DPoolManager::set_paused);
 	ClassDB::bind_method(D_METHOD("is_paused"), &Pasture3DPoolManager::is_paused);
 
@@ -787,6 +919,9 @@ void Pasture3DPoolManager::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("body_at", "global_pos"), &Pasture3DPoolManager::body_at);
 
 	ADD_SIGNAL(MethodInfo("profiles_changed"));
+	// A wave simulation built new output textures. Anything holding a PRIVATE copy of a water material
+	// re-uploads its profile into it; see Pasture3DWaterFFT::get_texture_generation().
+	ADD_SIGNAL(MethodInfo("wave_textures_changed"));
 
 	ClassDB::bind_method(D_METHOD("evaluate_height", "profile", "domain_xz"), &Pasture3DPoolManager::evaluate_height);
 	ClassDB::bind_method(D_METHOD("evaluate_normal", "profile", "domain_xz"), &Pasture3DPoolManager::evaluate_normal);
@@ -801,4 +936,8 @@ void Pasture3DPoolManager::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "sun_light", PROPERTY_HINT_NODE_TYPE, "DirectionalLight3D"),
 			"set_sun_light", "get_sun_light");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "paused"), "set_paused", "is_paused");
+	ADD_GROUP("Waves", "");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "wave_model", PROPERTY_HINT_ENUM, "FFT,Gerstner"), "set_wave_model", "get_wave_model");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "fft_resolution", PROPERTY_HINT_ENUM, "128:128,256:256,512:512"),
+			"set_fft_resolution", "get_fft_resolution");
 }

@@ -51,6 +51,18 @@ class Pasture3DPoolManager : public Node3D {
 	CLASS_NAME();
 
 public: // Constants
+	// Which wave model the materials draw (PASTURE3D_WATER_FFT_SPEC.md §4). FFT is the default and falls
+	// back to Gerstner where there is no RenderingDevice (Compatibility, headless). Phase 4 replaces that
+	// fallback with fBm and Phase 6 deletes GERSTNER.
+	enum WaveModel {
+		WAVE_MODEL_FFT = 0,
+		WAVE_MODEL_GERSTNER = 1,
+	};
+	// The values the shader's `_wave_model` uniform takes, from water_common.gdshaderinc. Spelled out
+	// rather than reusing the enum: 0 has to stay the bare-mesh default, which the enum's order is not.
+	static constexpr int SHADER_MODEL_GERSTNER = 0;
+	static constexpr int SHADER_MODEL_FFT = 1;
+
 	// Bodies find their manager by group. Matches WATER_MANAGER_GROUP in the spec.
 	//
 	// A `const char *` and not a `static inline StringName`. A StringName built at
@@ -105,6 +117,15 @@ private:
 
 	TypedArray<Pasture3DWaveProfile> _profiles;
 	real_t _loop_period = 120.f;
+	WaveModel _wave_model = WAVE_MODEL_FFT;
+	int _fft_resolution = 256;
+	// Simulations some material samples, in first-upload order. Only these are ticked: a profile no body
+	// selects costs nothing. Unique by pointer, so a simulation two profiles share is ticked once.
+	Vector<Ref<Pasture3DWaterFFT>> _live_ffts;
+	// Each live simulation's texture generation as of the last upload, parallel to _live_ffts.
+	Vector<int> _live_fft_generations;
+	int _rebind_count = 0;
+	int _fft_tick_count = 0;
 	TargetNode3D _sun_light;
 	bool _paused = false;
 
@@ -154,6 +175,9 @@ private:
 	void _seed_default_profiles();
 	void _update_clock(const double p_delta);
 	void _update_sun();
+	void _apply_model_to_profiles();
+	void _reupload_cache();
+	void _tick_ffts(const double p_delta);
 
 protected:
 	static void _bind_methods();
@@ -220,6 +244,17 @@ public:
 	real_t get_loop_period() const { return _loop_period; }
 	void set_sun_light(Node3D *p_light);
 	Node3D *get_sun_light() const { return _sun_light.ptr(); }
+	void set_wave_model(const WaveModel p_model);
+	WaveModel get_wave_model() const { return _wave_model; }
+	// What the materials actually draw: the setting, unless the renderer cannot run it.
+	bool is_fft_effective() const;
+	void set_fft_resolution(const int p_resolution);
+	int get_fft_resolution() const { return _fft_resolution; }
+	int get_live_fft_count() const { return _live_ffts.size(); }
+	// Simulation dispatches since this manager was made. A gate's witness that the tick runs.
+	int get_fft_tick_count() const { return _fft_tick_count; }
+	// Re-uploads caused by a simulation building new textures. A gate's witness for the rebind.
+	int get_fft_rebind_count() const { return _rebind_count; }
 	void set_paused(const bool p_paused);
 	bool is_paused() const { return _paused; }
 
@@ -284,5 +319,7 @@ public:
 
 	PackedStringArray _get_configuration_warnings() const;
 };
+
+VARIANT_ENUM_CAST(Pasture3DPoolManager::WaveModel);
 
 #endif // PASTURE3D_POOL_MANAGER_CLASS_H

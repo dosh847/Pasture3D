@@ -118,4 +118,45 @@ WaveSample water_eval_waves(vec3 p_pos) {
 	return o;
 }
 
+#ifdef WATER_FFT
+// ---------------------------------------------------------------------------
+// The FFT surface (PASTURE3D_WATER_FFT_SPEC.md §3). NOT part of the parity
+// contract above: its CPU answer is a readback (spec §5), not a transcription.
+// ---------------------------------------------------------------------------
+
+// Mip for cascade i when the samples are p_spacing metres apart: the level whose texel is twice the
+// spacing, which removes everything shorter than four samples a wavelength.
+// The mesh cannot draw those, and leaving them in is what makes a coarse ring crawl. Past the last level
+// the sampler clamps to the 1x1 mean, which is zero: a cascade far finer than the mesh vanishes from the
+// geometry, as it should, and stays in the fragment stage's slope.
+float water_fft_lod(float p_spacing, float p_length, float p_texels) {
+	return max(log2(2.0 * p_spacing * p_texels / p_length), 0.0);
+}
+
+// p_pos: undisplaced world-space position. p_spacing: vertex spacing in metres.
+// jacobian carries the summed FOAM, in [0, 1+], not Gerstner's fold-limit signal: the simulation already
+// turned the Jacobian into whitecaps with its own bias, decay and accumulation.
+WaveSample water_eval_fft(vec3 p_pos, float p_spacing) {
+	WaveSample o;
+	vec2 domain = p_pos.xz - _water_domain_origin.xz;
+	float texels = float(textureSize(_fft_displacement, 0).x);
+	vec3 disp = vec3(0.0);
+	vec2 slope = vec2(0.0);
+	float foam = 0.0;
+	for (int i = 0; i < 4; i++) {
+		float len = _fft_lengths[i];
+		vec3 uvw = vec3(domain / len, float(i));
+		float lod = water_fft_lod(p_spacing, len, texels);
+		vec4 d = textureLod(_fft_displacement, uvw, lod);
+		disp += d.xyz;
+		foam += d.w;
+		slope += textureLod(_fft_slope, uvw, lod).xy;
+	}
+	o.position = p_pos + disp;
+	o.normal = normalize(vec3(-slope.x, 1.0, -slope.y));
+	o.jacobian = foam;
+	return o;
+}
+#endif
+
 #endif // WATER_WAVES_INC

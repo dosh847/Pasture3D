@@ -57,6 +57,22 @@ void fragment() {
 	vec3 wave_normal = normalize(v_wave_normal);
 	vec2 slope = -wave_normal.xz / max(wave_normal.y, 1e-3);
 
+#ifdef WATER_FFT
+	// Per-pixel slope and foam from the cascades, sampled at the REST position. Replaces the per-vertex
+	// normal outright: the vertex stage filtered the short cascades out of the geometry, and this is where
+	// they come back. Implicit-derivative sampling is valid here because _wave_model is uniform.
+	bool fft = _wave_model == WATER_MODEL_FFT;
+	float fft_foam = 0.0;
+	if (fft) {
+		slope = vec2(0.0);
+		for (int i = 0; i < 4; i++) {
+			vec3 uvw = vec3(v_fft_domain / _fft_lengths[i], float(i));
+			slope += texture(_fft_slope, uvw).xy;
+			fft_foam += texture(_fft_displacement, uvw).w;
+		}
+	}
+#endif
+
 	// Detail amplitude the distance fade removed. Fed to roughness below so the
 	// energy is redistributed rather than thrown away (§3.4).
 	float detail_lost = 0.0;
@@ -105,8 +121,15 @@ void fragment() {
 #endif
 #endif
 
-	slope += detail * (detail_strength * detail_fade);
-	detail_lost = detail_strength * (1.0 - detail_fade);
+	float detail_gain = detail_strength;
+#ifdef WATER_FFT
+	// The detail texture stood in for wavelengths the Gerstner table could not reach; the FFT's 4 m
+	// cascade reaches them (FFT spec §3). The fetches above still run -- a uniform branch around them
+	// would save them, and Phase 6 decides whether WATER_DETAIL survives at all.
+	detail_gain = fft ? 0.0 : detail_gain;
+#endif
+	slope += detail * (detail_gain * detail_fade);
+	detail_lost = detail_gain * (1.0 - detail_fade);
 #endif
 
 	vec3 world_normal = normalize(vec3(-slope.x, 1.0, -slope.y));
@@ -193,8 +216,14 @@ void fragment() {
 	// The ramp ends at threshold + softness, not at 1.0: v_jacobian is bounded by
 	// wave_steepness (~0.35), so a ramp to 1.0 would keep foam permanently in its
 	// first few percent and no whitecap would ever reach full opacity.
-	foam += smoothstep(foam_crest_threshold,
-		foam_crest_threshold + foam_crest_softness, v_jacobian) * foam_crest_amount;
+	float crest = smoothstep(foam_crest_threshold,
+		foam_crest_threshold + foam_crest_softness, v_jacobian);
+#ifdef WATER_FFT
+	// The simulation's foam is already coverage in [0, 1+]: the threshold above is in Gerstner fold-limit
+	// units and means nothing here.
+	crest = fft ? clamp(fft_foam, 0.0, 1.0) : crest;
+#endif
+	foam += crest * foam_crest_amount;
 #endif
 #if defined(WATER_FOAM_SHORE) && defined(WATER_DEPTH_FADE)
 	// Also free: thickness came out of the depth fetch above.
@@ -235,8 +264,12 @@ void fragment() {
 	// v_jacobian peaks at wave_steepness, so calm water scatters less on its own.
 	vec3 to_camera = normalize(CAMERA_POSITION_WORLD - v_world_pos);
 	float backlit = clamp(-dot(water_sun_direction, to_camera), 0.0, 1.0);
+	float scatter_gate = clamp(v_jacobian, 0.0, 1.0);
+#ifdef WATER_FFT
+	scatter_gate = fft ? clamp(fft_foam, 0.0, 1.0) : scatter_gate;
+#endif
 	BACKLIGHT = scatter_color *
-		(scatter_strength * clamp(v_jacobian, 0.0, 1.0) * backlit * backlit);
+		(scatter_strength * scatter_gate * backlit * backlit);
 #endif
 
 #endif // WATER_DEBUG_GLOBALS

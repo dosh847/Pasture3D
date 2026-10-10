@@ -1,7 +1,8 @@
 # Pasture3D Water — FFT Ocean, fBm Fallback, Microfacet Lighting
 
-Status: **spec written 2026-10-09. Phase 1 built and gated 2026-10-09 (`WaterFFTGate` 6/6, §6.1); not
-committed. Phases 2–6 unbuilt.**
+Status: **spec written 2026-10-09. Phase 1 built, gated (`WaterFFTGate` 6/6, §6.1) and committed
+(52212cbc). Phase 2 built and gated 2026-10-09 (`WaterFFTWiringGate` 4/4, §6.2). Phases 3–6 unbuilt.
+Until Phase 4 the fallback is GERSTNER, not fBm.**
 
 Ports Garrett Gunnell's water (https://github.com/GarrettGunnell/Water, MIT-style reference code, last
 commit 2023-12-30) onto Pasture3D's ocean, lake and pond. The reference is a Unity project. Two parts of it
@@ -151,6 +152,28 @@ The **detail derivative texture** (`WATER_DETAIL`) existed to break up analytic 
 FFT cascades down to ~12 cm make it redundant on the FFT path. It stays compiled for fBm until Phase 6
 decides.
 
+**As built (Phase 2).**
+
+- `WATER_FFT` is defined by `water_common.gdshaderinc` for every variant except rivers
+  (`WATER_STREAM_WAVES`), the canvas_item parity probe (`WATER_PLAIN_DOMAIN_ORIGIN`, no instance uniforms)
+  and anything defining `WATER_NO_FFT`.
+- `_wave_model` 0 is GERSTNER, because 0 is what an unset uniform reads: a material on a bare mesh with no
+  manager still makes waves from its compile-time table.
+- The vertex stage computes the mip per cascade as `max(log2(2 · spacing · N / L), 0)`: the texel is twice
+  the vertex spacing, so nothing shorter than four samples a wavelength reaches the geometry.
+  - On a clipmap, the spacing is the ring scale.
+  - On a plain sheet, it is the per-instance `_fft_vertex_spacing`. `Pasture3DWaterBody` writes it from
+    `_effective_spacing()`.
+- The vertex normal comes from the filtered slope taps. The fragment stage then REPLACES it: it samples
+  slope and foam at the rest position (`v_fft_domain`), not the displaced one. Sampling at the displaced
+  position would shear every crest sideways by the choppiness.
+- In FFT mode the detail texture's gain is zeroed. Its fetches still run until Phase 6 decides.
+- Crest foam and the scatter gate read the simulation's foam channel directly. The Gerstner
+  `foam_crest_threshold` is in fold-limit units and means nothing here.
+- **Texel convention.** The shader samples cascade `i` at continuous texel `domain · N / L_i − 0.5`, so
+  texel `j` sits at `(j + 0.5) · L / N`. That is half a texel from the oracle's `j · L / N` grid. The CPU
+  readback (Phase 5) must use the shader's convention. `WaterFFTWiringGate` [R] does.
+
 ### 3.1 Lighting (Phase 3)
 
 The reference's `NEW_LIGHTING` block, split across Godot's stages:
@@ -187,6 +210,39 @@ standing rule that superseded code is removed rather than shimmed.
 - **Manager:** `wave_model` (FFT, fBm) and `fft_resolution` (128/256/512, default 256). Also project
   settings `pasture3d/water/wave_model` and `pasture3d/water/fft_resolution`, so a game's options menu can
   set them without a scene reference.
+
+**As built (Phase 2).**
+
+- Each `Pasture3DWaveProfile` owns a `Pasture3DWaterFFT` sub-resource (`fft`).
+  - Until it is AUTHORED, it is DERIVED from the profile's Gerstner knobs, so scenes saved before the port
+    keep their character: a pond does not load as an ocean.
+  - The cascade lengths scale with `length_max / 137`, the fetch by that ratio to the 1/0.66 power, and
+    the spectrum scale so that the height σ is 0.176 × the Gerstner amplitude sum. 0.176 is
+    `ocean_default`'s ratio.
+  - Any edit to the `fft` resource marks it authored.
+- The manager writes `resolution` and `loop_period` into each simulation. Those two setters do not emit
+  `changed`, so they neither mark the profile authored nor re-upload every material.
+- `get_amplitude_sum()` returns 6σ of the FFT (`get_displacement_bound()`) while the FFT draws.
+- `get_min_wavelength()` STAYS Gerstner. Its only consumer is mesh spacing, which is a cost knob for the
+  FFT (the vertex mip adapts to it).
+  - An FFT answer (¼ of cascade 1) meshed `lake_calm` at 0.48 m instead of 1.27 m.
+  - The clipmap's reach shrank 2.6×, and the lake stopped covering its own outline (`WaterTwoLakesGate`
+    [B] 0.72).
+- The manager has `wave_model` (FFT, GERSTNER) and `fft_resolution`.
+  - `is_fft_effective()` is FFT plus a RenderingDevice.
+  - The project settings above are not built yet.
+- The simulations tick from `NOTIFICATION_PROCESS`, once per rendered frame, and only the ones some
+  material has been given. While the manager is paused, `dt` is 0.
+- **Rebinding after a texture build.** A material DRAWN before a simulation's first build holds the
+  shader's default black array.
+  - `Texture2DArrayRD::get_rid()` lazily makes a plain 2D placeholder. The `sampler2DArray` refuses that
+    type and binds its default, and the later `texture_replace()` never reaches that binding.
+  - The simulation therefore counts its builds (`get_texture_generation()`). On a change the manager
+    re-uploads its cache and emits `wave_textures_changed`, and the ocean and masked pools re-upload into
+    their private duplicates.
+  - The signal is not `profiles_changed`, because water bodies with auto spacing re-mesh on that.
+  - Masked pools now also re-upload on `profiles_changed`. Their duplicate used to snapshot the plugin
+    uniforms once, so a knob edit or a model switch never reached it.
 
 Presets (Phase 6) give ocean, lake and pond profiles. Pond defaults to N=128-equivalent cascades
 (short lengths).
@@ -232,6 +288,39 @@ The criteria replaced the plan in the table; each has a control that fails.
 [A]'s tolerance adds `2|h̃|` for each mode whose `√(gk)/ω₀` sits within float32 rounding of an integer
 (8 such modes, all in the 4 m cascade). Those floor differently on the GPU and in float64, and the gate
 bounds rather than guesses them.
+
+### 6.2 Phase 2 result (2026-10-09, `WaterFFTWiringGate`, N=128, windowed Forward+)
+
+| | Criterion | Result | Control |
+|---|---|---|---|
+| B | material drawn before the first build renders the FFT after the manager's rebind | generation 1, rebind 1, correlation 0.989 | a private material drawn early and never re-uploaded: sd 0 m (flat) |
+| W | FFT model writes `_wave_model` 1, the sim's own texture wrappers and lengths; resolution reaches the sim | all as expected | GERSTNER: `_wave_model` 0, profile inactive |
+| T | one dispatch per rendered frame | 10 ticks / 10 updates in 10 frames | GERSTNER: 0 ticks |
+| R | unlit top-down render (EMISSION.b = h/8 + ½) vs the readback rebuilt at the shader's texel convention | correlation 0.989, slope 0.987, sd 0.886 vs 0.887 m | GERSTNER branch on the same prediction: −0.18 |
+
+Existing gates, run windowed after the change:
+
+- **Pass:** `WaterFFTGate`, `WaterPhase1Gate`, `WaterBodiesPhase1/3/4/5/7Gate`, `WaterPresetCheck`,
+  `WaterVariantWarningCheck`, `WaterBodyLateManagerCheck`, `GraphWaterNodesGate` and
+  `WaterTwoLakesGate`.
+  - TwoLakes went red twice before this. First on the min-wavelength rule above.
+  - Then on [G]'s anti-null: its two cameras were congruent, centred on identical lakes with identical
+    body-relative waves. Gerstner's 0.00093 there was float rounding at x = ±400 m, and the FFT's texture
+    lookup has none. Camera 1 is now 40 m off its lake's centre (anti-null now 0.0218).
+  - Once the rebind made the pools' FFT live, [G] and [H] read about 0.0004 between captures. The gate
+    froze the clock by disabling the manager's physics process, but the FFT's foam still integrates the
+    frame `dt`. The gate now also sets `paused`, which zeroes it. The same holds for any capture
+    comparison: freezing water_time alone no longer freezes the surface.
+- **Already red, unchanged:** `WaterPhase2–5Gate` and `WaterBodiesPhase0Baseline`, which carry the STALE
+  FIXTURE header (8c538e51).
+- **Red by design:** `WaterBodiesPhase2Gate` compares the extracted ocean against a Gerstner-era image
+  (`bench/baselines/phase1_ref`). The ocean is now FFT, so its pixel criterion cannot pass until that
+  baseline is re-taken. That gate also takes timings, and it ran once before this was noticed.
+- **Not run:** `WaterBodiesPhase6Gate`, because it times a query.
+
+Visual check (ocean / lake / pond on a plain sheet, FFT vs Gerstner): all three draw a broadband sea with
+per-pixel slope detail. The thin dark streaks on back slopes near the horizon are the same in the
+Gerstner shots. They come from the empty fixture, which has nothing under the sheet.
 
 ## 7. Risks
 

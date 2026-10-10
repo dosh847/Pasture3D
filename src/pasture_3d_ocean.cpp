@@ -56,6 +56,12 @@ void Pasture3DOcean::_try_register_with_manager() {
 	if (!manager->is_connected("profiles_changed", cb)) {
 		manager->connect("profiles_changed", cb);
 	}
+	// The runtime material is a private duplicate, so the manager's re-upload after an FFT texture build
+	// cannot reach it; this does. Nothing else to redo -- the bounds did not move.
+	Callable rebind = callable_mp(this, &Pasture3DOcean::_rebuild_runtime_material);
+	if (!manager->is_connected("wave_textures_changed", rebind)) {
+		manager->connect("wave_textures_changed", rebind);
+	}
 	// So body_at() can hand out the ocean as the fallback for a point no pool claims --
 	// which is what makes a buoy work in open water.
 	manager->register_body(this);
