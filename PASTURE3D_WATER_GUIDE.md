@@ -14,8 +14,8 @@ class, `Pasture3DWaterBody`, so buoys (§5) and the query API (§6) work the sam
 the material, underwater and level controls in §4.
 
 Waves are an **FFT ocean simulation** (Tessendorf, four cascades, after Garrett Gunnell's Water) run
-on the GPU once per wave profile per frame, with an **fBm** fallback for renderers without a
-RenderingDevice or machines without the GPU time to spare. Rivers have their own channel model (§4).
+on the GPU once per wave profile per frame, with an **fBm** compatibility model for renderers without
+a RenderingDevice. The fBm is not the cheaper model (§3, §10). Rivers have their own channel model (§4).
 The sun is lit by Garrett's microfacet model inside `light()`.
 
 Design rationale, measurements and the phase history live in
@@ -150,8 +150,21 @@ old scene gets on load (below), so a lake still loads as that lake.
 **FFT needs a RenderingDevice** — Forward+ or Mobile. On Compatibility, or headless, a manager that
 asks for FFT draws fBm instead, warns once, and `is_wave_model_fallback()` says so.
 
-**fBm is the cheap model,** not a lesser one: a sum of `exp(sin)` octaves evaluated in the shader, no
-textures and no compute. It has no breaking signal, so it draws no crest foam.
+**fBm is the compatibility model, not the cheap one.** It is a sum of 40 `exp(sin)` octaves evaluated
+in the shader: no textures and no compute. Its per-pixel cost is about what the FFT's simulation and
+draw cost together (§10), and it looks worse: it has no breaking signal, so it draws no crest foam.
+It is the right choice where:
+
+- **There is no RenderingDevice:** Compatibility, or a headless server. There it is the only model,
+  and nothing warns.
+- **CPU height queries must be exact and same-frame.** `get_water_height()` under the fBm is the
+  shader's own sum (§6), with no readback lag and no first-frame flat answer. That suits a server
+  that simulates buoys headless, or lockstep multiplayer that needs every peer to agree.
+
+**Choosing fBm on Forward+ or Mobile warns.** The manager shows a configuration warning, logs once
+per run, and `is_fbm_by_choice()` returns true. It stays selectable, because it is useful for
+previewing what Compatibility players see. It may be hidden from the Forward+ inspector later. To
+save GPU time, lower `fft_resolution` to 128 instead.
 
 ### The knobs, on `Pasture3DWaveProfile`
 
@@ -567,9 +580,22 @@ await `RenderingServer.frame_post_draw`, which never emits headless).
 
 ## 10. Performance notes
 
-- **The FFT costs one simulation per profile in use,** every frame, whatever the screen covers: an
-  ocean, a lake and a pond on three profiles run three. `fft_resolution` 128 is a quarter of 256's
-  work. Not yet timed on this plugin's hardware; the fBm fallback costs no compute at all.
+- **The FFT costs one simulation per profile in use,** every frame, whatever the screen covers and
+  even with the water hidden: an ocean, a lake and a pond on three profiles run three.
+- **`fft_resolution` is the cost lever, not `wave_model`.** Measured GPU time, simulation plus draw,
+  for one body at 1280×800 on an RTX 3070 (`WaterModelCostTiming`, FFT spec §6.4):
+
+  | Model | Ocean | Lake |
+  |---|---|---|
+  | FFT, `fft_resolution` 128 | 0.27 ms | 0.27 ms |
+  | FFT, 256 (default) | 0.38 ms | 0.37 ms |
+  | FFT, 512 | 0.83 ms | 0.79 ms |
+  | fBm, 40 octaves (shipped) | 0.39 ms | 0.35 ms |
+
+  The fBm's cost is all fragment work, and its octave count cannot come down. At 16 octaves it
+  times like FFT 128, but cutting the series loses the short waves: the water goes glassy close up
+  and the sun glint turns into a blob. Respacing 16 octaves over the same wavelengths keeps the
+  detail but streaks (`WaterFBMOctaveCompare`).
 - **Geometry is nearly free; fragments are not.** Measured clipmap geometry cost is inside the noise
   floor. If you need the water cheaper, use the low tier or reduce how much screen it covers — do not
   reduce `mesh_lods`.
@@ -653,7 +679,13 @@ readback, and the first query on a quiet sea answers flat until one lands (§6).
 frames.
 
 **My sea looks different on Compatibility.** It is the fBm, not the FFT: that renderer has no
-RenderingDevice (§3). Set `wave_model` to fBm on Forward+ to preview it there.
+RenderingDevice (§3). Set `wave_model` to fBm on Forward+ to preview it there. The manager will warn
+that fBm is the compatibility model, which is expected while previewing.
+
+**The manager warns "wave_model is fBm on a renderer that can run the FFT".** fBm was chosen,
+directly or through `pasture_3d/water/wave_model`, on Forward+ or Mobile. It costs as much as the FFT
+there and looks worse (§3). Switch back to FFT, or use `fft_resolution` 128 to save GPU time. Keep
+fBm only to test, or when you need exact same-frame CPU heights.
 
 **The ocean vanishes when the camera moves.** Its cull volume is sized from the node's Y and the wave
 amplitude sum. Raise `cull_margin`.

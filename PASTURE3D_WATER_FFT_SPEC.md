@@ -3,7 +3,7 @@
 Status: **spec written 2026-10-09. Phase 1 built, gated (`WaterFFTGate` 6/6, §6.1) and committed
 (52212cbc). Phase 2 built, gated (`WaterFFTWiringGate` 4/4, §6.2) and committed (84923526). Phase 3
 built, gated and committed (47a3b43e, `WaterPBRGate` 3/3, §6.3). Phase 4 built, gated and committed
-(11a9a069, `WaterFBMGate`, §6.4); its uniform-branch timing is not measured yet. Phase 5 built and gated
+(11a9a069, `WaterFBMGate`, §6.4); its uniform-branch timing was measured after Phase 6 (§6.4). Phase 5 built and gated
 2026-10-09 (`WaterBuoyGate` on Forward+, headless and Compatibility, §6.5) and committed (70647d40).
 Phase 6 built and gated 2026-10-09 (`WaterRetireGerstnerGate` 4/4, §6.6), not committed. Gerstner is
 gone.**
@@ -530,10 +530,64 @@ No shader errors were logged on Forward+ or Compatibility.
 N's first framing tilted the orthographic camera 60°. That ran the view off the sheet, and both arms
 measured the background edge (ratio 1.0). The camera now stays straight down.
 
-**Not measured: the uniform-branch cost.** It needs the user's go-ahead (§6). The concern to measure: 40
-fragment octaves of `exp`, `sin` and `cos` near the camera can cost more per pixel than the FFT's eight
-texture taps. The footprint fade stops the loop early at distance only. If it measures badly, the levers
-are the fragment octave count, and the twin-variant route of §3.
+**Uniform-branch cost, measured 2026-10-09 with the user's go-ahead** (`WaterModelBranchTiming`, RTX 3070,
+1280×800, windowed Forward+). The shipped material is timed against the same shader with
+`WATER_STATIC_MODEL` defined: `_wave_model` becomes a const, the compiler folds the branch, and that is
+the code the twin-variant route would ship. Interleaved, five passes after a discarded warm-up, worst
+pass-to-pass spread 1.5%.
+
+| Body | Model | Uniform | Folded | Branch cost |
+|---|---|---|---|---|
+| ocean (clipmap) | FFT | 0.216 ms | 0.206 ms | +0.010 ms, +5.7% of the water |
+| ocean | fBm | 0.388 ms | 0.384 ms | +0.004 ms, +1.1% |
+| lake (meshed) | FFT | 0.216 ms | 0.204 ms | +0.012 ms, +6.9% |
+| lake | fBm | 0.347 ms | 0.340 ms | +0.007 ms, +2.3% |
+
+The water-hidden frame is 0.030 ms. Instrument checks: the folded and uniform variants draw identical
+frames (mean abs diff 0.00000), while folded FFT and folded fBm differ (0.034 / 0.027). Every arm costs
+more than the hidden frame.
+
+- The branch costs the **FFT** path, which is the default, 6–7% of the water's draw. The likely cause is
+  the untaken fBm code's register pressure on the shared program; the fBm path pays 1–2%.
+- **The fBm fallback draws ~1.7× the FFT's fragment cost** (0.38 vs 0.21 ms on the ocean): its 40
+  fragment octaves near the camera. Not counted here: the FFT's compute. It is dispatched outside the
+  viewport's render timer, so these figures compare draws only. The fBm is the "no compute" fallback,
+  not a cheaper draw.
+- Decided 2026-10-09: **keep the uniform branch.** Its ~10 µs does not justify making the manager swap
+  `shader` on its cached duplicates.
+
+**Full cost, FFT compute included** (`WaterModelCostTiming`, same machine and frame, user's go-ahead). The
+FFT's compute is bracketed by GPU timestamps queued from nodes that process before and after the manager.
+Checks: compute scales with N (0.058 < 0.163 < 0.605 ms); fBm arms read 0.0001 ms between the stamps;
+every arm draws more than the hidden frame. Draw spread 0.9%.
+
+| Arm | Draw | Compute | Total (ocean) | Total (lake) |
+|---|---|---|---|---|
+| FFT N=128 | 0.208 | 0.058 | 0.266 | 0.265 |
+| **FFT N=256 (shipped)** | 0.217 | 0.163 | **0.380** | **0.374** |
+| FFT N=512 | 0.223 | 0.605 | 0.828 | 0.794 |
+| **fBm 40 fragment octaves (shipped)** | 0.393 | — | **0.393** | **0.348** |
+| fBm 16 octaves | 0.276 | — | 0.276 | 0.278 |
+| fBm 12 octaves | 0.253 | — | 0.253 | 0.257 |
+
+- At the shipped settings the two models cost the **same** in total (0.38 vs 0.39 ms on the ocean). The
+  draw-only comparison above, which made the fBm look 1.7× dearer, left out 0.16 ms of compute.
+- fBm at 16 fragment octaves is 27% cheaper than the shipped FFT and level with FFT N=128.
+- The FFT's compute is per **profile**, whatever the water covers on screen; it ran even with the ocean
+  hidden (0.163 ms). An ocean, a lake and a pond on three profiles pay it three times, about 0.5 ms here.
+  The fBm's cost is per pixel.
+
+**Octave count, visually** (`WaterFBMOctaveCompare`, six views, 40 against 16). Plain 16 octaves cuts
+the series' short waves: the water goes glassy close up and the sun glint becomes a blob. 16 octaves
+respaced over the same wavelength range (frequency, amplitude and speed ratios raised to 39/15, height
+rescaled by the amplitude-sum ratio) keeps the detail but shows parallel streaking. Neither ships.
+
+**Decided 2026-10-09: the fBm is the compatibility model, not a performance option.** It stays at 40
+fragment octaves. Its value is that it needs no RenderingDevice (Compatibility, headless) and that
+CPU height queries are exact and same-frame, with no readback lag. The performance lever is
+`fft_resolution` 128. Choosing fBm where the FFT can run raises a configuration warning on the manager
+and a once-per-run log (`is_fbm_by_choice()`, `WaterFBMGate` [W] on all three renderers). It stays
+selectable for testing; hiding it from Forward+ is a possible later step.
 
 Existing gates, run windowed after the change, all pass: `WaterPBRGate`, `WaterFFTGate`,
 `WaterFFTWiringGate`, `WaterPhase1Gate`, `WaterBodiesPhase1/3/4/5/7Gate`, `WaterPresetCheck`,

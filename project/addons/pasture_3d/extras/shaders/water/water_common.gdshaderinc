@@ -90,7 +90,13 @@ uniform bool _draws_wave_profile = false;
 // material; uniform across a draw, so it costs a branch and no divergence (FFT spec §3). The default is
 // the fBm, whose uniform defaults below are the reference's waves: a material dropped on a bare mesh, with
 // no manager to upload anything, still makes waves (spec G6).
+#ifdef WATER_STATIC_MODEL
+// Measurement only: the branch folded at compile time, which is what the twin-variant alternative would
+// ship. WaterModelBranchTiming times the uniform branch against it (FFT spec §6.4).
+const int _wave_model = WATER_STATIC_MODEL;
+#else
 uniform int _wave_model = WATER_MODEL_FBM;
+#endif
 // The profile's Pasture3DWaterFFT outputs: 4 layers, one per cascade, full mip chains.
 //   _fft_displacement  xyz = displacement in metres, a = foam
 //   _fft_slope         xy  = dh/dx, dh/dz;  z = the cascade's own Jacobian

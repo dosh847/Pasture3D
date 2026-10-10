@@ -94,6 +94,10 @@ void Pasture3DPoolManager::_apply_model_to_profiles() {
 		LOG(WARN, "FFT waves need a RenderingDevice (Forward+ or Mobile) and this renderer has none; ",
 				"drawing the fBm fallback instead");
 	}
+	if (is_fbm_by_choice() && !_choice_warned) {
+		_choice_warned = true;
+		LOG(WARN, FBM_CHOICE_WARNING);
+	}
 	const int shader_model = model == WAVE_MODEL_FFT ? SHADER_MODEL_FFT : SHADER_MODEL_FBM;
 	for (int i = 0; i < _profiles.size(); i++) {
 		Ref<Pasture3DWaveProfile> profile = _profiles[i];
@@ -538,6 +542,10 @@ bool Pasture3DPoolManager::is_wave_model_fallback() const {
 	return _requested_wave_model() == WAVE_MODEL_FFT && !Pasture3DWaterFFT::is_supported();
 }
 
+bool Pasture3DPoolManager::is_fbm_by_choice() const {
+	return _requested_wave_model() == WAVE_MODEL_FBM && Pasture3DWaterFFT::is_supported();
+}
+
 int Pasture3DPoolManager::get_effective_fft_resolution() const {
 	int r = _fft_resolution;
 	if (r <= 0) {
@@ -753,6 +761,13 @@ Vector2 Pasture3DPoolManager::solve_domain(const StringName &p_profile, const Ve
 	return profile->solve_domain(p_target_xz, (real_t)_water_time);
 }
 
+// The editor's configuration warning and the runtime log share one text (FFT spec §6.4 has the numbers).
+const char *const Pasture3DPoolManager::FBM_CHOICE_WARNING =
+		"wave_model is fBm on a renderer that can run the FFT. fBm is the compatibility model, for renderers "
+		"without compute shaders (Compatibility, headless) and for exact, same-frame CPU height queries. Here "
+		"it costs as much as the FFT and looks worse; to save GPU time lower fft_resolution instead. Fine for "
+		"testing.";
+
 PackedStringArray Pasture3DPoolManager::_get_configuration_warnings() const {
 	PackedStringArray warnings;
 	if (_managers.size() > 1) {
@@ -763,8 +778,11 @@ PackedStringArray Pasture3DPoolManager::_get_configuration_warnings() const {
 	}
 	if (_profiles.is_empty()) {
 		warnings.push_back(
-				"No wave profiles. Water bodies selecting a profile by name will fall back to "
-				"whatever compile-time table their material's variant carries.");
+				"No wave profiles. Water bodies selecting a profile by name find none, so the manager "
+				"uploads nothing and their materials draw the shader's default fBm.");
+	}
+	if (is_fbm_by_choice()) {
+		warnings.push_back(FBM_CHOICE_WARNING);
 	}
 	if (_sun_light.is_null()) {
 		warnings.push_back(
@@ -990,6 +1008,8 @@ void Pasture3DPoolManager::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_fft_effective"), &Pasture3DPoolManager::is_fft_effective);
 	ClassDB::bind_method(D_METHOD("get_effective_wave_model"), &Pasture3DPoolManager::get_effective_wave_model);
 	ClassDB::bind_method(D_METHOD("is_wave_model_fallback"), &Pasture3DPoolManager::is_wave_model_fallback);
+	ClassDB::bind_method(D_METHOD("is_fbm_by_choice"), &Pasture3DPoolManager::is_fbm_by_choice);
+	ClassDB::bind_method(D_METHOD("get_manager_warnings"), &Pasture3DPoolManager::get_manager_warnings);
 	ClassDB::bind_method(D_METHOD("get_effective_fft_resolution"), &Pasture3DPoolManager::get_effective_fft_resolution);
 	ClassDB::bind_method(D_METHOD("refresh_project_settings"), &Pasture3DPoolManager::refresh_project_settings);
 	ClassDB::bind_static_method("Pasture3DPoolManager", D_METHOD("register_water_settings"),

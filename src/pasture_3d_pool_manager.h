@@ -132,6 +132,9 @@ private:
 	int _applied_resolution = -1;
 	// The no-device warning is about the machine, not the scene: once per process.
 	static inline bool _fallback_warned = false;
+	// Likewise the fBm-by-choice warning: once per process, whichever manager asks first.
+	static inline bool _choice_warned = false;
+	static const char *const FBM_CHOICE_WARNING;
 	// Simulations some material samples, in first-upload order. Only these are ticked: a profile no body
 	// selects costs nothing. Unique by pointer, so a simulation two profiles share is ticked once.
 	Vector<Ref<Pasture3DWaterFFT>> _live_ffts;
@@ -270,6 +273,10 @@ public:
 	bool is_fft_effective() const { return get_effective_wave_model() == WAVE_MODEL_FFT; }
 	// True when the FFT was asked for and the fBm is drawn instead because there is no device.
 	bool is_wave_model_fallback() const;
+	// fBm was ASKED for (here or through the project setting) on a renderer that can run the FFT. fBm is the
+	// compatibility model: on Forward+/Mobile it costs as much as the FFT and looks worse (FFT spec §6.4),
+	// so this warns. Still selectable, for testing and for exact CPU height queries.
+	bool is_fbm_by_choice() const;
 	void set_fft_resolution(const int p_resolution);
 	int get_fft_resolution() const { return _fft_resolution; }
 	// The resolution the simulations run at: the property, or the project setting when it is 0.
@@ -343,6 +350,11 @@ public:
 	Vector3 evaluate_surface_point(const StringName &p_profile, const Vector2 &p_domain_xz) const;
 	// Inverse: the domain parameter whose displaced point lands on p_target_xz.
 	Vector2 solve_domain(const StringName &p_profile, const Vector2 &p_target_xz) const;
+
+	// The same text _get_configuration_warnings() shows, as a BOUND method, for the reason
+	// Pasture3DOcean::get_ocean_warnings() exists: GDExtension virtuals are not callable from script,
+	// so a bench could not otherwise assert the fBm-by-choice warning is shown.
+	PackedStringArray get_manager_warnings() const { return _get_configuration_warnings(); }
 
 	PackedStringArray _get_configuration_warnings() const;
 };

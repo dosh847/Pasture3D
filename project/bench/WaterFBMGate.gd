@@ -30,6 +30,11 @@ extends Node
 #   [P] Project setting (Forward+ only: elsewhere FFT is not reachable to switch from). A manager in the
 #       tree on PROJECT follows pasture_3d/water/wave_model when it is written at runtime, both ways, with
 #       no call on the manager: the effective model, the profile, and a cached material's _wave_model.
+#   [W] fBm-by-choice warning (every mode). fBm ASKED for where the FFT could run is flagged: an explicit FBM
+#       manager, and a PROJECT manager with the project setting at fBm, report is_fbm_by_choice() and carry
+#       the configuration warning exactly when a RenderingDevice exists. Controls: an FFT manager and a
+#       PROJECT manager on the FFT setting never warn (so the warning is about fBm, not about any model),
+#       and with no device the FBM manager does not warn (fBm is the right model there, not a choice).
 #
 # Every criterion counts its completions; one that throws before asserting reports as missing.
 
@@ -70,17 +75,19 @@ func _ready() -> void:
 	var device := RenderingServer.get_rendering_device() != null
 	if headless:
 		_mode = "headless"
-		_criteria = ["H"]
+		_criteria = ["H", "W"]
 	elif not device:
 		_mode = "compatibility"
-		_criteria = ["H", "F", "N"]
+		_criteria = ["H", "F", "N", "W"]
 	else:
 		_mode = "forward+"
-		_criteria = ["F", "D", "L", "N", "P"]
+		_criteria = ["F", "D", "L", "N", "P", "W"]
 	print("=== WaterFBMGate (%s) ===" % _mode)
 	_make_profile()
 	if _criteria.has("H"):
 		_criterion_h()
+	if _criteria.has("W"):
+		_criterion_w(device)
 	if not headless:
 		_build_view()
 		_manager = _make_manager(Pasture3DPoolManager.WAVE_MODEL_FBM)
@@ -456,3 +463,36 @@ func _criterion_p() -> void:
 		details.append("setting %d -> effective %d, profile %d, material _wave_model %d (want %s)" % [
 				states[k][0], states[k][1], states[k][2], states[k][3], str(want[k])])
 	_check("P", states == want, "\n      " + "\n      ".join(details))
+
+
+func _criterion_w(p_device: bool) -> void:
+	var setting := "pasture_3d/water/wave_model"
+	var before: Variant = ProjectSettings.get_setting(setting, 0)
+	# [name, model, project setting, want warned]
+	var arms := [
+		["explicit FBM", Pasture3DPoolManager.WAVE_MODEL_FBM, 0, p_device],
+		["PROJECT, setting fBm", Pasture3DPoolManager.WAVE_MODEL_PROJECT, 1, p_device],
+		["CONTROL explicit FFT", Pasture3DPoolManager.WAVE_MODEL_FFT, 1, false],
+		["CONTROL PROJECT, setting FFT", Pasture3DPoolManager.WAVE_MODEL_PROJECT, 0, false],
+	]
+	var ok := true
+	var details := PackedStringArray()
+	for a in arms:
+		ProjectSettings.set_setting(setting, a[2])
+		var m := _make_manager(a[1])
+		var flag := m.is_fbm_by_choice()
+		var warned := false
+		for w in m.get_manager_warnings():
+			if String(w).contains("compatibility model"):
+				warned = true
+		m.free()
+		var good: bool = flag == a[3] and warned == a[3]
+		ok = ok and good
+		details.append("%-30s is_fbm_by_choice %s, warning %s (want %s)%s" % [
+				a[0], flag, warned, a[3], "" if good else "  <-- wrong"])
+	ProjectSettings.set_setting(setting, before)
+	details.append("device %s: %s" % [p_device,
+			"fBm is a choice here, so it warns" if p_device else "fBm is the only model here, so nothing warns"])
+	_check("W", ok, "
+      " + "
+      ".join(details))
