@@ -30,6 +30,17 @@
 #       [H]'s re-evaluation. get_height_sigma(), the CPU estimate the cull bounds and fit_sea use, squares
 #       to that expectation within 5%. Control: a sea at 0.6x the energy, realised and estimated, must miss.
 #   [M] Mip chain. Mip 1 is the 2x2 box average of mip 0, in every cascade, for both outputs.
+#   [G] Per-cascade tile, drawn, displaces and foam offset (PASTURE3D_WATER_REFERENCE_SPEC.md G1-G4). The
+#       defaults are the reference scene's: repeats 1/_Tile = (100, 1/3, 1/3, 1/0.13) m, a tile of 0 falls back
+#       to the cascade's length, and the foam offset sums all four cascades, hidden ones included (-0.84).
+#       A hidden cascade is not simulated: after a full update, an update later with drawn 0b1001 leaves
+#       layers 1 and 2 bit-identical while 0 and 3 move. Control: drawn 15 moves layer 1. get_height_sigma
+#       counts only the displacing cascades, drawn AND displaces: the default sea's estimate is below the
+#       all-displacing one, and displaces 15 under drawn 0b1001 gives the same estimate as drawn 15 under
+#       displaces 0b1001 (the AND). Control: the all-displacing estimate must differ.
+#
+# Every other criterion runs with all four cascades drawn and displacing (_make), because each reads all
+# four layers or the variance of all four.
 #
 # [A]'s tolerance carries an AMBIGUITY bound. A mode whose sqrt(g|k|)/w0 sits within float32 rounding of
 # an integer floors differently on the GPU than in the float64 oracle; its phase then differs by a whole
@@ -45,7 +56,7 @@
 # Run: Godot_v4.7-stable_win64_console.exe --path project res://bench/WaterFFTGate.tscn
 extends Node
 
-const CRITERIA: PackedStringArray = ["A", "S", "D", "H", "B", "P", "M"]
+const CRITERIA: PackedStringArray = ["A", "S", "D", "H", "B", "P", "M", "G"]
 const N := 128
 const PERIOD := 120.0
 const T_A := 37.3
@@ -97,6 +108,8 @@ func _make() -> Pasture3DWaterFFT:
 	fft.loop_period = PERIOD
 	fft.seed = 1
 	fft.choppiness = 0.8
+	fft.cascade_drawn = 15
+	fft.cascade_displaces = 15
 	return fft
 
 
@@ -108,6 +121,7 @@ func _run() -> void:
 	_criterion_b()
 	_criterion_p()
 	_criterion_m()
+	_criterion_g()
 
 
 # --- readback helpers ---------------------------------------------------------------------------------
@@ -588,3 +602,54 @@ func _criterion_m() -> void:
 	var ok := peak > 1e-6 and checked > 0 and worst <= 1.0
 	_check("M", ok, "%d mip-1 texel channels vs 2x2 mip-0 average, worst err/tol %.3f, peak %s" % [
 			checked, worst, _g(peak)])
+
+
+# --- [G] per-cascade tile, drawn, displaces, foam offset --------------------------------------------------
+
+func _criterion_g() -> void:
+	var def := Pasture3DWaterFFT.new()
+	var want_rep := Vector4(100.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 0.13)
+	var rep := def.get_cascade_repeats()
+	var rep_ok := rep.is_equal_approx(want_rep)
+	def.cascade_tiles = Vector4(0.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 0.13)
+	var fallback_ok := is_equal_approx(def.get_cascade_repeats().x, def.cascade_lengths.x)
+	var foam := def.get_foam_offset_sum()
+	var foam_ok := is_equal_approx(foam, -0.84)
+	var masks_ok := def.cascade_drawn == 0b1001 and def.cascade_displaces == 0b0001 and def.get_displacing_mask() == 0b0001
+
+	# Skipping. A full update first, so every layer holds a real field.
+	var fft := _make()
+	fft.update(T_A, 0.0)
+	var before: Array[PackedFloat32Array] = []
+	for c in 4:
+		before.append(_disp(fft, c))
+	var empty := false
+	for c in 4:
+		empty = empty or _variance_y(before[c]) < 1e-10
+	fft.cascade_drawn = 0b1001
+	fft.update(T_A + 0.5, 0.0)
+	var held := before[1] == _disp(fft, 1) and before[2] == _disp(fft, 2)
+	var moved := before[0] != _disp(fft, 0) and before[3] != _disp(fft, 3)
+	fft.cascade_drawn = 15
+	fft.update(T_A + 1.0, 0.0)
+	var ctl_moved := before[1] != _disp(fft, 1)
+
+	# Sigma counts the displacing set.
+	var all := _make()
+	var s_all := all.get_height_sigma()
+	var d := _make()
+	d.cascade_drawn = def.cascade_drawn
+	d.cascade_displaces = def.cascade_displaces
+	var s_def := d.get_height_sigma()
+	var a := _make()
+	a.cascade_drawn = 0b1001
+	var s_a := a.get_height_sigma()
+	var b := _make()
+	b.cascade_displaces = 0b1001
+	var s_b := b.get_height_sigma()
+	var sigma_ok := s_def > 1e-4 and s_def < s_all and is_equal_approx(s_a, s_b) and absf(s_a - s_all) > 1e-4
+
+	var ok := rep_ok and fallback_ok and foam_ok and masks_ok and not empty and held and moved and ctl_moved and sigma_ok
+	_check("G", ok, "default repeats %s (want %s): %s; tile 0 falls back to the length: %s; foam offset sum %.3f (want -0.84); masks drawn %d displaces %d displacing %d: %s; drawn 0b1001: hidden layers held %s, shown layers moved %s (fields empty: %s); control drawn 15 moves layer 1: %s; sigma default %.4f m < all-displacing %.4f m, drawn 0b1001 %.4f m == displaces 0b1001 %.4f m (must differ from all): %s" % [
+			rep, want_rep, rep_ok, fallback_ok, foam, def.cascade_drawn, def.cascade_displaces, def.get_displacing_mask(), masks_ok,
+			held, moved, empty, ctl_moved, s_def, s_all, s_a, s_b, sigma_ok])

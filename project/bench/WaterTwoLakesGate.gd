@@ -1185,7 +1185,7 @@ func _cover_for(p_pool) -> ShaderMaterial:
 			"_shore_offset", "_shore_kill_margin", "sea_level"]:
 		cover.set_shader_parameter(nm, rt.get_shader_parameter(nm))
 	if _carry_waves:
-		for nm in ["_wave_model", "_fft_displacement", "_fft_slope", "_fft_lengths",
+		for nm in ["_wave_model", "_fft_displacement", "_fft_slope", "_fft_repeat", "_fft_drawn", "_fft_displaces",
 				"_fbm_v0", "_fbm_v1", "_fbm_v2", "_fbm_v3"]:
 			cover.set_shader_parameter(nm, rt.get_shader_parameter(nm))
 	else:

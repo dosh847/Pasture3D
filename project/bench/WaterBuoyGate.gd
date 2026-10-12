@@ -381,12 +381,15 @@ func _criterion_r() -> void:
 
 
 # Displacement at a domain point from four synchronous layer reads: the sampler, written again here.
-func _sync_sample(p_layers: Array, p_n: int, p_lengths: Vector4, p_dom: Vector2) -> Vector3:
+# Only the cascades that displace, each at its own repeat: a hidden cascade's layer is not even updated.
+func _sync_sample(p_layers: Array, p_n: int, p_repeats: Vector4, p_mask: int, p_dom: Vector2) -> Vector3:
 	var sum := Vector3.ZERO
 	for c in 4:
+		if not (p_mask >> c) & 1:
+			continue
 		var bytes: PackedByteArray = p_layers[c]
-		var x := p_dom.x / p_lengths[c] * p_n - 0.5
-		var z := p_dom.y / p_lengths[c] * p_n - 0.5
+		var x := p_dom.x / p_repeats[c] * p_n - 0.5
+		var z := p_dom.y / p_repeats[c] * p_n - 0.5
 		var fx := floorf(x)
 		var fz := floorf(z)
 		var tx := x - fx
@@ -436,7 +439,8 @@ func _criteria_s_a() -> void:
 	await _settle(20)
 	# The manager re-uploads its cache on a texture rebuild, but this material is not in its cache.
 	m.upload_profile_into(mat, &"buoy_fft")
-	print("    FFT sea: resolution %d, lengths %s, height sigma %.3f m" % [fft.get_resolution(), fft.get_cascade_lengths(), fft.get_height_sigma()])
+	print("    FFT sea: resolution %d, repeats %s, displacing mask %d, height sigma %.3f m" % [
+			fft.get_resolution(), fft.get_cascade_repeats(), fft.get_displacing_mask(), fft.get_height_sigma()])
 
 	# The earlier instant: CPU answers kept, the stale buffer of both controls.
 	var held0: bool = await _hold(m, profile, &"buoy_fft")
@@ -463,11 +467,12 @@ func _criteria_s_a() -> void:
 	# [S]
 	var layers := _sync_layers(fft)
 	var n: int = fft.get_resolution()
-	var lengths: Vector4 = fft.get_cascade_lengths()
+	var repeats: Vector4 = fft.get_cascade_repeats()
+	var mask: int = fft.get_displacing_mask()
 	var s_err := 0.0
 	var s_ctrl := 0.0
 	for k in points.size():
-		var want := _sync_sample(layers, n, lengths, points[k])
+		var want := _sync_sample(layers, n, repeats, mask, points[k])
 		var got: Vector3 = fft.sample_cpu_displacement(points[k])
 		s_err = maxf(s_err, (got - want).length())
 		s_ctrl = maxf(s_ctrl, (cpu0[k] - want).length())

@@ -341,8 +341,11 @@ void Pasture3DWaterFFT::_write_params() {
 	_rd->buffer_update(_params_buffer, 0, PARAM_FLOATS * 4, bytes);
 }
 
-static PackedByteArray push_bytes(const float p_a, const float p_b) {
+// Every kernel's push constant is 16 bytes: two floats (UPDATE, ASSEMBLE: time and dt; DOWNSAMPLE: the
+// destination size as uint bits), then the cascade mask the kernel skips the rest of.
+static PackedByteArray push_bytes(const float p_a, const float p_b, const uint32_t p_mask) {
 	float f[4] = { p_a, p_b, 0.f, 0.f };
+	memcpy(&f[2], &p_mask, 4);
 	PackedByteArray bytes;
 	bytes.resize(16);
 	memcpy(bytes.ptrw(), f, 16);
@@ -389,30 +392,35 @@ void Pasture3DWaterFFT::_render_update(const float p_time, const float p_dt, con
 	};
 	const PackedByteArray none;
 	if (_spectrum_dirty) {
+		// Every cascade, drawn or not, so that drawing one later needs no re-initialisation.
 		dispatch(K_INIT, _sets[K_INIT], none, groups, groups);
 		dispatch(K_PACK, _sets[K_PACK], none, groups, groups);
 		_spectrum_dirty = false;
 	}
-	dispatch(K_UPDATE, _sets[K_UPDATE], push_bytes(p_time, p_dt), groups, groups);
-	dispatch(K_FFT_H, _sets[K_FFT_H], none, 1, n);
-	dispatch(K_FFT_V, _sets[K_FFT_V], none, 1, n);
-	dispatch(K_ASSEMBLE, _sets[K_ASSEMBLE], push_bytes(p_time, p_dt), groups, groups);
+	// The per-frame kernels run only the drawn cascades (spec G2): a hidden one keeps its last frame.
+	const uint32_t drawn = (uint32_t)(_cascade_drawn & 0xf);
+	dispatch(K_UPDATE, _sets[K_UPDATE], push_bytes(p_time, p_dt, drawn), groups, groups);
+	dispatch(K_FFT_H, _sets[K_FFT_H], push_bytes(0.f, 0.f, drawn), 1, n);
+	dispatch(K_FFT_V, _sets[K_FFT_V], push_bytes(0.f, 0.f, drawn), 1, n);
+	dispatch(K_ASSEMBLE, _sets[K_ASSEMBLE], push_bytes(p_time, p_dt, drawn), groups, groups);
 	for (int m = 1; m < _mip_count; m++) {
-		int size = n >> m;
-		uint32_t pc[4] = { (uint32_t)size, 0u, 0u, 0u };
-		PackedByteArray bytes;
-		bytes.resize(16);
-		memcpy(bytes.ptrw(), pc, 16);
-		dispatch(K_DOWNSAMPLE, _downsample_sets[m - 1], bytes, (size + 7) / 8, (size + 7) / 8);
+		const uint32_t size = (uint32_t)(n >> m);
+		float size_bits;
+		memcpy(&size_bits, &size, 4);
+		dispatch(K_DOWNSAMPLE, _downsample_sets[m - 1], push_bytes(size_bits, 0.f, drawn), (size + 7) / 8,
+				(size + 7) / 8);
 	}
 	_update_count++;
 
-	if (p_readback) {
+	const int displacing = get_displacing_mask();
+	if (p_readback && displacing != 0) {
 		// Queued after AssembleMaps (and the mips, which the copy does not need but cannot skip: a layer's
-		// download carries its whole chain). The device delivers each layer when the frame completes.
+		// download carries its whole chain). The device delivers each layer when the frame completes. Only
+		// the displacing cascades: the others move nothing a buoy could ride.
 		PendingReadback pending;
 		pending.surface.resolution = n;
-		pending.surface.lengths = _cascade_lengths;
+		pending.surface.repeats = get_cascade_repeats();
+		pending.surface.displaces = displacing;
 		pending.surface.time = p_time;
 		pending.surface.update = _update_count;
 		{
@@ -423,8 +431,10 @@ void Pasture3DWaterFFT::_render_update(const float p_time, const float p_dt, con
 			_pending.push_back(pending);
 		}
 		for (int c = 0; c < CASCADES; c++) {
-			_rd->texture_get_data_async(_disp_tex, c,
-					callable_mp(this, &Pasture3DWaterFFT::_on_readback).bind(c, _update_count));
+			if (displacing & (1 << c)) {
+				_rd->texture_get_data_async(_disp_tex, c,
+						callable_mp(this, &Pasture3DWaterFFT::_on_readback).bind(c, _update_count));
+			}
 		}
 	}
 }
@@ -450,7 +460,7 @@ void Pasture3DWaterFFT::_on_readback(const PackedByteArray &p_data, const int p_
 	// Mip 0 leads the layer's chain.
 	pending.surface.layers[p_layer] = p_data.size() == bytes ? p_data : p_data.slice(0, bytes);
 	pending.received |= 1 << p_layer;
-	if (pending.received != (1 << CASCADES) - 1) {
+	if (pending.received != pending.surface.displaces) {
 		return;
 	}
 	if (pending.surface.update > _cpu_surface.update) {
@@ -626,13 +636,13 @@ Vector3 Pasture3DWaterFFT::CpuSurface::sample(const Vector2 &p_domain_xz) const 
 	const int n = resolution;
 	const int64_t bytes = (int64_t)n * n * 8;
 	for (int c = 0; c < CASCADES; c++) {
-		if (layers[c].size() < bytes || lengths[c] <= 0.f) {
+		if (!(displaces & (1 << c)) || layers[c].size() < bytes || repeats[c] <= 0.f) {
 			continue;
 		}
 		const uint16_t *texels = reinterpret_cast<const uint16_t *>(layers[c].ptr());
 		// In double: a domain kilometres from the origin over a 4 m tile is a large texel coordinate.
-		const double x = (double)p_domain_xz.x / lengths[c] * n - 0.5;
-		const double z = (double)p_domain_xz.y / lengths[c] * n - 0.5;
+		const double x = (double)p_domain_xz.x / repeats[c] * n - 0.5;
+		const double z = (double)p_domain_xz.y / repeats[c] * n - 0.5;
 		const double fx = std::floor(x);
 		const double fz = std::floor(z);
 		const float tx = (float)(x - fx);
@@ -781,6 +791,55 @@ void Pasture3DWaterFFT::set_cascade_lengths(const Vector4 &p_lengths) {
 	_knob_changed(true);
 }
 
+void Pasture3DWaterFFT::set_cascade_tiles(const Vector4 &p_tiles) {
+	Vector4 v(MAX(p_tiles.x, 0.f), MAX(p_tiles.y, 0.f), MAX(p_tiles.z, 0.f), MAX(p_tiles.w, 0.f));
+	if (v == _cascade_tiles) {
+		return;
+	}
+	_cascade_tiles = v;
+	_knob_changed(false);
+}
+
+void Pasture3DWaterFFT::set_cascade_drawn(const int p_mask) {
+	const int m = p_mask & 0xf;
+	if (m == _cascade_drawn) {
+		return;
+	}
+	_cascade_drawn = m;
+	_sigma_dirty = true; // the displacing set is drawn AND displaces
+	_knob_changed(false);
+}
+
+void Pasture3DWaterFFT::set_cascade_displaces(const int p_mask) {
+	const int m = p_mask & 0xf;
+	if (m == _cascade_displaces) {
+		return;
+	}
+	_cascade_displaces = m;
+	_sigma_dirty = true;
+	_knob_changed(false);
+}
+
+void Pasture3DWaterFFT::set_cascade_foam_offset(const Vector4 &p_offset) {
+	if (p_offset == _cascade_foam_offset) {
+		return;
+	}
+	_cascade_foam_offset = p_offset;
+	_knob_changed(false);
+}
+
+Vector4 Pasture3DWaterFFT::get_cascade_repeats() const {
+	Vector4 r;
+	for (int i = 0; i < CASCADES; i++) {
+		r[i] = _cascade_tiles[i] > 0.f ? _cascade_tiles[i] : _cascade_lengths[i];
+	}
+	return r;
+}
+
+float Pasture3DWaterFFT::get_foam_offset_sum() const {
+	return _cascade_foam_offset.x + _cascade_foam_offset.y + _cascade_foam_offset.z + _cascade_foam_offset.w;
+}
+
 void Pasture3DWaterFFT::set_band_limited(const bool p_enabled) {
 	if (p_enabled == _band_limited) {
 		return;
@@ -858,6 +917,9 @@ struct SeaTerms {
 /**
  * The sea's variance, on the CPU.
  *
+ * Of the displacing cascades only (get_displacing_mask()): the others move nothing, and a sea whose bound
+ * counted them would cull and fit to waves it does not draw.
+ *
  * The expected spatial variance of a cascade's height is the sum, over the modes its grid holds, of
  * E|htilde(k)|^2 -- with the reference's h0, sqrt(2 Psi dk^2) per Gaussian pair, that is 8 Psi(k) dk^2 per
  * mode, Psi being the spectrum the INIT kernel builds: JONSWAP x TMA x fade x spread x dw/dk / k. The
@@ -883,7 +945,11 @@ float Pasture3DWaterFFT::get_height_sigma() const {
 	const Vector4 hi = get_band_high();
 	const int steps = 2000;
 	double total = 0.0;
+	const int displacing = get_displacing_mask();
 	for (int c = 0; c < CASCADES; c++) {
+		if (!(displacing & (1 << c))) {
+			continue;
+		}
 		const double dk = Math_TAU / MAX(_cascade_lengths[c], 0.01f);
 		const double k_ring = LOW_RING * dk;
 		const double k_max = MIN(0.5 * _resolution * dk, (double)hi[c]);
@@ -1085,6 +1151,17 @@ void Pasture3DWaterFFT::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_loop_period"), &Pasture3DWaterFFT::get_loop_period);
 	ClassDB::bind_method(D_METHOD("set_cascade_lengths", "lengths"), &Pasture3DWaterFFT::set_cascade_lengths);
 	ClassDB::bind_method(D_METHOD("get_cascade_lengths"), &Pasture3DWaterFFT::get_cascade_lengths);
+	ClassDB::bind_method(D_METHOD("set_cascade_tiles", "tiles"), &Pasture3DWaterFFT::set_cascade_tiles);
+	ClassDB::bind_method(D_METHOD("get_cascade_tiles"), &Pasture3DWaterFFT::get_cascade_tiles);
+	ClassDB::bind_method(D_METHOD("set_cascade_drawn", "mask"), &Pasture3DWaterFFT::set_cascade_drawn);
+	ClassDB::bind_method(D_METHOD("get_cascade_drawn"), &Pasture3DWaterFFT::get_cascade_drawn);
+	ClassDB::bind_method(D_METHOD("set_cascade_displaces", "mask"), &Pasture3DWaterFFT::set_cascade_displaces);
+	ClassDB::bind_method(D_METHOD("get_cascade_displaces"), &Pasture3DWaterFFT::get_cascade_displaces);
+	ClassDB::bind_method(D_METHOD("set_cascade_foam_offset", "offset"), &Pasture3DWaterFFT::set_cascade_foam_offset);
+	ClassDB::bind_method(D_METHOD("get_cascade_foam_offset"), &Pasture3DWaterFFT::get_cascade_foam_offset);
+	ClassDB::bind_method(D_METHOD("get_cascade_repeats"), &Pasture3DWaterFFT::get_cascade_repeats);
+	ClassDB::bind_method(D_METHOD("get_displacing_mask"), &Pasture3DWaterFFT::get_displacing_mask);
+	ClassDB::bind_method(D_METHOD("get_foam_offset_sum"), &Pasture3DWaterFFT::get_foam_offset_sum);
 	ClassDB::bind_method(D_METHOD("set_band_limited", "enabled"), &Pasture3DWaterFFT::set_band_limited);
 	ClassDB::bind_method(D_METHOD("get_band_limited"), &Pasture3DWaterFFT::get_band_limited);
 	ClassDB::bind_method(D_METHOD("set_foam_bias", "value"), &Pasture3DWaterFFT::set_foam_bias);
@@ -1106,6 +1183,10 @@ void Pasture3DWaterFFT::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "choppiness", PROPERTY_HINT_RANGE, "0.0,3.0,0.01"), "set_choppiness", "get_choppiness");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "loop_period", PROPERTY_HINT_RANGE, "1.0,600.0,0.1,suffix:s", PROPERTY_USAGE_NONE), "set_loop_period", "get_loop_period");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR4, "cascade_lengths", PROPERTY_HINT_NONE, "suffix:m"), "set_cascade_lengths", "get_cascade_lengths");
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR4, "cascade_tiles", PROPERTY_HINT_NONE, "suffix:m"), "set_cascade_tiles", "get_cascade_tiles");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "cascade_drawn", PROPERTY_HINT_FLAGS, "Cascade 1,Cascade 2,Cascade 3,Cascade 4"), "set_cascade_drawn", "get_cascade_drawn");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "cascade_displaces", PROPERTY_HINT_FLAGS, "Cascade 1,Cascade 2,Cascade 3,Cascade 4"), "set_cascade_displaces", "get_cascade_displaces");
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR4, "cascade_foam_offset"), "set_cascade_foam_offset", "get_cascade_foam_offset");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "band_limited"), "set_band_limited", "get_band_limited");
 	ADD_GROUP("Foam", "foam_");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "foam_bias", PROPERTY_HINT_RANGE, "-2.0,2.0,0.01"), "set_foam_bias", "get_foam_bias");

@@ -45,11 +45,14 @@ WaveSample water_eval_fft(vec3 p_pos, float p_spacing) {
 	vec2 slope = vec2(0.0);
 	float foam = 0.0;
 	for (int i = 0; i < 4; i++) {
-		float len = _fft_lengths[i];
+		if (_fft_drawn[i] == 0.0) {
+			continue;
+		}
+		float len = _fft_repeat[i];
 		vec3 uvw = vec3(domain / len, float(i));
 		float lod = water_fft_lod(p_spacing, len, texels);
 		vec4 d = textureLod(_fft_displacement, uvw, lod);
-		disp += d.xyz;
+		disp += d.xyz * _fft_displaces[i];
 		foam += d.w;
 		slope += textureLod(_fft_slope, uvw, lod).xy;
 	}

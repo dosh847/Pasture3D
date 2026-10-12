@@ -85,18 +85,27 @@ layout(rgba16f, set = 0, binding = 8) restrict writeonly uniform image2D slope_d
 layout(push_constant, std430) uniform Push {
 	uint dst_size;
 	uint pad0;
+	uint drawn;  // bit per cascade: the others are skipped (spec G2)
 	uint pad1;
-	uint pad2;
 } pc;
 #endif
 
-#if defined(KERNEL_UPDATE) || defined(KERNEL_ASSEMBLE)
+#if defined(KERNEL_UPDATE) || defined(KERNEL_ASSEMBLE) || defined(KERNEL_FFT_H) || defined(KERNEL_FFT_V)
 layout(push_constant, std430) uniform Push {
 	float time;
 	float dt;
-	float pad0;
+	uint drawn;  // bit per cascade: the others are skipped (spec G2)
 	float pad1;
 } pc;
+#endif
+
+#ifndef KERNEL_INIT
+#ifndef KERNEL_PACK
+// Whether cascade i is drawn. A hidden cascade's layers keep their last frame: nothing samples them.
+bool drawn(int i) {
+	return (pc.drawn & (1u << uint(i))) != 0u;
+}
+#endif
 #endif
 
 vec2 complex_mult(vec2 a, vec2 b) {
@@ -256,6 +265,9 @@ void main() {
 	float half_n = float(N) / 2.0;
 	float w_0 = TWO_PI / params.repeat_time;
 	for (int i = 0; i < 4; i++) {
+		if (!drawn(i)) {
+			continue;
+		}
 		vec4 initial = imageLoad(initial_spectrum, ivec3(id, i));
 		vec2 h0 = initial.xy;
 		vec2 h0_conj = initial.zw;
@@ -343,6 +355,10 @@ void main() {
 	ivec2 texel = ivec2(int(row), int(t));
 #endif
 	for (int i = 0; i < 8; i++) {
+		// Uniform across the workgroup, so the barriers inside fft() are still reached by every thread.
+		if (!drawn(i / 2)) {
+			continue;
+		}
 		vec4 result = fft(t, imageLoad(spectrum, ivec3(texel, i)));
 		imageStore(spectrum, ivec3(texel, i), result);
 	}
@@ -362,6 +378,9 @@ void main() {
 	}
 	vec2 lambda = params.lambda;
 	for (int i = 0; i < 4; i++) {
+		if (!drawn(i)) {
+			continue;
+		}
 		vec4 hd = permute(imageLoad(spectrum, ivec3(id, i * 2)), id);
 		vec4 hs = permute(imageLoad(spectrum, ivec3(id, i * 2 + 1)), id);
 
@@ -399,6 +418,9 @@ void main() {
 	}
 	ivec2 s = id * 2;
 	for (int i = 0; i < 4; i++) {
+		if (!drawn(i)) {
+			continue;
+		}
 		vec4 d = imageLoad(disp_src[i], s) + imageLoad(disp_src[i], s + ivec2(1, 0)) +
 				imageLoad(disp_src[i], s + ivec2(0, 1)) + imageLoad(disp_src[i], s + ivec2(1, 1));
 		vec4 g = imageLoad(slope_src[i], s) + imageLoad(slope_src[i], s + ivec2(1, 0)) +

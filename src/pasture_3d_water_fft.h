@@ -39,7 +39,10 @@ using namespace godot;
  * Outputs, N x N x 4 layers (one per cascade), rgba16f with a full mip chain:
  *   displacement  xyz = displacement in metres (x/z scaled by choppiness), a = foam in [0, 1+]
  *   slope         xy  = height slope d(y)/dx, d(y)/dz, z = Jacobian of the horizontal displacement
- * Cascade i tiles every cascade_lengths[i] metres and carries spectra 2i and 2i+1, as the reference does.
+ * Cascade i simulates a cascade_lengths[i] metre tile and carries spectra 2i and 2i+1, as the reference does.
+ * It is DRAWN repeating every get_cascade_repeats()[i] metres -- cascade_tiles, the reference's per-cascade
+ * _Tile, which need not be the simulated length -- and only the cascades in cascade_drawn are simulated or
+ * drawn at all, as the reference's visualizeLayer. PASTURE3D_WATER_REFERENCE_SPEC.md G1-G4.
  *
  * The CPU's copy of the surface (buoys, PASTURE3D_WATER_FFT_SPEC.md §5) is a readback of the displacement's
  * mip 0, taken only while something asks for it: see request_cpu_surface() and get_cpu_surface().
@@ -74,14 +77,16 @@ public:
 	struct CpuSurface {
 		PackedByteArray layers[CASCADES];
 		int resolution = 0;
-		Vector4 lengths;
+		Vector4 repeats; // metres per tile as DRAWN: get_cascade_repeats()
+		int displaces = 0; // the cascades summed, get_displacing_mask(); only these are read back
 		float time = 0.f; // the water clock this frame was dispatched at
 		int update = -1; // get_update_count() after that dispatch
 
 		bool is_valid() const { return resolution > 0; }
 		// The summed displacement (x, y, z) in metres at a rest-domain point, with the vertex shader's
-		// texel convention (water_eval_fft): uv = domain / length, repeat-wrapped, bilinear between texel
-		// centres at (i + 0.5) / N. Mip 0, so every cascade at full detail. Zero when invalid.
+		// texel convention (water_eval_fft): uv = domain / repeat, repeat-wrapped, bilinear between texel
+		// centres at (i + 0.5) / N, over the displacing cascades only. Mip 0, so every cascade at full
+		// detail. Zero when invalid.
 		Vector3 sample(const Vector2 &p_domain_xz) const;
 	};
 
@@ -118,6 +123,11 @@ private:
 	float _choppiness = 1.f;
 	float _loop_period = 120.f;
 	Vector4 _cascade_lengths = Vector4(94.f, 128.f, 64.f, 32.f);
+	// The scene's tile_i are 0.01, 3, 3 and 0.13 per metre: these repeats. 0 means the cascade's length.
+	Vector4 _cascade_tiles = Vector4(100.f, 1.f / 3.f, 1.f / 3.f, 1.f / 0.13f);
+	int _cascade_drawn = 0b1001; // visualizeLayer1..4
+	int _cascade_displaces = 0b0001; // contributeDisplacement1..4
+	Vector4 _cascade_foam_offset = Vector4(0.04f, -0.04f, -0.46f, -0.38f); // foamSubtract1..4
 	bool _band_limited = false;
 	SpectrumKnobs _spectra[SPECTRA];
 	float _foam_bias = 0.85f;
@@ -254,6 +264,24 @@ public:
 	Vector4 get_cascade_lengths() const { return _cascade_lengths; }
 	void set_band_limited(const bool p_enabled);
 	bool get_band_limited() const { return _band_limited; }
+	void set_cascade_tiles(const Vector4 &p_tiles);
+	Vector4 get_cascade_tiles() const { return _cascade_tiles; }
+	void set_cascade_drawn(const int p_mask);
+	int get_cascade_drawn() const { return _cascade_drawn; }
+	void set_cascade_displaces(const int p_mask);
+	int get_cascade_displaces() const { return _cascade_displaces; }
+	void set_cascade_foam_offset(const Vector4 &p_offset);
+	Vector4 get_cascade_foam_offset() const { return _cascade_foam_offset; }
+
+	// Metres per drawn tile: cascade_tiles, with 0 meaning the cascade's own length.
+	Vector4 get_cascade_repeats() const;
+	// The cascades that move the surface: displaces AND drawn, because the reference multiplies its
+	// displacement by both flags. The height sigma, the bounds and the CPU surface all count only these.
+	int get_displacing_mask() const { return _cascade_drawn & _cascade_displaces & 0xf; }
+	// What the shader adds to the summed foam before it clamps: every cascade's offset, DRAWN OR NOT. The
+	// reference adds _FoamSubtract_i after multiplying the sample by the layer's flag, so a hidden cascade
+	// still subtracts its offset (the scene's total is -0.84 with two of four drawn).
+	float get_foam_offset_sum() const;
 
 	void set_spectrum_knob(const int p_spectrum, const StringName &p_knob, const float p_value);
 	float get_spectrum_knob(const int p_spectrum, const StringName &p_knob) const;

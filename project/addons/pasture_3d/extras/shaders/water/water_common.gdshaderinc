@@ -100,11 +100,19 @@ uniform int _wave_model = WATER_MODEL_FBM;
 // The profile's Pasture3DWaterFFT outputs: 4 layers, one per cascade, full mip chains.
 //   _fft_displacement  xyz = displacement in metres, a = foam
 //   _fft_slope         xy  = dh/dx, dh/dz;  z = the cascade's own Jacobian
-// Cascade i tiles every _fft_lengths[i] metres of DOMAIN space. The mips are the simulation's own 2x2
-// box chain (WaterFFTGate [M]); the sampler's job is only to pick and blend them.
+// Cascade i repeats every _fft_repeat[i] metres of DOMAIN space: the reference's per-cascade _Tile, which
+// need not be the length it was simulated at (PASTURE3D_WATER_REFERENCE_SPEC.md G1). The mips are the
+// simulation's own 2x2 box chain (WaterFFTGate [M]); the sampler's job is only to pick and blend them.
+// Per cascade, 0 or 1 (G2-G4): _fft_drawn, the reference's visualizeLayer, gates everything the cascade
+// contributes; _fft_displaces, its contributeDisplacement already ANDed with drawn, gates the geometry.
+// _fft_foam_offset is every cascade's foamSubtract summed, hidden ones included, as the reference adds them.
+// Defaults are the reference's scene, so a material bound by hand draws what it drew.
 uniform sampler2DArray _fft_displacement : filter_linear_mipmap, repeat_enable, hint_default_black;
 uniform sampler2DArray _fft_slope : filter_linear_mipmap_anisotropic, repeat_enable, hint_default_black;
-uniform vec4 _fft_lengths = vec4(500.0, 85.0, 16.0, 4.0);
+uniform vec4 _fft_repeat = vec4(100.0, 0.33333334, 0.33333334, 7.6923075);
+uniform vec4 _fft_drawn = vec4(1.0, 0.0, 0.0, 1.0);
+uniform vec4 _fft_displaces = vec4(1.0, 0.0, 0.0, 0.0);
+uniform float _fft_foam_offset = -0.84;
 // The profile's Pasture3DWaterFBM, one set for the geometry (_fbm_v*) and one for the normals (_fbm_f*),
 // packed as Pasture3DWaterFBM::get_shader_pack() documents:
 //   0 = (seed, seed_iter, frequency, frequency_mult)   1 = (amplitude, amplitude_mult, speed, speed_ramp)

@@ -66,7 +66,16 @@ void Pasture3DPoolManager::_upload_into(const Ref<Material> &p_material, const R
 		// set_texture_rd_rid() later replaces in place. Uploading before the first tick is therefore fine.
 		mat->set_shader_parameter("_fft_displacement", fft->get_displacement_texture());
 		mat->set_shader_parameter("_fft_slope", fft->get_slope_texture());
-		mat->set_shader_parameter("_fft_lengths", fft->get_cascade_lengths());
+		mat->set_shader_parameter("_fft_repeat", fft->get_cascade_repeats());
+		Vector4 drawn;
+		Vector4 displaces;
+		for (int i = 0; i < Pasture3DWaterFFT::CASCADES; i++) {
+			drawn[i] = (fft->get_cascade_drawn() >> i) & 1 ? 1.f : 0.f;
+			displaces[i] = (fft->get_displacing_mask() >> i) & 1 ? 1.f : 0.f;
+		}
+		mat->set_shader_parameter("_fft_drawn", drawn);
+		mat->set_shader_parameter("_fft_displaces", displaces);
+		mat->set_shader_parameter("_fft_foam_offset", fft->get_foam_offset_sum());
 		const int at = _live_ffts.find(fft);
 		if (at < 0) {
 			_live_ffts.push_back(fft);
@@ -267,7 +276,7 @@ void Pasture3DPoolManager::register_water_settings() {
 
 bool Pasture3DPoolManager::is_plugin_written_param(const StringName &p_name) {
 	// The `_` prefix is this codebase's existing marker for a uniform the plugin fills
-	// in rather than one the artist sets -- _wave_model, _fft_lengths, _mesh_size, _subdiv,
+	// in rather than one the artist sets -- _wave_model, _fft_repeat, _mesh_size, _subdiv,
 	// _vertex_spacing, _target_pos, _water_domain_origin all carry it, in the water
 	// shaders and in the legacy one alike. The exception is named as an art knob
 	// because it reads as one, but the ocean owns it.

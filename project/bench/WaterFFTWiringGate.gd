@@ -12,13 +12,17 @@ extends Node
 #       sampler2DArray binds its default black array instead, and the later texture_replace() never
 #       reaches that binding. Only re-setting the parameter does.
 #   [W] Wiring. A manager in the FFT model gives its profile a live simulation, and upload_profile_into()
-#       writes _wave_model = 1, the simulation's own texture wrappers and its cascade lengths. Control:
+#       writes _wave_model = 1, the simulation's own texture wrappers, its per-cascade repeats, drawn and
+#       displacing masks, and its summed foam offset. Control:
 #       switched to FBM, the same upload writes _wave_model = 2 and the profile reports inactive.
 #   [T] Tick. Over TICK_FRAMES rendered frames the manager dispatches the simulation at least once a
 #       frame and the simulation's own update count agrees. Control: in FBM nothing is dispatched.
 #   [R] Render. An unlit top-down render of water_body_debug (EMISSION.b = height / 8 + 0.5) correlates
-#       with the height the gate rebuilds from the simulation's readback, bilinear, at the shader's own
-#       texel convention (domain * N / L - 0.5). Control: the same surface drawn by the fBm branch,
+#       with the height the gate rebuilds from the simulation's readback: only the displacing cascades
+#       (drawn AND contributing, spec G2/G3), each at its own repeat, trilinear at the mip the vertex stage
+#       picks, at the shader's texel convention (domain * N / repeat - 0.5), and at the rest point the
+#       horizontal displacement carries onto the pixel. Since R2 the one displacing cascade is short against
+#       its 100 m tile, so mip 0 at the rest point no longer approximates what is drawn. Control: the same surface drawn by the fBm branch,
 #       against the same prediction, must not correlate. The regression slope is printed, not gated:
 #       correlation is what says the field is THIS field; the slope says the encoding survived the
 #       viewport, which is the viewport's business.
@@ -32,6 +36,7 @@ const PATCH := 256.0
 const PIXELS := 128
 const SPACING := 2.0
 const TICK_FRAMES := 10
+const SOLVE_ITERATIONS := 4
 
 var _fail := 0
 var _seen: Dictionary = {}
@@ -194,7 +199,13 @@ func _criterion_w() -> void:
 	var model_fft: int = _mat.get_shader_parameter("_wave_model")
 	var disp_ok: bool = _mat.get_shader_parameter("_fft_displacement") == fft.get_displacement_texture()
 	var slope_ok: bool = _mat.get_shader_parameter("_fft_slope") == fft.get_slope_texture()
-	var lengths: Vector4 = _mat.get_shader_parameter("_fft_lengths")
+	var repeat: Vector4 = _mat.get_shader_parameter("_fft_repeat")
+	var drawn: Vector4 = _mat.get_shader_parameter("_fft_drawn")
+	var displaces: Vector4 = _mat.get_shader_parameter("_fft_displaces")
+	var foam_offset: float = _mat.get_shader_parameter("_fft_foam_offset")
+	var masks_ok := true
+	for i in 4:
+		masks_ok = masks_ok and drawn[i] == float((fft.cascade_drawn >> i) & 1) 				and displaces[i] == float((fft.get_displacing_mask() >> i) & 1)
 	var live: int = _manager.get_live_fft_count()
 	var active: bool = _profile.is_fft_active()
 	var res_ok: bool = fft.resolution == RES
@@ -207,9 +218,9 @@ func _criterion_w() -> void:
 	_manager.upload_profile_into(_mat, &"gate")
 
 	var ok := _manager.is_fft_effective() and active and model_fft == 1 and disp_ok and slope_ok \
-			and lengths == fft.cascade_lengths and live == 1 and res_ok and model_ctl == 2 and not active_ctl
-	_check("W", ok, "FFT: active %s, _wave_model %d, textures %s/%s, lengths %s, live %d, resolution %d; control FBM: _wave_model %d, active %s" % [
-			active, model_fft, disp_ok, slope_ok, lengths, live, fft.resolution, model_ctl, active_ctl])
+			and repeat == fft.get_cascade_repeats() and masks_ok and is_equal_approx(foam_offset, fft.get_foam_offset_sum()) 			and live == 1 and res_ok and model_ctl == 2 and not active_ctl
+	_check("W", ok, "FFT: active %s, _wave_model %d, textures %s/%s, repeat %s, drawn %s, displaces %s (masks match %s), foam offset %.3f, live %d, resolution %d; control FBM: _wave_model %d, active %s" % [
+			active, model_fft, disp_ok, slope_ok, repeat, drawn, displaces, masks_ok, foam_offset, live, fft.resolution, model_ctl, active_ctl])
 
 
 # --- [T] tick ----------------------------------------------------------------------------------------
@@ -244,8 +255,8 @@ func _halves(p_bytes: PackedByteArray) -> PackedFloat32Array:
 	return out
 
 
-## Bilinear, wrapping, of the y channel, at continuous texel coordinate (p_u, p_v).
-func _bilinear_y(p_disp: PackedFloat32Array, p_n: int, p_u: float, p_v: float) -> float:
+## Bilinear, wrapping, of xyz, at continuous texel coordinate (p_u, p_v) of a p_n square layer.
+func _bilinear(p_disp: PackedFloat32Array, p_n: int, p_u: float, p_v: float) -> Vector3:
 	var u0 := floori(p_u)
 	var v0 := floori(p_v)
 	var fu := p_u - float(u0)
@@ -254,31 +265,68 @@ func _bilinear_y(p_disp: PackedFloat32Array, p_n: int, p_u: float, p_v: float) -
 	var b := posmod(u0 + 1, p_n)
 	var c := posmod(v0, p_n)
 	var d := posmod(v0 + 1, p_n)
-	var h00 := p_disp[(c * p_n + a) * 4 + 1]
-	var h10 := p_disp[(c * p_n + b) * 4 + 1]
-	var h01 := p_disp[(d * p_n + a) * 4 + 1]
-	var h11 := p_disp[(d * p_n + b) * 4 + 1]
-	return lerpf(lerpf(h00, h10, fu), lerpf(h01, h11, fu), fv)
+	var t00 := _texel(p_disp, (c * p_n + a) * 4)
+	var t10 := _texel(p_disp, (c * p_n + b) * 4)
+	var t01 := _texel(p_disp, (d * p_n + a) * 4)
+	var t11 := _texel(p_disp, (d * p_n + b) * 4)
+	return t00.lerp(t10, fu).lerp(t01.lerp(t11, fu), fv)
 
 
-## Height the shader should draw at each pixel centre, from the simulation's mip 0.
-func _predict() -> PackedFloat32Array:
-	var fft: Pasture3DWaterFFT = _profile.fft
-	var lengths := fft.cascade_lengths
-	var layers: Array[PackedFloat32Array] = []
+func _texel(p_disp: PackedFloat32Array, p_i: int) -> Vector3:
+	return Vector3(p_disp[p_i], p_disp[p_i + 1], p_disp[p_i + 2])
+
+
+## Displacement the vertex stage samples at domain p_dom: each displacing cascade at its own repeat,
+## trilinear at the shader's lod (water_fft_lod), as textureLod over filter_linear_mipmap reads it.
+func _displacement(p_mips: Array, p_repeats: Vector4, p_mask: int, p_dom: Vector2) -> Vector3:
+	var sum := Vector3.ZERO
 	for c in 4:
-		layers.append(_halves(fft.read_layer(Pasture3DWaterFFT.OUTPUT_DISPLACEMENT, c, 0)))
+		if not (p_mask >> c) & 1:
+			continue
+		var lod := maxf(log(2.0 * SPACING * float(RES) / p_repeats[c]) / log(2.0), 0.0)
+		var m0 := mini(floori(lod), p_mips[c].size() - 1)
+		var m1 := mini(m0 + 1, p_mips[c].size() - 1)
+		var f := clampf(lod - float(m0), 0.0, 1.0)
+		var a := _bilinear_at(p_mips[c][m0], RES >> m0, p_repeats[c], p_dom)
+		var b := _bilinear_at(p_mips[c][m1], RES >> m1, p_repeats[c], p_dom)
+		sum += a.lerp(b, f)
+	return sum
+
+
+func _bilinear_at(p_disp: PackedFloat32Array, p_n: int, p_repeat: float, p_dom: Vector2) -> Vector3:
+	var k := float(p_n) / p_repeat
+	return _bilinear(p_disp, p_n, p_dom.x * k - 0.5, p_dom.y * k - 0.5)
+
+
+## Height the shader should draw at each pixel centre. The vertex at rest point p lands at p + D(p).xz, so
+## the surface over pixel x is the one whose rest point solves p + D(p).xz = x: a fixed point, as the
+## manager's solve_domain finds it. Only the cascades that displace (drawn AND contributing), each at its
+## own repeat and at the mip the vertex stage picks for SPACING.
+func _predict(p_mask: int = -1) -> PackedFloat32Array:
+	var fft: Pasture3DWaterFFT = _profile.fft
+	var repeats := fft.get_cascade_repeats()
+	var mask := fft.get_displacing_mask() if p_mask < 0 else p_mask
+	var mips: Array = []
+	for c in 4:
+		var chain: Array[PackedFloat32Array] = []
+		if (mask >> c) & 1:
+			# The full chain, RES down to 1: the simulation builds every level.
+			for m in int(log(float(RES)) / log(2.0) + 0.5) + 1:
+				chain.append(_halves(fft.read_layer(Pasture3DWaterFFT.OUTPUT_DISPLACEMENT, c, m)))
+		mips.append(chain)
 	var out := PackedFloat32Array()
 	out.resize(PIXELS * PIXELS)
 	for py in PIXELS:
 		var z := (float(py) + 0.5) / float(PIXELS) * PATCH - PATCH * 0.5
 		for px in PIXELS:
 			var x := (float(px) + 0.5) / float(PIXELS) * PATCH - PATCH * 0.5
-			var h := 0.0
-			for c in 4:
-				var k := float(RES) / lengths[c]
-				h += _bilinear_y(layers[c], RES, x * k - 0.5, z * k - 0.5)
-			out[py * PIXELS + px] = h
+			var target := Vector2(x, z)
+			var dom := target
+			var d := Vector3.ZERO
+			for it in SOLVE_ITERATIONS:
+				d = _displacement(mips, repeats, mask, dom)
+				dom = target - Vector2(d.x, d.z)
+			out[py * PIXELS + px] = _displacement(mips, repeats, mask, dom).y
 	return out
 
 

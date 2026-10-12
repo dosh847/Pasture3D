@@ -67,12 +67,16 @@ void fragment() {
 	if (fft) {
 		slope = vec2(0.0);
 		for (int i = 0; i < 4; i++) {
-			vec3 uvw = vec3(v_fft_domain / _fft_lengths[i], float(i));
+			if (_fft_drawn[i] == 0.0) {
+				continue;
+			}
+			vec3 uvw = vec3(v_fft_domain / _fft_repeat[i], float(i));
 			slope += texture(_fft_slope, uvw).xy;
 			vec4 disp = texture(_fft_displacement, uvw);
 			fft_foam += disp.w;
 			fft_height += disp.y;
 		}
+		fft_foam += _fft_foam_offset;
 	}
 	// The fBm fallback's normals: the fragment set, summed per pixel at the rest position like the cascades,
 	// down to the octave this pixel can still resolve (two samples a wavelength). Its height is light()'s

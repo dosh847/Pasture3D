@@ -1,6 +1,6 @@
 # Pasture3D Water: Reference Fidelity
 
-Status: **audit written 2026-10-11. Decisions D1–D5 taken 2026-10-11 (the recommendations, §4). R1 built 2026-10-11 (§7.1); R2–R7 not started.**
+Status: **audit written 2026-10-11. Decisions D1–D5 taken 2026-10-11 (the recommendations, §4). R1 built 2026-10-11 (§7.1), R2 built 2026-10-12 (§7.2); R3–R7 not started.**
 
 ## 1. The ask
 
@@ -213,3 +213,30 @@ Fidelity is a claim about pixels, so it is gated on pixels.
   - `fit_sea` scales the scene's sea, its eight fetches and its lengths, by `length_max / 137`, and the scales by the height target. `get_length_max()` reads the longest cascade × 137/128.
   - Scenes saved with `wind/*` and `swell/*` lose those keys on load and fall back to the scene sea. Nothing has shipped, so there is no migration.
 - **Until R2 the sea is too tall.** The sigma and displacement bound count every cascade. The reference displaces with cascade 1 only and draws cascade 2 at a 0.33 m repeat, so the default sea's Hs of about 10.6 m (N = 128) overstates what the reference draws. R2's `cascade_displaces` is what brings the bound down.
+
+### 7.2 R2, as built (2026-10-12)
+
+- **Ported, on `Pasture3DWaterFFT`, with the scene's values as defaults:**
+  - `cascade_tiles` (G1), a Vector4 of metres of repeat: 1/_Tile, so (100, 1/3, 1/3, 1/0.13). A tile of 0 means the cascade's length. `get_cascade_repeats()` resolves it.
+  - `cascade_drawn` (G2) and `cascade_displaces` (G3), 4-bit flag masks: 0b1001 and 0b0001. `get_displacing_mask()` is drawn AND displaces, as the reference multiplies `_DebugLayer` into `_ContributeDisplacement`.
+  - `cascade_foam_offset` (G4): (0.04, −0.04, −0.46, −0.38). The reference adds every cascade's offset, hidden ones included, so the shader takes the sum (`get_foam_offset_sum()`, −0.84) as one uniform.
+- **Uniforms.** `_fft_lengths` is gone. The material gets `_fft_repeat`, `_fft_drawn` and `_fft_displaces` (0/1 per cascade), and `_fft_foam_offset`.
+  - The vertex stage multiplies each drawn cascade's displacement by its `_fft_displaces`, but takes its slope and foam either way.
+  - The fragment stage skips undrawn cascades and adds the offset after the sum; the existing 0–1 clamp is the reference's saturate.
+  - A coverage readout that copies wave uniforms by name must carry the two masks too (WaterTwoLakesGate, WaterShorePoolProbe), or it draws the shader's defaults.
+- **A hidden cascade is not simulated.** UPDATE, the FFT passes, ASSEMBLE and DOWNSAMPLE take the drawn mask in their push constant and skip it; its layers keep their last frame. INIT and PACK still run every cascade, so showing one again needs no re-init. The FFT skip is uniform per workgroup, so its barriers are still safe.
+- **The CPU follows G3.** The readback copies only the displacing layers, `sample()` sums only them at their repeats, and `get_height_sigma()` counts only them.
+- **The reference's geometry is gentle.** The scene's displacing sea is cascade 1 alone: sigma 0.10 m, Hs about 0.4 m at N = 128, against 2.66 m sigma with every cascade displacing. Its texture comes from cascade 4's normals at a 7.7 m repeat.
+- **Interim until R5: the fit over-drives the hidden cascades.** `fit_sea` scales all eight spectra by one gain to put the DISPLACING sigma on the height target. A default profile's target of 0.86 m therefore multiplies the energy about 70×, and cascade 4's slopes come with it, about 8× steeper than the reference's. `fit_sea` now also scales `cascade_tiles` by r, so a pond's repeats shrink with its lengths. The R5 fit rewrite has to decide whether the height target applies to the displacing cascades only.
+- **Gates:**
+  - **WaterFFTGate [G] (new):**
+    - The defaults, and the tile-0 fallback.
+    - Hidden layers stay bit-identical across an update while the shown ones move. Control: drawn 15 moves them.
+    - Sigma counts the displacing set: the default sits below the all-displacing estimate, and drawn 0b1001 under displaces 15 equals the reverse (the AND).
+    - The other criteria run with all four cascades drawn and displacing.
+  - **WaterFFTWiringGate:**
+    - [W] checks all four new uniforms.
+    - [R] now predicts what the shader draws: the displacing cascades only, trilinear at the vertex stage's mip, at the rest point the horizontal displacement carries onto the pixel. Mip 0 at the rest point read 0.89, because the one displacing cascade is short against its 100 m tile; the model reads 0.997.
+  - **WaterBuoyGate:**
+    - Its sync sampler follows the mask and the repeats.
+    - [A] passes again (rel RMS 0.017), now that the sea is not 10 m tall.

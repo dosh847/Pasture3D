@@ -132,7 +132,7 @@ func _carries(p_mat: ShaderMaterial, p_profile: Pasture3DWaveProfile) -> bool:
 		var fft := p_profile.fft
 		return int(p_mat.get_shader_parameter("_wave_model")) == 1 \
 				and p_mat.get_shader_parameter("_fft_displacement") == fft.get_displacement_texture() \
-				and p_mat.get_shader_parameter("_fft_lengths") == fft.cascade_lengths
+				and p_mat.get_shader_parameter("_fft_repeat") == fft.get_cascade_repeats()
 	var pack := p_profile.fbm.get_shader_pack(Pasture3DWaterFBM.SET_VERTEX)
 	for i in 4:
 		if p_mat.get_shader_parameter("_fbm_v%d" % i) != pack[i]:

@@ -56,7 +56,8 @@ void Pasture3DWaveProfile::_on_fbm_changed() {
  *
  *   SIZE by r = length_max / REF_LENGTH. Every cascade length scales by r, and so does each spectrum's
  *   peak wavelength -- by scaling fetch, since at fixed wind the JONSWAP peak goes as (U F)^0.66, so F
- *   scales as r^(1/0.66). A pond's tiles shrink with its waves.
+ *   scales as r^(1/0.66). So do the per-cascade repeats (cascade_tiles): a pond's tiles shrink with its
+ *   waves. A tile of 0 means "the cascade's length" and stays 0.
  *
  *   HEIGHT to p_sigma, through `scale` (variance, so squared), which moves all eight spectra together.
  *
@@ -84,6 +85,7 @@ void Pasture3DWaveProfile::_fit(const real_t p_direction_deg, const real_t p_len
 		// The default sea's knobs, read from a default instance so they cannot drift from it.
 		Pasture3DWaterFFT *ref = memnew(Pasture3DWaterFFT);
 		const Vector4 ref_lengths = ref->get_cascade_lengths();
+		const Vector4 ref_tiles = ref->get_cascade_tiles();
 		float ref_fetch[n];
 		float ref_scale[n];
 		for (int i = 0; i < n; i++) {
@@ -93,6 +95,7 @@ void Pasture3DWaveProfile::_fit(const real_t p_direction_deg, const real_t p_len
 		memdelete(ref);
 		const float r = CLAMP(length_max / (float)REF_LENGTH, 0.01f, 20.f);
 		_fft->set_cascade_lengths(ref_lengths * r);
+		_fft->set_cascade_tiles(ref_tiles * r);
 		for (int i = 0; i < n; i++) {
 			_fft->set_spectrum_knob(i, "fetch", ref_fetch[i] * std::pow(r, 1.f / 0.66f));
 			_fft->set_spectrum_knob(i, "scale", ref_scale[i]);
