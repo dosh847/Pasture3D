@@ -391,9 +391,12 @@ uniform float foam_scale : hint_range(0.001, 1.0, 0.001) = 0.07;
 // detail_flow0, which went river-only with WATER_DETAIL; a river's foam rides its flow instead.
 uniform vec2 foam_flow = vec2(0.32, 0.11);
 #endif
+#ifndef WATER_PBR
 // Foam is a scattering layer sitting on the water, so it must raise roughness.
-// The legacy shader tinted albedo only, which gives you mirror-smooth foam.
+// The legacy shader tinted albedo only, which gives you mirror-smooth foam. The lit variants take the
+// reference's foam_roughness_modifier instead (sun group).
 uniform float foam_roughness : hint_range(0.0, 1.0, 0.01) = 0.8;
+#endif
 #ifdef WATER_FOAM_CREST
 #ifndef WATER_FFT
 // A stream's crest signal is its surface slope, ~1 where the channel model is as steep as it gets
@@ -416,14 +419,23 @@ group_uniforms;
 // ---------------------------------------------------------------------------
 // Sun lighting (FFT spec §3.1), Garrett's NEW_LIGHTING terms evaluated per light in light().
 //
-// The water's own colour is ALBEDO -- deep_color through the absorption solve -- so it plays the role of
-// the reference's _ScatterColor and there is no separate one. The defaults are the reference's
-// SampleScene values.
+// Lit the reference's way, end to end (PASTURE3D_WATER_REFERENCE_SPEC.md R4): ALBEDO is 0, so Godot's
+// ambient light adds nothing the reference does not have, and light() writes every sun term to
+// SPECULAR_LIGHT, which Godot does not multiply by ALBEDO. The defaults are the reference's SampleScene
+// values.
 // ---------------------------------------------------------------------------
 group_uniforms sun;
+// The reference's _ScatterColor (L5): the colour every body term is lit in. deep_color no longer draws on
+// these variants; the absorption solve now tints THIS colour, and only where the water is thin enough to
+// see through (the shore fade, §3.4) -- in deep water it is scatter_color exactly.
+uniform vec3 scatter_color : source_color = vec3(0.016, 0.0736, 0.16);
 // Beckmann alpha (rms microfacet slope) of the SUN lobe. Not the perceptual ROUGHNESS Godot squares for
 // its environment reflection: that one is still base_roughness above.
 uniform float sun_roughness : hint_range(0.01, 0.5, 0.001) = 0.075;
+// The reference's foamRoughnessModifier (PASTURE3D_WATER_REFERENCE_SPEC.md L3): added to the roughness, sun
+// lobe and reflection alike, per unit of foam. Its scene sets 0 -- the foam is an unlit lerp (L1) and needs
+// no roughness to look matte.
+uniform float foam_roughness_modifier : hint_range(0.0, 1.0, 0.001) = 0.0;
 // k2: light scattered back out of the body toward a viewer looking into the water.
 uniform float view_scatter : hint_range(0.0, 4.0, 0.01) = 1.0;
 // k3: body scatter that follows the sun's incidence on the surface.
@@ -436,6 +448,17 @@ uniform float bubble_density : hint_range(0.0, 4.0, 0.01) = 1.0;
 // reference's _WavePeakScatterStrength times its _HeightModifier, which only ever appear as a product.
 uniform float wave_peak_scatter : hint_range(0.0, 8.0, 0.01) = 1.0;
 #endif
+group_uniforms;
+
+group_uniforms environment;
+// The reference's environment reflection (L4, decision D3): F * texture(environment_map, reflect) *
+// environment_light_strength, with the reference's own rough Fresnel, written to EMISSION. Exact, but it
+// replaces Godot's sky reflection, reflection probes and SSR outright (SPECULAR goes to 0). Off, the sky
+// reflects through Godot's own path, at SPECULAR = specular_amount, which the reference's F and strength
+// cannot reach.
+uniform bool use_environment_map = false;
+uniform samplerCube environment_map : source_color, filter_linear_mipmap, hint_default_black;
+uniform float environment_light_strength : hint_range(0.0, 4.0, 0.01) = 0.5;
 group_uniforms;
 #endif
 
@@ -565,6 +588,8 @@ varying float v_fft_depth;
 #ifdef WATER_PBR
 // Fragment -> light(): x = foam coverage, y = crest height above the rest level in metres (k1's H).
 varying vec2 v_pbr;
+// Fragment -> light(): the body colour the sun terms are lit in, scatter_color through the absorption solve.
+varying vec3 v_body_color;
 #endif
 
 #ifdef WATER_SHORE_MASK

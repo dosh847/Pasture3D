@@ -506,7 +506,20 @@ Higher values absorb faster, so the water goes opaque sooner and takes on the co
 The ocean's low red absorption is why it is blue; the pond's high values are why it is murky. It also
 drives the underwater fog and the underwater screen tint, so those follow the surface automatically.
 
-**`deep_color`** is what you see once absorption is total.
+**`scatter_color`** is the colour the water's body is lit in, the reference's `_ScatterColor`: what you see
+in deep water, scaled by the sun. On the ocean, lake and pond it replaces `deep_color` at the surface.
+**`deep_color`** still colours rivers and the underwater fog.
+
+These variants are lit the reference's way: there is no ambient term, so **water in shadow is lit only by
+its reflection**, and **foam is unlit**. `foam_color` is emitted wherever there is foam, so foam glows in
+shadow and at night, as the reference's does. **`foam_roughness_modifier`** (default 0) roughens the sun
+highlight and the reflection under foam. The crest foam is not multiplied by `foam_tex`; the texture
+breaks up shore foam only.
+
+**`use_environment_map`, `environment_map`, `environment_light_strength`** reflect a cubemap the
+reference's way, at its Fresnel and strength (0.5), written as emission. It is exact, but reflection probes
+and screen-space reflections no longer reach the water. Off, the water reflects Godot's sky as usual,
+scaled by `specular_amount`.
 
 **`sun_roughness`** is the width of the sun's highlight (Beckmann α). The ocean's 0.075 is the
 reference's; still water wants less, which is why the pond ships at 0.035. Raising it spreads the sun

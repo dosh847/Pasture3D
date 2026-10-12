@@ -38,12 +38,19 @@ extends Node
 #       NORMAL lerped toward up -- slope' = f s / ((1 - f) L + f), L = |(s, 1)| -- with strength applied
 #       first. Control: the naive slope * f must miss by several times more. Foam falloff 2 scales the
 #       crest by f^2, and the slopes are untouched by it.
+#   [L] Lit crest foam (PASTURE3D_WATER_REFERENCE_SPEC.md L1, L2), from water_crest_lit: the shipped lit
+#       shading with crest foam, in a world with no light, ambient or reflection. Every pixel is
+#       crest * foam_color -- the foam is emitted, unlit -- with the crest from the [N] readout. foam_tex
+#       black and white draw the same: the reference's crest foam is untextured. Control: the pre-R4
+#       textured crest under black foam_tex is 0 everywhere, and the pixels' mean must exceed 10x the error.
 #
 # Every criterion counts its completions; one that throws before asserting reports as missing.
 
-const CRITERIA: PackedStringArray = ["B", "W", "T", "R", "F", "N"]
+const CRITERIA: PackedStringArray = ["B", "W", "T", "R", "F", "N", "L"]
 const DEBUG_SHADER := "res://bench/water_body_debug.gdshader"
 const SHADING_SHADER := "res://bench/water_fft_shading_debug.gdshader"
+const CREST_LIT_SHADER := "res://bench/water_crest_lit.gdshader"
+const FOAM_COLOR := Color(0.85, 0.89, 0.92)
 const CAM_HEIGHT := 100.0
 const CAM_FAR := 400.0
 const RES := 128
@@ -130,6 +137,7 @@ func _run() -> void:
 	await _criterion_r()
 	await _criterion_f()
 	await _criterion_n()
+	await _criterion_l()
 
 
 func _build_view() -> void:
@@ -519,3 +527,76 @@ func _criterion_n() -> void:
 			and e_flat < 1e-3 and foam_mean > 0.01 and e_foam < 2e-3
 	_check("N", ok, "slope rms %.4f; strength 2: max |s - 2 s0| %.5f; strength 3 + normal falloff 1 at fade %.2f: rms error %.5f against the normal lerp (tol %.4f), control slope * f %.5f (must exceed 3x); foam falloff 2: crest mean %.4f, max |c - c0 f^2| %.5f (tol 2e-3), slopes moved %.6f (tol 1e-3)" % [
 			s_rms, e_double, f, e_ref, tol, e_naive, foam_mean, e_foam, e_flat])
+
+
+func _render_rgb() -> Array:
+	await _frames(4)
+	var img := _vp.get_texture().get_image()
+	var out := []
+	for py in PIXELS:
+		for px in PIXELS:
+			out.append(img.get_pixel(px, py))
+	return out
+
+
+func _criterion_l() -> void:
+	# The crest itself, from the readout: every fade off, so it is clamp(fft_foam, 0, 1).
+	var dbg := ShaderMaterial.new()
+	dbg.shader = load(SHADING_SHADER)
+	_manager.upload_profile_into(dbg, &"gate")
+	dbg.set_shader_parameter("_fft_foam_offset", 0.5)
+	_mesh.material_override = dbg
+	var crest: Array = (await _shading(dbg, 1.0, 0.0, 0.0))[2]
+
+	# A world that adds nothing: no light, no ambient, no reflection, linear output. All that can reach the
+	# pixel is what the fragment stage emits.
+	var env := Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color.BLACK
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_DISABLED
+	env.reflected_light_source = Environment.REFLECTION_SOURCE_DISABLED
+	env.tonemap_mode = Environment.TONE_MAPPER_LINEAR
+	var we := WorldEnvironment.new()
+	we.environment = env
+	_vp.add_child(we)
+	var lit := ShaderMaterial.new()
+	lit.shader = load(CREST_LIT_SHADER)
+	_manager.upload_profile_into(lit, &"gate")
+	lit.set_shader_parameter("_fft_foam_offset", 0.5)
+	lit.set_shader_parameter("fft_normal_falloff", 0.0)
+	lit.set_shader_parameter("fft_foam_falloff", 0.0)
+	lit.set_shader_parameter("foam_crest_amount", 1.0)
+	lit.set_shader_parameter("foam_color", FOAM_COLOR)
+	_mesh.material_override = lit
+	var black_img := Image.create(4, 4, false, Image.FORMAT_RGBA8)
+	black_img.fill(Color.BLACK)
+	lit.set_shader_parameter("foam_tex", ImageTexture.create_from_image(black_img))
+	var black: Array = await _render_rgb()
+	var white_img := Image.create(4, 4, false, Image.FORMAT_RGBA8)
+	white_img.fill(Color.WHITE)
+	lit.set_shader_parameter("foam_tex", ImageTexture.create_from_image(white_img))
+	var white: Array = await _render_rgb()
+	_mesh.material_override = _mat
+	we.queue_free()
+
+	var foam_lin := FOAM_COLOR.srgb_to_linear()
+	var n := PIXELS * PIXELS
+	var crest_mean := 0.0
+	var e_pred := 0.0
+	var e_tex := 0.0
+	var got_mean := 0.0
+	for i in n:
+		var c: float = clampf(crest[i], 0.0, 1.0)
+		crest_mean += c
+		var b: Color = black[i]
+		var w: Color = white[i]
+		for ch in 3:
+			e_pred = maxf(e_pred, absf(b[ch] - c * foam_lin[ch]))
+			e_tex = maxf(e_tex, absf(w[ch] - b[ch]))
+		got_mean += b.g
+	crest_mean /= n
+	got_mean /= n
+	# Control: the textured crest (pre-R4) under a black foam_tex is 0 everywhere, so it misses by the mean.
+	var ok := crest_mean > 0.05 and e_pred < 0.005 and e_tex < 1e-3 and got_mean > 10.0 * e_pred
+	_check("L", ok, "crest mean %.4f; foam_tex black, no light: max |pixel - crest * foam_color| %.5f (tol 0.005); foam_tex white moves it %.6f (tol 1e-3); textured-crest control misses by the mean %.4f (must exceed 10x)" % [
+			crest_mean, e_pred, e_tex, got_mean])

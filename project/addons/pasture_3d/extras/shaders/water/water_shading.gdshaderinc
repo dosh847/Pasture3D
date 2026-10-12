@@ -12,6 +12,16 @@
 #ifndef WATER_SHADING_INC
 #define WATER_SHADING_INC
 
+#ifdef WATER_PBR
+// The reference's Fresnel for eta 1.33, flattened with roughness: R = (0.33 / 2.33)^2. One definition for
+// the sun term in light() and the environment reflection in fragment(), which the reference shares.
+float water_ref_fresnel(float p_n_dot_v, float p_alpha) {
+	float f = 0.020059 + 0.979941 * pow(max(1.0 - p_n_dot_v, 0.0), 5.0 * exp(-2.69 * p_alpha))
+		/ (1.0 + 22.7 * pow(p_alpha, 1.5));
+	return clamp(f, 0.0, 1.0);
+}
+#endif
+
 void fragment() {
 #ifdef WATER_DEBUG_GLOBALS
 	// Diagnostic: writes the three plugin-driven globals straight to ALBEDO so
@@ -177,7 +187,13 @@ void fragment() {
 	float n_dot_v = clamp(dot(NORMAL, VIEW), 0.0, 1.0);
 	float fresnel = water_fresnel(n_dot_v);
 
-	vec3 albedo = deep_color;
+#ifdef WATER_PBR
+	// L5: the body colour is the reference's scatter_color, lit in light().
+	vec3 body_base = scatter_color;
+#else
+	vec3 body_base = deep_color;
+#endif
+	vec3 albedo = body_base;
 	// Opacity from absorption alone, before fresnel. Opaque unless the depth
 	// path says otherwise, which is the right default: with no way to know what
 	// is behind, showing it would be a guess.
@@ -212,7 +228,7 @@ void fragment() {
 	// background filtered by it. Visually close; physically not the same thing,
 	// so it is written down rather than glossed.
 	absorb_alpha = 1.0 - dot(transmit, WATER_LUMA);
-	albedo = min(deep_color * (vec3(1.0) - transmit) / max(absorb_alpha, 1e-3), vec3(1.0));
+	albedo = min(body_base * (vec3(1.0) - transmit) / max(absorb_alpha, 1e-3), vec3(1.0));
 #endif
 
 	// Reflection replaces transmission: light bounced off the surface did not
@@ -239,8 +255,8 @@ void fragment() {
 	// A stream's slope: whitecaps from threshold to threshold + softness.
 	float crest = smoothstep(foam_crest_threshold,
 		foam_crest_threshold + foam_crest_softness, v_jacobian);
-#endif
 	foam += crest * foam_crest_amount;
+#endif
 #endif
 #if defined(WATER_FOAM_SHORE) && defined(WATER_DEPTH_FADE)
 	// Also free: thickness came out of the depth fetch above.
@@ -258,14 +274,47 @@ void fragment() {
 	foam = clamp(foam, 0.0, 1.0) * texture(foam_tex,
 		domain * foam_scale - water_scroll(foam_flow * foam_scale)).r;
 #endif
+#if defined(WATER_FOAM_CREST) && defined(WATER_FFT)
+	// L2: the reference's crest foam is untextured. foam_tex breaks up the shore foam only.
+	foam = clamp(foam + crest * foam_crest_amount, 0.0, 1.0);
+#endif
 
+#ifdef WATER_PBR
+	// L1 is below, in the outputs: the foam is an unlit lerp. L3: roughness rises by the modifier.
+	roughness = clamp(roughness + foam * foam_roughness_modifier, 0.02, 1.0);
+#else
 	albedo = mix(albedo, foam_color, foam);
 	roughness = mix(roughness, foam_roughness, foam);
+#endif
 	alpha = mix(alpha, 1.0, foam);
 #endif
 
+#ifdef WATER_PBR
+	// The reference's output is lerp(water, foam_color, foam), the foam an unlit constant (L1). Every lit
+	// term below and in light() carries (1 - foam), and the foam colour is emitted. It glows in shadow,
+	// as the reference's does. ALBEDO 0: the reference has no ambient term, and light() needs no ALBEDO.
+	float lerp_foam = 0.0;
+#if defined(WATER_FOAM_CREST) || defined(WATER_FOAM_SHORE)
+	lerp_foam = foam;
+	EMISSION = foam * foam_color;
+#endif
+	v_body_color = albedo;
+	ALBEDO = vec3(0.0);
+	if (use_environment_map) {
+		// L4: F * env * strength, the reference's reflection, at the reference's roughness.
+		float env_alpha = sun_roughness + lerp_foam * foam_roughness_modifier;
+		float env_f = water_ref_fresnel(dot(NORMAL, VIEW), env_alpha);
+		vec3 env_dir = mat3(INV_VIEW_MATRIX) * reflect(-VIEW, NORMAL);
+		EMISSION += (1.0 - lerp_foam) * env_f * texture(environment_map, env_dir).rgb * environment_light_strength;
+		SPECULAR = 0.0;
+	} else {
+		// Godot's sky. Its env BRDF is not linear in SPECULAR, so this (1 - foam) is the approximation.
+		SPECULAR = specular_amount * (1.0 - lerp_foam);
+	}
+#else
 	ALBEDO = albedo;
 	SPECULAR = specular_amount;
+#endif
 	ROUGHNESS = roughness;
 	ALPHA = alpha;
 
@@ -317,14 +366,15 @@ void fragment() {
 // ---------------------------------------------------------------------------
 // Sun lighting: GarrettGunnell/Water's NEW_LIGHTING, per light (FFT spec §3.1).
 //
-// The reference evaluates one hardcoded sun and writes the final colour. Godot calls this once per light
-// and owns everything else, so the port is the reference's sun terms and nothing more:
-//   - the environment reflection stays Godot's (sky radiance through ROUGHNESS/SPECULAR); the reference's
-//     cubemap sample stood in for exactly that;
-//   - ambient light stays Godot's, on ALBEDO;
+// The reference evaluates one hardcoded sun and writes the final colour. Godot calls this once per light,
+// so the port is the reference's sun terms, all of them into SPECULAR_LIGHT (ALBEDO is 0):
+//   - the environment reflection is the fragment stage's: environment_map into EMISSION, or Godot's sky
+//     through SPECULAR when there is none (D3);
+//   - there is no ambient term, as the reference has none;
+//   - the foam is emitted unlit by the fragment stage, so every term here carries (1 - foam) (L1);
 //   - shadows arrive through ATTENUATION, which every term here takes. The reference has no shadows, so
 //     nothing in it says which terms a shadow should dim; all of them is the only answer that leaves a
-//     shadowed patch of water lit by nothing but the sky.
+//     shadowed patch of water lit by nothing but its reflection.
 // ---------------------------------------------------------------------------
 
 // Smith masking for a Beckmann distribution, Walter et al.'s rational fit. The reference's form,
@@ -349,24 +399,21 @@ void light() {
 	// 3x on every term below.
 	vec3 irr = LIGHT_COLOR * (ATTENUATION / PI);
 
+	float foam = v_pbr.x;
 	vec3 h = normalize(LIGHT + VIEW);
 	float n_dot_l = clamp(dot(NORMAL, LIGHT), 0.0, 1.0);
-	float alpha = sun_roughness;
+	// L3: the reference's a = roughness + foam * foamRoughnessModifier.
+	float alpha = sun_roughness + foam * foam_roughness_modifier;
 	float light_mask = water_smith_beckmann(h, LIGHT, alpha);
 	float g = 1.0 / (1.0 + water_smith_beckmann(h, VIEW, alpha) + light_mask);
-	// Fresnel for eta 1.33, flattened with roughness the way the reference does: R = (0.33 / 2.33)^2.
-	float f = 0.020059 + 0.979941 * pow(max(1.0 - dot(NORMAL, VIEW), 0.0), 5.0 * exp(-2.69 * alpha))
-		/ (1.0 + 22.7 * pow(alpha, 1.5));
-	f = clamp(f, 0.0, 1.0);
+	float f = water_ref_fresnel(dot(NORMAL, VIEW), alpha);
 
 	// The reference divides by the MACRO normal's incidence -- world up -- not the textbook 4 (n.l)(n.v).
 	vec3 up = VIEW_MATRIX[1].xyz;
 	float up_dot_l = max(0.001, clamp(dot(up, LIGHT), 0.0, 1.0));
 	float d = water_beckmann(max(1e-4, dot(NORMAL, h)), alpha);
 
-	float foam = v_pbr.x;
-	// The reference lerps its whole output, specular included, toward the foam colour.
-	SPECULAR_LIGHT += irr * (f * g * d / (4.0 * up_dot_l) * n_dot_l * (1.0 - foam));
+	vec3 specular = vec3(f * g * d / (4.0 * up_dot_l) * n_dot_l);
 
 	float v_dot_n = clamp(dot(VIEW, NORMAL), 0.0, 1.0);
 	float k = view_scatter * v_dot_n * v_dot_n;
@@ -377,19 +424,9 @@ void light() {
 #endif
 	float body = k / (1.0 + light_mask) + shadow_scatter * n_dot_l;
 
-	// Godot multiplies DIFFUSE_LIGHT by ALBEDO after the loop (measured, [E]), and ALBEDO here is already
-	// the foam mix of two colours that need different light: the water's body terms and the foam's
-	// lambert. So the target is assembled per colour and divided back out by ALBEDO. Exact per channel,
-	// and the water's share of ALBEDO is recoverable without a varying: it is ALBEDO - foam * foam_color.
-#if defined(WATER_FOAM_CREST) || defined(WATER_FOAM_SHORE)
-	vec3 foam_albedo = foam * foam_color;
-#else
-	vec3 foam_albedo = vec3(0.0);
-#endif
-	vec3 water_albedo = max(ALBEDO - foam_albedo, vec3(0.0));
-	vec3 lit = irr * ((1.0 - f) * (body * water_albedo + (1.0 - foam) * bubble_density * bubble_color)
-		+ n_dot_l * foam_albedo);
-	DIFFUSE_LIGHT += lit / max(ALBEDO, vec3(1e-4));
+	// output = (1 - F) scatter + specular, lerped toward the (emitted) foam colour by foam.
+	vec3 scatter = body * v_body_color + bubble_density * bubble_color;
+	SPECULAR_LIGHT += irr * (1.0 - foam) * ((1.0 - f) * scatter + specular);
 }
 #endif
 

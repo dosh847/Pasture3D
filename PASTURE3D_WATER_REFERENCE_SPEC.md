@@ -1,6 +1,6 @@
 # Pasture3D Water: Reference Fidelity
 
-Status: **audit written 2026-10-11. Decisions D1–D5 taken 2026-10-11 (the recommendations, §4). R1 built 2026-10-11 (§7.1), R2 built 2026-10-12 (§7.2), R3 built 2026-10-12 (§7.3); R4–R7 not started.**
+Status: **audit written 2026-10-11. Decisions D1–D5 taken 2026-10-11 (the recommendations, §4). R1 built 2026-10-11 (§7.1), R2 built 2026-10-12 (§7.2), R3 built 2026-10-12 (§7.3), R4 built 2026-10-12 (§7.4); R5–R7 not started.**
 
 ## 1. The ask
 
@@ -266,3 +266,28 @@ Fidelity is a claim about pixels, so it is gated on pixels.
   - Its CPU field is now cascade 1 alone, whose spectra are the reference's short chop, scaled to the lake's height target by the interim fit.
   - That field is rough below the automatic 1.27 m spacing, so coarsening 4× only doubles the sag (0.18 → 0.36 m), where the gate requires more than double.
   - This belongs to the R5 fit and preset rewrite, with `min_wavelength`, which still reads the pre-R2 sea.
+
+### 7.4 R4, as built (2026-10-12)
+
+- **The output is the reference's**, on every lit variant (ocean, lake, pond; not rivers):
+  `lerp((1 − F) · scatter + specular, foam_color, foam)`, plus the environment term below.
+  - `ALBEDO` is 0. light() writes every sun term to `SPECULAR_LIGHT`, which Godot does not multiply by `ALBEDO`, so the old divide-back-out by `ALBEDO` is gone, and so is Godot's ambient light, which the reference does not have.
+  - Water in a shadow is now lit only by its reflection, and is darker than before R4.
+- **L1, unlit foam.** The fragment stage emits `foam · foam_color`, and every lit term carries `(1 − foam)`. Foam glows in shadow and at night, as the reference's does.
+- **L2, untextured crest.** Under FFT the crest foam is added after the `foam_tex` multiply, so `foam_tex` breaks up only the shore foam. The fBm has no crest; rivers keep the textured slope foam.
+- **L3, `foam_roughness_modifier`** (sun group, default 0, the scene's value). It adds `foam · modifier` to the sun lobe's alpha and to the environment Fresnel's. `foam_roughness` remains on rivers only, and is deleted from the four lit presets.
+- **L4, `environment_map`** (new `environment` group): `use_environment_map`, a `samplerCube`, and `environment_light_strength` (default 0.5).
+  - On: `EMISSION += (1 − foam) · F · env(reflect) · strength`, with the reference's rough Fresnel shared with light() (`water_ref_fresnel`), and `SPECULAR` 0. The reflection is exact, but reflection probes and SSR no longer reach the water (D3).
+  - Off (the default until R5 ships a map): Godot's sky through `SPECULAR = specular_amount · (1 − foam)`. Godot's environment BRDF is not linear in `SPECULAR`, so the foam factor is an approximation there.
+- **L5, `scatter_color`** (sun group, default the reference's (0.016, 0.0736, 0.16)). It replaces `deep_color` as the body colour on lit variants and is still tinted by the absorption solve, so the shore fade (§3.4) works as before. It reaches light() through a new varying, `v_body_color`.
+  - `deep_color` remains for rivers and for the underwater fog.
+  - The lake and pond presets carry `scatter_color` = their old `deep_color`. The ocean presets take the reference's default; R5 rewrites them.
+- **Gates:**
+  - **WaterPBRGate** (7/7). [E] [K] [A] are re-predicted in the new form. New criteria:
+    - [S]: `deep_color` set to a decoy is invisible. The decoy control misses by 20×.
+    - [F]: foam over a black floor at a known depth. The pixel is `foam · foam_color + (1 − foam) · water`; with the sun hidden, it is `foam · foam_color` (err 0.0008). The lambert-lit control misses by 3.9×.
+    - [R]: the modifier's alpha matches to 0.0003. The unmodified-alpha control misses by 0.12.
+    - [M]: a cubemap with one distinct face matches `F · +Y · strength` to 0.0024. The other-face control misses by 76×, and the map off draws black.
+  - **WaterFFTWiringGate [L] (new, 7/7):** `bench/water_crest_lit.gdshader`, the lit crest path without the clipmap, in a world with no light. Every pixel is `crest · foam_color` to 0.0002, and a black or a white `foam_tex` draws identically. The textured-crest control would read 0.
+  - **WaterMaterialPropagationCheck** now writes `foam_roughness_modifier` as its second write path (`foam_roughness` is no longer declared on the lake).
+  - **Re-run and passing:** FBM, Buoy, FFT, Phase1, Bodies Phase 1, 4 and 5 (correctness only), PresetCheck, RetireGerstner, VariantWarning, BodySplit. No timing gate was run.

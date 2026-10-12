@@ -31,9 +31,29 @@ extends Node
 #       under SHADOW_FRACTION of the prediction. Control: the same frame with the light's shadows off
 #       must match the prediction -- otherwise "dark" could mean the box is simply in front of the pixel.
 #
+# R4 of PASTURE3D_WATER_REFERENCE_SPEC.md: the reference's output, ALBEDO 0 and every sun term in
+# SPECULAR_LIGHT. The shore foam is the gate's foam source: an unshaded black floor FLOOR_DEPTH under the
+# sheet puts every pixel at a known thickness, t / sin(camera elevation) through the orthographic view, so
+# the foam is (1 - smoothstep(0, SHORE_DEPTH, thickness)) exactly (foam_tex is its default white).
+#   [S] Scatter colour (L5). The body terms are lit in scatter_color: with deep_color set to a decoy, the
+#       body-geometry pixel matches the prediction in scatter_color. Control: the same pixel against the
+#       prediction in the decoy must miss by over half of itself.
+#   [F] Foam is an unlit lerp (L1). Body geometry over the floor: the pixel is foam * foam_color plus
+#       (1 - foam) times the water's light. With the sun hidden, it is foam * foam_color alone -- the foam
+#       glows in the dark, as the reference's does. Control: the pre-R4 form, the foam lambert-lit by the sun
+#       and nothing emitted, must miss the lit pixel by over F_CTRL.
+#   [R] Foam roughness (L3). Spec geometry over the floor, foam_roughness_modifier R_MODIFIER: the sun lobe's
+#       alpha is sun_roughness + foam * modifier, and the pixel matches that. Control: the prediction at
+#       the unmodified alpha must miss by over R_CTRL.
+#   [M] Environment map (L4). A cubemap whose +Y face differs from the other five, the sun hidden: the
+#       pixel is F(n.v) * +Y * environment_light_strength, the reflected ray being mostly up. Control: the
+#       same prediction from any other face's colour misses by over half of itself -- the ray reached the
+#       map in WORLD space. Anti-null: with use_environment_map off the pixel is black (this world reflects
+#       nothing).
+#
 # Every criterion counts its completions; one that throws before asserting reports as missing.
 
-const CRITERIA: PackedStringArray = ["E", "K", "A"]
+const CRITERIA: PackedStringArray = ["E", "K", "A", "S", "F", "R", "M"]
 const SHADER := "res://addons/pasture_3d/extras/shaders/water/water_body.gdshader"
 const PIXELS := 32
 const TOL := 0.02
@@ -50,6 +70,17 @@ const CREST_WAVELENGTH := 4000.0
 const CREST_HEIGHT := 2.0
 const K_STRENGTH := 8.0
 const K_MIN_SHARE := 0.2
+# deep_color's value while scatter_color does the lighting: it must not reach the pixel.
+const DECOY := Color(0.1, 0.7, 0.9)
+const FOAM_COLOR := Color(0.85, 0.89, 0.92)
+const FLOOR_DEPTH := 0.6
+const SHORE_DEPTH := 1.0
+const F_CTRL := 0.2
+const R_MODIFIER := 0.5
+const R_CTRL := 0.1
+const ENV_UP := Color8(51, 128, 230)
+const ENV_SIDE := Color8(230, 77, 26)
+const ENV_STRENGTH := 4.0
 
 var _fail := 0
 var _seen: Dictionary = {}
@@ -59,6 +90,7 @@ var _sun: DirectionalLight3D
 var _box: MeshInstance3D
 var _mat: ShaderMaterial
 var _sheet: MeshInstance3D
+var _floor: MeshInstance3D
 
 
 func _ready() -> void:
@@ -67,6 +99,10 @@ func _ready() -> void:
 	await _criterion_e()
 	await _criterion_k()
 	await _criterion_a()
+	await _criterion_s()
+	await _criterion_f()
+	await _criterion_r()
+	await _criterion_m()
 	var missing := 0
 	for c in CRITERIA:
 		if not _seen.has(c):
@@ -124,7 +160,10 @@ func _build() -> void:
 	mat.set_shader_parameter("detail_strength", 0.0)
 	mat.set_shader_parameter("foam_shore_amount", 0.0)
 	mat.set_shader_parameter("absorption", Vector3(100.0, 100.0, 100.0))
-	mat.set_shader_parameter("deep_color", DEEP)
+	mat.set_shader_parameter("scatter_color", DEEP)
+	mat.set_shader_parameter("deep_color", DECOY)
+	mat.set_shader_parameter("foam_color", FOAM_COLOR)
+	mat.set_shader_parameter("foam_shore_depth", SHORE_DEPTH)
 	var mi := MeshInstance3D.new()
 	var plane := PlaneMesh.new()
 	plane.size = Vector2(60.0, 60.0)
@@ -142,6 +181,19 @@ func _build() -> void:
 	_box.mesh = box
 	_box.visible = false
 	_vp.add_child(_box)
+
+	# Opaque, so the depth prepass has it; unshaded black, so nothing of it shows through the water.
+	_floor = MeshInstance3D.new()
+	var floor_plane := PlaneMesh.new()
+	floor_plane.size = Vector2(60.0, 60.0)
+	_floor.mesh = floor_plane
+	var floor_mat := StandardMaterial3D.new()
+	floor_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	floor_mat.albedo_color = Color.BLACK
+	_floor.material_override = floor_mat
+	_floor.position = Vector3(0.0, -FLOOR_DEPTH, 0.0)
+	_floor.visible = false
+	_vp.add_child(_floor)
 
 
 # One octave along +x of CREST_WAVELENGTH, still and undragged, in both sets, whose crest stands p_crest
@@ -197,38 +249,54 @@ func _smith(p_h: Vector3, p_s: Vector3, p_alpha: float) -> float:
 	return (1.0 - 1.259 * a + 0.396 * a * a) / (3.535 * a + 2.181 * a * a) if a < 1.6 else 0.0
 
 
-# light() for a level normal and no foam, as a white sun of p_energy sees it. p_pi_fold false is the
-# control: the irradiance Godot's LIGHT_COLOR gives with the PI left in. p_k1 is wave_peak_scatter times
-# the crest height.
+func _fresnel(p_n_dot_v: float, p_alpha: float) -> float:
+	return clampf(0.020059 + 0.979941 * pow(maxf(1.0 - p_n_dot_v, 0.0), 5.0 * exp(-2.69 * p_alpha))
+			/ (1.0 + 22.7 * pow(p_alpha, 1.5)), 0.0, 1.0)
+
+
+# The reference's output for a level normal, as a white sun of p_energy sees it:
+#   (1 - foam) * irr * ((1 - F) * (body * scatter_color + bubbles) + specular) + foam * foam_color.
+# p_pi_fold false is the control: the irradiance Godot's LIGHT_COLOR gives with the PI left in. p_k1 is
+# wave_peak_scatter times the crest height. p_alpha_add is foam * foam_roughness_modifier. p_lit_foam is the
+# pre-R4 control: the foam lambert-lit by the sun instead of emitted.
 func _predict(p_to_sun: Vector3, p_to_cam: Vector3, p_energy: float, p_pi_fold: bool,
-		p_k1 := 0.0) -> Vector3:
+		p_k1 := 0.0, p_foam := 0.0, p_alpha_add := 0.0, p_body := DEEP, p_lit_foam := false) -> Vector3:
 	var n := Vector3.UP
 	var l := p_to_sun.normalized()
 	var v := p_to_cam.normalized()
 	var irr := p_energy * (1.0 if p_pi_fold else PI)
 	var h := (l + v).normalized()
 	var n_dot_l := clampf(n.dot(l), 0.0, 1.0)
-	var a := SUN_ROUGHNESS
+	var a := SUN_ROUGHNESS + p_alpha_add
 	var light_mask := _smith(h, l, a)
 	var g := 1.0 / (1.0 + _smith(h, v, a) + light_mask)
-	var f := clampf(0.020059 + 0.979941 * pow(maxf(1.0 - n.dot(v), 0.0), 5.0 * exp(-2.69 * a))
-			/ (1.0 + 22.7 * pow(a, 1.5)), 0.0, 1.0)
+	var f := _fresnel(n.dot(v), a)
 	var up_dot_l := maxf(0.001, clampf(n.dot(l), 0.0, 1.0))
 	var ndoth := maxf(1e-4, n.dot(h))
 	var n2 := ndoth * ndoth
 	var d := exp((n2 - 1.0) / (a * a * n2)) / (PI * a * a * n2 * n2)
-	var spec := irr * f * g * d / (4.0 * up_dot_l) * n_dot_l
+	var spec := f * g * d / (4.0 * up_dot_l) * n_dot_l
 	var v_dot_n := clampf(v.dot(n), 0.0, 1.0)
 	var into_sun := clampf(l.dot(-v), 0.0, 1.0)
 	var away := 0.5 - 0.5 * l.dot(n)
 	var k1 := p_k1 * pow(into_sun, 4.0) * pow(away, 3.0)
 	var body := (VIEW_SCATTER * v_dot_n * v_dot_n + k1) / (1.0 + light_mask) + SHADOW_SCATTER * n_dot_l
-	var deep := DEEP.srgb_to_linear()
+	var tint := p_body.srgb_to_linear()
 	var bubble := BUBBLE.srgb_to_linear()
+	var foam_lin := FOAM_COLOR.srgb_to_linear()
 	var out := Vector3.ZERO
 	for i in 3:
-		out[i] = spec + irr * (1.0 - f) * (body * deep[i] + BUBBLE_DENSITY * bubble[i])
+		var water: float = irr * ((1.0 - f) * (body * tint[i] + BUBBLE_DENSITY * bubble[i]) + spec)
+		var foam_term: float = irr * n_dot_l * foam_lin[i] if p_lit_foam else foam_lin[i]
+		out[i] = (1.0 - p_foam) * water + p_foam * foam_term
 	return out
+
+
+# The shore foam over the floor, seen from p_to_cam: the orthographic ray crosses FLOOR_DEPTH of water in
+# FLOOR_DEPTH / sin(elevation) of view depth.
+func _floor_foam(p_to_cam: Vector3) -> float:
+	var thickness := FLOOR_DEPTH / p_to_cam.normalized().y
+	return clampf(1.0 - smoothstep(0.0, SHORE_DEPTH, thickness), 0.0, 1.0)
 
 
 func _rel_err(p_got: Color, p_want: Vector3) -> float:
@@ -314,3 +382,100 @@ func _criterion_a() -> void:
 	_check("A", frac < SHADOW_FRACTION and ctrl_err < TOL,
 			"shadowed %s = %.4f of predicted | shadows-off control %s err %.4f" % [
 				_fmt(shadowed), frac, _fmt(unshadowed), ctrl_err])
+
+
+func _criterion_s() -> void:
+	var to_sun := _dir(35.0, 0.0)
+	var to_cam := _dir(60.0, 180.0)
+	_pose(to_sun, to_cam)
+	_sun.light_energy = 0.25
+	var got := await _sample()
+	var want := _predict(to_sun, to_cam, 0.25, true)
+	var decoy := _predict(to_sun, to_cam, 0.25, true, 0.0, 0.0, 0.0, DECOY)
+	var err := _rel_err(got, want)
+	var ctrl := _rel_err(got, decoy)
+	_check("S", err < TOL and ctrl > 0.5,
+			"scatter_color %s, deep_color %s: got %s want %s err %.4f | lit-in-deep_color control err %.3f" % [
+				_fmt(DEEP), _fmt(DECOY), _fmt(got), _fmt(want), err, ctrl])
+
+
+func _criterion_f() -> void:
+	var to_sun := _dir(35.0, 0.0)
+	var to_cam := _dir(60.0, 180.0)
+	var foam := _floor_foam(to_cam)
+	_pose(to_sun, to_cam)
+	_sun.light_energy = 0.25
+	_mat.set_shader_parameter("foam_shore_amount", 1.0)
+	_floor.visible = true
+	var lit := await _sample()
+	_sun.visible = false
+	var dark := await _sample()
+	_sun.visible = true
+	_floor.visible = false
+	_mat.set_shader_parameter("foam_shore_amount", 0.0)
+
+	var want := _predict(to_sun, to_cam, 0.25, true, 0.0, foam)
+	var want_dark := _predict(to_sun, to_cam, 0.0, true, 0.0, foam)
+	var old := _predict(to_sun, to_cam, 0.25, true, 0.0, foam, 0.0, DEEP, true)
+	var err := _rel_err(lit, want)
+	var err_dark := _rel_err(dark, want_dark)
+	var ctrl := _rel_err(lit, old)
+	_check("F", foam > 0.1 and err < TOL and err_dark < TOL and ctrl > F_CTRL,
+			"foam %.4f | lit got %s want %s err %.4f | sun hidden got %s want foam * foam_color %s err %.4f | lambert-lit foam control err %.3f" % [
+				foam, _fmt(lit), _fmt(want), err, _fmt(dark), _fmt(want_dark), err_dark, ctrl])
+
+
+func _criterion_r() -> void:
+	var to_sun := _dir(90.0, 0.0)
+	var to_cam := _dir(90.0, 0.0)
+	var foam := _floor_foam(to_cam)
+	_pose(to_sun, to_cam)
+	_sun.light_energy = 0.25
+	_mat.set_shader_parameter("foam_shore_amount", 1.0)
+	_mat.set_shader_parameter("foam_roughness_modifier", R_MODIFIER)
+	_floor.visible = true
+	var got := await _sample()
+	_floor.visible = false
+	_mat.set_shader_parameter("foam_roughness_modifier", 0.0)
+	_mat.set_shader_parameter("foam_shore_amount", 0.0)
+
+	var want := _predict(to_sun, to_cam, 0.25, true, 0.0, foam, foam * R_MODIFIER)
+	var unmodified := _predict(to_sun, to_cam, 0.25, true, 0.0, foam)
+	var err := _rel_err(got, want)
+	var ctrl := _rel_err(got, unmodified)
+	_check("R", foam > 0.1 and err < TOL and ctrl > R_CTRL,
+			"foam %.4f, alpha %.4f: got %s want %s err %.4f | unmodified-alpha control err %.3f" % [
+				foam, SUN_ROUGHNESS + foam * R_MODIFIER, _fmt(got), _fmt(want), err, ctrl])
+
+
+func _criterion_m() -> void:
+	var to_cam := _dir(60.0, 180.0)
+	var images: Array[Image] = []
+	for face in 6:
+		var img := Image.create(4, 4, false, Image.FORMAT_RGBA8)
+		# Layer order +X, -X, +Y, -Y, +Z, -Z.
+		img.fill(ENV_UP if face == 2 else ENV_SIDE)
+		images.append(img)
+	var cube := Cubemap.new()
+	cube.create_from_images(images)
+	_pose(_dir(35.0, 0.0), to_cam)
+	_sun.visible = false
+	_mat.set_shader_parameter("environment_map", cube)
+	_mat.set_shader_parameter("environment_light_strength", ENV_STRENGTH)
+	var off := await _sample()
+	_mat.set_shader_parameter("use_environment_map", true)
+	var got := await _sample()
+	_mat.set_shader_parameter("use_environment_map", false)
+	_sun.visible = true
+
+	var f := _fresnel(to_cam.normalized().y, SUN_ROUGHNESS)
+	var up := ENV_UP.srgb_to_linear()
+	var side := ENV_SIDE.srgb_to_linear()
+	var want := Vector3(up.r, up.g, up.b) * (f * ENV_STRENGTH)
+	var wrong := Vector3(side.r, side.g, side.b) * (f * ENV_STRENGTH)
+	var err := _rel_err(got, want)
+	var ctrl := _rel_err(got, wrong)
+	var off_sum := off.r + off.g + off.b
+	_check("M", err < TOL and ctrl > 0.5 and off_sum < 1e-4,
+			"F %.4f: got %s want F * +Y * strength %s err %.4f | other-face control err %.3f | map off %s" % [
+				f, _fmt(got), _fmt(want), err, ctrl, _fmt(off)])

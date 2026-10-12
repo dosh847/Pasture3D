@@ -120,7 +120,7 @@ func _check_b_base_edits_propagate() -> void:
 	base.changed.connect(func(): signalled.append("changed"))
 	base.property_list_changed.connect(func(): signalled.append("property_list_changed"))
 	base.set_shader_parameter("foam_scale", new_scale)
-	base.set("shader_parameter/foam_roughness", 0.5)
+	base.set("shader_parameter/foam_roughness_modifier", 0.5)
 	print("    signals emitted by a parameter edit: %s (must be empty -- hence the poll)" % [signalled])
 	if not signalled.is_empty():
 		print("    .. ShaderMaterial now announces edits; sync_material_params could be pushed")
