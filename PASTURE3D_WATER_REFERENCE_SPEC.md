@@ -1,6 +1,6 @@
 # Pasture3D Water: Reference Fidelity
 
-Status: **audit written 2026-10-11. Decisions D1–D5 taken 2026-10-11 (the recommendations, §4). R1 built 2026-10-11 (§7.1), R2 built 2026-10-12 (§7.2), R3 built 2026-10-12 (§7.3), R4 built 2026-10-12 (§7.4); R5–R7 not started.**
+Status: **audit written 2026-10-11. Decisions D1–D5 taken 2026-10-11 (the recommendations, §4). R1 built 2026-10-11 (§7.1), R2 built 2026-10-12 (§7.2), R3 built 2026-10-12 (§7.3), R4 built 2026-10-12 (§7.4), R5 built 2026-10-12 (§7.5); R6–R7 not started.**
 
 ## 1. The ask
 
@@ -291,3 +291,56 @@ Fidelity is a claim about pixels, so it is gated on pixels.
   - **WaterFFTWiringGate [L] (new, 7/7):** `bench/water_crest_lit.gdshader`, the lit crest path without the clipmap, in a world with no light. Every pixel is `crest · foam_color` to 0.0002, and a black or a white `foam_tex` draws identically. The textured-crest control would read 0.
   - **WaterMaterialPropagationCheck** now writes `foam_roughness_modifier` as its second write path (`foam_roughness` is no longer declared on the lake).
   - **Re-run and passing:** FBM, Buoy, FFT, Phase1, Bodies Phase 1, 4 and 5 (correctness only), PresetCheck, RetireGerstner, VariantWarning, BodySplit. No timing gate was run.
+
+### 7.5 R5, as built (2026-10-12)
+
+- **`ocean_default` is ocean_garrett.** The name is kept, since renaming it would orphan every saved
+  scene's `wave_profile`.
+  - A fresh `Pasture3DWaveProfile` is the reference. Its constructor fits at `REF_LENGTH` (137 m), along
+    spectrum 0's heading, with no height gain. It no longer starts from the legacy table.
+  - The shipped `ocean_default` is a fresh profile.
+- **`M_water_ocean.tres` is the Garrett instance.** The shader's defaults are already the reference's.
+  - The file now says so, sets `foam_color` (0.6, 0.5568, 0.492) and `foam_crest_amount` 1, and keeps
+    our absorption, `deep_color` and shore (D4).
+  - There is no cubemap, so it reflects Godot's sky (D3).
+  - `M_water_ocean_low.tres` takes the same `foam_color`.
+- **Lake and pond, by Froude similarity.** The new call is `fit_reference_sea(direction, length)`.
+  - At r = length / 137, it scales every length, tile, depth, fetch and `short_waves_fade` by r, and the
+    wind by √r. The JONSWAP alpha (gF/U²), the spread and the TMA term are then invariant, and the peak
+    wavelength scales by r.
+  - Heights scale by r, and slopes are unchanged.
+  - Every spectrum's heading turns by the same angle, so that spectrum 0 runs along `direction`.
+  - `lake_calm` = (35°, 25 m): σ 0.019 m. `pond_still` = (55°, 12 m): σ 0.009 m. Both are to be judged
+    by eye.
+- **`fit_sea` is the migration.** It does the same, then applies a height gain to every spectrum's
+  `scale`. `river_flow` is `fit_sea(0, 10, 0.0236074)` with `min_wavelength` 5.0084, as before.
+- **The fBm targets the FFT's actual σ**, not r × the reference's. The discrete low ring puts the FFT
+  1.6–2.5% off r.
+- **`min_wavelength` comes from a height tolerance**, `HEIGHT_TOLERANCE` = 5 cm.
+  - The fit meshes the longest wavelength above which all but a (tol/σ)² fraction of the displacing
+    variance lies. That leaves the normals waves whose σ totals under 5 cm.
+  - The wavelength comes from the new `Pasture3DWaterFFT.get_variance_wavelength(fraction)`, a
+    continuum integral over the displacing bands.
+  - Results: ocean 9.1 m. The lake and pond get 17.2 m and 8.2 m, their longest waves, because σ < tol.
+  - The first attempt used the 95% variance wavelength. It gave the lake 0.73 m, which pinned the pool
+    spacing at its 0.25 m floor and broke WaterBodiesPhase3Gate [B] and [F] and WaterTwoLakesGate.
+- **A pool fix that the presets exposed.** A masked pool's clipmap ring count covered half the body's
+  diagonal. Its own comment, and a camera at one corner, need all of it.
+  - Ring doubling's overshoot had hidden this until the Garrett lake's 2.14 m spacing left lake A in
+    WaterTwoLakesGate one ring short: 0.878 coverage, seen from a camera 30 m off its edge.
+  - The count now covers the full diagonal plus `mask_range`. That costs at most one more ring (lake A
+    2 → 3, lake B 5 → 6).
+- **Gates:**
+  - **WaterRetireGerstnerGate [P]** is rewritten as "presets are the reference".
+    - Each shipped profile equals its construction call. `_knobs` now also covers tiles, depth, wind,
+      heading and `short_waves_fade`. Control: the next preset's call misses by more than 0.05.
+    - From outside the fit: `ocean_default`'s FFT equals a default `Pasture3DWaterFFT` exactly.
+    - σ / (r σ_ref) is 1.0175 for the lake and 1.0250 for the pond, both within 0.03. Control: with the
+      wind left unscaled, they read 2.13 and 2.92.
+  - **WaterFFTWiringGate [N]** now runs at base strength 4 (`N_BASE`).
+    - Why: the reference's sea has a slope rms of 0.05. That is under the criterion's own liveness
+      floor, and too gentle for the fade's curvature to show.
+    - Now: rms 0.194, and an error of 0.0037 against a tolerance of 0.0119. The control misses by 0.037.
+  - **Re-run and passing:** RetireGerstner, Wiring (7/7), FFT, Buoy, FBM, PBR, Phase1, Bodies Phase 1,
+    3, 4 and 5 (correctness only), TwoLakes (8/8), SplitScreen, PresetCheck, VariantWarning, BodySplit,
+    LateManager, MaterialPropagation. No timing gate was run.

@@ -2,6 +2,15 @@
 ;
 ; The default for Pasture3D.ocean_material (constants.h OCEAN_MATERIAL_PATH).
 ;
+; The look is GarrettGunnell/Water's SampleScene (PASTURE3D_WATER_REFERENCE_SPEC.md §2, R5): its
+; foam colour, and crest foam at full strength (the reference has no multiplier). scatter_color,
+; sun_roughness, bubbles, scatter strengths, foam_roughness_modifier and environment_light_strength
+; are the shader's defaults, which ARE the reference's values, so they are not repeated here.
+; absorption, deep_color (the underwater fog) and the shore foam are ours: the reference has
+; nothing to say about water you can see the bottom of (decision D4). The reference reflects a
+; cubemap (use_environment_map); none ships, so this reflects Godot's sky. Its scene's camera
+; far plane is 2000 m, and the far-plane fades are tuned to it.
+;
 ; Note what is NOT here: the waves. They are the manager's wave profile (FFT, or the
 ; fBm fallback), uploaded into the duplicate the ocean draws with, because the CPU
 ; height query has to answer from the same model. Shape the ocean's waves on its
@@ -36,9 +45,9 @@ shader_parameter/sea_level = 0.0
 shader_parameter/base_roughness = 0.06
 shader_parameter/specular_amount = 0.5
 shader_parameter/foam_tex = ExtResource("3_mewtu")
-shader_parameter/foam_color = Color(0.85, 0.89, 0.92, 1)
+shader_parameter/foam_color = Color(0.6, 0.5568, 0.492, 1)
 shader_parameter/foam_scale = 0.07
-shader_parameter/foam_crest_amount = 0.476
+shader_parameter/foam_crest_amount = 1.0
 shader_parameter/foam_shore_depth = 1.2
 shader_parameter/foam_shore_amount = 0.381
 shader_parameter/wave_peak_scatter = 1.0

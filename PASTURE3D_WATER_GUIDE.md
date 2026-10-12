@@ -135,13 +135,19 @@ ships four:
 
 | Profile | Heading | Longest wave | Height σ | Shortest wave meshed | Intended for |
 |---|---|---|---|---|---|
-| `ocean_default` | 20° | 137 m | 0.86 m | 10.2 m | `Pasture3DOcean` |
-| `lake_calm` | 35° | 25 m | 0.12 m | 10.2 m | Lakes over ~40 m across |
-| `pond_still` | 55° | 12 m | 0.013 m | 6.0 m | Ponds under ~40 m across |
+| `ocean_default` | 22° | 137 m | 0.103 m | 9.1 m | `Pasture3DOcean` |
+| `lake_calm` | 35° | 25 m | 0.019 m | 17.2 m | Lakes over ~40 m across |
+| `pond_still` | 55° | 12 m | 0.009 m | 8.2 m | Ponds under ~40 m across |
 | `river_flow` | 0° | 10 m | 0.024 m | 5.0 m | A stream's buoyancy and mesh density only — see §4 |
 
-These are the Gerstner presets the plugin shipped until 2026-10-09, carried through the same fit an
-old scene gets on load (below), so a lake still loads as that lake.
+**`ocean_default` is GarrettGunnell/Water's sea**, with every knob as the reference's scene sets it.
+A fresh `Pasture3DWaveProfile` is that sea, and so is a default `Pasture3DWaterFFT`. The name is kept so
+that saved scenes which select it keep working.
+
+**`lake_calm` and `pond_still` are the same sea, scaled down** (`fit_reference_sea`, below). The
+reference has no lake or pond, so these presets are a proposal: judge them by eye. They are much calmer
+than the Gerstner-era presets they replace (the lake was 0.12 m, the pond 0.013 m). `river_flow` is the
+old river preset, fitted as before.
 
 ### Which model draws: `wave_model`
 
@@ -180,9 +186,25 @@ save GPU time, lower `fft_resolution` to 128 instead.
 | `fbm` | A `Pasture3DWaterFBM`: the fallback's knobs, a `vertex/*` set for the geometry and a `fragment/*` set for the normals. `seed` is the heading in radians, `frequency` the first octave's wavenumber, `height` the metres the normalised sum is scaled to. |
 | `min_wavelength` | Metres. The shortest wave the mesh must resolve: water bodies mesh at an eighth of it. A **cost** knob — the FFT picks its mip from the mesh spacing and the fBm drops octaves it cannot draw, so a coarser mesh loses short waves from the geometry while the fragment stage still draws them as slope. |
 
-**Sizing a sea from three numbers.** `fit_sea(direction_deg, length_max, sigma)` sets both models to
-a sea whose longest wave is `length_max` metres, running along `direction_deg`, with a height standard
-deviation of `sigma` metres. That is how the presets are made; start there and tune.
+**Sizing a sea.** Two calls set both models at once:
+
+- **`fit_reference_sea(direction_deg, length_max)`** gives the reference's sea at another scale. Its
+  longest cascade is `length_max` metres instead of 137 m, and it is turned so its main swell runs along
+  `direction_deg`. It scales the way a real sea does (Froude similarity), with r = `length_max` / 137:
+  - every length, the fetch and the depth by r;
+  - the wind by √r.
+
+  Heights then scale by r, and **slopes do not change**, so a pond reads as the same kind of water,
+  only smaller. The lake and pond presets are made this way.
+- **`fit_sea(direction_deg, length_max, sigma)`** does the same, then rescales every spectrum so that the
+  height standard deviation is `sigma` metres. Slopes scale with it.
+
+Both calls set `min_wavelength` (below). Start from one and tune.
+
+**How `min_wavelength` is chosen.** The fits mesh only the waves they must and leave the rest to the
+normals: together, the waves shorter than `min_wavelength` have a height σ of 5 cm. A sea whose total
+height σ is under 5 cm (the lake, the pond) needs none of its height in the geometry, so it is meshed at
+its longest wave. To mesh more closely, set `min_wavelength` by hand.
 
 The loop period is **not** on the profile. It is `loop_period` on the manager, because the
 quantisation that makes the clock wrap seamlessly — the FFT's dispersion and the fBm's speeds — is
@@ -204,8 +226,8 @@ not get one and needs that instance uniform set by hand.
 
 Profiles used to carry Gerstner knobs (`wave_count`, `direction_deg`, `spread_deg`, `amplitude`,
 `length_max`, `steepness`). A scene that still has them loads fine: the profile reads them once and
-fits the FFT and the fBm to them — the longest wave, the heading, and a height σ of 0.176 × the old
-table's amplitude sum — and sets `min_wavelength` to the old table's shortest wave. It does that only
+fits the FFT and the fBm to them, through `fit_sea` — the longest wave, the heading, and a height σ of
+0.176 × the old table's amplitude sum — and sets `min_wavelength` by the fit's 5 cm rule. It does that only
 where the scene did not also store the model itself. Nothing writes the old knobs back, so the next
 save stores the fitted models instead. `spread_deg` and `steepness` have no counterpart and are
 dropped.

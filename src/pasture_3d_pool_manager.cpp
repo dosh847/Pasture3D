@@ -431,21 +431,22 @@ void Pasture3DPoolManager::_update_sun() {
 }
 
 /**
- * Fills _profiles with the four shipped sea states (spec §5.2).
+ * Fills _profiles with the four shipped sea states (spec §5.2, PASTURE3D_WATER_REFERENCE_SPEC.md §5).
  *
  * A manager with no profiles is a manager that answers every question with "no such
- * profile", so a freshly added one carries four. Each is fit_sea() of a direction, a
- * longest wave and a height sigma, plus the shortest wave its mesh must resolve.
+ * profile", so a freshly added one carries four:
  *
- * The numbers are the Gerstner presets these profiles shipped as until Phase 6 of the FFT
- * port, carried through the same fit a migrated scene gets: sigma is 0.176 x the old
- * table's amplitude sum, and min_wavelength is the old table's shortest wave
- * (Pasture3DWaveProfile::legacy_series at the default 120 s period). WaterRetireGerstnerGate
- * [P] checks each against a migration of the old knobs, so the two cannot drift apart.
+ *   ocean_default  the reference's sea, exactly: a new Pasture3DWaveProfile.
+ *   lake_calm      the reference's sea scaled to a 25 m longest wave, and pond_still to 12 m
+ *   pond_still     (fit_reference_sea): lower wind, shorter fetch, smaller cascades and shallower
+ *                  water, all by one Froude scaling, so each is the reference's sea seen smaller and
+ *                  its height scales with it. The sizes are the Gerstner presets' longest waves.
+ *   river_flow     chop aligned to a flow direction, fit_sea() of the retired river preset. A river's
+ *                  material does not draw it (water_stream.gdshaderinc replaces the wave model); a
+ *                  Pasture3DStream reads it for its buoyancy and its mesh density, so its
+ *                  min_wavelength stays the retired table's shortest wave rather than the FFT's.
  *
- * `river_flow` is chop aligned to a flow direction. A river's material does not draw it
- * (water_stream.gdshaderinc replaces the wave model); a Pasture3DStream reads it for its
- * buoyancy and its mesh density.
+ * WaterRetireGerstnerGate [P] checks these against the same calls, so the two cannot drift apart.
  *
  * Seeded in the CONSTRUCTOR rather than on entering the tree, because that is what
  * makes it a property default: a scene stores `profiles` as edited and set_profiles()
@@ -455,27 +456,34 @@ void Pasture3DPoolManager::_update_sun() {
  * half-constructed Node should be doing.
  */
 void Pasture3DPoolManager::_seed_default_profiles() {
-	struct Preset {
+	Ref<Pasture3DWaveProfile> ocean;
+	ocean.instantiate();
+	ocean->set_profile_name("ocean_default");
+	_profiles.push_back(ocean);
+
+	struct Scaled {
 		const char *name;
 		real_t direction_deg;
 		real_t length_max; // metres
-		real_t sigma; // height sigma, metres
-		real_t min_wavelength; // metres
 	};
-	const Preset presets[] = {
-		{ "ocean_default", 20.f, 137.f, 0.859467f, 10.1778f },
-		{ "lake_calm", 35.f, 25.f, 0.117721f, 10.1778f },
-		{ "pond_still", 55.f, 12.f, 0.0133478f, 6.0422f },
-		{ "river_flow", 0.f, 10.f, 0.0236074f, 5.0084f },
+	const Scaled scaled[] = {
+		{ "lake_calm", 35.f, 25.f },
+		{ "pond_still", 55.f, 12.f },
 	};
-	for (const Preset &p : presets) {
+	for (const Scaled &p : scaled) {
 		Ref<Pasture3DWaveProfile> profile;
 		profile.instantiate();
 		profile->set_profile_name(p.name);
-		profile->fit_sea(p.direction_deg, p.length_max, p.sigma);
-		profile->set_min_wavelength(p.min_wavelength);
+		profile->fit_reference_sea(p.direction_deg, p.length_max);
 		_profiles.push_back(profile);
 	}
+
+	Ref<Pasture3DWaveProfile> river;
+	river.instantiate();
+	river->set_profile_name("river_flow");
+	river->fit_sea(0.f, 10.f, 0.0236074f);
+	river->set_min_wavelength(5.0084f);
+	_profiles.push_back(river);
 	_connect_profiles();
 }
 

@@ -30,8 +30,9 @@ Pasture3DWaveProfile::Pasture3DWaveProfile() {
 	// The defaults are not authored ones: a scene that stores only legacy keys re-fits them on load.
 	_fft_authored = false;
 	_fbm_authored = false;
-	// A new profile is the sea the retired defaults described, so it fits from them: one path for both.
-	_apply_legacy();
+	// A new profile is the reference's sea (PASTURE3D_WATER_REFERENCE_SPEC.md §5): the FFT's defaults
+	// exactly, the fBm fitted to them, min_wavelength read off them.
+	_fit(fft->get_spectrum_knob(0, "direction_deg"), REF_LENGTH, -1.f, false);
 }
 
 void Pasture3DWaveProfile::_on_fft_changed() {
@@ -52,17 +53,23 @@ void Pasture3DWaveProfile::_on_fbm_changed() {
  * Fits the FFT and the fBm to a direction, a size and a height.
  *
  * FFT. The simulation's defaults are the reference's scene (PASTURE3D_WATER_REFERENCE_SPEC.md §2). This
- * keeps that sea's SHAPE and rescales it twice:
+ * keeps that sea's SHAPE -- all eight spectra, the cascade roles, the foam -- and rescales it:
  *
- *   SIZE by r = length_max / REF_LENGTH. Every cascade length scales by r, and so does each spectrum's
- *   peak wavelength -- by scaling fetch, since at fixed wind the JONSWAP peak goes as (U F)^0.66, so F
- *   scales as r^(1/0.66). So do the per-cascade repeats (cascade_tiles): a pond's tiles shrink with its
- *   waves. A tile of 0 means "the cascade's length" and stays 0.
+ *   SIZE by r = length_max / REF_LENGTH, by Froude similarity: every length by r, every speed by sqrt(r).
+ *   Cascade lengths, tiles (a tile of 0 stays 0), depth and each spectrum's fetch and short_waves_fade
+ *   scale by r; wind by sqrt(r). The JONSWAP alpha depends on g F / U^2 and the peak wavelength on U F / g
+ *   to the 0.66 (0.99 r after the 1.5 power), the spread on omega / omega_peak and TMA on omega sqrt(d / g),
+ *   so the scaled sea is the reference's sea at r of its size: heights scale by r too, slopes not at all.
  *
- *   HEIGHT to p_sigma, through `scale` (variance, so squared), which moves all eight spectra together.
+ *   DIRECTION. Every spectrum turns by p_direction_deg minus the reference's first spectrum's, so the
+ *   displacing cascade's first spectrum runs along p_direction_deg and the rest keep their angles to it.
  *
- * Depth is left at the reference's 20 m. Wind speed is left alone because scale and fetch already carry
- * both axes. An interim fit: the presets are rebuilt against the reference in R5 of that spec.
+ *   HEIGHT to p_sigma, through `scale` (variance, so squared), which moves all eight spectra together. A
+ *   negative p_sigma leaves the scaled reference's own height.
+ *
+ * min_wavelength is then read off the fitted FFT: the shortest wave that leaves under HEIGHT_TOLERANCE of
+ * height sigma to the normals. Height, not a share of the variance, because what the geometry misses is
+ * metres: a share would mesh a 2 cm lake's waves as finely as an ocean's.
  *
  * fBm. The reference's knobs are its look; this keeps all of them except the four that say WHERE and HOW BIG:
  *
@@ -78,32 +85,50 @@ void Pasture3DWaveProfile::_on_fbm_changed() {
 void Pasture3DWaveProfile::_fit(const real_t p_direction_deg, const real_t p_length_max, const real_t p_sigma,
 		const bool p_force) {
 	const float length_max = MAX((float)p_length_max, 0.01f);
+	const float r = CLAMP(length_max / (float)REF_LENGTH, 0.01f, 20.f);
+	// The default sea's knobs, read from a default instance so they cannot drift from it.
+	constexpr int n = Pasture3DWaterFFT::SPECTRA;
+	Pasture3DWaterFFT *ref = memnew(Pasture3DWaterFFT);
+	const Vector4 ref_lengths = ref->get_cascade_lengths();
+	const Vector4 ref_tiles = ref->get_cascade_tiles();
+	const float ref_depth = ref->get_depth();
+	const float ref_sigma = ref->get_height_sigma();
+	float ref_knobs[n][5];
+	static const char *scaled[5] = { "fetch", "short_waves_fade", "wind_speed", "direction_deg", "scale" };
+	for (int i = 0; i < n; i++) {
+		for (int j = 0; j < 5; j++) {
+			ref_knobs[i][j] = ref->get_spectrum_knob(i, scaled[j]);
+		}
+	}
+	memdelete(ref);
+	const float turn = (float)p_direction_deg - ref_knobs[0][3];
 	const float target = MAX((float)p_sigma, 0.f);
 	_deriving = true;
 	if (_fft.is_valid() && (p_force || !_fft_authored)) {
-		constexpr int n = Pasture3DWaterFFT::SPECTRA;
-		// The default sea's knobs, read from a default instance so they cannot drift from it.
-		Pasture3DWaterFFT *ref = memnew(Pasture3DWaterFFT);
-		const Vector4 ref_lengths = ref->get_cascade_lengths();
-		const Vector4 ref_tiles = ref->get_cascade_tiles();
-		float ref_fetch[n];
-		float ref_scale[n];
-		for (int i = 0; i < n; i++) {
-			ref_fetch[i] = ref->get_spectrum_knob(i, "fetch");
-			ref_scale[i] = ref->get_spectrum_knob(i, "scale");
-		}
-		memdelete(ref);
-		const float r = CLAMP(length_max / (float)REF_LENGTH, 0.01f, 20.f);
 		_fft->set_cascade_lengths(ref_lengths * r);
 		_fft->set_cascade_tiles(ref_tiles * r);
+		_fft->set_depth(ref_depth * r);
+		const float speed = std::sqrt(r);
 		for (int i = 0; i < n; i++) {
-			_fft->set_spectrum_knob(i, "fetch", ref_fetch[i] * std::pow(r, 1.f / 0.66f));
-			_fft->set_spectrum_knob(i, "scale", ref_scale[i]);
+			_fft->set_spectrum_knob(i, "fetch", ref_knobs[i][0] * r);
+			_fft->set_spectrum_knob(i, "short_waves_fade", ref_knobs[i][1] * r);
+			_fft->set_spectrum_knob(i, "wind_speed", ref_knobs[i][2] * speed);
+			_fft->set_spectrum_knob(i, "direction_deg", ref_knobs[i][3] + turn);
+			_fft->set_spectrum_knob(i, "scale", ref_knobs[i][4]);
 		}
+		if (p_sigma >= 0.f) {
+			const float sigma = _fft->get_height_sigma();
+			const float gain = sigma > 1e-6f ? (target / sigma) * (target / sigma) : 0.f;
+			for (int i = 0; i < n; i++) {
+				_fft->set_spectrum_knob(i, "scale", ref_knobs[i][4] * gain);
+			}
+		}
+		// The variance left below min_wavelength is (1 - fraction) sigma^2; keep it under the tolerance^2.
 		const float sigma = _fft->get_height_sigma();
-		const float gain = sigma > 1e-6f ? (target / sigma) * (target / sigma) : 0.f;
-		for (int i = 0; i < n; i++) {
-			_fft->set_spectrum_knob(i, "scale", ref_scale[i] * gain);
+		const float fraction = sigma > HEIGHT_TOLERANCE ? 1.f - (HEIGHT_TOLERANCE / sigma) * (HEIGHT_TOLERANCE / sigma) : 0.f;
+		const float wavelength = _fft->get_variance_wavelength(fraction);
+		if (wavelength > 0.f) {
+			_min_wavelength = MAX((real_t)wavelength, (real_t)0.1f);
 		}
 	}
 	if (_fbm.is_valid() && (p_force || !_fbm_authored)) {
@@ -113,8 +138,10 @@ void Pasture3DWaveProfile::_fit(const real_t p_direction_deg, const real_t p_len
 			_fbm->set_knob(i, "frequency", k0);
 			_fbm->set_knob(i, "speed", 2.f * std::sqrt(k0));
 		}
+		// Without a height, the fBm matches the FFT as it now stands, so the two models draw one sea.
+		const float fbm_target = p_sigma >= 0.f ? target : (_fft.is_valid() ? _fft->get_height_sigma() : ref_sigma * r);
 		const float unit_sigma = _fbm->get_unit_sigma(Pasture3DWaterFBM::SET_VERTEX);
-		const float height = unit_sigma > 1e-6f ? target / unit_sigma : 0.f;
+		const float height = unit_sigma > 1e-6f ? fbm_target / unit_sigma : 0.f;
 		const float sum_v = _fbm->get_amplitude_sum(Pasture3DWaterFBM::SET_VERTEX);
 		const float sum_f = _fbm->get_amplitude_sum(Pasture3DWaterFBM::SET_FRAGMENT);
 		_fbm->set_knob(Pasture3DWaterFBM::SET_VERTEX, "height", height);
@@ -127,7 +154,7 @@ void Pasture3DWaveProfile::_apply_legacy() {
 	float sum = 0.f;
 	float shortest = 0.f;
 	legacy_series(_legacy.count, _legacy.amplitude, _legacy.length_max, LEGACY_LOOP_PERIOD, sum, shortest);
-	_min_wavelength = shortest;
+	// min_wavelength follows the FFT the fit draws, not the retired table's shortest wave.
 	_fit(_legacy.direction_deg, MAX(_legacy.length_max, LEGACY_MIN_WAVELENGTH), LEGACY_SIGMA_PER_AMP * sum, false);
 	emit_changed();
 }
@@ -186,7 +213,14 @@ bool Pasture3DWaveProfile::migrate_legacy_key(const StringName &p_name, const Va
 }
 
 void Pasture3DWaveProfile::fit_sea(const real_t p_direction_deg, const real_t p_length_max, const real_t p_sigma) {
-	_fit(p_direction_deg, p_length_max, p_sigma, true);
+	_fit(p_direction_deg, p_length_max, MAX(p_sigma, (real_t)0.f), true);
+	_fft_authored = _fft.is_valid();
+	_fbm_authored = _fbm.is_valid();
+	emit_changed();
+}
+
+void Pasture3DWaveProfile::fit_reference_sea(const real_t p_direction_deg, const real_t p_length_max) {
+	_fit(p_direction_deg, p_length_max, -1.f, true);
 	_fft_authored = _fft.is_valid();
 	_fbm_authored = _fbm.is_valid();
 	emit_changed();
@@ -379,6 +413,7 @@ void Pasture3DWaveProfile::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_min_wavelength", "metres"), &Pasture3DWaveProfile::set_min_wavelength);
 	ClassDB::bind_method(D_METHOD("get_min_wavelength"), &Pasture3DWaveProfile::get_min_wavelength);
 	ClassDB::bind_method(D_METHOD("fit_sea", "direction_deg", "length_max", "sigma"), &Pasture3DWaveProfile::fit_sea);
+	ClassDB::bind_method(D_METHOD("fit_reference_sea", "direction_deg", "length_max"), &Pasture3DWaveProfile::fit_reference_sea);
 	BIND_ENUM_CONSTANT(MODEL_FFT);
 	BIND_ENUM_CONSTANT(MODEL_FBM);
 	ClassDB::bind_method(D_METHOD("set_active_model", "model"), &Pasture3DWaveProfile::set_active_model);

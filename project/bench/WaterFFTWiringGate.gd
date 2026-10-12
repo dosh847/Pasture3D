@@ -33,10 +33,11 @@ extends Node
 #       far plane moved to 200 (the far plane is read from the projection, not assumed). Control: falloff 0
 #       reads 1, and must miss 0.75.
 #   [N] Normal strength (L8), normal fade and foam fade (G5), from water_fft_shading_debug, which encodes
-#       the fragment's FINAL slope and crest foam. Against the same render with every fade off: strength 2
-#       doubles every slope; strength 3 under normal falloff 1 at fade f gives the reference's form, the
-#       NORMAL lerped toward up -- slope' = f s / ((1 - f) L + f), L = |(s, 1)| -- with strength applied
-#       first. Control: the naive slope * f must miss by several times more. Foam falloff 2 scales the
+#       the fragment's FINAL slope and crest foam. Against the same render with every fade off at strength
+#       N_BASE: twice it doubles every slope; three times it under normal falloff 1 at fade f gives the
+#       reference's form, the NORMAL lerped toward up -- slope' = f s / ((1 - f) L + f), L = |(s, 1)| -- with
+#       strength applied first. N_BASE is not 1 because the reference's sea is gentle (slope rms 0.05): the
+#       fade's curvature only shows on slopes near 1. Control: the naive slope * f must miss by several times more. Foam falloff 2 scales the
 #       crest by f^2, and the slopes are untouched by it.
 #   [L] Lit crest foam (PASTURE3D_WATER_REFERENCE_SPEC.md L1, L2), from water_crest_lit: the shipped lit
 #       shading with crest foam, in a world with no light, ambient or reflection. Every pixel is
@@ -481,6 +482,9 @@ func _shading(p_mat: ShaderMaterial, p_strength: float, p_normal: float, p_foam:
 	return [sx, sz, foam]
 
 
+const N_BASE := 4.0
+
+
 func _criterion_n() -> void:
 	var dbg := ShaderMaterial.new()
 	dbg.shader = load(SHADING_SHADER)
@@ -491,10 +495,10 @@ func _criterion_n() -> void:
 	_mesh.material_override = dbg
 	var f := 1.0 - CAM_HEIGHT / CAM_FAR
 
-	var base: Array = await _shading(dbg, 1.0, 0.0, 0.0)
-	var doubled: Array = await _shading(dbg, 2.0, 0.0, 0.0)
-	var faded: Array = await _shading(dbg, 3.0, 1.0, 0.0)
-	var foamed: Array = await _shading(dbg, 1.0, 0.0, 2.0)
+	var base: Array = await _shading(dbg, N_BASE, 0.0, 0.0)
+	var doubled: Array = await _shading(dbg, 2.0 * N_BASE, 0.0, 0.0)
+	var faded: Array = await _shading(dbg, 3.0 * N_BASE, 1.0, 0.0)
+	var foamed: Array = await _shading(dbg, N_BASE, 0.0, 2.0)
 	_mesh.material_override = _mat
 
 	var n := PIXELS * PIXELS
@@ -525,7 +529,7 @@ func _criterion_n() -> void:
 	var tol := 0.01 + 0.01 * s_rms
 	var ok: bool = s_rms > 0.05 and e_double < 0.01 * (1.0 + 2.0 * s_rms) and e_ref < tol and e_naive > 3.0 * e_ref \
 			and e_flat < 1e-3 and foam_mean > 0.01 and e_foam < 2e-3
-	_check("N", ok, "slope rms %.4f; strength 2: max |s - 2 s0| %.5f; strength 3 + normal falloff 1 at fade %.2f: rms error %.5f against the normal lerp (tol %.4f), control slope * f %.5f (must exceed 3x); foam falloff 2: crest mean %.4f, max |c - c0 f^2| %.5f (tol 2e-3), slopes moved %.6f (tol 1e-3)" % [
+	_check("N", ok, "slope rms %.4f at strength N_BASE; twice it: max |s - 2 s0| %.5f; three times + normal falloff 1 at fade %.2f: rms error %.5f against the normal lerp (tol %.4f), control slope * f %.5f (must exceed 3x); foam falloff 2: crest mean %.4f, max |c - c0 f^2| %.5f (tol 2e-3), slopes moved %.6f (tol 1e-3)" % [
 			s_rms, e_double, f, e_ref, tol, e_naive, foam_mean, e_foam, e_flat])
 
 

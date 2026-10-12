@@ -51,6 +51,10 @@ public: // Constants
 	// scene, whose longest tile is REF_TILE) at its own size. See fit_sea().
 	static constexpr real_t REF_LENGTH = 137.f;
 	static constexpr real_t REF_TILE = 128.f;
+	// min_wavelength is the shortest wave the geometry must carry for the waves it leaves to the fragment
+	// stage's normals to have a height sigma under this, metres. A sea under it altogether needs no wave in
+	// the geometry, and meshes at its longest (Pasture3DWaterFFT::get_variance_wavelength).
+	static constexpr real_t HEIGHT_TOLERANCE = 0.05f;
 	// Height sigma per metre of the retired Gerstner amplitude sum: the ocean preset summed to 5.24 m
 	// (unquantised) against the FFT ocean's sigma of 0.92 m.
 	static constexpr real_t LEGACY_SIGMA_PER_AMP = 0.176f;
@@ -101,9 +105,10 @@ private:
 
 	void _on_fft_changed();
 	void _on_fbm_changed();
-	// Fits the models that are not authored (or both, with p_force) to a direction, size and height.
+	// Fits the models that are not authored (or both, with p_force) to a direction, size and height. A
+	// negative p_sigma keeps the reference's height at that size (fit_reference_sea()).
 	void _fit(const real_t p_direction_deg, const real_t p_length_max, const real_t p_sigma, const bool p_force);
-	// Re-fits the unauthored models from _legacy, and sets min_wavelength to the series' shortest wave.
+	// Re-fits the unauthored models from _legacy.
 	void _apply_legacy();
 
 protected:
@@ -133,8 +138,13 @@ public:
 	real_t get_min_wavelength() const { return _min_wavelength; }
 
 	// Fits both models to a sea `p_sigma` metres in height sigma whose longest wave is `p_length_max` metres
-	// and runs along `p_direction_deg`. Overwrites whatever the knobs held, and counts as authoring them.
+	// and runs along `p_direction_deg`: the reference's sea scaled to that size, then to that height.
+	// Overwrites whatever the knobs held, sets min_wavelength from the FFT, and counts as authoring them.
 	void fit_sea(const real_t p_direction_deg, const real_t p_length_max, const real_t p_sigma);
+	// fit_sea() without the height: the reference's sea at `p_length_max`, every length, depth and time
+	// scaled as one (Froude similarity), so its height scales with it. Exactly the reference at REF_LENGTH
+	// and the reference's direction.
+	void fit_reference_sea(const real_t p_direction_deg, const real_t p_length_max);
 
 	// Accepts one retired Gerstner key (see the class comment). True when the key was one. Public for
 	// Pasture3D::migrate_ocean(), which carries an older generation of the same knobs.

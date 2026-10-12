@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 #include "logger.h"
 #include "pasture_3d_water_fft.h"
@@ -1004,6 +1005,84 @@ float Pasture3DWaterFFT::get_height_sigma() const {
 	return _sigma;
 }
 
+float Pasture3DWaterFFT::get_variance_wavelength(const float p_fraction) const {
+	SeaTerms terms;
+	terms.g = GRAVITY;
+	terms.depth = MAX(_depth, 0.01f);
+	const Vector4 lo = get_band_low();
+	const Vector4 hi = get_band_high();
+	const int displacing = get_displacing_mask();
+	// One log-spaced k axis spanning every displacing cascade's band; each cascade adds only inside its own.
+	double k_lo = 0.0;
+	double k_hi = 0.0;
+	for (int c = 0; c < CASCADES; c++) {
+		if (!(displacing & (1 << c))) {
+			continue;
+		}
+		const double dk = Math_TAU / MAX(_cascade_lengths[c], 0.01f);
+		const double a = MAX(dk, (double)lo[c]);
+		const double b = MIN(0.5 * _resolution * dk, (double)hi[c]);
+		if (b <= a) {
+			continue;
+		}
+		k_lo = k_lo > 0.0 ? MIN(k_lo, a) : a;
+		k_hi = MAX(k_hi, b);
+	}
+	if (k_hi <= k_lo) {
+		return 0.f;
+	}
+	static constexpr int STEPS = 4000;
+	std::vector<double> cumulative(STEPS + 1, 0.0);
+	double total = 0.0;
+	double prev_k = k_lo;
+	double prev_f = 0.0;
+	for (int i = 0; i <= STEPS; i++) {
+		const double k = k_lo * std::pow(k_hi / k_lo, (double)i / STEPS);
+		double omega, domega, tma;
+		terms.dispersion(k, omega, domega, tma);
+		double f = 0.0;
+		for (int c = 0; c < CASCADES; c++) {
+			if (!(displacing & (1 << c))) {
+				continue;
+			}
+			const double dk = Math_TAU / MAX(_cascade_lengths[c], 0.01f);
+			if (k < MAX(dk, (double)lo[c]) || k > MIN(0.5 * _resolution * dk, (double)hi[c])) {
+				continue;
+			}
+			for (int si = 2 * c; si < 2 * c + 2; si++) {
+				const PackedFloat32Array sp = get_spectrum_params(si);
+				const float *p = sp.ptr();
+				if (p[0] <= 0.f) {
+					continue;
+				}
+				f += SeaTerms::radial(p, k, omega, tma, terms.g) * (2.0 - CLAMP((double)p[2], 0.0, 1.0));
+			}
+		}
+		f *= domega;
+		if (i > 0) {
+			total += 0.5 * (f + prev_f) * (k - prev_k);
+		}
+		cumulative[i] = total;
+		prev_k = k;
+		prev_f = f;
+	}
+	if (total <= 0.0) {
+		return 0.f;
+	}
+	// Variance accumulates from the long waves down, so the first k past the fraction is the wavelength.
+	const double target = CLAMP((double)p_fraction, 0.0, 1.0) * total;
+	for (int i = 1; i <= STEPS; i++) {
+		if (cumulative[i] >= target) {
+			const double k0 = k_lo * std::pow(k_hi / k_lo, (double)(i - 1) / STEPS);
+			const double k1 = k_lo * std::pow(k_hi / k_lo, (double)i / STEPS);
+			const double span = cumulative[i] - cumulative[i - 1];
+			const double t = span > 0.0 ? (target - cumulative[i - 1]) / span : 0.0;
+			return (float)(Math_TAU / (k0 + t * (k1 - k0)));
+		}
+	}
+	return (float)(Math_TAU / k_hi);
+}
+
 void Pasture3DWaterFFT::set_spectrum_knob(const int p_spectrum, const StringName &p_knob, const float p_value) {
 	ERR_FAIL_INDEX(p_spectrum, SPECTRA);
 	float *v = knob_ptr(_spectra[p_spectrum], p_knob);
@@ -1175,6 +1254,7 @@ void Pasture3DWaterFFT::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("get_height_sigma"), &Pasture3DWaterFFT::get_height_sigma);
 	ClassDB::bind_method(D_METHOD("get_displacement_bound"), &Pasture3DWaterFFT::get_displacement_bound);
+	ClassDB::bind_method(D_METHOD("get_variance_wavelength", "fraction"), &Pasture3DWaterFFT::get_variance_wavelength);
 
 	// Manager-driven: bound so a gate can drive a standalone simulation, never stored.
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "resolution", PROPERTY_HINT_ENUM, "128:128,256:256,512:512", PROPERTY_USAGE_NONE), "set_resolution", "get_resolution");

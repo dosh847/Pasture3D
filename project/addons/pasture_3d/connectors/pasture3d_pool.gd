@@ -719,9 +719,11 @@ func _ensure_clipmap(p_min: Vector2, p_max: Vector2, p_wave_spacing: float) -> v
 	var mesh_size := mask_clipmap_mesh_size
 	var lods := mask_clipmap_lods
 	if lods <= 0:
-		# The smallest ring count whose reach covers the diagonal. One ring of reach is
-		# 2 * mesh_size * spacing; every ring after doubles it.
-		var need: float = (p_max - p_min).length() * 0.5 + mask_range
+		# The smallest ring count whose reach covers the diagonal -- the whole of it, from a camera at
+		# one corner. Half of it covers only a camera at the centre, and ring doubling's overshoot hid
+		# that until a coarser wave spacing landed a lake one ring short (WaterTwoLakesGate [B]). One
+		# ring of reach is 2 * mesh_size * spacing; every ring after doubles it.
+		var need: float = (p_max - p_min).length() + mask_range
 		var one_ring: float = 2.0 * float(mesh_size) * p_wave_spacing
 		lods = 1
 		while lods < 10 and one_ring * pow(2.0, float(lods - 1)) < need:

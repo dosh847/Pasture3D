@@ -16,10 +16,16 @@ extends Node
 #       retired _waves, wave_steepness, the ocean's detail_*) loads without complaint and is dropped,
 #       which is how a preset rots. Controls: each preset must store at least one parameter (so the
 #       comparison ran), and the retired `_waves` checked against the ocean's list must be undeclared.
-#   [P] Presets are migrations. Each of the four shipped profiles equals a fresh profile handed its old
-#       Gerstner knobs as legacy keys: the fBm and FFT knobs and min_wavelength, to P_TOL relative (the
-#       presets are spelled to six figures). Control: each preset against the NEXT preset's migration
-#       must miss by over P_CTRL, or the comparison cannot tell the presets apart.
+#   [P] Presets are the reference (PASTURE3D_WATER_REFERENCE_SPEC.md R5). Each of the four shipped profiles
+#       equals a fresh profile given the call PRESETS names for it -- none for ocean_default, which IS a
+#       fresh profile -- on every fBm and FFT knob the fit writes and min_wavelength, to P_TOL relative.
+#       Control: each preset against the NEXT preset's call must miss by over P_CTRL. And two checks from
+#       outside the fit, which a fit agreeing with itself cannot satisfy:
+#         ocean_default's FFT knobs equal a default Pasture3DWaterFFT's exactly -- the reference's scene.
+#         lake_calm and pond_still are that sea at r = length_max / REF_LENGTH: their height sigma, which
+#         get_height_sigma() integrates from the spectrum the knobs describe, is r times the reference's
+#         to within P_FROUDE. Control: the same sea with the wind left at the reference's (the scaling
+#         the interim fit did, by fetch alone) must miss r by over P_FROUDE_CTRL.
 #   [M] Migration on load. Legacy profiles written as .tres and loaded from disk: one with only the old
 #       keys re-fits to the same knobs as [P]'s path; two that also carry an authored fbm -- before the
 #       keys and after them, since load order is file order -- keep that fbm exactly while the FFT
@@ -38,6 +44,19 @@ const G_MIN_RES := 200
 const G_MIN_SRC := 50
 const P_TOL := 1e-4
 const P_CTRL := 0.05
+const P_FROUDE := 0.03
+const P_FROUDE_CTRL := 0.1
+# The reference sea's longest cascade, metres: Garrett's scene. Spelled here, not read from the profile, so
+# the Froude check does not inherit the fit's own r.
+const REF_LENGTH := 137.0
+# The shipped profiles and the call that makes each: [] is a fresh profile, [direction, length] is
+# fit_reference_sea(), [direction, length, sigma, min_wavelength] is fit_sea() then min_wavelength.
+const PRESETS := {
+	"ocean_default": [],
+	"lake_calm": [35.0, 25.0],
+	"pond_still": [55.0, 12.0],
+	"river_flow": [0.0, 10.0, 0.0236074, 5.0084],
+}
 const AUTHORED_HEIGHT := 3.25
 
 # Every symbol Phase 6 deleted, as a regex. Lookbehinds keep the legacy keys out.
@@ -223,7 +242,8 @@ func _migrated(p_knobs: Array) -> Pasture3DWaveProfile:
 	return p
 
 
-# Everything the fit writes, plus min_wavelength.
+# Everything the fit writes, plus min_wavelength. The R5 knobs are appended, so [M]'s slices still index
+# the cascade lengths and the first spectra.
 func _knobs(p: Pasture3DWaveProfile) -> PackedFloat64Array:
 	var out := PackedFloat64Array()
 	for s in 2:
@@ -235,7 +255,36 @@ func _knobs(p: Pasture3DWaveProfile) -> PackedFloat64Array:
 		for k in [&"scale", &"fetch"]:
 			out.append(p.fft.get_spectrum_knob(s, k))
 	out.append(p.min_wavelength)
+	var t: Vector4 = p.fft.cascade_tiles
+	out.append_array([t.x, t.y, t.z, t.w, p.fft.depth])
+	for s in Pasture3DWaterFFT.SPECTRA:
+		for k in [&"wind_speed", &"direction_deg", &"short_waves_fade"]:
+			out.append(p.fft.get_spectrum_knob(s, k))
 	return out
+
+
+# The FFT's own knobs, for the reference comparison: everything a default Pasture3DWaterFFT sets.
+func _fft_knobs(p_fft: Pasture3DWaterFFT) -> PackedFloat64Array:
+	var out := PackedFloat64Array()
+	for v in [p_fft.cascade_lengths, p_fft.cascade_tiles, p_fft.cascade_foam_offset]:
+		out.append_array([v.x, v.y, v.z, v.w])
+	out.append_array([p_fft.cascade_drawn, p_fft.cascade_displaces, p_fft.depth, p_fft.seed, p_fft.choppiness,
+			p_fft.foam_bias, p_fft.foam_threshold, p_fft.foam_add, p_fft.foam_decay, int(p_fft.band_limited)])
+	for s in Pasture3DWaterFFT.SPECTRA:
+		for k in [&"scale", &"wind_speed", &"direction_deg", &"fetch", &"spread_blend", &"swell",
+				&"peak_enhancement", &"short_waves_fade"]:
+			out.append(p_fft.get_spectrum_knob(s, k))
+	return out
+
+
+func _made(p_call: Array) -> Pasture3DWaveProfile:
+	var p := Pasture3DWaveProfile.new()
+	if p_call.size() == 2:
+		p.fit_reference_sea(p_call[0], p_call[1])
+	elif p_call.size() == 4:
+		p.fit_sea(p_call[0], p_call[1], p_call[2])
+		p.min_wavelength = p_call[3]
+	return p
 
 
 func _e(p_x: float) -> String:
@@ -255,9 +304,10 @@ func _rel(p_a: PackedFloat64Array, p_b: PackedFloat64Array) -> float:
 
 func _criterion_p() -> void:
 	var m := Pasture3DPoolManager.new()
-	var names: Array = LEGACY_PRESETS.keys()
+	var names: Array = PRESETS.keys()
 	var details := PackedStringArray()
 	var ok := true
+	var rows := 0
 	for i in names.size():
 		var name: String = names[i]
 		var next: String = names[(i + 1) % names.size()]
@@ -266,14 +316,41 @@ func _criterion_p() -> void:
 			ok = false
 			details.append("%s: the manager ships no such profile" % name)
 			continue
-		var err := _rel(_knobs(shipped), _knobs(_migrated(LEGACY_PRESETS[name])))
-		var ctrl := _rel(_knobs(shipped), _knobs(_migrated(LEGACY_PRESETS[next])))
+		var err := _rel(_knobs(shipped), _knobs(_made(PRESETS[name])))
+		var ctrl := _rel(_knobs(shipped), _knobs(_made(PRESETS[next])))
 		var row_ok := err < P_TOL and ctrl > P_CTRL
 		ok = ok and row_ok
-		details.append("%s: vs its migration %s (tol %s) | CONTROL vs %s's %.3f (need > %.2f) -> %s" % [
+		rows += 1
+		details.append("%s: vs its call %s (tol %s) | CONTROL vs %s's %.3f (need > %.2f) -> %s" % [
 				name, _e(err), _e(P_TOL), next, ctrl, P_CTRL, "ok" if row_ok else "WRONG"])
+
+	# From outside the fit: the reference itself, and Froude similarity read off the spectrum.
+	var reference := Pasture3DWaterFFT.new()
+	var ocean: Pasture3DWaveProfile = m.get_profile("ocean_default")
+	var ref_err := _rel(_fft_knobs(ocean.fft), _fft_knobs(reference)) if ocean != null else INF
+	var ref_ok := ref_err == 0.0
+	details.append("ocean_default's FFT vs a default Pasture3DWaterFFT: %s (must be 0) -> %s" % [
+			_e(ref_err), "ok" if ref_ok else "WRONG"])
+	ok = ok and ref_ok
+	var ref_sigma := reference.get_height_sigma()
+	for name in ["lake_calm", "pond_still"]:
+		var shipped: Pasture3DWaveProfile = m.get_profile(name)
+		if shipped == null:
+			ok = false
+			continue
+		var r: float = PRESETS[name][1] / REF_LENGTH
+		var ratio := shipped.fft.get_height_sigma() / ref_sigma / r
+		var still := shipped.fft.duplicate() as Pasture3DWaterFFT
+		for s in Pasture3DWaterFFT.SPECTRA:
+			still.set_spectrum_knob(s, &"wind_speed", reference.get_spectrum_knob(s, &"wind_speed"))
+		var ctrl_ratio := still.get_height_sigma() / ref_sigma / r
+		var row_ok := absf(ratio - 1.0) < P_FROUDE and absf(ctrl_ratio - 1.0) > P_FROUDE_CTRL
+		ok = ok and row_ok
+		rows += 1
+		details.append("%s at r %.4f: sigma / (r sigma_ref) %.4f (within %.2f of 1) | CONTROL, wind unscaled: %.4f (must miss by %.2f) -> %s" % [
+				name, r, ratio, P_FROUDE, ctrl_ratio, P_FROUDE_CTRL, "ok" if row_ok else "WRONG"])
 	m.free()
-	_check("P", ok and details.size() == names.size(), "\n      " + "\n      ".join(details))
+	_check("P", ok and rows == names.size() + 2, "\n      " + "\n      ".join(details))
 
 
 func _write_profile(p_path: String, p_lines: PackedStringArray, p_fbm_path := "") -> void:

@@ -306,6 +306,12 @@ public:
 	// Vertical reach for cull volumes: 1.5 significant wave heights. The largest crest in a field of a
 	// few thousand waves is about that, and a cull box that clips a rare crest pops it out of view.
 	float get_displacement_bound() const { return 6.f * get_height_sigma(); }
+	// The wavelength, metres, above which `p_fraction` of the displacing cascades' height variance lies:
+	// 0.95 says which waves carry the sea's height, and so what a mesh must resolve
+	// (Pasture3DWaveProfile::min_wavelength). A continuum integral over each displacing cascade's band, so
+	// it ignores the low-ring discreteness get_height_sigma() sums mode by mode: it says WHERE the
+	// variance is, not how much.
+	float get_variance_wavelength(const float p_fraction) const;
 };
 
 VARIANT_ENUM_CAST(Pasture3DWaterFFT::Output);
