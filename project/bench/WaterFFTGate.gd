@@ -14,13 +14,21 @@
 #       loop_period mismatched by x1.37, the two differ. This proves the quantisation is what closes the
 #       loop, not a short period.
 #   [D] Determinism. One seed twice is bit-identical; a second seed differs.
-#   [B] Band limit (spec §2.2.2). Height variance summed over cascades is NOT inflated by overlap: with
-#       band_limited off, the same spectrum's variance must rise past x1.3. Band-limited, a second cascade
-#       layout gives the same variance within +-20%, because it is one sea, not four. Averaged over
-#       SEEDS seeds: one realisation of the spectral peak is a few dozen modes, about 15% noise.
-#   [P] Physical scale (spec §2.2.6). At scale 1 the realised height variance (seed-averaged) equals the
-#       integral of the spectrum, which the gate computes itself in 1D: S(w(k)) * TMA * fade(k) * dw/dk over
-#       the k the grid holds, both spectra, within +-20%. The reference's normalisation reads x8 here.
+#   [H] The initial spectrum is the reference's (PASTURE3D_WATER_REFERENCE_SPEC.md S1, S3, S9, S10). On the
+#       default sea -- the reference's scene, eight spectra -- the GPU's h0 matches, texel by texel, the
+#       reference's CS_InitializeSpectrum re-evaluated here: its hash (constants as HLSL truncates them) and
+#       seed chain, Box-Muller, cascade i on spectra 2i and 2i+1, the cos^2 spread at the UNROTATED angle,
+#       and sqrt(2 Psi |dw/dk| / k dk^2). Controls, each of which must miss most texels: Elias' decimal hash
+#       constants, the cos^2 rotated with the wind, and our former normalisation (variance / 8).
+#   [B] Band limit (spec §2.2.2), on a fixture of ONE spectrum in every cascade, so that the cascades
+#       describe one sea. band_limited is off by default (the reference overlaps). Turned on, height variance
+#       summed over cascades is NOT inflated by overlap: with it off the same sea's variance rises past
+#       x1.3. On, a second layout, and the first layout in a scrambled order (the band split walks the
+#       cascades by length, not index), give the same variance within +-20%. Averaged over SEEDS seeds.
+#   [P] Scale. The realised height variance (P_SEEDS-averaged, summed over cascades) of the default sea equals
+#       its expectation within +-20%: 8 Psi(k) dk^2 per mode, summed over every mode the grids hold, from
+#       [H]'s re-evaluation. get_height_sigma(), the CPU estimate the cull bounds and fit_sea use, squares
+#       to that expectation within 5%. Control: a sea at 0.6x the energy, realised and estimated, must miss.
 #   [M] Mip chain. Mip 1 is the 2x2 box average of mip 0, in every cascade, for both outputs.
 #
 # [A]'s tolerance carries an AMBIGUITY bound. A mode whose sqrt(g|k|)/w0 sits within float32 rounding of
@@ -37,12 +45,17 @@
 # Run: Godot_v4.7-stable_win64_console.exe --path project res://bench/WaterFFTGate.tscn
 extends Node
 
-const CRITERIA: PackedStringArray = ["A", "S", "D", "B", "P", "M"]
+const CRITERIA: PackedStringArray = ["A", "S", "D", "H", "B", "P", "M"]
 const N := 128
 const PERIOD := 120.0
 const T_A := 37.3
 const G := 9.81
 const SEEDS := 6
+# The reference's sea peaks far below its tiles, so each cascade's variance sits in its first ring of about
+# eight modes: ~35% scatter per seed. 6 seeds read cascade 1 at 0.64 of its expectation; 48 bring the
+# total's scatter to ~5%. [H] pins h0 exactly; this is only the statistics of the realised sea.
+const P_SEEDS := 48
+const SEED_STRIDE := 100003
 
 var _fail := 0
 var _seen: Dictionary = {}
@@ -91,6 +104,7 @@ func _run() -> void:
 	_criterion_a()
 	_criterion_s()
 	_criterion_d()
+	_criterion_h()
 	_criterion_b()
 	_criterion_p()
 	_criterion_m()
@@ -299,43 +313,211 @@ func _criterion_d() -> void:
 			_g(same), differ, _g(peak)])
 
 
+# --- [H] the reference's initial spectrum ------------------------------------------------------------
+
+const MASK32 := 0xFFFFFFFF
+var _f32_box := PackedFloat32Array([0.0])
+
+
+## Rounds to float32, which the kernel's hash arithmetic runs in: the seed chain floors hash() * 10, and a
+## float64 product can land on the other side of an integer.
+func _f32(p_x: float) -> float:
+	_f32_box[0] = p_x
+	return _f32_box[0]
+
+
+## a * b mod 2^32, without overflowing GDScript's int64.
+func _mul32(p_a: int, p_b: int) -> int:
+	return (p_a * (p_b & 0xFFFF) + (((p_a * (p_b >> 16)) & 0xFFFF) << 16)) & MASK32
+
+
+## The kernel's hash(): Hugo Elias' integer hash, with the reference's constants (p_decimal: Elias' own).
+func _hash(p_n: int, p_decimal: bool) -> float:
+	var c1 := 789221 if p_decimal else 0x789221
+	var c2 := 1376312589 if p_decimal else 0x76312589
+	var n := p_n & MASK32
+	n = ((n << 13) & MASK32) ^ n
+	n = (_mul32(n, (_mul32(_mul32(n, n), 15731) + c1) & MASK32) + c2) & MASK32
+	return _f32(_f32(float(n & 0x7FFFFFFF)) / _f32(float(0x7FFFFFFF)))
+
+
+## The gaussian pair each texel of each cascade draws: [gauss1, gauss2] per cascade, as the kernel's seed
+## chain produces them.
+func _gaussians(p_x: int, p_y: int, p_seed: int, p_decimal: bool) -> Array:
+	var seed := (p_x + N * p_y + N + p_seed) & MASK32
+	var out := []
+	for i in 4:
+		seed = (seed + i + int(_f32(_hash(seed, p_decimal) * 10.0))) & MASK32
+		var u := [_hash(seed, p_decimal), _hash(_mul32(seed, 2), p_decimal), _hash(_mul32(seed, 3), p_decimal),
+				_hash(_mul32(seed, 4), p_decimal)]
+		var r1 := sqrt(-2.0 * log(maxf(u[0], 1e-7)))
+		var r2 := sqrt(-2.0 * log(maxf(u[2], 1e-7)))
+		out.append([Vector2(r1 * cos(TAU * u[1]), r1 * sin(TAU * u[1])),
+				Vector2(r2 * cos(TAU * u[3]), r2 * sin(TAU * u[3]))])
+	return out
+
+
+## The reference's DirectionSpectrum; p_rotated is the control that rotates the cos^2 half with the wind.
+func _direction(p_sp: PackedFloat32Array, p_theta: float, p_omega: float, p_rotated: bool) -> float:
+	var ratio := p_omega / p_sp[5]
+	var sp := 9.77 * pow(ratio, -2.5) if ratio > 1.0 else 6.97 * pow(ratio, 5.0)
+	sp += 16.0 * tanh(minf(ratio, 20.0)) * p_sp[3] * p_sp[3]
+	var s2 := sp * sp
+	var s3 := s2 * sp
+	var s4 := s3 * sp
+	var norm := (-0.000564 * s4 + 0.00776 * s3 - 0.044 * s2 + 0.192 * sp + 0.163) if sp < 5.0 \
+			else (-4.80e-08 * s4 + 1.07e-05 * s3 - 9.53e-04 * s2 + 5.90e-02 * sp + 3.93e-01)
+	var c2s := norm * pow(absf(cos(0.5 * (p_theta - p_sp[1]))), 2.0 * sp)
+	var c := cos(p_theta - p_sp[1]) if p_rotated else cos(p_theta)
+	return lerpf(2.0 / 3.1415 * c * c, c2s, p_sp[2])
+
+
+## Psi(k) |dw/dk| / k for one cascade's pair of spectra at grid wavevector p_k: the sqrt argument's
+## spectral part. [base, rotated-control].
+func _psi(p_fft: Pasture3DWaterFFT, p_cascade: int, p_k: Vector2) -> Vector2:
+	var depth := p_fft.depth
+	var k := p_k.length()
+	var kd := minf(k * depth, 20.0)
+	var th := tanh(kd)
+	var omega := sqrt(G * k * th)
+	var ch := cosh(kd)
+	var domega := G * (depth * k / ch / ch + th) / omega / 2.0
+	var angle := atan2(p_k.y, p_k.x)
+	var out := Vector2.ZERO
+	for j in 2:
+		var sp := p_fft.get_spectrum_params(2 * p_cascade + j)
+		if j == 1 and sp[0] <= 0.0:
+			continue
+		var radial := _jonswap(sp, omega, depth) * exp(-sp[7] * sp[7] * k * k)
+		out += Vector2(radial * _direction(sp, angle, omega, false), radial * _direction(sp, angle, omega, true))
+	return out * absf(domega) / k
+
+
+## [H]'s per-cascade expected height variance, 4 * sum of the sqrt argument over every mode: [P] reuses it.
+var _expected := PackedFloat64Array()
+
+
+func _criterion_h() -> void:
+	var fft := _make()
+	fft.update(0.0, 0.0)
+	var lengths := fft.cascade_lengths
+	var lo := fft.get_band_low()
+	var hi := fft.get_band_high()
+	var gpu: Array = []
+	var peak := PackedFloat64Array([0, 0, 0, 0])
+	for c in 4:
+		var h0 := _floats(fft.read_layer(Pasture3DWaterFFT.OUTPUT_INITIAL_SPECTRUM, c))
+		gpu.append(h0)
+		for i in N * N:
+			peak[c] = maxf(peak[c], Vector2(h0[i * 4], h0[i * 4 + 1]).length())
+	_expected = PackedFloat64Array([0, 0, 0, 0])
+	# [matched, decimal, rotated, normalisation] texels, of `counted` non-empty ones.
+	var hits := PackedInt64Array([0, 0, 0, 0])
+	var counted := 0
+	var zero_mismatch := 0
+	var worst := 0.0
+	var half := N / 2
+	for y in N:
+		for x in N:
+			var g: Array = _gaussians(x, y, fft.seed, false)
+			var gd: Array = _gaussians(x, y, fft.seed, true)
+			for c in 4:
+				var dk := TAU / lengths[c]
+				var k := Vector2(x - half, y - half) * dk
+				var kl := k.length()
+				var o := (y * N + x) * 4
+				var got := Vector2(gpu[c][o], gpu[c][o + 1])
+				if x == 0 or y == 0 or kl < lo[c] or kl >= hi[c]:
+					if got != Vector2.ZERO:
+						zero_mismatch += 1
+					continue
+				var psi := _psi(fft, c, k)
+				var arg := 2.0 * psi.x * dk * dk
+				_expected[c] += 4.0 * arg
+				var want := Vector2(g[c][1].x, g[c][0].y) * sqrt(arg)
+				var tol := 2e-3 * want.length() + 1e-6 * peak[c]
+				var err := (got - want).length()
+				counted += 1
+				worst = maxf(worst, err / tol)
+				if err <= tol:
+					hits[0] += 1
+				if (got - Vector2(gd[c][1].x, gd[c][0].y) * sqrt(arg)).length() <= tol:
+					hits[1] += 1
+				if (got - Vector2(g[c][1].x, g[c][0].y) * sqrt(2.0 * psi.y * dk * dk)).length() <= tol:
+					hits[2] += 1
+				if (got - want / sqrt(8.0)).length() <= tol:
+					hits[3] += 1
+	var frac := PackedFloat64Array()
+	for i in 4:
+		frac.append(float(hits[i]) / float(maxi(counted, 1)))
+	var empty := peak[0] <= 0.0 or peak[1] <= 0.0 or peak[2] <= 0.0 or peak[3] <= 0.0
+	var ok := not empty and counted > 0 and zero_mismatch == 0 and frac[0] >= 0.999 \
+			and frac[1] < 0.5 and frac[2] < 0.5 and frac[3] < 0.5
+	_check("H", ok, "%d texels: %.4f match the reference h0 (>= 0.999, worst err/tol %.2f), %d non-zero where it is zero; controls (each < 0.5): decimal hash %.4f, rotated cos^2 %.4f, variance/8 %.4f; peaks %s%s" % [
+			counted, frac[0], worst, zero_mismatch, frac[1], frac[2], frac[3], peak, " EMPTY CASCADE" if empty else ""])
+
+
 # --- [B] band limit -----------------------------------------------------------------------------------
 
-## Height variance per cascade, averaged over SEEDS seeds.
-func _total_variance(p_lengths: Vector4, p_banded: bool) -> Array:
+## One spectrum in every cascade (the pair's second off), deep water: the cascades describe ONE sea, which
+## is what a band split is for. The reference's scene is not that: each of its cascades is its own sea.
+func _one_sea(p_fft: Pasture3DWaterFFT) -> void:
+	p_fft.depth = 100.0
+	for c in 4:
+		var knobs := {"scale": 1.0, "wind_speed": 10.0, "direction_deg": 0.0, "fetch": 100000.0,
+				"spread_blend": 1.0, "swell": 0.2, "peak_enhancement": 3.3, "short_waves_fade": 0.01}
+		for key in knobs:
+			p_fft.set_spectrum_knob(2 * c, key, knobs[key])
+		p_fft.set_spectrum_knob(2 * c + 1, "scale", 0.0)
+
+
+## Height variance per cascade, averaged over SEEDS seeds: [total, per cascade, the fft]. A zero p_lengths
+## keeps the default layout; p_energy scales every spectrum.
+func _total_variance(p_lengths: Vector4, p_banded: bool, p_one_sea: bool = true, p_energy: float = 1.0,
+		p_seeds: int = SEEDS) -> Array:
 	var fft := _make()
-	fft.cascade_lengths = p_lengths
+	if p_one_sea:
+		_one_sea(fft)
+	if p_energy != 1.0:
+		for i in Pasture3DWaterFFT.SPECTRA:
+			fft.set_spectrum_knob(i, "scale", fft.get_spectrum_knob(i, "scale") * p_energy)
+	if p_lengths != Vector4.ZERO:
+		fft.cascade_lengths = p_lengths
 	fft.band_limited = p_banded
-	var parts := PackedFloat32Array([0.0, 0.0, 0.0, 0.0])
-	for i in SEEDS:
-		fft.seed = 101 + i
+	var parts := PackedFloat64Array([0.0, 0.0, 0.0, 0.0])
+	for i in p_seeds:
+		# Spaced past N^2: the kernel adds the seed to x + N y + N, so consecutive seeds hand a texel its
+		# neighbour's draws, and the +k and -k modes of the dominant ring repeat each other two seeds apart.
+		fft.seed = 101 + i * SEED_STRIDE
 		fft.update(0.0, 0.0)
 		for c in 4:
-			parts[c] += _variance_y(_disp(fft, c)) / float(SEEDS)
+			parts[c] += _variance_y(_disp(fft, c)) / float(p_seeds)
 	var total := 0.0
 	for v in parts:
 		total += v
-	return [total, parts]
-
-
-## [B]'s banded default-layout result, reused by [P].
-var _banded: Array = []
+	return [total, parts, fft]
 
 
 func _criterion_b() -> void:
+	var default_off := not Pasture3DWaterFFT.new().band_limited
 	var la := Vector4(500.0, 85.0, 16.0, 4.0)
 	var lb := Vector4(400.0, 70.0, 13.0, 3.3)
-	_banded = _total_variance(la, true)
+	var lc := Vector4(85.0, 500.0, 4.0, 16.0)
+	var banded: Array = _total_variance(la, true)
 	var other: Array = _total_variance(lb, true)
+	var scrambled: Array = _total_variance(lc, true)
 	var overlapped: Array = _total_variance(la, false)
-	var inflate: float = overlapped[0] / max(_banded[0], 1e-12)
-	var layout: float = other[0] / max(_banded[0], 1e-12)
-	var ok: bool = _banded[0] > 1e-8 and inflate > 1.3 and layout > 1.0 / 1.2 and layout < 1.2
-	_check("B", ok, "%d seeds: variance banded %s m^2 %s; layout B %s %s (ratio %.3f, within 1.2x); unbanded %s %s (x%.2f, must exceed 1.3)" % [
-			SEEDS, _g(_banded[0]), _banded[1], _g(other[0]), other[1], layout, _g(overlapped[0]), overlapped[1], inflate])
+	var inflate: float = overlapped[0] / max(banded[0], 1e-12)
+	var layout: float = other[0] / max(banded[0], 1e-12)
+	var order: float = scrambled[0] / max(banded[0], 1e-12)
+	var ok: bool = default_off and banded[0] > 1e-8 and inflate > 1.3 and layout > 1.0 / 1.2 and layout < 1.2 \
+			and order > 1.0 / 1.2 and order < 1.2
+	_check("B", ok, "band_limited off by default: %s; %d seeds, one sea: banded %s m^2 %s; layout B %s (ratio %.3f), scrambled order %s %s (ratio %.3f), both within 1.2x; unbanded %s %s (x%.2f, must exceed 1.3)" % [
+			default_off, SEEDS, _g(banded[0]), banded[1], _g(other[0]), layout, _g(scrambled[0]), scrambled[1], order,
+			_g(overlapped[0]), overlapped[1], inflate])
 
 
-# --- [P] physical scale -------------------------------------------------------------------------------
+# --- [P] scale ----------------------------------------------------------------------------------------
 
 ## JONSWAP with the TMA depth correction, from the derived params the kernel receives:
 ## [scale, angle, spread_blend, swell, alpha, peak_omega, gamma, short_waves_fade].
@@ -353,58 +535,25 @@ func _jonswap(p_sp: PackedFloat32Array, p_omega: float, p_depth: float) -> float
 			* pow(absf(p_sp[6]), r)
 
 
-## Variance of the sea the knobs describe: the integral of S(w(k)) * fade(k) * dw/dk over the k the grid
-## realises. The directional spread integrates to 1 over the circle at spread_blend 1, so it drops out.
-func _spectrum_integral(p_fft: Pasture3DWaterFFT) -> float:
-	var lengths := p_fft.cascade_lengths
-	var depth := p_fft.depth
-	var k0 := 0.5 * TAU / lengths[0]
-	var k1 := PI * float(N) / lengths[3]
-	var steps := 20000
-	var total := 0.0
-	var prev_k := k0
-	var prev_f := 0.0
-	for i in steps + 1:
-		var k := k0 * pow(k1 / k0, float(i) / float(steps))
-		var kd: float = min(k * depth, 20.0)
-		var th := tanh(kd)
-		var omega := sqrt(G * k * th)
-		var ch := cosh(kd)
-		var domega := G * (depth * k / ch / ch + th) / omega / 2.0
-		var f := 0.0
-		for sidx in 2:
-			var sp := p_fft.get_spectrum_params(sidx)
-			if sidx == 1 and sp[0] <= 0.0:
-				continue
-			f += _jonswap(sp, omega, depth) * exp(-sp[7] * sp[7] * k * k) * domega
-		if i > 0:
-			total += 0.5 * (f + prev_f) * (k - prev_k)
-		prev_k = k
-		prev_f = f
-	return total
-
-
 func _criterion_p() -> void:
-	var fft := _make()
-	var blend_ok := fft.get_spectrum_knob(0, "spread_blend") == 1.0 and fft.get_spectrum_knob(1, "spread_blend") == 1.0
-	var expected := _spectrum_integral(fft)
-	var realised: float = _banded[0] if not _banded.is_empty() else 0.0
-	var ratio: float = realised / max(expected, 1e-12)
-	# Control: the same comparison must fail for a sea at 0.6x the energy, measured, not assumed.
-	var quiet := _make()
-	quiet.set_spectrum_knob(0, "scale", 0.6)
-	quiet.set_spectrum_knob(1, "scale", 0.6 * fft.get_spectrum_knob(1, "scale"))
-	var quiet_var := 0.0
-	for i in SEEDS:
-		quiet.seed = 101 + i
-		quiet.update(0.0, 0.0)
-		for c in 4:
-			quiet_var += _variance_y(_disp(quiet, c)) / float(SEEDS)
-	var control: float = quiet_var / max(expected, 1e-12)
-	var ok: bool = blend_ok and expected > 1e-6 and realised > 1e-8 and ratio > 1.0 / 1.2 and ratio < 1.2 			and control < 1.0 / 1.2
-	_check("P", ok, "realised variance %s m^2 (Hs %.2f m) vs spectrum integral %s m^2 (Hs %.2f m): ratio %.3f, within 1.2x; control at 0.6x energy %.3f (must fall below 0.833)%s" % [
-			_g(realised), 4.0 * sqrt(realised), _g(expected), 4.0 * sqrt(expected), ratio, control,
-			"" if blend_ok else " (spread_blend is not 1: the integral assumes a unit-mass spread)"])
+	var expected := 0.0
+	for v in _expected:
+		expected += v
+	var real: Array = _total_variance(Vector4.ZERO, false, false, 1.0, P_SEEDS)
+	var quiet: Array = _total_variance(Vector4.ZERO, false, false, 0.6, P_SEEDS)
+	var sigma: float = (real[2] as Pasture3DWaterFFT).get_height_sigma()
+	var quiet_sigma: float = (quiet[2] as Pasture3DWaterFFT).get_height_sigma()
+	var ratio: float = real[0] / max(expected, 1e-12)
+	var est: float = sigma * sigma / max(expected, 1e-12)
+	var control: float = quiet[0] / max(expected, 1e-12)
+	var est_control: float = quiet_sigma * quiet_sigma / max(expected, 1e-12)
+	var per := PackedFloat64Array()
+	for c in 4:
+		per.append(real[1][c] / max(_expected[c], 1e-12) if _expected.size() == 4 else 0.0)
+	var ok: bool = expected > 1e-8 and real[0] > 1e-8 and ratio > 1.0 / 1.2 and ratio < 1.2 \
+			and est > 1.0 / 1.05 and est < 1.05 and control < 1.0 / 1.2 and est_control < 1.0 / 1.05
+	_check("P", ok, "default sea, %d seeds: realised variance %s m^2 (Hs %.2f m) vs expected %s m^2 (Hs %.2f m): ratio %.3f (within 1.2x; per cascade %s); get_height_sigma^2 / expected %.4f (within 1.05x); controls at 0.6x energy: realised %.3f (< 0.833), estimate %.3f (< 0.952)" % [
+			P_SEEDS, _g(real[0]), 4.0 * sqrt(real[0]), _g(expected), 4.0 * sqrt(expected), ratio, per, est, control, est_control])
 
 
 # --- [M] mip chain ------------------------------------------------------------------------------------

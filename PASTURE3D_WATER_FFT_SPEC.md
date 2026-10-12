@@ -96,6 +96,11 @@ offered.
 
 ### 2.2 Deliberate deviations from the reference
 
+> **Superseded in part (2026-10-11).** The user chose full fidelity to the reference, so several of these
+> deviations are being reverted: see PASTURE3D_WATER_REFERENCE_SPEC.md. As of R1, items 2 (band limits)
+> and 6 (normalisation) now follow the reference, as do the two shared spectra (now eight, a pair per
+> cascade), the rotated cos² and the hash constants. The rest stand until their phases.
+
 1. **Cascade tiling is physical.** The reference samples cascade *i* at `worldPos.xz * _Tile_i` with
    hand-set tiles. Its own scene has a 32 m spectrum sampled at a 7.7 m repeat, which plays the waves at
    the wrong speed for their size. Here the UV is `xz / length_scale_i`, always.

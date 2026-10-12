@@ -47,8 +47,10 @@ public: // Constants
 		MODEL_FBM = 2,
 	};
 
-	// The fit's reference: the FFT's default sea is an ocean whose longest wave is this long. See fit_sea().
+	// The fit's reference: fit_sea() at this length_max leaves the FFT's default sea (the reference's
+	// scene, whose longest tile is REF_TILE) at its own size. See fit_sea().
 	static constexpr real_t REF_LENGTH = 137.f;
+	static constexpr real_t REF_TILE = 128.f;
 	// Height sigma per metre of the retired Gerstner amplitude sum: the ocean preset summed to 5.24 m
 	// (unquantised) against the FFT ocean's sigma of 0.92 m.
 	static constexpr real_t LEGACY_SIGMA_PER_AMP = 0.176f;
@@ -157,7 +159,7 @@ public:
 	// it is the simulation's displacement bound, from the spectrum; under the fBm, the octaves' reach.
 	real_t get_amplitude_sum();
 	// The longest wave the drawn sea carries, metres: fit_sea()'s `length_max`, read back from the knobs.
-	// Under the FFT, from the first cascade (the fit makes it 500/137 of the longest wave); under the fBm,
+	// Under the FFT, from the longest cascade (the fit makes it REF_TILE/REF_LENGTH of the longest wave); under the fBm,
 	// the first octave's wavelength. A METHOD, not a property: a `length_max` property would shadow the
 	// legacy key of the same name, and _set() would never see it on load.
 	real_t get_length_max() const;

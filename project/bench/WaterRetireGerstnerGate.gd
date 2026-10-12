@@ -231,7 +231,7 @@ func _knobs(p: Pasture3DWaveProfile) -> PackedFloat64Array:
 			out.append(p.fbm.get_knob(s, k))
 	var l: Vector4 = p.fft.cascade_lengths
 	out.append_array([l.x, l.y, l.z, l.w])
-	for s in 2:
+	for s in Pasture3DWaterFFT.SPECTRA:
 		for k in [&"scale", &"fetch"]:
 			out.append(p.fft.get_spectrum_knob(s, k))
 	out.append(p.min_wavelength)

@@ -27,8 +27,9 @@ static const char *KERNEL_DEFINES[] = {
 	"KERNEL_DOWNSAMPLE",
 };
 
-// Floats in the kernel's Params block (std430): 2 spectra x 8, three vec4s, then 12 scalars.
-static constexpr int PARAM_FLOATS = 40;
+// Floats in the kernel's Params block (std430): 8 spectra x 8, three vec4s, then 12 scalars.
+static constexpr int PARAM_FLOATS = 88;
+static constexpr int PARAM_SPECTRA_FLOATS = Pasture3DWaterFFT::SPECTRA * 8;
 
 ///////////////////////////
 // Private Functions
@@ -309,30 +310,31 @@ void Pasture3DWaterFFT::_free_kernels() {
 
 void Pasture3DWaterFFT::_write_params() {
 	float f[PARAM_FLOATS] = {};
-	for (int s = 0; s < 2; s++) {
+	for (int s = 0; s < SPECTRA; s++) {
 		PackedFloat32Array sp = get_spectrum_params(s);
 		for (int i = 0; i < 8; i++) {
 			f[s * 8 + i] = sp[i];
 		}
 	}
+	const int b = PARAM_SPECTRA_FLOATS;
 	Vector4 lo = get_band_low();
 	Vector4 hi = get_band_high();
 	for (int i = 0; i < CASCADES; i++) {
-		f[16 + i] = _cascade_lengths[i];
-		f[20 + i] = lo[i];
-		f[24 + i] = hi[i];
+		f[b + i] = _cascade_lengths[i];
+		f[b + 4 + i] = lo[i];
+		f[b + 8 + i] = hi[i];
 	}
-	f[28] = _choppiness;
-	f[29] = _choppiness;
-	f[30] = GRAVITY;
-	f[31] = _depth;
-	f[32] = _loop_period;
-	f[33] = _foam_bias;
-	f[34] = _foam_threshold;
-	f[35] = _foam_add;
-	f[36] = _foam_decay;
+	f[b + 12] = _choppiness;
+	f[b + 13] = _choppiness;
+	f[b + 14] = GRAVITY;
+	f[b + 15] = _depth;
+	f[b + 16] = _loop_period;
+	f[b + 17] = _foam_bias;
+	f[b + 18] = _foam_threshold;
+	f[b + 19] = _foam_add;
+	f[b + 20] = _foam_decay;
 	uint32_t seed = (uint32_t)_seed;
-	memcpy(&f[37], &seed, sizeof(seed));
+	memcpy(&f[b + 21], &seed, sizeof(seed));
 	PackedByteArray bytes;
 	bytes.resize(PARAM_FLOATS * 4);
 	memcpy(bytes.ptrw(), f, PARAM_FLOATS * 4);
@@ -521,13 +523,29 @@ void Pasture3DWaterFFT::_knob_changed(const bool p_respectrum, const bool p_emit
 Pasture3DWaterFFT::Pasture3DWaterFFT() {
 	_disp_texture.instantiate();
 	_slope_texture.instantiate();
-	// The swell defaults: longer, older, more directional than the wind sea. U=12 m/s over 300 km peaks
-	// near 133 m, a quarter of the longest tile; the wind sea (10 m/s, 100 km) peaks near 57 m.
-	_spectra[1].scale = 0.5f;
-	_spectra[1].wind_speed = 12.f;
-	_spectra[1].direction_deg = 30.f;
-	_spectra[1].fetch = 300000.f;
-	_spectra[1].swell = 1.f;
+	// The reference's SampleScene spectrum1..spectrum8: scale, wind, direction, fetch, spread blend, swell,
+	// peak enhancement, short-waves fade. PASTURE3D_WATER_REFERENCE_SPEC.md §2.
+	static const float scene[SPECTRA][8] = {
+		{ 0.1f, 2.f, 22.f, 100000.f, 0.642f, 1.f, 1.f, 0.025f },
+		{ 0.07f, 2.f, 59.f, 1000.f, 0.f, 1.f, 1.f, 0.01f },
+		{ 0.25f, 20.f, 97.f, 100000000.f, 0.14f, 1.f, 1.f, 0.5f },
+		{ 0.25f, 20.f, 67.f, 1000000.f, 0.47f, 1.f, 1.f, 0.5f },
+		{ 0.15f, 5.f, 105.f, 1000000.f, 0.2f, 1.f, 1.f, 0.5f },
+		{ 0.1f, 1.f, 19.f, 10000.f, 0.298f, 0.695f, 1.f, 0.5f },
+		{ 1.f, 1.f, 209.f, 200000.f, 0.56f, 1.f, 1.f, 0.0001f },
+		{ 0.23f, 1.f, 0.f, 1000.f, 0.f, 0.f, 1.f, 0.0001f },
+	};
+	for (int i = 0; i < SPECTRA; i++) {
+		SpectrumKnobs &k = _spectra[i];
+		k.scale = scene[i][0];
+		k.wind_speed = scene[i][1];
+		k.direction_deg = scene[i][2];
+		k.fetch = scene[i][3];
+		k.spread_blend = scene[i][4];
+		k.swell = scene[i][5];
+		k.peak_enhancement = scene[i][6];
+		k.short_waves_fade = scene[i][7];
+	}
 }
 
 Pasture3DWaterFFT::~Pasture3DWaterFFT() {
@@ -641,28 +659,48 @@ PackedByteArray Pasture3DWaterFFT::read_layer(const int p_output, const int p_la
 	return _render_read(p_output, p_layer, p_mip);
 }
 
+// The cascades from longest to shortest, ties in index order. The lengths are not sorted (the reference's
+// scene runs 94, 128, 64, 32), so the band split walks this order instead.
+static void cascades_by_length(const Vector4 &p_lengths, int r_order[Pasture3DWaterFFT::CASCADES]) {
+	for (int i = 0; i < Pasture3DWaterFFT::CASCADES; i++) {
+		r_order[i] = i;
+	}
+	for (int i = 1; i < Pasture3DWaterFFT::CASCADES; i++) {
+		for (int j = i; j > 0 && p_lengths[r_order[j]] > p_lengths[r_order[j - 1]]; j--) {
+			SWAP(r_order[j], r_order[j - 1]);
+		}
+	}
+}
+
 Vector4 Pasture3DWaterFFT::get_band_low() const {
+	// The reference's _LowCutoff. It also keeps out k = 0, where dw/dk / k divides by zero.
+	Vector4 lo(1e-4f, 1e-4f, 1e-4f, 1e-4f);
+	if (!_band_limited) {
+		return lo;
+	}
 	Vector4 hi = get_band_high();
-	Vector4 lo;
-	lo[0] = 1e-4f;
-	for (int i = 1; i < CASCADES; i++) {
-		lo[i] = _band_limited ? hi[i - 1] : 1e-4f;
+	int order[CASCADES];
+	cascades_by_length(_cascade_lengths, order);
+	for (int n = 1; n < CASCADES; n++) {
+		lo[order[n]] = hi[order[n - 1]];
 	}
 	return lo;
 }
 
 Vector4 Pasture3DWaterFFT::get_band_high() const {
-	Vector4 hi;
-	for (int i = 0; i < CASCADES; i++) {
-		if (!_band_limited || i == CASCADES - 1) {
-			// The reference's _HighCutoff. Past the grid's corner there are no samples anyway.
-			hi[i] = 9000.f;
-			continue;
-		}
-		// gasgiant's split: hand over to the next cascade six of its fundamentals in, so each cascade's
-		// lowest modes -- the ones a tile repeat makes most visible -- come from the cascade above. Capped
-		// at this cascade's Nyquist so nothing it cannot represent is assigned to it.
-		float handover = 6.f * (float)Math_TAU / _cascade_lengths[i + 1];
+	// The reference's _HighCutoff. Past the grid's corner there are no samples anyway.
+	Vector4 hi(9000.f, 9000.f, 9000.f, 9000.f);
+	if (!_band_limited) {
+		return hi;
+	}
+	int order[CASCADES];
+	cascades_by_length(_cascade_lengths, order);
+	for (int n = 0; n < CASCADES - 1; n++) {
+		const int i = order[n];
+		// gasgiant's split: hand over to the next shorter cascade six of its fundamentals in, so each
+		// cascade's lowest modes -- the ones a tile repeat makes most visible -- come from the cascade above.
+		// Capped at this cascade's Nyquist so nothing it cannot represent is assigned to it.
+		float handover = 6.f * (float)Math_TAU / _cascade_lengths[order[n + 1]];
 		float nyquist = (float)Math_PI * (float)_resolution / _cascade_lengths[i];
 		hi[i] = MIN(handover, nyquist);
 	}
@@ -672,9 +710,7 @@ Vector4 Pasture3DWaterFFT::get_band_high() const {
 PackedFloat32Array Pasture3DWaterFFT::get_spectrum_params(const int p_spectrum) const {
 	PackedFloat32Array out;
 	out.resize(8);
-	if (p_spectrum < 0 || p_spectrum > 1) {
-		return out;
-	}
+	ERR_FAIL_INDEX_V(p_spectrum, SPECTRA, out);
 	const SpectrumKnobs &k = _spectra[p_spectrum];
 	float wind = MAX(k.wind_speed, 0.01f);
 	float fetch = MAX(k.fetch, 1.f);
@@ -736,19 +772,8 @@ void Pasture3DWaterFFT::set_loop_period(const float p_seconds) {
 }
 
 void Pasture3DWaterFFT::set_cascade_lengths(const Vector4 &p_lengths) {
-	// Descending, and positive: the band split assumes cascade 0 is the longest.
-	float l[CASCADES] = { p_lengths.x, p_lengths.y, p_lengths.z, p_lengths.w };
-	for (int i = 0; i < CASCADES; i++) {
-		l[i] = MAX(l[i], 0.25f);
-	}
-	for (int i = 0; i < CASCADES; i++) {
-		for (int j = i + 1; j < CASCADES; j++) {
-			if (l[j] > l[i]) {
-				SWAP(l[i], l[j]);
-			}
-		}
-	}
-	Vector4 v(l[0], l[1], l[2], l[3]);
+	// In any order: cascade i is spectra 2i and 2i+1 whatever its length, and the band split sorts.
+	Vector4 v(MAX(p_lengths.x, 0.25f), MAX(p_lengths.y, 0.25f), MAX(p_lengths.z, 0.25f), MAX(p_lengths.w, 0.25f));
 	if (v == _cascade_lengths) {
 		return;
 	}
@@ -785,64 +810,136 @@ static float *knob_ptr(Pasture3DWaterFFT::SpectrumKnobs &p_k, const StringName &
 	return nullptr;
 }
 
+// The INIT kernel's spectrum terms in double, for get_height_sigma(). p is get_spectrum_params():
+// [scale, angle_rad, spread_blend, swell, alpha, peak_omega, gamma, short_waves_fade].
+namespace {
+struct SeaTerms {
+	double g = 0.0;
+	double depth = 0.0;
+
+	// w(k), dw/dk and the TMA correction at |k|.
+	void dispersion(const double p_k, double &r_omega, double &r_domega, double &r_tma) const {
+		const double kd = MIN(p_k * depth, 20.0);
+		const double th = std::tanh(kd);
+		const double ch = std::cosh(kd);
+		r_omega = std::sqrt(g * p_k * th);
+		r_domega = g * (depth * p_k / ch / ch + th) / r_omega / 2.0;
+		const double oh = r_omega * std::sqrt(depth / g);
+		r_tma = oh <= 1.0 ? 0.5 * oh * oh : (oh < 2.0 ? 1.0 - 0.5 * (2.0 - oh) * (2.0 - oh) : 1.0);
+	}
+
+	// JONSWAP x TMA x short-wave fade: everything but the directional spread.
+	static double radial(const float *p, const double p_k, const double p_omega, const double p_tma, const double p_g) {
+		const double peak = p[5];
+		const double sigma = p_omega <= peak ? 0.07 : 0.09;
+		const double r = std::exp(-(p_omega - peak) * (p_omega - peak) / 2.0 / sigma / sigma / peak / peak);
+		return p[0] * p_tma * p[4] * p_g * p_g / std::pow(p_omega, 5.0) *
+				std::exp(-1.25 * std::pow(peak / p_omega, 4.0)) * std::pow(std::abs((double)p[6]), r) *
+				std::exp(-(double)p[7] * p[7] * p_k * p_k);
+	}
+
+	// The directional spread at angle theta, as the kernel's direction_spectrum(): cos^2 unrotated (S9).
+	static double spread(const float *p, const double p_theta, const double p_omega) {
+		const double ratio = p_omega / p[5];
+		double s = ratio > 1.0 ? 9.77 * std::pow(ratio, -2.5) : 6.97 * std::pow(ratio, 5.0);
+		s += 16.0 * std::tanh(MIN(ratio, 20.0)) * p[3] * p[3];
+		const double s2 = s * s;
+		const double s3 = s2 * s;
+		const double s4 = s3 * s;
+		const double norm = s < 5.0 ? -0.000564 * s4 + 0.00776 * s3 - 0.044 * s2 + 0.192 * s + 0.163
+									: -4.80e-08 * s4 + 1.07e-05 * s3 - 9.53e-04 * s2 + 5.90e-02 * s + 3.93e-01;
+		const double c2s = norm * std::pow(std::abs(std::cos(0.5 * (p_theta - p[1]))), 2.0 * s);
+		const double c = std::cos(p_theta);
+		return 2.0 / 3.1415 * c * c * (1.0 - p[2]) + c2s * p[2];
+	}
+};
+} // namespace
+
 /**
- * The spectrum's variance, integrated in 1D on the CPU.
+ * The sea's variance, on the CPU.
  *
- * The same terms the INIT kernel multiplies -- JONSWAP, TMA, short-wave fade, dw/dk -- with the directional
- * spread integrated out analytically: cosine-2s integrates to 1 over the circle, and the reference's cos^2
- * half to 2, so a spectrum at spread_blend b carries (2 - b) of its energy. Integrated from half the longest
- * tile's fundamental to the shortest tile's Nyquist, which is the range the cascades hold. The Nyquist row
- * the kernel leaves empty is a sliver of the shortest cascade and is ignored.
+ * The expected spatial variance of a cascade's height is the sum, over the modes its grid holds, of
+ * E|htilde(k)|^2 -- with the reference's h0, sqrt(2 Psi dk^2) per Gaussian pair, that is 8 Psi(k) dk^2 per
+ * mode, Psi being the spectrum the INIT kernel builds: JONSWAP x TMA x fade x spread x dw/dk / k. The
+ * cascades are independent draws, so their variances add -- and where they overlap (band_limited off, the
+ * reference) the overlap counts in each, as the summed displacement carries it in each.
+ *
+ * Summed mode by mode out to LOW_RING fundamentals, then integrated in 1D with the spread integrated out
+ * analytically (cosine-2s to 1 over the circle, the cos^2 half to 2, so a spectrum at spread_blend b
+ * carries 2 - b). The sum is not optional: the reference's spectra peak far below its tiles' fundamentals,
+ * so a cascade's energy sits in its first few rings of modes, where a continuum integral misjudges the
+ * variance by up to 2x. The Nyquist row the kernel leaves empty is a sliver of each cascade and is ignored,
+ * as are the grid's corners past the inscribed circle.
  */
 float Pasture3DWaterFFT::get_height_sigma() const {
 	if (!_sigma_dirty) {
 		return _sigma;
 	}
-	const double g = GRAVITY;
-	const double depth = MAX(_depth, 0.01f);
-	const double k0 = 0.5 * Math_TAU / MAX(_cascade_lengths[0], 0.01f);
-	const double k1 = Math_PI * (double)_resolution / MAX(_cascade_lengths[CASCADES - 1], 0.01f);
-	PackedFloat32Array sp[2] = { get_spectrum_params(0), get_spectrum_params(1) };
-	const int steps = 4000;
+	static constexpr int LOW_RING = 16;
+	SeaTerms terms;
+	terms.g = GRAVITY;
+	terms.depth = MAX(_depth, 0.01f);
+	const Vector4 lo = get_band_low();
+	const Vector4 hi = get_band_high();
+	const int steps = 2000;
 	double total = 0.0;
-	double prev_k = k0;
-	double prev_f = 0.0;
-	for (int i = 0; i <= steps; i++) {
-		double k = k0 * std::pow(k1 / k0, (double)i / steps);
-		double kd = MIN(k * depth, 20.0);
-		double th = std::tanh(kd);
-		double omega = std::sqrt(g * k * th);
-		double ch = std::cosh(kd);
-		double domega = g * (depth * k / ch / ch + th) / omega / 2.0;
-		double oh = omega * std::sqrt(depth / g);
-		double tma = oh <= 1.0 ? 0.5 * oh * oh : (oh < 2.0 ? 1.0 - 0.5 * (2.0 - oh) * (2.0 - oh) : 1.0);
-		double f = 0.0;
-		for (int si = 0; si < 2; si++) {
-			const float *p = sp[si].ptr();
-			if (si == 1 && p[0] <= 0.f) {
-				continue;
+	for (int c = 0; c < CASCADES; c++) {
+		const double dk = Math_TAU / MAX(_cascade_lengths[c], 0.01f);
+		const double k_ring = LOW_RING * dk;
+		const double k_max = MIN(0.5 * _resolution * dk, (double)hi[c]);
+		PackedFloat32Array sp[2] = { get_spectrum_params(2 * c), get_spectrum_params(2 * c + 1) };
+		const int pair = sp[1][0] > 0.f ? 2 : 1;
+		// The low rings, mode by mode.
+		for (int iy = -LOW_RING; iy <= LOW_RING; iy++) {
+			for (int ix = -LOW_RING; ix <= LOW_RING; ix++) {
+				const double kx = ix * dk;
+				const double ky = iy * dk;
+				const double k = std::sqrt(kx * kx + ky * ky);
+				if (k <= 0.0 || k >= k_ring || k < lo[c] || k >= k_max) {
+					continue;
+				}
+				double omega, domega, tma;
+				terms.dispersion(k, omega, domega, tma);
+				const double theta = std::atan2(ky, kx);
+				double psi = 0.0;
+				for (int si = 0; si < pair; si++) {
+					const float *p = sp[si].ptr();
+					psi += SeaTerms::radial(p, k, omega, tma, terms.g) * SeaTerms::spread(p, theta, omega);
+				}
+				total += psi * domega / k * dk * dk;
 			}
-			double peak = p[5];
-			double sigma = omega <= peak ? 0.07 : 0.09;
-			double r = std::exp(-(omega - peak) * (omega - peak) / 2.0 / sigma / sigma / peak / peak);
-			double s = p[0] * tma * p[4] * g * g / std::pow(omega, 5.0) * std::exp(-1.25 * std::pow(peak / omega, 4.0)) *
-					std::pow(std::abs((double)p[6]), r);
-			double spread = 2.0 - CLAMP((double)p[2], 0.0, 1.0);
-			f += s * spread * std::exp(-(double)p[7] * p[7] * k * k) * domega;
 		}
-		if (i > 0) {
-			total += 0.5 * (f + prev_f) * (k - prev_k);
+		// The rest, as a 1D integral.
+		const double k0 = MAX(k_ring, (double)lo[c]);
+		if (k_max <= k0) {
+			continue;
 		}
-		prev_k = k;
-		prev_f = f;
+		double prev_k = k0;
+		double prev_f = 0.0;
+		for (int i = 0; i <= steps; i++) {
+			const double k = k0 * std::pow(k_max / k0, (double)i / steps);
+			double omega, domega, tma;
+			terms.dispersion(k, omega, domega, tma);
+			double f = 0.0;
+			for (int si = 0; si < pair; si++) {
+				const float *p = sp[si].ptr();
+				f += SeaTerms::radial(p, k, omega, tma, terms.g) * (2.0 - CLAMP((double)p[2], 0.0, 1.0));
+			}
+			f *= domega;
+			if (i > 0) {
+				total += 0.5 * (f + prev_f) * (k - prev_k);
+			}
+			prev_k = k;
+			prev_f = f;
+		}
 	}
-	_sigma = (float)std::sqrt(MAX(total, 0.0));
+	_sigma = (float)std::sqrt(MAX(8.0 * total, 0.0));
 	_sigma_dirty = false;
 	return _sigma;
 }
 
 void Pasture3DWaterFFT::set_spectrum_knob(const int p_spectrum, const StringName &p_knob, const float p_value) {
-	ERR_FAIL_INDEX(p_spectrum, 2);
+	ERR_FAIL_INDEX(p_spectrum, SPECTRA);
 	float *v = knob_ptr(_spectra[p_spectrum], p_knob);
 	ERR_FAIL_NULL_MSG(v, vformat("Unknown spectrum knob '%s'", String(p_knob)));
 	if (*v == p_value) {
@@ -853,7 +950,7 @@ void Pasture3DWaterFFT::set_spectrum_knob(const int p_spectrum, const StringName
 }
 
 float Pasture3DWaterFFT::get_spectrum_knob(const int p_spectrum, const StringName &p_knob) const {
-	ERR_FAIL_INDEX_V(p_spectrum, 2, 0.f);
+	ERR_FAIL_INDEX_V(p_spectrum, SPECTRA, 0.f);
 	float *v = knob_ptr(const_cast<SpectrumKnobs &>(_spectra[p_spectrum]), p_knob);
 	ERR_FAIL_NULL_V_MSG(v, 0.f, vformat("Unknown spectrum knob '%s'", String(p_knob)));
 	return *v;
@@ -891,24 +988,32 @@ void Pasture3DWaterFFT::set_foam_decay(const float p_value) {
 // Protected Functions
 ///////////////////////////
 
-// The two spectra's knobs as "wind/<knob>" and "swell/<knob>". Dynamic rather than sixteen bound
-// setters, because they are one struct twice and the knob names are already the API (set_spectrum_knob).
-static const char *SPECTRUM_PREFIX[2] = { "wind/", "swell/" };
+// The eight spectra's knobs as "spectrum_1/<knob>" .. "spectrum_8/<knob>", the reference's spectrum1..8
+// (index 0..7 in set_spectrum_knob). Dynamic rather than 64 bound setters, because they are one struct
+// eight times and the knob names are already the API.
+static const char *SPECTRUM_PREFIX = "spectrum_";
 static const char *SPECTRUM_KNOBS[] = { "scale", "wind_speed", "direction_deg", "fetch", "spread_blend", "swell",
 	"peak_enhancement", "short_waves_fade" };
-static const char *SPECTRUM_HINTS[] = { "0,4,0.01,or_greater", "0.1,40,0.1,suffix:m/s", "-180,180,0.5,degrees",
-	"10,1000000,10,exp,suffix:m", "0,1,0.01", "0.01,1,0.01", "1,10,0.01", "0,1,0.001,suffix:m" };
+static const char *SPECTRUM_HINTS[] = { "0,4,0.01,or_greater", "0.1,40,0.1,suffix:m/s", "-360,360,0.5,degrees",
+	"10,100000000,10,exp,suffix:m", "0,1,0.01", "0,1,0.01", "1,10,0.01", "0,1,0.001,suffix:m" };
 
 static bool split_spectrum_name(const StringName &p_name, int &r_spectrum, StringName &r_knob) {
 	String n = p_name;
-	for (int i = 0; i < 2; i++) {
-		if (n.begins_with(SPECTRUM_PREFIX[i])) {
-			r_spectrum = i;
-			r_knob = n.substr(String(SPECTRUM_PREFIX[i]).length());
-			return true;
-		}
+	if (!n.begins_with(SPECTRUM_PREFIX)) {
+		return false;
 	}
-	return false;
+	const int start = String(SPECTRUM_PREFIX).length();
+	const int slash = n.find("/");
+	if (slash < 0) {
+		return false;
+	}
+	const String number = n.substr(start, slash - start);
+	if (!number.is_valid_int()) {
+		return false;
+	}
+	r_spectrum = number.to_int() - 1;
+	r_knob = n.substr(slash + 1);
+	return r_spectrum >= 0 && r_spectrum < Pasture3DWaterFFT::SPECTRA;
 }
 
 bool Pasture3DWaterFFT::_set(const StringName &p_name, const Variant &p_value) {
@@ -933,9 +1038,9 @@ bool Pasture3DWaterFFT::_get(const StringName &p_name, Variant &r_ret) const {
 }
 
 void Pasture3DWaterFFT::_get_property_list(List<PropertyInfo> *p_list) const {
-	for (int i = 0; i < 2; i++) {
+	for (int i = 0; i < SPECTRA; i++) {
 		for (int k = 0; k < 8; k++) {
-			p_list->push_back(PropertyInfo(Variant::FLOAT, String(SPECTRUM_PREFIX[i]) + SPECTRUM_KNOBS[k],
+			p_list->push_back(PropertyInfo(Variant::FLOAT, vformat("%s%d/%s", SPECTRUM_PREFIX, i + 1, SPECTRUM_KNOBS[k]),
 					PROPERTY_HINT_RANGE, SPECTRUM_HINTS[k]));
 		}
 	}
@@ -947,6 +1052,7 @@ void Pasture3DWaterFFT::_bind_methods() {
 	BIND_ENUM_CONSTANT(OUTPUT_DISPLACEMENT);
 	BIND_ENUM_CONSTANT(OUTPUT_SLOPE);
 	BIND_CONSTANT(READBACK_KEEPALIVE);
+	BIND_CONSTANT(SPECTRA);
 
 	ClassDB::bind_static_method("Pasture3DWaterFFT", D_METHOD("is_supported"), &Pasture3DWaterFFT::is_supported);
 	ClassDB::bind_method(D_METHOD("is_available"), &Pasture3DWaterFFT::is_available);

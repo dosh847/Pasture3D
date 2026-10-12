@@ -71,6 +71,11 @@ misplaced click could turn a lake into a river with nothing in the scene to say 
 1. Add a **`Pasture3DPoolManager`** to the scene and set its **`sun_light`** to your
    `DirectionalLight3D`.
 2. Add a **`Pasture3DOcean`**. Move it in Y to set the sea level.
+3. Assign its **`material`**: `M_water_ocean.tres`, or `M_water_ocean_low.tres` for the low tier. A new
+   ocean has none, and with none it draws nothing. The node shows a "No material" warning.
+
+The ocean is hidden wherever the terrain is above it, so set the sea level below the coast and above
+the seabed.
 
 `sun_light` is not decoration — it is how the plugin learns the sun's direction and colour, which it
 publishes to the global uniforms every water body reads. Without it the water is lit by Godot's light
@@ -171,7 +176,7 @@ save GPU time, lower `fft_resolution` to 128 instead.
 | Property | Meaning |
 |---|---|
 | `profile_name` | The selection key. Bodies name it in `wave_profile`. |
-| `fft` | A `Pasture3DWaterFFT`: the simulation and its knobs. `seed`, `depth`, `choppiness`, `cascade_lengths`, and two spectra, `wind/*` and `swell/*` — `scale`, `wind_speed`, `direction_deg`, `fetch`, `spread_blend`, `swell`, `peak_enhancement`, `short_waves_fade`. Foam: `foam_bias`, `foam_threshold`, `foam_add`, `foam_decay`. |
+| `fft` | A `Pasture3DWaterFFT`: the simulation and its knobs. `seed`, `depth`, `choppiness`, `cascade_lengths` (any order), `band_limited` (off: every cascade spans every wavelength, as the reference does), and eight spectra, `spectrum_1/*` … `spectrum_8/*`, two per cascade (cascade i carries spectra 2i−1 and 2i) — `scale`, `wind_speed`, `direction_deg`, `fetch`, `spread_blend`, `swell`, `peak_enhancement`, `short_waves_fade`. Foam: `foam_bias`, `foam_threshold`, `foam_add`, `foam_decay`. |
 | `fbm` | A `Pasture3DWaterFBM`: the fallback's knobs, a `vertex/*` set for the geometry and a `fragment/*` set for the normals. `seed` is the heading in radians, `frequency` the first octave's wavenumber, `height` the metres the normalised sum is scaled to. |
 | `min_wavelength` | Metres. The shortest wave the mesh must resolve: water bodies mesh at an eighth of it. A **cost** knob — the FFT picks its mip from the mesh spacing and the fBm drops octaves it cannot draw, so a coarser mesh loses short waves from the geometry while the fragment stage still draws them as slope. |
 

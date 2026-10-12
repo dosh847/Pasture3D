@@ -8,17 +8,15 @@
 // define per compiled variant. Each kernel declares only the bindings it uses, because Godot builds a
 // uniform set from the shader's reflected layout and an unused binding is stripped by the compiler.
 //
-// Deviations from the reference (§2.2), each marked where it happens:
-//   - cascades are band-limited by k_lo/k_hi, not overlapped;
-//   - the "wind" term of the directional spread is rotated by the wind angle in both halves of the blend;
+// The spectrum is the reference's, quirks included (PASTURE3D_WATER_REFERENCE_SPEC.md S1-S3, S9, S10): eight
+// spectra, two per cascade; its h0 normalisation; the cos^2 half of the spread at the unrotated angle; its
+// hash constants as HLSL truncates them. Band limits (k_lo/k_hi) are optional and default to the reference's
+// full overlap. Deviations, each marked where it happens:
 //   - foam decays and accumulates per SECOND (dt), not per dispatch;
-//   - h0 is physically normalised (scale 1 = the JONSWAP sea), where the reference's gives 8x the variance;
 //   - the dispersion phase is reduced to one cycle before cos/sin, and uses the finite-depth w(k) that
 //     the spectrum was built with (the reference advances by deep-water sqrt(g k));
 //   - the Nyquist row and column are empty: a mode at k = -N/2 is its own conjugate partner, so it
-//     breaks the two-real-signals-per-FFT packing and leaks between the packed channels;
-//   - the hash uses Hugo Elias' decimal constants (the reference's 0x1376312589U is a 36-bit literal that
-//     HLSL truncates and GLSL rejects).
+//     breaks the two-real-signals-per-FFT packing and leaks between the packed channels.
 R"(
 #define PI 3.14159265358979323846
 #define TWO_PI 6.28318530717958647692
@@ -42,9 +40,9 @@ struct Spectrum {
 
 #if defined(KERNEL_INIT) || defined(KERNEL_UPDATE) || defined(KERNEL_ASSEMBLE)
 // Rebuilt by the host when a knob changes; constant across frames otherwise. Layout mirrored by
-// Pasture3DWaterFFT::_write_params() -- 40 floats, std430.
+// Pasture3DWaterFFT::_write_params() -- 88 floats, std430.
 layout(set = 0, binding = 0, std430) restrict readonly buffer Params {
-	Spectrum spectra[2];  // [0] wind sea, [1] swell
+	Spectrum spectra[8];  // cascade i: [2i] and [2i+1]
 	vec4 length_scales;   // metres per cascade tile
 	vec4 k_lo;            // band limits per cascade, rad/m: k_lo <= |k| < k_hi
 	vec4 k_hi;
@@ -116,9 +114,11 @@ float dispersion(float k) {
 
 #ifdef KERNEL_INIT
 float hash(uint n) {
-	// Integer hash, Hugo Elias.
+	// Integer hash, Hugo Elias, with the reference's constants: it writes them as hex, 0x789221U and
+	// 0x1376312589U, and HLSL truncates the 36-bit second one to its low 32 bits. Elias' decimal 789221 and
+	// 1376312589 draw a different sea from the same seed.
 	n = (n << 13u) ^ n;
-	n = n * (n * n * 15731u + 789221u) + 1376312589u;
+	n = n * (n * n * 15731u + 0x789221u) + 0x76312589u;
 	return float(n & 0x7fffffffu) / float(0x7fffffff);
 }
 
@@ -160,10 +160,9 @@ float spread_power(float omega, float peak_omega) {
 float direction_spectrum(float theta, float omega, Spectrum sp) {
 	float s = spread_power(omega, sp.peak_omega) +
 			16.0 * tanh(min(omega / sp.peak_omega, 20.0)) * sp.swell * sp.swell;
-	// The reference evaluates the cos^2 half at the UNROTATED angle, so with spread_blend < 1 part of
-	// the energy always travels along +-X whatever the wind direction. Rotated here.
-	float rel = theta - sp.angle;
-	return mix(2.0 / PI * cos(rel) * cos(rel), cosine_2s(rel, s), sp.spread_blend);
+	// As the reference: the cos^2 half at the UNROTATED angle, so with spread_blend < 1 part of the energy
+	// travels along +-X whatever the wind direction (S9), and its 3.1415 for pi.
+	return mix(2.0 / 3.1415 * cos(theta) * cos(theta), cosine_2s(theta - sp.angle, s), sp.spread_blend);
 }
 
 float tma_correction(float omega) {
@@ -215,16 +214,16 @@ void main() {
 			float k_angle = atan(k.y, k.x);
 			float omega = dispersion(k_len);
 			float d_omega_dk = dispersion_derivative(k_len);
-			float s = jonswap(omega, params.spectra[0]) * direction_spectrum(k_angle, omega, params.spectra[0]) *
-					short_waves_fade(k_len, params.spectra[0]);
-			if (params.spectra[1].scale > 0.0) {
-				s += jonswap(omega, params.spectra[1]) * direction_spectrum(k_angle, omega, params.spectra[1]) *
-						short_waves_fade(k_len, params.spectra[1]);
+			Spectrum a = params.spectra[i * 2];
+			Spectrum b = params.spectra[i * 2 + 1];
+			float s = jonswap(omega, a) * direction_spectrum(k_angle, omega, a) * short_waves_fade(k_len, a);
+			if (b.scale > 0.0) {
+				s += jonswap(omega, b) * direction_spectrum(k_angle, omega, b) * short_waves_fade(k_len, b);
 			}
-			// Physically normalised: E|h0|^2 = Psi(k) dk^2 / 2, so the realised height variance is the
-			// integral of the spectrum and scale = 1 is the sea this wind and fetch describe. The reference's
-			// sqrt(2 * Psi * dk^2) gives eight times that variance, which is why its scene runs scale 0.1-0.25.
-			h0.xy = vec2(gauss2.x, gauss1.y) * sqrt(s * abs(d_omega_dk) / k_len * delta_k * delta_k / 4.0);
+			// The reference's normalisation: E|h0|^2 = 4 Psi(k) dk^2, so the realised height variance is
+			// eight times the spectrum's integral (Pasture3DWaterFFT::get_height_sigma). Its scene's scales
+			// of 0.1-0.25 are tuned against that.
+			h0.xy = vec2(gauss2.x, gauss1.y) * sqrt(2.0 * s * abs(d_omega_dk) / k_len * delta_k * delta_k);
 		}
 		imageStore(initial_spectrum, ivec3(ivec2(id), i), h0);
 	}

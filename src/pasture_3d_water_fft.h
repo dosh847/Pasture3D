@@ -39,7 +39,7 @@ using namespace godot;
  * Outputs, N x N x 4 layers (one per cascade), rgba16f with a full mip chain:
  *   displacement  xyz = displacement in metres (x/z scaled by choppiness), a = foam in [0, 1+]
  *   slope         xy  = height slope d(y)/dx, d(y)/dz, z = Jacobian of the horizontal displacement
- * Cascade i tiles every cascade_lengths[i] metres.
+ * Cascade i tiles every cascade_lengths[i] metres and carries spectra 2i and 2i+1, as the reference does.
  *
  * The CPU's copy of the surface (buoys, PASTURE3D_WATER_FFT_SPEC.md §5) is a readback of the displacement's
  * mip 0, taken only while something asks for it: see request_cpu_surface() and get_cpu_surface().
@@ -50,6 +50,8 @@ class Pasture3DWaterFFT : public Resource {
 
 public:
 	static constexpr int CASCADES = 4;
+	// Two per cascade: the reference's spectrum1..spectrum8, index 0..7 here.
+	static constexpr int SPECTRA = 2 * CASCADES;
 	static constexpr float GRAVITY = 9.81f;
 
 	enum Output {
@@ -110,15 +112,14 @@ private:
 	// --- Knobs ---
 	int _resolution = 256;
 	int _seed = 1;
-	float _depth = 100.f;
+	// The defaults are the reference's SampleScene (PASTURE3D_WATER_REFERENCE_SPEC.md §2), set in the
+	// constructor for the spectra. The lengths are in the scene's order, which is not descending.
+	float _depth = 20.f;
 	float _choppiness = 1.f;
 	float _loop_period = 120.f;
-	// The longest tile must hold the swell's peak wavelength several times over, or the peak falls below
-	// the grid's fundamental and a handful of modes carry the whole sea (measured: a 340 m swell on a 256 m
-	// tile halved its variance when the tile moved to 180 m).
-	Vector4 _cascade_lengths = Vector4(500.f, 85.f, 16.f, 4.f);
-	bool _band_limited = true;
-	SpectrumKnobs _spectra[2];
+	Vector4 _cascade_lengths = Vector4(94.f, 128.f, 64.f, 32.f);
+	bool _band_limited = false;
+	SpectrumKnobs _spectra[SPECTRA];
 	float _foam_bias = 0.85f;
 	float _foam_threshold = 0.f;
 	float _foam_add = 6.f; // per second; the reference's 0.1 per frame at 60 fps
@@ -216,7 +217,8 @@ public:
 	Ref<Texture2DArrayRD> get_displacement_texture() const { return _disp_texture; }
 	Ref<Texture2DArrayRD> get_slope_texture() const { return _slope_texture; }
 
-	// The band each cascade keeps, |k| in [low, high), rad/m. Derived from the cascade lengths.
+	// The band each cascade keeps, |k| in [low, high), rad/m. Derived from the cascade lengths. Without
+	// band_limited every cascade keeps everything, as the reference does.
 	Vector4 get_band_low() const;
 	Vector4 get_band_high() const;
 
@@ -265,13 +267,13 @@ public:
 	void set_foam_decay(const float p_value);
 	float get_foam_decay() const { return _foam_decay; }
 
-	// The derived JONSWAP parameters the kernel receives, for the gate's CPU oracle:
+	// The derived JONSWAP parameters the kernel receives for spectrum 0..SPECTRA-1, for the gate's CPU oracle:
 	// [scale, angle_rad, spread_blend, swell, alpha, peak_omega, gamma, short_waves_fade].
 	PackedFloat32Array get_spectrum_params(const int p_spectrum) const;
 
-	// Standard deviation of surface height in metres: the square root of the spectrum's integral over the
-	// wavenumbers the cascades hold. CPU, independent of the GPU, and what the realised sea measures
-	// against (WaterFFTGate [P]). Significant wave height is 4x this.
+	// Standard deviation of surface height in metres: the square root of the expected variance of the
+	// modes the four cascades hold, each cascade its own pair of spectra. CPU, independent of the GPU, and
+	// what the realised sea measures against (WaterFFTGate [P]). Significant wave height is 4x this.
 	float get_height_sigma() const;
 	// Vertical reach for cull volumes: 1.5 significant wave heights. The largest crest in a field of a
 	// few thousand waves is about that, and a cull box that clips a rare crest pops it out of view.
