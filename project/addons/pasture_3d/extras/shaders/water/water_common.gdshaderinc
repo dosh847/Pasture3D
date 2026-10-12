@@ -26,7 +26,7 @@
 // Godot's built-in lambert/GGX and the look they were tuned under. Off for the debug readouts, which write
 // EMISSION with zero SPECULAR and rely on the light loop contributing nothing -- a custom light() adds
 // SPECULAR_LIGHT whatever SPECULAR says.
-#if !defined(WATER_STREAM_WAVES) && !defined(WATER_DEBUG_SURFACE) && !defined(WATER_DEBUG_GLOBALS) && !defined(WATER_NO_PBR)
+#if !defined(WATER_STREAM_WAVES) && !defined(WATER_DEBUG_SURFACE) && !defined(WATER_DEBUG_GLOBALS) && !defined(WATER_NO_PBR) 		&& !defined(WATER_DEBUG_FFT_SHADING)
 #define WATER_PBR
 #endif
 
@@ -113,6 +113,18 @@ uniform vec4 _fft_repeat = vec4(100.0, 0.33333334, 0.33333334, 7.6923075);
 uniform vec4 _fft_drawn = vec4(1.0, 0.0, 0.0, 1.0);
 uniform vec4 _fft_displaces = vec4(1.0, 0.0, 0.0, 0.0);
 uniform float _fft_foam_offset = -0.84;
+// The reference's _NormalStrength (PASTURE3D_WATER_REFERENCE_SPEC.md L8): the drawn cascades' summed slope
+// is scaled by it before the normal is built. Geometry and foam are untouched.
+uniform float fft_normal_strength : hint_range(0.0, 4.0, 0.01) = 1.0;
+// Far-plane fades (G5), the reference's *DepthAttenuation. Displacement, normal and crest foam are each
+// scaled toward nothing by pow(1 - depth / far, falloff): depth is the REST vertex's linear view depth,
+// far the camera's far plane. The look therefore depends on the camera's far plane, as the reference's
+// does -- its scene is tuned at far = 2000 m. 0 turns a fade off. FFT only: the fBm has its own octave
+// fade. The vertex stage evaluates this in whatever view it is drawn for, so a shadow pass would fade by
+// the LIGHT's far plane; water casts no shadows by default.
+uniform float fft_displacement_falloff : hint_range(0.0, 8.0, 0.01) = 1.0;
+uniform float fft_normal_falloff : hint_range(0.0, 8.0, 0.01) = 1.0;
+uniform float fft_foam_falloff : hint_range(0.0, 8.0, 0.01) = 1.0;
 // The profile's Pasture3DWaterFBM, one set for the geometry (_fbm_v*) and one for the normals (_fbm_f*),
 // packed as Pasture3DWaterFBM::get_shader_pack() documents:
 //   0 = (seed, seed_iter, frequency, frequency_mult)   1 = (amplitude, amplitude_mult, speed, speed_ramp)
@@ -546,6 +558,8 @@ varying float v_base_y;
 // sheet, so the fragment stage samples slope and foam where this vertex CAME FROM; sampling at the
 // displaced position would shear every crest sideways by the choppiness.
 varying vec2 v_fft_domain;
+// 1 - depth / far at the rest vertex, in [0, 1]: the reference's per-vertex `depth`, interpolated as its is.
+varying float v_fft_depth;
 #endif
 
 #ifdef WATER_PBR

@@ -77,6 +77,12 @@ void fragment() {
 			fft_height += disp.y;
 		}
 		fft_foam += _fft_foam_offset;
+		// L8, then G5: scaled, then faded toward flat. The reference lerps the NORMAL toward up, not the
+		// slope toward zero; the two differ wherever the slope is steep.
+		slope *= fft_normal_strength;
+		vec3 fft_n = normalize(mix(vec3(0.0, 1.0, 0.0), normalize(vec3(-slope.x, 1.0, -slope.y)),
+				water_fft_fade(v_fft_depth, fft_normal_falloff)));
+		slope = -fft_n.xz / fft_n.y;
 	}
 	// The fBm fallback's normals: the fragment set, summed per pixel at the rest position like the cascades,
 	// down to the octave this pixel can still resolve (two samples a wavelength). Its height is light()'s
@@ -228,7 +234,7 @@ void fragment() {
 #ifdef WATER_FFT
 	// The simulation's foam is already coverage in [0, 1+]. The fBm has no breaking signal at all (the
 	// reference draws no foam).
-	float crest = fft ? clamp(fft_foam, 0.0, 1.0) : 0.0;
+	float crest = fft ? clamp(fft_foam, 0.0, 1.0) * water_fft_fade(v_fft_depth, fft_foam_falloff) : 0.0;
 #else
 	// A stream's slope: whitecaps from threshold to threshold + softness.
 	float crest = smoothstep(foam_crest_threshold,
@@ -262,6 +268,20 @@ void fragment() {
 	SPECULAR = specular_amount;
 	ROUGHNESS = roughness;
 	ALPHA = alpha;
+
+#ifdef WATER_DEBUG_FFT_SHADING
+#ifndef WATER_FOAM_CREST
+#error "WATER_DEBUG_FFT_SHADING reads the crest foam; it needs WATER_FOAM_CREST"
+#endif
+	// Diagnostic, unlit like WATER_DEBUG_SURFACE but at the END of the fragment stage: the per-pixel slope
+	// after normal strength and the normal fade, and the crest foam after its fade. What WATER_DEBUG_SURFACE
+	// encodes is the VERTEX normal, which neither touches (WaterFFTWiringGate [N]).
+	ALBEDO = vec3(0.0);
+	SPECULAR = 0.0;
+	ROUGHNESS = 1.0;
+	ALPHA = 1.0;
+	EMISSION = vec3(slope.x * 0.125 + 0.5, slope.y * 0.125 + 0.5, crest);
+#endif
 
 #ifdef WATER_PBR
 	// What light() needs that it cannot read itself. The crest height is the displaced surface above the

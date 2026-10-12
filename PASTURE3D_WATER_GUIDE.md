@@ -516,6 +516,15 @@ path into a broad blown-out streak.
 reference's subsurface terms: light through the body toward the viewer, light on the sun-facing side,
 light through a crest per metre of crest height, and a flat bubble term.
 
+**`fft_normal_strength`** scales the FFT's per-pixel slope, as the reference's `normalStrength` does: 2 is twice as
+steep, 0 is a flat mirror. Geometry and foam are untouched.
+
+**`fft_displacement_falloff`, `fft_normal_falloff`, `fft_foam_falloff`** fade the FFT's waves, normals and crest foam
+with distance from the camera, as `pow(1 - depth / far, falloff)`. The weight is 1 at the camera and 0 at the camera's
+far plane. So **the camera's far plane is part of the look**, as it is in the reference, which is tuned at 2000 m; at
+Godot's default 4000 m the fades are half as strong at any given distance. 0 turns a fade off. Buoys do not fade: a
+floating object far from the camera sits slightly off the drawn wave, by the same factor.
+
 **`foam_crest_amount`** scales the FFT's own foam, which comes from the wave Jacobian — whitecaps
 where the surface folds. The simulation's `foam_*` knobs on the profile shape it; the fBm draws none.
 

@@ -30,6 +30,11 @@ struct WaveSample {
 // The mesh cannot draw those, and leaving them in is what makes a coarse ring crawl. Past the last level
 // the sampler clamps to the 1x1 mean, which is zero: a cascade far finer than the mesh vanishes from the
 // geometry, as it should, and stays in the fragment stage's slope.
+// pow(p_depth, p_falloff), with a falloff of 0 meaning no fade: GLSL leaves pow(0, 0) undefined.
+float water_fft_fade(float p_depth, float p_falloff) {
+	return p_falloff > 0.0 ? pow(p_depth, p_falloff) : 1.0;
+}
+
 float water_fft_lod(float p_spacing, float p_length, float p_texels) {
 	return max(log2(2.0 * p_spacing * p_texels / p_length), 0.0);
 }

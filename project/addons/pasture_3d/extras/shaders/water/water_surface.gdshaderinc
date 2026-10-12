@@ -80,8 +80,16 @@ void vertex() {
 #else
 	float fft_spacing = _fft_vertex_spacing;
 #endif
+	// The far plane from the projection, as the depth-fade reconstruction reads view z: under reversed Z
+	// a depth of 0 IS the far plane. Perspective and orthographic alike.
+	vec4 fft_far = INV_PROJECTION_MATRIX * vec4(0.0, 0.0, 0.0, 1.0);
+	float fft_view_depth = -(VIEW_MATRIX * vec4(world_pos, 1.0)).z;
+	v_fft_depth = clamp(1.0 - fft_view_depth / max(-fft_far.z / fft_far.w, 1e-3), 0.0, 1.0);
 	if (_wave_model == WATER_MODEL_FFT) {
 		wave = water_eval_fft(world_pos, fft_spacing);
+		// G5: the displacement fades toward the rest sheet. The normal and foam the vertex carries are
+		// replaced per pixel, where their own fades apply.
+		wave.position = world_pos + (wave.position - world_pos) * water_fft_fade(v_fft_depth, fft_displacement_falloff);
 	} else {
 		wave = water_eval_fbm(world_pos, fft_spacing);
 	}

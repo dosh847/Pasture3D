@@ -26,11 +26,26 @@ extends Node
 #       against the same prediction, must not correlate. The regression slope is printed, not gated:
 #       correlation is what says the field is THIS field; the slope says the encoding survived the
 #       viewport, which is the viewport's business.
+#   [F] Far-plane displacement fade (PASTURE3D_WATER_REFERENCE_SPEC.md G5). The camera looks straight down
+#       from CAM_HEIGHT onto the flat rest sheet, so every rest vertex sits at the same linear view depth
+#       and the fade is one number, (1 - CAM_HEIGHT / far)^falloff. The rendered height's spread against the
+#       same render at falloff 0 must read that number: 0.75 at far 400, 0.5625 at falloff 2, 0.5 with the
+#       far plane moved to 200 (the far plane is read from the projection, not assumed). Control: falloff 0
+#       reads 1, and must miss 0.75.
+#   [N] Normal strength (L8), normal fade and foam fade (G5), from water_fft_shading_debug, which encodes
+#       the fragment's FINAL slope and crest foam. Against the same render with every fade off: strength 2
+#       doubles every slope; strength 3 under normal falloff 1 at fade f gives the reference's form, the
+#       NORMAL lerped toward up -- slope' = f s / ((1 - f) L + f), L = |(s, 1)| -- with strength applied
+#       first. Control: the naive slope * f must miss by several times more. Foam falloff 2 scales the
+#       crest by f^2, and the slopes are untouched by it.
 #
 # Every criterion counts its completions; one that throws before asserting reports as missing.
 
-const CRITERIA: PackedStringArray = ["B", "W", "T", "R"]
+const CRITERIA: PackedStringArray = ["B", "W", "T", "R", "F", "N"]
 const DEBUG_SHADER := "res://bench/water_body_debug.gdshader"
+const SHADING_SHADER := "res://bench/water_fft_shading_debug.gdshader"
+const CAM_HEIGHT := 100.0
+const CAM_FAR := 400.0
 const RES := 128
 const PATCH := 256.0
 const PIXELS := 128
@@ -45,6 +60,7 @@ var _profile: Pasture3DWaveProfile
 var _mat: ShaderMaterial
 var _vp: SubViewport
 var _mesh: MeshInstance3D
+var _cam: Camera3D
 
 
 func _ready() -> void:
@@ -112,6 +128,8 @@ func _run() -> void:
 	await _criterion_w()
 	await _criterion_t()
 	await _criterion_r()
+	await _criterion_f()
+	await _criterion_n()
 
 
 func _build_view() -> void:
@@ -125,10 +143,11 @@ func _build_view() -> void:
 	var cam := Camera3D.new()
 	cam.projection = Camera3D.PROJECTION_ORTHOGONAL
 	cam.size = PATCH
-	cam.position = Vector3(0.0, 100.0, 0.0)
+	cam.position = Vector3(0.0, CAM_HEIGHT, 0.0)
 	# Looking down -Y, screen-right is +X and screen-up is -Z.
 	cam.rotation_degrees = Vector3(-90.0, 0.0, 0.0)
-	cam.far = 400.0
+	cam.far = CAM_FAR
+	_cam = cam
 	cam.current = true
 	_vp.add_child(cam)
 	var mi := MeshInstance3D.new()
@@ -301,11 +320,14 @@ func _bilinear_at(p_disp: PackedFloat32Array, p_n: int, p_repeat: float, p_dom: 
 ## Height the shader should draw at each pixel centre. The vertex at rest point p lands at p + D(p).xz, so
 ## the surface over pixel x is the one whose rest point solves p + D(p).xz = x: a fixed point, as the
 ## manager's solve_domain finds it. Only the cascades that displace (drawn AND contributing), each at its
-## own repeat and at the mip the vertex stage picks for SPACING.
+## own repeat and at the mip the vertex stage picks for SPACING, scaled by the far-plane fade (G5).
 func _predict(p_mask: int = -1) -> PackedFloat32Array:
 	var fft: Pasture3DWaterFFT = _profile.fft
 	var repeats := fft.get_cascade_repeats()
 	var mask := fft.get_displacing_mask() if p_mask < 0 else p_mask
+	# The far-plane fade at the material's default falloff of 1 ([F] measures it on its own): every rest
+	# vertex is CAM_HEIGHT deep, so it is one number.
+	var fade := 1.0 - CAM_HEIGHT / CAM_FAR
 	var mips: Array = []
 	for c in 4:
 		var chain: Array[PackedFloat32Array] = []
@@ -324,9 +346,9 @@ func _predict(p_mask: int = -1) -> PackedFloat32Array:
 			var dom := target
 			var d := Vector3.ZERO
 			for it in SOLVE_ITERATIONS:
-				d = _displacement(mips, repeats, mask, dom)
+				d = _displacement(mips, repeats, mask, dom) * fade
 				dom = target - Vector2(d.x, d.z)
-			out[py * PIXELS + px] = _displacement(mips, repeats, mask, dom).y
+			out[py * PIXELS + px] = _displacement(mips, repeats, mask, dom).y * fade
 	return out
 
 
@@ -393,3 +415,107 @@ func _variance(p_values: PackedFloat32Array) -> float:
 	for v in p_values:
 		s += (v - m) * (v - m)
 	return s / n
+
+
+# --- [F] displacement fade ---------------------------------------------------------------------------
+
+func _sd_ratio(p_a: PackedFloat32Array, p_b: PackedFloat32Array) -> float:
+	return sqrt(_variance(p_a) / maxf(_variance(p_b), 1e-30))
+
+
+func _render_falloff(p_falloff: float, p_far: float) -> PackedFloat32Array:
+	_mat.set_shader_parameter("fft_displacement_falloff", p_falloff)
+	_cam.far = p_far
+	await _frames(4)
+	return _rendered()
+
+
+func _criterion_f() -> void:
+	_mesh.material_override = _mat
+	var off: PackedFloat32Array = await _render_falloff(0.0, CAM_FAR)
+	var one: PackedFloat32Array = await _render_falloff(1.0, CAM_FAR)
+	var two: PackedFloat32Array = await _render_falloff(2.0, CAM_FAR)
+	var near_far: PackedFloat32Array = await _render_falloff(1.0, CAM_FAR * 0.5)
+	var ctl: PackedFloat32Array = await _render_falloff(0.0, CAM_FAR * 0.5)
+	_cam.far = CAM_FAR
+	_mat.set_shader_parameter("fft_displacement_falloff", 1.0)
+	var f := 1.0 - CAM_HEIGHT / CAM_FAR
+	var f2 := 1.0 - CAM_HEIGHT / (CAM_FAR * 0.5)
+	var r1 := _sd_ratio(one, off)
+	var r2 := _sd_ratio(two, off)
+	var r3 := _sd_ratio(near_far, off)
+	var rc := _sd_ratio(ctl, off)
+	var tol := 0.03
+	var ok: bool = sqrt(_variance(off)) > 0.05 and absf(r1 - f) < tol and absf(r2 - f * f) < tol \
+			and absf(r3 - f2) < tol and absf(rc - 1.0) < tol and absf(rc - f) > 3.0 * tol
+	_check("F", ok, "height sd vs falloff 0 (%s m): falloff 1 %.4f (want %.4f), falloff 2 %.4f (want %.4f), far %d %.4f (want %.4f), each within %.2f; control falloff 0 at far %d: %.4f (must miss %.4f)" % [
+			_g(sqrt(_variance(off))), r1, f, r2, f * f, int(CAM_FAR * 0.5), r3, f2, tol, int(CAM_FAR * 0.5), rc, f])
+
+
+# --- [N] normal strength, normal fade, foam fade -------------------------------------------------------
+
+## [slope x, slope z, crest] per pixel from the shading readout.
+func _shading(p_mat: ShaderMaterial, p_strength: float, p_normal: float, p_foam: float) -> Array:
+	p_mat.set_shader_parameter("fft_normal_strength", p_strength)
+	p_mat.set_shader_parameter("fft_normal_falloff", p_normal)
+	p_mat.set_shader_parameter("fft_foam_falloff", p_foam)
+	await _frames(4)
+	var img := _vp.get_texture().get_image()
+	var sx := PackedFloat32Array()
+	var sz := PackedFloat32Array()
+	var foam := PackedFloat32Array()
+	for py in PIXELS:
+		for px in PIXELS:
+			var c := img.get_pixel(px, py)
+			sx.append((c.r - 0.5) * 8.0)
+			sz.append((c.g - 0.5) * 8.0)
+			foam.append(c.b)
+	return [sx, sz, foam]
+
+
+func _criterion_n() -> void:
+	var dbg := ShaderMaterial.new()
+	dbg.shader = load(SHADING_SHADER)
+	_manager.upload_profile_into(dbg, &"gate")
+	# Foam everywhere on screen, mid-range so the clamp cannot hide the fade: the run is paused, and the
+	# simulation accumulates no foam at dt 0. What [N] measures is the fade, not the foam.
+	dbg.set_shader_parameter("_fft_foam_offset", 0.5)
+	_mesh.material_override = dbg
+	var f := 1.0 - CAM_HEIGHT / CAM_FAR
+
+	var base: Array = await _shading(dbg, 1.0, 0.0, 0.0)
+	var doubled: Array = await _shading(dbg, 2.0, 0.0, 0.0)
+	var faded: Array = await _shading(dbg, 3.0, 1.0, 0.0)
+	var foamed: Array = await _shading(dbg, 1.0, 0.0, 2.0)
+	_mesh.material_override = _mat
+
+	var n := PIXELS * PIXELS
+	var s_rms := 0.0
+	var e_double := 0.0
+	var e_ref := 0.0
+	var e_naive := 0.0
+	var e_flat := 0.0
+	var foam_sum := 0.0
+	var e_foam := 0.0
+	for i in n:
+		var s := Vector2(base[0][i], base[1][i])
+		s_rms += s.length_squared()
+		e_double = maxf(e_double, (Vector2(doubled[0][i], doubled[1][i]) - 2.0 * s).length())
+		var s3 := 3.0 * s
+		var l := sqrt(1.0 + s3.length_squared())
+		var want := s3 * (f / ((1.0 - f) * l + f))
+		var got := Vector2(faded[0][i], faded[1][i])
+		e_ref += (got - want).length_squared()
+		e_naive += (got - s3 * f).length_squared()
+		e_flat = maxf(e_flat, (Vector2(foamed[0][i], foamed[1][i]) - s).length())
+		foam_sum += base[2][i]
+		e_foam = maxf(e_foam, absf(foamed[2][i] - base[2][i] * f * f))
+	s_rms = sqrt(s_rms / n)
+	e_ref = sqrt(e_ref / n)
+	e_naive = sqrt(e_naive / n)
+	var foam_mean := foam_sum / n
+	var tol := 0.01 + 0.01 * s_rms
+	var ok: bool = s_rms > 0.05 and e_double < 0.01 * (1.0 + 2.0 * s_rms) and e_ref < tol and e_naive > 3.0 * e_ref \
+			and e_flat < 1e-3 and foam_mean > 0.01 and e_foam < 2e-3
+	_check("N", ok, "slope rms %.4f; strength 2: max |s - 2 s0| %.5f; strength 3 + normal falloff 1 at fade %.2f: rms error %.5f against the normal lerp (tol %.4f), control slope * f %.5f (must exceed 3x); foam falloff 2: crest mean %.4f, max |c - c0 f^2| %.5f (tol 2e-3), slopes moved %.6f (tol 1e-3)" % [
+			s_rms, e_double, f, e_ref, tol, e_naive, foam_mean, e_foam, e_flat])

@@ -1,6 +1,6 @@
 # Pasture3D Water: Reference Fidelity
 
-Status: **audit written 2026-10-11. Decisions D1–D5 taken 2026-10-11 (the recommendations, §4). R1 built 2026-10-11 (§7.1), R2 built 2026-10-12 (§7.2); R3–R7 not started.**
+Status: **audit written 2026-10-11. Decisions D1–D5 taken 2026-10-11 (the recommendations, §4). R1 built 2026-10-11 (§7.1), R2 built 2026-10-12 (§7.2), R3 built 2026-10-12 (§7.3); R4–R7 not started.**
 
 ## 1. The ask
 
@@ -240,3 +240,29 @@ Fidelity is a claim about pixels, so it is gated on pixels.
   - **WaterBuoyGate:**
     - Its sync sampler follows the mask and the repeats.
     - [A] passes again (rel RMS 0.017), now that the sea is not 10 m tall.
+
+### 7.3 R3, as built (2026-10-12)
+
+- **Ported, as material uniforms in the `waves` group, FFT only, with the scene's values as defaults:**
+  - `fft_normal_strength` (L8), default 1. It scales the drawn cascades' summed slope before the normal is built; geometry and foam are untouched.
+  - `fft_displacement_falloff`, `fft_normal_falloff` and `fft_foam_falloff` (G5), each default 1. 0 turns that fade off.
+- **The fade is the reference's.**
+  - The weight is `pow(1 − depth / far, falloff)`, where depth is the REST vertex's linear view depth, computed per vertex and interpolated as the reference does.
+  - far is read from `INV_PROJECTION_MATRIX` at reversed-Z depth 0, for perspective and orthographic cameras alike.
+  - The displacement scales toward the rest sheet. The normal is lerped toward up, not its slope toward zero, and strength is applied first. The crest foam scales after its clamp.
+  - The fBm keeps its own octave fade (D5).
+- **The look depends on the camera's far plane, as the reference's does.** The scene is tuned at far 2000 m; Godot's default far is 4000 m, which halves every fade at a given distance.
+- **Buoys do not fade.** The CPU answers for no camera, so a buoy at depth d sits `(1 − d / far)^falloff` short of the drawn displacement. At 100 m under a 4000 m far plane that is 2.5% of the wave height. WaterBuoyGate [A] draws with the displacement fade off for that reason; with it on, under its 200 m far plane, it read 0.34 relative RMS.
+- **Shadow passes fade by the light's view.** The vertex stage evaluates the fade in whatever view it is drawn for. Water casts no shadows by default (`cast_shadows` off on the ocean and the clipmap), so this is only a caveat.
+- **Readouts.**
+  - `bench/water_fft_shading_debug.gdshader` (new, `WATER_DEBUG_FFT_SHADING`) writes the fragment's final slope and crest foam, unlit. `WATER_DEBUG_SURFACE` encodes only the vertex normal, which neither normal term touches.
+  - The coverage readouts in WaterTwoLakesGate and WaterShorePoolProbe now copy `fft_displacement_falloff` with the other geometry uniforms.
+- **Gates:**
+  - **WaterFFTWiringGate [F] (new):** an orthographic camera puts every rest vertex at one depth, so the fade is one number. The rendered height reads it within 0.008 at falloff 1, falloff 2, and with the far plane halved. Control: falloff 0 reads 1.000.
+  - **WaterFFTWiringGate [N] (new):** strength 2 doubles every slope. Strength 3 under the normal fade matches the normal-lerp form to 0.0035 RMS, where the naive slope × f misses by 0.11. The foam fade scales the crest by f² and moves no slope.
+  - **[B] and [R]** now predict the faded field.
+  - A windowed compile check drew all ten water shaders and the two readouts without error. Its control, a variant that trips the new `#error`, fails.
+- **Found while re-running the gates, from R2 and not R3: WaterBodiesPhase3Gate [B] fails.**
+  - Its CPU field is now cascade 1 alone, whose spectra are the reference's short chop, scaled to the lake's height target by the interim fit.
+  - That field is rough below the automatic 1.27 m spacing, so coarsening 4× only doubles the sag (0.18 → 0.36 m), where the gate requires more than double.
+  - This belongs to the R5 fit and preset rewrite, with `min_wavelength`, which still reads the pre-R2 sea.

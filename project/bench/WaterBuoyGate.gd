@@ -30,7 +30,10 @@ extends Node
 #   [A] FFT buoy against the drawn surface (Forward+). Paused, the sheet at mip 0 everywhere: each pixel's
 #       height against evaluate_height(solve_domain(xz)). Relative RMS under A_TOL. Controls: the stale
 #       buffer (answers kept from a second earlier) misses by over A_CTRL. Reported, not asserted: the
-#       error without the horizontal solve.
+#       error without the horizontal solve. Drawn with the far-plane displacement fade OFF
+#       (PASTURE3D_WATER_REFERENCE_SPEC.md G5): the fade belongs to a camera, and a buoy answers for none,
+#       so with it on the drawn sheet sits (1 - depth / far) short of the buoy everywhere -- 0.34 rel RMS
+#       here, with the camera's far plane at 200 m.
 #
 # Every criterion counts its completions; one that throws before asserting reports as missing.
 
@@ -436,6 +439,7 @@ func _criteria_s_a() -> void:
 	var mat := ShaderMaterial.new()
 	mat.shader = _debug_shader
 	m.upload_profile_into(mat, &"buoy_fft")
+	mat.set_shader_parameter(&"fft_displacement_falloff", 0.0)
 	await _settle(20)
 	# The manager re-uploads its cache on a texture rebuild, but this material is not in its cache.
 	m.upload_profile_into(mat, &"buoy_fft")

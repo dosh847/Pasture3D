@@ -794,7 +794,7 @@ func _criterion_h_coarse_rings() -> void:
 		# unset it draws the shader's default fBm -- a metre-high sea that is not this pool's.
 		for nm in ["_shore_sdf", "_shore_rect", "_shore_texels", "_shore_range",
 				"_shore_feather", "_shore_offset", "_shore_kill_margin", "sea_level",
-				"_wave_model", "_fft_displacement", "_fft_slope", "_fft_repeat", "_fft_drawn", "_fft_displaces",
+				"_wave_model", "_fft_displacement", "_fft_slope", "_fft_repeat", "_fft_drawn", "_fft_displaces", "fft_displacement_falloff",
 				"_fbm_v0", "_fbm_v1", "_fbm_v2", "_fbm_v3"]:
 			cover.set_shader_parameter(nm, rt.get_shader_parameter(nm))
 		var clip: Node = pool.get_node_or_null("Clipmap")
