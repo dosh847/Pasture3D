@@ -24,7 +24,13 @@ extends Node
 #       Control: the same two instants with water_time_period set to 97 s -- the speeds quantise to the
 #       wrong loop -- differ by over L_CTRL.
 #   [N] Normals reach the lit surface. The shipped water_body shader, lit by one sun, fBm vs a flat sea (the
-#       FFT branch over unbound textures, which is what the manager uploads for a profile with no model): the fBm frame's luminance spread is over N_RATIO x the flat one's. This is the fragment set
+#       FFT branch over unbound textures, which is what the manager uploads for a profile with no model).
+#       Measured on the per-pixel difference, fBm minus flat: its luminance spread is over N_REL x the flat
+#       frame's mean. The flat frame is not uniform -- its body falls off with n.v toward the camera, which
+#       Godot's VIEW carries even under this orthographic camera -- and with the reference's colours (R6)
+#       that falloff alone is half the fBm frame's spread, so a spread compared frame against frame no longer
+#       separates them; the difference cancels it. Control: a second flat render, differenced the same way,
+#       must stay under N_REL x the mean. This is the fragment set
 #       (water_fbm with p_drag_by_frequency), which [F] cannot see, and on Compatibility it is the only proof
 #       that the lit variant compiles.
 #   [P] Project setting (Forward+ only: elsewhere FFT is not reachable to switch from). A manager in the
@@ -54,7 +60,7 @@ const D_TOL := 0.08
 const D_CTRL := 0.3
 const L_TOL := 0.01
 const L_CTRL := 0.3
-const N_RATIO := 10.0
+const N_REL := 0.05
 
 var _fail := 0
 var _seen: Dictionary = {}
@@ -410,13 +416,21 @@ func _lit_material(p_model: int) -> ShaderMaterial:
 	return mat
 
 
-func _luma_spread(p_img: Image) -> Array:
+func _luma(p_img: Image) -> PackedFloat64Array:
 	var l := PackedFloat64Array()
 	for j in PIXELS:
 		for i in PIXELS:
 			var c := p_img.get_pixel(i, j)
 			l.append(0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b)
-	return [_mean(l), _rms_dev(l)]
+	return l
+
+
+func _diff(p_a: PackedFloat64Array, p_b: PackedFloat64Array) -> PackedFloat64Array:
+	var d := PackedFloat64Array()
+	d.resize(p_a.size())
+	for i in p_a.size():
+		d[i] = p_a[i] - p_b[i]
+	return d
 
 
 func _criterion_n() -> void:
@@ -426,13 +440,16 @@ func _criterion_n() -> void:
 	_sun.look_at_from_position(to_sun * 50.0, Vector3.ZERO, Vector3.UP)
 	# The camera stays straight down: a tilted orthographic view runs off the sheet, and the background's
 	# edge then IS the spread, in both arms alike.
-	var fbm := _luma_spread(await _render(_lit_material(Pasture3DPoolManager.WAVE_MODEL_FBM), T_SHAPE))
-	var flat := _luma_spread(await _render(_lit_material(Pasture3DPoolManager.WAVE_MODEL_FFT), T_SHAPE))
+	var fbm := _luma(await _render(_lit_material(Pasture3DPoolManager.WAVE_MODEL_FBM), T_SHAPE))
+	var flat := _luma(await _render(_lit_material(Pasture3DPoolManager.WAVE_MODEL_FFT), T_SHAPE))
+	var flat2 := _luma(await _render(_lit_material(Pasture3DPoolManager.WAVE_MODEL_FFT), T_SHAPE))
 	_sun.visible = false
-	var ratio: float = fbm[1] / maxf(flat[1], 1e-6)
-	_check("N", fbm[0] > 1e-3 and ratio > N_RATIO,
-			"fBm lit mean %.4f spread %.5f | flat control mean %.4f spread %.6f | ratio %.1f (need > %.0f)" % [
-				fbm[0], fbm[1], flat[0], flat[1], ratio, N_RATIO])
+	var mean := _mean(flat)
+	var rel := _rms_dev(_diff(fbm, flat)) / maxf(mean, 1e-6)
+	var ctrl := _rms_dev(_diff(flat2, flat)) / maxf(mean, 1e-6)
+	_check("N", mean > 1e-3 and rel > N_REL and ctrl < N_REL,
+			"flat mean %.4f (frame spread %.5f), fBm mean %.4f (frame spread %.5f) | fBm - flat spread %.4f x mean (need > %.2f) | CONTROL flat - flat %.6f x mean (must stay under)" % [
+				mean, _rms_dev(flat), _mean(fbm), _rms_dev(fbm), rel, N_REL, ctrl])
 
 
 func _criterion_p() -> void:

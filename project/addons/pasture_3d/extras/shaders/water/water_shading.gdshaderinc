@@ -72,6 +72,9 @@ void fragment() {
 	// normal outright: the vertex stage filtered the short cascades out of the geometry, and this is where
 	// they come back. Implicit-derivative sampling is valid here because _wave_model is uniform.
 	bool fft = _wave_model == WATER_MODEL_FFT;
+#ifdef WATER_DEBUG_REF_INPUTS
+	vec2 fft_raw_slope = vec2(0.0);
+#endif
 	float fft_foam = 0.0;
 	float fft_height = 0.0;
 	if (fft) {
@@ -87,6 +90,9 @@ void fragment() {
 			fft_height += disp.y;
 		}
 		fft_foam += _fft_foam_offset;
+#ifdef WATER_DEBUG_REF_INPUTS
+		fft_raw_slope = slope;
+#endif
 		// L8, then G5: scaled, then faded toward flat. The reference lerps the NORMAL toward up, not the
 		// slope toward zero; the two differ wherever the slope is steep.
 		slope *= fft_normal_strength;
@@ -330,6 +336,42 @@ void fragment() {
 	ROUGHNESS = 1.0;
 	ALPHA = 1.0;
 	EMISSION = vec3(slope.x * 0.125 + 0.5, slope.y * 0.125 + 0.5, crest);
+#endif
+
+#ifdef WATER_DEBUG_REF_INPUTS
+#ifndef WATER_FFT
+#error "WATER_DEBUG_REF_INPUTS reads the FFT's per-pixel sums; it needs WATER_FFT"
+#endif
+	// Diagnostic, unlit: what the reference's fp() consumes, RAW -- before normal strength, either fade or
+	// the foam clamp, which the reference oracle applies itself (WaterReferenceABGate). One value a pass,
+	// picked by _debug_ref_value and mapped into [0, 1], split base 256 across the three channels so a
+	// half-float target carries it to float32 precision: u = r + g / 256 + b / 65536.
+	float ref_value = 0.0;
+	if (_debug_ref_value == 0) {
+		ref_value = fft_raw_slope.x / 16.0 + 0.5;
+	} else if (_debug_ref_value == 1) {
+		ref_value = fft_raw_slope.y / 16.0 + 0.5;
+	} else if (_debug_ref_value == 2) {
+		ref_value = (fft_foam + 2.0) / 8.0;
+	} else if (_debug_ref_value == 3) {
+		ref_value = fft_height / 32.0 + 0.5;
+	} else if (_debug_ref_value <= 6) {
+		vec3 ref_view = mat3(INV_VIEW_MATRIX) * VIEW;
+		ref_value = ref_view[_debug_ref_value - 4] / 4.0 + 0.5;
+	} else if (_debug_ref_value == 7) {
+		ref_value = v_fft_depth;
+	} else {
+		ref_value = v_fft_domain[_debug_ref_value - 8] / 8192.0 + 0.5;
+	}
+	ref_value = clamp(ref_value, 0.0, 1.0);
+	float ref_hi = floor(ref_value * 256.0) / 256.0;
+	float ref_rest = (ref_value - ref_hi) * 256.0;
+	float ref_mid = floor(ref_rest * 256.0) / 256.0;
+	ALBEDO = vec3(0.0);
+	SPECULAR = 0.0;
+	ROUGHNESS = 1.0;
+	ALPHA = 1.0;
+	EMISSION = vec3(ref_hi, ref_mid, (ref_rest - ref_mid) * 256.0);
 #endif
 
 #ifdef WATER_PBR

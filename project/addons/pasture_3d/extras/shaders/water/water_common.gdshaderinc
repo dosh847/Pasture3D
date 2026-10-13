@@ -428,7 +428,10 @@ group_uniforms sun;
 // The reference's _ScatterColor (L5): the colour every body term is lit in. deep_color no longer draws on
 // these variants; the absorption solve now tints THIS colour, and only where the water is thin enough to
 // see through (the shore fade, §3.4) -- in deep water it is scatter_color exactly.
-uniform vec3 scatter_color : source_color = vec3(0.016, 0.0736, 0.16);
+// The default is the reference's (0.016, 0.0736, 0.16) sRGB-encoded: FFTWater.cs passes its colours with
+// SetVector, which does not linearise, so those numbers ARE linear; source_color linearises what it is
+// given, and these values land on them exactly (WaterReferenceABGate's "colours" control).
+uniform vec3 scatter_color : source_color = vec3(0.133352, 0.300728, 0.436627);
 // Beckmann alpha (rms microfacet slope) of the SUN lobe. Not the perceptual ROUGHNESS Godot squares for
 // its environment reflection: that one is still base_roughness above.
 uniform float sun_roughness : hint_range(0.01, 0.5, 0.001) = 0.075;
@@ -441,7 +444,8 @@ uniform float view_scatter : hint_range(0.0, 4.0, 0.01) = 1.0;
 // k3: body scatter that follows the sun's incidence on the surface.
 uniform float shadow_scatter : hint_range(0.0, 4.0, 0.01) = 0.5;
 // k4: a constant in-scatter from bubbles, in its own colour.
-uniform vec3 bubble_color : source_color = vec3(0.0, 0.02, 0.016);
+// The reference's (0, 0.02, 0.016), sRGB-encoded like scatter_color.
+uniform vec3 bubble_color : source_color = vec3(0.0, 0.151704, 0.133352);
 uniform float bubble_density : hint_range(0.0, 4.0, 0.01) = 1.0;
 #ifdef WATER_SCATTER
 // k1: sun shining THROUGH a crest toward the viewer, per metre of crest height above the rest level. The

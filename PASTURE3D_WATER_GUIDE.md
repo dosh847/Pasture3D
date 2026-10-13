@@ -81,6 +81,10 @@ the seabed.
 publishes to the global uniforms every water body reads. Without it the water is lit by Godot's light
 loop but its own sun-dependent terms (specular tint, scattering) sit at their defaults.
 
+**The reference's sun** is a `DirectionalLight3D` coloured **(1, 0.851, 0.601)** at energy 1. Godot
+decodes a light's colour from sRGB, so that is the reference's irradiance (1, 0.694, 0.32); typing
+(1, 0.694, 0.32) gives a sun about half as green and a fifth as blue.
+
 ### Water on a bare mesh, with no plugin nodes at all
 
 Put `M_water_lake.tres` or `M_water_pond.tres` on any `MeshInstance3D`. Give the mesh subdivisions —
@@ -531,6 +535,12 @@ drives the underwater fog and the underwater screen tint, so those follow the su
 **`scatter_color`** is the colour the water's body is lit in, the reference's `_ScatterColor`: what you see
 in deep water, scaled by the sun. On the ocean, lake and pond it replaces `deep_color` at the surface.
 **`deep_color`** still colours rivers and the underwater fog.
+
+**The colours are sRGB-encoded reference numbers.** The reference passes its colours to the shader
+unconverted, so its `_ScatterColor` (0.016, 0.0736, 0.16) is a linear value. A `source_color` uniform
+decodes what you type, so the shipped defaults are those numbers sRGB-encoded: `scatter_color`
+(0.133, 0.301, 0.437), `bubble_color` (0, 0.152, 0.133), `foam_color` (0.798, 0.772, 0.730). To match a
+colour from the reference's scene, encode it the same way.
 
 These variants are lit the reference's way: there is no ambient term, so **water in shadow is lit only by
 its reflection**, and **foam is unlit**. `foam_color` is emitted wherever there is foam, so foam glows in

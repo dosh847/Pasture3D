@@ -1,6 +1,6 @@
 # Pasture3D Water: Reference Fidelity
 
-Status: **audit written 2026-10-11. Decisions D1–D5 taken 2026-10-11 (the recommendations, §4). R1 built 2026-10-11 (§7.1), R2 built 2026-10-12 (§7.2), R3 built 2026-10-12 (§7.3), R4 built 2026-10-12 (§7.4), R5 built 2026-10-12 (§7.5); R6–R7 not started.**
+Status: **audit written 2026-10-11. Decisions D1–D5 taken 2026-10-11 (the recommendations, §4). R1 built 2026-10-11 (§7.1), R2 built 2026-10-12 (§7.2), R3 built 2026-10-12 (§7.3), R4 built 2026-10-12 (§7.4), R5 built 2026-10-12 (§7.5), R6 built 2026-10-12 (§7.6); R7 not started.**
 
 ## 1. The ask
 
@@ -22,9 +22,11 @@ This reverses some deliberate departures recorded in PASTURE3D_WATER_FFT_SPEC.md
 - `Assets/Scenes/SampleScene.unity`. Its saved values differ from the script defaults, and its values are
   what the reference renders.
 
-**Colour space.** The reference renders in a linear colour space (`m_ActiveColorSpace: 1`). Its Color
-fields are sRGB-authored and linearised by `SetColor`. Godot's `source_color` uniforms do the same, so
-its colours port as-is.
+**Colour space.** The reference renders in a linear colour space (`m_ActiveColorSpace: 1`). But
+`FFTWater.cs` passes `_SunIrradiance`, `_ScatterColor`, `_BubbleColor` and `_FoamColor` with `SetVector`,
+which does not convert: the shader sees the typed numbers as linear. Godot's `source_color` uniforms and a
+light's colour are decoded from sRGB, so the port types the reference's numbers **sRGB-encoded**. (This
+paragraph said the opposite until R6, whose A/B found it; see §7.6.)
 
 ## 2. The reference scene
 
@@ -106,7 +108,7 @@ Each line gives what we do, what the reference does, and the proposal.
 | L4 | Environment reflection is Godot's sky, through `SPECULAR` = `specular_amount` | `F · texCUBE(env, reflect) · environmentLightStrength`, with its own F | **OPEN, see D3.** |
 | L5 | `ALBEDO` = `deep_color` through an absorption solve, which plays the role of `_ScatterColor` | A `_ScatterColor` constant | **Port it** as `scatter_color`. The absorption solve stays only for the shore fade (§3.4). |
 | L6 | Every light term takes `ATTENUATION` (shadows) | No shadows | **Keep.** The reference cannot say; this is Godot's lighting. |
-| L7 | The sun comes from the scene's DirectionalLight3D | `_SunIrradiance` | **Keep.** Document it: a light coloured (1, 0.694, 0.32) at energy 1 *is* the reference's irradiance (FFT spec §3.1). |
+| L7 | The sun comes from the scene's DirectionalLight3D | `_SunIrradiance` | **Keep.** Document it: Godot decodes a light's colour from sRGB, so a light coloured (1, 0.851, 0.601), the encoding of (1, 0.694, 0.32), at energy 1 *is* the reference's irradiance (corrected in R6, §7.6). |
 | L8 | `normal_strength` and the normal fade were not ported | `_NormalStrength`, normal depth attenuation | **Port both** (G5 covers the fade). |
 | L9 | Alpha from `water_fresnel` | Opaque, ZWrite on | **Keep** for the shore fade (§3.4). In open water our alpha is 1, which matches. |
 
@@ -344,3 +346,61 @@ Fidelity is a claim about pixels, so it is gated on pixels.
   - **Re-run and passing:** RetireGerstner, Wiring (7/7), FFT, Buoy, FBM, PBR, Phase1, Bodies Phase 1,
     3, 4 and 5 (correctness only), TwoLakes (8/8), SplitScreen, PresetCheck, VariantWarning, BodySplit,
     LateManager, MaterialPropagation. No timing gate was run.
+
+### 7.6 R6, as built (2026-10-12)
+
+- **The A/B found the colours wrong.** `FFTWater.cs` sets the four lighting colours with `SetVector`, which
+  passes the numbers through. Our `source_color` uniforms decoded them as sRGB, so the shipped water was:
+  - a body 7–13× too dark per channel (scatter and bubble);
+  - foam about half as bright.
+
+  The fix is in the values, not the shader: the `water_common` defaults for `scatter_color` and
+  `bubble_color`, and `foam_color` in both ocean materials, are now the reference's numbers sRGB-encoded.
+  Godot decodes a `DirectionalLight3D`'s colour as well (measured: a (1, 0.694, 0.32) sun lit at
+  1 : 0.449 : 0.107), so the reference's sun is a light coloured (1, 0.851, 0.601). §1 and L7 are corrected.
+- **The gate, `bench/WaterReferenceABGate`.** It renders the shipped Garrett instance over live FFT
+  waves, with no sky, ambient or reflections, a linear tonemap and a float readback. It then reads back
+  the same frame once per input, through a debug readout in `water_shading.gdshaderinc`
+  (`WATER_DEBUG_REF_INPUTS`, bench shader `water_ref_inputs.gdshader`). Each input is packed into three
+  8-bit channels, for 24 bits per pass:
+  - the summed slope, the foam and the height, raw;
+  - the view direction, the fade depth and the rest position.
+
+  `ref_fp()` is the reference's `NEW_LIGHTING` fragment, transcribed from FFTWater.shader. It is fed
+  those inputs and the reference scene's own lighting values, spelled only in the gate.
+  - **[D] depth.** Our fade depth is the reference's `1 − Linear01Depth`. The far plane is fitted, not
+    assumed: Godot builds its reversed-Z projection in float32, and the depth term cancels, so the depth
+    buffer, and our fade, which reads the same matrix, ends at 1997.34 m of a nominal 2000 at near 0.05,
+    and at 149.98 m of 150. The fade reaching 0 where Godot clips is the reference's meaning.
+    - Result: F within 0.2% of far, residual ~7e-7 against 1e-5.
+    - Control: the fit made from the distance instead of z_eye must leave a residual over 1e-4.
+  - **[A] the A/B.** Three views:
+    - into a low sun (the glitter path and the backlit crest scatter);
+    - the sun behind the camera;
+    - an exercised view, with normal strength 2, foam roughness modifier 0.5, a 150 m far plane, and the
+      foam offset lifted by 0.75. The scene's offset makes no foam on this sea, since raw foam peaks
+      near −0.14.
+
+    Error per pixel is max over rgb of |got − want| / (|want| + 0.002).
+    - Result: p99 0.0009 against 0.003, and the worst pixel 0.0010 against 0.03, in all three views.
+    - Controls: each break must fail the view as a render would, with p99 over 3 × tol or worst over
+      3 × max tol. The breaks are colours linearised, sun not linearised, L1, L2, L3, L4, L5, L8 and G5.
+      All are caught. The smallest are L3 (0.28 / 0.87) and L2 (0.68 / 0.85).
+    - Anti-null: 1451 foamy pixels and about 1200 glint pixels.
+- **Two traps, found on the way:**
+  - **The texture placeholder.** A material drawn before the FFT textures exist keeps the black
+    `Texture2DArrayRD` placeholder: a flat sea, which the A/B saw as Fresnel at n·v = V.y. The gate
+    re-uploads the profile into its materials after warm-up.
+  - **A mid-grey environment cubemap** carries the GPU's sRGB decode, a 0.3% channel bias. A white map
+    decodes to exactly 1.
+- **Re-baselined:**
+  - WaterPBRGate's bubble constant now follows the new default.
+  - **WaterFBMGate [N]** is measured on the per-pixel difference, fBm minus flat, against 0.05 × the
+    flat frame's mean. Its flat frame is not uniform: the body falls off with n·v toward the camera, which
+    Godot's `VIEW` carries even under the gate's orthographic camera. At the old, too-dark colours that
+    falloff was under the frame-spread ratio's noise; at the reference's it is half the fBm frame's
+    spread, and the ratio read 2.2 against 10. The difference cancels it: 0.16 × mean. Control: a second
+    flat render, differenced the same way, reads 0.
+- **Re-run and passing:** ReferenceAB, PBR, Wiring, FFT, FBM, Buoy, PresetCheck, VariantWarning, Phase1,
+  Bodies Phase 1, 3, 4 and 5 (correctness only), TwoLakes, SplitScreen, RetireGerstner, BodySplit,
+  LateManager, MaterialPropagation. No timing gate was run.

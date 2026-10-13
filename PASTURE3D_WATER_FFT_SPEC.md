@@ -210,8 +210,9 @@ scene has no light in range (unshaded previews).
   - `LIGHT_COLOR` is colour × energy × π.
   - `DIFFUSE_LIGHT` is multiplied by `ALBEDO` after the loop.
   - `SPECULAR_LIGHT` is added untouched, whatever `SPECULAR` says.
-  - So the reference's irradiance is `LIGHT_COLOR · ATTENUATION / π`. A white `DirectionalLight3D` at
-    energy 1 and colour (1, 0.694, 0.32) is the reference's `_SunIrradiance`.
+  - So the reference's irradiance is `LIGHT_COLOR · ATTENUATION / π`. Godot decodes the light's colour
+    from sRGB, so a `DirectionalLight3D` at energy 1 coloured (1, 0.851, 0.601), the sRGB encoding of
+    (1, 0.694, 0.32), is the reference's `_SunIrradiance` (corrected in the reference spec, R6).
 - **`WATER_PBR`** is defined in `water_common.gdshaderinc` for every lit variant except rivers
   (`WATER_STREAM_WAVES`), the canvas_item probe and the two debug readouts. Rivers keep Godot's built-in
   lights and the look they were tuned under. `WATER_NO_PBR` opts a custom variant out, which is also how

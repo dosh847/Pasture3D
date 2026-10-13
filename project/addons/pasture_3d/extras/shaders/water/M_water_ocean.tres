@@ -6,6 +6,9 @@
 ; foam colour, and crest foam at full strength (the reference has no multiplier). scatter_color,
 ; sun_roughness, bubbles, scatter strengths, foam_roughness_modifier and environment_light_strength
 ; are the shader's defaults, which ARE the reference's values, so they are not repeated here.
+; Every colour is the reference's number sRGB-encoded: its script passes colours with SetVector,
+; unconverted, so its numbers are linear, and source_color linearises what it is given. Its sun,
+; (1, 0.694, 0.32), is a DirectionalLight3D coloured (1, 0.851, 0.601) at energy 1 for the same reason.
 ; absorption, deep_color (the underwater fog) and the shore foam are ours: the reference has
 ; nothing to say about water you can see the bottom of (decision D4). The reference reflects a
 ; cubemap (use_environment_map); none ships, so this reflects Godot's sky. Its scene's camera
@@ -45,7 +48,7 @@ shader_parameter/sea_level = 0.0
 shader_parameter/base_roughness = 0.06
 shader_parameter/specular_amount = 0.5
 shader_parameter/foam_tex = ExtResource("3_mewtu")
-shader_parameter/foam_color = Color(0.6, 0.5568, 0.492, 1)
+shader_parameter/foam_color = Color(0.797738, 0.771597, 0.730063, 1)
 shader_parameter/foam_scale = 0.07
 shader_parameter/foam_crest_amount = 1.0
 shader_parameter/foam_shore_depth = 1.2
