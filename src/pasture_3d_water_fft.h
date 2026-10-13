@@ -56,6 +56,9 @@ public:
 	// Two per cascade: the reference's spectrum1..spectrum8, index 0..7 here.
 	static constexpr int SPECTRA = 2 * CASCADES;
 	static constexpr float GRAVITY = 9.81f;
+	// The FFT sizes offered. 1024 is the reference's; whether a device runs it is resolution_for_limits().
+	static constexpr int MIN_RESOLUTION = 128;
+	static constexpr int MAX_RESOLUTION = 1024;
 
 	enum Output {
 		OUTPUT_INITIAL_SPECTRUM = 0,
@@ -213,6 +216,16 @@ public:
 	// Whether a RenderingDevice exists (Forward+ / Mobile). False under Compatibility and headless.
 	static bool is_supported();
 	bool is_available();
+	// A request snapped to the offered powers of two.
+	static int snap_resolution(const int p_resolution);
+	// The largest offered N, at most p_requested, that a device with these compute limits can run: one
+	// workgroup of N threads per row, ping-ponging 2 * N vec4s (32 N bytes) of shared memory. Vulkan
+	// guarantees only 16 KB and 128 invocations, so every N above 128 is a device question.
+	static int resolution_for_limits(const int p_requested, const int64_t p_shared_bytes,
+			const int64_t p_invocations, const int64_t p_size_x);
+	// resolution_for_limits(MAX_RESOLUTION) on this device; MAX_RESOLUTION when there is none, since
+	// nothing then runs and the CPU side may model any N.
+	static int get_max_resolution();
 
 	void update(const float p_time, const float p_dt);
 	int get_update_count() const { return _update_count; }

@@ -568,6 +568,33 @@ bool Pasture3DWaterFFT::is_supported() {
 	return RS && RS->get_rendering_device() != nullptr;
 }
 
+int Pasture3DWaterFFT::snap_resolution(const int p_resolution) {
+	int r = MIN_RESOLUTION;
+	while (r < MAX_RESOLUTION && r < p_resolution) {
+		r <<= 1;
+	}
+	return r;
+}
+
+int Pasture3DWaterFFT::resolution_for_limits(const int p_requested, const int64_t p_shared_bytes,
+		const int64_t p_invocations, const int64_t p_size_x) {
+	int r = snap_resolution(p_requested);
+	while (r > MIN_RESOLUTION && (32 * (int64_t)r > p_shared_bytes || r > p_invocations || r > p_size_x)) {
+		r >>= 1;
+	}
+	return r;
+}
+
+int Pasture3DWaterFFT::get_max_resolution() {
+	RenderingDevice *rd = RS ? RS->get_rendering_device() : nullptr;
+	if (!rd) {
+		return MAX_RESOLUTION;
+	}
+	return resolution_for_limits(MAX_RESOLUTION, (int64_t)rd->limit_get(RenderingDevice::LIMIT_MAX_COMPUTE_SHARED_MEMORY_SIZE),
+			(int64_t)rd->limit_get(RenderingDevice::LIMIT_MAX_COMPUTE_WORKGROUP_INVOCATIONS),
+			(int64_t)rd->limit_get(RenderingDevice::LIMIT_MAX_COMPUTE_WORKGROUP_SIZE_X));
+}
+
 bool Pasture3DWaterFFT::is_available() {
 	return !_init_failed && is_supported();
 }
@@ -738,9 +765,14 @@ PackedFloat32Array Pasture3DWaterFFT::get_spectrum_params(const int p_spectrum) 
 }
 
 void Pasture3DWaterFFT::set_resolution(const int p_resolution) {
-	// Powers of two only, and no 1024: the FFT's shared memory is 2 * N * 16 bytes, and 32 KB is past
-	// Vulkan's guaranteed 16 KB.
-	int r = p_resolution <= 128 ? 128 : (p_resolution <= 256 ? 256 : 512);
+	// Powers of two, and no more than the device runs (resolution_for_limits). 1024 needs 32 KB of shared
+	// memory, which most desktop GPUs have and Vulkan does not promise.
+	int r = snap_resolution(p_resolution);
+	const int max_r = get_max_resolution();
+	if (r > max_r) {
+		LOG(WARN, "FFT resolution ", r, " needs more compute shared memory or workgroup size than this GPU has; running at ", max_r);
+		r = max_r;
+	}
 	if (r == _resolution) {
 		return;
 	}
@@ -1200,6 +1232,10 @@ void Pasture3DWaterFFT::_bind_methods() {
 	BIND_CONSTANT(SPECTRA);
 
 	ClassDB::bind_static_method("Pasture3DWaterFFT", D_METHOD("is_supported"), &Pasture3DWaterFFT::is_supported);
+	ClassDB::bind_static_method("Pasture3DWaterFFT", D_METHOD("snap_resolution", "resolution"), &Pasture3DWaterFFT::snap_resolution);
+	ClassDB::bind_static_method("Pasture3DWaterFFT", D_METHOD("resolution_for_limits", "requested", "shared_bytes", "invocations", "size_x"),
+			&Pasture3DWaterFFT::resolution_for_limits);
+	ClassDB::bind_static_method("Pasture3DWaterFFT", D_METHOD("get_max_resolution"), &Pasture3DWaterFFT::get_max_resolution);
 	ClassDB::bind_method(D_METHOD("is_available"), &Pasture3DWaterFFT::is_available);
 	ClassDB::bind_method(D_METHOD("update", "time", "delta"), &Pasture3DWaterFFT::update);
 	ClassDB::bind_method(D_METHOD("get_update_count"), &Pasture3DWaterFFT::get_update_count);
@@ -1257,7 +1293,7 @@ void Pasture3DWaterFFT::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_variance_wavelength", "fraction"), &Pasture3DWaterFFT::get_variance_wavelength);
 
 	// Manager-driven: bound so a gate can drive a standalone simulation, never stored.
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "resolution", PROPERTY_HINT_ENUM, "128:128,256:256,512:512", PROPERTY_USAGE_NONE), "set_resolution", "get_resolution");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "resolution", PROPERTY_HINT_ENUM, "128:128,256:256,512:512,1024:1024", PROPERTY_USAGE_NONE), "set_resolution", "get_resolution");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "seed"), "set_seed", "get_seed");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "depth", PROPERTY_HINT_RANGE, "0.1,500.0,0.1,or_greater,suffix:m"), "set_depth", "get_depth");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "choppiness", PROPERTY_HINT_RANGE, "0.0,3.0,0.01"), "set_choppiness", "get_choppiness");

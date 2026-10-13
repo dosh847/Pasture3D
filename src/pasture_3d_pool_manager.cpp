@@ -258,7 +258,7 @@ void Pasture3DPoolManager::register_water_settings() {
 	};
 	const SettingDecl decls[] = {
 		{ SETTING_WAVE_MODEL, 0, "FFT,fBm" },
-		{ SETTING_FFT_RESOLUTION, 256, "128:128,256:256,512:512" },
+		{ SETTING_FFT_RESOLUTION, 256, "128:128,256:256,512:512,1024:1024" },
 	};
 	for (const SettingDecl &decl : decls) {
 		if (!ps->has_setting(decl.name)) {
@@ -563,13 +563,17 @@ bool Pasture3DPoolManager::is_fbm_by_choice() const {
 	return _requested_wave_model() == WAVE_MODEL_FBM && Pasture3DWaterFFT::is_supported();
 }
 
-int Pasture3DPoolManager::get_effective_fft_resolution() const {
+int Pasture3DPoolManager::_requested_fft_resolution() const {
 	int r = _fft_resolution;
 	if (r <= 0) {
 		ProjectSettings *ps = ProjectSettings::get_singleton();
 		r = ps ? (int)ps->get_setting(SETTING_FFT_RESOLUTION, 256) : 256;
 	}
-	return r <= 128 ? 128 : (r <= 256 ? 256 : 512);
+	return Pasture3DWaterFFT::snap_resolution(r);
+}
+
+int Pasture3DPoolManager::get_effective_fft_resolution() const {
+	return MIN(_requested_fft_resolution(), Pasture3DWaterFFT::get_max_resolution());
 }
 
 void Pasture3DPoolManager::set_wave_model(const WaveModel p_model) {
@@ -586,11 +590,14 @@ void Pasture3DPoolManager::set_wave_model(const WaveModel p_model) {
 }
 
 void Pasture3DPoolManager::set_fft_resolution(const int p_resolution) {
-	int r = p_resolution <= 0 ? 0 : (p_resolution <= 128 ? 128 : (p_resolution <= 256 ? 256 : 512));
+	// Stored as asked, so a scene keeps its 1024 on a machine that cannot run it; the effective resolution
+	// falls back and the configuration warning says so.
+	int r = p_resolution <= 0 ? 0 : Pasture3DWaterFFT::snap_resolution(p_resolution);
 	if (_fft_resolution == r) {
 		return;
 	}
 	_fft_resolution = r;
+	update_configuration_warnings();
 	// The simulations rebuild in place on their next tick and keep their texture RIDs, so no material
 	// needs a re-upload; only the cull bounds, which read the spectrum's band, are refreshed.
 	_apply_model_to_profiles();
@@ -800,6 +807,15 @@ PackedStringArray Pasture3DPoolManager::_get_configuration_warnings() const {
 	}
 	if (is_fbm_by_choice()) {
 		warnings.push_back(FBM_CHOICE_WARNING);
+	}
+	if (_requested_wave_model() == WAVE_MODEL_FFT && Pasture3DWaterFFT::is_supported()) {
+		const int asked = _requested_fft_resolution();
+		const int runs = get_effective_fft_resolution();
+		if (runs < asked) {
+			warnings.push_back(vformat("fft_resolution asks for %d, but this GPU's compute limits (shared memory, "
+									   "workgroup size) allow at most %d, so the FFT runs at %d.",
+					asked, runs, runs));
+		}
 	}
 	if (_sun_light.is_null()) {
 		warnings.push_back(
@@ -1090,6 +1106,6 @@ void Pasture3DPoolManager::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "paused"), "set_paused", "is_paused");
 	ADD_GROUP("Waves", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "wave_model", PROPERTY_HINT_ENUM, "FFT:0,fBm:2,Project Setting:3"), "set_wave_model", "get_wave_model");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "fft_resolution", PROPERTY_HINT_ENUM, "Project Setting:0,128:128,256:256,512:512"),
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "fft_resolution", PROPERTY_HINT_ENUM, "Project Setting:0,128:128,256:256,512:512,1024:1024"),
 			"set_fft_resolution", "get_fft_resolution");
 }

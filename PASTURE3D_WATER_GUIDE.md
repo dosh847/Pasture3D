@@ -159,8 +159,16 @@ old river preset, fitted as before.
 |---|---|---|
 | `wave_model` | `Pasture3DPoolManager` | **Project Setting** (default), **FFT** or **fBm**. |
 | `pasture_3d/water/wave_model` | Project Settings | FFT (default) or fBm, for every manager left on Project Setting. A game's options menu can write it at runtime with `ProjectSettings.set_setting()`; the managers follow without a node reference. |
-| `fft_resolution` | `Pasture3DPoolManager` | 0 = the project setting. Otherwise 128, 256 or 512 texels per cascade. |
-| `pasture_3d/water/fft_resolution` | Project Settings | 256 by default. 128 is a quarter of the work. |
+| `fft_resolution` | `Pasture3DPoolManager` | 0 = the project setting. Otherwise 128, 256, 512 or 1024 texels per cascade. |
+| `pasture_3d/water/fft_resolution` | Project Settings | 256 by default. 128 is a quarter of the work. 1024 is the reference's. |
+
+**1024 is what GarrettGunnell/Water runs,** and the closest look to it: the reference's 94 m cascade
+has 9 cm texels at 1024 and 37 cm at 256, which shows in the near-camera normals. It needs 32 KB of
+compute shared memory and 1024-thread workgroups. Most desktop GPUs have both, but Vulkan does not
+promise them. On a GPU without them the FFT runs at the largest size the GPU allows, logs a warning,
+and the manager shows a configuration warning; the scene keeps its 1024 for a machine that can run
+it. 1024 also holds about 280 MB of simulation textures per profile in use, against about 17 MB at
+256.
 
 **FFT needs a RenderingDevice** — Forward+ or Mobile. On Compatibility, or headless, a manager that
 asks for FFT draws fBm instead, warns once, and `is_wave_model_fallback()` says so.
@@ -649,6 +657,7 @@ await `RenderingServer.frame_post_draw`, which never emits headless).
   | FFT, `fft_resolution` 128 | 0.27 ms | 0.27 ms |
   | FFT, 256 (default) | 0.38 ms | 0.37 ms |
   | FFT, 512 | 0.83 ms | 0.79 ms |
+  | FFT, 1024 | not measured | not measured |
   | fBm, 40 octaves (shipped) | 0.39 ms | 0.35 ms |
 
   The fBm's cost is all fragment work, and its octave count cannot come down. At 16 octaves it

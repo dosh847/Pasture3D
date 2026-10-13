@@ -91,8 +91,8 @@ Ported from `FFTWater.compute`. Kernels are numbered as in the reference.
 | 6 | Downsample | every frame | mip chain (Unity's `GenerateMips()` has no Godot equivalent for storage textures) |
 
 `SIZE`/`LOG_SIZE` become specialisation constants, not 1024. Shared memory is `2·N·16 B` = 16 KB at
-N=512, which is inside Vulkan's guaranteed 16 KB minimum. N=1024 (32 KB) is desktop-only and is not
-offered.
+N=512, which is inside Vulkan's guaranteed 16 KB minimum. N=1024 (32 KB) is offered since the reference
+spec's R7, on devices whose limits allow it, with a fallback (`resolution_for_limits`).
 
 ### 2.2 Deliberate deviations from the reference
 

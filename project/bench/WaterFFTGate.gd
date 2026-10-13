@@ -38,6 +38,13 @@
 #       counts only the displacing cascades, drawn AND displaces: the default sea's estimate is below the
 #       all-displacing one, and displaces 15 under drawn 0b1001 gives the same estimate as drawn 15 under
 #       displaces 0b1001 (the AND). Control: the all-displacing estimate must differ.
+#   [X] N = 1024, the reference's (PASTURE3D_WATER_REFERENCE_SPEC.md R7, D2). The fallback rule on limits
+#       spelled here (X_LIMITS: Vulkan's guaranteed minimums among them), worked by hand, not by the rule.
+#       On this device: asking a simulation for 1024 runs at the rule applied to the device's own limits,
+#       read here from the RenderingDevice, and so does a manager's effective resolution; the readback has
+#       that many texels. Where that is 1024, the transform at 1024 matches [A]'s DFT at X_SAMPLES texels in
+#       every cascade, with [A]'s tolerance and control. On a device that cannot run 1024 the transform is
+#       reported NOT RUN, and the criterion rests on the fallback alone.
 #
 # Every other criterion runs with all four cascades drawn and displacing (_make), because each reads all
 # four layers or the variance of all four.
@@ -56,8 +63,21 @@
 # Run: Godot_v4.7-stable_win64_console.exe --path project res://bench/WaterFFTGate.tscn
 extends Node
 
-const CRITERIA: PackedStringArray = ["A", "S", "D", "H", "B", "P", "M", "G"]
+const CRITERIA: PackedStringArray = ["A", "S", "D", "H", "B", "P", "M", "G", "X"]
 const N := 128
+const X_N := 1024
+const X_SAMPLES := [Vector2i(0, 0), Vector2i(613, 1001)]
+# [requested, shared bytes, invocations, size_x, the N that must run].
+const X_LIMITS := [
+	[1024, 32768, 1024, 1024, 1024],
+	[1024, 16384, 1024, 1024, 512],  # Vulkan's guaranteed shared memory
+	[1024, 32768, 512, 1024, 512],
+	[1024, 32768, 1024, 256, 256],
+	[1024, 16384, 128, 128, 128],  # Vulkan's guaranteed minimums
+	[256, 32768, 1024, 1024, 256],  # never raised past the request
+	[3000, 65536, 2048, 2048, 1024],  # 1024 is the largest offered
+	[200, 32768, 1024, 1024, 256],  # snapped up to a power of two
+]
 const PERIOD := 120.0
 const T_A := 37.3
 const G := 9.81
@@ -102,9 +122,9 @@ func _check(p_name: String, p_ok: bool, p_detail: String) -> void:
 		_fail += 1
 
 
-func _make() -> Pasture3DWaterFFT:
+func _make(p_n: int = N) -> Pasture3DWaterFFT:
 	var fft := Pasture3DWaterFFT.new()
-	fft.resolution = N
+	fft.resolution = p_n
 	fft.loop_period = PERIOD
 	fft.seed = 1
 	fft.choppiness = 0.8
@@ -122,6 +142,7 @@ func _run() -> void:
 	_criterion_p()
 	_criterion_m()
 	_criterion_g()
+	_criterion_x()
 
 
 # --- readback helpers ---------------------------------------------------------------------------------
@@ -187,20 +208,20 @@ func _max_abs_xyz(p_a: PackedFloat32Array) -> float:
 ## Mirrors the kernel's definitions, not its arithmetic: htilde(k,t) = h0 e^{iwt} + conj(h0(-k)) e^{-iwt},
 ## with w quantised to the loop; Dy = sum htilde e^{ik.x}; Dx,z = sum i htilde k_x,z/|k| e^{ik.x}.
 func _oracle(p_h0: PackedFloat32Array, p_length: float, p_t: float, p_px: int, p_pz: int,
-		p_lambda: float, p_depth: float) -> Array:
+		p_lambda: float, p_depth: float, p_n: int = N) -> Array:
 	var w0 := TAU / PERIOD
 	var dk := TAU / p_length
-	var half := N / 2
+	var half := p_n / 2
 	var dx := 0.0
 	var dy := 0.0
 	var dz := 0.0
 	var ambiguity := 0.0
 	var ambiguous := 0
-	for n in N:
+	for n in p_n:
 		var kz := float(n - half) * dk
-		var phase_z := TAU * float((n - half) * p_pz) / float(N)
-		for m in N:
-			var o := (n * N + m) * 4
+		var phase_z := TAU * float((n - half) * p_pz) / float(p_n)
+		for m in p_n:
+			var o := (n * p_n + m) * 4
 			var hr := p_h0[o]
 			var hi := p_h0[o + 1]
 			var cr := p_h0[o + 2]
@@ -223,7 +244,7 @@ func _oracle(p_h0: PackedFloat32Array, p_length: float, p_t: float, p_px: int, p
 			# htilde = h0 * e + h0conj * conj(e)
 			var tr := hr * ec - hi * es + cr * ec + ci * es
 			var ti := hr * es + hi * ec - cr * es + ci * ec
-			var th := TAU * float((m - half) * p_px) / float(N) + phase_z
+			var th := TAU * float((m - half) * p_px) / float(p_n) + phase_z
 			var bc := cos(th)
 			var bs := sin(th)
 			# Re(htilde e^{i th})
@@ -653,3 +674,68 @@ func _criterion_g() -> void:
 	_check("G", ok, "default repeats %s (want %s): %s; tile 0 falls back to the length: %s; foam offset sum %.3f (want -0.84); masks drawn %d displaces %d displacing %d: %s; drawn 0b1001: hidden layers held %s, shown layers moved %s (fields empty: %s); control drawn 15 moves layer 1: %s; sigma default %.4f m < all-displacing %.4f m, drawn 0b1001 %.4f m == displaces 0b1001 %.4f m (must differ from all): %s" % [
 			rep, want_rep, rep_ok, fallback_ok, foam, def.cascade_drawn, def.cascade_displaces, def.get_displacing_mask(), masks_ok,
 			held, moved, empty, ctl_moved, s_def, s_all, s_a, s_b, sigma_ok])
+
+
+# --- [X] N = 1024 -------------------------------------------------------------------------------------
+
+func _criterion_x() -> void:
+	var rule_ok := true
+	var rule_parts := PackedStringArray()
+	for row in X_LIMITS:
+		var got := Pasture3DWaterFFT.resolution_for_limits(row[0], row[1], row[2], row[3])
+		rule_ok = rule_ok and got == row[4]
+		if got != row[4]:
+			rule_parts.append("%s -> %d (want %d)" % [str(row.slice(0, 4)), got, row[4]])
+
+	var rd := RenderingServer.get_rendering_device()
+	var device_n := Pasture3DWaterFFT.resolution_for_limits(X_N,
+			rd.limit_get(RenderingDevice.LIMIT_MAX_COMPUTE_SHARED_MEMORY_SIZE),
+			rd.limit_get(RenderingDevice.LIMIT_MAX_COMPUTE_WORKGROUP_INVOCATIONS),
+			rd.limit_get(RenderingDevice.LIMIT_MAX_COMPUTE_WORKGROUP_SIZE_X))
+	var fft := _make(X_N)
+	var manager := Pasture3DPoolManager.new()
+	manager.fft_resolution = X_N
+	var effective := manager.get_effective_fft_resolution()
+	manager.free()
+	fft.update(T_A, 0.0)
+	var texels := fft.read_layer(Pasture3DWaterFFT.OUTPUT_DISPLACEMENT, 0, 0).size() / 8
+	var device_ok := fft.resolution == device_n and effective == device_n and texels == device_n * device_n
+
+	var transform := "NOT RUN (this device runs at most %d)" % device_n
+	var transform_ok := true
+	if device_n == X_N:
+		var lengths := fft.cascade_lengths
+		var completed := 0
+		var worst := 0.0
+		var control_min := INF
+		var empty := false
+		var parts := PackedStringArray()
+		for c in 4:
+			var h0 := _floats(fft.read_layer(Pasture3DWaterFFT.OUTPUT_INITIAL_SPECTRUM, c))
+			var disp := _disp(fft, c)
+			var peak := _max_abs_xyz(disp)
+			empty = empty or peak <= 1e-6
+			var base_tol := 2e-3 * peak + 1e-5
+			var cw := 0.0
+			var cc := 0.0
+			for smp in X_SAMPLES:
+				var o: int = (smp.y * X_N + smp.x) * 4
+				var gpu := Vector3(disp[o], disp[o + 1], disp[o + 2])
+				var now: Array = _oracle(h0, lengths[c], T_A, smp.x, smp.y, fft.choppiness, fft.depth, X_N)
+				var later: Array = _oracle(h0, lengths[c], T_A + 0.5, smp.x, smp.y, fft.choppiness, fft.depth, X_N)
+				var tol: float = base_tol + now[1]
+				cw = max(cw, (gpu - (now[0] as Vector3)).length() / tol)
+				cc = max(cc, (gpu - (later[0] as Vector3)).length() / tol)
+				completed += 1
+			worst = max(worst, cw)
+			control_min = min(control_min, cc)
+			parts.append("c%d err/tol %.3f ctl/tol %.1f" % [c, cw, cc])
+		transform_ok = not empty and completed == 4 * X_SAMPLES.size() and worst <= 1.0 and control_min > 1.0
+		transform = "transform at %d: %d/%d samples, worst err/tol %.3f, control min %.1f (must exceed 1)%s [%s]" % [
+				X_N, completed, 4 * X_SAMPLES.size(), worst, control_min, " EMPTY FIELD" if empty else "",
+				", ".join(parts)]
+	_check("X", rule_ok and device_ok and transform_ok,
+			"fallback rule %d/%d rows%s | device runs %d: simulation %d, manager %d, readback %d texels -> %s | %s" % [
+				X_LIMITS.size() - rule_parts.size(), X_LIMITS.size(),
+				"" if rule_ok else " WRONG: " + "; ".join(rule_parts), device_n, fft.resolution, effective,
+				texels, "ok" if device_ok else "WRONG", transform])

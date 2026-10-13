@@ -197,6 +197,8 @@ private:
 	void _on_project_settings_changed();
 	// The requested model with PROJECT resolved, before the no-device fallback.
 	WaveModel _requested_wave_model() const;
+	// fft_resolution, or the project setting behind its 0, snapped; before the device fallback.
+	int _requested_fft_resolution() const;
 
 protected:
 	static void _bind_methods();

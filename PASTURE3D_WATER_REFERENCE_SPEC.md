@@ -1,6 +1,6 @@
 # Pasture3D Water: Reference Fidelity
 
-Status: **audit written 2026-10-11. Decisions D1–D5 taken 2026-10-11 (the recommendations, §4). R1 built 2026-10-11 (§7.1), R2 built 2026-10-12 (§7.2), R3 built 2026-10-12 (§7.3), R4 built 2026-10-12 (§7.4), R5 built 2026-10-12 (§7.5), R6 built 2026-10-12 (§7.6); R7 not started.**
+Status: **audit written 2026-10-11. Decisions D1–D5 taken 2026-10-11 (the recommendations, §4). R1 built 2026-10-11 (§7.1), R2 built 2026-10-12 (§7.2), R3 built 2026-10-12 (§7.3), R4 built 2026-10-12 (§7.4), R5 built 2026-10-12 (§7.5), R6 built 2026-10-12 (§7.6), R7 built 2026-10-12 (§7.7).**
 
 ## 1. The ask
 
@@ -81,7 +81,7 @@ Each line gives what we do, what the reference does, and the proposal.
 | S4 | Phase from finite-depth ω, quantised to the loop | Spectrum built with `√(gk·tanh kd)`, phase advanced with deep-water `√(gk)`, also quantised by repeatTime | **OPEN, see D1.** At depth 20 the 94 m waves move about 7% faster in the reference. |
 | S5 | Foam decay and add per second | Per frame | **Keep per second.** It is identical at 60 fps, and per frame changes foam life with the frame rate. The defaults are already 0.1 and 0.0175 per frame at 60 fps. |
 | S6 | The Nyquist row and column are empty | Filled | **Keep.** The reference leaks between its packed channels there. The difference is a sliver of the shortest cascade's energy. |
-| S7 | N ≤ 512 | N = 1024 | **OPEN, see D2.** 1024 needs 32 KB of shared memory, which Vulkan does not guarantee; most desktop GPUs have it. |
+| S7 | N ≤ 512 | N = 1024 | **Offered (D2, built in R7).** 1024 needs 32 KB of shared memory and 1024-thread workgroups, which Vulkan does not guarantee; most desktop GPUs have them. |
 | S8 | Phase reduced to one cycle before cos/sin | Raw ω·t | **Keep.** It is a precision fix, invisible at the reference's speeds. |
 | S9 | The cos² half of the directional spread is rotated by the wind angle | `lerp(2/π·cos²θ, Cosine2s(θ − angle, s), spreadBlend)`: the cos² half uses the **unrotated** θ | **Reproduce it** (found in R1). The scene's spectrum 2 has spreadBlend 0 at 59°, so all of its energy runs along ±X, and that is part of the look. |
 | S10 | Hash constants 789221 and 1376312589 (decimal) | `0x789221U` and `0x1376312589U`; HLSL truncates the second to `0x76312589` | **Reproduce it** (found in R1): `0x789221u` and `0x76312589u`. With the decimals the same seed gives a different sea. |
@@ -404,3 +404,35 @@ Fidelity is a claim about pixels, so it is gated on pixels.
 - **Re-run and passing:** ReferenceAB, PBR, Wiring, FFT, FBM, Buoy, PresetCheck, VariantWarning, Phase1,
   Bodies Phase 1, 3, 4 and 5 (correctness only), TwoLakes, SplitScreen, RetireGerstner, BodySplit,
   LateManager, MaterialPropagation. No timing gate was run.
+
+### 7.7 R7, as built (2026-10-12)
+
+- **N = 1024 is offered**, as D2 recommended: on `Pasture3DPoolManager.fft_resolution`, the
+  `pasture_3d/water/fft_resolution` project setting and `Pasture3DWaterFFT.resolution`. The default is
+  still 256. 1024 is the reference's, and about 16× the simulation work and memory of 256.
+- **The fallback is the device's limits, not shared memory alone.** The kernel's FFT pass runs one
+  workgroup of N threads per row, so N needs 32 N bytes of shared memory, N invocations and an N-wide
+  workgroup. Vulkan guarantees 16 KB and 128 of each, so 512 was already a device question.
+  - `Pasture3DWaterFFT.resolution_for_limits(requested, shared, invocations, size_x)` halves the
+    request until all three fit, and never goes below 128. `get_max_resolution()` applies it to this
+    device's `RenderingDevice` limits, or returns 1024 when there is no device.
+  - `set_resolution` clamps to it and logs a warning. The manager's effective resolution takes the same
+    minimum. `fft_resolution` keeps what was asked, so a scene keeps its 1024 for a machine that can run
+    it, and the manager shows a configuration warning while it falls back.
+- **WaterFFTGate [X].**
+  - The fallback rule, on eight hand-worked rows of limits, including Vulkan's guaranteed minimums.
+  - On this device: a simulation asked for 1024, and a manager's effective resolution, both run at the
+    rule applied to the device's limits, and the readback has that many texels.
+  - Where that is 1024, the transform at 1024 matches [A]'s direct DFT at two texels in every cascade,
+    with [A]'s tolerance and its half-second control.
+- **No timing was measured.** The guide's cost table has 1024 as "not measured".
+- **Re-run and passing:** FFT (9/9), Wiring, Buoy, PBR, FBM, PresetCheck, VariantWarning, Bodies Phase 1 and 3
+  (correctness only), TwoLakes, RetireGerstner, SplitScreen, LateManager, MaterialPropagation.
+- **End to end:** WaterReferenceABGate, run once with its manager at 1024, passes as at 256: p99 0.0009,
+  every control caught.
+- **The reference's foam is tuned for 1024.** At the scene's foam offset, the 256 sea makes no foam (its
+  raw foam peaks near −0.14, which is why R6's exercised view lifts the offset). At 1024 the same views
+  show foam: 22 foamy pixels at the scene's offset, and 12502 against 1451 in the exercised view. The
+  Jacobian sees the short waves that only 1024 resolves. So **at 256 the Garrett instance shows no
+  crest foam** in the A/B's views. Whether the default should be 1024, or the foam offset should be retuned per
+  resolution, is open for the user.
