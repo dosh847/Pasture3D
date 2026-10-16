@@ -116,12 +116,15 @@ uniform float _fft_foam_offset = -0.84;
 // The reference's _NormalStrength (PASTURE3D_WATER_REFERENCE_SPEC.md L8): the drawn cascades' summed slope
 // is scaled by it before the normal is built. Geometry and foam are untouched.
 uniform float fft_normal_strength : hint_range(0.0, 4.0, 0.01) = 1.0;
-// Far-plane fades (G5), the reference's *DepthAttenuation. Displacement, normal and crest foam are each
-// scaled toward nothing by pow(1 - depth / far, falloff): depth is the REST vertex's linear view depth,
-// far the camera's far plane. The look therefore depends on the camera's far plane, as the reference's
-// does -- its scene is tuned at far = 2000 m. 0 turns a fade off. FFT only: the fBm has its own octave
-// fade. The vertex stage evaluates this in whatever view it is drawn for, so a shadow pass would fade by
-// the LIGHT's far plane; water casts no shadows by default.
+// Distance fades (G5), the reference's *DepthAttenuation. Displacement, normal and crest foam are each
+// scaled toward nothing by pow(1 - depth / fft_fade_distance, falloff): depth is the REST vertex's linear
+// view depth. 0 turns a fade off. FFT only: the fBm has its own octave fade.
+// The reference divides by the camera's FAR PLANE, so its look changes with every camera (the editor's
+// default far of 4000 m fades the normals half as fast as its 2000 m scene). A distance in metres keeps
+// the look under any camera (P-D4 of PASTURE3D_WATER_PRODUCTION_SPEC.md); 2000 m is the reference's look at
+// its own far plane. fft_fade_distance = 0 restores the reference: the far plane of whatever view draws
+// it, which for a shadow pass would be the LIGHT's; water casts no shadows by default.
+uniform float fft_fade_distance : hint_range(0.0, 20000.0, 1.0) = 2000.0;
 uniform float fft_displacement_falloff : hint_range(0.0, 8.0, 0.01) = 1.0;
 uniform float fft_normal_falloff : hint_range(0.0, 8.0, 0.01) = 1.0;
 uniform float fft_foam_falloff : hint_range(0.0, 8.0, 0.01) = 1.0;
@@ -167,6 +170,12 @@ group_uniforms;
 group_uniforms surface;
 uniform float base_roughness : hint_range(0.0, 1.0, 0.001) = 0.06;
 uniform float specular_amount : hint_range(0.0, 1.0, 0.01) = 0.5;
+// The lowest elevation, in degrees, a reflection may point at (production spec §2.4, H1). At grazing
+// views a facet tilted away from the camera reflects DOWN, and Godot's sky below the horizon is its
+// ground colour: a fifth of the sea drew dark, jagged streaks in a band at mid distance. A real ray
+// there hits the back of the next wave. The normal of such a facet is bent just far enough that its
+// reflection grazes the horizon instead. -90 turns it off (the reference does not do this).
+uniform float reflection_min_elevation : hint_range(-90.0, 10.0, 0.1) = 3.0;
 #ifdef WATER_DETAIL
 // Toksvig in spirit (§3.4): normal detail the distance fade removed is converted
 // into roughness rather than discarded, so the specular lobe widens by exactly

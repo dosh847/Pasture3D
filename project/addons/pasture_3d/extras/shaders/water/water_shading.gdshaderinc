@@ -186,6 +186,22 @@ void fragment() {
 	// has no sea_level uniform at all.
 	if (CAMERA_POSITION_WORLD.y < v_base_y) {
 		world_normal = -world_normal;
+	} else {
+		// Keep the reflection above the horizon (reflection_min_elevation). The bent normal is the half
+		// vector between the view and the reflection lifted to the minimum, so it reflects there EXACTLY,
+		// and a facet already above it is untouched. Bent before NORMAL is written, so Godot's sky lookup,
+		// the environment map and light() all see one normal. light() is unaffected where it matters: a
+		// facet that reflects below the horizon cannot reflect a sun above it.
+		vec3 to_eye = normalize(mat3(INV_VIEW_MATRIX) * VIEW);
+		vec3 r = reflect(-to_eye, world_normal);
+		float min_y = sin(radians(reflection_min_elevation));
+		if (r.y < min_y) {
+			vec2 across = r.xz;
+			float len = length(across);
+			across = len > 1e-5 ? across / len : normalize(-to_eye.xz + vec2(1e-5));
+			vec3 lifted = vec3(across.x * sqrt(1.0 - min_y * min_y), min_y, across.y * sqrt(1.0 - min_y * min_y));
+			world_normal = normalize(to_eye + lifted);
+		}
 	}
 
 	NORMAL = normalize(mat3(VIEW_MATRIX) * world_normal);

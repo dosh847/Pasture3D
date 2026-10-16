@@ -2,7 +2,7 @@
 
 Status: **plan written 2026-10-16, from the user's review of `sculpting_2.tscn` after the reference port
 (PASTURE3D_WATER_REFERENCE_SPEC.md, R1–R7). Decisions taken 2026-10-16: every recommendation in §3, with
-P-D5 deferred as recommended. W1 built (§2.1); W2–W6 not started.**
+P-D5 deferred as recommended. W1 built (§2.1); W2 built (§2.4); W3–W6 not started.**
 
 The reference port proved that our shading equals GarrettGunnell/Water's, per pixel. It did not prove the
 water looks finished in a real scene. The user's review found five problems. Two had causes that could be
@@ -158,6 +158,32 @@ sky through `SPECULAR`, at `ROUGHNESS` 0.075. Three hypotheses, each testable:
 default sky, a camera at 6 m pitched −10°. Measure the fraction of pixels whose reflection points below the
 horizon, and a temporal-stability metric: per-pixel luminance variance across a slow pan. Fix what
 the measurements point to. **Gate:** both metrics under a threshold, on the bench and with the editor's far.
+
+**Built (W2, 2026-10-16).**
+- **H1 confirmed and fixed.** bench/WaterReflectionBandProbe renders one frozen sea under three skies that
+  differ only below the horizon. With a red ground the dark streaks turned red, exactly; with a ground
+  equal to the horizon colour the band vanished. 15–22% of the water reflected below the horizon,
+  up to 47% in the rows just under it.
+  - Fix: `reflection_min_elevation` (degrees, default 3; −90 off). Where the reflection of the view about
+    the normal dips below that elevation, the normal is replaced by the half vector between the view and
+    the same reflection lifted to it. Only the reflection direction changes; the sun highlight, Fresnel and
+    scatter all read the bent normal, as the facet now "is" one that reflects the horizon.
+  - Gate: WaterHorizonBendGate. [B] under 2% below the horizon in three views (measured 0.0–0.1%);
+    control, the bend off, over 10% (15.5–20.1%). [U] bent to 0°, 99.8% of the pixels it changes reflect
+    below the horizon; control, a 60° bend, 34.5%. The first [U] claimed a steep view down changes
+    nothing, and failed: even at −70° pitch, 0.15% of facets near the camera reflect below the horizon.
+  - WaterReferenceABGate runs with the bend off: the reference has none.
+- **P-D4 built.** `fft_fade_distance` (metres, default 2000) replaces the far plane in the G5 fades; 0
+  restores the reference's far-plane fade, which the A/B gate uses since its [D] reads the far plane back.
+  WaterFFTWiringGate [F] now also asserts that moving the camera's far plane does not move the fade.
+- **H2 measured, not a problem; no LEAN/Toksvig.** bench/WaterShimmerProbe pans a frozen sea a quarter
+  pixel per frame under the editor's 4000 m far plane, and compares per-pixel temporal luminance std
+  against the same pan rendered at 4x and box-filtered (the answer without aliasing). From 25 to 110 m
+  the 1x render shimmers LESS than the truth (ratio 0.94 down to 0.50: the slope mips average detail
+  away); at 10–19 m it shimmers 8–28% more. Neither is the band.
+- **H3 measured, negligible at these distances.** The far-plane fade at 4000 m and the 2000 m metric fade
+  give the same shimmer to the third decimal out to 110 m; they differ only where the fade is a large
+  fraction of its distance. P-D4 stands for the stability of the look, not for H2.
 
 ### 2.5 Lake, pond and river presets need tuning by eye
 

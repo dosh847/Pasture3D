@@ -244,6 +244,14 @@ func _build() -> void:
 	_inputs.shader = load(INPUT_SHADER)
 	_manager.upload_profile_into(_lit, &"ocean_default")
 	_manager.upload_profile_into(_inputs, &"ocean_default")
+	# The horizon bend (W2) is ours, not the reference's: it moves exactly the pixels whose reflection
+	# dips below the horizon. The A/B measures the reference's maths, so both materials run with it off;
+	# WaterHorizonBendGate owns the bend.
+	_lit.set_shader_parameter("reflection_min_elevation", -90.0)
+	_inputs.set_shader_parameter("reflection_min_elevation", -90.0)
+	# Likewise the fade distance (P-D4): the reference fades by the camera's far plane, and [D] reads it back.
+	_lit.set_shader_parameter("fft_fade_distance", 0.0)
+	_inputs.set_shader_parameter("fft_fade_distance", 0.0)
 
 	_mesh = MeshInstance3D.new()
 	var plane := PlaneMesh.new()

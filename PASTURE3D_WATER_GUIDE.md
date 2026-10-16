@@ -596,10 +596,17 @@ light through a crest per metre of crest height, and a flat bubble term.
 steep, 0 is a flat mirror. Geometry and foam are untouched.
 
 **`fft_displacement_falloff`, `fft_normal_falloff`, `fft_foam_falloff`** fade the FFT's waves, normals and crest foam
-with distance from the camera, as `pow(1 - depth / far, falloff)`. The weight is 1 at the camera and 0 at the camera's
-far plane. So **the camera's far plane is part of the look**, as it is in the reference, which is tuned at 2000 m; at
-Godot's default 4000 m the fades are half as strong at any given distance. 0 turns a fade off. Buoys do not fade: a
-floating object far from the camera sits slightly off the drawn wave, by the same factor.
+with distance from the camera, as `pow(1 - depth / fft_fade_distance, falloff)`. The weight is 1 at the camera and 0
+at **`fft_fade_distance`** (default 2000 m). A falloff of 0 turns its fade off. The reference divides by the camera's far plane
+instead, which made every camera change retune the water (Godot's default 4000 m halved the fades);
+`fft_fade_distance = 0` restores that. Buoys do not fade: a floating object far from the camera sits slightly off
+the drawn wave, by the same factor.
+
+**`reflection_min_elevation`** (degrees, default 3) keeps every reflection at least that far above the horizon.
+At grazing angles a wave face tilted away from the camera reflects *downward*, and below the horizon Godot's sky
+is its ground colour: dark brown streaks in a band of mid-distance water. The shader bends the normal just
+enough to lift such a reflection to this elevation, and touches no other pixel. −90 turns it off (the
+reference has no bend).
 
 **`foam_crest_amount`** scales the FFT's own foam, which comes from the wave Jacobian — whitecaps
 where the surface folds. The simulation's `foam_*` knobs on the profile shape it; the fBm draws none.
