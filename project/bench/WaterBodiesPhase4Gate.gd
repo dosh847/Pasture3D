@@ -553,37 +553,42 @@ func _gate_f_manager() -> void:
 		_fail += 1
 		print("    !! %d lake pools, %d pond pools" % [lake_pools.size(), pond_pools.size()])
 
-	# The fallback, when the manager has been re-profiled and the wanted name is simply absent.
-	# "Take the first" is the obvious implementation and it hands a lake the OCEAN, because
-	# ocean_default is first in the shipped order — 4.9 m of swell in a basin a few metres deep.
-	var custom := _make_manager_with(root, {"ocean_default": 137.0, "brook": 9.0, "tarn": 55.0})
-	var wide := _make_brush("Pasture3DMound", root, [[60.0, true]])   # 120 m span -> budget 60 m
+	# A re-profiled manager still answers the seeded names. They are built-ins (production spec §2.1),
+	# so a scene's own profiles can add to them or override them but never remove them. This replaced
+	# a fallback that picked the longest-fitting profile when lake_calm was absent: it no longer can be.
+	var custom := _make_manager_with(root, {"brook": 9.0, "tarn": 55.0})
+	var wide := _make_brush("Pasture3DMound", root, [[60.0, true]])   # 120 m span
 	_make_carve(wide)
 	wide.position = Vector3(-600, 0, 0)
-	await _settle()
-	var picked: StringName = wide._seed_profile_for(
-		wide.get_children().filter(func(c): return c is Path3D)[0], custom)
-	if picked == &"tarn":
-		print("    with lake_calm absent, a 120 m loop picked 'tarn' (55 m) — the longest that fits")
-	else:
-		_fail += 1
-		print("    !! the fallback picked '%s', expected 'tarn'" % picked)
-	# Control: the same call on a manager holding ONLY oversized profiles must not silently pick a
-	# fitting one — there is none — and must not error either.
-	var only_big := _make_manager_with(root, {"ocean_default": 137.0, "swell": 200.0})
-	var tiny := _make_brush("Pasture3DMound", root, [[6.0, true]])
+	var tiny := _make_brush("Pasture3DMound", root, [[6.0, true]])    # 12 m span
 	_make_carve(tiny)
 	tiny.position = Vector3(-900, 0, 0)
 	await _settle()
-	var forced: StringName = tiny._seed_profile_for(
-		tiny.get_children().filter(func(c): return c is Path3D)[0], only_big)
-	if forced == &"ocean_default":
-		print("    control (nothing fits a 12 m pond): fires — falls to the shortest, 137 m")
+	var picked: StringName = wide._seed_profile_for(wide.get_children().filter(func(c): return c is Path3D)[0])
+	var picked_small: StringName = tiny._seed_profile_for(tiny.get_children().filter(func(c): return c is Path3D)[0])
+	var builtin_of := func(p_m, p_n):
+		for b in p_m.get_builtin_profiles():
+			if b.profile_name == p_n:
+				return b
+		return null
+	if picked == &"lake_calm" and picked_small == &"pond_still" 			and custom.get_profile(picked) == builtin_of.call(custom, picked) 			and custom.get_profile(picked_small) == builtin_of.call(custom, picked_small):
+		print("    a manager holding only [brook, tarn] still answers '%s' and '%s' with the built-ins" % [
+			picked, picked_small])
 	else:
 		_fail += 1
-		print("    !! control did NOT fire: picked '%s', expected the shortest" % forced)
+		print("    !! re-profiled manager: seeded '%s'/'%s', answered %s/%s" % [picked, picked_small,
+			custom.get_profile(picked), custom.get_profile(picked_small)])
+	# Control: a scene that overrides lake_calm gets its override, not the built-in. And the resolution
+	# test can fail: a name that is neither a built-in nor the scene's own answers nothing.
+	var overridden := _make_manager_with(root, {"lake_calm": 40.0})
+	var answered = overridden.get_profile(&"lake_calm")
+	if answered != null and answered != builtin_of.call(overridden, &"lake_calm") 			and overridden.get_profile(&"tarn") == null:
+		print("    control (an override answers instead; an unknown name answers nothing): fires")
+	else:
+		_fail += 1
+		print("    !! control did NOT fire: lake_calm -> %s, tarn -> %s" % [answered, overridden.get_profile(&"tarn")])
 	custom.queue_free()
-	only_big.queue_free()
+	overridden.queue_free()
 	await _settle()
 
 	# Control: the second press must NOT create a second manager.
@@ -772,7 +777,7 @@ func _make_manager_with(p_root: Node3D, p_specs: Dictionary) -> Pasture3DPoolMan
 	for n in p_specs:
 		var profile := Pasture3DWaveProfile.new()
 		profile.profile_name = n
-		profile.fit_sea(0.0, p_specs[n], 0.1) # only the longest wave matters to the fallback
+		profile.fit_sea(0.0, p_specs[n], 0.1)
 		profiles.append(profile)
 	m.profiles = profiles
 	p_root.add_child(m)

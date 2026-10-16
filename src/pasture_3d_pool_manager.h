@@ -121,7 +121,12 @@ private:
 	// from. A raw pointer is safe only because EXIT_TREE clears it; nothing else
 	// may hold it across a frame.
 
+	// The profiles the scene added: its own sea states, and explicit overrides of a built-in (one named
+	// like it). Serialised. Empty by default, so a scene stores nothing it did not add.
 	TypedArray<Pasture3DWaveProfile> _profiles;
+	// The shipped sea states (_seed_builtin_profiles). Never serialised: a scene that names one gets the
+	// current one, so retuning a preset reaches every scene (production spec §2.1).
+	TypedArray<Pasture3DWaveProfile> _builtin_profiles;
 	real_t _loop_period = 120.f;
 	WaveModel _wave_model = WAVE_MODEL_PROJECT;
 	// 0 = the project setting.
@@ -188,7 +193,11 @@ private:
 	void _poll_base_materials();
 	void _on_profile_changed();
 	void _connect_profiles();
-	void _seed_default_profiles();
+	void _seed_builtin_profiles();
+	// Every profile a name can reach: the scene's, then the built-ins it does not override.
+	TypedArray<Pasture3DWaveProfile> _all_profiles() const;
+	// p_profiles without the stale copies of built-ins a scene saved before they stopped being serialised.
+	TypedArray<Pasture3DWaveProfile> _drop_stale_builtin_copies(const TypedArray<Pasture3DWaveProfile> &p_profiles) const;
 	void _update_clock(const double p_delta);
 	void _update_sun();
 	void _apply_model_to_profiles();
@@ -263,6 +272,16 @@ public:
 
 	void set_profiles(const TypedArray<Pasture3DWaveProfile> &p_profiles);
 	TypedArray<Pasture3DWaveProfile> get_profiles() const { return _profiles; }
+	TypedArray<Pasture3DWaveProfile> get_builtin_profiles() const { return _builtin_profiles; }
+	PackedStringArray get_builtin_profile_names() const;
+	bool is_builtin_profile_name(const StringName &p_name) const;
+	// Copies the built-in p_name into `profiles`, where it overrides the built-in and is saved with the
+	// scene. Returns the copy, or the existing override; null for a name that is not a built-in.
+	Ref<Pasture3DWaveProfile> override_builtin(const StringName &p_name);
+	// True when p_a and p_b store the same knobs: every stored property but the name, sub-resources
+	// compared by their own stored properties. p_skip names properties of the FFT to leave out.
+	static bool profiles_store_same_knobs(const Ref<Pasture3DWaveProfile> &p_a, const Ref<Pasture3DWaveProfile> &p_b,
+			const PackedStringArray &p_skip_fft = PackedStringArray());
 	void set_loop_period(const real_t p_seconds);
 	real_t get_loop_period() const { return _loop_period; }
 	void set_sun_light(Node3D *p_light);

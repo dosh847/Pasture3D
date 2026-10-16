@@ -6,11 +6,11 @@ extends Node
 ## that processes BEFORE the manager queues a "begin" GPU timestamp onto the render thread and one that
 ## processes AFTER it queues "end"; call_on_render_thread is FIFO, so the dispatch sits between them.
 ##
-##   FFT total  = viewport draw + (end - begin), at fft_resolution 128 / 256 (shipped) / 512
+##   FFT total  = viewport draw + (end - begin), at fft_resolution 128 / 256 (shipped) / 512 / 1024
 ##   fBm total  = viewport draw, at 40 (shipped) / 16 / 12 fragment octaves
 ##
 ## Instrument checks:
-##   C1. the compute reading scales with resolution (512 > 256 > 128), so it is the FFT
+##   C1. the compute reading scales with resolution (1024 > 512 > 256 > 128), so it is the FFT
 ##   C2. CONTROL: on the fBm arms nothing is dispatched between the stamps, so begin..end reads ~0
 ##   C3. every arm's draw costs more than the frame with the water hidden
 ##
@@ -75,7 +75,7 @@ func _ready() -> void:
 func _run() -> void:
 	var arms := []
 	for body in ["ocean", "lake"]:
-		for r in [128, 256, 512]:
+		for r in [128, 256, 512, 1024]:
 			arms.append([body, "fft", r])
 		for o in [40, 16, 12]:
 			arms.append([body, "fbm", o])
@@ -120,8 +120,9 @@ func _run() -> void:
 		var c128: float = med[[body, "fft", 128]].y
 		var c256: float = med[[body, "fft", 256]].y
 		var c512: float = med[[body, "fft", 512]].y
-		print("[C1] %s compute scales with N: %.4f < %.4f < %.4f" % [body, c128, c256, c512])
-		if not (c128 < c256 and c256 < c512) or c256 <= 0.0:
+		var c1024: float = med[[body, "fft", 1024]].y
+		print("[C1] %s compute scales with N: %.4f < %.4f < %.4f < %.4f" % [body, c128, c256, c512, c1024])
+		if not (c128 < c256 and c256 < c512 and c512 < c1024) or c256 <= 0.0:
 			_fail += 1
 			print("    !! the stamps are not bracketing the FFT")
 		var fbm_c: float = med[[body, "fbm", 40]].y

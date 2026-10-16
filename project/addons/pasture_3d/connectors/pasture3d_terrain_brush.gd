@@ -4809,7 +4809,8 @@ func _build_pool_for(p_spline: Path3D, p_manager: Node) -> Node:
 		# A river gets the river profile and the river shader, and its width comes from the channel
 		# the brush carved — a Trough already knows how wide its bed is, so asking the user again
 		# would be asking them to repeat themselves.
-		pool.wave_profile = _seed_river_profile(p_manager)
+		# A built-in, so every manager answers it.
+		pool.wave_profile = &"river_flow"
 		pool.water_preset = 0 # River: a stream's presets are River / Custom, in that order
 		pool.material = load(RIVER_MATERIAL)
 		var bed = get("bed_half_width")
@@ -4818,7 +4819,7 @@ func _build_pool_for(p_spline: Path3D, p_manager: Node) -> Node:
 		if p_manager != null:
 			pool.manager = p_manager
 		return pool
-	pool.wave_profile = _seed_profile_for(p_spline, p_manager)
+	pool.wave_profile = _seed_profile_for(p_spline)
 	# Match the material to the sea state rather than leaving a pond on the lake preset: the pond
 	# variant is a genuinely cheaper shader, not the lake one tinted differently.
 	pool.water_preset = 1 if pool.wave_profile == &"pond_still" else 0
@@ -4842,61 +4843,11 @@ func _pool_name_for(p_spline: Path3D, p_is_river: bool) -> String:
 	return "%s%s%d" % [name, suffix, splines.find(p_spline) + 1]
 
 
-## Starting profile for a new pool, chosen from the loop's size (§7.8 step 6). Falls back to
-## whatever the manager does have if the wanted name is not on it, so a manager the user has
-## re-profiled still produces water rather than a warning.
-func _seed_profile_for(p_spline: Path3D, p_manager: Node) -> StringName:
-	var span := _spline_span(p_spline)
-	var want: StringName = &"lake_calm" if span >= POND_MAX_SPAN else &"pond_still"
-	if p_manager == null or not p_manager.has_method("has_profile"):
-		return want
-	if p_manager.has_profile(want):
-		return want
-	return _closest_profile_for(span, p_manager, want)
-
-
-## The best available profile for a body this wide, when the wanted one is not on the manager.
-##
-## NOT simply the first: on a manager re-profiled to, say, [ocean_default, river_flow], "first" hands
-## a 150 m lake the OCEAN — 4.9 m of crest-to-trough swell in a basin a few metres deep. That is what
-## happens in practice, because ocean_default is first in the shipped order.
-##
-## The rule is physical rather than a heuristic: a wave longer than the body is wide cannot fit in
-## it. So take the LONGEST profile whose longest wave still fits across the loop, and if nothing
-## fits, the shortest available — the closest anyone can get with what the manager actually has.
-func _closest_profile_for(p_span: float, p_manager: Node, p_want: StringName) -> StringName:
-	var names: PackedStringArray = p_manager.get_profile_names()
-	if names.is_empty():
-		return p_want
-	var budget := p_span * 0.5
-	var best := ""
-	var best_len := -INF
-	var shortest := ""
-	var shortest_len := INF
-	for n in names:
-		var profile = p_manager.get_profile(n)
-		if profile == null:
-			continue
-		var l: float = profile.get_length_max()
-		if l < shortest_len:
-			shortest_len = l
-			shortest = n
-		if l <= budget and l > best_len:
-			best_len = l
-			best = n
-	if best != "":
-		return StringName(best)
-	return StringName(shortest) if shortest != "" else StringName(names[0])
-
-
-## The starting profile for a river. `river_flow` if the manager has it, else the shortest-waved
-## profile it does have — a channel a few metres across must not be handed ocean swell.
-func _seed_river_profile(p_manager: Node) -> StringName:
-	if p_manager == null or not p_manager.has_method("has_profile"):
-		return &"river_flow"
-	if p_manager.has_profile(&"river_flow"):
-		return &"river_flow"
-	return _closest_profile_for(0.0, p_manager, &"river_flow")
+## Starting profile for a new pool, chosen from the loop's size (§7.8 step 6). Both names are
+## built-ins (Pasture3DPoolManager.get_builtin_profile_names()), so every manager answers them: one
+## the user has re-profiled still has them, and one that overrides them answers with the override.
+func _seed_profile_for(p_spline: Path3D) -> StringName:
+	return &"lake_calm" if _spline_span(p_spline) >= POND_MAX_SPAN else &"pond_still"
 
 
 ## The larger XZ extent of a spline's loop, in metres. Taken from the footprint box with the

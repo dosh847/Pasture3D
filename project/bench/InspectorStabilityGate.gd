@@ -283,7 +283,8 @@ func _gate_cv_water_profile_hint() -> void:
 	var mgr = ClassDB.instantiate("Pasture3DPoolManager")
 	_root.add_child(mgr)
 	var calm = ClassDB.instantiate("Pasture3DWaveProfile")
-	calm.profile_name = &"lake_calm"
+	# Not a built-in's name: a bare profile named like one is a stale copy, and the manager drops it.
+	calm.profile_name = &"calm_test"
 	var fast = ClassDB.instantiate("Pasture3DWaveProfile")
 	fast.profile_name = &"river_fast"
 	mgr.profiles = [calm, fast]
@@ -335,8 +336,10 @@ func _gate_cv_water_profile_hint() -> void:
 	for d in pool.get_property_list():
 		if d.name == "wave_profile":
 			hint = String(d.hint_string)
+	# The scene's three, then the built-ins: what the manager answers, in its order.
+	var want := ",".join(mgr.get_profile_names())
 	print("    control: the dropdown itself still lists every live profile: '%s'" % hint)
-	if hint != "lake_calm,river_slow,sea":
+	if hint != want or not hint.begins_with("calm_test,river_slow,sea,"):
 		_fail += 1
 		print("    !! the hint is not what the manager holds, so the re-hint path is broken outright")
 

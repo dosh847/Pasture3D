@@ -134,8 +134,8 @@ editor strips `.tres` comments when it re-saves.
 
 ## 3. Wave profiles
 
-Every body selects a **profile by name** from the scene's `Pasture3DPoolManager`. A fresh manager
-ships four:
+Every body selects a **profile by name** from the scene's `Pasture3DPoolManager`. Every manager has
+four **built-in** profiles:
 
 | Profile | Heading | Longest wave | Height σ | Shortest wave meshed | Intended for |
 |---|---|---|---|---|---|
@@ -152,6 +152,29 @@ that saved scenes which select it keep working.
 reference has no lake or pond, so these presets are a proposal: judge them by eye. They are much calmer
 than the Gerstner-era presets they replace (the lake was 0.12 m, the pond 0.013 m). `river_flow` is the
 old river preset, fitted as before.
+
+### Built-ins and overrides
+
+**The built-ins live in the plugin, not in your scene.** A scene that names `lake_calm` gets the current
+`lake_calm`, so when a preset is retuned, every scene picks the change up. The inspector shows them under
+`builtin_profiles`, read-only.
+
+- **`profiles` holds only what your scene adds.** It is empty on a new manager. A profile there with a
+  new name is your own sea state.
+- **To tune a built-in for one scene, override it.** Call `override_builtin(&"lake_calm")`: this copies the
+  current preset into `profiles` under the same name, where it wins and is saved with the scene. Tune the
+  copy. The built-in is untouched, and the override no longer follows later retunes.
+- **Older scenes saved copies of all four.** Until 2026-10, a fresh manager put the presets into
+  `profiles` itself, so every scene saved them, and the copies stopped following retunes. On load the
+  manager drops a stock-named profile that is one of these copies, and prints a line naming it:
+  - **A Gerstner-era copy:** only the retired keys (`wave_count`, `amplitude`…), at exactly the retired
+    preset's values.
+  - **An interim copy:** an FFT storing nothing but `cascade_lengths`. This copy drew the ocean's
+    spectrum on lake-sized cascades, which is why such lakes and ponds raced.
+  - **A copy of the current built-in.**
+
+  Save the scene to drop the copies from the file. Anything else named like a built-in was tuned on
+  purpose, and stays as an override.
 
 ### Which model draws: `wave_model`
 
@@ -654,11 +677,15 @@ await `RenderingServer.frame_post_draw`, which never emits headless).
 
   | Model | Ocean | Lake |
   |---|---|---|
-  | FFT, `fft_resolution` 128 | 0.27 ms | 0.27 ms |
-  | FFT, 256 (default) | 0.38 ms | 0.37 ms |
-  | FFT, 512 | 0.83 ms | 0.79 ms |
-  | FFT, 1024 | not measured | not measured |
-  | fBm, 40 octaves (shipped) | 0.39 ms | 0.35 ms |
+  | FFT, `fft_resolution` 128 | 0.25 ms | 0.23 ms |
+  | FFT, 256 (default) | 0.31 ms | 0.28 ms |
+  | FFT, 512 | 0.59 ms | 0.56 ms |
+  | FFT, 1024 (the reference's) | 2.24 ms | 2.13 ms |
+  | fBm, 40 octaves (shipped) | 0.39 ms | 0.31 ms |
+
+  Measured 2026-10-16, after the reference port. The simulation alone is 0.09 ms at 256, 0.37 ms at
+  512 and 2.0 ms at 1024: 1024 costs 5.5× what 512 does, more than its 4× the work, and it is paid
+  per profile in use, so an ocean, a lake and a pond at 1024 spend 6 ms.
 
   The fBm's cost is all fragment work, and its octave count cannot come down. At 16 octaves it
   times like FFT 128, but cutting the series loses the short waves: the water goes glassy close up

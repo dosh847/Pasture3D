@@ -1,0 +1,88 @@
+[gd_scene load_steps=14 format=3]
+
+; A Pasture3DPoolManager as sculpting_2.tscn saved it before the built-in presets stopped being
+; serialised (PASTURE3D_WATER_PRODUCTION_SPEC.md §2.1). ocean_default, lake_calm and river_flow are
+; byte-for-byte that scene's stale copies. pond_still is NOT: its spectrum is tuned (wind 3.5 m/s), so it
+; is a deliberate override and must survive. my_sea is the scene's own profile. Read by WaterBuiltinPresetsGate.
+
+[sub_resource type="Pasture3DWaterFBM" id="fbm_ocean"]
+vertex/seed = 0.34906587
+vertex/frequency = 0.045862667
+vertex/speed = 0.4283114
+vertex/height = 7.3399467
+fragment/seed = 0.34906587
+fragment/frequency = 0.045862667
+fragment/speed = 0.4283114
+fragment/height = 9.222545
+
+[sub_resource type="Pasture3DWaterFFT" id="fft_ocean"]
+
+[sub_resource type="Pasture3DWaveProfile" id="ocean"]
+profile_name = &"ocean_default"
+fft = SubResource("fft_ocean")
+fbm = SubResource("fbm_ocean")
+
+[sub_resource type="Pasture3DWaterFBM" id="fbm_lake"]
+vertex/seed = 0.6108653
+vertex/frequency = 0.25132743
+vertex/speed = 1.0026513
+vertex/height = 1.0053493
+fragment/seed = 0.6108653
+fragment/frequency = 0.25132743
+fragment/speed = 1.0026513
+fragment/height = 1.2632079
+
+[sub_resource type="Pasture3DWaterFFT" id="fft_lake"]
+cascade_lengths = Vector4(91.240875, 15.510949, 2.919708, 0.729927)
+
+[sub_resource type="Pasture3DWaveProfile" id="lake"]
+profile_name = &"lake_calm"
+fft = SubResource("fft_lake")
+fbm = SubResource("fbm_lake")
+
+[sub_resource type="Pasture3DWaterFBM" id="fbm_pond"]
+vertex/seed = 0.9599311
+vertex/frequency = 0.5235988
+vertex/speed = 1.4472026
+vertex/height = 0.11399221
+fragment/seed = 0.9599311
+fragment/frequency = 0.5235988
+fragment/speed = 1.4472026
+fragment/height = 0.1432297
+
+[sub_resource type="Pasture3DWaterFFT" id="fft_pond"]
+cascade_lengths = Vector4(43.79562, 7.4452553, 1.4014598, 0.35036495)
+spectrum_1/wind_speed = 3.5
+
+[sub_resource type="Pasture3DWaveProfile" id="pond"]
+profile_name = &"pond_still"
+fft = SubResource("fft_pond")
+fbm = SubResource("fbm_pond")
+min_wavelength = 6.0421557
+
+[sub_resource type="Pasture3DWaterFBM" id="fbm_river"]
+vertex/frequency = 0.62831855
+vertex/speed = 1.585331
+vertex/height = 0.20161042
+fragment/frequency = 0.62831855
+fragment/speed = 1.585331
+fragment/height = 0.25332078
+
+[sub_resource type="Pasture3DWaterFFT" id="fft_river"]
+cascade_lengths = Vector4(36.49635, 6.204379, 1.1678832, 0.2919708)
+
+[sub_resource type="Pasture3DWaveProfile" id="river"]
+profile_name = &"river_flow"
+fft = SubResource("fft_river")
+fbm = SubResource("fbm_river")
+min_wavelength = 5.0084352
+
+[sub_resource type="Pasture3DWaterFFT" id="fft_mine"]
+cascade_lengths = Vector4(60.0, 10.0, 2.0, 0.5)
+
+[sub_resource type="Pasture3DWaveProfile" id="mine"]
+profile_name = &"my_sea"
+fft = SubResource("fft_mine")
+
+[node name="Pasture3DPoolManager" type="Pasture3DPoolManager"]
+profiles = Array[Pasture3DWaveProfile]([SubResource("ocean"), SubResource("lake"), SubResource("pond"), SubResource("river"), SubResource("mine")])

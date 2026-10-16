@@ -108,8 +108,11 @@ void Pasture3DPoolManager::_apply_model_to_profiles() {
 		LOG(WARN, FBM_CHOICE_WARNING);
 	}
 	const int shader_model = model == WAVE_MODEL_FFT ? SHADER_MODEL_FFT : SHADER_MODEL_FBM;
-	for (int i = 0; i < _profiles.size(); i++) {
-		Ref<Pasture3DWaveProfile> profile = _profiles[i];
+	// The built-ins too, overridden or not: one a scene stops overriding is drawn at once.
+	TypedArray<Pasture3DWaveProfile> all = _profiles.duplicate();
+	all.append_array(_builtin_profiles);
+	for (int i = 0; i < all.size(); i++) {
+		Ref<Pasture3DWaveProfile> profile = all[i];
 		if (profile.is_null()) {
 			continue;
 		}
@@ -374,8 +377,10 @@ void Pasture3DPoolManager::_on_profile_changed() {
 void Pasture3DPoolManager::_connect_profiles() {
 	_apply_model_to_profiles();
 	Callable cb = callable_mp(this, &Pasture3DPoolManager::_on_profile_changed);
-	for (int i = 0; i < _profiles.size(); i++) {
-		Ref<Pasture3DWaveProfile> profile = _profiles[i];
+	TypedArray<Pasture3DWaveProfile> all = _profiles.duplicate();
+	all.append_array(_builtin_profiles);
+	for (int i = 0; i < all.size(); i++) {
+		Ref<Pasture3DWaveProfile> profile = all[i];
 		if (profile.is_null()) {
 			continue;
 		}
@@ -431,10 +436,7 @@ void Pasture3DPoolManager::_update_sun() {
 }
 
 /**
- * Fills _profiles with the four shipped sea states (spec §5.2, PASTURE3D_WATER_REFERENCE_SPEC.md §5).
- *
- * A manager with no profiles is a manager that answers every question with "no such
- * profile", so a freshly added one carries four:
+ * Fills _builtin_profiles with the four shipped sea states (spec §5.2, PASTURE3D_WATER_REFERENCE_SPEC.md §5).
  *
  *   ocean_default  the reference's sea, exactly: a new Pasture3DWaveProfile.
  *   lake_calm      the reference's sea scaled to a 25 m longest wave, and pond_still to 12 m
@@ -448,18 +450,17 @@ void Pasture3DPoolManager::_update_sun() {
  *
  * WaterRetireGerstnerGate [P] checks these against the same calls, so the two cannot drift apart.
  *
- * Seeded in the CONSTRUCTOR rather than on entering the tree, because that is what
- * makes it a property default: a scene stores `profiles` as edited and set_profiles()
- * replaces these on load, including with an empty array if that is what was saved.
- * Writes _profiles directly instead of calling set_profiles() -- that path emits
- * profiles_changed and touches configuration warnings, neither of which a
- * half-constructed Node should be doing.
+ * BUILT-INS, NOT A PROPERTY DEFAULT (production spec §2.1). These used to seed `profiles` itself, and
+ * an array of fresh resources never equals the default, so every scene saved all four. A saved copy
+ * then shadowed every later retune: sculpting_2's lake drew the reference ocean's spectrum on lake-sized
+ * cascades long after R5 had refitted the preset. Now a scene names a built-in and gets the current one;
+ * to keep its own, it overrides it explicitly (override_builtin()).
  */
-void Pasture3DPoolManager::_seed_default_profiles() {
+void Pasture3DPoolManager::_seed_builtin_profiles() {
 	Ref<Pasture3DWaveProfile> ocean;
 	ocean.instantiate();
 	ocean->set_profile_name("ocean_default");
-	_profiles.push_back(ocean);
+	_builtin_profiles.push_back(ocean);
 
 	struct Scaled {
 		const char *name;
@@ -475,7 +476,7 @@ void Pasture3DPoolManager::_seed_default_profiles() {
 		profile.instantiate();
 		profile->set_profile_name(p.name);
 		profile->fit_reference_sea(p.direction_deg, p.length_max);
-		_profiles.push_back(profile);
+		_builtin_profiles.push_back(profile);
 	}
 
 	Ref<Pasture3DWaveProfile> river;
@@ -483,8 +484,171 @@ void Pasture3DPoolManager::_seed_default_profiles() {
 	river->set_profile_name("river_flow");
 	river->fit_sea(0.f, 10.f, 0.0236074f);
 	river->set_min_wavelength(5.0084f);
-	_profiles.push_back(river);
+	_builtin_profiles.push_back(river);
 	_connect_profiles();
+}
+
+TypedArray<Pasture3DWaveProfile> Pasture3DPoolManager::_all_profiles() const {
+	TypedArray<Pasture3DWaveProfile> all = _profiles.duplicate();
+	for (int i = 0; i < _builtin_profiles.size(); i++) {
+		Ref<Pasture3DWaveProfile> builtin = _builtin_profiles[i];
+		bool overridden = false;
+		for (int j = 0; j < _profiles.size(); j++) {
+			Ref<Pasture3DWaveProfile> own = _profiles[j];
+			if (own.is_valid() && own->get_profile_name() == builtin->get_profile_name()) {
+				overridden = true;
+				break;
+			}
+		}
+		if (!overridden) {
+			all.push_back(builtin);
+		}
+	}
+	return all;
+}
+
+// Compares the STORAGE properties of two objects of one class, recursing into Object values.
+static bool stored_properties_equal(Object *p_a, Object *p_b, const PackedStringArray &p_skip) {
+	if (p_a == p_b) {
+		return true;
+	}
+	if (!p_a || !p_b || p_a->get_class() != p_b->get_class()) {
+		return false;
+	}
+	TypedArray<Dictionary> props = p_a->get_property_list();
+	for (int i = 0; i < props.size(); i++) {
+		Dictionary prop = props[i];
+		if (!((int)prop["usage"] & PROPERTY_USAGE_STORAGE)) {
+			continue;
+		}
+		String name = prop["name"];
+		if (name == "script" || name.begins_with("resource_") || p_skip.has(name)) {
+			continue;
+		}
+		Variant va = p_a->get(name);
+		Variant vb = p_b->get(name);
+		if (va.get_type() != vb.get_type()) {
+			return false;
+		}
+		switch (va.get_type()) {
+			case Variant::OBJECT: {
+				// A nested resource compares by its own knobs, and never inherits the skip list.
+				if (!stored_properties_equal((Object *)va, (Object *)vb, PackedStringArray())) {
+					return false;
+				}
+			} break;
+			case Variant::FLOAT: {
+				if (!Math::is_equal_approx((double)va, (double)vb)) {
+					return false;
+				}
+			} break;
+			case Variant::VECTOR4: {
+				if (!((Vector4)va).is_equal_approx((Vector4)vb)) {
+					return false;
+				}
+			} break;
+			default: {
+				if (va != vb) {
+					return false;
+				}
+			} break;
+		}
+	}
+	return true;
+}
+
+bool Pasture3DPoolManager::profiles_store_same_knobs(const Ref<Pasture3DWaveProfile> &p_a,
+		const Ref<Pasture3DWaveProfile> &p_b, const PackedStringArray &p_skip_fft) {
+	if (p_a.is_null() || p_b.is_null()) {
+		return p_a.is_null() && p_b.is_null();
+	}
+	PackedStringArray skip;
+	skip.push_back("profile_name");
+	skip.push_back("fft");
+	if (!stored_properties_equal(p_a.ptr(), p_b.ptr(), skip)) {
+		return false;
+	}
+	return stored_properties_equal(p_a->get_fft().ptr(), p_b->get_fft().ptr(), p_skip_fft);
+}
+
+/**
+ * Drops the copies of built-ins that scenes saved while the built-ins were a property default.
+ *
+ * Three kinds go, each with a line in the output so the change is not silent:
+ *   - a copy of the CURRENT built-in. It changes nothing today, and would shadow the next retune.
+ *   - a copy of the retired Gerstner preset, saved before Phase 6: no FFT or fBm, only the old keys,
+ *     holding exactly the values that preset seeded (RETIRED below; big_regions.tscn has all four).
+ *     The legacy migration fits a real spectrum from them, so neither other test can see one.
+ *   - a copy of the interim Gerstner-era fit: an FFT that stores nothing but cascade_lengths. Its other
+ *     knobs fall to the class defaults, the reference ocean's, so it draws the ocean's spectrum on the
+ *     cascades of a lake. That is what made sculpting_2's lake and pond race. Its fBm and min_wavelength
+ *     are not compared: the interim fit derived them from the same lengths.
+ * Anything else named like a built-in was tuned on purpose, and is kept as an override.
+ *
+ * Runs in set_profiles(), so it also sees a script's assignment. A script that builds a profile on
+ * purpose fits it, which sets the spectrum, so it is never taken for the interim fit.
+ */
+TypedArray<Pasture3DWaveProfile> Pasture3DPoolManager::_drop_stale_builtin_copies(
+		const TypedArray<Pasture3DWaveProfile> &p_profiles) const {
+	// The Gerstner presets as _seed_default_profiles() made them until Phase 6 (f47e8f3e). The spread and
+	// steepness are not kept by a profile, so they cannot be compared.
+	struct Retired {
+		const char *name;
+		int count;
+		real_t direction_deg;
+		real_t amplitude;
+		real_t length_max;
+	};
+	static const Retired RETIRED[] = {
+		{ "ocean_default", 8, 20.f, 1.6f, 137.f },
+		{ "lake_calm", 4, 35.f, 0.25f, 25.f },
+		{ "pond_still", 2, 55.f, 0.05f, 12.f },
+		{ "river_flow", 3, 0.f, 0.06f, 10.f },
+	};
+	Ref<Pasture3DWaterFFT> fresh_fft;
+	fresh_fft.instantiate();
+	PackedStringArray lengths_only;
+	lengths_only.push_back("cascade_lengths");
+	TypedArray<Pasture3DWaveProfile> kept;
+	for (int i = 0; i < p_profiles.size(); i++) {
+		Ref<Pasture3DWaveProfile> profile = p_profiles[i];
+		if (profile.is_null() || !is_builtin_profile_name(profile->get_profile_name())) {
+			kept.push_back(profile);
+			continue;
+		}
+		const StringName name = profile->get_profile_name();
+		Ref<Pasture3DWaveProfile> builtin;
+		for (int j = 0; j < _builtin_profiles.size(); j++) {
+			Ref<Pasture3DWaveProfile> b = _builtin_profiles[j];
+			if (b->get_profile_name() == name) {
+				builtin = b;
+			}
+		}
+		if (profiles_store_same_knobs(profile, builtin)) {
+			UtilityFunctions::print("Pasture3DPoolManager: '", name, "' was a saved copy of the built-in; using ",
+					"the built-in. Save the scene to drop the copy.");
+			continue;
+		}
+		bool retired = false;
+		for (const Retired &r : RETIRED) {
+			if (name == StringName(r.name) && profile->is_legacy_copy(r.count, r.direction_deg, r.amplitude, r.length_max)) {
+				retired = true;
+			}
+		}
+		if (retired) {
+			UtilityFunctions::print("Pasture3DPoolManager: '", name, "' was a copy of the retired Gerstner preset; ",
+					"using the built-in. Save the scene to drop the copy.");
+			continue;
+		}
+		if (stored_properties_equal(profile->get_fft().ptr(), fresh_fft.ptr(), lengths_only)) {
+			UtilityFunctions::print("Pasture3DPoolManager: '", name, "' was a stale copy of an old preset (it ",
+					"stored only its cascade lengths, so it drew the ocean's spectrum); using the built-in. Save the ",
+					"scene to drop the copy.");
+			continue;
+		}
+		kept.push_back(profile);
+	}
+	return kept;
 }
 
 ///////////////////////////
@@ -493,7 +657,7 @@ void Pasture3DPoolManager::_seed_default_profiles() {
 
 Pasture3DPoolManager::Pasture3DPoolManager() {
 	set_notify_transform(false);
-	_seed_default_profiles();
+	_seed_builtin_profiles();
 }
 
 Pasture3DPoolManager::~Pasture3DPoolManager() {
@@ -509,7 +673,7 @@ void Pasture3DPoolManager::set_profiles(const TypedArray<Pasture3DWaveProfile> &
 			profile->disconnect("changed", cb);
 		}
 	}
-	_profiles = p_profiles;
+	_profiles = _drop_stale_builtin_copies(p_profiles);
 	// Simulations of profiles that are gone would otherwise be ticked forever.
 	_live_ffts.clear();
 	_live_fft_generations.clear();
@@ -609,8 +773,9 @@ void Pasture3DPoolManager::set_paused(const bool p_paused) {
 }
 
 Ref<Pasture3DWaveProfile> Pasture3DPoolManager::get_profile(const StringName &p_name) const {
-	for (int i = 0; i < _profiles.size(); i++) {
-		Ref<Pasture3DWaveProfile> profile = _profiles[i];
+	TypedArray<Pasture3DWaveProfile> all = _all_profiles();
+	for (int i = 0; i < all.size(); i++) {
+		Ref<Pasture3DWaveProfile> profile = all[i];
 		if (profile.is_valid() && profile->get_profile_name() == p_name) {
 			return profile;
 		}
@@ -620,13 +785,55 @@ Ref<Pasture3DWaveProfile> Pasture3DPoolManager::get_profile(const StringName &p_
 
 PackedStringArray Pasture3DPoolManager::get_profile_names() const {
 	PackedStringArray names;
-	for (int i = 0; i < _profiles.size(); i++) {
-		Ref<Pasture3DWaveProfile> profile = _profiles[i];
+	TypedArray<Pasture3DWaveProfile> all = _all_profiles();
+	for (int i = 0; i < all.size(); i++) {
+		Ref<Pasture3DWaveProfile> profile = all[i];
 		if (profile.is_valid()) {
 			names.push_back(String(profile->get_profile_name()));
 		}
 	}
 	return names;
+}
+
+PackedStringArray Pasture3DPoolManager::get_builtin_profile_names() const {
+	PackedStringArray names;
+	for (int i = 0; i < _builtin_profiles.size(); i++) {
+		names.push_back(String(Ref<Pasture3DWaveProfile>(_builtin_profiles[i])->get_profile_name()));
+	}
+	return names;
+}
+
+bool Pasture3DPoolManager::is_builtin_profile_name(const StringName &p_name) const {
+	return get_builtin_profile_names().has(String(p_name));
+}
+
+Ref<Pasture3DWaveProfile> Pasture3DPoolManager::override_builtin(const StringName &p_name) {
+	for (int i = 0; i < _profiles.size(); i++) {
+		Ref<Pasture3DWaveProfile> own = _profiles[i];
+		if (own.is_valid() && own->get_profile_name() == p_name) {
+			return own;
+		}
+	}
+	for (int i = 0; i < _builtin_profiles.size(); i++) {
+		Ref<Pasture3DWaveProfile> builtin = _builtin_profiles[i];
+		if (builtin->get_profile_name() != p_name) {
+			continue;
+		}
+		// Deep, so the copy's FFT and fBm are its own: tuning the override must not move the built-in.
+		Ref<Pasture3DWaveProfile> copy = builtin->duplicate(true);
+		// Not through set_profiles(): a fresh copy of the current built-in is exactly what its stale-copy
+		// filter drops. The rest of what set_profiles() does, it does here.
+		_profiles.push_back(copy);
+		_live_ffts.clear();
+		_live_fft_generations.clear();
+		_connect_profiles();
+		rebuild_tables();
+		update_configuration_warnings();
+		notify_property_list_changed();
+		return copy;
+	}
+	LOG(WARN, "'", p_name, "' is not a built-in profile. Built-ins: ", String(", ").join(get_builtin_profile_names()));
+	return Ref<Pasture3DWaveProfile>();
 }
 
 Ref<Material> Pasture3DPoolManager::get_material_for(const Ref<Material> &p_base, const StringName &p_profile) {
@@ -662,8 +869,10 @@ void Pasture3DPoolManager::clear_material_cache() {
 }
 
 void Pasture3DPoolManager::rebuild_tables() {
-	for (int i = 0; i < _profiles.size(); i++) {
-		Ref<Pasture3DWaveProfile> profile = _profiles[i];
+	TypedArray<Pasture3DWaveProfile> all = _profiles.duplicate();
+	all.append_array(_builtin_profiles);
+	for (int i = 0; i < all.size(); i++) {
+		Ref<Pasture3DWaveProfile> profile = all[i];
 		if (profile.is_valid()) {
 			profile->set_loop_period(_loop_period);
 		}
@@ -800,11 +1009,6 @@ PackedStringArray Pasture3DPoolManager::_get_configuration_warnings() const {
 				"shader global, so they overwrite each other every frame and the clock runs at the "
 				"rate of however many are present. Keep one.");
 	}
-	if (_profiles.is_empty()) {
-		warnings.push_back(
-				"No wave profiles. Water bodies selecting a profile by name find none, so the manager "
-				"uploads nothing and their materials draw the shader's default fBm.");
-	}
 	if (is_fbm_by_choice()) {
 		warnings.push_back(FBM_CHOICE_WARNING);
 	}
@@ -823,8 +1027,15 @@ PackedStringArray Pasture3DPoolManager::_get_configuration_warnings() const {
 				"(specular tint, scattering) sit at their defaults.");
 	}
 	// A duplicate profile name is silently first-wins in get_profile(), which is
-	// the kind of thing that gets debugged for an hour.
-	PackedStringArray names = get_profile_names();
+	// the kind of thing that gets debugged for an hour. The scene's own only: one named
+	// like a built-in is an override, on purpose.
+	PackedStringArray names;
+	for (int i = 0; i < _profiles.size(); i++) {
+		Ref<Pasture3DWaveProfile> profile = _profiles[i];
+		if (profile.is_valid()) {
+			names.push_back(String(profile->get_profile_name()));
+		}
+	}
 	for (int i = 0; i < names.size(); i++) {
 		for (int j = i + 1; j < names.size(); j++) {
 			if (names[i] == names[j]) {
@@ -1029,6 +1240,12 @@ void Pasture3DPoolManager::_push_cameras_to_bodies() {
 void Pasture3DPoolManager::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_profiles", "profiles"), &Pasture3DPoolManager::set_profiles);
 	ClassDB::bind_method(D_METHOD("get_profiles"), &Pasture3DPoolManager::get_profiles);
+	ClassDB::bind_method(D_METHOD("get_builtin_profiles"), &Pasture3DPoolManager::get_builtin_profiles);
+	ClassDB::bind_method(D_METHOD("get_builtin_profile_names"), &Pasture3DPoolManager::get_builtin_profile_names);
+	ClassDB::bind_method(D_METHOD("is_builtin_profile_name", "name"), &Pasture3DPoolManager::is_builtin_profile_name);
+	ClassDB::bind_method(D_METHOD("override_builtin", "name"), &Pasture3DPoolManager::override_builtin);
+	ClassDB::bind_static_method("Pasture3DPoolManager", D_METHOD("profiles_store_same_knobs", "a", "b", "skip_fft"),
+			&Pasture3DPoolManager::profiles_store_same_knobs, DEFVAL(PackedStringArray()));
 	ClassDB::bind_method(D_METHOD("set_loop_period", "seconds"), &Pasture3DPoolManager::set_loop_period);
 	ClassDB::bind_method(D_METHOD("get_loop_period"), &Pasture3DPoolManager::get_loop_period);
 	ClassDB::bind_method(D_METHOD("set_sun_light", "light"), &Pasture3DPoolManager::set_sun_light);
@@ -1099,6 +1316,11 @@ void Pasture3DPoolManager::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "profiles", PROPERTY_HINT_TYPE_STRING,
 						 String::num(Variant::OBJECT) + "/" + String::num(PROPERTY_HINT_RESOURCE_TYPE) + ":Pasture3DWaveProfile"),
 			"set_profiles", "get_profiles");
+	// Shown so the scene's author can see what the names select; read-only and never saved.
+	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "builtin_profiles", PROPERTY_HINT_TYPE_STRING,
+						 String::num(Variant::OBJECT) + "/" + String::num(PROPERTY_HINT_RESOURCE_TYPE) + ":Pasture3DWaveProfile",
+						 PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY),
+			"", "get_builtin_profiles");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "loop_period", PROPERTY_HINT_RANGE, "1,600,0.5,or_greater,suffix:s"),
 			"set_loop_period", "get_loop_period");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "sun_light", PROPERTY_HINT_NODE_TYPE, "DirectionalLight3D"),

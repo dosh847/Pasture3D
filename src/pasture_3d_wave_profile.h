@@ -149,6 +149,10 @@ public:
 	// Accepts one retired Gerstner key (see the class comment). True when the key was one. Public for
 	// Pasture3D::migrate_ocean(), which carries an older generation of the same knobs.
 	bool migrate_legacy_key(const StringName &p_name, const Variant &p_value);
+	// True when neither model is authored and the retired knobs hold exactly these values: a profile
+	// saved before Phase 6 as a copy of the Gerstner preset with them (Pasture3DPoolManager's migration).
+	bool is_legacy_copy(const int p_count, const real_t p_direction_deg, const real_t p_amplitude,
+			const real_t p_length_max) const;
 	// The retired series, transcribed: the amplitude sum and the shortest wavelength a Gerstner table of
 	// these knobs had. The only Gerstner arithmetic left, and it runs on load, never per frame.
 	static void legacy_series(const int p_count, const float p_amplitude, const float p_length_max,

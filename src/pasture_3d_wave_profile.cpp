@@ -401,6 +401,14 @@ bool Pasture3DWaveProfile::_set(const StringName &p_name, const Variant &p_value
 	return migrate_legacy_key(p_name, p_value);
 }
 
+bool Pasture3DWaveProfile::is_legacy_copy(const int p_count, const real_t p_direction_deg, const real_t p_amplitude,
+		const real_t p_length_max) const {
+	return !_fft_authored && !_fbm_authored && _legacy.count == p_count &&
+			Math::is_equal_approx(_legacy.direction_deg, (float)p_direction_deg) &&
+			Math::is_equal_approx(_legacy.amplitude, (float)p_amplitude) &&
+			Math::is_equal_approx(_legacy.length_max, MAX((float)p_length_max, LEGACY_MIN_WAVELENGTH));
+}
+
 void Pasture3DWaveProfile::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_profile_name", "name"), &Pasture3DWaveProfile::set_profile_name);
 	ClassDB::bind_method(D_METHOD("get_profile_name"), &Pasture3DWaveProfile::get_profile_name);
@@ -410,6 +418,8 @@ void Pasture3DWaveProfile::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_fbm"), &Pasture3DWaveProfile::get_fbm);
 	ClassDB::bind_method(D_METHOD("is_fft_authored"), &Pasture3DWaveProfile::is_fft_authored);
 	ClassDB::bind_method(D_METHOD("is_fbm_authored"), &Pasture3DWaveProfile::is_fbm_authored);
+	ClassDB::bind_method(D_METHOD("is_legacy_copy", "count", "direction_deg", "amplitude", "length_max"),
+			&Pasture3DWaveProfile::is_legacy_copy);
 	ClassDB::bind_method(D_METHOD("set_min_wavelength", "metres"), &Pasture3DWaveProfile::set_min_wavelength);
 	ClassDB::bind_method(D_METHOD("get_min_wavelength"), &Pasture3DWaveProfile::get_min_wavelength);
 	ClassDB::bind_method(D_METHOD("fit_sea", "direction_deg", "length_max", "sigma"), &Pasture3DWaveProfile::fit_sea);
