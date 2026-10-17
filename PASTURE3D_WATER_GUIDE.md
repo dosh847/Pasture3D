@@ -187,6 +187,10 @@ old river preset, fitted as before.
   `profiles`, or click **Open** to tune it in its own inspector. The built-in is untouched, and the
   override no longer follows later retunes. The copy is kept even before you change anything. **Revert**
   drops it and goes back to the built-in.
+- **Or start from the water itself.** On a `Pasture3DOcean` or `Pasture3DPool`, a line under
+  `wave_profile` shows where that profile comes from, with the same buttons for it. There, **Edit a copy**
+  also opens the copy, ready to tune. A pool with an explicit `manager` edits that manager's profiles.
+  Streams have no line: their surface comes from their material, not from a profile.
 - **To reuse a profile, save it to a file.** Click **Save to file…** on a profile in this scene. This writes
   it to a `.tres`, with its FFT and fBm inside, and the scene then references that file. In another scene,
   click **Add from file…** on its manager. Edits to the file reach every scene that uses it; save the

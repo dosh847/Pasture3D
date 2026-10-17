@@ -12,12 +12,16 @@ extends Node
 ##       Control: an embedded override packs as a sub_resource.
 ##   [H] The row's helpers: source_of() names each source; profiles_with() replaces by name in place;
 ##       profiles_without() removes by name.
+##   [B] The line under a body's `wave_profile`: manager_for() takes a pool's explicit manager over the
+##       scene's, and the scene's for an ocean; the buttons follow the profile's source; the line rebuilds
+##       when the source or the name changes. Controls: before the poll runs, the line still shows the
+##       old buttons; with no manager in the tree it offers none.
 ## Runs headless:
 ##   Godot --headless --path project res://bench/WaterProfileFileGate.tscn
 
 const Row = preload("res://addons/pasture_3d/src/wave_profile_row.gd")
 const DIR := "user://wave_profile_gate/"
-const CRITERIA := 4
+const CRITERIA := 5
 
 var _failures := 0
 var _completed := 0
@@ -30,6 +34,7 @@ func _ready() -> void:
 	_criterion_f()
 	_criterion_p()
 	_criterion_h()
+	_criterion_b()
 	if _completed != CRITERIA:
 		_fail("only %d of %d criteria ran to the end" % [_completed, CRITERIA])
 	print("=== WAVE PROFILE FILES %s (%d failures, %d/%d criteria) ===" % [
@@ -178,4 +183,55 @@ func _criterion_h() -> void:
 	m.profiles = Row.profiles_without(m, &"nope")
 	_check(m.profiles.size() == 1, "CONTROL removing an absent name keeps the rest")
 	m.free()
+	_completed += 1
+
+
+## The button texts on a body line, in order.
+func _buttons(p_row: Control) -> Array:
+	var out := []
+	for line in p_row.get_children():
+		for c in line.get_children():
+			if c is Button:
+				out.append(c.text)
+	return out
+
+
+func _criterion_b() -> void:
+	print("[B] the line under a body's wave_profile")
+	var none := Pasture3DOcean.new()
+	add_child(none)
+	var bare := Row.new().setup_for_body(none, null)
+	_check(Row.manager_for(none) == null and _buttons(bare).is_empty(),
+		"CONTROL with no manager the line offers nothing")
+	bare.free()
+	none.free()
+
+	var m := Pasture3DPoolManager.new()
+	add_child(m)
+	var ocean := Pasture3DOcean.new()
+	ocean.wave_profile = &"ocean_choppy"
+	add_child(ocean)
+	var pool := Pasture3DPool.new()
+	var other := Pasture3DPoolManager.new()
+	pool.manager = other
+	add_child(pool)
+	_check(Row.manager_for(ocean) == m, "an ocean uses the scene's manager")
+	_check(Row.manager_for(pool) == other, "a pool's explicit manager wins over the scene's")
+
+	var row := Row.new().setup_for_body(ocean, null)
+	add_child(row)
+	_check(_buttons(row) == ["Edit a copy"], "a built-in offers Edit a copy (%s)" % [_buttons(row)])
+	var copy := m.override_builtin(&"ocean_choppy")
+	_check(_buttons(row) == ["Edit a copy"], "CONTROL before the poll the line is unchanged")
+	row._process(1.0)
+	_check(_buttons(row) == ["Open", "Save to file...", "Revert"], "the scene's copy offers %s" % [_buttons(row)])
+	Row.save_to_file(copy, DIR + "choppy_body.tres")
+	row._process(1.0)
+	_check(_buttons(row) == ["Open", "Revert"], "a file-backed copy offers %s" % [_buttons(row)])
+	ocean.wave_profile = &"lake_calm"
+	row._process(1.0)
+	_check(_buttons(row) == ["Edit a copy"], "renaming the body's profile rebuilds the line")
+	for n in [row, pool, ocean, m]:
+		n.free()
+	other.free()
 	_completed += 1

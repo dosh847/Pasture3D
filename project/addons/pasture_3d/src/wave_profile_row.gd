@@ -15,6 +15,10 @@
 # A profile file is a Pasture3DWaveProfile with its FFT and fBm embedded. Its profile_name is what a water
 # body's wave_profile selects, so a file named like a built-in overrides that built-in where it is added.
 #
+# The same buttons, for the one profile it uses, sit under `wave_profile` on a Pasture3DOcean or a
+# Pasture3DPool (setup_for_body), because that is where you look when a sea needs tuning. There "Edit a copy"
+# also opens the copy, and the line rebuilds itself when the body's profile or its source changes.
+#
 # The array edits go through `profiles`, so they are undoable and need no state here. The logic is the
 # static functions, which take no editor objects, so a headless gate can call them
 # (bench/WaterProfileFileGate.gd); the controls only route buttons to them.
@@ -29,6 +33,11 @@ var _manager: Pasture3DPoolManager
 var _undo: EditorUndoRedoManager
 var _dialog: EditorFileDialog
 var _dialog_target: Pasture3DWaveProfile
+## The ocean or pool whose profile this line shows; null for the manager's full list.
+var _body: Node
+## What the body line was last built from (_body_signature); see _process.
+var _body_shown := ""
+var _body_poll := 0.0
 
 
 ## Where the profile p_name resolves from on p_manager: SOURCE_BUILTIN, SOURCE_SCENE, or its file's path.
@@ -78,6 +87,20 @@ static func profiles_without(p_manager: Pasture3DPoolManager, p_name: StringName
 	return out
 
 
+## The manager whose profiles p_body's `wave_profile` names: its explicit `manager`, else the scene's, else
+## null. A Pasture3DOcean has no explicit one; it uses the first manager in the tree, as this does.
+static func manager_for(p_body: Node) -> Pasture3DPoolManager:
+	var explicit = p_body.get(&"manager")
+	if explicit is Pasture3DPoolManager and is_instance_valid(explicit):
+		return explicit
+	if not p_body.is_inside_tree():
+		return null
+	for m in p_body.get_tree().get_nodes_in_group(&"pasture3d_water_manager"):
+		if m is Pasture3DPoolManager:
+			return m
+	return null
+
+
 ## Loads p_path as a wave profile, or null with the reason pushed as an error.
 static func load_profile(p_path: String) -> Pasture3DWaveProfile:
 	var res := ResourceLoader.load(p_path)
@@ -92,6 +115,64 @@ func setup(p_manager: Pasture3DPoolManager, p_undo: EditorUndoRedoManager) -> Co
 	_undo = p_undo
 	_build()
 	return self
+
+
+## The single line under p_body's `wave_profile`.
+func setup_for_body(p_body: Node, p_undo: EditorUndoRedoManager) -> Control:
+	_body = p_body
+	_undo = p_undo
+	_build_body()
+	set_process(true)
+	return self
+
+
+func _body_signature() -> String:
+	var m := manager_for(_body)
+	if m == null:
+		return ""
+	var name: StringName = _body.get(&"wave_profile")
+	return "%s|%s|%s|%s" % [m.get_instance_id(), name, m.has_profile(name), source_of(m, name)]
+
+
+# Polled, not signalled: setting wave_profile emits nothing the Inspector rebuilds on, and the manager can
+# come and go under the body.
+func _process(p_delta: float) -> void:
+	if _body == null or not is_instance_valid(_body):
+		return
+	_body_poll += p_delta
+	if _body_poll < 0.25:
+		return
+	_body_poll = 0.0
+	if _body_signature() != _body_shown:
+		_build_body()
+
+
+func _build_body() -> void:
+	for c in get_children():
+		if c != _dialog:
+			remove_child(c)
+			c.queue_free()
+	_manager = manager_for(_body)
+	_body_shown = _body_signature()
+	var line := HBoxContainer.new()
+	add_child(line)
+	var where := Label.new()
+	where.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	where.clip_text = true
+	where.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
+	line.add_child(where)
+	if _manager == null:
+		where.text = "No Pasture3DPoolManager in the scene"
+		where.tooltip_text = "Wave profiles live on a Pasture3DPoolManager. Add one to edit them."
+		return
+	var name: StringName = _body.get(&"wave_profile")
+	if not _manager.has_profile(name):
+		where.text = "No profile named '%s'" % name
+		return
+	var src := source_of(_manager, name)
+	where.text = src.get_file() if src.begins_with("res://") else src
+	where.tooltip_text = "'%s' on %s, from %s" % [name, _manager.name, src]
+	_add_actions(line, name, src)
 
 
 func _build() -> void:
@@ -123,22 +204,28 @@ func _build() -> void:
 		grid.add_child(where)
 		var buttons := HBoxContainer.new()
 		grid.add_child(buttons)
-		var profile := _manager.get_profile(name)
-		if src == SOURCE_BUILTIN:
-			_button(buttons, "Edit a copy", "Copy the built-in into this scene's profiles, where it can be tuned.",
-					_edit_copy.bind(name))
-			continue
-		_button(buttons, "Open", "Edit this profile in the Inspector.", _open.bind(profile))
-		if src == SOURCE_SCENE:
-			_button(buttons, "Save to file...", "Write this profile to a .tres, to reuse in other scenes.",
-					_ask_save.bind(profile))
-		if _manager.is_builtin_profile_name(name):
-			_button(buttons, "Revert", "Drop this scene's version and use the built-in again.", _remove.bind(name))
-		else:
-			_button(buttons, "Remove", "Remove this profile from the scene.", _remove.bind(name))
+		_add_actions(buttons, name, src)
 
 	_button(self, "Add from file...", "Add a saved wave profile (.tres) to this scene. One named like a built-in overrides it.",
 			_ask_add)
+
+
+## The buttons for the profile p_name, which resolves from p_src.
+func _add_actions(p_parent: Control, p_name: StringName, p_src: String) -> void:
+	if p_src == SOURCE_BUILTIN:
+		_button(p_parent, "Edit a copy", "Copy the built-in into this scene's profiles, where it can be tuned.",
+				_edit_copy.bind(p_name))
+		return
+	var profile := _manager.get_profile(p_name)
+	_button(p_parent, "Open", "Edit this profile in the Inspector.", _open.bind(profile))
+	if p_src == SOURCE_SCENE:
+		_button(p_parent, "Save to file...", "Write this profile to a .tres, to reuse in other scenes.",
+				_ask_save.bind(profile))
+	if _manager.is_builtin_profile_name(p_name):
+		_button(p_parent, "Revert", "Drop this scene's version and use the built-in again.", _remove.bind(p_name))
+	elif _body == null:
+		# Not on a body: removing the profile it uses would leave it naming nothing.
+		_button(p_parent, "Remove", "Remove this profile from the scene.", _remove.bind(p_name))
 
 
 func _button(p_parent: Control, p_text: String, p_tip: String, p_call: Callable) -> void:
@@ -164,6 +251,8 @@ func _edit_copy(p_name: StringName) -> void:
 	_undo.add_undo_property(_manager, &"profiles", _manager.profiles)
 	_undo.add_undo_method(_manager, &"notify_property_list_changed")
 	_undo.commit_action()
+	if _body != null:
+		_open(_manager.get_profile(p_name))
 
 
 func _remove(p_name: StringName) -> void:
@@ -207,6 +296,8 @@ func _on_file_selected(p_path: String) -> void:
 			return
 		EditorInterface.mark_scene_as_unsaved()
 		_manager.notify_property_list_changed()
+		if _body != null:
+			_build_body()
 		return
 	var profile := load_profile(p_path)
 	if profile != null:
