@@ -70,9 +70,11 @@ misplaced click could turn a lake into a river with nothing in the scene to say 
 
 1. Add a **`Pasture3DPoolManager`** to the scene and set its **`sun_light`** to your
    `DirectionalLight3D`.
-2. Add a **`Pasture3DOcean`**. Move it in Y to set the sea level.
-3. Assign its **`material`**: `M_water_ocean.tres`, or `M_water_ocean_low.tres` for the low tier. A new
-   ocean has none, and with none it draws nothing. The node shows a "No material" warning.
+2. Add a **`Pasture3DOcean`**. Set its **`sea_level`**, or move the node in Y: they are the same
+   number, the node's global Y.
+3. A new ocean gets `M_water_ocean.tres` as its **`material`**. Swap in `M_water_ocean_low.tres` for
+   the low tier. An ocean with no material is given the default again when it enters the scene; to
+   hide it, turn off **`enabled`**.
 
 The ocean is hidden wherever the terrain is above it, so set the sea level below the coast and above
 the seabed.
@@ -161,9 +163,19 @@ old river preset, fitted as before.
 
 - **`profiles` holds only what your scene adds.** It is empty on a new manager. A profile there with a
   new name is your own sea state.
-- **To tune a built-in for one scene, override it.** Call `override_builtin(&"lake_calm")`: this copies the
-  current preset into `profiles` under the same name, where it wins and is saved with the scene. Tune the
-  copy. The built-in is untouched, and the override no longer follows later retunes.
+- **To tune a built-in for one scene, override it.** Select the manager. The **Wave Profiles** section at
+  the top of its inspector lists every name, where it comes from, and what you can do with it. Click
+  **Edit a copy** on a built-in (from code: `override_builtin(&"lake_calm")`). This copies the current
+  preset into `profiles` under the same name, where it wins and is saved with the scene. Tune the copy in
+  `profiles`, or click **Open** to tune it in its own inspector. The built-in is untouched, and the
+  override no longer follows later retunes. The copy is kept even before you change anything. **Revert**
+  drops it and goes back to the built-in.
+- **To reuse a profile, save it to a file.** Click **Save to file…** on a profile in this scene. This writes
+  it to a `.tres`, with its FFT and fBm inside, and the scene then references that file. In another scene,
+  click **Add from file…** on its manager. Edits to the file reach every scene that uses it; save the
+  scene, or the file, to keep them. The profile's `profile_name` is what a body's `wave_profile` selects.
+  A file named like a built-in overrides that built-in wherever you add it, and is kept even when it
+  matches the built-in exactly.
 - **Older scenes saved copies of all four.** Until 2026-10, a fresh manager put the presets into
   `profiles` itself, so every scene saved them, and the copies stopped following retunes. On load the
   manager drops a stock-named profile that is one of these copies, and prints a line naming it:
@@ -174,7 +186,7 @@ old river preset, fitted as before.
   - **A copy of the current built-in.**
 
   Save the scene to drop the copies from the file. Anything else named like a built-in was tuned on
-  purpose, and stays as an override.
+  purpose, and stays as an override. So does an Edit a copy override, and any profile saved to a file.
 
 ### Which model draws: `wave_model`
 
@@ -667,7 +679,7 @@ re-saving without migrating loses them — migrate first.
 Two things moved rather than being renamed:
 
 - **Sea level.** There was never an `ocean_sea_level` property — it was the material's `sea_level`
-  uniform. It is now the **`Pasture3DOcean` node's Y**. Move the node.
+  uniform. It is now the **`Pasture3DOcean` node's Y**. Move the node, or set its `sea_level`.
 - **`get_water_height()` and friends** were on `Pasture3D`. They are on the bodies now, and
   `Pasture3DPoolManager.body_at()` is how you find the right one. See §6.
 

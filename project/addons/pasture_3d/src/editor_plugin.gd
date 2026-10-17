@@ -35,6 +35,7 @@ var _region_drag_to: Variant = null
 var graph_editor: Pasture3DGraphEditor # bottom-panel visual node-graph editor
 var graph_inspect_dock: Pasture3DGraphInspector # §7's probe/histogram/profile dock (V4)
 var graph_inspector: Pasture3DGraphInspectorPlugin # "Edit in Graph Editor" button
+var wave_profile_inspector: EditorInspectorPlugin # Wave Profiles row on a Pasture3DPoolManager
 var brush_gizmo: EditorNode3DGizmoPlugin # Clickable origin markers for brush nodes
 ## The selected Pasture3D brush, re-derived on `selection_changed` rather than per input event —
 ## see `_current_brush`. May hold a freed node; read it through `_current_brush`, not directly.
@@ -143,6 +144,9 @@ func _enter_tree() -> void:
 	graph_inspector.editor = graph_editor
 	graph_inspector.plugin = self
 	add_inspector_plugin(graph_inspector)
+	wave_profile_inspector = preload("res://addons/pasture_3d/src/wave_profile_inspector_plugin.gd").new()
+	wave_profile_inspector.plugin = self
+	add_inspector_plugin(wave_profile_inspector)
 
 	# Clickable origin markers so brush nodes are easy to select in a busy scene.
 	brush_gizmo = Pasture3DBrushGizmo.new()
@@ -217,6 +221,8 @@ func _exit_tree() -> void:
 		region_gizmo.detach()
 	if graph_inspector:
 		remove_inspector_plugin(graph_inspector)
+	if wave_profile_inspector:
+		remove_inspector_plugin(wave_profile_inspector)
 	if graph_inspect_dock:
 		remove_control_from_docks(graph_inspect_dock)
 		graph_inspect_dock.queue_free()

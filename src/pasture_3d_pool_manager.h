@@ -77,6 +77,9 @@ public: // Constants
 	// "Error 1114: a dynamic link library initialization routine failed", with no
 	// indication of which line. add_to_group() takes a StringName and converts.
 	static constexpr const char *MANAGER_GROUP = "pasture3d_water_manager";
+	// Metadata override_builtin() puts on its copy, so the copy is kept by _drop_stale_builtin_copies()
+	// even while it still equals the built-in. Saved with the scene, as metadata is.
+	static constexpr const char *OVERRIDE_META = "pasture3d_override";
 
 private:
 	// Process-global count of managers currently in a tree. Pasture3D reads it to

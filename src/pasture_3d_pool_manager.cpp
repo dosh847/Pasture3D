@@ -525,7 +525,8 @@ static bool stored_properties_equal(Object *p_a, Object *p_b, const PackedString
 			continue;
 		}
 		String name = prop["name"];
-		if (name == "script" || name.begins_with("resource_") || p_skip.has(name)) {
+		// Metadata is not a knob: OVERRIDE_META marks a copy without changing the sea it draws.
+		if (name == "script" || name.begins_with("resource_") || name.begins_with("metadata/") || p_skip.has(name)) {
 			continue;
 		}
 		Variant va = p_a->get(name);
@@ -586,7 +587,13 @@ bool Pasture3DPoolManager::profiles_store_same_knobs(const Ref<Pasture3DWaveProf
  *     knobs fall to the class defaults, the reference ocean's, so it draws the ocean's spectrum on the
  *     cascades of a lake. That is what made sculpting_2's lake and pond race. Its fBm and min_wavelength
  *     are not compared: the interim fit derived them from the same lengths.
- * Anything else named like a built-in was tuned on purpose, and is kept as an override.
+ * Anything else named like a built-in was tuned on purpose, and is kept as an override. So is, before
+ * any test, a profile someone CHOSE to keep:
+ *   - one override_builtin() made (OVERRIDE_META). "Edit a copy" in the inspector makes one, and until
+ *     its first edit it equals the built-in -- the first test would drop it on the next array edit or
+ *     scene load, and the button would seem to do nothing.
+ *   - one saved to its own file. A scene references a .tres by path, so nothing was copied by accident,
+ *     and dropping it would remove the reference from the scene on its next save.
  *
  * Runs in set_profiles(), so it also sees a script's assignment. A script that builds a profile on
  * purpose fits it, which sets the spectrum, so it is never taken for the interim fit.
@@ -616,6 +623,11 @@ TypedArray<Pasture3DWaveProfile> Pasture3DPoolManager::_drop_stale_builtin_copie
 	for (int i = 0; i < p_profiles.size(); i++) {
 		Ref<Pasture3DWaveProfile> profile = p_profiles[i];
 		if (profile.is_null() || !is_builtin_profile_name(profile->get_profile_name())) {
+			kept.push_back(profile);
+			continue;
+		}
+		const String path = profile->get_path();
+		if (profile->has_meta(OVERRIDE_META) || (!path.is_empty() && !path.contains("::"))) {
 			kept.push_back(profile);
 			continue;
 		}
@@ -824,14 +836,11 @@ Ref<Pasture3DWaveProfile> Pasture3DPoolManager::override_builtin(const StringNam
 		}
 		// Deep, so the copy's FFT and fBm are its own: tuning the override must not move the built-in.
 		Ref<Pasture3DWaveProfile> copy = builtin->duplicate(true);
-		// Not through set_profiles(): a fresh copy of the current built-in is exactly what its stale-copy
-		// filter drops. The rest of what set_profiles() does, it does here.
-		_profiles.push_back(copy);
-		_live_ffts.clear();
-		_live_fft_generations.clear();
-		_connect_profiles();
-		rebuild_tables();
-		update_configuration_warnings();
+		// Marked, so the stale-copy filter keeps it while it still equals the built-in.
+		copy->set_meta(OVERRIDE_META, true);
+		TypedArray<Pasture3DWaveProfile> profiles = _profiles.duplicate();
+		profiles.push_back(copy);
+		set_profiles(profiles);
 		notify_property_list_changed();
 		return copy;
 	}

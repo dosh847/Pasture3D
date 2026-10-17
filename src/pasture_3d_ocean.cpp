@@ -2,6 +2,7 @@
 
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/scene_tree.hpp>
 #include <godot_cpp/classes/shader.hpp>
 #include <godot_cpp/classes/shader_material.hpp>
@@ -69,6 +70,35 @@ void Pasture3DOcean::_try_register_with_manager() {
 	// The table and the cull AABB were built against "no manager"; now there is one.
 	_rebuild_runtime_material();
 	_update_aabbs(true);
+}
+
+/**
+ * An ocean with no material gets the shipped one, OCEAN_MATERIAL_PATH.
+ *
+ * Without it, an ocean added from the Create Node dialog drew the clipmap with Godot's default
+ * material: a white sheet, and a sheet that ignored sea level, because the sheet is built flat at
+ * y=0 and it is the water shader that lifts it to sea_level. The constant was the default for
+ * Pasture3D.ocean_material and nothing read it after the ocean became its own node.
+ *
+ * At ENTER_WORLD rather than in the constructor: a scene sets its saved material after
+ * construction, and a resource loaded for every instance only to be replaced is a load per ocean
+ * per scene open. The material is then a property like any other and saves with the scene.
+ * Clearing it does not stick -- the next ENTER_WORLD fills it again -- because an ocean with no
+ * water material draws nothing useful; `enabled` is the switch for drawing nothing.
+ */
+void Pasture3DOcean::_ensure_material() {
+	if (_material.is_valid()) {
+		return;
+	}
+	ResourceLoader *loader = ResourceLoader::get_singleton();
+	if (!loader->exists(OCEAN_MATERIAL_PATH)) {
+		LOG(WARN, "No ocean material and no default at ", OCEAN_MATERIAL_PATH);
+		return;
+	}
+	_material = loader->load(OCEAN_MATERIAL_PATH);
+	_runtime_material = Ref<Material>();
+	LOG(INFO, "Ocean had no material; assigned ", OCEAN_MATERIAL_PATH);
+	update_configuration_warnings();
 }
 
 void Pasture3DOcean::_setup_mesher() {
@@ -356,6 +386,23 @@ void Pasture3DOcean::set_wave_profile(const StringName &p_name) {
 	update_configuration_warnings();
 }
 
+/**
+ * Moves the node: sea level IS its global Y (see the header). An inspector field for the same
+ * number, because "where is sea level" was not answerable from the inspector -- the position
+ * field is local, and nothing said it was the sea level. Not stored: the transform is.
+ */
+void Pasture3DOcean::set_sea_level(const real_t p_level) {
+	if (is_inside_tree()) {
+		Vector3 pos = get_global_position();
+		pos.y = p_level;
+		set_global_position(pos);
+	} else {
+		Vector3 pos = get_position();
+		pos.y = p_level;
+		set_position(pos);
+	}
+}
+
 void Pasture3DOcean::set_domain_origin(const Vector3 &p_origin) {
 	SET_IF_DIFF(_domain_origin, p_origin);
 	_drop_height_memo(); // subtracted before the solve, so it moves the answer
@@ -539,6 +586,7 @@ void Pasture3DOcean::_notification(int p_what) {
 			// the material recompiles. An ocean can exist with no manager, so it
 			// cannot rely on the manager having done it.
 			Pasture3DPoolManager::register_water_globals();
+			_ensure_material();
 			_setup_mesher();
 			set_physics_process(true);
 			break;
@@ -653,6 +701,7 @@ void Pasture3DOcean::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_clipmap_target", "node"), &Pasture3DOcean::set_clipmap_target);
 	ClassDB::bind_method(D_METHOD("get_clipmap_target"), &Pasture3DOcean::get_clipmap_target);
 
+	ClassDB::bind_method(D_METHOD("set_sea_level", "level"), &Pasture3DOcean::set_sea_level);
 	ClassDB::bind_method(D_METHOD("get_sea_level"), &Pasture3DOcean::get_sea_level);
 	ClassDB::bind_method(D_METHOD("get_water_height", "global_xz"), &Pasture3DOcean::get_water_height);
 	ClassDB::bind_method(D_METHOD("get_water_normal", "global_xz"), &Pasture3DOcean::get_water_normal);
@@ -663,6 +712,9 @@ void Pasture3DOcean::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_ocean_warnings"), &Pasture3DOcean::get_ocean_warnings);
 
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "enabled"), "set_enabled", "is_enabled");
+	// EDITOR usage only: an alias of the transform's Y, so saving it too would save sea level twice
+	// and let the two disagree on load.
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sea_level", PROPERTY_HINT_RANGE, "-500.0,500.0,0.01,or_less,or_greater,suffix:m", PROPERTY_USAGE_EDITOR), "set_sea_level", "get_sea_level");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "material", PROPERTY_HINT_RESOURCE_TYPE, "ShaderMaterial,BaseMaterial3D"), "set_material", "get_material");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "wave_profile"), "set_wave_profile", "get_wave_profile");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "domain_origin"), "set_domain_origin", "get_domain_origin");

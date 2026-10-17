@@ -133,6 +133,7 @@ private:
 	// criterion H's first control is the standing guard against forgetting.
 	void _drop_height_memo() const { _height_memo_valid = false; }
 	void _try_register_with_manager();
+	void _ensure_material();
 	void _setup_mesher();
 	void _destroy_mesher(const bool p_final = false);
 	void _rebuild_runtime_material();
@@ -187,7 +188,8 @@ public:
 
 	// The undisplaced sheet's height: this node's Y. Written to the material's
 	// sea_level uniform, and added to every CPU query.
-	real_t get_sea_level() const { return get_global_position().y; }
+	real_t get_sea_level() const { return is_inside_tree() ? get_global_position().y : get_position().y; }
+	void set_sea_level(const real_t p_level);
 
 	// --- CPU water query (water spec §4.3, G4) ------------------------------
 	// Same three signatures Pasture3D carried, same contract, now answered from the
