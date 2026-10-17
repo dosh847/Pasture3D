@@ -134,6 +134,8 @@ private:
 	bool _band_limited = false;
 	SpectrumKnobs _spectra[SPECTRA];
 	float _foam_bias = 0.85f;
+	// Added to the foam offsets' sum: ours, not the reference's (production spec W3). 0 is the reference.
+	float _foam_lift = 0.f;
 	float _foam_threshold = 0.f;
 	float _foam_add = 6.f; // per second; the reference's 0.1 per frame at 60 fps
 	float _foam_decay = 1.05f; // per second; the reference's 0.0175 per frame at 60 fps
@@ -301,6 +303,8 @@ public:
 
 	void set_foam_bias(const float p_value);
 	float get_foam_bias() const { return _foam_bias; }
+	void set_foam_lift(const float p_value);
+	float get_foam_lift() const { return _foam_lift; }
 	void set_foam_threshold(const float p_value);
 	float get_foam_threshold() const { return _foam_threshold; }
 	void set_foam_add(const float p_value);

@@ -99,7 +99,7 @@ uniform int _wave_model = WATER_MODEL_FBM;
 #endif
 // The profile's Pasture3DWaterFFT outputs: 4 layers, one per cascade, full mip chains.
 //   _fft_displacement  xyz = displacement in metres, a = foam
-//   _fft_slope         xy  = dh/dx, dh/dz;  z = the cascade's own Jacobian
+//   _fft_slope         xy  = dh/dx, dh/dz;  z = foam again, w = foam^2 (the crest's footprint, below)
 // Cascade i repeats every _fft_repeat[i] metres of DOMAIN space: the reference's per-cascade _Tile, which
 // need not be the length it was simulated at (PASTURE3D_WATER_REFERENCE_SPEC.md G1). The mips are the
 // simulation's own 2x2 box chain (WaterFFTGate [M]); the sampler's job is only to pick and blend them.
@@ -113,6 +113,12 @@ uniform vec4 _fft_repeat = vec4(100.0, 0.33333334, 0.33333334, 7.6923075);
 uniform vec4 _fft_drawn = vec4(1.0, 0.0, 0.0, 1.0);
 uniform vec4 _fft_displaces = vec4(1.0, 0.0, 0.0, 0.0);
 uniform float _fft_foam_offset = -0.84;
+// The crest over a pixel's FOOTPRINT (production spec W3). The crest is clamp(summed foam + offset), and
+// the mips average the foam before that clamp: clamp(mean) is far below mean(clamp) wherever the foam is
+// patchy, so the foam faded out past ~40 m long before the foam fade. On, the slope mips' second moment
+// gives the foam's spread over the footprint, and the crest is the clamp's expectation over a normal of
+// that mean and spread. Off is the reference's clamp(mean), which WaterReferenceABGate measures.
+uniform bool fft_foam_footprint = true;
 // The reference's _NormalStrength (PASTURE3D_WATER_REFERENCE_SPEC.md L8): the drawn cascades' summed slope
 // is scaled by it before the normal is built. Geometry and foam are untouched.
 uniform float fft_normal_strength : hint_range(0.0, 4.0, 0.01) = 1.0;

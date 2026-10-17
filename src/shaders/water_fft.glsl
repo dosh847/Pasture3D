@@ -74,7 +74,7 @@ layout(rgba32f, set = 0, binding = 2) restrict uniform image2DArray spectrum;
 // One 2D view per cascade: the outputs carry mip chains, and a storage binding has to name a single
 // level, which this godot-cpp can only express as a per-layer 2D slice.
 layout(rgba16f, set = 0, binding = 3) restrict uniform image2D displacement[4]; // xyz metres, a foam
-layout(rgba16f, set = 0, binding = 4) restrict writeonly uniform image2D slope[4]; // xy slope, z jacobian
+layout(rgba16f, set = 0, binding = 4) restrict writeonly uniform image2D slope[4]; // xy slope, z foam, w foam^2
 #endif
 
 #ifdef KERNEL_DOWNSAMPLE
@@ -405,7 +405,11 @@ void main() {
 		}
 
 		imageStore(displacement[i], id, vec4(disp, foam));
-		imageStore(slope[i], id, vec4(slopes, jacobian, 0.0));
+		// The foam again, and its square: the box mips below then carry its mean AND its second moment, so
+		// the fragment can threshold a far pixel by the foam's spread over the footprint instead of only
+		// its mean (production spec W3). The slope sampler is the anisotropic one, so both moments are
+		// filtered alike; the displacement's .a stays the simulation's state.
+		imageStore(slope[i], id, vec4(slopes, foam, foam * foam));
 	}
 }
 #endif // KERNEL_ASSEMBLE

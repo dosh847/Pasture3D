@@ -869,8 +869,23 @@ Vector4 Pasture3DWaterFFT::get_cascade_repeats() const {
 	return r;
 }
 
+/**
+ * What the crest's threshold is moved by: every cascade's foamSubtract, hidden ones included, as the reference
+ * adds them, plus foam_lift. The shader adds its own per-resolution lift on top
+ * (water_fft_foam_resolution_lift()), so this is the offset at 1024, where the reference set its offsets.
+ */
 float Pasture3DWaterFFT::get_foam_offset_sum() const {
-	return _cascade_foam_offset.x + _cascade_foam_offset.y + _cascade_foam_offset.z + _cascade_foam_offset.w;
+	return _cascade_foam_offset.x + _cascade_foam_offset.y + _cascade_foam_offset.z + _cascade_foam_offset.w +
+			_foam_lift;
+}
+
+void Pasture3DWaterFFT::set_foam_lift(const float p_value) {
+	if (p_value == _foam_lift) {
+		return;
+	}
+	_foam_lift = p_value;
+	// A material uniform only: the simulation never reads it.
+	_knob_changed(false);
 }
 
 void Pasture3DWaterFFT::set_band_limited(const bool p_enabled) {
@@ -1281,6 +1296,8 @@ void Pasture3DWaterFFT::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_band_limited"), &Pasture3DWaterFFT::get_band_limited);
 	ClassDB::bind_method(D_METHOD("set_foam_bias", "value"), &Pasture3DWaterFFT::set_foam_bias);
 	ClassDB::bind_method(D_METHOD("get_foam_bias"), &Pasture3DWaterFFT::get_foam_bias);
+	ClassDB::bind_method(D_METHOD("set_foam_lift", "value"), &Pasture3DWaterFFT::set_foam_lift);
+	ClassDB::bind_method(D_METHOD("get_foam_lift"), &Pasture3DWaterFFT::get_foam_lift);
 	ClassDB::bind_method(D_METHOD("set_foam_threshold", "value"), &Pasture3DWaterFFT::set_foam_threshold);
 	ClassDB::bind_method(D_METHOD("get_foam_threshold"), &Pasture3DWaterFFT::get_foam_threshold);
 	ClassDB::bind_method(D_METHOD("set_foam_add", "per_second"), &Pasture3DWaterFFT::set_foam_add);
@@ -1306,6 +1323,7 @@ void Pasture3DWaterFFT::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "band_limited"), "set_band_limited", "get_band_limited");
 	ADD_GROUP("Foam", "foam_");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "foam_bias", PROPERTY_HINT_RANGE, "-2.0,2.0,0.01"), "set_foam_bias", "get_foam_bias");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "foam_lift", PROPERTY_HINT_RANGE, "-2.0,2.0,0.01"), "set_foam_lift", "get_foam_lift");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "foam_threshold", PROPERTY_HINT_RANGE, "-10.0,10.0,0.01"), "set_foam_threshold", "get_foam_threshold");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "foam_add", PROPERTY_HINT_RANGE, "0.0,60.0,0.01,suffix:/s"), "set_foam_add", "get_foam_add");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "foam_decay", PROPERTY_HINT_RANGE, "0.0,60.0,0.01,suffix:/s"), "set_foam_decay", "get_foam_decay");

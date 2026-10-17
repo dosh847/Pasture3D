@@ -438,7 +438,7 @@ void Pasture3DPoolManager::_update_sun() {
 /**
  * Fills _builtin_profiles with the four shipped sea states (spec §5.2, PASTURE3D_WATER_REFERENCE_SPEC.md §5).
  *
- *   ocean_default  the reference's sea, exactly: a new Pasture3DWaveProfile.
+ *   ocean_default  the reference's sea, exactly, a new Pasture3DWaveProfile, but for its foam_lift (W3).
  *   lake_calm      the reference's sea scaled to a 25 m longest wave, and pond_still to 12 m
  *   pond_still     (fit_reference_sea): lower wind, shorter fetch, smaller cascades and shallower
  *                  water, all by one Froude scaling, so each is the reference's sea seen smaller and
@@ -460,6 +460,9 @@ void Pasture3DPoolManager::_seed_builtin_profiles() {
 	Ref<Pasture3DWaveProfile> ocean;
 	ocean.instantiate();
 	ocean->set_profile_name("ocean_default");
+	// Ours, on the reference's offsets (production spec W3): its crests make next to no foam. 0.25 at 1024
+	// is the look chosen by eye at 256, where the shader's resolution lift adds 0.2 more.
+	ocean->get_fft()->set_foam_lift(0.25f);
 	_builtin_profiles.push_back(ocean);
 
 	struct Scaled {

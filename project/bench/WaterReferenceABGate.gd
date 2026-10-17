@@ -252,6 +252,13 @@ func _build() -> void:
 	# Likewise the fade distance (P-D4): the reference fades by the camera's far plane, and [D] reads it back.
 	_lit.set_shader_parameter("fft_fade_distance", 0.0)
 	_inputs.set_shader_parameter("fft_fade_distance", 0.0)
+	# And the crest foam (W3): the reference's bare offsets without the ocean's foam_lift, and its clamp of
+	# the mipped mean without the footprint. WaterFoamGate owns both. The shader's resolution lift stays (0 at
+	# 1024): the inputs readout returns the summed foam after it, so ref_fp() is fed the same crest.
+	var fft: Pasture3DWaterFFT = _manager.get_profile(&"ocean_default").fft
+	for m in [_lit, _inputs]:
+		m.set_shader_parameter("_fft_foam_offset", fft.get_foam_offset_sum() - fft.foam_lift)
+		m.set_shader_parameter("fft_foam_footprint", false)
 
 	_mesh = MeshInstance3D.new()
 	var plane := PlaneMesh.new()

@@ -22,6 +22,36 @@ float water_ref_fresnel(float p_n_dot_v, float p_alpha) {
 }
 #endif
 
+#ifdef WATER_FFT
+// E[max(X, 0)] for X normal with mean p_m and spread p_s > 0: m Phi(m/s) + s phi(m/s). Phi is the logistic
+// fit 1 / (1 + exp(-1.5976 z - 0.07056 z^3)), within 1.4e-4 of the normal CDF everywhere.
+float water_ramp_expectation(float p_m, float p_s) {
+	float z = p_m / p_s;
+	float cdf = 1.0 / (1.0 + exp(clamp(-1.5976 * z - 0.07056 * z * z * z, -80.0, 80.0)));
+	return p_m * cdf + p_s * 0.39894228 * exp(-0.5 * z * z);
+}
+
+// The crest clamp(X, 0, 1) expected over a footprint whose summed foam has mean p_m and variance p_var.
+// clamp(x, 0, 1) = max(x, 0) - max(x - 1, 0), and each ramp has the closed form above. A footprint of one
+// texel has no spread, and the expectation is the clamp itself.
+float water_fft_crest(float p_m, float p_var) {
+	float s = sqrt(max(p_var, 0.0));
+	if (s < 1e-3) {
+		return clamp(p_m, 0.0, 1.0);
+	}
+	return clamp(water_ramp_expectation(p_m, s) - water_ramp_expectation(p_m - 1.0, s), 0.0, 1.0);
+}
+
+// The crest foam's resolution correction (production spec W3). A coarser simulation resolves fewer folds,
+// so the same offset makes less foam; this lift of the offset gives each N the mean crest 1024 gives, the
+// resolution the reference's offsets were set at, and with it the same coverage (27-28%). Measured by
+// WaterFoamCoverageProbe from the simulation's own texels, on ocean_default at its shipped look (mean
+// crest 0.044), reproducible to 0.004. N is read off the texture, so a resolution change needs no upload.
+float water_fft_foam_resolution_lift(int p_n) {
+	return p_n == 512 ? 0.13 : p_n == 256 ? 0.2 : p_n == 128 ? 0.315 : 0.0;
+}
+#endif
+
 void fragment() {
 #ifdef WATER_DEBUG_GLOBALS
 	// Diagnostic: writes the three plugin-driven globals straight to ALBEDO so
@@ -75,7 +105,11 @@ void fragment() {
 #ifdef WATER_DEBUG_REF_INPUTS
 	vec2 fft_raw_slope = vec2(0.0);
 #endif
+	// The pixel's footprint in domain metres, taken outside every branch, where derivatives are defined. The
+	// fBm picks its last octave by it, and the crest foam its tile blend.
+	float footprint = max(length(dFdx(v_fft_domain)), length(dFdy(v_fft_domain)));
 	float fft_foam = 0.0;
+	float fft_foam_var = 0.0;
 	float fft_height = 0.0;
 	if (fft) {
 		slope = vec2(0.0);
@@ -84,12 +118,25 @@ void fragment() {
 				continue;
 			}
 			vec3 uvw = vec3(v_fft_domain / _fft_repeat[i], float(i));
-			slope += texture(_fft_slope, uvw).xy;
-			vec4 disp = texture(_fft_displacement, uvw);
-			fft_foam += disp.w;
-			fft_height += disp.y;
+			// The foam from the slope texture, not the displacement's .a: its moments share one sampler.
+			vec4 fs = texture(_fft_slope, uvw);
+			slope += fs.xy;
+			vec2 foam_m = fs.zw;
+			if (fft_foam_footprint) {
+				// A cascade's foam repeats every tile, in a lattice that lines up into rows down the view
+				// once foam carries that far. As the footprint grows toward the tile, its moments go to the
+				// whole tile's, the last mip: the same mean crest, as an even tone instead of rows.
+				float tile = smoothstep(0.004, 0.02, footprint / _fft_repeat[i]);
+				if (tile > 0.0) {
+					foam_m = mix(foam_m, textureLod(_fft_slope, uvw, 16.0).zw, tile);
+				}
+			}
+			fft_foam += foam_m.x;
+			// Cascades fold independently, so their spreads add.
+			fft_foam_var += max(foam_m.y - foam_m.x * foam_m.x, 0.0);
+			fft_height += texture(_fft_displacement, uvw).y;
 		}
-		fft_foam += _fft_foam_offset;
+		fft_foam += _fft_foam_offset + water_fft_foam_resolution_lift(textureSize(_fft_slope, 0).x);
 #ifdef WATER_DEBUG_REF_INPUTS
 		fft_raw_slope = slope;
 #endif
@@ -102,13 +149,11 @@ void fragment() {
 	}
 	// The fBm fallback's normals: the fragment set, summed per pixel at the rest position like the cascades,
 	// down to the octave this pixel can still resolve (two samples a wavelength). Its height is light()'s
-	// crest height. The footprint is taken outside the branch, where derivatives are always defined.
-	// Any value but FFT draws the fBm (water_surface.gdshaderinc), so this is !fft and not == FBM.
+	// crest height. Any value but FFT draws the fBm (water_surface.gdshaderinc), so this is !fft and not == FBM.
 	bool fbm = !fft;
-	float fbm_footprint = max(length(dFdx(v_fft_domain)), length(dFdy(v_fft_domain)));
 	float fbm_height = 0.0;
 	if (fbm) {
-		vec3 s = water_fbm(v_fft_domain, _fbm_f0, _fbm_f1, _fbm_f2, _fbm_f3, fbm_footprint, 2.0, true);
+		vec3 s = water_fbm(v_fft_domain, _fbm_f0, _fbm_f1, _fbm_f2, _fbm_f3, footprint, 2.0, true);
 		slope = s.yz;
 		fbm_height = s.x;
 	}
@@ -272,7 +317,8 @@ void fragment() {
 #ifdef WATER_FFT
 	// The simulation's foam is already coverage in [0, 1+]. The fBm has no breaking signal at all (the
 	// reference draws no foam).
-	float crest = fft ? clamp(fft_foam, 0.0, 1.0) * water_fft_fade(v_fft_depth, fft_foam_falloff) : 0.0;
+	float crest = fft ? (fft_foam_footprint ? water_fft_crest(fft_foam, fft_foam_var) : clamp(fft_foam, 0.0, 1.0))
+		* water_fft_fade(v_fft_depth, fft_foam_falloff) : 0.0;
 #else
 	// A stream's slope: whitecaps from threshold to threshold + softness.
 	float crest = smoothstep(foam_crest_threshold,

@@ -217,7 +217,7 @@ save GPU time, lower `fft_resolution` to 128 instead.
 | Property | Meaning |
 |---|---|
 | `profile_name` | The selection key. Bodies name it in `wave_profile`. |
-| `fft` | A `Pasture3DWaterFFT`: the simulation and its knobs. `seed`, `depth`, `choppiness`, `cascade_lengths` (any order), `cascade_tiles` (metres between repeats per cascade; 0 = the cascade's length), `cascade_drawn` and `cascade_displaces` (per-cascade flags: a hidden cascade is not simulated, and only drawn-and-displacing cascades move the geometry, the buoys and the height bound), `cascade_foam_offset` (added to the foam, summed over all four), `band_limited` (off: every cascade spans every wavelength, as the reference does), and eight spectra, `spectrum_1/*` … `spectrum_8/*`, two per cascade (cascade i carries spectra 2i−1 and 2i) — `scale`, `wind_speed`, `direction_deg`, `fetch`, `spread_blend`, `swell`, `peak_enhancement`, `short_waves_fade`. Foam: `foam_bias`, `foam_threshold`, `foam_add`, `foam_decay`. |
+| `fft` | A `Pasture3DWaterFFT`: the simulation and its knobs. `seed`, `depth`, `choppiness`, `cascade_lengths` (any order), `cascade_tiles` (metres between repeats per cascade; 0 = the cascade's length), `cascade_drawn` and `cascade_displaces` (per-cascade flags: a hidden cascade is not simulated, and only drawn-and-displacing cascades move the geometry, the buoys and the height bound), `cascade_foam_offset` (added to the foam, summed over all four), `band_limited` (off: every cascade spans every wavelength, as the reference does), and eight spectra, `spectrum_1/*` … `spectrum_8/*`, two per cascade (cascade i carries spectra 2i−1 and 2i) — `scale`, `wind_speed`, `direction_deg`, `fetch`, `spread_blend`, `swell`, `peak_enhancement`, `short_waves_fade`. Foam: `foam_bias`, `foam_threshold`, `foam_add`, `foam_decay`, and `foam_lift` (added to the summed offsets; ours, 0 is the reference). |
 | `fbm` | A `Pasture3DWaterFBM`: the fallback's knobs, a `vertex/*` set for the geometry and a `fragment/*` set for the normals. `seed` is the heading in radians, `frequency` the first octave's wavenumber, `height` the metres the normalised sum is scaled to. |
 | `min_wavelength` | Metres. The shortest wave the mesh must resolve: water bodies mesh at an eighth of it. A **cost** knob — the FFT picks its mip from the mesh spacing and the fBm drops octaves it cannot draw, so a coarser mesh loses short waves from the geometry while the fragment stage still draws them as slope. |
 
@@ -610,6 +610,16 @@ reference has no bend).
 
 **`foam_crest_amount`** scales the FFT's own foam, which comes from the wave Jacobian — whitecaps
 where the surface folds. The simulation's `foam_*` knobs on the profile shape it; the fBm draws none.
+How much of it shows is the profile's **`foam_lift`**: added to the summed `cascade_foam_offset`, higher
+is more foam. 0 is the reference's; the built-in ocean ships 0.25. The shader adds its own small lift per
+resolution on top (+0.315 at 128, +0.2 at 256, +0.13 at 512, 0 at 1024), so a sea shows the same amount
+of foam whatever `fft_resolution` the project runs at.
+
+**`fft_foam_footprint`** (default on) keeps the crest foam's amount at a distance. A far pixel covers
+many whitecaps; without it the shader thresholds their average, which is never foamy, and the foam ends
+about 40 m out. With it, each pixel shows the share of its area that foams. As the area grows to a good
+part of a cascade's repeat, that cascade's foam becomes an even tone rather than a pattern, so the short
+cascade's 7.7 m tile does not show as rows. Off is the reference.
 
 **River only — `detail_strength`** scales the ripple texture's slope (0.25 applies about 0.10 m/m rms
 slope; much past 0.5 tilts reflections below the horizon, which reads as coloured speckle).

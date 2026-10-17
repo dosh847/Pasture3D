@@ -2,7 +2,7 @@
 
 Status: **plan written 2026-10-16, from the user's review of `sculpting_2.tscn` after the reference port
 (PASTURE3D_WATER_REFERENCE_SPEC.md, R1–R7). Decisions taken 2026-10-16: every recommendation in §3, with
-P-D5 deferred as recommended. W1 built (§2.1); W2 built (§2.4); W3–W6 not started.**
+P-D5 deferred as recommended. W1 built (§2.1); W2 built (§2.4); W3 built (§2.2); W4–W6 not started.**
 
 The reference port proved that our shading equals GarrettGunnell/Water's, per pixel. It did not prove the
 water looks finished in a real scene. The user's review found five problems. Two had causes that could be
@@ -111,6 +111,44 @@ foam coverage at 1024.
   must miss.
 - Judge by eye that the foam sits on crests and not as a uniform haze. A bias can buy coverage with
   smeared foam.
+
+**Built (W3, 2026-10-16).** The premise was wrong in two ways, and the user re-scoped W3 from the numbers.
+- **256 is not foamless, and 1024 is not the target.** bench/WaterFoamCoverageProbe reads the cascades' foam
+  straight off the simulation's texels (mip 0, every drawn cascade, histograms convolved since the cascades
+  tile at incommensurate repeats). At the reference's offsets the mean crest is 0.047 at 1024, 0.018 at 512,
+  0.011 at 256 and 0.004 at 128: 256 makes a quarter of 1024's foam, not none, and 1024's is itself sparse.
+  The user chose the look by eye instead, from bench/WaterFoamLevelCompare's grids: +0.45 on the offset at
+  256 (mean crest 0.044, 27% coverage).
+  - A first rendered probe (a 64 m view) gave lifts that moved 40% between runs: the view saw less than one
+    tile of the 100 m cascade, and at 1024 each pixel already averaged eight texels before the clamp. The
+    texel probe is reproducible to 0.004.
+- **The offset, split in two.** `Pasture3DWaterFFT.foam_lift` (default 0, the reference) is added to the
+  offsets' sum; the built-in ocean_default ships 0.25, the lift at 1024 that gives the chosen mean crest.
+  The shader adds a per-resolution lift on top, `water_fft_foam_resolution_lift()`: 512 +0.13, 256 +0.2,
+  128 +0.315, 1024 0, so 256 lands on the user's +0.45 and every N shows the same mean crest. Matching the
+  MEAN also matched coverage (27–28% at every N), which coverage-matching alone would not have promised.
+  N is read off the texture with textureSize(), so a resolution change needs no material upload. The
+  correction is calibrated on the ocean only; lake_calm and pond_still are W5's.
+- **Foam vanished past ~40 m: the mips average the foam before the clamp.** clamp(mean) is far below
+  mean(clamp) where foam is patchy, and at the shipped offset the mean foam never clears it. The slope
+  texture now stores (slope, foam, foam²) (its Jacobian channel was unread), so the box mips carry the
+  foam's second moment, both read through the one anisotropic sampler. The fragment treats the summed
+  foam over a footprint as normal with that mean and variance (cascades add) and takes the clamp's
+  expectation in closed form, `water_fft_crest()`. `fft_foam_footprint` (default on) switches it; off is
+  the reference.
+- **Then the 7.7 m tile showed.** Foam that carries also shows the short cascade's lattice: its foam (mean
+  0.30 per texel, against the long cascade's 0.017) dominates the crest, and its 7.7 m repeat lines up in
+  rows down the view. As a pixel's footprint grows from 0.004 to 0.02 of a cascade's repeat, that
+  cascade's foam moments go to the whole tile's (its last mip): the same mean crest, an even tone instead
+  of rows. Judged by eye; no gate measures the lattice.
+- **Gate: WaterFoamGate.** The truth is the sea's mean crest from the texels of the frame being rendered.
+  [F] at N 1024, the rendered mean crest over 100, 400 and 1600 m top-down views (0.2 to 3.1 m a pixel) is
+  0.95 of the truth at every scale (tol 10%); control, the footprint off, 0.009 at 1600 m. [R] at every N
+  the rendered mean crest is within 3.3% of 256's (tol 10%); control, the truths at the uploaded offset
+  without the resolution lift, spread 12x.
+- WaterReferenceABGate runs with the ocean's foam_lift taken back out and the footprint off.
+- Not seen before because there was no far foam: one probe run crashed with an out-of-memory error
+  inside libpasture while switching N 512 to 128, and did not recur in three reruns.
 
 ### 2.3 Shore foam reads as one tiled image
 
@@ -229,7 +267,7 @@ Taken 2026-10-16: the recommendation in each. P-D5 waits for W5, as recommended.
 |---|---|---|
 | W1 | Built-in presets, scene migration, PondWater's profile (§2.1) | P-D2 |
 | W2 | Reflection diagnosis bench; then the fix it points to (§2.4) | P-D4 if H3 |
-| W3 | Foam calibration per N (§2.2) | P-D1 |
+| W3 | Foam calibration per N, and foam that carries to the distance (§2.2) | P-D1 |
 | W4 | Shore foam (§2.3) | P-D3 |
 | W5 | Preset review and tuning by eye, with the user (§2.5) | W1, P-D5 |
 | W6 | Production checks: the timing gates Phase 2, 6 and 7 (run only with the user's go-ahead), the low tier, Mobile, and a device that falls back from 1024 | W1–W5 |
