@@ -137,11 +137,12 @@ editor strips `.tres` comments when it re-saves.
 ## 3. Wave profiles
 
 Every body selects a **profile by name** from the scene's `Pasture3DPoolManager`. Every manager has
-four **built-in** profiles:
+five **built-in** profiles:
 
 | Profile | Heading | Longest wave | Height σ | Shortest wave meshed | Intended for |
 |---|---|---|---|---|---|
 | `ocean_default` | 22° | 137 m | 0.103 m | 9.1 m | `Pasture3DOcean` |
+| `ocean_choppy` | 22° / 45° | 256 m | 3.6 m | 9.1 m | `Pasture3DOcean`, rolling seas |
 | `lake_calm` | 35° | 25 m | 0.019 m | 17.2 m | Lakes over ~40 m across |
 | `pond_still` | 55° | 12 m | 0.009 m | 8.2 m | Ponds under ~40 m across |
 | `river_flow` | 0° | 10 m | 0.024 m | 5.0 m | A stream's buoyancy and mesh density only — see §4 |
@@ -149,6 +150,22 @@ four **built-in** profiles:
 **`ocean_default` is GarrettGunnell/Water's sea**, with every knob as the reference's scene sets it.
 A fresh `Pasture3DWaveProfile` is that sea, and so is a default `Pasture3DWaterFFT`. The name is kept so
 that saved scenes which select it keep working.
+
+**`ocean_choppy` is a rolling sea with chop on it**, the look of Sea of Thieves rather than the
+reference's calm. Its crests reach about 8 m above sea level and its troughs about 10 m below, so keep
+coasts and anything floating well clear of that. It changes two things:
+
+- **Swell on cascade 2.** The reference fills cascade 2 with two 20 m/s spectra, but neither draws nor
+  displaces it, and it repeats every 1/3 m. Its `cascade_tiles` entry need not match its length, so
+  switching it on as it stands gives sub-metre noise, not waves. Here it repeats at its own 256 m and
+  blows 14 m/s over 1000 km at half the reference's scale, from two headings. Its scale
+  (`spectrum_3/scale`, `spectrum_4/scale`, 0.5) is the dial for wave height: 0.9 makes a storm with
+  breaking walls of white water.
+- **Chop on cascade 1.** Its spectra blow at 8 m/s instead of 2 m/s, with `choppiness` 1.4. The steeper
+  sea folds much more, so `foam_lift` is -0.2, not 0.25. The `cascade_foam_offset` entries are summed,
+  so one cascade's offset moves every cascade's foam.
+
+To use it, set an ocean's `wave_profile` to `ocean_choppy`.
 
 **`lake_calm` and `pond_still` are the same sea, scaled down** (`fit_reference_sea`, below). The
 reference has no lake or pond, so these presets are a proposal: judge them by eye. They are much calmer

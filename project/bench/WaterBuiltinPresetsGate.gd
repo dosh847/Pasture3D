@@ -14,7 +14,7 @@ extends Node
 ##   Godot --headless --path project res://bench/WaterBuiltinPresetsGate.tscn
 
 const FIXTURE := "res://bench/fixtures/stale_water_presets.tscn"
-const STOCK := ["ocean_default", "lake_calm", "pond_still", "river_flow"]
+const STOCK := ["ocean_default", "ocean_choppy", "lake_calm", "pond_still", "river_flow"]
 const CRITERIA := 5
 
 var _failures := 0
@@ -123,7 +123,9 @@ func _criterion_m() -> void:
 	_check(pond != null and is_equal_approx(pond.fft.get("spectrum_1/wind_speed"), 3.5),
 		"CONTROL override's wind 3.5 m/s (%s)" % [pond.fft.get("spectrum_1/wind_speed") if pond else "null"])
 	_check(own.has("my_sea") and m.get_profile(&"my_sea") != null, "CONTROL the scene's own my_sea kept")
-	_check(m.get_profile_names().size() == 5, "five names answer (%s)" % [m.get_profile_names()])
+	# Every built-in plus the fixture's my_sea; the stock names it overrides are not extra.
+	var want := m.get_builtin_profile_names().size() + 1
+	_check(m.get_profile_names().size() == want, "%d names answer (%s)" % [want, m.get_profile_names()])
 	m.free()
 	_completed += 1
 

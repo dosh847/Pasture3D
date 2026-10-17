@@ -436,9 +436,10 @@ void Pasture3DPoolManager::_update_sun() {
 }
 
 /**
- * Fills _builtin_profiles with the four shipped sea states (spec §5.2, PASTURE3D_WATER_REFERENCE_SPEC.md §5).
+ * Fills _builtin_profiles with the five shipped sea states (spec §5.2, PASTURE3D_WATER_REFERENCE_SPEC.md §5).
  *
  *   ocean_default  the reference's sea, exactly, a new Pasture3DWaveProfile, but for its foam_lift (W3).
+ *   ocean_choppy   a 256 m swell on cascade 2 with 8 m/s chop on cascade 1: rolling seas, foam on the ridges.
  *   lake_calm      the reference's sea scaled to a 25 m longest wave, and pond_still to 12 m
  *   pond_still     (fit_reference_sea): lower wind, shorter fetch, smaller cascades and shallower
  *                  water, all by one Froude scaling, so each is the reference's sea seen smaller and
@@ -464,6 +465,49 @@ void Pasture3DPoolManager::_seed_builtin_profiles() {
 	// is the look chosen by eye at 256, where the shader's resolution lift adds 0.2 more.
 	ocean->get_fft()->set_foam_lift(0.25f);
 	_builtin_profiles.push_back(ocean);
+
+	// A rolling sea with chop on it, the look of Sea of Thieves rather than the reference's calm.
+	//
+	// SWELL: cascade 2. The reference simulates two 20 m/s spectra on it and then neither draws nor displaces
+	// it, and tiles it every 1/3 m -- its _Tile need not be its length -- so turning it on as it stands gives
+	// sub-metre noise and foam, not waves. Here it is tiled at its own 256 m and carries a 14 m/s wind over
+	// 1000 km at half the reference's scale, two headings 23 degrees apart. Its foamSubtract is -0.5: the
+	// offsets are SUMMED, so a cascade cannot be kept out of the foam by its own offset alone without taking
+	// every other cascade's foam with it.
+	// CHOP: cascade 1's spectra 1-2 at 8 m/s over 20 km instead of 2 m/s, choppiness 1.4. The steeper sea folds
+	// far more, so foam_lift goes DOWN to -0.2; at the default's 0.25 it whitens over.
+	// Chosen by eye against ocean_default (2026-10-16, bench/ChoppyOceanProbe). Scale 0.9 on the swell read
+	// as a storm with breaking walls; chop alone, without the swell, barely moved the surface.
+	Ref<Pasture3DWaveProfile> choppy;
+	choppy.instantiate();
+	choppy->set_profile_name("ocean_choppy");
+	Ref<Pasture3DWaterFFT> chop = choppy->get_fft();
+	for (int i = 0; i < 2; i++) {
+		chop->set_spectrum_knob(i, "wind_speed", 8.f);
+		chop->set_spectrum_knob(i, "fetch", 20000.f);
+	}
+	const float swell_heading[2] = { 22.f, 45.f };
+	for (int i = 2; i < 4; i++) {
+		chop->set_spectrum_knob(i, "scale", 0.5f);
+		chop->set_spectrum_knob(i, "wind_speed", 14.f);
+		chop->set_spectrum_knob(i, "fetch", 1000000.f);
+		chop->set_spectrum_knob(i, "direction_deg", swell_heading[i - 2]);
+		chop->set_spectrum_knob(i, "spread_blend", 0.7f);
+	}
+	Vector4 lengths = chop->get_cascade_lengths();
+	lengths.y = 256.f;
+	chop->set_cascade_lengths(lengths);
+	Vector4 tiles = chop->get_cascade_tiles();
+	tiles.y = 256.f;
+	chop->set_cascade_tiles(tiles);
+	Vector4 foam_offset = chop->get_cascade_foam_offset();
+	foam_offset.y = -0.5f;
+	chop->set_cascade_foam_offset(foam_offset);
+	chop->set_cascade_drawn(chop->get_cascade_drawn() | 0b0010);
+	chop->set_cascade_displaces(chop->get_cascade_displaces() | 0b0010);
+	chop->set_choppiness(1.4f);
+	chop->set_foam_lift(-0.2f);
+	_builtin_profiles.push_back(choppy);
 
 	struct Scaled {
 		const char *name;
