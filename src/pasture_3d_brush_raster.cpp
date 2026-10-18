@@ -449,6 +449,7 @@ struct BrushModStep {
 	int graph_feather_mode = 0; // 0=USE_BRUSH_MASK, 1=CUSTOM, 2=OFF
 	double graph_custom_falloff_width = 15.0;
 	PackedFloat32Array graph_custom_lut;
+	double graph_full_reach = 0.0; // metres past the outline the graph composites at 1 (Leveler OUTSIDE wall)
 	ErosionParams erosion; // EROSION
 	PackedFloat32Array erodability; // EROSION: the hardness LUT, empty for uniform rock
 	bool publish_fields = false; // EROSION: write the four channels into the stack's field context
@@ -651,6 +652,7 @@ bool brush_mod_build(const Dictionary &p_params, std::vector<BrushModStep> &r_st
 			st.graph_feather_mode = d.get("feather_mode", 0);
 			st.graph_custom_falloff_width = d.get("custom_falloff_width", 15.0);
 			st.graph_custom_lut = d.get("custom_lut", PackedFloat32Array());
+			st.graph_full_reach = d.get("full_reach", 0.0);
 			st.frozen = d.get("frozen", false);
 			st.defer = d.get("defer", false);
 			st.serve_stale = d.get("serve_stale", true);
@@ -1541,7 +1543,7 @@ void Pasture3DData::_apply_control_block(Pasture3DLayer *p_layer, const int p_mi
 //   `p_point_pr(i)`  the mask a generator run (Noise / Relief, and the bake-scale lattice) multiplies by at
 //                    cell i. Called only where amp[i] is finite, in the same place the fused loop computed it,
 //                    so a Mound bake is bitwise what it was (gate LB-B).
-//   `p_graph_profile(fmode, custom_fw, custom_lut, gprofile)`  fills a GRAPH step's feather mask.
+//   `p_graph_profile(fmode, custom_fw, custom_lut, full_reach, gprofile)`  fills a GRAPH step's feather mask.
 //
 // On return `r_vals` holds the finished grid (a delta under ADD, an absolute target otherwise), NaN where
 // nothing is written. Margin restoration and the final write stay with the host.
@@ -1744,7 +1746,7 @@ static void brush_run_step_loop(std::vector<BrushModStep> &steps, std::vector<do
 		} else if (steps[si].kind == BrushModStep::GRAPH) {
 			const int fmode = steps[si].graph_feather_mode; // 0=USE_BRUSH_MASK, 1=CUSTOM, 2=OFF
 			std::vector<float> gprofile((size_t)gw * gh, 0.f);
-			p_graph_profile(fmode, MAX(steps[si].graph_custom_falloff_width, 0.001), steps[si].graph_custom_lut, gprofile);
+			p_graph_profile(fmode, MAX(steps[si].graph_custom_falloff_width, 0.001), steps[si].graph_custom_lut, steps[si].graph_full_reach, gprofile);
 			const int ps = steps[si].preview_scale;
 			if (ps > 1 && gw >= 2 * ps && gh >= 2 * ps) {
 				BrushModStep &st = steps[si];
@@ -2180,7 +2182,8 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 				}
 				return pr;
 			},
-			[&](const int fmode, const double custom_fw, const PackedFloat32Array &custom_lut, std::vector<float> &gprofile) {
+			[&](const int fmode, const double custom_fw, const PackedFloat32Array &custom_lut, const double full_reach,
+					std::vector<float> &gprofile) {
 				const double brush_fw = MAX(falloff_width, 0.001);
 
 				// A pure function of each cell's own signed distance, so the rows split across threads exactly.
@@ -2189,6 +2192,12 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 						const int row = iz * gw;
 						for (int ix = 0; ix < gw; ix++) {
 							const int i = row + ix;
+							// A graph that builds its own falloff past the outline (the Leveler's OUTSIDE wall)
+							// composites at full strength out to that reach. Twin of `_graph_feather_mask`.
+							if (full_reach > 0.0 && ((double)field[i] + edge_offset + full_reach) > 0.0) {
+								gprofile[i] = 1.f;
+								continue;
+							}
 							if (fmode == 2) {
 								// OFF means full strength ACROSS THE LOOP, so the interior is 1 and only the band has
 								// anywhere to fade — already continuous, and translating it would take strength away
@@ -2340,7 +2349,7 @@ PackedFloat32Array Pasture3DData::brush_run_stack_on_field(const Dictionary &p_p
 
 	brush_run_step_loop(steps, amp, basey, vals, add, gw, gh, vs, min_x, min_z, fields, host_fields, frame,
 			[&](const int i) -> double { return profile[(size_t)i]; },
-			[&](const int fmode, const double, const PackedFloat32Array &, std::vector<float> &gprofile) {
+			[&](const int fmode, const double, const PackedFloat32Array &, const double, std::vector<float> &gprofile) {
 				for (size_t k = 0; k < n; k++) {
 					gprofile[k] = fmode == 2 ? (profile[k] > 0.0 ? 1.f : 0.f) : (float)profile[k];
 				}

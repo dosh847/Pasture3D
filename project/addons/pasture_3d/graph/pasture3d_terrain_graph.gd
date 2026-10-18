@@ -539,6 +539,16 @@ func reads_footprint() -> bool:
 	return false
 
 
+## The largest `outward_reach()` of any unmuted node: how far past the host brush's outline this graph
+## writes at full strength. See Pasture3DGraphNode.outward_reach.
+func outward_reach() -> float:
+	var r := 0.0
+	for node in nodes:
+		if node != null and not node.muted:
+			r = maxf(r, node.outward_reach())
+	return r
+
+
 ## The footprint pin over `p_rect` at `p_gw` x `p_gh`: nearest footprint cell to each cell centre, 0 outside
 ## the footprint's rect, 1.0 everywhere when there is none. The oracle for graph_footprint_fill.
 static func footprint_grid(p_fp: Dictionary, p_gw: int, p_gh: int, p_rect: Rect2) -> PackedFloat32Array:
@@ -885,9 +895,13 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 ## measuring the wrong thing.
 func _path_inputs(p_ni: int, p_inputs_of: Dictionary) -> Array:
 	var out: Array = []
+	var k := 0
 	for s_i in p_inputs_of.get(p_ni, []):
 		var src: int = s_i
-		if src < 0 or src >= nodes.size() or nodes[src] == null:
+		k += 1
+		if src < 0:
+			out.append(nodes[p_ni].unwired_path(k - 1))
+		elif src >= nodes.size() or nodes[src] == null:
 			out.append(null)
 		else:
 			out.append(_resolved_path_of(src, p_inputs_of))
@@ -1723,13 +1737,18 @@ func _path_operand_of(p_ni: int, p_inputs_of: Dictionary) -> Pasture3DGraphPath:
 		return null
 	var types := nodes[p_ni].input_port_types()
 	var srcs: Array = p_inputs_of.get(p_ni, [])
-	for k in range(mini(types.size(), srcs.size())):
+	var first_unwired := -1
+	for k in range(types.size()):
 		if int(types[k]) != Pasture3DGraphNode.PortType.PATH:
 			continue
-		var src := int(srcs[k])
+		var src := int(srcs[k]) if k < srcs.size() else -1
 		if src >= 0 and src < nodes.size() and nodes[src] != null:
 			return _resolved_path_of(src, p_inputs_of)
-	return null
+		if src < 0 and first_unwired < 0:
+			first_unwired = k
+	# Nothing wired: the node's own fallback for the empty socket, the same one `_path_inputs` hands the
+	# GDScript route.
+	return nodes[p_ni].unwired_path(first_unwired) if first_unwired >= 0 else null
 
 
 ## The PATH a node actually produces, resolved through the whole upstream filter chain — or null.

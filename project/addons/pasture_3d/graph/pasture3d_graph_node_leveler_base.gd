@@ -67,7 +67,7 @@ const LUT_SIZE := 256
 		emit_changed()
 
 ## Use the loop's own half-width, at the nearest point on the loop, as the wall width. Inert without a
-## loop — `feather` applies then.
+## loop — `feather` applies then. The brush's own outline (an empty `loop` socket) carries no widths.
 @export var feather_from_path_width: bool = false:
 	set(v):
 		feather_from_path_width = v
@@ -113,11 +113,51 @@ const LUT_SIZE := 256
 var _path: Pasture3DGraphPath = null
 var _loop_open: bool = false
 
+## The HOST brush's own outline, read as the loop when the `loop` socket is empty. Stamped by
+## Pasture3DGraphSources.resolve_host_loops, never saved: an empty socket means "this brush's area", so a
+## Leveler inside a brush graph builds its walls from the brush's spline rather than from the grid border.
+## Null with no host, or a host whose spline is not a closed ring — then the area is the mask and the walls
+## start at the grid border, as before.
+var host_loop: Pasture3DGraphPath = null
+
+
+## Assign only when the outline actually changed, by content digest — the rule Pasture3DGraphSources._assign
+## gives for sources: `changed` bumps the revision and invalidates every cache downstream, so stamping an
+## identical loop on every resolve would re-solve the graph on every bake.
+func set_host_loop(p_loop: Pasture3DGraphPath) -> void:
+	if p_loop == null and host_loop == null:
+		return
+	if p_loop != null and host_loop != null and p_loop.content_digest() == host_loop.content_digest():
+		return
+	host_loop = p_loop
+	emit_changed()
+
+
+## Port 1 (`loop`) falls back to the host brush's outline when nothing is wired. Both evaluator routes ask
+## this, so the GDScript and native routes read the same ring.
+func unwired_path(p_port: int) -> Pasture3DGraphPath:
+	return host_loop if p_port == 1 else null
+
 ## Set by the last GDScript-side evaluation, read by the gates and the warnings. Does not exist on the
 ## lowered route — a graph solved natively never touches the node.
 var last_level: float = NAN
 var last_core_count: int = 0
 var evaluated: bool = false
+
+
+## An OUTSIDE wall lies beyond the area, and inside a brush graph the area is (by default) the brush's own
+## outline, so the brush must widen its footprint by the wall width or crop the wall at its rim. With
+## `feather_from_path_width`, the widest half-width of the last loop seen; `feather` before the first
+## evaluation, or when the loop carries no widths.
+func outward_reach() -> float:
+	if feather_side != FeatherSide.OUTSIDE:
+		return 0.0
+	if feather_from_path_width and _path != null and not _path.half_widths.is_empty():
+		var w := 0.0
+		for h in _path.half_widths:
+			w = maxf(w, h)
+		return w * path_width_scale
+	return feather
 
 
 func role() -> Role:
@@ -199,6 +239,9 @@ func node_warnings() -> PackedStringArray:
 		out.append("Leveler: the loop is an open path, so it is ignored. Close it to use it as an area.")
 	if feather_from_path_width and _path == null:
 		out.append("Leveler: Feather From Path Width needs a closed loop wired in; Feather applies instead.")
+	elif feather_from_path_width and _path == host_loop and _path.half_widths.is_empty():
+		out.append("Leveler: Feather From Path Width reads the brush's own outline, which carries no "
+				+ "widths, so every wall is 1 m. Wire a loop with widths, or turn it off and use Feather.")
 	if evaluated and last_core_count == 0:
 		out.append("Leveler: no cell is fully inside the area, so the height passes through unchanged.")
 	return out

@@ -781,6 +781,32 @@ func graph_shape_path(p_index: int = 0) -> Pasture3DGraphPath:
 	return path
 
 
+## This brush's own area as a closed PATH in world XZ, for a graph node reading an empty loop socket (the
+## Leveler). Unlike `graph_shape_path`, which hands over the authored control points, this is the BAKED
+## outline — fillet and curve handles included — so the ring the walls are measured from is the same one
+## the brush's footprint is rasterised from. Null when the brush is not a closed ring or has no usable
+## spline: an open line has no inside to level.
+func graph_host_loop(p_index: int = 0) -> Pasture3DGraphPath:
+	if not _is_closed():
+		return null
+	var splines := _get_splines()
+	if p_index < 0 or p_index >= splines.size():
+		return null
+	var sp: Path3D = splines[p_index]
+	if not is_instance_valid(sp) or sp.curve == null or sp.curve.point_count < 3:
+		return null
+	var pts := PackedVector2Array()
+	for w in _baked_world_points(sp):
+		pts.append(Vector2(w.x, w.z))
+	if pts.size() < 3:
+		return null
+	var path := Pasture3DGraphPath.new()
+	path.source_label = shape_key()
+	path.points = pts
+	path.closed = true
+	return path
+
+
 ## Nearest Pasture3D ancestor (direct parent first), or null. Drives the auto-terrain assignment.
 func _terrain_ancestor() -> Pasture3D:
 	var n := get_parent()
@@ -4276,9 +4302,23 @@ func _editor_points_shifted(_p_ur: EditorUndoRedoManager, _p_gpi: int, _p_delta:
 	pass
 
 
-## Toggle a loop point between a smooth curve and a sharp corner (double-click). Smoothing seeds
-## mirrored in/out tangents from the neighbour direction; a second toggle zeroes them back to a corner.
-## Undoable. Used by the brush gizmo.
+## Whether a point's tangents are MIRRORED: both non-trivial, collinear and opposite, roughly equal
+## length. The gizmo mirrors the partner handle while dragging exactly such a point, so this is the one
+## definition of "smooth" — the double-click toggle below decides by it too.
+static func tangents_mirrored(p_in: Vector3, p_out: Vector3) -> bool:
+	if p_in.length() < 0.02 or p_out.length() < 0.02:
+		return false
+	return (p_in + p_out).length() < 0.1 * maxf(p_in.length(), p_out.length())
+
+
+## Toggle a loop point between a smooth curve and a sharp corner (double-click). Undoable. Used by the
+## brush gizmo.
+##
+## Only a point that is already smooth (`tangents_mirrored`) is sharpened. Anything else is smoothed:
+## a corner (both tangents zero) gets mirrored handles seeded from the neighbour direction, and a BROKEN
+## point (non-zero, not mirrored — Shift-dragged, one side zeroed, a road's corner fillet) gets mirrored
+## handles along its current direction. Sharpening a broken point used to be the rule, and its zero
+## tangents draw as stubs pointing at the neighbours, which look aligned but do not mirror when dragged.
 func editor_smooth_point(path: Path3D, idx: int) -> void:
 	if path == null or path.curve == null or idx < 0 or idx >= path.curve.point_count:
 		return
@@ -4287,9 +4327,9 @@ func editor_smooth_point(path: Path3D, idx: int) -> void:
 	var old_out := c.get_point_out(idx)
 	var new_in := Vector3.ZERO
 	var new_out := Vector3.ZERO
-	var smoothing := old_in.length() <= 0.02 and old_out.length() <= 0.02
+	var smoothing := not tangents_mirrored(old_in, old_out)
 	if smoothing:
-		new_out = _smooth_handle(path, idx)
+		new_out = _aligned_handle(path, idx, old_in, old_out)
 		new_in = -new_out
 	var ur := _editor_undo()
 	if ur:
@@ -4337,6 +4377,24 @@ func editor_set_point_tangents(path: Path3D, idx: int, p_in: Vector3, p_out: Vec
 		return
 	path.curve.set_point_in(idx, p_in)
 	path.curve.set_point_out(idx, p_out)
+
+
+## The out-handle that aligns a non-smooth point. A broken point keeps its own heading (out minus in, so
+## a one-sided point follows its live side) and the mean length of its non-zero sides; a corner, or a
+## point whose two sides cancel, falls back to `_smooth_handle`.
+func _aligned_handle(path: Path3D, idx: int, p_in: Vector3, p_out: Vector3) -> Vector3:
+	var li := p_in.length()
+	var lo := p_out.length()
+	var dir := p_out - p_in
+	if (li <= 0.02 and lo <= 0.02) or dir.length() < 0.001:
+		return _smooth_handle(path, idx)
+	var n := 0
+	var total := 0.0
+	for l in [li, lo]:
+		if l > 0.02:
+			total += l
+			n += 1
+	return dir.normalized() * (total / float(n))
 
 
 ## A mirrored tangent handle (path-local) for smoothing a point: along the previous→next direction,
@@ -6003,6 +6061,7 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 			blk["feather_mode"] = int(m.feather_mode)
 			blk["custom_falloff_width"] = m.custom_falloff_width
 			blk["custom_lut"] = _ramp_lut(m.custom_falloff_curve)
+			blk["full_reach"] = m.graph.outward_reach()
 		if m is Pasture3DNodeRelief:
 			m.material.set_host_frame(p_ex, p_ez)
 			# §9.9. Offered on EVERY compile, never left set from a previous pass: the flag says what is
@@ -6682,7 +6741,7 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	# `_graph_feather_mask`, which is also what the gate asks rather than restating.
 	var mask := _graph_feather_mask(n, sdf, edge_off, _effective_modifier_margin(), fmode,
 			custom_fw if fmode == 1 else brush_fw, custom_curve if fmode == 1 else brush_curve,
-			mm, mf, profile)
+			mm, mf, profile, g.outward_reach())
 	# The Input node's footprint pin is this mask: stamped before anything below compiles or evaluates.
 	g.set_host_footprint(PackedFloat32Array(Array(mask)), gw, gh, rect)
 
@@ -6797,7 +6856,8 @@ func _composite_graph(p_vals: PackedFloat32Array, p_z: PackedFloat32Array, p_zo:
 ## At margin 0 every expression here is the historical one, cell for cell.
 func _graph_feather_mask(p_n: int, p_sdf: PackedFloat32Array, p_edge_off: float, p_margin: float,
 		p_fmode: int, p_fw: float, p_curve: Curve, p_margin_mask: PackedByteArray,
-		p_margin_feather: PackedFloat64Array, p_profile: PackedFloat64Array) -> PackedFloat64Array:
+		p_margin_feather: PackedFloat64Array, p_profile: PackedFloat64Array,
+		p_full_reach: float = 0.0) -> PackedFloat64Array:
 	var mask := PackedFloat64Array()
 	mask.resize(p_n)
 	var have_sdf := p_sdf.size() == p_n
@@ -6808,6 +6868,11 @@ func _graph_feather_mask(p_n: int, p_sdf: PackedFloat32Array, p_edge_off: float,
 			# A host that runs the stack without a signed field (the road brush) has no rim to translate a
 			# ramp away from; its own profile is the only mask there is.
 			mask[k] = p_profile[k] if p_profile.size() == p_n else 1.0
+			continue
+		# A graph that builds its own falloff past the outline (the Leveler's OUTSIDE wall) composites at
+		# full strength out to that reach; the brush's ramp on top would taper the wall a second time.
+		if p_full_reach > 0.0 and (p_sdf[k] + p_edge_off + p_full_reach) > 0.0:
+			mask[k] = 1.0
 			continue
 		if p_fmode == 2: # OFF
 			if have_mm and p_margin_mask[k] == 1:
@@ -7561,8 +7626,23 @@ func _padding() -> float:
 
 ## The Modifier Margin actually in force: the exported metres, but only on a host that runs the stack (the
 ## property is hidden elsewhere and a stray stored value must not silently widen a brush that can't use it).
+##
+## A graph whose nodes write past the outline (a Leveler's OUTSIDE wall, `_graph_outward_reach`) raises it
+## to that reach, so the authored margin is a floor rather than something the user has to match by hand.
 func _effective_modifier_margin() -> float:
-	return maxf(modifier_margin, 0.0) if _supports_modifiers() else 0.0
+	if not _supports_modifiers():
+		return 0.0
+	return maxf(maxf(modifier_margin, 0.0), _graph_outward_reach())
+
+
+## The largest `outward_reach()` of any active graph modifier: metres past the outline a graph writes at
+## full strength. See Pasture3DGraphNode.outward_reach.
+func _graph_outward_reach() -> float:
+	var r := 0.0
+	for m in modifiers:
+		if m is Pasture3DNodeGraph and m.is_active() and m.graph != null:
+			r = maxf(r, m.graph.outward_reach())
+	return r
 
 
 ## The lateral reach the footprint AABB is padded by on every side: the subclass's intrinsic `_padding()`

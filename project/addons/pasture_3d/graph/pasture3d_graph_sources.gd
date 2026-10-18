@@ -37,6 +37,30 @@ static func resolve(p_graph: Pasture3DTerrainGraph, p_host: Node = null) -> int:
 	filled += resolve_splines(p_graph, p_host)
 	filled += resolve_publish_targets(p_graph, p_host)
 	filled += resolve_host_placements(p_graph, p_host)
+	filled += resolve_host_loops(p_graph, p_host)
+	return filled
+
+
+## Stamp the HOST brush's own outline on every node that reads it for an empty PATH socket (the Leveler's
+## `loop`). Built once per resolve and shared, so every such node names one geometry-table entry. No host,
+## a host that is not a brush, or a brush whose spline is not a closed ring stamps null, which leaves those
+## nodes reading their socket as truly empty.
+static func resolve_host_loops(p_graph: Pasture3DTerrainGraph, p_host: Node = null) -> int:
+	if p_graph == null:
+		return 0
+	var loop: Pasture3DGraphPath = null
+	var built := false
+	var filled := 0
+	for node in p_graph.nodes:
+		if node == null or not node.has_method("set_host_loop"):
+			continue
+		if not built:
+			built = true
+			if p_host is Pasture3DTerrainBrush:
+				loop = (p_host as Pasture3DTerrainBrush).graph_host_loop()
+		node.set_host_loop(loop)
+		if loop != null:
+			filled += 1
 	return filled
 
 

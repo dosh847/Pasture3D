@@ -333,14 +333,6 @@ func pick_handle_at(p_brush: Node3D, p_camera: Camera3D, p_point: Vector2) -> Ar
 	return _h.pick_handle_at(p_brush, p_camera, p_point)
 
 
-## A point is "smooth" when both tangents are non-trivial and roughly mirror images (collinear, equal
-## length). Such points keep their handles mirrored while dragging.
-func _is_smooth(p_in: Vector3, p_out: Vector3) -> bool:
-	if p_in.length() < 0.02 or p_out.length() < 0.02:
-		return false
-	return (p_in + p_out).length() < 0.1 * maxf(p_in.length(), p_out.length())
-
-
 ## Box-select: every loop POSITION inside the selection frustum (group move). Tangents are excluded so
 ## a box drag never drags curvature handles by surprise.
 func _subgizmos_intersect_frustum(p_gizmo: EditorNode3DGizmo, _camera: Camera3D, p_frustum: Array[Plane]) -> PackedInt32Array:
@@ -413,7 +405,8 @@ func _set_subgizmo_transform(p_gizmo: EditorNode3DGizmo, p_id: int, p_transform:
 		_orig[p_id] = path.curve.get_point_in(idx) if kind == 1 else path.curve.get_point_out(idx)
 		_start[p_id] = _h.handle_display_local(node, path, idx, kind)
 		if not _smooth_drag.has(gpi):
-			_smooth_drag[gpi] = _is_smooth(path.curve.get_point_in(idx), path.curve.get_point_out(idx))
+			_smooth_drag[gpi] = Pasture3DTerrainBrush.tangents_mirrored(path.curve.get_point_in(idx),
+					path.curve.get_point_out(idx))
 	var delta_node: Vector3 = p_transform.origin - (_start[p_id] as Vector3)
 	var delta_path: Vector3 = path.global_transform.basis.inverse() * (node.global_transform.basis * delta_node)
 	var new_off: Vector3 = (_orig[p_id] as Vector3) + delta_path

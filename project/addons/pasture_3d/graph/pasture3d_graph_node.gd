@@ -395,6 +395,22 @@ func set_path_inputs(_p_paths: Array) -> void:
 	pass
 
 
+## The PATH a node reads on input port `p_port` when NOTHING is wired there, or null. Both evaluator routes
+## ask it — `_path_inputs` for the GDScript hand-off and `_path_operand_of` for the native geometry table —
+## so a fallback cannot exist on one route and not the other. A port wired to something that resolves to
+## no path still reads null: a wire is a choice, and this only answers for an empty socket.
+func unwired_path(_p_port: int) -> Pasture3DGraphPath:
+	return null
+
+
+## Metres past the HOST brush's outline this node writes, at full strength, when it runs inside a brush
+## graph (the Leveler's outward wall). The brush widens its footprint by the largest of these and holds the
+## graph's composite mask at 1 across that band, so a node that builds its own falloff is neither cropped
+## at the rim nor tapered a second time by the brush's. 0 for every node that stays inside the outline.
+func outward_reach() -> float:
+	return 0.0
+
+
 ## Types for each input port. Defaults to HEIGHT for all ports.
 func input_port_types() -> PackedInt32Array:
 	var arr := PackedInt32Array()
