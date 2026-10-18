@@ -48,5 +48,4 @@ shader_parameter/_vertex_density = 1.0
 shader_parameter/_region_size = 1.0
 shader_parameter/_region_texel_size = 1.0
 shader_parameter/_region_map_size = 1
-shader_parameter/_region_map = PackedInt32Array()
 shader_parameter/_region_locations = PackedVector2Array()
