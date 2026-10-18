@@ -60,6 +60,10 @@ private:
 	int _region_size = 0; // Set by Pasture3D::set_region_size
 	Vector2i _region_sizev = V2I(_region_size);
 	real_t _vertex_spacing = 1.f; // Set by Pasture3D::set_vertex_spacing
+	// The height of unsculpted ground (Pasture3D::base_height). New regions start at it; changing it moves
+	// the Base layer of every region by the difference. Each region's index entry records the base its file
+	// was written under, so a region unloaded during a change catches up when it loads (_rebase_if_stale).
+	real_t _base_height = 0.f;
 
 	AABB _edited_area;
 	Vector2 _master_height_range = V2_ZERO;
@@ -284,6 +288,10 @@ private:
 	// Recomposite a just-loaded region when the index says it was written under a different stack.
 	// Returns whether it recomposited.
 	bool _recomposite_if_stale(const Vector2i &p_region_loc);
+	// Add p_delta to a loaded region's Base layer and recomposite it. Marks it modified.
+	void _shift_region_base(const Vector2i &p_region_loc, const real_t p_delta);
+	// Shift a just-loaded region whose file was written under another base height. Returns whether it did.
+	bool _rebase_if_stale(const Vector2i &p_region_loc);
 
 public:
 	Pasture3DData() { _region_index.instantiate(); }
@@ -719,6 +727,10 @@ public:
 	void update_master_height(const real_t p_height);
 	void update_master_heights(const Vector2 &p_low_high);
 	void calc_height_range(const bool p_recursive = false);
+	// Called by Pasture3D::set_base_height. Before load, only records it; after, moves the loaded regions
+	// and returns the area they cover (empty when none moved).
+	AABB set_base_height(const real_t p_height);
+	real_t get_base_height() const { return _base_height; }
 
 	void import_images(const TypedArray<Image> &p_images, const Vector3 &p_global_position = V3_ZERO,
 			const real_t p_offset = 0.f, const real_t p_scale = 1.f);

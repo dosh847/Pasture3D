@@ -157,6 +157,10 @@
 		<member name="assets" type="Pasture3DAssets" setter="set_assets" getter="get_assets">
 			The list of texture and mesh assets used by Pasture3D. You can optionally save this as an external [code skip-lint].tres[/code] text file if you wish to share it with Pasture3D nodes in other scenes.
 		</member>
+		<member name="base_height" type="float" setter="set_base_height" getter="get_base_height" default="0.0">
+			The height of unsculpted ground, in metres. New regions start at this height. Changing it moves the hand-sculpted Base layer of every region by the difference, so you can drop a sea floor well below a sea level kept at 0. Regions that are unloaded during the change are moved when they next load.
+			Brush layers are not re-baked. An ADD layer moves with the ground. A MAX or REPLACE layer keeps the heights it was baked at until you run Bake All Brushes, where a brush with [code]relative_to_terrain[/code] then rises from the new ground. The material's [code]ground_level[/code] moves by the same difference.
+		</member>
 		<member name="buffer_shader_override" type="Shader" setter="set_buffer_shader_override" getter="get_buffer_shader_override">
 		</member>
 		<member name="buffer_shader_override_enabled" type="bool" setter="set_buffer_shader_override_enabled" getter="is_buffer_shader_override_enabled" default="false">

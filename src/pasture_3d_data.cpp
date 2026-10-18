@@ -339,6 +339,7 @@ void Pasture3DData::initialize(Pasture3D *p_terrain) {
 	_terrain = p_terrain;
 	_region_map.resize(get_region_map_size() * get_region_map_size());
 	_vertex_spacing = _terrain->get_vertex_spacing();
+	_base_height = _terrain->get_base_height(); // Before loading: regions written under another are moved to it
 	if (!prev_initialized && !_terrain->get_data_directory().is_empty()) {
 		load_directory(_terrain->get_data_directory());
 	}
@@ -575,6 +576,10 @@ Ref<Pasture3DRegion> Pasture3DData::add_region_blank(const Vector2i &p_region_lo
 	region->set_location(p_region_loc);
 	region->set_region_size(_region_size);
 	region->set_vertex_spacing(_vertex_spacing);
+	if (_base_height != 0.f) {
+		region->sanitize_maps();
+		region->get_height_map()->fill(Color(_base_height, 0.f, 0.f, 1.f));
+	}
 	if (add_region(region, p_update) == OK) {
 		region->set_modified(true);
 		return region;
@@ -1073,6 +1078,7 @@ void Pasture3DData::load_directory(const String &p_dir) {
 	}
 	bool recomposited = false;
 	for (const Vector2i &region_loc : _regions.keys()) {
+		recomposited = _rebase_if_stale(region_loc) || recomposited;
 		recomposited = _recomposite_if_stale(region_loc) || recomposited;
 		_index_region(region_loc);
 	}
@@ -1187,6 +1193,7 @@ Error Pasture3DData::adopt_region(const Vector2i &p_region_loc, const Ref<Pastur
 		_evict_region_tiles(p_region_loc);
 		return err;
 	}
+	_rebase_if_stale(p_region_loc);
 	_recomposite_if_stale(p_region_loc);
 	_index_region(p_region_loc);
 	_bump_generation(p_region_loc);
@@ -1384,6 +1391,7 @@ void Pasture3DData::_index_region(const Vector2i &p_region_loc) {
 	Dictionary entry = _region_index->get_entry(p_region_loc).duplicate();
 	entry["height_range"] = region->get_height_range();
 	entry["stack_signature"] = _stack_signature();
+	entry["base_height"] = _base_height; // Unmodified: the file holds this base (see _rebase_if_stale)
 	entry["type_path"] = region->get_type_path();
 	entry["texel_ratio"] = region->get_texel_ratio();
 	entry["locked"] = region->is_locked();
@@ -1495,6 +1503,99 @@ void Pasture3DData::_evict_region_tiles(const Vector2i &p_region_loc) {
 			layer->restore_region_tiles(p_region_loc, Dictionary()); // Empty = erase.
 		}
 	}
+}
+
+// Adds p_delta to every height in an RF (or RGF: value, weight) image. NaN is "no value" and stays NaN.
+static void add_to_height_image(const Ref<Image> &p_image, const real_t p_delta) {
+	if (p_image.is_null()) {
+		return;
+	}
+	const Image::Format format = p_image->get_format();
+	ERR_FAIL_COND_MSG(format != Image::FORMAT_RF && format != Image::FORMAT_RGF,
+			"Cannot shift a height image of format " + itos(format));
+	const int stride = format == Image::FORMAT_RF ? 1 : 2;
+	const int64_t n = (int64_t)p_image->get_width() * p_image->get_height();
+	float *f = reinterpret_cast<float *>(p_image->ptrw());
+	for (int64_t i = 0; i < n; i++) {
+		float &v = f[i * stride];
+		if (!std::isnan(v)) {
+			v += (float)p_delta;
+		}
+	}
+}
+
+void Pasture3DData::_shift_region_base(const Vector2i &p_region_loc, const real_t p_delta) {
+	Pasture3DRegion *region = get_region_ptr(p_region_loc);
+	if (!region || region->is_deleted() || p_delta == 0.f) {
+		return;
+	}
+	Ref<Image> height_map = region->get_height_map();
+	const int base_idx = _layer_stack.is_valid() ? _layer_stack->find_base_layer(TYPE_HEIGHT) : -1;
+	Pasture3DLayer *base = base_idx >= 0 ? _layer_stack->get_layer_ptr(base_idx) : nullptr;
+	if (!base || !base->has_region(p_region_loc) || base->get_tile(p_region_loc, V2I_ZERO) == height_map) {
+		// No layers, or the Base aliases the region map: the map IS the Base.
+		add_to_height_image(height_map, p_delta);
+	} else {
+		// The Base is its own source: move it, and the layers above re-blend over it.
+		Dictionary tiles = base->get_tiles()[p_region_loc];
+		Array images = tiles.values();
+		for (int i = 0; i < images.size(); i++) {
+			add_to_height_image(images[i], p_delta);
+		}
+		base->set_modified(true);
+		composite_region(p_region_loc, Rect2i(), false);
+	}
+	region->calc_height_range();
+	region->set_modified(true);
+	region->set_edited(true);
+}
+
+bool Pasture3DData::_rebase_if_stale(const Vector2i &p_region_loc) {
+	const Dictionary entry = _region_index->get_entry(p_region_loc);
+	// No entry: nothing says what this file was written under. An entry from before base heights: 0.
+	if (entry.is_empty()) {
+		return false;
+	}
+	const real_t written = entry.get("base_height", 0.0);
+	if (written == _base_height || !get_region_ptr(p_region_loc)) {
+		return false;
+	}
+	LOG(INFO, "Region ", p_region_loc, " was written at base height ", written, "; moving it to ", _base_height);
+	_shift_region_base(p_region_loc, _base_height - written);
+	return true;
+}
+
+AABB Pasture3DData::set_base_height(const real_t p_height) {
+	if (p_height == _base_height) {
+		return AABB();
+	}
+	const real_t delta = p_height - _base_height;
+	_base_height = p_height;
+	if (!_terrain) {
+		return AABB(); // Not loaded yet: regions are moved to it as they load.
+	}
+	AABB area;
+	bool any = false;
+	const real_t extent = (real_t)_region_size * _vertex_spacing;
+	for (const Vector2i &region_loc : _region_locations) {
+		const Pasture3DRegion *region = get_region_ptr(region_loc);
+		if (!region || region->is_deleted()) {
+			continue;
+		}
+		_shift_region_base(region_loc, delta);
+		const AABB box(Vector3(region_loc.x * extent, region->get_height_range().x, region_loc.y * extent),
+				Vector3(extent, MAX(region->get_height_range().y - region->get_height_range().x, (real_t)1.f), extent));
+		area = any ? area.merge(box) : box;
+		any = true;
+	}
+	if (!any) {
+		return AABB();
+	}
+	calc_height_range();
+	update_maps(TYPE_HEIGHT, true, false);
+	area = area.grow(MAX(Math::abs(delta), (real_t)1.f));
+	add_edited_area(area);
+	return area;
 }
 
 bool Pasture3DData::_recomposite_if_stale(const Vector2i &p_region_loc) {

@@ -1028,6 +1028,30 @@ void Pasture3D::set_vertex_spacing(const real_t p_spacing) {
 	}
 }
 
+/**
+ * The height of unsculpted ground: new regions start at it, and changing it moves the hand-sculpted Base
+ * layer of every region by the difference (Pasture3DData::set_base_height), so sea level can stay at 0
+ * while the sea floor sits well below it. Brush layers are not re-baked: a REPLACE or MAX brush keeps the
+ * heights it was baked at until Bake All Brushes, and an ADD layer moves with the ground. The world
+ * background's ground_level moves by the same difference, so the ground outside regions keeps meeting it.
+ */
+void Pasture3D::set_base_height(const real_t p_height) {
+	const real_t old = _base_height;
+	SET_IF_DIFF(_base_height, CLAMP(p_height, -10000.f, 10000.f));
+	LOG(INFO, "Setting base height: ", _base_height);
+	if (!(_collision && _data && _instancer && _material.is_valid())) {
+		return; // Loading: Pasture3DData::initialize reads it, before the regions load.
+	}
+	const AABB area = _data->set_base_height(_base_height);
+	const real_t ground_level = _material->get("ground_level");
+	_material->set("ground_level", ground_level + (_base_height - old));
+	if (area.has_surface()) {
+		_instancer->update_transforms(area);
+		_collision->destroy();
+		_collision->build();
+	}
+}
+
 void Pasture3D::set_cull_margin(const real_t p_margin) {
 	SET_IF_DIFF(_cull_margin, CLAMP(p_margin, 0.f, 100000.f));
 	LOG(INFO, "Setting extra cull margin: ", _cull_margin);
@@ -1865,6 +1889,8 @@ void Pasture3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_tessellation_level"), &Pasture3D::get_tessellation_level);
 	ClassDB::bind_method(D_METHOD("set_vertex_spacing", "scale"), &Pasture3D::set_vertex_spacing);
 	ClassDB::bind_method(D_METHOD("get_vertex_spacing"), &Pasture3D::get_vertex_spacing);
+	ClassDB::bind_method(D_METHOD("set_base_height", "height"), &Pasture3D::set_base_height);
+	ClassDB::bind_method(D_METHOD("get_base_height"), &Pasture3D::get_base_height);
 	ClassDB::bind_method(D_METHOD("set_cull_margin", "margin"), &Pasture3D::set_cull_margin);
 	ClassDB::bind_method(D_METHOD("get_cull_margin"), &Pasture3D::get_cull_margin);
 	ClassDB::bind_method(D_METHOD("set_cast_shadows", "shadow_casting_setting"), &Pasture3D::set_cast_shadows);
@@ -1954,6 +1980,7 @@ void Pasture3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "version", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY), "", "get_version");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_level", PROPERTY_HINT_ENUM, "Errors,Info,Debug,Extreme"), "set_debug_level", "get_debug_level");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "data_directory", PROPERTY_HINT_DIR), "set_data_directory", "get_data_directory");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "base_height", PROPERTY_HINT_RANGE, "-1000.0,1000.0,0.1,or_less,or_greater,suffix:m"), "set_base_height", "get_base_height");
 
 	// Object references
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "material", PROPERTY_HINT_RESOURCE_TYPE, "Pasture3DMaterial"), "set_material", "get_material");

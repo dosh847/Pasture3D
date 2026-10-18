@@ -131,6 +131,7 @@ private:
 	int _tessellation_level = 0;
 	int _mesh_size = 48;
 	real_t _vertex_spacing = 1.0f;
+	real_t _base_height = 0.0f;
 	real_t _cull_margin = 0.0f;
 	RenderingServer::ShadowCastingSetting _cast_shadows = RenderingServer::SHADOW_CASTING_SETTING_ON;
 	GeometryInstance3D::GIMode _gi_mode = GeometryInstance3D::GI_MODE_STATIC;
@@ -316,6 +317,8 @@ public:
 	int get_mesh_size() const { return _mesh_size; }
 	void set_vertex_spacing(const real_t p_spacing);
 	real_t get_vertex_spacing() const { return _vertex_spacing; }
+	void set_base_height(const real_t p_height);
+	real_t get_base_height() const { return _base_height; }
 	void set_cull_margin(const real_t p_margin);
 	real_t get_cull_margin() const { return _cull_margin; }
 	void set_cast_shadows(const RenderingServer::ShadowCastingSetting p_cast_shadows);
