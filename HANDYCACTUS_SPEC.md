@@ -1,7 +1,7 @@
 # HandyCactus — Tree Supports for FDM in Blender (Spec v0.1)
 
-> Status: draft from the requirements interview (2026-10-19). Lives here
-> temporarily; moves to its own repository when that is created.
+> Status: v0.2. The interview's open questions are resolved (2026-10-19). Lives
+> here temporarily; moves to its own repository when that is created.
 
 HandyCactus is a Blender extension that generates **resin-style tree supports
 for FDM printing**: thin, tapered tips that touch the model at points and snap
@@ -17,10 +17,14 @@ and PandaProps (github.com/PandaProps/releases).
 |---|---|
 | Home | New dedicated repository (this spec moves there) |
 | Process | FDM, with resin-style contact tips |
-| Primary use case | Tabletop miniatures, 25–75 mm, 0.2–0.4 mm nozzle |
+| Primary use case | Tabletop miniatures at 32–50 mm scale (42 mm most common), **0.2 mm nozzle** by default |
 | Workflow | Automatic generation, then manual editing in the viewport |
-| Blender | 5.x only, packaged as an Extension (`blender_manifest.toml`) |
-| Output | A separate support object next to the model (never merged into it) |
+| Blender | Latest stable release, for the newest Geometry Nodes: `blender_version_min = "5.2.0"` (5.2 LTS). Raise the minimum when a later release adds a GN feature we use |
+| Output | A separate support object next to the models (never merged into them) |
+| Multiple objects | One generate pass covers several target objects (e.g. a multi-part mini), producing one shared supports object |
+| Feet | Yes: small flared feet on every trunk |
+| Junction look | Plain overlapping tubes and spheres |
+| Cross-bracing | v2 |
 | Representation | Python computes a support graph; a Geometry Nodes modifier turns it into a mesh |
 | Language | Pure Python + numpy + `mathutils` (BVH tree, KD-tree). No native code |
 | Anchoring | Build plate only. Trunks never land on the model |
@@ -33,13 +37,14 @@ and PandaProps (github.com/PandaProps/releases).
 | Export (v1) | 3MF (model and supports as parts of one object) and STL |
 | Units | Always millimetres, converted using the scene unit scale |
 | License | GPL-3.0-or-later, distributed on extensions.blender.org |
-| Deferred to v2+ | Bambu/Orca layer check, auto-orientation, landing on the model, rafts |
+| Deferred to v2+ | Bambu/Orca layer check, auto-orientation, landing on the model, rafts, cross-bracing |
 
 ## 2. Goals and non-goals
 
 **Goals (v1)**
-- One-click supports for a 28–32 mm mini that slice and print on a 0.4 mm
+- One-click supports for a 32–50 mm mini that slice and print on a 0.2 mm
   nozzle without manual fixes in most cases.
+- One pass supports a multi-part mini (body, arms, weapon, base) as a set.
 - Supports snap off and leave small marks that are easy to clean up.
 - Interactive editing that survives regeneration (locks).
 - Exports that open cleanly in Bambu Studio, OrcaSlicer, PrusaSlicer and Cura.
@@ -49,7 +54,9 @@ and PandaProps (github.com/PandaProps/releases).
 - Orienting the model. The user orients it; we only offer a "place on bed with
   lift" helper.
 - Running slicers.
-- Multiple target objects at once (see §14).
+- Cross-bracing between trunks (v2).
+- Smooth, organic blending at junctions. Only the optional watertight bake
+  in §5.3 merges the shells.
 
 ## 3. Terms
 
@@ -70,29 +77,36 @@ and PandaProps (github.com/PandaProps/releases).
 - All parameters are in mm. Internally,
   `mm_to_bu = 1 / (scene.unit_settings.scale_length * 1000)` converts to
   Blender units.
-- The target is read **evaluated** (with modifiers applied) and **in world
-  space**. A model below Z < 0 is an error that offers "Place on bed".
-- **Place on bed with lift** (helper operator): moves the object so its lowest
-  point sits at `lift_height` (default 3 mm). This leaves room for knuckles
-  under the lowest surfaces.
+- Targets are read **evaluated** (with modifiers applied) and **in world
+  space**. A target below Z < 0 is an error that offers "Place on bed".
+- **Place on bed with lift** (helper operator): moves the whole target set
+  together, keeping the parts' relative positions, so the set's lowest point
+  sits at `lift_height` (default 3 mm). This leaves room for knuckles under
+  the lowest surfaces.
 
 ## 5. Data model
 
 ### 5.1 Objects
 
-The model is the user's mesh. HandyCactus never changes the model's mesh
-data; it only reads it.
+**Targets** are one or more of the user's mesh objects. HandyCactus never
+changes their mesh data; it only reads it.
 
-The supports are one object, `<model>_HC_Supports`, holding the
-**support graph** as a mesh:
+The supports are one object, `<set name>_HC_Supports` (named after the first
+target by default), holding the **support graph** as a mesh:
 - Vertices are graph nodes and edges are graph segments.
 - A GN modifier (`HC_SupportGeometry` node group) turns it into solid
   geometry.
 
-The supports object stores a pointer back to its model
-(`PointerProperty` in an object property group) along with all generation
-parameters. Settings therefore stay with the file and travel with
-duplication.
+The supports object stores:
+- the **target set**: a CollectionProperty of object pointers, in a fixed
+  order;
+- all generation parameters.
+
+Settings therefore stay with the file and travel with duplication. To create
+a set, select the targets and press **Generate**. A set can be edited later
+(add or remove a target). Removing a target deletes the tips that touch it.
+**Regenerate** keeps any locked tree, even if some of its tips are on a
+removed target; those tips are flagged in checks.
 
 ### 5.2 Node attributes (POINT domain)
 
@@ -103,6 +117,7 @@ duplication.
 | `hc_parent` | INT | Index of the next node toward the bed (-1 for a foot) |
 | `hc_tree` | INT | Tree id |
 | `hc_tip` | INT | Tip id (contact and knuckle nodes; -1 otherwise) |
+| `hc_target` | INT | Index into the target set of the object a contact touches (-1 for non-contact nodes) |
 | `hc_dir` | FLOAT_VECTOR | Tip axis, unit vector from contact to knuckle |
 | `hc_locked` | BOOL | Node belongs to a locked tree |
 | `hc_flags` | INT | Bitfield: manual, override, check-failed, unreachable |
@@ -127,7 +142,7 @@ asserts it.
 3. **Knuckles and junctions**: Instance on Points (UV sphere, scaled by
    `hc_radius × knuckle_scale`), then Realize Instances.
 4. **Feet**: a flared cone from foot radius to `foot_radius` over
-   `foot_height` (see §14 open question 1).
+   `foot_height`. Feet are always generated, for bed adhesion.
 5. **Output**: overlapping closed shells. Slicers union overlapping shells
    within one part, so this is enough for slicing. A **Bake watertight**
    option (Mesh to Volume → Volume to Mesh, voxel size
@@ -144,19 +159,34 @@ takes and returns numpy arrays, plus a thin `mathutils` BVH/KD-tree adapter.
 Locked trees are loaded first and are never changed by the pipeline.
 
 ### 6.1 Preprocess
-- Get the evaluated mesh. Build numpy arrays: vertex positions (mm, world
-  space), triangles (from loop triangles), face normals, face areas, and
-  vertex adjacency.
-- Build `BVHTree.FromPolygons` for ray casts and nearest-point queries.
+- Get every target's evaluated mesh and concatenate them into one set of
+  numpy arrays: vertex positions (mm, world space), triangles (from loop
+  triangles), face normals, face areas, vertex adjacency, and a per-face
+  `target_index`.
+- Build one `BVHTree.FromPolygons` over the combined mesh, so every target
+  is an obstacle for every other target's tips and branches. Keep one BVH per
+  target for the inside test below.
+- **Overlapping parts**: multi-part minis often intersect (an arm pushed into
+  the body). Any face, sample or contact that lies **inside another target**
+  is discarded, because it will never print as a surface. "Inside" is decided
+  with a BVH nearest-point query on the other target: the point is inside if
+  its offset to the nearest point lies on the inner side of that face's
+  normal. Fall back to an odd/even ray-count test when the nearest face is
+  ambiguous (near edges). Targets that are not closed meshes produce a
+  warning, and this test is skipped for them.
 
 ### 6.2 Contact detection
 A face **needs support** when `normal.z < -sin(overhang_angle)`.
 `overhang_angle` is measured from vertical, default 45°. Faces with a lowest
-vertex below `bed_ignore_height` (default 0.3 mm) are skipped.
+vertex below `bed_ignore_height` (default 0.2 mm) are skipped. Detection runs
+per target, using the shared BVH for occlusion and the inside test.
+Connected patches and local minima never span two targets. A part's lowest
+point always needs a support, even if it touches another part, unless that
+point is inside the other part.
 
 1. **Overhang sampling**: group faces that need support into connected
    patches. Sample each patch with area-weighted Poisson-disk sampling at
-   `tip_spacing` (default 2.0 mm). Spacing is scaled down by
+   `tip_spacing` (default 1.5 mm). Spacing is scaled down by
    `steepness_density` as the face approaches horizontal.
 2. **Islands / local minima**: any vertex lower than all of its 1-ring
    neighbours (tolerance 0.01 mm) becomes a forced contact. Each overhang
@@ -165,13 +195,13 @@ vertex below `bed_ignore_height` (default 0.3 mm) are skipped.
    the bridging step.
 3. **Bridging**: inside a patch, drop a sample when its horizontal distance
    to the nearest *supported boundary* is ≤ `max_bridge / 2`
-   (default `max_bridge` = 3 mm). A supported boundary is a patch boundary
+   (default `max_bridge` = 2 mm). A supported boundary is a patch boundary
    edge whose neighbouring face does not need support. This is a v1
    heuristic and needs testing against real minis.
 4. **Paint masks**: vertex group `HC_Force` (weight > 0.5) forces sampling
    at the patch spacing even below the overhang threshold. `HC_Block`
    (weight > 0.5) removes all contacts, including islands, and the check
-   step reports them.
+   step reports them. Each target uses its own vertex groups.
 5. **Merge near-duplicates**: contacts closer than `0.5 × tip_spacing` are
    merged into one. Islands win.
 
@@ -179,7 +209,7 @@ vertex below `bed_ignore_height` (default 0.3 mm) are skipped.
 For each contact `p` with surface normal `n`:
 - The tip axis `d` starts as `n`, then is clamped to lie within
   `max_tip_angle` (default 45°) of `-Z`.
-- The knuckle position is `k = p + d × tip_length` (default 2.0 mm).
+- The knuckle position is `k = p + d × tip_length` (default 1.5 mm).
 - **Clearance**: cast a ray from `k` toward `p`. It must hit within
   `0.05 mm` of `p`. The tip cone's side samples must also stay at least
   `model_clearance` from the model, except within the last 0.5 mm.
@@ -203,9 +233,9 @@ active node:
    `z - step_z`, chosen by blending these pulls:
    - straight down;
    - toward the nearest merge partner (KD-tree query, within
-     `merge_distance`, default 4 mm);
+     `merge_distance`, default 3 mm);
    - away from the model, along the gradient of the BVH nearest distance
-     whenever `distance < radius + model_clearance` (default 1.0 mm).
+     whenever `distance < radius + model_clearance` (default 0.8 mm).
 
    The move direction is clamped to `max_branch_angle` from vertical
    (default 40°).
@@ -218,9 +248,10 @@ active node:
    stays inside the cone. The new radius is
    `min(max_radius, sqrt(r1² + r2²) × merge_growth)`. Merging into a
    **locked** tree is not allowed in v1, because it would change that tree.
+   Branches from different targets **may** merge into one tree.
 4. **Taper**: the radius grows by `taper_rate` mm per mm of descent
    (default 0.03), clamped to `[min_radius, max_radius]`. Defaults are
-   0.4–2.5 mm radius.
+   0.2–2.0 mm radius.
 5. **Landing**: a node that reaches `z ≤ 0` becomes a foot.
 6. **Stuck nodes**: since there is no landing on the model in v1, a stuck
    branch is removed back to its last junction. Its tips are marked
@@ -250,7 +281,7 @@ operator is a single undo step.
 
 | Input | Action |
 |---|---|
-| LMB on the model | Add a contact (raycast). Builds its tip and routes it incrementally |
+| LMB on a target | Add a contact (raycast against all targets in the set). Builds its tip and routes it incrementally |
 | Ctrl+LMB on a tip/knuckle | Delete the tip and prune its branch back to the first junction that still has other children. A tree left empty is removed |
 | LMB drag on a contact | Slide the contact along the surface (continuous raycast). The tip rebuilds live; on release the tree re-routes |
 | LMB drag on a junction or branch node | Move the node in the view plane (X/Y/Z constraint keys like `G`). Child and parent segments are re-checked for clearance and angle, and turn red if they violate it |
@@ -275,7 +306,7 @@ for confirmation.
 ## 8. Overhang heatmap overlay
 
 - A viewport draw handler (`gpu` module, `POST_VIEW`) draws a colour ramp on
-  the model's faces by severity: from "needs support" (yellow) to horizontal
+  the faces of every target in the active set, by severity: from "needs support" (yellow) to horizontal
   (red). Faces that need support but are farther than `tip_spacing` from any
   contact are drawn with a hatch or brighter red, to show coverage gaps.
 - Unreachable contacts and failed checks are drawn as red markers.
@@ -286,39 +317,48 @@ for confirmation.
 
 ## 9. Parameters and presets
 
-Defaults are for a **28–32 mm mini, 0.4 mm nozzle, 0.2 mm layers**.
+Defaults are for a **42 mm-scale mini, 0.2 mm nozzle, 0.08 mm layers**.
+Every value still needs tuning against test prints (M2/M6).
 
 | Group | Parameter | Default | Range |
 |---|---|---|---|
-| Printer | `nozzle_diameter` | 0.4 mm | 0.2–0.8 |
-| | `layer_height` | 0.2 mm | 0.05–0.4 |
+| Printer | `nozzle_diameter` | 0.2 mm | 0.1–0.8 |
+| | `layer_height` | 0.08 mm | 0.04–0.3 |
 | Placement | `lift_height` | 3.0 mm | 0–20 |
 | Detection | `overhang_angle` (from vertical) | 45° | 20–80 |
-| | `tip_spacing` | 2.0 mm | 0.5–10 |
+| | `tip_spacing` | 1.5 mm | 0.4–10 |
 | | `steepness_density` | 1.5× | 1–3 |
-| | `max_bridge` | 3.0 mm | 0–20 |
-| | `bed_ignore_height` | 0.3 mm | 0–2 |
-| Tips | `contact_diameter` | 0.4 mm | 0.2–1.5 |
-| | `penetration` | 0.2 mm | 0–0.6 |
-| | `tip_length` | 2.0 mm | 0.5–6 |
-| | `min_tip_length` | 0.8 mm | 0.3–3 |
+| | `max_bridge` | 2.0 mm | 0–20 |
+| | `bed_ignore_height` | 0.2 mm | 0–2 |
+| Tips | `contact_diameter` | 0.3 mm | 0.1–1.5 |
+| | `penetration` | 0.15 mm | 0–0.6 |
+| | `tip_length` | 1.5 mm | 0.4–6 |
+| | `min_tip_length` | 0.6 mm | 0.2–3 |
 | | `max_tip_angle` (from -Z) | 45° | 0–80 |
-| | `knuckle_diameter` | 0.9 mm | 0.4–3 |
-| Branches | `min_radius` | 0.4 mm | ≥ nozzle/2 |
-| | `max_radius` | 2.5 mm | 0.5–8 |
+| | `knuckle_diameter` | 0.6 mm | 0.3–3 |
+| Branches | `min_radius` | 0.2 mm (0.4 mm diameter = 2 × nozzle) | ≥ nozzle/2 |
+| | `max_radius` | 2.0 mm | 0.4–8 |
 | | `taper_rate` | 0.03 mm/mm | 0–0.2 |
 | | `max_branch_angle` (from vertical) | 40° | 0–60 |
-| | `merge_distance` | 4.0 mm | 0–20 |
+| | `merge_distance` | 3.0 mm | 0–20 |
 | | `merge_growth` | 1.0 | 0.8–1.3 |
-| | `model_clearance` | 1.0 mm | 0.2–5 |
-| | `step_z` | 0.5 mm | 0.1–2 |
-| Feet | `foot_radius` | 2.0 mm | 0–6 |
-| | `foot_height` | 0.6 mm | 0–3 |
+| | `model_clearance` | 0.8 mm | 0.2–5 |
+| | `step_z` | 0.4 mm | 0.1–2 |
+| Feet | `foot_radius` | 1.5 mm | 0–6 |
+| | `foot_height` | 0.4 mm | 0–3 |
 | Display | `profile_resolution` | 12 | 6–32 |
 
-**Built-in presets**: *Mini 28–32 mm*, *Mini 54 mm*, *Mini 75 mm / bust*,
-*Fine 0.2 mm nozzle*. Users can save their own presets through the standard
-Blender preset menu (`AddPresetBase`).
+**Built-in presets**, all for a 0.2 mm nozzle:
+
+| Preset | `tip_spacing` | `contact_diameter` | `tip_length` | `knuckle_diameter` | `max_radius` | `foot_radius` |
+|---|---|---|---|---|---|---|
+| *Mini 32 mm* | 1.3 | 0.25 | 1.3 | 0.5 | 1.6 | 1.2 |
+| ***Mini 42 mm* (default)** | 1.5 | 0.3 | 1.5 | 0.6 | 2.0 | 1.5 |
+| *Mini 50 mm* | 1.8 | 0.35 | 1.8 | 0.7 | 2.4 | 1.8 |
+
+There is also a *0.4 mm nozzle* variant: it doubles `nozzle_diameter` and
+`min_radius`, and raises the contact diameter to 0.4. Users can save their
+own presets through the standard Blender preset menu (`AddPresetBase`).
 
 ## 10. Printability checks
 
@@ -343,9 +383,11 @@ slicer-based layer check (v2) can reuse them.
 
 **Export 3MF** is pure Python (`zipfile` + `xml.etree`), with no
 dependencies.
-- It writes one build item: a parent object with two mesh **components**,
-  `"<model>"` and `"<model>_supports"`, in mm (`unit="millimeter"`). Bambu
-  Studio and OrcaSlicer import this as one object with two parts, so the
+- It writes one build item: a parent object whose mesh **components** are
+  one per target (named after the Blender object) plus `"<set>_supports"`,
+  in mm (`unit="millimeter"`). The parts of a multi-part mini are
+  physically tied together by shared trees, so they stay one object. Bambu
+  Studio and OrcaSlicer import this as one object with N + 1 parts, so the
   user can assign support filament or interface settings to the supports
   part.
 - It optionally adds `Metadata/model_settings.config` with part names, which
@@ -356,14 +398,14 @@ dependencies.
   PrusaSlicer and Cura (see §13).
 
 **Export STL** writes binary STL in mm, with one of two options:
-- *merged*: model and supports in one file;
-- *separate*: two files with `_model` / `_supports` suffixes.
+- *merged*: all targets and supports in one file;
+- *separate*: one file per target plus `_supports`.
 
 ## 12. Package layout
 
 ```
 handycactus/
-  blender_manifest.toml      # id "handycactus", blender_version_min "5.0.0",
+  blender_manifest.toml      # id "handycactus", blender_version_min "5.2.0",
                              # license ["SPDX:GPL-3.0-or-later"],
                              # permissions: files = "Export 3MF/STL"
   __init__.py                # register/unregister
@@ -398,8 +440,13 @@ tests/
   `.blend`, so it can be diffed and versioned. It is rebuilt when the stored
   `hc_gn_version` is older than the add-on's.
 - **CI**: GitHub Actions runs the core tests on Python 3.11. A headless
-  Blender 5.x job runs the Blender tests and builds the extension zip with
+  Blender job runs the Blender tests on the newest stable release (5.2 LTS
+  today) and builds the extension zip with
   `blender --command extension build`.
+- **Version policy**: track the newest stable Blender release and use its
+  Geometry Nodes features freely. When a new release ships with a node we
+  want, raise `blender_version_min` to it. The add-on has a single target
+  user on the latest Blender, so there is no backward-compatibility layer.
 
 ## 13. Performance targets and test plan
 
@@ -411,7 +458,7 @@ Reference machine: a 2023 mid-range laptop CPU.
 | Detection, 500k tris | < 1.5 s |
 | Tips + routing, 1,000 tips | < 4 s |
 | Incremental add-tip | < 150 ms |
-| Generate end to end, typical 28 mm mini (~300k tris, ~400 tips) | < 3 s |
+| Generate end to end, typical 42 mm mini (~500k tris over 1–5 parts, ~600 tips) | < 4 s |
 
 Long operations show progress (`wm.progress_begin/update`) and can be
 cancelled with Esc. They run in a modal timer operator that processes the
@@ -423,35 +470,33 @@ sweep in chunks, so the UI stays responsive.
   - minima detection on synthetic shapes (sphere, T-bar, arch, cantilever);
   - tip clamp and clearance;
   - routing invariants (angle, clearance, forest);
+  - multi-target sets: the inside test on intersecting parts, no patches
+    spanning two targets, cross-target merging;
   - determinism;
   - checks.
 - Blender tests: graph write and read back, GN build, undo, locks surviving
   regeneration, round-trip export.
-- **Golden prints** (manual, before each release): 3 CC0 minis printed on one
-  FDM printer. Record the success rate, snap-off quality and scarring.
+- **Golden prints** (manual, before each release): CC0 minis at 32, 42 and
+  50 mm, at least one of them multi-part, printed with a 0.2 mm nozzle.
+  Record the success rate, snap-off quality and scarring.
 - Slicer import matrix: Bambu Studio, OrcaSlicer, PrusaSlicer, Cura (latest
   stable versions).
 
 ## 14. Open questions
 
-1. **Feet**: the interview chose "build plate only, no raft or pads". Should
-   trunks still get a small flared foot for bed adhesion? The draft assumes
-   yes, with `foot_radius` 2 mm.
-2. **Junction look**: plain overlapping tubes and spheres (fast, slice fine),
-   or smooth organic blending (volume remesh, much slower)? The draft
-   assumes plain tubes, with blending only via "Bake watertight".
-3. **Trestle features**: the Trestle site could not be reached during
-   research. Are there specific behaviours from Trestle or PandaProps you
-   want matched? For example: tip shape, support-to-support bracing, a
-   particular snap-off design.
-4. **Multiple objects**: one model per supports object in v1. Should a
-   multi-part mini (separate base, arms) be handled by joining first, or as
-   several targets sharing one routing pass?
-5. **Cross-bracing**: trunks taller than about 30 mm wobble on FDM. Should
-   v1 add optional horizontal braces between neighbouring trunks, or leave
-   it to v2?
-6. **Minimum Blender**: 5.0.0 or a later 5.x? This depends on which
-   Geometry Nodes features are needed.
+None. All six were resolved on 2026-10-19:
+
+1. **Feet**: yes. Every trunk gets a flared foot (§5.3; the default
+   `foot_radius` is 1.5 mm).
+2. **Junction look**: plain overlapping tubes and spheres. The watertight
+   bake is optional.
+3. **Trestle/PandaProps parity**: the spec already covers what is needed.
+4. **Multiple objects**: one pass covers a whole target set (§5.1, §6.1).
+5. **Cross-bracing**: v2.
+6. **Blender version**: the latest stable release (5.2 LTS today), tracked
+   forward (§12).
+
+New questions found during implementation go here.
 
 ## 15. Milestones
 
@@ -459,7 +504,7 @@ sweep in chunks, so the UI stays responsive.
 |---|---|---|
 | M0 | Repository, manifest, CI, core param dataclass, empty panel | Extension installs in Blender 5; CI green |
 | M1 | Preprocess, detection, heatmap overlay | Synthetic shapes detect correctly; heatmap is responsive |
-| M2 | Tips, routing, graph I/O, GN geometry, Generate/Clear | Golden mini generates in < 3 s and slices |
+| M2 | Tips, routing, graph I/O, GN geometry, Generate/Clear, multi-target sets | Golden 42 mm multi-part mini generates in < 4 s and slices |
 | M3 | Printability checks + result list | All §10 checks have unit tests |
 | M4 | Manual editing tool, overrides, locks, Regenerate | Locks survive Regenerate; edits are undoable |
 | M5 | 3MF and STL export | Slicer import matrix passes |
