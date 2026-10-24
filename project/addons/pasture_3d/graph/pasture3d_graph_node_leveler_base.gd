@@ -152,12 +152,36 @@ var evaluated: bool = false
 func outward_reach() -> float:
 	if feather_side != FeatherSide.OUTSIDE:
 		return 0.0
+	return _wall_width()
+
+
+## The wall's width in metres: the loop's widest half-width with `feather_from_path_width`, else `feather`.
+func _wall_width() -> float:
 	if feather_from_path_width and _path != null and not _path.half_widths.is_empty():
 		var w := 0.0
 		for h in _path.half_widths:
 			w = maxf(w, h)
 		return w * path_width_scale
 	return feather
+
+
+## FLATTEN levels to a statistic of every fully-inside cell, so one moved span moves the whole area: INF.
+##
+## LEVEL AT HEIGHT is pointwise in the height (`hv + (target - hv) * w`); the weight `w` reads only whether
+## a cell is inside and its distance to the nearest edge. A moved span changes that distance only for cells
+## whose nearest edge point is on the span, and `w` stops changing past the wall, so the cells it moves lie
+## within the wall width of the span — before or after the move, both of which the host's box holds.
+##   INSIDE: the wall runs inward from the edge, so the reach is the wall width.
+##   OUTSIDE: the wall runs outward, and that band is already in the host's box: the brush pads it by its
+##   Modifier Margin, which `_effective_modifier_margin` raises to `outward_reach()` — this same width.
+##   Inside the outline the weight is 1 throughout, so nothing further in moves. 0.
+## Not covered: an edit that leaves NO cell fully inside makes the node pass the height through everywhere
+## (`core_count` 0). That takes collapsing the loop, which is not something a single point move does to a
+## working brush.
+func edit_reach() -> float:
+	if mode == Mode.FLATTEN:
+		return INF
+	return _wall_width() if feather_side == FeatherSide.INSIDE else 0.0
 
 
 func role() -> Role:

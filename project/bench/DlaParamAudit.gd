@@ -46,5 +46,5 @@ func _sweep(p_name: String, p_values: Array) -> void:
 		var levels: int = m.hierarchy_levels
 		var n0: int = maxi(n >> (levels - 1), 16)
 		print("    %-10s %8.3f %8.3f %8.3f %10d %8d %s"
-				% [str(v), m._grow_extent(n).x / half, float(m._blur_budget(n)) / half,
-				m._outer(n).x / half, m._particles(), n0, str(m._blur_budget(n))])
+				% [str(v), (m._grow_extent(n)[0] as Vector2).x / half, float(m._blur_budget(n)) / half,
+				(m._outer(n)[0] as Vector2).x / half, m._particles(), n0, str(m._blur_budget(n))])

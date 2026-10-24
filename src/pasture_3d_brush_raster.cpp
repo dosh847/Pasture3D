@@ -465,6 +465,10 @@ struct BrushModStep {
 	// A LIVE step solving on the worker sets it false: its cache is only the driver's answer for THIS
 	// surface, so a mismatch is a miss — which then defers again instead of showing an old solve.
 	bool serve_stale = true;
+	// A stale serve that is ALSO deferred: the old answer is painted, rebased onto today's surface, and the
+	// surface still goes out through `out` to be solved. Pass 1 of a Live step's run, with the brush's last
+	// Live answer as the cache, so an edit shows the previous solve instead of the un-solved shape.
+	bool requeue_stale = false;
 	// EROSION / GRAPH: the brush's Live Preview Resolution, as a cell-size multiplier (1, 2 or 4). Above 1
 	// the step runs on a block-averaged grid and only its CHANGE is upsampled back — see
 	// brush_preview_field_step. GDScript sends 1 for a Frozen step and for every Bake, so a coarse answer
@@ -621,6 +625,7 @@ bool brush_mod_build(const Dictionary &p_params, std::vector<BrushModStep> &r_st
 			st.frozen = d.get("frozen", false);
 			st.defer = d.get("defer", false);
 			st.serve_stale = d.get("serve_stale", true);
+			st.requeue_stale = d.get("requeue_stale", false);
 			// 16, not 4: a Layer brush's Bake Scale reaches 16x, and a graph step solves at max(preview, bake).
 			st.preview_scale = CLAMP((int)d.get("preview_scale", 1), 1, 16);
 			st.cache_key = d.get("cache_key", (int64_t)0);
@@ -656,6 +661,7 @@ bool brush_mod_build(const Dictionary &p_params, std::vector<BrushModStep> &r_st
 			st.frozen = d.get("frozen", false);
 			st.defer = d.get("defer", false);
 			st.serve_stale = d.get("serve_stale", true);
+			st.requeue_stale = d.get("requeue_stale", false);
 			// 16, not 4: a Layer brush's Bake Scale reaches 16x, and a graph step solves at max(preview, bake).
 			st.preview_scale = CLAMP((int)d.get("preview_scale", 1), 1, 16);
 			st.cache_key = d.get("cache_key", (int64_t)0);
@@ -737,7 +743,10 @@ void brush_mod_erode(BrushModStep &p_step, std::vector<float> &r_vals,
 		}
 		p_step.out["stale"] = stale;
 		p_step.out["served"] = true;
-		return;
+		if (!(stale && p_step.requeue_stale && p_step.defer && p_step.has_out)) {
+			return;
+		}
+		// A preview of the last answer: fall through and hand the surface out to be solved as well.
 	}
 
 	// ---- The deferred solve, pass 1 (sec10) ----
@@ -953,7 +962,10 @@ void brush_mod_graph(BrushModStep &p_step, std::vector<float> &r_vals, const std
 		}
 		p_step.out["stale"] = p_step.cache_key != key;
 		p_step.out["served"] = true;
-		return;
+		if (!(p_step.cache_key != key && p_step.requeue_stale && p_step.defer && p_step.has_out)) {
+			return;
+		}
+		// A preview of the last answer (BrushModStep::requeue_stale): served above, and still solved below.
 	}
 
 	if (p_step.defer && p_step.has_out) {

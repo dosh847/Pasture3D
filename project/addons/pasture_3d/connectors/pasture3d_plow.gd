@@ -122,7 +122,7 @@ func _padding() -> float:
 ## that carries a change one more cell. See `_edit_reach` on the base.
 func _edit_reach() -> float:
 	var vs: float = terrain.vertex_spacing if terrain else 1.0
-	return maxf(maxf(falloff_width, 0.0) + maxf(-edge_offset, 0.0) + smooth_passes * vs, _stack_edit_reach())
+	return _stack_edit_reach(maxf(falloff_width, 0.0) + maxf(-edge_offset, 0.0) + smooth_passes * vs)
 
 
 ## Starter shape: a closed square loop in local space.

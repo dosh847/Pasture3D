@@ -195,7 +195,7 @@ func _edit_reach() -> float:
 	if flank_mode == FlankMode.SLOPE_ANGLE:
 		var slope_run := absf(height) / maxf(tan(deg_to_rad(slope_angle)), 0.0001)
 		run = minf(slope_run, falloff_width) if falloff_width > 0.0 else slope_run
-	return maxf(maxf(run, 0.001) + maxf(-edge_offset, 0.0), _stack_edit_reach())
+	return _stack_edit_reach(maxf(run, 0.001) + maxf(-edge_offset, 0.0))
 
 
 ## Starter shape: a closed square loop in local space.

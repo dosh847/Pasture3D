@@ -43,6 +43,8 @@ func _ready() -> void:
 	await _j_live_preview_resolution()
 	await _k_spline_edit_rebakes_through_the_driver()
 	await _l_bake_scale()
+	await _m_pass1_previews_the_last_live_answer(false)
+	await _m_pass1_previews_the_last_live_answer(true)
 
 	print("\n=== %s (%d failures) ===\n" % ["DEFERRED DRIVER PASS" if _fail == 0 else "DEFERRED DRIVER FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
@@ -703,6 +705,104 @@ func _h_max_diff(p_a: Dictionary, p_b: Dictionary) -> float:
 		if fa:
 			worst = maxf(worst, absf(a[i] - b[i]))
 	return worst
+
+
+# --- M. Pass 1 of a Live run paints the LAST run's answer, and still solves ---------------------------
+#
+# A Live graph used to vanish for the length of the worker solve on every edit: pass 1 deferred it with
+# nothing to serve, so the brush showed its un-graphed shape until pass 2. The brush now keeps its last
+# Live answer (`_live_last`) and pass 1 serves it rebased (`requeue_stale`) while still queueing the solve.
+# Assertions: pass 1 is near the FRESH answer, far from the bare shape, and queued a graph solve.
+# CONTROL: the same pass 1 with `_live_last` cleared is the bare shape — so the preview is what moved it.
+func _m_pass1_previews_the_last_live_answer(p_gd: bool) -> void:
+	print("[M] pass 1 of a Live run previews the last answer (%s raster)" % ("GDScript" if p_gd else "native"))
+	var t := Pasture3D.new()
+	t.name = "PreviewTerrain"
+	t.vertex_spacing = 1.0
+	t.region_size = 64
+	add_child(t)
+	t.data.add_region_blankp(Vector3.ZERO)
+	t.data.update_maps(Pasture3DRegion.TYPE_HEIGHT, false, false)
+	var m := Pasture3DMound.new()
+	m.name = "MGate"
+	m.auto_refresh = false
+	m.force_gdscript_raster = p_gd
+	m.force_deferred_erosion = true
+	var path := Path3D.new()
+	var c := Curve3D.new()
+	for p in [Vector3(12, 0, 12), Vector3(48, 0, 12), Vector3(48, 0, 48), Vector3(12, 0, 48)]:
+		c.add_point(p)
+	c.closed = true
+	path.curve = c
+	m.add_child(path)
+	add_child(m)
+	m.terrain = t
+	var mods: Array[Pasture3DNode] = [_h_graph()]
+	m.modifiers = mods
+	await _m_run(m)
+	_check("control: a Live answer was kept", not m._live_last.is_empty(),
+			"%d entr(ies) in _live_last after a finished run (want > 0)" % m._live_last.size())
+
+	c.set_point_position(2, Vector3(52, 0, 52)) # the edit: the surface the graph is composited over moves
+	var keep: Dictionary = m._live_last.duplicate()
+	var pass1 := _m_pass1(m)
+	var queued: int = m.get_meta("m_queued", 0)
+	m._live_last.clear()
+	var bare := _m_pass1(m)
+	m._live_last = keep
+	await _m_run(m)
+	var fresh := _k_heights(t)
+
+	var graph_effect := _m_mean_diff(bare, fresh)
+	var preview_err := _m_mean_diff(pass1, fresh)
+	_check("control: the graph moves the ground", graph_effect > 0.5,
+			"mean |bare - fresh| %.3f m (want > 0.5)" % graph_effect)
+	_check("pass 1 shows the graph", preview_err < 0.25 * graph_effect,
+			"mean |pass 1 - fresh| %.3f m against a graph effect of %.3f m (want < 25%%)"
+					% [preview_err, graph_effect])
+	_check("pass 1 still solves", queued > 0, "%d graph solve(s) queued by the previewing pass 1 (want > 0)" % queued)
+	m.modifiers = _no_mods()
+	remove_child(m)
+	m.free()
+	t.queue_free()
+
+
+## One whole deferred run of `p_m`, waited out.
+func _m_run(p_m: Pasture3DMound) -> void:
+	var box := [false]
+	var drive := func() -> void:
+		await p_m._bake_deferred(p_m._refresh_owner.bind(p_m._layer_owner, false, []), p_m._layer_owner, false)
+		box[0] = true
+	drive.call()
+	while not box[0]:
+		await get_tree().process_frame
+
+
+## Pass 1 of a run and nothing after it: the heights the user sees while the worker solves.
+func _m_pass1(p_m: Pasture3DMound) -> PackedFloat32Array:
+	var run: int = p_m._begin_deferred_run()
+	p_m._pending_graph = []
+	p_m._pending_erosion = []
+	p_m._graph_defer = true
+	p_m._erosion_defer = true
+	p_m._refresh_owner(p_m._layer_owner, false, [])
+	p_m.set_meta("m_queued", p_m._pending_graph.size())
+	p_m._pending_graph = []
+	p_m._pending_erosion = []
+	p_m._end_deferred_run(run)
+	return _k_heights(p_m.terrain)
+
+
+func _m_mean_diff(p_a: PackedFloat32Array, p_b: PackedFloat32Array) -> float:
+	if p_a.size() != p_b.size() or p_a.is_empty():
+		return INF
+	var s := 0.0
+	var k := 0
+	for i in range(p_a.size()):
+		if is_finite(p_a[i]) and is_finite(p_b[i]):
+			s += absf(p_a[i] - p_b[i])
+			k += 1
+	return s / maxf(float(k), 1.0)
 
 
 # ---- helpers -----------------------------------------------------------------------------------------

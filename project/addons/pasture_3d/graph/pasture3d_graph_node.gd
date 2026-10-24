@@ -411,6 +411,21 @@ func outward_reach() -> float:
 	return 0.0
 
 
+## How far, in metres, a change to this node's inputs — or, for a node that reads it, to the HOST brush's
+## outline — can move this node's output. The host's dirty-rect bake after a point drag pads the moved span
+## by the sum of these along the graph (Pasture3DTerrainGraph.edit_reach); INF sends it whole-footprint.
+##
+## A cell node not touching paths is pointwise — `eval_cell` sees one cell — so 0. Everything else is INF
+## until it says otherwise: a grid node reads neighbours or the whole grid, a path is resampled and measured
+## along its length, and a node reading the host outline unwired sees a distance to its nearest edge,
+## which a moved span changes arbitrarily far away. Overriding this with a finite value is a claim the
+## host's rect bake relies on to stay correct, so it needs a criterion in RectEditReachGate.
+func edit_reach() -> float:
+	if needs_grid() or reads_paths() or output_port_types().has(PortType.PATH):
+		return INF
+	return 0.0
+
+
 ## Types for each input port. Defaults to HEIGHT for all ports.
 func input_port_types() -> PackedInt32Array:
 	var arr := PackedInt32Array()

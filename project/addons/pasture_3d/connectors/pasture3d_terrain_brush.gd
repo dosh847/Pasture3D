@@ -467,6 +467,14 @@ var _deferred_run_seq: int = 0
 ## Live solves the run has finished, keyed by `_live_key`. Same entry shape as a modifier's frozen cache,
 ## and never written into the modifier: a Live modifier must not come out of a bake holding a cache.
 var _live_solved: Dictionary = {}
+## The last Live answers, kept ACROSS runs: modifier instance id -> {extent: entry}, each entry tagged with
+## the run that filed it so a new run replaces the set rather than piling extents up. Never solved from and
+## never saved: pass 1 of the next run paints it, fitted to the new extent and rebased onto the edited
+## surface (`requeue_stale`), while the fresh solve is queued — so an edit shows the previous solve rather
+## than the brush without its Live modifiers. Pass 2 replaces it. Sanitised when filed: a cell either entry
+## grid holds as NaN becomes 0/0, which the rebase reads as "no change", so a loop that grew paints its
+## new cells un-solved instead of punching NaN holes.
+var _live_last: Dictionary = {}
 ## True while every solve in flight is Live, so an edit may cancel the run and start over.
 var _run_supersedable: bool = false
 ## Set when an edit cancelled the run; the driver then ends without a final bake or a "cancelled" print.
@@ -485,8 +493,106 @@ func _live_key(p_mod: Object, p_extent: String) -> String:
 func _file_solved(p_mod: Object, p_extent: String, p_entry: Dictionary, p_live: bool) -> void:
 	if p_live:
 		_live_solved[_live_key(p_mod, p_extent)] = p_entry
+		_keep_live_answer(p_mod, p_extent, p_entry)
 	else:
 		p_mod.store_cache(p_extent, p_entry)
+
+
+func _keep_live_answer(p_mod: Object, p_extent: String, p_entry: Dictionary) -> void:
+	var grid: PackedFloat32Array = p_entry.get("grid", PackedFloat32Array())
+	var z: PackedFloat32Array = p_entry.get("z", PackedFloat32Array())
+	if p_extent == "" or grid.is_empty() or z.size() != grid.size():
+		return
+	var g := grid.duplicate()
+	var zz := z.duplicate()
+	for i in range(g.size()):
+		if not (is_finite(g[i]) and is_finite(zz[i])):
+			g[i] = 0.0
+			zz[i] = 0.0
+	var id: int = p_mod.get_instance_id()
+	var per: Dictionary = _live_last.get(id, {})
+	for ext in per.keys():
+		if int(per[ext].get("run", 0)) != _deferred_run:
+			per.erase(ext)
+	per[p_extent] = {"run": _deferred_run, "key": int(p_entry.get("key", 0)), "grid": g, "z": zz}
+	_live_last[id] = per
+
+
+## The kept Live answer for `p_mod` fitted to `p_extent` at cell scale `p_scale` (the step's preview scale),
+## or {} when there is none. Exact extent and size: served as kept. Otherwise the kept extent overlapping
+## most is shifted onto the new grid, nearest cell, with 0/0 (no change) where it does not reach. A kept
+## answer at a different scale (Live Preview Resolution changed) is not fitted: the solve is seconds away.
+func _live_preview_entry(p_mod: Object, p_extent: String, p_scale: int) -> Dictionary:
+	var per: Dictionary = _live_last.get(p_mod.get_instance_id(), {})
+	var ne := _parse_extent(p_extent)
+	if per.is_empty() or ne.is_empty():
+		return {}
+	var s := maxi(p_scale, 1)
+	var cgw := ceili(float(ne[2]) / s)
+	var cgh := ceili(float(ne[3]) / s)
+	if per.has(p_extent) and (per[p_extent]["grid"] as PackedFloat32Array).size() == cgw * cgh:
+		return per[p_extent]
+	var best := ""
+	var best_area := 0
+	for ext: String in per.keys():
+		var oe := _parse_extent(ext)
+		if oe.is_empty() or _grid_scale(oe[2], oe[3], (per[ext]["grid"] as PackedFloat32Array).size()) != s:
+			continue
+		var w := mini(ne[0] + ne[2], oe[0] + oe[2]) - maxi(ne[0], oe[0])
+		var h := mini(ne[1] + ne[3], oe[1] + oe[3]) - maxi(ne[1], oe[1])
+		if w > 0 and h > 0 and w * h > best_area:
+			best_area = w * h
+			best = ext
+	if best == "":
+		return {}
+	var oe := _parse_extent(best)
+	var old: Dictionary = per[best]
+	var ocgw := ceili(float(oe[2]) / s)
+	var ocgh := ceili(float(oe[3]) / s)
+	var offx := roundi(float(ne[0] - oe[0]) / s)
+	var offz := roundi(float(ne[1] - oe[1]) / s)
+	# Key 0, never the kept one: a graph that ignores its input keys on content alone, so a fitted answer
+	# would match, be served as a hit, and never be solved — leaving zeros wherever the old grid did not reach.
+	return {"key": 0, "grid": _shift_grid(old["grid"], ocgw, ocgh, cgw, cgh, offx, offz),
+			"z": _shift_grid(old["z"], ocgw, ocgh, cgw, cgh, offx, offz)}
+
+
+## `p_src` (`p_sw` x `p_sh`) moved onto a `p_dw` x `p_dh` grid whose cell (0,0) is source cell
+## (`p_offx`, `p_offz`); zero where the source does not reach. Row slices, so no per-cell loop.
+func _shift_grid(p_src: PackedFloat32Array, p_sw: int, p_sh: int, p_dw: int, p_dh: int,
+		p_offx: int, p_offz: int) -> PackedFloat32Array:
+	var zero := PackedFloat32Array()
+	zero.resize(p_dw)
+	var out := PackedFloat32Array()
+	var x0 := clampi(-p_offx, 0, p_dw)
+	var x1 := clampi(p_sw - p_offx, x0, p_dw)
+	for cz in range(p_dh):
+		var sz := cz + p_offz
+		if sz < 0 or sz >= p_sh or x1 <= x0:
+			out.append_array(zero)
+			continue
+		if x0 > 0:
+			out.append_array(zero.slice(0, x0))
+		out.append_array(p_src.slice(sz * p_sw + x0 + p_offx, sz * p_sw + x1 + p_offx))
+		if x1 < p_dw:
+			out.append_array(zero.slice(0, p_dw - x1))
+	return out
+
+
+## `_extent_key`'s four integers (min x and z in cells, gw, gh), or empty for anything else.
+func _parse_extent(p_extent: String) -> PackedInt32Array:
+	var parts := p_extent.split(",")
+	if parts.size() != 4:
+		return PackedInt32Array()
+	return PackedInt32Array([int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])])
+
+
+## The block scale a `p_gw` x `p_gh` extent was solved at, read off the answer's cell count; 0 if none fits.
+func _grid_scale(p_gw: int, p_gh: int, p_size: int) -> int:
+	for s in range(1, 17):
+		if ceili(float(p_gw) / s) * ceili(float(p_gh) / s) == p_size:
+			return s
+	return 0
 
 
 ## Whether an edit arriving now should cancel the run and start over (newest edit wins). Its own function
@@ -5119,7 +5225,7 @@ func _spline_dirty_aabb(path: Path3D, moved_indices: PackedInt32Array,
 			return p_prev_painted
 		return whole.merge(p_prev_painted)
 
-	var pad := _total_padding() + reach
+	var pad := (0.0 if rect_ignores_padding else _total_padding()) + reach
 	var mn := Vector2(INF, INF)
 	var mx := Vector2(-INF, -INF)
 	# A closed loop's first point also bounds the closing span from its LAST point, and clamping the
@@ -5915,6 +6021,7 @@ func clear_erosion_caches() -> int:
 	for m in erosion_modifiers():
 		m.clear_cache()
 		n += 1
+	_live_last.clear() # a preview of a dropped solve is the same stale answer the clear is for
 	return n
 
 
@@ -6008,12 +6115,22 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 			var live_async: bool = (m.evaluation != Pasture3DNode.Evaluation.FROZEN and _erosion_running
 					and not _erosion_suppress)
 			var entry: Dictionary = {}
+			# Pass 1 of a Live run has no answer yet: paint the last run's, and solve anyway. Not when the
+			# stale cache must pin absolute heights — an un-rebased preview would paint the old surface.
+			var preview := false
 			if live_async:
 				entry = _live_solved.get(_live_key(m, p_extent), {})
+				if entry.is_empty() and not stale_cache_pins_absolute:
+					var ps := _preview_scale_for(m)
+					if m is Pasture3DNodeGraph:
+						ps = maxi(ps, bscale)
+					entry = _live_preview_entry(m, p_extent, ps)
+					preview = not entry.is_empty()
 			elif p_extent != "":
 				entry = m.cache_for(p_extent)
 			blk["live_async"] = live_async
-			blk["serve_stale"] = not live_async
+			blk["serve_stale"] = not live_async or preview
+			blk["requeue_stale"] = preview
 			blk["frozen"] = live_async or m.evaluation == Pasture3DNode.Evaluation.FROZEN
 			blk["cache_key"] = int(entry.get("key", 0))
 			blk["cache"] = entry.get("grid", PackedFloat32Array())
@@ -6766,7 +6883,10 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	elif frozen and extent != "":
 		entry = m.cache_for(extent)
 	var zo: PackedFloat32Array = entry.get("grid", PackedFloat32Array())
-	if zo.size() == n and (not live_async or int(entry.get("key", 0)) == key):
+	var requeue: bool = p_step.get("requeue_stale", false)
+	var requeued := false
+	var unserved := p_vals.duplicate() if requeue else PackedFloat32Array()
+	if zo.size() == n and (not live_async or requeue or int(entry.get("key", 0)) == key):
 		var czs: PackedFloat32Array = entry.get("z", PackedFloat32Array())
 		if int(entry.get("key", 0)) != key and czs.size() == n and not stale_cache_pins_absolute:
 			# Stale: carry the cached CHANGE onto today's surface, not the old absolute heights.
@@ -6778,7 +6898,9 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 		out_slot["stale"] = int(entry.get("key", 0)) != key
 		out_slot["served"] = true
 		Pasture3DBakeTrace.graph(self, frozen, extent, "STALE" if out_slot["stale"] else "HIT")
-		return p_vals
+		if not (out_slot["stale"] and requeue):
+			return p_vals
+		requeued = true # the last Live answer is painted; still queue the solve below
 
 	# Deferred driver pass 1: queue the solve for worker thread and return current surface
 	# Compiled on the main thread, and the deferral is conditional on it: a graph the native evaluator
@@ -6797,7 +6919,7 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 		out_slot["pending_gw"] = gw
 		out_slot["pending_gh"] = gh
 		out_slot["pending_rect"] = rect
-		out_slot["stale"] = false
+		out_slot["stale"] = requeued
 		out_slot["served"] = true
 		# Queued by `_commit_modifier_caches` from `out_slot`, as the native route's is. This used to ALSO
 		# append to `_pending_graph` here, so on this route every deferred graph was solved twice.
@@ -6805,6 +6927,10 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 		return p_vals
 
 	# MISS: evaluate, handing the graph the absolute surface for its Input node.
+	if requeued:
+		# The preview could not be deferred: undo it in place, so the fresh answer is composited once.
+		for k in range(n):
+			p_vals[k] = unserved[k]
 	var _trace_us := Time.get_ticks_usec()
 	zo = g.evaluate(gw, gh, rect, null, z)
 	Pasture3DBakeTrace.graph(self, frozen, extent, "MISS", Time.get_ticks_usec() - _trace_us)
@@ -6934,10 +7060,13 @@ func _apply_erosion_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	var key := hash([z, m.iterations, m.erosion_rate, m.area_exponent, m.hillslope_diffusion,
 			m.deposition, m.erodability_range, m.publish_fields])
 	var entry: Dictionary = {}
+	var requeue: bool = p_step.get("requeue_stale", false)
 	if live_async:
 		# The run's own answer, and only for this exact surface: a mismatch is a miss, which defers again.
-		if int(p_step.get("cache_key", 0)) == key:
-			entry = {"key": key, "grid": p_step.get("cache", PackedFloat32Array()),
+		# Except the last run's answer on pass 1 (`requeue`), which is painted stale and solved anyway.
+		if requeue or int(p_step.get("cache_key", 0)) == key:
+			entry = {"key": int(p_step.get("cache_key", 0)), "grid": p_step.get("cache", PackedFloat32Array()),
+					"z": p_step.get("cache_z", PackedFloat32Array()),
 					"flow": p_step.get("cache_flow", PackedFloat32Array()),
 					"ero": p_step.get("cache_ero", PackedFloat32Array()),
 					"dep": p_step.get("cache_dep", PackedFloat32Array()),
@@ -6966,7 +7095,9 @@ func _apply_erosion_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 			p_vals[i] = (served - basey[i]) if add else served
 		out["stale"] = int(entry.get("key", 0)) != key
 		out["served"] = true
-		return p_vals
+		if not (out["stale"] and requeue and bool(p_step.get("defer", false)) and p_step.has("out")):
+			return p_vals
+		# The last Live answer is painted; the surface still goes out to be solved below.
 
 	# §14 pass 1: hand the surface out and leave the grid un-eroded. `out` is non-empty exactly when the
 	# step is frozen and someone is listening, which is the same condition `defer` was compiled under.
@@ -7676,24 +7807,40 @@ func _edit_reach() -> float:
 	return 0.0
 
 
-## The modifier stack's part of a LOOP brush's `_edit_reach()` (Mound, Plow). A field step (smoothing,
-## erosion, graph) solves over the whole grid, and a relief modifier is framed by the whole loop, so
-## neither is local to a moved span. Noise reads world XZ at one cell and adds nothing.
-func _stack_edit_reach() -> float:
+## A LOOP brush's `_edit_reach()` (Mound, Plow) once its modifier stack has run, given `p_host`, the reach
+## of the brush's own shape. A field step (smoothing, erosion) solves over the whole grid, and a relief
+## modifier is framed by the whole loop, so neither is local to a moved span: INF. Noise reads world XZ at
+## one cell and adds nothing.
+##
+## A GRAPH step is as local as its nodes say (Pasture3DTerrainGraph.edit_reach). Its input changed out to
+## the reach so far, so its output changed out to that PLUS the graph's — the reaches add, where the brush's
+## own and a pointwise step's only take the larger. Its composite mask is a separate change: a CUSTOM
+## feather ramps over its own width from the rim, which the brush's falloff need not cover.
+func _stack_edit_reach(p_host: float = 0.0) -> float:
 	if not _supports_modifiers():
-		return 0.0
+		return p_host
+	var reach := p_host
 	for m in modifiers:
 		if m == null or not m.is_active():
 			continue
+		if m is Pasture3DNodeGraph:
+			if m.graph == null:
+				continue
+			reach += m.graph.edit_reach()
+			if m.feather_mode == Pasture3DNodeGraph.FeatherMode.CUSTOM:
+				reach = maxf(reach, m.custom_falloff_width)
+			continue
 		if m is Pasture3DNodeRelief or m.needs_grid():
 			return INF
-	return 0.0
+	return reach
 
 
 ## Gate controls (RectEditReachGate): a point drag's box ignores `_edit_reach()` / does not wrap a closed
 ## loop's neighbours past its first and last point.
 var rect_ignores_edit_reach: bool = false
 var rect_no_closed_wrap: bool = false
+## Gate control (RectEditReachGate [GO]): a point drag's box drops `_total_padding()` and keeps the reach.
+var rect_ignores_padding: bool = false
 
 
 ## How far, in metres, the crease-smoothing kernel reaches — the sum of the three box passes' half-widths.

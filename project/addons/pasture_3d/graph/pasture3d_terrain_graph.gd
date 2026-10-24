@@ -549,6 +549,25 @@ func outward_reach() -> float:
 	return r
 
 
+## How far, in metres, an edit to the host brush can spread through this graph to its output: the longest
+## chain of `edit_reach()` from any node to the output, summed (a node's own reach adds to the furthest of
+## its inputs'). A muted node passes its input through and adds nothing. INF as soon as any node on the
+## chain is INF, and 0 for a graph with no usable output (a flat field cannot move).
+func edit_reach() -> float:
+	var order := _eval_order()
+	if order.is_empty():
+		return 0.0
+	var acc := {}
+	for ni: int in order:
+		var upstream := 0.0
+		for c in connections:
+			if c.size() >= 4 and int(c[2]) == ni and acc.has(int(c[0])):
+				upstream = maxf(upstream, float(acc[int(c[0])]))
+		var node: Pasture3DGraphNode = nodes[ni]
+		acc[ni] = upstream + (0.0 if node.muted else node.edit_reach())
+	return float(acc.get(output_index(), 0.0))
+
+
 ## The footprint pin over `p_rect` at `p_gw` x `p_gh`: nearest footprint cell to each cell centre, 0 outside
 ## the footprint's rect, 1.0 everywhere when there is none. The oracle for graph_footprint_fill.
 static func footprint_grid(p_fp: Dictionary, p_gw: int, p_gh: int, p_rect: Rect2) -> PackedFloat32Array:

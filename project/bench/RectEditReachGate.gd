@@ -21,10 +21,19 @@
 #   [L] the reported configuration: a cone Mound inside a Pasture3DLayerBrush (Children Footprints). Same
 #       control as [C]
 #
+# A GRAPH modifier used to send every drag whole-footprint. It now pads by the graph's edit reach (2026-10-24),
+# and the Leveler is the first node to claim a finite one. Each arm: [R]'s rectangle, a capped 20 m Mound,
+# Input -> Leveler (LINEAR wall, so a missed cell moves enough to see) -> Output, Live:
+#   [GI] Level At Height, INSIDE wall 60 m: reach = brush + 60. Control `rect_ignores_edit_reach` disagrees.
+#        Witness: the clip leaves part of the footprint out
+#   [GO] Level At Height, OUTSIDE wall 100 m: reach adds 0, because the Modifier Margin pad already holds the
+#        wall. Control `rect_ignores_padding` (pad dropped, reach kept) disagrees. Same witness
+#   [GF] FLATTEN: the level is a statistic of the whole area, so INF: agree, and the clip encloses the footprint
+#
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/RectEditReachGate.tscn
 extends Node
 
-const CRITERIA := 5
+const CRITERIA := 8
 const RS := 512
 const CENTRE := Vector3(256, 0, 256)
 const AGREE_M := 0.001
@@ -55,7 +64,7 @@ func _ready() -> void:
 	_terrain.change_region_size(RS)
 	_terrain.data.add_region_blank(Vector2i(0, 0), true)
 	_terrain.data.ensure_layer_stack()
-	for f in [_c, _d, _r, _w, _l]:
+	for f in [_c, _d, _r, _w, _l, _gi, _go, _gf]:
 		await f.call()
 	if _ran != CRITERIA:
 		_check("completed", false, "%d of %d criteria ran" % [_ran, CRITERIA])
@@ -229,4 +238,59 @@ func _xz(p_box: AABB) -> String:
 
 func _l() -> void:
 	await _pair("L", func(_m): pass, 7, Vector3(0, 0, 30), "rect_ignores_edit_reach", true)
+	_ran += 1
+
+
+## [R]'s capped Mound carrying Input -> Leveler -> Output, Level At Height 10 m under a 20 m top, so the wall
+## blends between two heights 10 m apart and a cell the box misses is metres out, not centimetres.
+func _leveled(p_mode: int, p_side: int, p_feather: float) -> Callable:
+	return func(m: Pasture3DMound) -> void:
+		_capped(20.0).call(m)
+		var lev := Pasture3DGraphNodeLeveler.new()
+		lev.mode = p_mode
+		lev.feather_side = p_side
+		lev.feather = p_feather
+		lev.target_height = 10.0
+		var lin := Curve.new()
+		lin.add_point(Vector2(0, 1), 0.0, -1.0, Curve.TANGENT_LINEAR, Curve.TANGENT_LINEAR)
+		lin.add_point(Vector2(1, 0), -1.0, 0.0, Curve.TANGENT_LINEAR, Curve.TANGENT_LINEAR)
+		lev.falloff = lin
+		var g := Pasture3DTerrainGraph.create_default() # [0] Input -> [1] Output
+		var li := g.add_node(lev)
+		g.connections = [PackedInt32Array([0, 0, li, 0]), PackedInt32Array([li, 0, 1, 0])]
+		var gm := Pasture3DNodeGraph.new()
+		gm.evaluation = Pasture3DNode.Evaluation.LIVE
+		gm.graph = g
+		var mods: Array[Pasture3DNode] = [gm]
+		m.modifiers = mods
+
+
+func _graph_arm(p_tag: String, p_setup: Callable, p_control: String) -> void:
+	_loop = RECT
+	var fixed: Array = await _pair(p_tag, p_setup, 3, Vector3(0, 0, 10), p_control)
+	_loop = LOOP
+	_check("[%s] a finite graph reach leaves part of the footprint out of the clip" % p_tag,
+			not _encloses_xz(fixed[1], fixed[2]), "clip %s, footprint %s" % [_xz(fixed[1]), _xz(fixed[2])])
+	_ran += 1
+
+
+func _gi() -> void:
+	await _graph_arm("GI", _leveled(Pasture3DGraphNodeLeveler.Mode.LEVEL_AT_HEIGHT,
+			Pasture3DGraphNodeLeveler.FeatherSide.INSIDE, 60.0), "rect_ignores_edit_reach")
+
+
+func _go() -> void:
+	await _graph_arm("GO", _leveled(Pasture3DGraphNodeLeveler.Mode.LEVEL_AT_HEIGHT,
+			# 100 m, not 40: the tile snap alone covers a 40 m wall, and the control could not fail.
+			Pasture3DGraphNodeLeveler.FeatherSide.OUTSIDE, 100.0), "rect_ignores_padding")
+
+
+func _gf() -> void:
+	_loop = RECT
+	var fixed: Array = await _arm(_leveled(Pasture3DGraphNodeLeveler.Mode.FLATTEN,
+			Pasture3DGraphNodeLeveler.FeatherSide.INSIDE, 60.0), 3, Vector3(0, 0, 10), "", false)
+	_loop = LOOP
+	_check("[GF] rect == full", fixed[0] <= AGREE_M, "worst %.4f m (<= %.3f)" % [fixed[0], AGREE_M])
+	_check("[GF] an unbounded graph reach clips the whole footprint", _encloses_xz(fixed[1], fixed[2]),
+			"clip %s, footprint %s" % [_xz(fixed[1]), _xz(fixed[2])])
 	_ran += 1

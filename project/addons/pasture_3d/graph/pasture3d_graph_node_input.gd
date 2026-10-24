@@ -26,6 +26,12 @@ func needs_grid() -> bool:
 	return true
 
 
+## The host's surface and footprint, cell for cell: where they changed is the brush's own reach, which the
+## host has already counted. Adds nothing.
+func edit_reach() -> float:
+	return 0.0
+
+
 func input_count() -> int:
 	return 0
 
