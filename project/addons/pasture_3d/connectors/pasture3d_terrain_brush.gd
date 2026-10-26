@@ -2375,9 +2375,14 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 	if owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
 		var lb_host := _layer_brush_for_owner(owner)
 		if lb_host != null:
-			var was_stale: bool = lb_host.base_is_stale()
-			if was_stale:
+			# `bake_base` skips a matching key itself. Asking `base_is_stale` first built the stage 1 inputs
+			# (a read and hash of the whole extent) twice whenever the base was stale, and once for nothing
+			# when it was not.
+			if lb_host.stale_check_first and not lb_host.base_is_stale():
+				lb_host.last_base_decision = "skip"
+			else:
 				lb_host.bake_base()
+			var was_stale: bool = lb_host.last_base_decision in ["solve", "clear"]
 			if not rect_ignores_base_change:
 				base_change = lb_host.base_change()
 			if not _erosion_running:

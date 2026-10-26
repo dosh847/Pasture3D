@@ -3,6 +3,11 @@
 # LayerBrushBaseGate — phase 3 of PASTURE3D_LAYER_BRUSH_SPEC.md: the Layer's base stage.
 #
 #   [A] empty stack: the base row holds 0 cells; control: holding every cell holds some
+#   [E] a member edit under a stack-less Layer whose base row is empty writes nothing; a base still holding an
+#       old stack's cells is cleared once; control: without the shortcut the outline move rewrites the base
+#   [V] a quiet stack over an empty base row solves, holds nothing and skips the composite and diff; control: with
+#       the skip off it composites and lands on the same ground. [F] a member rect bake builds the stage 1 inputs
+#       once, stale or not; control: asking base_is_stale first builds twice
 #   [G] extent Whole Terrain == region union, Footprints == outlines ⊕ margin snapped to tiles; the first member
 #       flips Whole Terrain to Footprints, a second member / removal / load don't; control: flip on load
 #   [H] Footprints profile: no base cell moves beyond outline ⊕ margin, none at a thin diagonal's AABB corner,
@@ -23,7 +28,7 @@
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/LayerBrushBaseGate.tscn
 extends Node
 
-const CRITERIA := 7
+const CRITERIA := 9
 var RS := 64
 
 var _fail := 0
@@ -42,7 +47,7 @@ func _ready() -> void:
 	_terrain.data.ensure_layer_stack()
 	# The terrain may enforce a larger region than asked for; measure over the one it made.
 	RS = _terrain.region_size
-	for f in [_a, _g, _h, _i, _k, _p, _bs]:
+	for f in [_a, _e, _v, _g, _h, _i, _k, _p, _bs]:
 		await f.call()
 	if _ran != CRITERIA:
 		_check("completed", false, "%d of %d criteria ran" % [_ran, CRITERIA])
@@ -164,6 +169,110 @@ func _a() -> void:
 	lb._base_key = ""
 	lb.bake_base()
 	_check("A control", quiet == 0 and lb.base_cell_count > 0, "zero-strength stack holds %d; hold-every-cell holds %d" % [quiet, lb.base_cell_count])
+	_drop([lb])
+	await _settle()
+	_ran += 1
+
+
+## Move every point of the member's first spline by `p_d`, so its footprint and the Footprints extent move.
+func _shift(p_m: Node, p_d: Vector3) -> void:
+	var c: Curve3D = p_m._get_splines()[0].curve
+	for i in range(c.point_count):
+		c.set_point_position(i, c.get_point_position(i) + p_d)
+
+
+func _e() -> void:
+	var lb := _layer("Shortcut", false)
+	var m := _mound(lb, "Kid", _square(16, 16, 6))
+	await _settle()
+	m._refresh_owner(m._layer_owner, false, [])
+	_shift(m, Vector3(100, 0, 100))
+	var stale := lb.base_is_stale()
+	var wrote := lb.bake_base()
+	var empty: bool = _terrain.data.get_layer_stack().get_layer(_row(lb.base_owner_id())).get_region_locations().is_empty()
+	_check("E skips empty base", stale and not wrote and lb.last_base_decision == "clear" and not lb.base_is_stale() and empty,
+			"outline move stale %s, wrote %s (%s), fresh after %s" % [stale, wrote, lb.last_base_decision, not lb.base_is_stale()])
+	# A base left holding an old stack's cells is not empty: the first bake after the stack goes clears it.
+	var nz := Pasture3DNodeNoise.new()
+	nz.noise = FastNoiseLite.new()
+	nz.strength = 4.0
+	var mods: Array[Pasture3DNode] = [nz]
+	lb.modifiers = mods
+	lb.bake_base()
+	var held := lb.base_cell_count
+	var none: Array[Pasture3DNode] = []
+	lb.modifiers = none
+	var cleared := lb.bake_base()
+	var worst := 0.0
+	for v in _base_delta(lb):
+		worst = maxf(worst, absf(v))
+	_shift(m, Vector3(-80, 0, 0))
+	var again := lb.bake_base()
+	_check("E clears once", held > 0 and cleared and worst == 0.0 and not again,
+			"held %d, removal cleared %s (worst %.4f m), next move wrote %s" % [held, cleared, worst, again])
+	lb.no_empty_shortcut = true
+	_shift(m, Vector3(0, 0, -80))
+	var ctl := lb.bake_base()
+	_check("E control", ctl, "without the shortcut an outline move rewrites the empty base: %s" % ctl)
+	# Take the rows with it: the member's paint sits under P's flow fixture and would change what P measures.
+	lb._remove_rows()
+	_drop([lb])
+	await _settle()
+	_ran += 1
+
+
+## [V] A stack that moves nothing over an empty base row: the solve runs, holds nothing, and no composite or
+## diff follows; the result equals the same solve with the skip off. [F] A member's rect bake builds the
+## stage 1 inputs once.
+func _v() -> void:
+	var lb := _layer("Quiet", false)
+	var m := _mound(lb, "Kid", _square(32, 32, 8))
+	var nz := Pasture3DNodeNoise.new()
+	nz.noise = FastNoiseLite.new()
+	nz.strength = 0.00001
+	var mods: Array[Pasture3DNode] = [nz]
+	lb.modifiers = mods
+	await _settle()
+	m._refresh_owner(m._layer_owner, false, [])
+	var base_layer: Pasture3DLayer = _terrain.data.get_layer_stack().get_layer(_row(lb.base_owner_id()))
+	var empty_before := base_layer.get_region_locations().is_empty()
+	var c0 := lb.base_composites
+	lb._base_key = ""
+	var wrote := lb.bake_base()
+	var skipped := lb.base_composites == c0
+	var after := _heights()
+	_check("V empty to empty", empty_before and wrote and lb.last_base_decision == "solve" and lb.base_cell_count == 0
+			and skipped and lb.base_change().size == Vector3.ZERO,
+			"row empty %s, solved %s (%s), held %d, composites skipped %s" % [empty_before, wrote, lb.last_base_decision,
+				lb.base_cell_count, skipped])
+	lb.no_empty_skip = true
+	c0 = lb.base_composites
+	lb._base_key = ""
+	lb.bake_base()
+	lb.no_empty_skip = false
+	_check("V control", lb.base_composites == c0 + 1 and _heights() == after,
+			"with the skip off the same solve composites %d time(s) and lands on the same ground %s"
+				% [lb.base_composites - c0, _heights() == after])
+
+	# [F] One input build per rect bake whether or not the base is stale.
+	var sp: Path3D = m._get_splines()[0]
+	sp.curve.set_point_position(1, sp.curve.get_point_position(1) + Vector3(5, 0, 0))
+	var b0 := lb.base_input_builds
+	m._refresh_owner_rect(m._layer_owner, {sp.get_instance_id(): true}, false, [], false)
+	var stale_builds := lb.base_input_builds - b0
+	var stale_dec := lb.last_base_decision
+	b0 = lb.base_input_builds
+	m._refresh_owner_rect(m._layer_owner, {sp.get_instance_id(): true}, true, [], false)
+	var fresh_builds := lb.base_input_builds - b0
+	_check("F rect builds once", stale_builds == 1 and stale_dec == "solve" and fresh_builds == 1 and lb.last_base_decision == "skip",
+			"stale: %d build(s) (%s); fresh: %d build(s) (%s)" % [stale_builds, stale_dec, fresh_builds, lb.last_base_decision])
+	lb.stale_check_first = true
+	sp.curve.set_point_position(1, sp.curve.get_point_position(1) + Vector3(-5, 0, 0))
+	b0 = lb.base_input_builds
+	m._refresh_owner_rect(m._layer_owner, {sp.get_instance_id(): true}, false, [], false)
+	lb.stale_check_first = false
+	_check("F control", lb.base_input_builds - b0 == 2, "asking base_is_stale first builds %d time(s)" % (lb.base_input_builds - b0))
+	lb._remove_rows()
 	_drop([lb])
 	await _settle()
 	_ran += 1

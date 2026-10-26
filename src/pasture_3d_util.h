@@ -385,6 +385,27 @@ public:
 			const PackedFloat32Array &p_widths, const bool p_closed, const int p_gw, const int p_gh,
 			const Rect2 &p_rect, const double p_width_scale, const double p_feather, const bool p_invert);
 
+	// Layer brush stage 1 (PASTURE3D_LAYER_BRUSH_SPEC.md §7.2), native so the base never walks its extent in
+	// GDScript. The grid's cell (ix, iz) sits at (p_min_x + ix * p_vs, p_min_z + iz * p_vs).
+	//
+	// Children Footprints profile: the max over every path of `path_mask_grid` (width scale 1, feather
+	// `p_margin`), then smoothstep. A closed ring is 0 beyond its bounds grown by the margin, so each ring is
+	// only evaluated inside that box; open paths cover the grid.
+	static PackedFloat64Array layer_footprint_profile(const Array &p_points, const Array &p_widths,
+			const PackedByteArray &p_closed, const int p_gw, const int p_gh, const double p_min_x,
+			const double p_min_z, const double p_vs, const double p_margin);
+	// Whole Region profile: 1 inside the union of the region squares at `p_regions` (region coordinates, each
+	// `p_region_world` metres, owning vertices [origin, origin + size - vs]), smoothstep to 0 over the margin.
+	static PackedFloat64Array layer_region_profile(const PackedVector2Array &p_regions, const double p_region_world,
+			const int p_gw, const int p_gh, const double p_min_x, const double p_min_z, const double p_vs,
+			const double p_margin);
+	// The cells the base holds: `p_result` where it is a number and moved at least `p_eps` off `p_below`
+	// (every number when `p_hold_every`), NaN elsewhere. Returns [vals, held_count].
+	static Array layer_base_filter(const PackedFloat32Array &p_result, const PackedFloat32Array &p_below,
+			const double p_eps, const bool p_hold_every);
+	// The cell bounds where two row-major grids of width `p_gw` differ (NaN == NaN), or an empty Rect2i.
+	static Rect2i grid_changed_bounds(const PackedFloat32Array &p_a, const PackedFloat32Array &p_b, const int p_gw);
+
 	// PATH Operations: Derive family (GRID -> PATH) and Reshape family (PATH -> PATH)
 	static PackedFloat32Array path_drape_solve(const PackedVector2Array &p_points,
 			const PackedFloat32Array &p_existing_heights, const bool p_closed,

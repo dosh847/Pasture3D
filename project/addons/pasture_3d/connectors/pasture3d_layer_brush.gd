@@ -195,6 +195,24 @@ var key_without_below: bool = false
 var flip_on_load: bool = false
 ## Test hook for LB-H's control: build the Footprints profile from member AABBs, not outlines.
 var profile_from_aabbs: bool = false
+## Test hook for LB-E's control: clear and recomposite an empty base row as if it held something.
+var no_empty_shortcut: bool = false
+## Test hooks for LB-R/LB-V/LB-F's controls: re-read on a repass, composite an empty-to-empty solve, re-check
+## the base during a run's member passes.
+var no_repass_reuse: bool = false
+var no_empty_skip: bool = false
+var no_run_fresh: bool = false
+## Test hook for LB-F's rect control: a member's rect bake asks `base_is_stale` before `bake_base`, as it used to.
+var stale_check_first: bool = false
+## Work counters the gates read: `_base_inputs` calls, full below reads, profile builds, base composites.
+var base_input_builds: int = 0
+var base_below_reads: int = 0
+var base_profile_builds: int = 0
+var base_composites: int = 0
+## Pass 1's reads, reused by this run's driver repasses. Not persisted; cleared when the run ends.
+var _repass_memo: Dictionary = {}
+## True between this run's base commit and its end: member passes find the base already answered.
+var _base_committed_in_run: bool = false
 
 
 ## ---- Whole Region (§7.1, §7.5, phase 3b) ---------------------------------------------------------------
@@ -264,35 +282,13 @@ func _valid_selection() -> Array[Vector2i]:
 
 
 ## §7.2 Whole Region: 1 inside the selection, smoothstep 1 -> 0 over the margin outside it. The selection is a
-## union of axis-aligned squares, so the distance is exact: no JFA, no approximation.
+## union of axis-aligned squares, so the distance is exact: no JFA, no approximation. Native: it spans the extent.
 func _region_profile(p_inp: Dictionary) -> PackedFloat64Array:
-	var gw: int = p_inp["gw"]
-	var gh: int = p_inp["gh"]
-	var vs: float = p_inp["vs"]
-	var min_x: float = p_inp["min_x"]
-	var min_z: float = p_inp["min_z"]
-	var rsw := _region_world()
-	var margin := _effective_modifier_margin()
-	var sel := _valid_selection()
-	var prof := PackedFloat64Array()
-	prof.resize(gw * gh)
-	for iz in range(gh):
-		var z := min_z + iz * vs
-		for ix in range(gw):
-			var x := min_x + ix * vs
-			var d := INF
-			for loc in sel:
-				# A region owns vertices [origin, origin + size - vs]; the next vertex is its neighbour's.
-				var ax := loc.x * rsw
-				var az := loc.y * rsw
-				var dx := maxf(maxf(ax - x, x - (ax + rsw - vs)), 0.0)
-				var dz := maxf(maxf(az - z, z - (az + rsw - vs)), 0.0)
-				d = minf(d, sqrt(dx * dx + dz * dz))
-				if d <= 0.0:
-					break
-			var t := 1.0 if d <= 0.0 else (0.0 if margin <= 0.0 else clampf(1.0 - d / margin, 0.0, 1.0))
-			prof[iz * gw + ix] = t * t * (3.0 - 2.0 * t)
-	return prof
+	var regions := PackedVector2Array()
+	for loc in _valid_selection():
+		regions.append(Vector2(loc))
+	return Pasture3DUtil.layer_region_profile(regions, _region_world(), p_inp["gw"], p_inp["gh"], p_inp["min_x"],
+			p_inp["min_z"], p_inp["vs"], _effective_modifier_margin())
 
 
 func _connect_region_signal() -> void:
@@ -567,6 +563,8 @@ func bake_layer_run(p_record_undo: bool = false, p_lead: Node = null, p_member_b
 	if not bake.is_valid() and lead != null:
 		bake = lead._refresh_owner.bind(owner, false, [])
 	_cancel = false
+	_base_committed_in_run = false
+	_repass_memo = {}
 	if children_before_base and lead != null:
 		_hold_base = true
 		await _run_members(lead, bake, owner)
@@ -574,10 +572,15 @@ func bake_layer_run(p_record_undo: bool = false, p_lead: Node = null, p_member_b
 		await _run_base()
 	else:
 		await _run_base()
+		# Members cannot move anything stage 1 reads while they bake, so the base this run just committed
+		# answers every member pass; asking again re-read and re-hashed the whole extent per pass.
+		_base_committed_in_run = not _cancel and not no_run_fresh
 		if not _cancel and lead != null and is_instance_valid(lead):
 			await _run_members(lead, bake, owner)
 		elif _cancel:
 			work_log.append("cancelled")
+	_base_committed_in_run = false
+	_repass_memo = {}
 	_layer_run_active = false
 	# Every pass of the member stage has repainted what the base moved; the next edit starts from nothing.
 	_base_change = AABB()
@@ -697,7 +700,10 @@ func _log_children() -> void:
 
 
 func base_is_stale() -> bool:
+	var t0 := Time.get_ticks_usec()
 	var inp := _base_inputs()
+	if Pasture3DBakeTrace.enabled:
+		Pasture3DBakeTrace.mark("%s base_is_stale: inputs %.1f ms" % [name, (Time.get_ticks_usec() - t0) / 1000.0])
 	return not inp.is_empty() and inp["key"] != _base_key
 
 
@@ -706,9 +712,14 @@ func bake_base() -> bool:
 	if _hold_base:
 		last_base_decision = "held"
 		return false
+	if _base_committed_in_run and not _deferred_repass:
+		last_base_decision = "fresh"
+		return false
 	ensure_rows()
 	_connect_region_signal()
+	var t0 := Time.get_ticks_usec()
 	var inp := _base_inputs()
+	_base_laps = ["inputs %.1f" % ((Time.get_ticks_usec() - t0) / 1000.0)]
 	if inp.is_empty():
 		return false
 	# A driver repass must run even on a matching key: pass 1 recorded the key with the un-solved base.
@@ -717,13 +728,32 @@ func bake_base() -> bool:
 		return false
 	var row: int = inp["row"]
 	var box: AABB = inp["box"]
+	# No stack and nothing held: the base is empty before and after, so there is nothing to clear, composite or
+	# diff. Without this a Layer with no modifiers cleared, recomposited and cell-diffed the whole members'
+	# extent on every member edit (6.6 s per point on the demo island) to arrive where it started.
+	if not no_empty_shortcut and not inp.has("below") and _stack().get_layer(row).get_region_locations().is_empty():
+		_base_box = AABB()
+		_base_key = inp["key"]
+		base_cell_count = 0
+		last_base_decision = "clear"
+		return false
+	# An empty row has nothing to clear, and the ground above it IS the ground below it, which the inputs
+	# already read: the pre-solve read is `below`, and a solve that holds nothing changes nothing at all.
+	var was_empty: bool = (not no_empty_skip and inp.has("below")
+			and _stack().get_layer(row).get_region_locations().is_empty())
 	var clear := _base_box
-	if box.size.x > 0.0 and box.size.z > 0.0:
+	if was_empty:
+		clear = box
+	elif box.size.x > 0.0 and box.size.z > 0.0:
 		clear = box if clear.size == Vector3.ZERO else clear.merge(box)
 	# The ground members stand on, before, so the solve can report where it actually moved (§6.3).
-	var pre := _read_main_below(clear)
-	if clear.size != Vector3.ZERO:
+	var t1 := Time.get_ticks_usec()
+	var pre: PackedFloat32Array = inp["below"] if was_empty else _read_main_below(clear)
+	_base_lap("read pre", t1)
+	t1 = Time.get_ticks_usec()
+	if clear.size != Vector3.ZERO and not was_empty:
 		terrain.data.clear_layer_in_area(row, clear, false)
+	_base_lap("clear", t1)
 	_base_box = box if box.size.x > 0.0 and box.size.z > 0.0 else AABB()
 	_base_key = inp["key"]
 	base_cell_count = 0
@@ -734,10 +764,26 @@ func bake_base() -> bool:
 		base_solve_count += 1
 		work_log.append("base_solve")
 		_solve_base(inp)
-	if clear.size != Vector3.ZERO:
+	if clear.size != Vector3.ZERO and not (was_empty and base_cell_count == 0):
+		base_composites += 1
+		t1 = Time.get_ticks_usec()
 		terrain.data.composite_area(clear, false)
+		_base_lap("composite", t1)
+		t1 = Time.get_ticks_usec()
 		_note_base_change(clear, pre)
+		_base_lap("diff", t1)
+	if Pasture3DBakeTrace.enabled:
+		Pasture3DBakeTrace.mark("%s bake_base %s over %dx%d cells, %d held: %s ms" % [name, last_base_decision,
+				int(inp.get("gw", 0)), int(inp.get("gh", 0)), base_cell_count, ", ".join(_base_laps)])
 	return true
+
+
+## Phase timings of the last `bake_base`, for the bake trace.
+var _base_laps: PackedStringArray = []
+
+
+func _base_lap(p_label: String, p_since: int) -> void:
+	_base_laps.append("%s %.1f" % [p_label, (Time.get_ticks_usec() - p_since) / 1000.0])
 
 
 ## ---- Changed-box clipping (§6.3) ----------------------------------------------------------------------------
@@ -777,25 +823,11 @@ func _note_base_change(p_box: AABB, p_pre: PackedFloat32Array) -> void:
 	if post.is_empty() or post.size() != p_pre.size() or gw <= 0:
 		chg = AABB(Vector3(p_box.position.x, 0.0, p_box.position.z), Vector3(p_box.size.x, 0.0, p_box.size.z))
 	else:
-		var gh := post.size() / gw
-		var x0 := gw
-		var x1 := -1
-		var z0 := gh
-		var z1 := -1
-		for iz in range(gh):
-			for ix in range(gw):
-				var a := p_pre[iz * gw + ix]
-				var b := post[iz * gw + ix]
-				if a == b or (is_nan(a) and is_nan(b)):
-					continue
-				x0 = mini(x0, ix)
-				x1 = maxi(x1, ix)
-				z0 = mini(z0, iz)
-				z1 = maxi(z1, iz)
-		if x1 < 0:
+		var r: Rect2i = Pasture3DUtil.grid_changed_bounds(p_pre, post, gw)
+		if r.size.x <= 0:
 			return
-		chg = AABB(Vector3(p_box.position.x + x0 * vs, 0.0, p_box.position.z + z0 * vs),
-				Vector3((x1 - x0 + 1) * vs, 0.0, (z1 - z0 + 1) * vs))
+		chg = AABB(Vector3(p_box.position.x + r.position.x * vs, 0.0, p_box.position.z + r.position.y * vs),
+				Vector3(r.size.x * vs, 0.0, r.size.y * vs))
 	_base_change = chg if _base_change.size == Vector3.ZERO else _base_change.merge(chg)
 
 
@@ -811,20 +843,29 @@ func _solve_base(p_inp: Dictionary) -> void:
 	var params := {"min_x": p_inp["min_x"], "min_z": p_inp["min_z"], "vs": p_inp["vs"], "gw": gw, "gh": gh,
 			"blend": BLEND_REPLACE, "modifiers": stack["list"], "op_selectors": stack["op_selectors"],
 			"need_fields": stack["need_fields"], "need_host_fields": false, "base_below": below}
-	var result: PackedFloat32Array = terrain.data.brush_run_stack_on_field(params, below, amp, _base_profile(p_inp))
+	var t1 := Time.get_ticks_usec()
+	var prof: PackedFloat64Array = p_inp["profile"] if p_inp.has("profile") else _base_profile(p_inp)
+	if not p_inp.has("profile"):
+		base_profile_builds += 1
+		if _repass_memo.get("key", "") == p_inp["key"]:
+			_repass_memo["profile"] = prof
+	_base_lap("profile", t1)
+	t1 = Time.get_ticks_usec()
+	var result: PackedFloat32Array = terrain.data.brush_run_stack_on_field(params, below, amp, prof)
+	_base_lap("stack", t1)
+	t1 = Time.get_ticks_usec()
 	# NaN below epsilon (§6.1): the base is absolute REPLACE, so a held cell freezes the ground beneath it.
-	var vals := PackedFloat32Array()
-	vals.resize(n)
-	for i in range(n):
-		var r := result[i] if i < result.size() else NAN
-		if is_nan(r) or is_nan(below[i]) or (not hold_every_cell and absf(r - below[i]) < MODIFIER_MARGIN_EPS):
-			vals[i] = NAN
-		else:
-			vals[i] = r
-			base_cell_count += 1
+	var filtered: Array = Pasture3DUtil.layer_base_filter(result, below, MODIFIER_MARGIN_EPS, hold_every_cell)
+	var vals: PackedFloat32Array = filtered[0]
+	base_cell_count += int(filtered[1])
+	_base_lap("filter", t1)
+	t1 = Time.get_ticks_usec()
 	if base_cell_count > 0:
 		terrain.data.stamp_grid(int(p_inp["row"]), vals, p_inp["min_x"], p_inp["min_z"], p_inp["vs"], gw, gh, BLEND_REPLACE)
+	_base_lap("stamp", t1)
+	t1 = Time.get_ticks_usec()
 	_commit_modifier_caches(stack, p_inp["extent"])
+	_base_lap("commit", t1)
 
 
 ## Everything stage 1 is a function of, and its key (§6.2). Empty when the rows are not there.
@@ -838,13 +879,15 @@ func _base_inputs() -> Dictionary:
 	var vs: float = terrain.vertex_spacing
 	var box := _base_extent(row)
 	var inp := {"row": row, "vs": vs, "box": box}
+	base_input_builds += 1
 	var h := HashingContext.new()
 	h.start(HashingContext.HASH_MD5)
 	# The effective Bake Scale changes the result, so it is part of what the base is a function of.
-	h.update(("%d|%s|%d" % [extent_mode, str(_modifier_signature()), _effective_bake_scale()]).to_utf8_buffer())
+	var head := "%d|%s|%d" % [extent_mode, str(_modifier_signature()), _effective_bake_scale()]
 	if extent_mode == ExtentMode.WHOLE_REGION:
 		# The SORTED valid selection (§7.1): a reordered list is the same base.
-		h.update(str(_selection_raw if key_unsorted_selection else _valid_selection()).to_utf8_buffer())
+		head += str(_selection_raw if key_unsorted_selection else _valid_selection())
+	h.update(head.to_utf8_buffer())
 	if box.size.x > 0.0 and box.size.z > 0.0:
 		var gw := roundi(box.size.x / vs)
 		var gh := roundi(box.size.z / vs)
@@ -853,10 +896,24 @@ func _base_inputs() -> Dictionary:
 		inp["gw"] = gw
 		inp["gh"] = gh
 		inp["extent"] = _extent_key(box.position.x, box.position.z, vs, gw, gh)
+		head += str(inp["extent"])
 		h.update(str(inp["extent"]).to_utf8_buffer())
+		# Compiled fresh on every pass: it is how a driver repass picks up the solve phase B filed.
 		var comp := _compile_modifiers(inp["extent"])
 		if int(comp["count"]) > 0:
 			inp["stack"] = comp
+			# A driver repass inside this Layer's run reads the same ground and the same outlines pass 1 read
+			# (members sit above the base and cannot move mid-run), so it reuses pass 1's reads, key and
+			# profile rather than reading and hashing the whole extent again. The memo dies with the run.
+			if _deferred_repass and not no_repass_reuse and _repass_memo.get("head", "") == head:
+				inp["below"] = _repass_memo["below"]
+				if _repass_memo.has("paths"):
+					inp["paths"] = _repass_memo["paths"]
+				if _repass_memo.has("profile"):
+					inp["profile"] = _repass_memo["profile"]
+				inp["key"] = _repass_memo["key"]
+				return inp
+			base_below_reads += 1
 			var below: PackedFloat32Array = terrain.data.composite_height_below(row, box.position.x, box.position.z, vs, gw, gh)
 			inp["below"] = below
 			if not key_without_below:
@@ -868,6 +925,10 @@ func _base_inputs() -> Dictionary:
 					h.update(("%s|%s" % [p.source_label, p.closed]).to_utf8_buffer())
 					h.update(p.points.to_byte_array())
 	inp["key"] = h.finish().hex_encode()
+	if inp.has("below") and _layer_run_active:
+		_repass_memo = {"head": head, "key": inp["key"], "below": inp["below"]}
+		if inp.has("paths"):
+			_repass_memo["paths"] = inp["paths"]
 	return inp
 
 
@@ -913,22 +974,21 @@ func _member_paths() -> Array:
 func _base_profile(p_inp: Dictionary) -> PackedFloat64Array:
 	var gw: int = p_inp["gw"]
 	var gh: int = p_inp["gh"]
-	var n := gw * gh
-	var prof := PackedFloat64Array()
-	prof.resize(n)
 	var vs: float = p_inp["vs"]
 	var min_x: float = p_inp["min_x"]
 	var min_z: float = p_inp["min_z"]
 	if extent_mode == ExtentMode.WHOLE_TERRAIN or profile_full_extent:
-		prof.fill(1.0)
-		return prof
+		var full := PackedFloat64Array()
+		full.resize(gw * gh)
+		full.fill(1.0)
+		return full
 	if extent_mode == ExtentMode.WHOLE_REGION:
 		return _region_profile(p_inp)
-	prof.fill(0.0)
-	# Cell centres of this rect land on the grid's vertices.
-	var rect := Rect2(min_x - vs * 0.5, min_z - vs * 0.5, gw * vs, gh * vs)
 	var margin := _effective_modifier_margin()
 	if profile_from_aabbs:
+		var prof := PackedFloat64Array()
+		prof.resize(gw * gh)
+		prof.fill(0.0)
 		for mbr in members():
 			for fp: AABB in mbr._own_footprints():
 				for iz in range(gh):
@@ -938,15 +998,16 @@ func _base_profile(p_inp: Dictionary) -> PackedFloat64Array:
 						if x >= fp.position.x and x <= fp.end.x and z >= fp.position.z and z <= fp.end.z:
 							prof[iz * gw + ix] = 1.0
 		return prof
+	# The same path mask kernel the graph's shape nodes use, folded and smoothed natively: the profile spans
+	# every member's footprint, and a GDScript pass over it was most of a member edit (3.6 s on the demo island).
+	var pts: Array = []
+	var widths: Array = []
+	var closed := PackedByteArray()
 	for p: Pasture3DGraphPath in p_inp.get("paths", []):
-		var m: PackedFloat32Array = Pasture3DUtil.path_mask_grid(p.points, p.half_widths, p.closed, gw, gh, rect, 1.0, margin, false)
-		for i in range(mini(n, m.size())):
-			if m[i] > prof[i]:
-				prof[i] = m[i]
-	for i in range(n):
-		var t := prof[i]
-		prof[i] = t * t * (3.0 - 2.0 * t)
-	return prof
+		pts.append(p.points)
+		widths.append(p.half_widths)
+		closed.append(1 if p.closed else 0)
+	return Pasture3DUtil.layer_footprint_profile(pts, widths, closed, gw, gh, min_x, min_z, vs, margin)
 
 
 const _HIDDEN_BRUSH_PROPERTIES: Array[StringName] = [

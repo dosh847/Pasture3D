@@ -8,12 +8,14 @@
 #       synchronous bake over the NEW base, bitwise. Control: children collect their solves first
 #   [T] Bake All Brushes on the Layer re-solves a FROZEN base whose own slider moved. Control: Refresh,
 #       which honours the freeze and must leave the height untouched
+#   [W] One deferred run reads the ground and builds the profile once, and the members' passes rebuild no inputs;
+#       the result equals the sync bake. Control: no repass reuse and no in-run fresh base
 #   [U] It clears the MEMBERS' frozen solves too, not only the Layer's. Control: Refresh again
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/LayerBrushDriverGate.tscn
 extends Node
 
-const CRITERIA := 4
+const CRITERIA := 5
 
 var _fail := 0
 var _ran := 0
@@ -28,7 +30,7 @@ func _ready() -> void:
 	add_child(_terrain)
 	_terrain.data.add_region_blank(Vector2i(0, 0), true)
 	_terrain.data.ensure_layer_stack()
-	for f in [_l, _s, _t, _u]:
+	for f in [_l, _s, _t, _u, _w]:
 		await f.call()
 	if _ran != CRITERIA:
 		_check("completed", false, "%d of %d criteria ran" % [_ran, CRITERIA])
@@ -231,6 +233,70 @@ func _t() -> void:
 				and not bool(rep.get("cancelled", true)) and int(o["clear"]) == 0 and bool(o["ok"]),
 			"height moved %s; report cleared %d, members %d; log %s" % [
 				after_bake != before, int(rep.get("cleared", 0)), int(rep.get("members", -1)), lb.work_log])
+	lb.free()
+	await _settle()
+	_ran += 1
+
+
+## [W] One deferred run reads the ground and builds the profile once: the driver's repass reuses pass 1's,
+## and the members' passes find the base already answered. The result still equals the synchronous bake.
+func _w() -> void:
+	var nz := _noise(4)
+	var lb := _layer("Reuse", [nz, _erosion(Pasture3DNode.Evaluation.LIVE)])
+	var kid := _mound(lb, "Kid", [_erosion(Pasture3DNode.Evaluation.LIVE)])
+	await _settle()
+	lb.extent_mode = Pasture3DLayerBrush.ExtentMode.CHILDREN_FOOTPRINTS
+	nz.noise.seed = 5
+	lb._base_key = ""
+	lb.bake_layer()
+	var ref := _heights()
+	nz.noise.seed = 4
+	lb._base_key = ""
+	lb.bake_layer()
+
+	var counts := func() -> Array:
+		return [lb.base_below_reads, lb.base_profile_builds, lb.base_input_builds]
+	nz.noise.seed = 5
+	lb._base_key = ""
+	# Both runs start from no Live answers, so they have the same passes and the counts compare.
+	lb.clear_erosion_caches()
+	kid.clear_erosion_caches()
+	lb.work_log.clear()
+	var c0: Array = counts.call()
+	await lb.bake_layer_run()
+	var c1: Array = counts.call()
+	var run := _heights()
+	var solves := lb.work_log.count("base_solve")
+	var reads: int = c1[0] - c0[0]
+	var profiles: int = c1[1] - c0[1]
+	var builds: int = c1[2] - c0[2]
+	var children := 0
+	for e in lb.work_log:
+		if e.begins_with("child:"):
+			children += 1
+	_check("W one read per run", solves >= 2 and children >= 2 and reads == 1 and profiles == 1 and builds == solves and run == ref,
+			"%d base pass(es), %d member pass(es): %d below read(s), %d profile(s), %d input build(s); equals the sync bake %s"
+				% [solves, children, reads, profiles, builds, run == ref])
+
+	nz.noise.seed = 4
+	lb._base_key = ""
+	lb.bake_layer()
+	nz.noise.seed = 5
+	lb._base_key = ""
+	lb.no_repass_reuse = true
+	lb.no_run_fresh = true
+	lb.clear_erosion_caches()
+	kid.clear_erosion_caches()
+	lb.work_log.clear()
+	c0 = counts.call()
+	await lb.bake_layer_run()
+	c1 = counts.call()
+	lb.no_repass_reuse = false
+	lb.no_run_fresh = false
+	_check("W control", lb.work_log.count("base_solve") == solves and c1[0] - c0[0] >= 2 and c1[2] - c0[2] > solves
+			and _heights() == ref,
+			"without reuse: %d below read(s), %d input build(s), same ground %s"
+				% [c1[0] - c0[0], c1[2] - c0[2], _heights() == ref])
 	lb.free()
 	await _settle()
 	_ran += 1

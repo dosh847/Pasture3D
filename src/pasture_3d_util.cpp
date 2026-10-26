@@ -1977,6 +1977,172 @@ PackedFloat32Array Pasture3DUtil::path_mask_grid(const PackedVector2Array &p_poi
 			p_feather, p_invert);
 }
 
+PackedFloat64Array Pasture3DUtil::layer_footprint_profile(const Array &p_points, const Array &p_widths,
+		const PackedByteArray &p_closed, const int p_gw, const int p_gh, const double p_min_x,
+		const double p_min_z, const double p_vs, const double p_margin) {
+	PackedFloat64Array prof;
+	if (p_gw <= 0 || p_gh <= 0) {
+		return prof;
+	}
+	prof.resize((int64_t)p_gw * p_gh);
+	prof.fill(0.0);
+	double *w = prof.ptrw();
+	for (int pi = 0; pi < p_points.size(); pi++) {
+		const PackedVector2Array pts = p_points[pi];
+		const PackedFloat32Array widths = pi < p_widths.size() ? PackedFloat32Array(p_widths[pi]) : PackedFloat32Array();
+		const bool closed = pi < p_closed.size() && p_closed[pi] != 0;
+		Pasture3DPathGeom geom;
+		geom.closed = closed && pts.size() >= 3;
+		geom.build(path_close_ring(pts, closed), widths);
+		if (geom.is_empty()) {
+			continue;
+		}
+		// Rows and columns that can be non-zero. A ring's mask is 0 past its bounds grown by the feather; a
+		// corridor's reach depends on its width, so it keeps the whole grid.
+		int x0 = 0, x1 = p_gw - 1, z0 = 0, z1 = p_gh - 1;
+		if (geom.closed) {
+			double bx0 = INFINITY, bx1 = -INFINITY, bz0 = INFINITY, bz1 = -INFINITY;
+			for (int k = 0; k < pts.size(); k++) {
+				bx0 = std::min(bx0, (double)pts[k].x);
+				bx1 = std::max(bx1, (double)pts[k].x);
+				bz0 = std::min(bz0, (double)pts[k].y);
+				bz1 = std::max(bz1, (double)pts[k].y);
+			}
+			const double g = std::max(p_margin, 0.0) + p_vs;
+			x0 = std::max(0, (int)std::floor((bx0 - g - p_min_x) / p_vs));
+			x1 = std::min(p_gw - 1, (int)std::ceil((bx1 + g - p_min_x) / p_vs));
+			z0 = std::max(0, (int)std::floor((bz0 - g - p_min_z) / p_vs));
+			z1 = std::min(p_gh - 1, (int)std::ceil((bz1 + g - p_min_z) / p_vs));
+			if (x0 > x1 || z0 > z1) {
+				continue;
+			}
+		}
+		Pasture3DThreadPool::parallel_for_rows(z1 - z0 + 1, 16, [&](int r0, int r1) {
+			std::vector<int> scratch;
+			scratch.reserve(32);
+			for (int iz = z0 + r0; iz < z0 + r1; iz++) {
+				const double wz = p_min_z + (double)iz * p_vs;
+				const int64_t row = (int64_t)iz * p_gw;
+				for (int ix = x0; ix <= x1; ix++) {
+					const double wx = p_min_x + (double)ix * p_vs;
+					// The same arithmetic as path_mask_grid_geom, rounded through float as its grid is.
+					double m = 1.0;
+					if (geom.closed) {
+						if (!geom.inside(wx, wz)) {
+							const double d = geom.nearest(wx, wz, scratch).distance;
+							m = p_margin <= 0.0 ? 0.0 : std::clamp(1.0 - d / p_margin, 0.0, 1.0);
+						}
+					} else {
+						const Pasture3DPathHit hit = geom.nearest(wx, wz, scratch);
+						const double half = std::max(geom.half_width_at(hit.s), 1e-6);
+						const double edge = hit.distance - half;
+						if (edge > 0.0) {
+							m = p_margin <= 0.0 ? 0.0 : std::clamp(1.0 - edge / p_margin, 0.0, 1.0);
+						}
+					}
+					const double mf = (double)(float)m;
+					if (mf > w[row + ix]) {
+						w[row + ix] = mf;
+					}
+				}
+			}
+		});
+	}
+	const int64_t n = (int64_t)p_gw * p_gh;
+	for (int64_t i = 0; i < n; i++) {
+		const double t = w[i];
+		w[i] = t * t * (3.0 - 2.0 * t);
+	}
+	return prof;
+}
+
+PackedFloat64Array Pasture3DUtil::layer_region_profile(const PackedVector2Array &p_regions, const double p_region_world,
+		const int p_gw, const int p_gh, const double p_min_x, const double p_min_z, const double p_vs,
+		const double p_margin) {
+	PackedFloat64Array prof;
+	if (p_gw <= 0 || p_gh <= 0) {
+		return prof;
+	}
+	prof.resize((int64_t)p_gw * p_gh);
+	double *w = prof.ptrw();
+	const double rsw = p_region_world;
+	Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int z0, int z1) {
+		for (int iz = z0; iz < z1; iz++) {
+			const double z = p_min_z + iz * p_vs;
+			for (int ix = 0; ix < p_gw; ix++) {
+				const double x = p_min_x + ix * p_vs;
+				double d = INFINITY;
+				for (int k = 0; k < p_regions.size(); k++) {
+					const double ax = p_regions[k].x * rsw;
+					const double az = p_regions[k].y * rsw;
+					const double dx = std::max(std::max(ax - x, x - (ax + rsw - p_vs)), 0.0);
+					const double dz = std::max(std::max(az - z, z - (az + rsw - p_vs)), 0.0);
+					d = std::min(d, std::sqrt(dx * dx + dz * dz));
+					if (d <= 0.0) {
+						break;
+					}
+				}
+				const double t = d <= 0.0 ? 1.0 : (p_margin <= 0.0 ? 0.0 : std::clamp(1.0 - d / p_margin, 0.0, 1.0));
+				w[(int64_t)iz * p_gw + ix] = t * t * (3.0 - 2.0 * t);
+			}
+		}
+	});
+	return prof;
+}
+
+Array Pasture3DUtil::layer_base_filter(const PackedFloat32Array &p_result, const PackedFloat32Array &p_below,
+		const double p_eps, const bool p_hold_every) {
+	const int64_t n = p_below.size();
+	PackedFloat32Array vals;
+	vals.resize(n);
+	float *v = vals.ptrw();
+	const float *r = p_result.ptr();
+	const float *b = p_below.ptr();
+	const int64_t rn = p_result.size();
+	int64_t held = 0;
+	for (int64_t i = 0; i < n; i++) {
+		const float ri = i < rn ? r[i] : NAN;
+		if (std::isnan(ri) || std::isnan(b[i]) || (!p_hold_every && std::abs((double)ri - (double)b[i]) < p_eps)) {
+			v[i] = NAN;
+		} else {
+			v[i] = ri;
+			held++;
+		}
+	}
+	Array out;
+	out.append(vals);
+	out.append(held);
+	return out;
+}
+
+Rect2i Pasture3DUtil::grid_changed_bounds(const PackedFloat32Array &p_a, const PackedFloat32Array &p_b, const int p_gw) {
+	if (p_gw <= 0 || p_a.size() != p_b.size()) {
+		return Rect2i();
+	}
+	const int gh = (int)(p_a.size() / p_gw);
+	const float *a = p_a.ptr();
+	const float *b = p_b.ptr();
+	int x0 = p_gw, x1 = -1, z0 = gh, z1 = -1;
+	for (int iz = 0; iz < gh; iz++) {
+		const int64_t row = (int64_t)iz * p_gw;
+		for (int ix = 0; ix < p_gw; ix++) {
+			const float va = a[row + ix];
+			const float vb = b[row + ix];
+			if (va == vb || (std::isnan(va) && std::isnan(vb))) {
+				continue;
+			}
+			x0 = std::min(x0, ix);
+			x1 = std::max(x1, ix);
+			z0 = std::min(z0, iz);
+			z1 = std::max(z1, iz);
+		}
+	}
+	if (x1 < 0) {
+		return Rect2i();
+	}
+	return Rect2i(x0, z0, x1 - x0 + 1, z1 - z0 + 1);
+}
+
 PackedFloat32Array Pasture3DUtil::path_drape_solve(const PackedVector2Array &p_points,
 		const PackedFloat32Array &p_existing_heights, const bool p_closed,
 		const PackedFloat32Array &p_grid, const int p_gw, const int p_gh, const Rect2 &p_rect,
@@ -3138,6 +3304,19 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("path_mask_grid", "points", "widths", "closed", "gw", "gh", "rect", "width_scale",
 					"feather", "invert"),
 			&Pasture3DUtil::path_mask_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("layer_footprint_profile", "points", "widths", "closed", "gw", "gh", "min_x", "min_z", "vs",
+					"margin"),
+			&Pasture3DUtil::layer_footprint_profile);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("layer_region_profile", "regions", "region_world", "gw", "gh", "min_x", "min_z", "vs",
+					"margin"),
+			&Pasture3DUtil::layer_region_profile);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("layer_base_filter", "result", "below", "eps", "hold_every"),
+			&Pasture3DUtil::layer_base_filter);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("grid_changed_bounds", "a", "b", "gw"), &Pasture3DUtil::grid_changed_bounds);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("path_drape_solve", "points", "existing_heights", "closed", "grid", "gw", "gh",
 					"rect", "offset", "force_downhill", "min_drop"),
