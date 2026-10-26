@@ -512,6 +512,25 @@ func output_index() -> int:
 	return output_node
 
 
+## True when the graph returns its input unchanged: nothing but Input and Output nodes, the Output fed by an
+## Input. Composited, that is `z + (z - z) * mask = z` whatever the strength, feather or blend, so a host
+## drops it from the stack instead of deferring, solving and repainting a no-op (demo island, 2026-10-26:
+## an accidental Input -> Output graph made every member edit a two-pass deferred run).
+func is_identity() -> bool:
+	var out := output_index()
+	if out < 0 or out >= nodes.size() or nodes[out] == null or nodes[out].muted:
+		return false
+	for nd in nodes:
+		if nd != null and nd.op() != &"input" and nd.op() != &"output":
+			return false
+	for c in connections:
+		if c.size() >= 4 and int(c[2]) == out and int(c[3]) == 0:
+			var src := int(c[0])
+			return (src >= 0 and src < nodes.size() and nodes[src] != null
+					and nodes[src].op() == &"input" and int(c[1]) == 0)
+	return false
+
+
 ## True when an Input node feeds the output — the graph is a FILTER whose result depends on the surface it
 ## is handed, not a pure generator. A host reads this to decide whether its frozen cache must key on that
 ## surface: an Input-reading graph re-evaluates when the surface changes, a generator does not.

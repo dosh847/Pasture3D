@@ -701,6 +701,7 @@ func _log_children() -> void:
 
 func base_is_stale() -> bool:
 	var t0 := Time.get_ticks_usec()
+	_input_laps = []
 	var inp := _base_inputs()
 	if Pasture3DBakeTrace.enabled:
 		Pasture3DBakeTrace.mark("%s base_is_stale: inputs %.1f ms" % [name, (Time.get_ticks_usec() - t0) / 1000.0])
@@ -718,8 +719,10 @@ func bake_base() -> bool:
 	ensure_rows()
 	_connect_region_signal()
 	var t0 := Time.get_ticks_usec()
+	_input_laps = []
 	var inp := _base_inputs()
-	_base_laps = ["inputs %.1f" % ((Time.get_ticks_usec() - t0) / 1000.0)]
+	_base_laps = ["inputs %.1f%s" % [(Time.get_ticks_usec() - t0) / 1000.0,
+			(" (" + ", ".join(_input_laps) + ")") if not _input_laps.is_empty() else ""]]
 	if inp.is_empty():
 		return false
 	# A driver repass must run even on a matching key: pass 1 recorded the key with the un-solved base.
@@ -780,6 +783,12 @@ func bake_base() -> bool:
 
 ## Phase timings of the last `bake_base`, for the bake trace.
 var _base_laps: PackedStringArray = []
+## The inputs' own split (below read, below hash, member paths), folded into the "inputs" lap.
+var _input_laps: PackedStringArray = []
+## Trace only: the extent and below hash of the last read, and the last stack result over that extent.
+var _trace_below_key := ""
+var _trace_result_extent := ""
+var _trace_result := PackedFloat32Array()
 
 
 func _base_lap(p_label: String, p_since: int) -> void:
@@ -853,6 +862,8 @@ func _solve_base(p_inp: Dictionary) -> void:
 	t1 = Time.get_ticks_usec()
 	var result: PackedFloat32Array = terrain.data.brush_run_stack_on_field(params, below, amp, prof)
 	_base_lap("stack", t1)
+	if Pasture3DBakeTrace.enabled:
+		_trace_result_locality(p_inp, result)
 	t1 = Time.get_ticks_usec()
 	# NaN below epsilon (§6.1): the base is absolute REPLACE, so a held cell freezes the ground beneath it.
 	var filtered: Array = Pasture3DUtil.layer_base_filter(result, below, MODIFIER_MARGIN_EPS, hold_every_cell)
@@ -866,6 +877,30 @@ func _solve_base(p_inp: Dictionary) -> void:
 	t1 = Time.get_ticks_usec()
 	_commit_modifier_caches(stack, p_inp["extent"])
 	_base_lap("commit", t1)
+
+
+## Trace only: where this stack result differs from the last one over the same extent, against the extent
+## and the stack's edit reach. A change box much smaller than the extent says a re-solve near the edited
+## outline would have been enough; one as large as the extent says the stack is not local.
+func _trace_result_locality(p_inp: Dictionary, p_result: PackedFloat32Array) -> void:
+	var gw: int = p_inp["gw"]
+	var gh: int = p_inp["gh"]
+	var vs: float = p_inp["vs"]
+	var ext := str(p_inp["extent"])
+	var what := "no earlier result over this extent"
+	if ext == _trace_result_extent and _trace_result.size() == p_result.size():
+		var r: Rect2i = Pasture3DUtil.grid_changed_bounds(_trace_result, p_result, gw)
+		if r.size.x <= 0:
+			what = "result unchanged"
+		else:
+			what = "changed x[%.1f..%.1f] z[%.1f..%.1f] (%.0f x %.0f m, %.1f%% of the extent)" % [
+					float(p_inp["min_x"]) + r.position.x * vs, float(p_inp["min_x"]) + r.end.x * vs,
+					float(p_inp["min_z"]) + r.position.y * vs, float(p_inp["min_z"]) + r.end.y * vs,
+					r.size.x * vs, r.size.y * vs, 100.0 * float(r.size.x * r.size.y) / maxf(1.0, float(gw * gh))]
+	Pasture3DBakeTrace.mark("%s bake_base locality over %dx%d cells (%.0f x %.0f m): %s; stack edit reach %.1f m" % [
+			name, gw, gh, gw * vs, gh * vs, what, _stack_edit_reach()])
+	_trace_result_extent = ext
+	_trace_result = p_result
 
 
 ## Everything stage 1 is a function of, and its key (§6.2). Empty when the rows are not there.
@@ -914,16 +949,29 @@ func _base_inputs() -> Dictionary:
 				inp["key"] = _repass_memo["key"]
 				return inp
 			base_below_reads += 1
+			var t1 := Time.get_ticks_usec()
 			var below: PackedFloat32Array = terrain.data.composite_height_below(row, box.position.x, box.position.z, vs, gw, gh)
 			inp["below"] = below
+			_input_laps.append("below read %.1f" % ((Time.get_ticks_usec() - t1) / 1000.0))
+			t1 = Time.get_ticks_usec()
 			if not key_without_below:
 				h.update(below.to_byte_array())
+			_input_laps.append("below hash %.1f" % ((Time.get_ticks_usec() - t1) / 1000.0))
+			if Pasture3DBakeTrace.enabled:
+				# What a lower-layer change counter would have decided: did the ground under the extent move
+				# since the last read of this same extent? Hashed separately, so only while tracing.
+				var bh := below.to_byte_array()
+				var bkey := "%s|%d" % [str(inp["extent"]), hash(bh)]
+				_input_laps.append("below %s" % ("CHANGED" if bkey != _trace_below_key else "unchanged"))
+				_trace_below_key = bkey
+			t1 = Time.get_ticks_usec()
 			if extent_mode == ExtentMode.CHILDREN_FOOTPRINTS:
 				var paths := _member_paths()
 				inp["paths"] = paths
 				for p: Pasture3DGraphPath in paths:
 					h.update(("%s|%s" % [p.source_label, p.closed]).to_utf8_buffer())
 					h.update(p.points.to_byte_array())
+			_input_laps.append("paths %.1f" % ((Time.get_ticks_usec() - t1) / 1000.0))
 	inp["key"] = h.finish().hex_encode()
 	if inp.has("below") and _layer_run_active:
 		_repass_memo = {"head": head, "key": inp["key"], "below": inp["below"]}

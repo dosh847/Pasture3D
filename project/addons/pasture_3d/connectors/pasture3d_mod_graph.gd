@@ -326,8 +326,14 @@ func needs_grid() -> bool:
 
 ## Inactive with no graph, a zero strength, or a graph with no output — exactly the cases where running
 ## it would cost the O(cells) evaluation and the forced GDScript path for nothing.
+## Gate control: keep an identity graph (Input -> Output) in the stack.
+var identity_is_active := false
+
+
+## An identity graph is inactive: it paints the surface it was given, so it costs nothing and reaches nothing.
 func is_active() -> bool:
-	return enabled and graph != null and not is_zero_approx(strength) and graph.output_index() >= 0
+	return (enabled and graph != null and not is_zero_approx(strength) and graph.output_index() >= 0
+			and (identity_is_active or not graph.is_identity()))
 
 
 func _validate_property(property: Dictionary) -> void:

@@ -405,6 +405,12 @@ public:
 			const double p_eps, const bool p_hold_every);
 	// The cell bounds where two row-major grids of width `p_gw` differ (NaN == NaN), or an empty Rect2i.
 	static Rect2i grid_changed_bounds(const PackedFloat32Array &p_a, const PackedFloat32Array &p_b, const int p_gw);
+	// The worst |p_zo - served| over the grid, where `served` is `p_cache` rebased onto `p_z` by `p_cache_z`
+	// exactly as a stale graph serve does it (no rebase when `p_cache_z` is empty), over the cells where `p_z`
+	// is a number (the rest are outside the brush and never painted). NaN == NaN; INF when the sizes disagree
+	// or one side alone is NaN. 0 means a solved answer paints what its preview painted.
+	static double stale_serve_worst(const PackedFloat32Array &p_zo, const PackedFloat32Array &p_z,
+			const PackedFloat32Array &p_cache, const PackedFloat32Array &p_cache_z);
 
 	// PATH Operations: Derive family (GRID -> PATH) and Reshape family (PATH -> PATH)
 	static PackedFloat32Array path_drape_solve(const PackedVector2Array &p_points,

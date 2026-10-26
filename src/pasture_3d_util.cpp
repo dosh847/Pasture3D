@@ -2143,6 +2143,43 @@ Rect2i Pasture3DUtil::grid_changed_bounds(const PackedFloat32Array &p_a, const P
 	return Rect2i(x0, z0, x1 - x0 + 1, z1 - z0 + 1);
 }
 
+double Pasture3DUtil::stale_serve_worst(const PackedFloat32Array &p_zo, const PackedFloat32Array &p_z,
+		const PackedFloat32Array &p_cache, const PackedFloat32Array &p_cache_z) {
+	const int64_t n = p_zo.size();
+	if (n == 0 || p_z.size() != n || p_cache.size() != n) {
+		return INFINITY;
+	}
+	const bool rebase = p_cache_z.size() == n;
+	const float *zo = p_zo.ptr();
+	const float *z = p_z.ptr();
+	const float *c = p_cache.ptr();
+	const float *cz = rebase ? p_cache_z.ptr() : nullptr;
+	double worst = 0.0;
+	for (int64_t i = 0; i < n; i++) {
+		// A NaN input cell is outside the brush: the composite skips it on both passes, whatever either holds.
+		if (std::isnan(z[i])) {
+			continue;
+		}
+		// The serve exactly as brush_mod_graph rebases it, float rounding included.
+		float served = c[i];
+		if (rebase && std::isfinite(cz[i]) && std::isfinite(z[i])) {
+			served = (float)((double)c[i] + (double)z[i] - (double)cz[i]);
+		}
+		const float a = zo[i];
+		if (a == served || (std::isnan(a) && std::isnan(served))) {
+			continue;
+		}
+		const double d = std::abs((double)a - (double)served);
+		if (!(d <= worst)) {
+			worst = std::isfinite(d) ? d : INFINITY;
+			if (std::isinf(worst)) {
+				return worst;
+			}
+		}
+	}
+	return worst;
+}
+
 PackedFloat32Array Pasture3DUtil::path_drape_solve(const PackedVector2Array &p_points,
 		const PackedFloat32Array &p_existing_heights, const bool p_closed,
 		const PackedFloat32Array &p_grid, const int p_gw, const int p_gh, const Rect2 &p_rect,
@@ -3317,6 +3354,8 @@ void Pasture3DUtil::_bind_methods() {
 			&Pasture3DUtil::layer_base_filter);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("grid_changed_bounds", "a", "b", "gw"), &Pasture3DUtil::grid_changed_bounds);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("stale_serve_worst", "zo", "z", "cache", "cache_z"), &Pasture3DUtil::stale_serve_worst);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("path_drape_solve", "points", "existing_heights", "closed", "grid", "gw", "gh",
 					"rect", "offset", "force_downhill", "min_drop"),

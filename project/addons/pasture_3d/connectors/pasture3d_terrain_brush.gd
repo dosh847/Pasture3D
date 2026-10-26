@@ -2009,6 +2009,20 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 				for st: Dictionary in pending_erosion:
 					_store_solved_erosion(st)
 
+		# Pass 1 painted each graph's last answer, rebased onto the edited surface. When every solve came back
+		# as exactly that, pass 2 would clear and repaint the same ground (trace 2026-10-25: Mound6, 0.95 s,
+		# 0 of 2304 samples moved), so the run ends here.
+		if ok and live_round == 0 and not repass_always and _solves_match_preview(pending_graph, pending_erosion):
+			Pasture3DBakeTrace.mark("%s: deferred driver pass 2 skipped: %d graph solve(s) match what pass 1 painted" % [
+					name, pending_graph.size()])
+			repass_skips += 1
+			pending_graph = []
+			pending_erosion = []
+			if p_owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
+				var lb_host := _layer_brush_for_owner(p_owner)
+				if lb_host != null:
+					lb_host.clear_base_change() # pass 1 repainted it; held only for the pass now skipped
+			break
 		Pasture3DBakeTrace.mark("%s: deferred driver pass 2 (round %d)" % [name, live_round])
 		_pending_erosion = []
 		_pending_graph = []
@@ -2432,6 +2446,17 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 				unchanged += 1
 				continue
 			var curr := _spline_dirty_aabb(path, moved, prev)
+			# What the spline's box is built from. A one-point drag should give a box a few spans wide; the
+			# whole-spline fallback (no moved points known, or an infinite edit reach) and a large edit reach or
+			# padding are the three ways it grows to the brush's whole footprint.
+			if Pasture3DBakeTrace.enabled:
+				var reach := 0.0 if rect_ignores_edit_reach else _edit_reach()
+				var n_pts := path.curve.point_count if path.curve != null else 0
+				var whole := moved.is_empty() or moved.size() >= n_pts or n_pts < 2 or is_inf(reach)
+				Pasture3DBakeTrace.mark("%s rect spline box %s: %s, %d of %d point(s) moved, edit reach %.1f m, padding %.1f m, previous painted %s -> %s" % [
+						name, path.name,
+						"WHOLE SPLINE" + (" (infinite edit reach)" if is_inf(reach) else (" (no moved points)" if moved.is_empty() else " (every point moved)")) if whole else "moved spans",
+						moved.size(), n_pts, reach, _total_padding(), _aabb_xz_str(prev), _aabb_xz_str(curr)])
 			if curr.size != Vector3.ZERO:
 				dirty = curr if not have else dirty.merge(curr)
 				have = true
@@ -2465,6 +2490,20 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 	# repainted (the far-away "cut"). Tile boundaries sit at world multiples of tile_size * vertex_spacing.
 	var clips := _cluster_rect_boxes(pieces, _layer_tile_world(layer_id))
 	_last_rect_decision = "rect"
+	if Pasture3DBakeTrace.enabled:
+		var parts := PackedStringArray()
+		if have:
+			parts.append("splines %s" % _aabb_xz_str(dirty))
+		for bx: AABB in p_boxes:
+			if bx.size.x > 0.0 or bx.size.z > 0.0:
+				parts.append("queued box %s" % _aabb_xz_str(bx))
+		if base_change.size.x > 0.0 or base_change.size.z > 0.0:
+			parts.append("base change %s" % _aabb_xz_str(base_change))
+		var cl := PackedStringArray()
+		for c: AABB in clips:
+			cl.append(_aabb_xz_str(c))
+		Pasture3DBakeTrace.mark("%s rect pieces: [%s] -> %d clip(s) [%s] (tiles of %.1f m)" % [
+				name, "; ".join(parts), clips.size(), "; ".join(cl), _layer_tile_world(layer_id)])
 
 	var blend := _layer_blend_for(layer_id)
 	var _trace_tok := Pasture3DBakeTrace.bake_begin(self, "rect")
@@ -5278,6 +5317,14 @@ func _spline_dirty_aabb(path: Path3D, moved_indices: PackedInt32Array,
 	return AABB(Vector3(mn.x, -10000.0, mn.y), Vector3(mx.x - mn.x, 20000.0, mx.y - mn.y))
 
 
+## A box's XZ extent and size for trace marks, or "none" for an empty box.
+func _aabb_xz_str(p_box: AABB) -> String:
+	if p_box.size.x <= 0.0 and p_box.size.z <= 0.0:
+		return "none"
+	return "x[%.1f..%.1f] z[%.1f..%.1f] (%.0f x %.0f m)" % [p_box.position.x, p_box.end.x,
+			p_box.position.z, p_box.end.z, p_box.size.x, p_box.size.z]
+
+
 ## Point `p_idx` and its neighbours on either side, the points bounding the spans it shapes. Wrapped on a
 ## closed loop, clamped on an open one. An index past the end (a removed point) is dropped.
 func _span_neighbours(p_idx: int, p_n: int, p_closed: bool) -> PackedInt32Array:
@@ -5857,6 +5904,40 @@ func _bake_scale_report() -> Dictionary:
 
 ## True while the deferred driver re-runs its bake after a solve (pass 2+). See `_refresh_owner_rect`.
 var _deferred_repass := false
+## Gate control: always run pass 2, even when every solve matches what pass 1 painted.
+var repass_always := false
+## How many driver runs ended after pass 1 because nothing they solved would change the ground.
+var repass_skips := 0
+## Largest |solve - preview| still counted as a match, in metres. Under the bake probe's 1 mm "moved".
+const REPASS_MATCH_EPS := 1e-4
+
+
+## True when the run's solves would paint exactly what pass 1 painted in their place: no erosion pending,
+## and every graph solve equal (within REPASS_MATCH_EPS) to the stale answer pass 1 served for it. A graph
+## with channel sinks never matches, since its sinks publish the new fields only on pass 2.
+func _solves_match_preview(p_graph: Array, p_erosion: Array) -> bool:
+	if p_graph.is_empty() or not p_erosion.is_empty():
+		if Pasture3DBakeTrace.enabled:
+			Pasture3DBakeTrace.mark("%s: pass 2 needed: %d graph solve(s), %d erosion solve(s) pending" % [
+					name, p_graph.size(), p_erosion.size()])
+		return false
+	for st: Dictionary in p_graph:
+		if not st.has("served_cache") or not st.has("zo") or st.has("tap_keys"):
+			if Pasture3DBakeTrace.enabled:
+				Pasture3DBakeTrace.mark("%s: pass 2 needed: graph %s %s" % [name,
+						st["mod"].display_name() if st.has("mod") else "?",
+						"has channel sinks" if st.has("tap_keys") else (
+						"has no solved answer" if not st.has("zo") else
+						"was not previewed on pass 1 (no stale answer to compare)")])
+			return false
+		var worst: float = Pasture3DUtil.stale_serve_worst(st["zo"], st["z"], st["served_cache"],
+				st["served_cache_z"])
+		if Pasture3DBakeTrace.enabled:
+			Pasture3DBakeTrace.mark("%s: graph solve vs pass 1 preview over %dx%d cells: worst %.6f m" % [
+					name, int(st.get("gw", 0)), int(st.get("gh", 0)), worst])
+		if not (worst <= REPASS_MATCH_EPS):
+			return false
+	return true
 
 ## Set by Bake / Bake All: every step solves full-res until the next edit arms a refresh.
 var _preview_full_res := false
@@ -6316,6 +6397,11 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 			if not entry.is_empty():
 				# Tells the solve phases which cache the answer goes back into.
 				entry["live"] = bool(step.get("live_async", false))
+				# What this pass painted in the solve's place, when it painted a stale answer: the driver
+				# compares the solve against it and skips a pass 2 that would repaint the same ground.
+				if bool(out.get("served", false)) and bool(out.get("stale", false)):
+					entry["served_cache"] = step.get("cache", PackedFloat32Array())
+					entry["served_cache_z"] = step.get("cache_z", PackedFloat32Array())
 				var queues := _pending_queues()
 				var queue: StringName = m.pending_queue()
 				if queues.has(queue):
