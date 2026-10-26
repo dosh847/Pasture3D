@@ -38,6 +38,20 @@ class_name Pasture3DSpline
 extends Pasture3DTerrainBrush
 
 
+## Something a graph reads from this spline may have changed: a point, a tangent, a published property,
+## or where the spline sits in the scene (which is its key). Every Spline Source the host bound to this
+## spline at resolve listens, re-reads its path and follows the key (Pasture3DGraphNodeSplineSource
+## .bind_spline).
+##
+## Emitted from the debounced refresh tick, not per drag frame: the listeners re-read the whole path, and
+## the brush that reads it bakes once per tick anyway.
+##
+## It exists because the key alone is a NAME. Moving this spline (out of IslandShape, say) changes its key,
+## a graph still holding the old one matches nothing, and the old path saved with the graph is served
+## forever. It looks like a terrain that ignores edits. A connection follows the object, not the name.
+signal edited
+
+
 @export_group("Shape")
 ## Connect the last point back to the first.
 ##
@@ -108,6 +122,22 @@ func _paints() -> bool:
 # reading this file does not leave the question open.
 func _paint_spline(_path: Path3D) -> void:
 	pass
+
+
+## The base walks the scene for consumers by KEY, which also resolves (and so binds) a graph that has not
+## resolved since the scene loaded. `edited` reaches the graphs already bound, including one whose key no
+## longer matches because the spline moved. Neither covers the other, so both run; `_assign` compares
+## digests, so a source reached twice is assigned once.
+func _refresh_consumers() -> void:
+	edited.emit()
+	super()
+
+
+## A reparent is a key change with no edit attached. ENTER_TREE is where it lands, and the bound sources
+## take the new key now, before anything resolves by the old one and misses.
+func _notification(p_what: int) -> void:
+	if p_what == NOTIFICATION_ENTER_TREE:
+		edited.emit()
 
 
 func _default_snap_to_surface() -> bool:

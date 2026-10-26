@@ -219,15 +219,17 @@ static func resolve_splines(p_graph: Pasture3DTerrainGraph, p_host: Node = null)
 					keys.append(k)
 				keys.sort()
 		src.editor_spline_keys = keys
-		if src.spline_key.is_empty():
-			if own != null:
-				_assign(src, own.graph_spline_path(src.spline_index, src.sample_points, src.sample_interval))
-				filled += 1
+		# Bound to whatever this resolve found, so the node hears the spline's `edited` from now on, even
+		# after a move that changes its key (Pasture3DGraphNodeSplineSource.bind_spline).
+		var found: Pasture3DSpline = own if src.spline_key.is_empty() else by_key.get(src.spline_key)
+		src.key_unresolved = not src.spline_key.is_empty() and found == null and terrain != null
+		if found == null:
+			# A miss keeps the binding it had. A spline that moved and has not re-entered the tree yet is
+			# still the right spline, and its `edited` will bring the key up to date.
 			continue
-		if by_key.has(src.spline_key):
-			var sp: Pasture3DSpline = by_key[src.spline_key]
-			_assign(src, sp.graph_spline_path(src.spline_index, src.sample_points, src.sample_interval))
-			filled += 1
+		src.bind_spline(found)
+		_assign(src, found.graph_spline_path(src.spline_index, src.sample_points, src.sample_interval))
+		filled += 1
 	return filled
 
 

@@ -82,6 +82,20 @@ extends Pasture3DGraphNode
 		emit_changed()
 
 
+## The Pasture3DSpline the host last resolved this node to, whose `edited` signal it listens to. Weak,
+## because a resource saved in a scene must not keep a deleted node alive. Never saved: binding is a
+## resolve-time fact, and a scene that loads binds again at its first resolve.
+var _bound: WeakRef = null
+
+## True when the last resolve found no spline under a non-empty key. The path saved with the graph is
+## still served (see Pasture3DGraphSources.resolve_splines), so without a warning a stale key looks like
+## a terrain that ignores every edit.
+var key_unresolved: bool = false
+
+## Gate control only: ignore `edited`, so a gate can show what happens without the connection.
+var ignore_spline_edits: bool = false
+
+
 ## The spline keys the HOST last offered, for the inspector dropdown. Never saved and never read by the
 ## solve. Setting it NOTIFIES, because `_validate_property` only runs while Godot is building a property
 ## list, and a list stamped after that build is invisible — the bug that left Road Key a plain String box
@@ -104,6 +118,40 @@ func _validate_property(property: Dictionary) -> void:
 		return
 	property["hint"] = PROPERTY_HINT_ENUM_SUGGESTION
 	property["hint_string"] = ",".join(editor_spline_keys)
+
+
+## Listen to `p_spline` (null unbinds). Called by the host's resolve with whatever it resolved this node
+## to, every time, so a node whose empty key now names a different child rebinds rather than keeping the
+## old one.
+func bind_spline(p_spline: Pasture3DSpline) -> void:
+	var cur: Pasture3DSpline = bound_spline()
+	if cur == p_spline:
+		return
+	if cur != null and cur.edited.is_connected(_on_spline_edited):
+		cur.edited.disconnect(_on_spline_edited)
+	_bound = weakref(p_spline) if p_spline != null else null
+	if p_spline != null and not p_spline.edited.is_connected(_on_spline_edited):
+		p_spline.edited.connect(_on_spline_edited)
+
+
+func bound_spline() -> Pasture3DSpline:
+	if _bound == null:
+		return null
+	var o: Object = _bound.get_ref()
+	return o as Pasture3DSpline if is_instance_valid(o) else null
+
+
+## The bound spline changed. Follow its key if it moved (a typed key only: the empty key means "the host's
+## child" and still does), then re-read the path. Assigning a different path emits `changed`, which the
+## host's modifier stack turns into a bake (Pasture3DTerrainBrush._on_modifier_changed).
+func _on_spline_edited() -> void:
+	var sp := bound_spline()
+	if ignore_spline_edits or sp == null or not sp.is_inside_tree():
+		return
+	if not spline_key.is_empty() and sp.spline_key() != spline_key:
+		spline_key = sp.spline_key()
+	key_unresolved = false
+	Pasture3DGraphSources._assign(self, sp.graph_spline_path(spline_index, sample_points, sample_interval))
 
 
 func op() -> StringName:
@@ -152,6 +200,10 @@ func eval_cell(_p_wx: float, _p_wz: float, _p_inputs: PackedFloat32Array) -> flo
 
 func node_warnings() -> PackedStringArray:
 	var out := PackedStringArray()
+	if key_unresolved and path != null and path.segment_count() > 0:
+		out.append(("Spline Source \"%s\" names no spline in this scene, so it is showing the path saved "
+				% spline_key) + "with the graph and will not follow edits. The spline was probably moved "
+				+ "or renamed: pick it again, or clear the key if it is this brush's own child.")
 	if path == null or path.segment_count() == 0:
 		if spline_key.is_empty():
 			out.append("Spline Source has no key and no host spline: it produces nothing. Add a "

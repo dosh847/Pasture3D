@@ -16,10 +16,15 @@
 #   D  editing a spline re-resolves the graphs that read it, and only those;
 #   E  re-resolving an UNCHANGED spline changes nothing, or every bake invalidates every downstream cache;
 #   F  a Pasture3DSpline appears in exactly one dropdown.
+#   H  a spline MOVED in the scene keeps reaching the graph that read it. Its key is its scene path, so
+#      the move leaves the graph holding a name that matches nothing, and the path saved with the graph is
+#      served forever: a terrain that ignores every edit. The `edited` signal binds by object instead, and
+#      the key follows. Control: the same move with the node ignoring `edited`, which must go stale and
+#      raise the stale-key warning.
 @tool
 extends Node
 
-const CRITERIA: Array[String] = ["A", "B", "C", "D", "E", "F", "G"]
+const CRITERIA: Array[String] = ["A", "B", "C", "D", "E", "F", "G", "H"]
 
 var _fail: int = 0
 var _reported: Dictionary = {}
@@ -34,6 +39,7 @@ func _ready() -> void:
 	_e_resolving_an_unchanged_spline_changes_nothing()
 	_f_a_spline_is_offered_in_exactly_one_dropdown()
 	_g_sample_points_toggle_and_interval()
+	_h_a_moved_spline_still_reaches_its_graph()
 	_account_for_silent_criteria()
 	print("\n=== %s (%d failures) ===\n"
 			% ["SPLINE SOURCE PASS" if _fail == 0 else "SPLINE SOURCE FAIL", _fail])
@@ -427,3 +433,64 @@ func _g_sample_points_toggle_and_interval() -> void:
 					% [default_pts, dense_pts, sparse_pts])
 	_drop(t)
 
+
+
+# --- H. A moved spline still reaches its graph ----------------------------------------------------------
+
+## One run: resolve by key, move the spline out of its holder (which changes its key), move a point, and
+## run the spline's refresh tick. Returns what the consumer ended up with.
+func _h_run(p_ignore: bool) -> Dictionary:
+	var t := _terrain()
+	var host := _mound_under(t, "Consumer", Vector3.ZERO)
+	var holder := Node3D.new()
+	holder.name = "Holder"
+	t.add_child(holder)
+	var sp := _spline_under(holder, "Island", Vector3(40.0, 0.0, 0.0))
+	var old_key := sp.spline_key()
+	var src := _give_graph(host, old_key)
+	src.ignore_spline_edits = p_ignore
+	var mod := host.modifiers[0] as Pasture3DNodeGraph
+	# LIVE: a graph step defaults to FROZEN, which only marks itself stale on an edit and never asks
+	# the host to bake. This criterion is about the edit reaching the host at all.
+	mod.evaluation = Pasture3DNodeGraph.Evaluation.LIVE
+	var graph: Pasture3DTerrainGraph = mod.graph
+	Pasture3DGraphSources.resolve(graph, host)
+	var bound := src.bound_spline() == sp
+
+	holder.remove_child(sp)
+	t.add_child(sp)
+	var line: Path3D = sp._get_splines()[0]
+	line.curve.set_point_position(0, Vector3(-10.0, 0.0, 60.0))
+	host._stack_dirty = false
+	sp._refresh_consumers()
+	var followed := false
+	if src.path != null:
+		for v in src.path.points:
+			if absf(v.y - 60.0) < 0.6:
+				followed = true
+				break
+	var rebake := host._stack_dirty
+	# The next bake resolves by key: a key that followed resolves, a stale one warns.
+	Pasture3DGraphSources.resolve(graph, host)
+	var warned := false
+	for w in src.node_warnings():
+		if w.contains("names no spline"):
+			warned = true
+	var out := {"bound": bound, "old_key": old_key, "key": src.spline_key, "new_key": sp.spline_key(),
+			"followed": followed, "rebake": rebake, "warned": warned}
+	_drop(t)
+	return out
+
+
+func _h_a_moved_spline_still_reaches_its_graph() -> void:
+	var r := _h_run(false)
+	print("    moved: bound at resolve = %s, key %s -> %s (spline now %s), path followed the edit = %s, "
+			% [str(r.bound), r.old_key, r.key, r.new_key, str(r.followed)]
+			+ "host stack dirty = %s, stale-key warning = %s" % [str(r.rebake), str(r.warned)])
+	var c := _h_run(true)
+	print("    control (ignoring edited): key %s, path followed = %s, stale-key warning = %s"
+			% [c.key, str(c.followed), str(c.warned)])
+	_check("H", r.bound and r.old_key != r.new_key and r.key == r.new_key and r.followed and r.rebake
+			and not r.warned and not c.followed and c.key == c.old_key and c.warned,
+			"a moved spline's edit reached its graph and the key followed; without the signal it went stale "
+			+ "and warned")
