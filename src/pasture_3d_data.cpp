@@ -78,6 +78,11 @@ bool Pasture3DData::gpu_raster_available() {
 	return gpu && gpu->available();
 }
 
+bool Pasture3DData::gpu_raster_fits(int p_gw, int p_gh) {
+	Pasture3DGPURaster *gpu = _ensure_gpu_raster();
+	return gpu && gpu->fits_texture(p_gw, p_gh);
+}
+
 // Lerp that holds p_a at t == 0, so a NaN neighbour the weight never reaches cannot poison the result.
 static inline real_t _lerp_hold(const real_t p_a, const real_t p_b, const real_t p_t) {
 	return p_t == 0.f ? p_a : p_a + (p_b - p_a) * p_t;
@@ -4781,6 +4786,7 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("stamp_plow_loop", "layer_id", "poly", "clip", "params", "lut", "src_data"), &Pasture3DData::stamp_plow_loop);
 	ClassDB::bind_method(D_METHOD("stamp_splat_loop", "layer_id", "poly", "clip", "params", "lut"), &Pasture3DData::stamp_splat_loop);
 	ClassDB::bind_method(D_METHOD("gpu_raster_available"), &Pasture3DData::gpu_raster_available);
+	ClassDB::bind_method(D_METHOD("gpu_raster_fits", "gw", "gh"), &Pasture3DData::gpu_raster_fits);
 	// Pasture3DSim (PASTURE3D_SIM_NODE_SPEC.md §4, §6, §8.1).
 	ClassDB::bind_method(D_METHOD("erode_heightfield", "z", "params", "erodability"), &Pasture3DData::erode_heightfield, DEFVAL(PackedFloat32Array()));
 	ClassDB::bind_method(D_METHOD("erosion_progress"), &Pasture3DData::erosion_progress);

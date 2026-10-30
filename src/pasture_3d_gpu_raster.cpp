@@ -154,6 +154,14 @@ bool Pasture3DGPURaster::available() {
 	return _ensure_init();
 }
 
+bool Pasture3DGPURaster::fits_texture(int p_gw, int p_gh) {
+	if (!_ensure_init()) {
+		return false;
+	}
+	const int64_t max_2d = (int64_t)_rd->limit_get(RenderingDevice::LIMIT_MAX_TEXTURE_SIZE_2D);
+	return max_2d > 0 && p_gw <= max_2d && p_gh <= max_2d;
+}
+
 bool Pasture3DGPURaster::closed_loop_field(const PackedVector2Array &p_poly, double p_min_x, double p_min_z,
 		double p_vs, int p_gw, int p_gh, std::vector<float> &r_field, float &r_max_inside) {
 	if (!_ensure_init()) {
@@ -161,6 +169,15 @@ bool Pasture3DGPURaster::closed_loop_field(const PackedVector2Array &p_poly, dou
 	}
 	const int pc = p_poly.size();
 	if (pc < 3 || p_gw < 1 || p_gh < 1) {
+		return false;
+	}
+	// The field is one 2D texture, so a grid wider or taller than the device allows (16384 on most) cannot
+	// be made. Asked first: texture_create would refuse it too, but with an engine ERROR on every bake of a
+	// large loop (an island-sized Plow) before the CPU fallback quietly gave the right answer anyway.
+	if (!fits_texture(p_gw, p_gh)) {
+		// Said, because a loop this large is usually a padding or bounds mistake upstream, not a real terrain.
+		UtilityFunctions::push_warning(vformat("GPU raster: a %d x %d closed-loop grid (%.0f x %.0f m) is past this "
+				"device's 2D texture limit, so it rasterised on the CPU.", p_gw, p_gh, p_gw * p_vs, p_gh * p_vs));
 		return false;
 	}
 

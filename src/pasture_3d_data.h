@@ -567,6 +567,8 @@ public:
 	// Capability query (spec §5.3): true if a local RenderingDevice + the analytic compute pipeline could
 	// be created. For tooling/tests/diagnostics; read-only, no behaviour change. Bound to GDScript.
 	bool gpu_raster_available();
+	// Whether the GPU closed-loop field can take a gw x gh grid (the device's 2D texture limit). False with no GPU.
+	bool gpu_raster_fits(int p_gw, int p_gh);
 
 	// ---- Pasture3DSim (PASTURE3D_SIM_NODE_SPEC.md) ----
 	// The stream-power solver, exposed as a PURE function of a heightfield: no terrain is read or written,

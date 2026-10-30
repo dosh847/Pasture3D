@@ -29,6 +29,8 @@ public:
 
 	// True once the local RD + compute pipeline exist (lazily initialised). False => caller uses C++.
 	bool available();
+	// True when a gw x gh 2D texture is within this device's LIMIT_MAX_TEXTURE_SIZE_2D. False with no device.
+	bool fits_texture(int p_gw, int p_gh);
 
 	// Compute the analytic signed-distance field of `p_poly` (closed, world XZ; .x=x, .y=z) over the
 	// gw*gh grid anchored at (min_x,min_z) with spacing vs. On success fills r_field (size gw*gh,
