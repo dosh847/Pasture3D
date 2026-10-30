@@ -1215,6 +1215,42 @@ func member_count() -> int:
 	return members().size()
 
 
+## Gate control: a brush entering or leaving this Layer full-bakes the Layer, as it did before the hand-off.
+var member_join_full_bake: bool = false
+
+
+## A child entering or leaving. The base class full-bakes, which for a Layer is stage 1 plus every member: a
+## Ctrl+D'd member cost 16.6 s that way (trace 2026-10-30). Only the arriving members' own footprints are
+## new, so each takes a rect bake of its own instead. Leaving needs nothing here: a delete is caught by the
+## member's `_check_member_deleted`, and a move out rebinds through `_sync_layer_host`.
+func _on_child_changed(node: Node) -> void:
+	var joining := _joining_members(node)
+	if joining.is_empty() or member_join_full_bake:
+		super(node)
+		return
+	if _tree_settling:
+		return
+	for b: Node in joining:
+		if node.is_inside_tree() and not node.is_queued_for_deletion():
+			b._schedule_join_refresh.call_deferred()
+
+
+## The members `node` brings with it, when every brush in its subtree is one of this Layer's members; empty
+## otherwise (a nested Layer brush, a road that refuses membership, no brush at all), and the full bake
+## stands. Split out so a headless gate can assert the decision; the scheduling it feeds is editor-only.
+func _joining_members(node: Node) -> Array:
+	var out: Array = []
+	var todo: Array[Node] = [node]
+	while not todo.is_empty():
+		var n: Node = todo.pop_back()
+		if n is Pasture3DTerrainBrush:
+			if not n._paints() or n._hosted_by() != self:
+				return []
+			out.append(n)
+		todo.append_array(n.get_children())
+	return out
+
+
 ## Bring every member's binding in line with the tree. Run on ready (children are ready before their parent,
 ## so a member that synced first may still hold a uid this node has since replaced) and after a duplicate.
 func adopt_members() -> void:

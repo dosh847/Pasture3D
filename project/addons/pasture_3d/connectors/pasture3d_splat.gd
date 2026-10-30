@@ -19,43 +19,43 @@ extends Pasture3DTerrainBrush
 @export var material: int = 0:
 	set(v):
 		material = maxi(0, v)
-		_schedule_refresh()
+		_schedule_shape_refresh()
 ## Maximum material strength at the centre (0..1 → control blend 0..255).
 @export_range(0.0, 1.0) var strength: float = 1.0:
 	set(v):
 		strength = clampf(v, 0.0, 1.0)
-		_schedule_refresh()
+		_schedule_shape_refresh()
 ## Feather to the underlying base texture (true) or to the material itself (false).
 @export var preserve_base: bool = true:
 	set(v):
 		preserve_base = v
-		_schedule_refresh()
+		_schedule_shape_refresh()
 ## Control uv-scale / uv-rotation buckets (texture tiling density / rotation). 0 = default.
 @export var uv_scale: int = 0:
 	set(v):
 		uv_scale = clampi(v, 0, 7)
-		_schedule_refresh()
+		_schedule_shape_refresh()
 @export var uv_rotation: int = 0:
 	set(v):
 		uv_rotation = clampi(v, 0, 15)
-		_schedule_refresh()
+		_schedule_shape_refresh()
 
 @export_group("Mask")
 ## Metres from the loop edge inward over which the material fades in.
 @export var falloff_width: float = 10.0:
 	set(v):
 		falloff_width = v
-		_schedule_refresh()
+		_schedule_shape_refresh()
 ## Optional 0→1 falloff shape (default = smoothstep).
 @export var falloff_curve: Curve:
 	set(v):
 		falloff_curve = v
-		_schedule_refresh()
+		_schedule_shape_refresh()
 ## Expand (+) / contract (−) the masked area off the spline, in metres.
 @export var edge_offset: float = 0.0:
 	set(v):
 		edge_offset = v
-		_schedule_refresh()
+		_schedule_shape_refresh()
 
 @export_group("Mask Noise")
 @export var noise: FastNoiseLite
@@ -63,7 +63,7 @@ extends Pasture3DTerrainBrush
 @export var noise_strength: float = 0.0:
 	set(v):
 		noise_strength = v
-		_schedule_refresh()
+		_schedule_shape_refresh()
 
 
 func _default_layer_name() -> String:

@@ -21,43 +21,43 @@ const _LUT_MAX := 256
 @export var falloff_width: float = 10.0:
 	set(v):
 		falloff_width = maxf(v, 0.0)
-		_schedule_refresh()
+		_schedule_shape_refresh()
 
 ## Optional 0→1 falloff shape (default = smoothstep).
 @export var falloff_curve: Curve:
 	set(v):
-		if falloff_curve != null and falloff_curve.changed.is_connected(_schedule_refresh):
-			falloff_curve.changed.disconnect(_schedule_refresh)
+		if falloff_curve != null and falloff_curve.changed.is_connected(_schedule_shape_refresh):
+			falloff_curve.changed.disconnect(_schedule_shape_refresh)
 		falloff_curve = v
-		if falloff_curve != null and not falloff_curve.changed.is_connected(_schedule_refresh):
-			falloff_curve.changed.connect(_schedule_refresh)
-		_schedule_refresh()
+		if falloff_curve != null and not falloff_curve.changed.is_connected(_schedule_shape_refresh):
+			falloff_curve.changed.connect(_schedule_shape_refresh)
+		_schedule_shape_refresh()
 
 ## Expand (+) / contract (−) the masked area off the spline, in metres.
 @export var edge_offset: float = 0.0:
 	set(v):
 		edge_offset = v
-		_schedule_refresh()
+		_schedule_shape_refresh()
 
 @export_group("Compositing")
 ## true = stamp relief onto the existing per-pixel ground; false = relative to the node's Y plane.
 @export var relative_to_terrain: bool = true:
 	set(v):
 		relative_to_terrain = v
-		_schedule_refresh()
+		_schedule_shape_refresh()
 
 ## How the relief composites: ADD = stamp on top; MAX/MIN = raise/lower-only; REPLACE = absolute pad.
 @export var blend_mode: BlendMode = BlendMode.ADD:
 	set(v):
 		blend_mode = v
-		_schedule_refresh()
+		_schedule_shape_refresh()
 
 @export_group("Smoothing")
 ## Passes of NaN-aware separable Gaussian blur applied after rasterisation.
 @export_range(0, 5) var smooth_passes: int = 0:
 	set(v):
 		smooth_passes = clampi(v, 0, 5)
-		_schedule_refresh()
+		_schedule_shape_refresh()
 
 
 func _default_layer_name() -> String:

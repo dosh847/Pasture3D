@@ -27,7 +27,7 @@ enum FlankMode { FIXED_WIDTH, SLOPE_ANGLE }
 @export var blend_mode: BlendMode = BlendMode.MAX:
 	set(v):
 		blend_mode = v
-		_schedule_refresh() # re-bake so the new blend takes effect immediately (and undo-coherently)
+		_schedule_shape_refresh() # re-bake so the new blend takes effect immediately (and undo-coherently)
 ## Flip the sign so the same controls carve a depression.
 @export var invert: bool = false
 ## true = measure height above the per-pixel terrain (hill drapes on the ground); false = above the
@@ -37,34 +37,34 @@ enum FlankMode { FIXED_WIDTH, SLOPE_ANGLE }
 @export var flank_mode: FlankMode = FlankMode.SLOPE_ANGLE:
 	set(v):
 		flank_mode = v
-		_schedule_refresh()
+		_schedule_shape_refresh()
 		notify_property_list_changed() # show/hide slope_angle
 ## Slope-angle mode only: degrees the flank rises from the loop edge (ramp run = height / tan(angle)).
 @export_range(1.0, 89.0, 0.5) var slope_angle: float = 30.0:
 	set(v):
 		slope_angle = clampf(v, 1.0, 89.0)
-		_schedule_refresh()
+		_schedule_shape_refresh()
 
 @export_group("Mask")
 ## Metres from the loop edge inward over which the shape ramp and modifier stack feather in.
 @export var falloff_width: float = 15.0:
 	set(v):
 		falloff_width = maxf(v, 0.0)
-		_schedule_refresh()
+		_schedule_shape_refresh()
 ## Optional 0→1 slope shape for the ramp / mask (default = smoothstep).
 @export var falloff_curve: Curve:
 	set(v):
-		if falloff_curve != null and falloff_curve.changed.is_connected(_schedule_refresh):
-			falloff_curve.changed.disconnect(_schedule_refresh)
+		if falloff_curve != null and falloff_curve.changed.is_connected(_schedule_shape_refresh):
+			falloff_curve.changed.disconnect(_schedule_shape_refresh)
 		falloff_curve = v
-		if falloff_curve != null and not falloff_curve.changed.is_connected(_schedule_refresh):
-			falloff_curve.changed.connect(_schedule_refresh)
-		_schedule_refresh()
+		if falloff_curve != null and not falloff_curve.changed.is_connected(_schedule_shape_refresh):
+			falloff_curve.changed.connect(_schedule_shape_refresh)
+		_schedule_shape_refresh()
 ## Expand (+) or contract (−) the effective boundary off the spline, in metres.
 @export var edge_offset: float = 0.0:
 	set(v):
 		edge_offset = v
-		_schedule_refresh()
+		_schedule_shape_refresh()
 
 # ---- Legacy property migration (PASTURE3D_BRUSH_EROSION_SPEC.md §6.6) ------------------------------
 #

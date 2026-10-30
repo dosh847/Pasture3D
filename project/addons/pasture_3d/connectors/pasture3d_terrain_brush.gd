@@ -1128,9 +1128,9 @@ func _on_inspector_property_edited(_property: StringName) -> void:
 		return
 	var inspector := EditorInterface.get_inspector()
 	if inspector and inspector.get_edited_object() == self:
-		for s in _get_splines():
-			_dirty_splines[s.get_instance_id()] = true
-		_schedule_refresh()
+		# A property that reaches past this brush's own paint (`terrain`, the layer binding) schedules its
+		# own full bake or rebind from its setter; the full flag wins over the rect path at the tick.
+		_schedule_shape_refresh()
 
 
 ## ---- Inspector: the tool-layer dropdown (bind by owner_id, display live name) ----
@@ -1503,6 +1503,32 @@ func _schedule_refresh() -> void:
 	_arm_gen += 1
 	Pasture3DBakeTrace.arm(self, "full")
 	_arm_refresh_timer()
+
+
+## Shape scheduler — a property of THIS brush changed (slope angle, falloff, blend, ...), no curve moved. What
+## the brush paints can only change inside what it painted before ∪ what it paints now, so take the rect
+## path over every spline's whole footprint instead of `_schedule_refresh`'s whole layer: a trace showed a
+## slope-angle edit repainting all 9 tools on a Layer (2.05 s) for one Mound's footprint (0.80 s rect).
+## Arms like a modifier edit: no point moved, so `_stack_dirty` stops the rect path's "nothing changed" skip.
+func _schedule_shape_refresh() -> void:
+	if not _can_auto_refresh():
+		return
+	for s in _get_splines():
+		_dirty_splines[s.get_instance_id()] = true
+	_stack_dirty = true
+	_arm_gen += 1
+	Pasture3DBakeTrace.arm(self, "shape")
+	_arm_refresh_timer()
+
+
+## Member-join scheduler — this brush has just entered a Layer brush (a duplicate, a paste, a drag in). Only
+## its own footprint is new on the layer; the Layer used to full-bake itself and every member for it (trace
+## 2026-10-30: 16.6 s per Ctrl+D). Deferred by the caller past `_ready`, whose `_seed_cache` gives the rect
+## path a previous footprint to union with.
+func _schedule_join_refresh() -> void:
+	if not is_inside_tree() or not _paints():
+		return
+	_schedule_shape_refresh()
 
 
 ## Node-transform scheduler — the whole brush moved/rotated/scaled. Every child spline shifts together,
