@@ -207,9 +207,40 @@ func _on_evaluation_pressed() -> void:
 	# All-Frozen is the only state that thaws. All-Live freezes, and so does Mixed.
 	var target: int = Pasture3DNode.Evaluation.LIVE if frozen == mods.size() \
 			else Pasture3DNode.Evaluation.FROZEN
-	for m in mods:
+	# Evaluation lives on the modifier, and a duplicated brush shares its modifiers: setting it in place made
+	# every brush sharing one go Live. A shared one is split off for this brush first (the graph stays shared).
+	for m in unshare_graph_mods(brush):
 		m.evaluation = target
 	sync()
+
+
+## This brush's graph modifiers, with every one another brush also holds replaced by this brush's own copy.
+## The copy keeps the same graph and settings and takes over the cache entries this brush solved, so the
+## split re-solves nothing. Returns the modifiers in stack order, as `graph_mods` does.
+static func unshare_graph_mods(p_brush: Pasture3DTerrainBrush) -> Array[Pasture3DNodeGraph]:
+	var out: Array[Pasture3DNodeGraph] = []
+	if p_brush == null:
+		return out
+	var others := {}
+	if p_brush.is_inside_tree():
+		for b in p_brush.get_tree().get_nodes_in_group(Pasture3DTerrainBrush.BRUSH_GROUP):
+			if b != p_brush and b is Pasture3DTerrainBrush:
+				for m in (b as Pasture3DTerrainBrush).modifiers:
+					if m != null:
+						others[m] = true
+	var stack: Array[Pasture3DNode] = p_brush.modifiers.duplicate()
+	var split := false
+	for i in stack.size():
+		if stack[i] is Pasture3DNodeGraph:
+			var m := stack[i] as Pasture3DNodeGraph
+			if others.has(m):
+				m = m.split_for_host(p_brush)
+				stack[i] = m
+				split = true
+			out.append(m)
+	if split:
+		p_brush.modifiers = stack
+	return out
 
 
 ## Find the brush's first graph modifier, or build one carrying the default graph

@@ -36,6 +36,7 @@ func _ready() -> void:
 	_test_mixed_stack()
 	_test_all_live()
 	_test_bake_button()
+	_test_shared_modifier_toggle()
 	_test_unsupported_brush_is_the_control()
 	print("\n=== %s (%d failures) ===\n" % [
 		"BRUSH GRAPH ROW PASS" if _fail == 0 else "BRUSH GRAPH ROW FAIL", _fail])
@@ -245,6 +246,52 @@ func _test_bake_button() -> void:
 	_check("another host's entries survive", others == 2, "%d of 2 modifiers kept only the other host's entry" % others)
 	r[2].free()
 	brush.free()
+	print("")
+
+## [G] Live/Frozen on one of two brushes sharing a modifier (a duplicate) changes that brush only. Evaluation
+## lives on the modifier, so the press must split a per-brush copy off first: same graph, and this brush's
+## cache entries move with it so the split re-solves nothing. The control is the old in-place set, which
+## flips the other brush too -- it must, or the first criterion here could not tell the two apart.
+func _test_shared_modifier_toggle() -> void:
+	print("[G] Live on a brush sharing its modifier")
+	var a := _mound()
+	var b := _mound()
+	var shared := _graph_mod(Pasture3DNode.Evaluation.FROZEN)
+	a.modifiers = [shared]
+	b.modifiers = [shared]
+	var grid := PackedFloat32Array()
+	grid.resize(64)
+	shared.store_cache("0,0,8,8", {"grid": grid, "host": a.get_instance_id()})
+	shared.store_cache("64,64,8,8", {"grid": grid, "host": b.get_instance_id()})
+	_check("both brushes start on one modifier", a.modifiers[0] == b.modifiers[0])
+	var r := _row(a)
+	r[1].emit_signal(&"pressed")
+	var ma := a.modifiers[0] as Pasture3DNodeGraph
+	var mb := b.modifiers[0] as Pasture3DNodeGraph
+	_check("the pressed brush went Live", ma.evaluation == Pasture3DNode.Evaluation.LIVE)
+	_check("the other brush stayed Frozen", mb.evaluation == Pasture3DNode.Evaluation.FROZEN)
+	_check("the pressed brush now holds its own copy", ma != mb and mb == shared)
+	_check("the copy keeps the same graph", ma.graph == shared.graph)
+	_check("this brush's cache entry moved to the copy",
+			ma._cache.has("0,0,8,8") and not ma._cache.has("64,64,8,8"), str(ma._cache.keys()))
+	_check("the other brush's entry stayed", mb._cache.has("64,64,8,8") and not mb._cache.has("0,0,8,8"),
+			str(mb._cache.keys()))
+	_check("a second press touches no new copy", (func() -> bool:
+			r[1].emit_signal(&"pressed")
+			return a.modifiers[0] == ma and ma.evaluation == Pasture3DNode.Evaluation.FROZEN 					and mb.evaluation == Pasture3DNode.Evaluation.FROZEN).call())
+	r[2].free()
+
+	# CONTROL: setting evaluation in place on a shared modifier flips both brushes.
+	var c := _mound()
+	var d := _mound()
+	var both := _graph_mod(Pasture3DNode.Evaluation.FROZEN)
+	c.modifiers = [both]
+	d.modifiers = [both]
+	(c.modifiers[0] as Pasture3DNodeGraph).evaluation = Pasture3DNode.Evaluation.LIVE
+	_check("control: the in-place set makes the other brush Live too",
+			(d.modifiers[0] as Pasture3DNodeGraph).evaluation == Pasture3DNode.Evaluation.LIVE)
+	for n in [a, b, c, d]:
+		n.free()
 	print("")
 
 

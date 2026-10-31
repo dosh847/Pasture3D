@@ -188,6 +188,23 @@ static func bake_all_hosts(p_graph: Pasture3DTerrainGraph, p_tree: SceneTree) ->
 	return hosts.size()
 
 
+## A copy of this modifier for `p_host` alone: same graph (shared, not copied) and settings, carrying the cache
+## entries `p_host` solved, which leave this one. For a per-brush setting on a modifier a duplicated brush
+## shares, such as Live/Frozen.
+func split_for_host(p_host: Object) -> Pasture3DNodeGraph:
+	_unspill()
+	var copy: Pasture3DNodeGraph = duplicate(false)
+	var id := p_host.get_instance_id()
+	var moved: Array = []
+	for k in _cache:
+		if int((_cache[k] as Dictionary).get("host", 0)) == id:
+			moved.append(k)
+	for k in moved:
+		copy._cache[k] = _cache[k]
+		_cache.erase(k)
+	return copy
+
+
 ## Drop the entries `p_host` filed, and no other host's. Each entry carries the id of the brush that solved
 ## it (`store_cache`'s caller tags it); an untagged entry is left alone. Returns how many were dropped.
 func drop_cache_for_host(p_host: Object) -> int:

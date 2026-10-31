@@ -390,7 +390,9 @@ func host_ambiguous() -> bool:
 
 
 func _find_host_modifier() -> Pasture3DNodeGraph:
-	if host_modifier != null and host_modifier.graph == graph:
+	# The bound brush must still hold it: Live/Frozen splits a shared modifier into a per-brush copy, after
+	# which the remembered one belongs to the other brush.
+	if host_modifier != null and host_modifier.graph == graph and (host_brush == null or host_brush.modifiers.has(host_modifier)):
 		return host_modifier
 	var brush := _find_host_brush()
 	if brush != null:
