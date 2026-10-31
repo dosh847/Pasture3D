@@ -3,9 +3,10 @@
 # Pasture3DGraphNodeDevGavoronoise — the GDScript oracle twin for Gavoronoise (spec §7.2).
 #
 # The algorithm is defined once, in src/pasture_3d_gavoronoise.h. This is one of its three
-# implementations; the others are the C++ kernel and the mode-18 shader. It exists because a generator
-# with derivative feedback has no closed form to check against — the only way to know the kernel computes
-# what was specified is to write the specification out a second time, slowly, and compare.
+# implementations; the others are the C++ kernel and the GAVORONOISE / GAVORONOISE_BASE shader modes. It
+# exists because a generator with derivative feedback has no closed form to check against — the only way to
+# know the kernel computes what was specified is to write the specification out a second time, slowly, and
+# compare. Erosion stage after Clay John (MIT), base after Inigo Quilez (MIT); notices in the kernel header.
 #
 # The hash below is integer arithmetic masked to 32 bits at every step. GDScript ints are 64-bit, so the
 # masks are not decoration: without them the multiplies keep their high bits, the values diverge from
@@ -16,6 +17,9 @@ class_name Pasture3DGraphNodeDevGavoronoise
 extends Pasture3DGraphNode
 
 const U32 := 0xffffffff
+const BASE_OCTAVES := 8
+const GRAD_EPS := 0.1
+const EROSION_SEED := 0x9e3779b9
 
 @export var amplitude: float = 60.0:
 	set(v):
@@ -27,7 +31,7 @@ const U32 := 0xffffffff
 		frequency = v
 		_param_changed()
 
-@export var octaves: int = 4:
+@export var octaves: int = 8:
 	set(v):
 		octaves = v
 		_param_changed()
@@ -67,6 +71,21 @@ const U32 := 0xffffffff
 		z_cut_max = v
 		_param_changed()
 
+@export var erosion_strength: float = 0.1:
+	set(v):
+		erosion_strength = v
+		_param_changed()
+
+@export var erosion_frequency: float = 4.0:
+	set(v):
+		erosion_frequency = v
+		_param_changed()
+
+@export var base_smoothing: float = 0.0:
+	set(v):
+		base_smoothing = v
+		_param_changed()
+
 
 func op() -> StringName:
 	return &"dev_gavoronoise"
@@ -81,103 +100,180 @@ func needs_grid() -> bool:
 
 
 func input_count() -> int:
-	return 0
+	return 1
 
 
 func input_names() -> PackedStringArray:
-	return PackedStringArray()
+	return PackedStringArray(["base"])
 
 
 func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array()
+	return PackedInt32Array([PortType.HEIGHT])
 
 
-func eval_grid(_p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:
+func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:
+	if p_inputs.size() > 0 and p_inputs[0] is PackedFloat32Array and p_inputs[0].size() == p_gw * p_gh:
+		return solve_base(p_gw, p_gh, p_rect, p_inputs[0])
 	return solve(p_gw, p_gh, p_rect)
 
 
+## The generator form.
 func solve(p_gw: int, p_gh: int, p_rect: Rect2) -> PackedFloat32Array:
-	var n := p_gw * p_gh
 	var out := PackedFloat32Array()
-	out.resize(n)
-	if is_zero_approx(amplitude) or octaves <= 0 or frequency <= 0.0:
+	out.resize(p_gw * p_gh)
+	if absf(amplitude) <= 1e-7 or frequency <= 0.0:
 		out.fill(0.0)
 		return out
-
-	var theta := deg_to_rad(angle_deg)
-	var cs := cos(theta)
-	var sn := sin(theta)
-	# Never exactly 0 — see the kernel header.
-	var aniso := maxf(clampf(angle_spread, 0.0, 1.0), 0.02)
-	# Fixed, and not exposed — see the kernel header.
-	var lacunarity := 2.0
-	var gain := 0.5
-
+	var theta := angle_deg * TAU / 360.0
+	var kx := -sin(theta)
+	var kz := cos(theta)
+	var spread := clampf(angle_spread, 0.0, 1.0)
 	for iz in p_gh:
 		for ix in p_gw:
 			var w := Pasture3DTerrainGraph.cell_to_world(ix, iz, p_gw, p_gh, p_rect)
-			var sx := w.x * cs + w.y * sn
-			var sz := -w.x * sn + w.y * cs
-
-			var total := 0.0
-			var max_amp := 0.0
-			var amp := 1.0
-			var freq := frequency
-			var grad_x := 0.0
-			var grad_z := 0.0
-
-			for o in octaves:
-				var qx := (sx * freq + grad_x * branch_strength) * aniso
-				var qz := sz * freq + grad_z * branch_strength
-				var bx := int(floor(qx))
-				var bz := int(floor(qz))
-
-				var best := 1.0e30
-				var best_dx := 0.0
-				var best_dz := 0.0
-				for oz in range(-1, 2):
-					for ox in range(-1, 2):
-						var cx := bx + ox
-						var cz := bz + oz
-						var h0 := _hash_cell(cx, cz, seed + o * 7919, 0x1)
-						var h1 := _hash_cell(cx, cz, seed + o * 7919, 0x2)
-						var fx := float(cx) + _rnd01(h0)
-						var fz := float(cz) + _rnd01(h1)
-						var dx := qx - fx
-						var dz := qz - fz
-						var d2 := dx * dx + dz * dz
-						if d2 < best:
-							best = d2
-							best_dx = dx
-							best_dz = dz
-
-				var dist := sqrt(best)
-				var v := clampf(1.0 - dist, 0.0, 1.0)
-
-				var gx := 0.0
-				var gz := 0.0
-				if dist > 1e-12 and v > 0.0:
-					gx = -best_dx / dist
-					gz = -best_dz / dist
-
-				var gl2 := grad_x * grad_x + grad_z * grad_z
-				var damp := 1.0 / (1.0 + slope_strength * gl2)
-
-				total += amp * v * damp
-				grad_x += gx * amp * damp
-				grad_z += gz * amp * damp
-				max_amp += amp
-
-				amp *= gain
-				freq *= lacunarity
-
-			var t := total / maxf(max_amp, 1e-4)
-			if z_cut_max - z_cut_min > 1e-9:
-				t = clampf((t - z_cut_min) / (z_cut_max - z_cut_min), 0.0, 1.0)
-			else:
-				t = 1.0 if t >= z_cut_max else 0.0
-			out[iz * p_gw + ix] = float(t * amplitude)
+			var px := w.x * frequency
+			var pz := w.y * frequency
+			var b := _base(px, pz, kx, kz, spread)
+			var mx := _base(px + GRAD_EPS, pz, kx, kz, spread) - _base(px - GRAD_EPS, pz, kx, kz, spread)
+			var mz := _base(px, pz + GRAD_EPS, kx, kz, spread) - _base(px, pz - GRAD_EPS, kx, kz, spread)
+			var dx := mz / GRAD_EPS * 0.5 * slope_strength
+			var dz := -mx / GRAD_EPS * 0.5 * slope_strength
+			var v := b + erosion_strength * _erosion(px, pz, b, dx, dz)
+			out[iz * p_gw + ix] = amplitude * (0.5 * v + 0.5)
 	return out
+
+
+## The base-input form: erode p_base along its own slope.
+func solve_base(p_gw: int, p_gh: int, p_rect: Rect2, p_base: PackedFloat32Array) -> PackedFloat32Array:
+	if absf(amplitude) <= 1e-7 or frequency <= 0.0 or erosion_strength == 0.0:
+		return p_base
+	var sm: PackedFloat32Array = Pasture3DGraphNodeDevTerrainMetrics.new().box_mean(p_base, p_gw, p_gh, p_rect,
+			base_smoothing) if base_smoothing > 0.0 else p_base
+	var cdx := p_rect.size.x / float(p_gw)
+	var cdz := p_rect.size.y / float(p_gh)
+	var to_n := 2.0 / (amplitude * frequency)
+	var out := PackedFloat32Array()
+	out.resize(p_gw * p_gh)
+	for iz in p_gh:
+		for ix in p_gw:
+			var i := iz * p_gw + ix
+			var z := p_base[i]
+			if not is_finite(z):
+				out[i] = z
+				continue
+			var xm := maxi(ix - 1, 0)
+			var xp := mini(ix + 1, p_gw - 1)
+			var zm := maxi(iz - 1, 0)
+			var zp := mini(iz + 1, p_gh - 1)
+			var a0 := sm[iz * p_gw + xm]
+			var a1 := sm[iz * p_gw + xp]
+			var b0 := sm[zm * p_gw + ix]
+			var b1 := sm[zp * p_gw + ix]
+			var gx := 0.0
+			var gz := 0.0
+			if is_finite(a0) and is_finite(a1) and is_finite(b0) and is_finite(b1):
+				gx = (a1 - a0) / (float(xp - xm) * cdx) * to_n
+				gz = (b1 - b0) / (float(zp - zm) * cdz) * to_n
+			var w := Pasture3DTerrainGraph.cell_to_world(ix, iz, p_gw, p_gh, p_rect)
+			var bn := 2.0 * z / amplitude - 1.0
+			var e := _erosion(w.x * frequency, w.y * frequency, bn, gz * slope_strength, -gx * slope_strength)
+			out[i] = z + erosion_strength * e * amplitude * 0.5
+	return out
+
+
+func _gabor(p_x: float, p_z: float, p_kx: float, p_kz: float, p_spread: float, p_seed: int) -> float:
+	var flx := floorf(p_x)
+	var flz := floorf(p_z)
+	var bx := int(flx)
+	var bz := int(flz)
+	var fx := p_x - flx
+	var fz := p_z - flz
+	var av := 0.0
+	var at := 0.0
+	for j in range(-2, 3):
+		for i in range(-2, 3):
+			var cx := bx + i
+			var cz := bz + j
+			var rx := fx - (float(i) + _rnd01(_hash_cell(cx, cz, p_seed, 1)))
+			var rz := fz - (float(j) + _rnd01(_hash_cell(cx, cz, p_seed, 2)))
+			var kx := p_kx + p_spread * (2.0 * _rnd01(_hash_cell(cx, cz, p_seed, 3)) - 1.0)
+			var kz := p_kz + p_spread * (2.0 * _rnd01(_hash_cell(cx, cz, p_seed, 4)) - 1.0)
+			var kl := sqrt(kx * kx + kz * kz)
+			if kl > 1e-9:
+				kx /= kl
+				kz /= kl
+			else:
+				kx = p_kx
+				kz = p_kz
+			var wt := exp(-4.0 * (rx * rx + rz * rz))
+			av += wt * cos(TAU * (rx * kx + rz * kz))
+			at += wt
+	return av / at
+
+
+func _base(p_x: float, p_z: float, p_kx: float, p_kz: float, p_spread: float) -> float:
+	var n := 0.0
+	var nf := 1.0
+	var na := 0.6
+	for o in BASE_OCTAVES:
+		var v := _gabor(p_x * nf, p_z * nf, p_kx, p_kz, p_spread, (seed + o * 7919) & U32)
+		n += v * na
+		na *= minf(v + 1.0, 2.0) * 0.5
+		na *= 0.5
+		nf *= 2.0
+	return n
+
+
+## Returns [value, slope x, slope z].
+func _eroder(p_x: float, p_z: float, p_dx: float, p_dz: float, p_seed: int) -> Array:
+	var flx := floorf(p_x)
+	var flz := floorf(p_z)
+	var bx := int(flx)
+	var bz := int(flz)
+	var fx := p_x - flx
+	var fz := p_z - flz
+	var va := 0.0
+	var vx := 0.0
+	var vz := 0.0
+	var wt := 0.0
+	for j in range(-2, 3):
+		for i in range(-2, 3):
+			var cx := bx + i
+			var cz := bz + j
+			var rx := fx - (float(i) + 0.5 * _rnd01(_hash_cell(cx, cz, p_seed, 5)))
+			var rz := fz - (float(j) + 0.5 * _rnd01(_hash_cell(cx, cz, p_seed, 6)))
+			var w := exp(-2.0 * (rx * rx + rz * rz))
+			var ph := TAU * (rx * p_dx + rz * p_dz)
+			va += w * cos(ph)
+			var s := -w * sin(ph)
+			vx += s * p_dx
+			vz += s * p_dz
+			wt += w
+	return [va / wt, vx / wt, vz / wt]
+
+
+func _smoothstep01(p_lo: float, p_hi: float, p_x: float) -> float:
+	if p_hi - p_lo <= 1e-9:
+		return 1.0 if p_x >= p_hi else 0.0
+	var t := clampf((p_x - p_lo) / (p_hi - p_lo), 0.0, 1.0)
+	return t * t * (3.0 - 2.0 * t)
+
+
+func _erosion(p_x: float, p_z: float, p_base: float, p_dx: float, p_dz: float) -> float:
+	var hv := 0.0
+	var hx := 0.0
+	var hz := 0.0
+	var a := 0.6 * _smoothstep01(z_cut_min, z_cut_max, p_base * 0.5 + 0.5)
+	var f := 1.0
+	for o in clampi(octaves, 1, 12):
+		var e := _eroder(p_x * erosion_frequency * f, p_z * erosion_frequency * f, p_dx + branch_strength * hz, p_dz - branch_strength * hx,
+				(EROSION_SEED + seed + o * 7919) & U32)
+		hv += a * e[0]
+		hx += a * f * e[1]
+		hz += a * f * e[2]
+		a *= 0.4
+		f *= 2.0
+	return hv
 
 
 ## uint32 multiply-xor-shift. Every step is masked back to 32 bits so this wraps the way C++ and GLSL do.

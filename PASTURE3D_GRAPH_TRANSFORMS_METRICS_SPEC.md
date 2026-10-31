@@ -739,34 +739,46 @@ Phase 5.*
 
 ### 7.2 `Gavoronoise` — `op = &"gavoronoise"`
 
-* **Class:** `Pasture3DGraphNodeGavoronoise` · **Role:** GENERATOR · **needs_grid:** `false` (cell, fusible)
+* **Class:** `Pasture3DGraphNodeGavoronoise` · **Role:** GENERATOR · **needs_grid:** `true` (the octave
+  loops are not a per-cell expression a neighbour's loop can absorb)
 * **Hesiod:** `Gavoronoise`
-* **Ports:** `amplitude` (FLOAT), `angle` (FLOAT — a per-cell angle field may be wired in), `frequency` (FLOAT)
-* **Parameters:** `frequency: float = 0.002` · `amplitude: float = 60.0` metres · `seed: int` ·
-  `angle_deg: float = 0.0` and `angle_spread: float = 1.0` (tectonic strike direction, and how far cells
-  deviate from it) · `octaves: int = 4` · `slope_strength: float = 1.0` · `branch_strength: float = 2.0` ·
-  `z_cut_min: float = 0.2` / `z_cut_max: float = 1.0`
-* **Maths:** a gradient-aware Voronoi. Per octave, evaluate a Voronoi/worley cell field, but instead of
-  taking the raw distance, accumulate the *directional derivative* of the cell field along a strike
-  direction and attenuate each subsequent octave by the accumulated slope — the same derivative-feedback
-  idea already implemented in `noise_jordan`, applied to a cellular rather than a gradient-noise base.
-  `branch_strength` scales the derivative feedback (higher = more dendritic branching); `z_cut_min/max`
-  window the output before amplitude scaling.
-* **Why it earns its place:** a genuine gap. `FastNoiseLite`'s cellular mode gives the distance field but
-  not the gradient feedback, and that feedback is what produces branching ridgelines that read as eroded
-  with no erosion pass. Best quality-per-millisecond generator in Hesiod's catalogue, and it is fusible.
-* **Implementation reuse:** share the derivative-accumulation scaffold with `pasture_3d_noise_jordan.cpp`
-  rather than duplicating it. If the two need to diverge, that is a refactor, not two copies.
-* **Native:** `src/pasture_3d_gavoronoise.cpp` plus a cell-fold opcode.
-* **Oracle:** yes — a fusible generator needs the fold-parity oracle, like Jordan and Swiss have.
-* **Gate — `GraphGavoronoiseGate.gd`:** **GA** determinism — the field is a pure function of the seed
-  (control: a different seed must differ); **GB** the field is dendritic, not a smooth blob and not white
-  noise. Reuse the DLA gate's two-scalar approach: *no single scalar separates a branching field from both
-  nulls*, so measure two, each against the null it exists to exclude (a ridge-connectivity measure against
-  the noise null, and a spectral-slope measure against the blob null); **GC** `angle_deg` visibly rotates the
-  dominant ridge orientation and `angle_spread = 0` makes ridges parallel; **GD** amplitude scales the field
-  linearly; **GE** fold parity against the oracle; **GF** resolution invariance (§3.6) — `frequency` is
-  cycles per metre, so the same world rect at two grid resolutions yields the same ridge spacing in metres.
+* **Ports:** `amplitude` (FLOAT), `angle` (FLOAT), `frequency` (FLOAT), `base` (HEIGHT, optional; rides in3,
+  unwired default NaN)
+* **Parameters:** `amplitude: float = 60.0` metres · `frequency: float = 0.002` cycles per metre ·
+  `octaves: int = 8` (erosion octaves, 1-12) · `seed: int` · **Erosion:** `erosion_strength: float = 0.1`
+  (gully depth as a fraction of amplitude) · `erosion_frequency: float = 4.0` (erosion cells per base cell) ·
+  `slope_strength: float = 1.0` · `branch_strength: float = 2.0` · `z_cut_min: float = 0.2` /
+  `z_cut_max: float = 1.0` · **Base:** `angle_deg: float = 0.0` and `angle_spread: float = 1.0` (generator
+  only) · `base_smoothing: float = 0.0` metres (base input only)
+* **Maths — eroded-terrain noise.** Defined once, in `src/pasture_3d_gavoronoise.h`, with C++, GLSL and
+  GDScript implementations that must agree. A smooth landform (8 octaves of oriented Gabor waves, peaks
+  rougher than valleys) is cut by gullies: per erosion octave, a 5x5-cell wave sum whose crests are laid
+  along `d = (dbase/dz, -dbase/dx)`, the contour-normal of the slope, so they run DOWNHILL. Each octave's own
+  slope is fed back into the next one's direction, scaled by `branch_strength`; that turning is the
+  branching (0 gives parallel gullies). Erosion fades in between `z_cut_min` and `z_cut_max` (fractions of
+  amplitude), so valleys stay smooth and high ground is cut hardest.
+  * **Generator** (`base` unwired): output `amplitude * (0.5 * (base + erosion_strength * h) + 0.5)` metres.
+  * **Base input** (`base` wired): the wired surface is read as `base = 2 z / amplitude - 1`, its slope from
+    the input box-blurred over `base_smoothing`, and the output is `z + erosion_strength * h * amplitude / 2`
+    — the input WITH its gullies cut in. Do not add it back onto the input.
+* **History.** The first build was a 1 - F1 Voronoi field with derivative feedback, as this section once
+  proposed. 1 - F1 is a cone on every feature point with a crease on every cell wall: it drew faceted
+  shards, and its "ridges" were cell walls with no relation to any slope. Rewritten 2026-10-31.
+* **Provenance.** The erosion stage follows Clay John's "Eroded Terrain Noise" (MIT, 2020) and the base
+  Inigo Quilez's Gabor-wave noise (MIT, 2023); both notices are in the kernel header. The hash, the metric
+  frame, `branch_strength` as a feedback scale, and the base-input form are this project's. During the
+  rewrite the implementer read HighMap's `gavoronoise.cl` / `gabor_wave.cl` kernels (GPLv3), which §2
+  forbids; no code was taken from them, and the implementation was written from the MIT upstreams.
+* **Native:** `src/pasture_3d_gavoronoise.cpp`; GPU modes `GAVORONOISE` (18) and `GAVORONOISE_BASE` (41).
+* **Oracle:** `Pasture3DGraphNodeDevGavoronoise` (`solve`, `solve_base`).
+* **Gate — `GraphGavoronoiseGate.gd`** (generator): **GA** determinism (control: another seed differs);
+  **GB** a landform, not cones — coefficient of variation of |gradient| (control: a 1 - F1 Voronoi field,
+  the old bug, must fail); **GC** the erosion detail's crests run down the base's slope (control: the same
+  detail against an unrelated landform); **GD** amplitude is linear; **GE** strike and spread (erosion off);
+  **GF** kernel == oracle, graph route == kernel; **GG** resolution invariance; **GH** GPU parity.
+* **Gate — `GraphGavoronoiseBaseGate.gd`** (base input): **BA** strength 0 returns the input bit for bit,
+  NaN passes through; **BB** on a cone the gullies are radial (control: the generator's gullies are not);
+  **BC** nothing below `z_cut_min` changes; **BD** kernel == oracle, graph route == kernel; **BE** GPU parity.
 
 ---
 

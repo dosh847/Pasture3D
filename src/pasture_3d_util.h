@@ -559,11 +559,14 @@ public:
 			double p_travel_distance_m, double p_depth_exponent, double p_viscosity_power,
 			double p_amount);
 
-	// Gradient-aware Voronoi generator (spec §7.2).
+	// Gavoronoise eroded-terrain noise (spec §7.2). `p_params` keys are GavoronoiseParams' field names;
+	// a missing key takes its default.
 	static PackedFloat32Array gavoronoise_grid(const int p_gw, const int p_gh, const Rect2 &p_rect,
-			const double p_amplitude, const double p_frequency, const int p_octaves, const int p_seed,
-			const double p_angle_deg, const double p_angle_spread, const double p_slope_strength,
-			const double p_branch_strength, const double p_z_cut_min, const double p_z_cut_max);
+			const Dictionary &p_params);
+
+	// Gavoronoise eroding an input surface along its own slope (the base-input form).
+	static PackedFloat32Array gavoronoise_base_grid(const int p_gw, const int p_gh, const Rect2 &p_rect,
+			const Dictionary &p_params, const PackedFloat32Array &p_base, const double p_base_smoothing_m);
 
 	// Native Swiss ridge noise generator.
 	static PackedFloat32Array noise_swiss_grid(const int p_gw, const int p_gh, const Rect2 &p_rect,

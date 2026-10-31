@@ -1122,9 +1122,26 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 			} break;
 
 			case GRAPH_OP_GAVORONOISE: {
-				PackedFloat32Array res = gavoronoise_grid(p_gw, p_gh, p_rect, P[0], P[1],
-						(int)P[2], (int)P[3], P[4], P[5], P[6],
-						P[7], (PH[9] ? P[9] : 0.f), (PH[10] ? P[10] : 1.f));
+				// Port 3 is the `base` surface. Wired, the node erodes it along its own slope (the base-input
+				// form, see the kernel header); unwired it generates its own base.
+				GavoronoiseParams gp;
+				gp.amplitude = P[0];
+				gp.frequency = P[1];
+				gp.octaves = (int)P[2];
+				gp.seed = (int)P[3];
+				gp.angle_deg = P[4];
+				gp.angle_spread = P[5];
+				gp.slope_strength = P[6];
+				gp.branch_strength = P[7];
+				gp.z_cut_min = PH[9] ? P[9] : 0.2f;
+				gp.z_cut_max = PH[10] ? P[10] : 1.f;
+				gp.erosion_strength = PH[12] ? P[12] : 0.1f;
+				gp.erosion_frequency = PH[13] ? P[13] : 4.f;
+				const int base_src = in3 ? in3[s] : -1;
+				PackedFloat32Array res = (base_src >= 0)
+						? gavoronoise_base_grid(p_gw, p_gh, p_rect, gp, get_grid_packed(base_src, c_in3),
+								  (PH[11] ? P[11] : 0.f))
+						: gavoronoise_grid(p_gw, p_gh, p_rect, gp);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
 			} break;
 

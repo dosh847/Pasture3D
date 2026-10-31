@@ -2423,12 +2423,32 @@ Dictionary Pasture3DUtil::mudslide_grid(const PackedFloat32Array &p_surface,
 	return d;
 }
 
+static GavoronoiseParams gavoronoise_params_from(const Dictionary &p_d) {
+	GavoronoiseParams g;
+	g.amplitude = (double)p_d.get("amplitude", g.amplitude);
+	g.frequency = (double)p_d.get("frequency", g.frequency);
+	g.octaves = (int)p_d.get("octaves", g.octaves);
+	g.seed = (int)p_d.get("seed", g.seed);
+	g.angle_deg = (double)p_d.get("angle_deg", g.angle_deg);
+	g.angle_spread = (double)p_d.get("angle_spread", g.angle_spread);
+	g.slope_strength = (double)p_d.get("slope_strength", g.slope_strength);
+	g.branch_strength = (double)p_d.get("branch_strength", g.branch_strength);
+	g.z_cut_min = (double)p_d.get("z_cut_min", g.z_cut_min);
+	g.z_cut_max = (double)p_d.get("z_cut_max", g.z_cut_max);
+	g.erosion_strength = (double)p_d.get("erosion_strength", g.erosion_strength);
+	g.erosion_frequency = (double)p_d.get("erosion_frequency", g.erosion_frequency);
+	return g;
+}
+
 PackedFloat32Array Pasture3DUtil::gavoronoise_grid(const int p_gw, const int p_gh, const Rect2 &p_rect,
-		const double p_amplitude, const double p_frequency, const int p_octaves, const int p_seed,
-		const double p_angle_deg, const double p_angle_spread, const double p_slope_strength,
-		const double p_branch_strength, const double p_z_cut_min, const double p_z_cut_max) {
-	return godot::gavoronoise_grid(p_gw, p_gh, p_rect, p_amplitude, p_frequency, p_octaves, p_seed,
-			p_angle_deg, p_angle_spread, p_slope_strength, p_branch_strength, p_z_cut_min, p_z_cut_max);
+		const Dictionary &p_params) {
+	return godot::gavoronoise_grid(p_gw, p_gh, p_rect, gavoronoise_params_from(p_params));
+}
+
+PackedFloat32Array Pasture3DUtil::gavoronoise_base_grid(const int p_gw, const int p_gh, const Rect2 &p_rect,
+		const Dictionary &p_params, const PackedFloat32Array &p_base, const double p_base_smoothing_m) {
+	return godot::gavoronoise_base_grid(p_gw, p_gh, p_rect, gavoronoise_params_from(p_params), p_base,
+			p_base_smoothing_m);
 }
 
 PackedFloat32Array Pasture3DUtil::noise_swiss_grid(const int p_gw, const int p_gh, const Rect2 &p_rect,
@@ -3477,8 +3497,11 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("mudslide_grid", "surface", "mask", "gw", "gh", "rect", "talus_angle_deg", "depth_m", "travel_distance_m", "depth_exponent", "viscosity_power", "amount"),
 			&Pasture3DUtil::mudslide_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
-			D_METHOD("gavoronoise_grid", "gw", "gh", "rect", "amplitude", "frequency", "octaves", "seed", "angle_deg", "angle_spread", "slope_strength", "branch_strength", "z_cut_min", "z_cut_max"),
+			D_METHOD("gavoronoise_grid", "gw", "gh", "rect", "params"),
 			&Pasture3DUtil::gavoronoise_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("gavoronoise_base_grid", "gw", "gh", "rect", "params", "base", "base_smoothing_m"),
+			&Pasture3DUtil::gavoronoise_base_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("noise_jordan_grid", "gw", "gh", "rect", "amplitude", "frequency", "octaves", "gain", "lacunarity", "warp_strength", "damp_strength", "seed"),
 			&Pasture3DUtil::noise_jordan_grid);

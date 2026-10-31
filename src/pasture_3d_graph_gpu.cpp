@@ -77,9 +77,10 @@ enum GraphKernelMode {
 	GKM_GRADIENT = 37,
 	// Phase 3: Value Ramp. The stop table rides the LUT binding.
 	GKM_VALUE_RAMP = 38,
-	// Displace (Hesiod's Warp) and Recast Canyon.
+	// Displace (Hesiod's Warp), Recast Canyon, and Gavoronoise's base-input form.
 	GKM_DISPLACE = 39,
 	GKM_RECAST_CANYON = 40,
+	GKM_GAVORONOISE_BASE = 41,
 };
 
 struct GraphKernelModeName {
@@ -129,6 +130,7 @@ static const GraphKernelModeName GRAPH_KERNEL_MODES[] = {
 	{ "GKM_VALUE_RAMP", GKM_VALUE_RAMP },
 	{ "GKM_DISPLACE", GKM_DISPLACE },
 	{ "GKM_RECAST_CANYON", GKM_RECAST_CANYON },
+	{ "GKM_GAVORONOISE_BASE", GKM_GAVORONOISE_BASE },
 };
 
 // `#version` has to be the first line of the source, so it is prepended here rather than living in the
@@ -157,6 +159,83 @@ static String _graph_kernel_defines() {
 // One compute shader, dispatched once per GRID node with a `mode` selecting the op. Reads up to two input
 // buffers (A, B) and writes one output buffer (OUT), all std430 float arrays over the gw*gh grid.
 // NOTE: no `#version` here -- _graph_kernel_defines() supplies it along with the GKM_* constants.
+// The Gavoronoise stages (src/pasture_3d_gavoronoise.h defines them; this is their float32 twin). A MACRO
+// for the same reason as GRAPH_DISTANCE_METRIC_GLSL below: it must sit before main(), inside GRAPH_GRID_GLSL.
+// Erosion stage after Clay John (MIT), base after Inigo Quilez (MIT); notices in the kernel header.
+#define GRAPH_GAV_GLSL R"(
+const float GAV_TAU = 6.283185307179586;
+float gavSmooth(float lo, float hi, float x) {
+	if (hi - lo <= 1e-9) { return x >= hi ? 1.0 : 0.0; }
+	float t = clamp((x - lo) / (hi - lo), 0.0, 1.0);
+	return t * t * (3.0 - 2.0 * t);
+}
+float gavGabor(vec2 q, vec2 k, float spread, uint sd) {
+	vec2 fl = floor(q);
+	ivec2 bc = ivec2(fl);
+	vec2 f = q - fl;
+	float av = 0.0;
+	float at = 0.0;
+	for (int j = -2; j <= 2; j++) {
+		for (int i = -2; i <= 2; i++) {
+			int cx = bc.x + i;
+			int cz = bc.y + j;
+			vec2 r = f - (vec2(float(i), float(j)) + vec2(gavRnd01(gavHashCell(cx, cz, sd, 1u)), gavRnd01(gavHashCell(cx, cz, sd, 2u))));
+			vec2 kk = k + spread * (2.0 * vec2(gavRnd01(gavHashCell(cx, cz, sd, 3u)), gavRnd01(gavHashCell(cx, cz, sd, 4u))) - 1.0);
+			float kl = length(kk);
+			kk = (kl > 1e-9) ? kk / kl : k;
+			float w = exp(-4.0 * dot(r, r));
+			av += w * cos(GAV_TAU * dot(r, kk));
+			at += w;
+		}
+	}
+	return av / at;
+}
+float gavBase(vec2 q, vec2 k, float spread, uint sd) {
+	float n = 0.0;
+	float nf = 1.0;
+	float na = 0.6;
+	for (int o = 0; o < 8; o++) {
+		float v = gavGabor(q * nf, k, spread, sd + uint(o) * 7919u);
+		n += v * na;
+		na *= min(v + 1.0, 2.0) * 0.5;
+		na *= 0.5;
+		nf *= 2.0;
+	}
+	return n;
+}
+vec3 gavEroder(vec2 q, vec2 d, uint sd) {
+	vec2 fl = floor(q);
+	ivec2 bc = ivec2(fl);
+	vec2 f = q - fl;
+	vec3 va = vec3(0.0);
+	float wt = 0.0;
+	for (int j = -2; j <= 2; j++) {
+		for (int i = -2; i <= 2; i++) {
+			int cx = bc.x + i;
+			int cz = bc.y + j;
+			vec2 r = f - (vec2(float(i), float(j)) + 0.5 * vec2(gavRnd01(gavHashCell(cx, cz, sd, 5u)), gavRnd01(gavHashCell(cx, cz, sd, 6u))));
+			float w = exp(-2.0 * dot(r, r));
+			float ph = GAV_TAU * dot(r, d);
+			va += vec3(cos(ph), -sin(ph) * d) * w;
+			wt += w;
+		}
+	}
+	return va / wt;
+}
+float gavErosion(vec2 q, float bn, vec2 d, int oct, uint sd, float branch, float zlo, float zhi, float efreq) {
+	vec3 h = vec3(0.0); // value, x slope, z slope
+	float a = 0.6 * gavSmooth(zlo, zhi, bn * 0.5 + 0.5);
+	float f = 1.0;
+	for (int o = 0; o < oct; o++) {
+		vec3 e = gavEroder(q * efreq * f, d + branch * vec2(h.z, -h.y), 0x9e3779b9u + sd + uint(o) * 7919u);
+		h += a * vec3(e.x, f * e.y, f * e.z);
+		a *= 0.4;
+		f *= 2.0;
+	}
+	return h.x;
+}
+)"
+
 // The GLSL twin of pasture_3d_distance_metric.h (PASTURE3D_GRADIENT_AND_COLOR_RAMP_SPEC.md §3). A MACRO, not a
 // `static const char *`, so it can be spliced into GRAPH_GRID_GLSL's preamble by literal concatenation: it
 // has to sit before main(), and main() lives inside that one literal. It is spliced in exactly once.
@@ -326,10 +405,10 @@ uint gavHashU32(uint x) {
 	return x;
 }
 
-uint gavHashCell(int cx, int cz, int sd, uint salt) {
+uint gavHashCell(int cx, int cz, uint sd, uint salt) {
 	uint h = gavHashU32(uint(cx) * 0x9e3779b1u);
 	h = gavHashU32(h ^ (uint(cz) * 0x85ebca6bu));
-	h = gavHashU32(h ^ uint(sd));
+	h = gavHashU32(h ^ sd);
 	return gavHashU32(h ^ salt);
 }
 
@@ -338,7 +417,7 @@ uint gavHashCell(int cx, int cz, int sd, uint salt) {
 float gavRnd01(uint h) {
 	return float(h & 0x00ffffffu) / 16777216.0;
 }
-
+)" GRAPH_GAV_GLSL R"(
 // The half-width at arc length `s`, interpolated between the vertices either side — a transcription of
 // Pasture3DPathGeom::half_width_at, including its `vertex_before` scan. The CPU's two shortcuts (an
 // empty width array meaning 1.0, a single width meaning constant) are not repeated here: the upload
@@ -833,74 +912,20 @@ static const char *GRAPH_GRID_GLSL_1B = R"(	if (p.mode == GKM_FALLOFF) { // FALL
 
 // MSVC caps a single string literal at 16380 bytes and this shader crossed it. The source is SPLIT, not
 // shortened: the two halves are concatenated at pipeline-creation time and the GLSL is unchanged.
-static const char *GRAPH_GRID_GLSL_2 = R"(	if (p.mode == GKM_GAVORONOISE) { // GAVORONOISE: a pure generator; no input buffers are read.
-	                    // ip = octaves, ip2 = seed. f0 amplitude, f1 frequency, f2 strike radians,
-	                    // f3 angle spread, f4 slope strength, f5 branch strength, f6/f7 the z-cut window.
-	                    //
-	                    // The algorithm is defined in src/pasture_3d_gavoronoise.h. This is one of its
-	                    // three implementations; nothing here is a GPU-specific approximation.
-		float wx = p.ox + (float(ix) + 0.5) * p.dx;
-		float wz = p.oz + (float(iz) + 0.5) * p.dz;
-		float cs = cos(p.f2);
-		float sn = sin(p.f2);
-		float sx = wx * cs + wz * sn;
-		float sz = -wx * sn + wz * cs;
-
-		float total = 0.0;
-		float maxAmp = 0.0;
-		float amp = 1.0;
-		float freq = p.f1;
-		float gradX = 0.0;
-		float gradZ = 0.0;
-
-		for (int oc = 0; oc < p.ip; oc++) {
-			float aniso = max(clamp(p.f3, 0.0, 1.0), 0.02); // along-strike compression; see the header
-			float qx = (sx * freq + gradX * p.f5) * aniso;
-			float qz = sz * freq + gradZ * p.f5;
-			int bx = int(floor(qx));
-			int bz = int(floor(qz));
-
-			float best = 1.0e30;
-			float bestDx = 0.0;
-			float bestDz = 0.0;
-			for (int oz2 = -1; oz2 <= 1; oz2++) {
-				for (int ox2 = -1; ox2 <= 1; ox2++) {
-					int cx = bx + ox2;
-					int cz = bz + oz2;
-					int sd = p.ip2 + oc * 7919;
-					uint h0 = gavHashCell(cx, cz, sd, 1u);
-					uint h1 = gavHashCell(cx, cz, sd, 2u);
-					float fx = float(cx) + gavRnd01(h0);
-					float fz = float(cz) + gavRnd01(h1);
-					float ddx = qx - fx;
-					float ddz = qz - fz;
-					float d2 = ddx * ddx + ddz * ddz;
-					if (d2 < best) { best = d2; bestDx = ddx; bestDz = ddz; }
-				}
-			}
-
-			float dist = sqrt(best);
-			float v = clamp(1.0 - dist, 0.0, 1.0);
-			float gx = 0.0;
-			float gz = 0.0;
-			if (dist > 1e-12 && v > 0.0) { gx = -bestDx / dist; gz = -bestDz / dist; }
-
-			float gl2 = gradX * gradX + gradZ * gradZ;
-			float damp = 1.0 / (1.0 + p.f4 * gl2);
-
-			total += amp * v * damp;
-			gradX += gx * amp * damp;
-			gradZ += gz * amp * damp;
-			maxAmp += amp;
-
-			amp *= 0.5;  // gain,       fixed — see the kernel header
-			freq *= 2.0; // lacunarity, fixed
-		}
-
-		float t = total / max(maxAmp, 1e-4);
-		if (p.f7 - p.f6 > 1e-9) { t = clamp((t - p.f6) / (p.f7 - p.f6), 0.0, 1.0); }
-		else { t = (t >= p.f7) ? 1.0 : 0.0; }
-		o[i] = t * p.f0;
+static const char *GRAPH_GRID_GLSL_2 = R"(	if (p.mode == GKM_GAVORONOISE) { // GAVORONOISE, generator form: no input buffers are read.
+	                    // ip = erosion octaves, ip2 = seed. f0 amplitude, f1 frequency, f2 strike radians,
+	                    // f3 angle spread, f4 slope strength, f5 branch strength, f6/f7 z-cut window,
+	                    // f8 erosion strength, f9 erosion frequency. Defined in src/pasture_3d_gavoronoise.h.
+		vec2 q = vec2(p.ox + (float(ix) + 0.5) * p.dx, p.oz + (float(iz) + 0.5) * p.dz) * p.f1;
+		vec2 k = vec2(-sin(p.f2), cos(p.f2));
+		float sp = clamp(p.f3, 0.0, 1.0);
+		uint sd = uint(p.ip2);
+		float bv = gavBase(q, k, sp, sd);
+		float mx = gavBase(q + vec2(0.1, 0.0), k, sp, sd) - gavBase(q - vec2(0.1, 0.0), k, sp, sd);
+		float mz = gavBase(q + vec2(0.0, 0.1), k, sp, sd) - gavBase(q - vec2(0.0, 0.1), k, sp, sd);
+		vec2 d = vec2(mz, -mx) / 0.1 * 0.5 * p.f4;
+		float v = bv + p.f8 * gavErosion(q, bv, d, p.ip, sd, p.f5, p.f6, p.f7, p.f9);
+		o[i] = p.f0 * (0.5 * v + 0.5);
 		return;
 	}
 	if (p.mode == GKM_WARP_DOWNSLOPE) { // WARP_DOWNSLOPE: a = z, b = z smoothed at radius, c = mask.
@@ -1007,6 +1032,28 @@ static const char *GRAPH_GRID_GLSL_2 = R"(	if (p.mode == GKM_GAVORONOISE) { // G
 		float t = (z - p.f1) / span;
 		float recast = p.f1 + span * pow(t, p.f2);
 		o[i] = z + (recast - z) * w;
+		return;
+	}
+	if (p.mode == GKM_GAVORONOISE_BASE) { // Gavoronoise, base-input form: b = the base surface (metres),
+	                    // a = that surface smoothed for its slope. Push constants as GAVORONOISE.
+		float z = b[i];
+		if (isnan(z) || isinf(z)) { o[i] = z; return; }
+		int xm = max(ix - 1, 0);
+		int xp = min(ix + 1, p.gw - 1);
+		int zm = max(iz - 1, 0);
+		int zp = min(iz + 1, p.gh - 1);
+		float a0 = a[iz * p.gw + xm];
+		float a1 = a[iz * p.gw + xp];
+		float b0 = a[zm * p.gw + ix];
+		float b1 = a[zp * p.gw + ix];
+		vec2 gr = vec2(0.0);
+		if (!isnan(a0) && !isnan(a1) && !isnan(b0) && !isnan(b1) && !isinf(a0) && !isinf(a1) && !isinf(b0) && !isinf(b1)) {
+			gr = vec2((a1 - a0) / (float(xp - xm) * p.dx), (b1 - b0) / (float(zp - zm) * p.dz)) * (2.0 / (p.f0 * p.f1));
+		}
+		vec2 q = vec2(p.ox + (float(ix) + 0.5) * p.dx, p.oz + (float(iz) + 0.5) * p.dz) * p.f1;
+		float bn = 2.0 * z / p.f0 - 1.0;
+		float e = gavErosion(q, bn, vec2(gr.y, -gr.x) * p.f4, p.ip, uint(p.ip2), p.f5, p.f6, p.f7, p.f9);
+		o[i] = z + p.f8 * e * p.f0 * 0.5;
 		return;
 	}
 	if (p.mode == GKM_MORPH_BLEND) { // MORPH_BLEND: a input, b morphed, c mask. f0 amount, f1 = is a mask wired.
@@ -2714,21 +2761,37 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				slot_buf[s] = out;
 			} break;
 			case GRAPH_OP_GAVORONOISE: {
-				// Spec §7.2. A generator: it reads no input buffer, so all three slots stay bound to the
-				// zero buffer and only the push constants carry its parameters.
+				// Spec §7.2. Unwired, a generator: it reads no input buffer and only the push constants carry
+				// its parameters. With port 3 (`base`) wired it erodes that surface, reading its slope from it
+				// smoothed through blur_plan -- the CPU kernel's box_mean_solve, so "smoothing" means one thing.
 				const RID out = empty_buf();
 				const double kPi = 3.14159265358979323846;
-				GraphDispatch d{ out, zero_buf, zero_buf, zero_buf, GKM_GAVORONOISE,
-					std::clamp((int)P[2], 1, 8) };
+				const int base_src = in3 ? in3[s] : -1;
+				const float amp = P[0];
+				const float freq = P[1];
+				const float es = PH[12] ? P[12] : 0.1f;
+				if (std::abs(amp) <= 1e-7f || freq <= 0.0f || (base_src >= 0 && es == 0.0f)) {
+					// The kernel's early-outs: a generator writes zeros, the base form returns its input.
+					plan.push_back({ out, base_src >= 0 ? slot_buf[base_src] : zero_buf, zero_buf, zero_buf, GKM_COPY, 0 });
+					slot_buf[s] = out;
+					break;
+				}
+				const RID base_buf = (base_src >= 0) ? slot_buf[base_src] : zero_buf;
+				const RID base_sm = (base_src >= 0) ? blur_plan(base_buf, (double)(PH[11] ? P[11] : 0.0f)) : zero_buf;
+				GraphDispatch d{ out, base_sm, base_buf, zero_buf,
+					(base_src >= 0) ? GKM_GAVORONOISE_BASE : GKM_GAVORONOISE,
+					std::clamp((int)P[2], 1, 12) };
 				d.ip2 = (int)P[3]; // seed
-				d.f0 = P[0]; // amplitude
-				d.f1 = P[1]; // frequency, cycles per metre
+				d.f0 = amp; // amplitude, metres
+				d.f1 = freq; // frequency, cycles per metre
 				d.f2 = (float)((double)P[4] * kPi / 180.0); // strike
 				d.f3 = std::clamp(P[5], 0.0f, 1.0f); // angle spread
-				d.f4 = std::max(P[6], 0.0f); // slope strength
-				d.f5 = std::max(P[7], 0.0f); // branch strength
-				d.f6 = PH[9] ? P[9] : 0.0f; // z cut min
+				d.f4 = P[6]; // slope strength
+				d.f5 = P[7]; // branch strength
+				d.f6 = PH[9] ? P[9] : 0.2f; // z cut min
 				d.f7 = PH[10] ? P[10] : 1.0f; // z cut max
+				d.f8 = es; // erosion strength
+				d.f9 = PH[13] ? P[13] : 4.0f; // erosion frequency
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;
