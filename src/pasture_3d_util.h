@@ -320,6 +320,16 @@ public:
 			const PackedFloat32Array &p_mask, int p_gw, int p_gh, const Rect2 &p_rect,
 			double p_displacement_m, double p_radius_m, bool p_reverse, double p_amount);
 
+	// Resample a surface at the point offset by two metre fields (Hesiod's Warp).
+	static PackedFloat32Array displace_grid(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_dx,
+			const PackedFloat32Array &p_dy, const PackedFloat32Array &p_mask, int p_gw, int p_gh,
+			const Rect2 &p_rect, double p_scale, double p_amount);
+
+	// Power-curve the ground between a floor and a cut height (after Hesiod's Recast Canyon).
+	static PackedFloat32Array recast_canyon_grid(const PackedFloat32Array &p_surface,
+			const PackedFloat32Array &p_noise, const PackedFloat32Array &p_mask, int p_gw, int p_gh,
+			double p_cut_height, double p_floor_height, double p_gamma, double p_amount);
+
 	static PackedFloat32Array talus_projection_grid(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_mask,
 			const int p_gw, const int p_gh, const Rect2 &p_rect, const double p_talus_angle_deg,
 			const int p_iterations, const double p_transfer_rate, const double p_amount);

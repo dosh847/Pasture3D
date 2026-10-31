@@ -97,6 +97,8 @@ enum GraphCellOpType {
 	GRAPH_OP_DLA = 64, // SOLVER grid: a DLA massif, optionally seeded by in0's ridges (2 outputs: height, mask)
 	GRAPH_OP_FLOAT_TO_MASK = 66, // FILTER grid: a unit-ful field to a 0..1 mask over a fixed or percentile window
 	GRAPH_OP_FRACTAL = 65, // GENERATOR grid: the relief FRACTAL material — fBm / ridged / billow, optionally domain-warped
+	GRAPH_OP_DISPLACE = 67, // FILTER grid: resample in0 at the point offset by the in1/in2 metre fields (in3 mask)
+	GRAPH_OP_RECAST_CANYON = 68, // FILTER: power-curve the band between a floor and a cut (in1 cut noise, in2 mask)
 };
 
 // Blend modes — sync with Pasture3DGraphNodeBlend.Mode { ADD, SUB, MUL, MAX, MIN } (0..4). Prefixed

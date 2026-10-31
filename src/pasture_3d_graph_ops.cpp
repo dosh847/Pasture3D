@@ -7,6 +7,8 @@
 #include "pasture_3d_morphology.h"
 #include "pasture_3d_terrain_metrics.h"
 #include "pasture_3d_warp_downslope.h"
+#include "pasture_3d_displace.h"
+#include "pasture_3d_recast_canyon.h"
 #include "pasture_3d_transform.h"
 #include "pasture_3d_thread_pool.h"
 #include "pasture_3d_crater.h"
@@ -1289,6 +1291,34 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				PackedFloat32Array res = recast_cliff_solve(in_arr, msk_arr, p_gw, p_gh, p_rect,
 						P[0], P[1], P[2], P[3], P[4], P[5],
 						P[6]);
+				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
+			} break;
+
+			case GRAPH_OP_DISPLACE: {
+				// Four FIELD ports, in0..in3: surface, dx, dy, mask. An unwired offset or mask is passed
+				// EMPTY, which the kernel reads as zero offset / fully on -- not as a grid of zeros, which
+				// for the mask would mean "nowhere".
+				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
+				const int s_dx = in1[s];
+				const int s_dy = in2 ? in2[s] : -1;
+				const int s_mk = in3 ? in3[s] : -1;
+				PackedFloat32Array res = displace_solve(in_arr,
+						s_dx >= 0 ? get_grid_packed(s_dx, c_in1) : PackedFloat32Array(),
+						s_dy >= 0 ? get_grid_packed(s_dy, c_in2) : PackedFloat32Array(),
+						s_mk >= 0 ? get_grid_packed(s_mk, c_in3) : PackedFloat32Array(),
+						p_gw, p_gh, p_rect, P[0], P[1]);
+				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
+			} break;
+
+			case GRAPH_OP_RECAST_CANYON: {
+				// in1 is the cut-height noise, in2 the mask; both optional, both passed empty when unwired.
+				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
+				const int s_nz = in1[s];
+				const int s_mk = in2 ? in2[s] : -1;
+				PackedFloat32Array res = recast_canyon_solve(in_arr,
+						s_nz >= 0 ? get_grid_packed(s_nz, c_in1) : PackedFloat32Array(),
+						s_mk >= 0 ? get_grid_packed(s_mk, c_in2) : PackedFloat32Array(),
+						p_gw, p_gh, P[0], P[1], P[2], P[3]);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
 			} break;
 

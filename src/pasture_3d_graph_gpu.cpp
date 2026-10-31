@@ -77,6 +77,9 @@ enum GraphKernelMode {
 	GKM_GRADIENT = 37,
 	// Phase 3: Value Ramp. The stop table rides the LUT binding.
 	GKM_VALUE_RAMP = 38,
+	// Displace (Hesiod's Warp) and Recast Canyon.
+	GKM_DISPLACE = 39,
+	GKM_RECAST_CANYON = 40,
 };
 
 struct GraphKernelModeName {
@@ -124,6 +127,8 @@ static const GraphKernelModeName GRAPH_KERNEL_MODES[] = {
 	{ "GKM_STRATA", GKM_STRATA },
 	{ "GKM_GRADIENT", GKM_GRADIENT },
 	{ "GKM_VALUE_RAMP", GKM_VALUE_RAMP },
+	{ "GKM_DISPLACE", GKM_DISPLACE },
+	{ "GKM_RECAST_CANYON", GKM_RECAST_CANYON },
 };
 
 // `#version` has to be the first line of the source, so it is prepended here rather than living in the
@@ -950,6 +955,58 @@ static const char *GRAPH_GRID_GLSL_2 = R"(	if (p.mode == GKM_GAVORONOISE) { // G
 			wsum += ww;
 		}
 		o[i] = (wsum <= 0.0) ? 0.0 : (acc / wsum);
+		return;
+	}
+	if (p.mode == GKM_DISPLACE) { // DISPLACE: a = z, b = dx metres, c = dz metres, g = mask.
+	                    // f0 scale, f1 amount; ip bit0 dx wired, bit1 dz wired, bit2 mask wired. The GEOMETRY
+	                    // binding carries the mask: four field operands and three general bindings.
+		float z = a[i];
+		if (isnan(z)) { o[i] = z; return; }
+		float w = p.f1;
+		if ((p.ip & 4) != 0) { float mv = g[i]; w = isnan(mv) ? 0.0 : w * clamp(mv, 0.0, 1.0); }
+		float ux = ((p.ip & 1) != 0) ? b[i] : 0.0;
+		float uz = ((p.ip & 2) != 0) ? c[i] : 0.0;
+		if (w <= 0.0 || isnan(ux) || isnan(uz) || isinf(ux) || isinf(uz)) { o[i] = z; return; }
+		// Metres to cells, as displace_solve does: the same field must push the same distance at any
+		// bake resolution.
+		float fx = float(ix) + ux * p.f0 * w / p.dx;
+		float fz = float(iz) + uz * p.f0 * w / p.dz;
+		// Bilinear tap, CLAMP edges, NaN taps DROPPED — transform_sample_bilinear, tap for tap.
+		int x0 = int(floor(fx));
+		int z0 = int(floor(fz));
+		float tx = fx - float(x0);
+		float tz = fz - float(z0);
+		float acc = 0.0;
+		float wsum = 0.0;
+		for (int k = 0; k < 4; k++) {
+			int sx = clamp(x0 + (k & 1), 0, p.gw - 1);
+			int sz = clamp(z0 + (k >> 1), 0, p.gh - 1);
+			float wx = ((k & 1) == 1) ? tx : (1.0 - tx);
+			float wz = ((k >> 1) == 1) ? tz : (1.0 - tz);
+			float ww = wx * wz;
+			if (ww <= 0.0) { continue; }
+			float v = a[sz * p.gw + sx];
+			if (isnan(v)) { continue; }
+			acc += ww * v;
+			wsum += ww;
+		}
+		o[i] = (wsum <= 0.0) ? 0.0 : (acc / wsum);
+		return;
+	}
+	if (p.mode == GKM_RECAST_CANYON) { // RECAST_CANYON: a = z, b = cut noise, c = mask.
+	                    // f0 cut, f1 floor, f2 gamma, f3 amount; ip bit0 noise wired, bit1 mask wired.
+		float z = a[i];
+		if (isnan(z)) { o[i] = z; return; }
+		float cut = p.f0;
+		if ((p.ip & 1) != 0) { float nv = b[i]; if (!isnan(nv) && !isinf(nv)) { cut += nv; } }
+		float span = cut - p.f1;
+		if (span <= 1.0e-6 || z >= cut || z <= p.f1) { o[i] = z; return; }
+		float w = p.f3;
+		if ((p.ip & 2) != 0) { float mv = c[i]; w = isnan(mv) ? 0.0 : w * clamp(mv, 0.0, 1.0); }
+		if (w <= 0.0) { o[i] = z; return; }
+		float t = (z - p.f1) / span;
+		float recast = p.f1 + span * pow(t, p.f2);
+		o[i] = z + (recast - z) * w;
 		return;
 	}
 	if (p.mode == GKM_MORPH_BLEND) { // MORPH_BLEND: a input, b morphed, c mask. f0 amount, f1 = is a mask wired.
@@ -2583,6 +2640,52 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				d.f4 = (float)(std::max((double)P[5], 0.0) * kPi / 180.0); // spread
 				d.f5 = amount;
 				d.f6 = (aux_src(s) >= 0) ? 1.0f : 0.0f;
+				plan.push_back(d);
+				slot_buf[s] = out;
+			} break;
+			case GRAPH_OP_DISPLACE: {
+				// params: 0 scale, b amount. Four field operands; the mask rides the geometry binding.
+				const RID src = in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf;
+				const int s_dx = in1[s];
+				const int s_dy = in2 ? in2[s] : -1;
+				const int s_mk = in3 ? in3[s] : -1;
+				const float amount = std::clamp(P[1], 0.0f, 1.0f);
+				if (amount <= 0.0f || P[0] == 0.0f || (s_dx < 0 && s_dy < 0)) {
+					const RID out = empty_buf();
+					plan.push_back({ out, src, zero_buf, zero_buf, GKM_COPY, 0 });
+					slot_buf[s] = out;
+					break;
+				}
+				const RID out = empty_buf();
+				GraphDispatch d{ out, src, s_dx >= 0 ? slot_buf[s_dx] : zero_buf, s_dy >= 0 ? slot_buf[s_dy] : zero_buf,
+					GKM_DISPLACE, (s_dx >= 0 ? 1 : 0) | (s_dy >= 0 ? 2 : 0) | (s_mk >= 0 ? 4 : 0) };
+				if (s_mk >= 0) {
+					d.geo = slot_buf[s_mk];
+				}
+				d.f0 = P[0];
+				d.f1 = amount;
+				plan.push_back(d);
+				slot_buf[s] = out;
+			} break;
+			case GRAPH_OP_RECAST_CANYON: {
+				// params: 0 cut, b floor, c gamma, d amount. Pointwise.
+				const RID src = in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf;
+				const int s_nz = in1[s];
+				const int s_mk = in2 ? in2[s] : -1;
+				const float amount = std::clamp(P[3], 0.0f, 1.0f);
+				if (amount <= 0.0f || P[2] <= 0.0f) {
+					const RID out = empty_buf();
+					plan.push_back({ out, src, zero_buf, zero_buf, GKM_COPY, 0 });
+					slot_buf[s] = out;
+					break;
+				}
+				const RID out = empty_buf();
+				GraphDispatch d{ out, src, s_nz >= 0 ? slot_buf[s_nz] : zero_buf, s_mk >= 0 ? slot_buf[s_mk] : zero_buf,
+					GKM_RECAST_CANYON, (s_nz >= 0 ? 1 : 0) | (s_mk >= 0 ? 2 : 0) };
+				d.f0 = P[0];
+				d.f1 = P[1];
+				d.f2 = P[2];
+				d.f3 = amount;
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;
