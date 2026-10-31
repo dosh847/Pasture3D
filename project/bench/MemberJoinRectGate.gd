@@ -1,6 +1,6 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
-# MemberJoinRectGate — a member joining a Layer brush, and a shape property edit, take a rect bake.
+# MemberJoinRectGate — a member joining or leaving a Layer brush, and a shape property edit, take a rect bake.
 #
 # A Ctrl+D'd member made its Layer full-bake stage 1 and every member (trace 2026-10-30: 16.6 s), and a
 # slope-angle edit repainted all 9 tools on the layer (2.05 s) for one Mound's footprint. Both now arm the
@@ -14,11 +14,15 @@
 #       control: the ground before that bake differs from the rebuild, so the comparison can say no
 #   [C] a slope-angle edit's rect bake is a rect and equals a full rebuild; control: without the stack flag
 #       the rect path skips ("nothing changed") and the ground differs from the rebuild
+#   [D] deleting a member lifts its painted boxes by a mate's rect bake, equal to a full rebuild; control:
+#       `member_join_full_bake` rebuilds the Layer instead (no rect) and lands on the same ground
+#   [E] undoing that delete restores by the member's rect bake, equal to the ground before the delete; control:
+#       the ground before that bake differs from it
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/MemberJoinRectGate.tscn
 extends Node
 
-const CRITERIA := 3
+const CRITERIA := 5
 const TOL := 1e-4
 var RS := 64
 
@@ -41,7 +45,7 @@ func _ready() -> void:
 	var m1 := _mound(lb, "One", _square(20, 20, 6))
 	await _settle()
 	lb.rebuild_layer()
-	for f in [_a, _b, _c]:
+	for f in [_a, _b, _c, _d, _e]:
 		await f.call(lb, m1)
 	if _ran != CRITERIA:
 		_check("completed", false, "%d of %d criteria ran" % [_ran, CRITERIA])
@@ -205,3 +209,67 @@ func _c(lb: Pasture3DLayerBrush, m1: Pasture3DMound) -> void:
 	var wc := _worst(ctl, full)
 	_check("C control", ctl_decision == "skip" and wc > TOL,
 			"without the stack flag: decision %s (want skip), worst |ground - full| %.4f m (want > %.4f)" % [ctl_decision, wc, TOL])
+
+
+## A second member partly over One, baked in, so a delete has a mate under its footprint to repaint.
+func _second(lb: Pasture3DLayerBrush) -> Pasture3DMound:
+	var m := _mound(lb, "Two", _square(30, 26, 6))
+	await _settle()
+	lb.rebuild_layer()
+	return m
+
+
+## Remove `p_m` from the Layer and let the deferred delete check run. Returns the mate's rect decision.
+func _delete(lb: Pasture3DLayerBrush, p_m: Pasture3DMound, p_mate: Pasture3DMound) -> String:
+	p_mate._last_rect_decision = ""
+	lb.remove_child(p_m)
+	await _settle()
+	return p_mate._last_rect_decision
+
+
+func _d(lb: Pasture3DLayerBrush, m1: Pasture3DMound) -> void:
+	_ran += 1
+	lb.detect_delete_headless = true
+	var two := await _second(lb)
+	var decision := await _delete(lb, two, m1)
+	var lifted := _heights()
+	var full := _full(lb)
+	var w := _worst(lifted, full)
+	_check("D delete lifts by rect", decision == "rect" and w <= TOL,
+			"mate decision %s (want rect); worst |lifted - full| %.6f m (want <= %.4f)" % [decision, w, TOL])
+	# Control: the Layer's full rebuild (the old path) lands on the same ground and takes no rect.
+	lb.add_child(two)
+	await _settle()
+	lb.rebuild_layer()
+	lb.member_join_full_bake = true
+	var ctl_decision := await _delete(lb, two, m1)
+	lb.member_join_full_bake = false
+	var wc := _worst(_heights(), full)
+	_check("D control", ctl_decision == "" and wc <= TOL,
+			"with member_join_full_bake: mate decision '%s' (want none, the Layer rebuilt), worst |ground - full| %.6f m" % [ctl_decision, wc])
+	two.free()
+	lb.rebuild_layer()
+
+
+func _e(lb: Pasture3DLayerBrush, m1: Pasture3DMound) -> void:
+	_ran += 1
+	lb.detect_delete_headless = true
+	var two := await _second(lb)
+	var original := _heights()
+	await _delete(lb, two, m1)
+	# Undo: back in the tree. Auto Refresh on takes the join path, whose tick headless cannot run; run the rect
+	# bake it arms.
+	two.auto_refresh = true
+	lb.add_child(two)
+	await _settle()
+	var before := _heights()
+	var decision := _tick_rect(two, true)
+	var w := _worst(_heights(), original)
+	_check("E undo restores by rect", decision == "rect" and w <= TOL,
+			"decision %s (want rect); worst |restored - before delete| %.6f m (want <= %.4f)" % [decision, w, TOL])
+	var wc := _worst(before, original)
+	_check("E control", wc > TOL, "before the undo's bake, worst |ground - before delete| %.4f m (want > %.4f)" % [wc, TOL])
+	lb.detect_delete_headless = false
+	lb.remove_child(two)
+	two.free()
+	lb.rebuild_layer()

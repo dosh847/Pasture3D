@@ -209,7 +209,7 @@ var _ready_done: bool = false   # True once _ready ran — gates re-parent auto-
 var reseat_keeps_layer_id: bool = false
 var _exit_host: Node = null # The Layer brush this member left, between EXIT_TREE and its deferred delete check
 var _left_host: Node = null # The Layer brush a delete took this member out of, so its undo can rebuild it
-var _exit_boxes: Array = [] # A standalone brush's footprints, between EXIT_TREE and its deferred delete check
+var _exit_boxes: Array = [] # A deleted brush's painted footprints, between EXIT_TREE and its deferred delete check
 var _deleted_from_scene: bool = false # A delete lifted this brush's footprint; its undo bakes it again
 ## Standalone delete detection is editor-only, like the Layer's: at runtime a brush leaving the tree is a
 ## scene being unloaded. Gates turn this on.
@@ -714,35 +714,40 @@ func _notification(what: int) -> void:
 			# descendant, but only the folder itself is re-parented. Deferred so the move has settled; a tab
 			# switch re-enters too and finds its binding already correct.
 			_sync_layer_host.call_deferred()
-		# Undoing a member delete: the host rebuilt without this brush, so it has to rebuild with it again.
+		# Undoing a member delete: the lift cleared this brush's footprint, so bake it back -- a rect bake over
+		# that footprint, as a join is. Only a brush that cannot arm a tick (Auto Refresh off) or the gate's
+		# control rebuilds the whole Layer, which used to cost as much as the delete did.
 		if is_instance_valid(_left_host):
-			_left_host.rebuild_layer.call_deferred()
+			if _left_host.member_join_full_bake or not auto_refresh:
+				_left_host.rebuild_layer.call_deferred()
+			else:
+				_schedule_join_refresh.call_deferred()
 		_left_host = null
-		# Undoing a standalone delete: the footprint was lifted, so bake it back.
+		# Undoing a standalone delete: the footprint was lifted, so bake it back. Same rect, same fallback.
 		if _deleted_from_scene:
 			_deleted_from_scene = false
 			_stamp_cache.clear()
-			refresh.call_deferred(false)
+			if auto_refresh and not delete_full_bake:
+				_schedule_join_refresh.call_deferred()
+			else:
+				refresh.call_deferred(false)
 			_on_restored_to_scene.call_deferred()
 	elif what == NOTIFICATION_EXIT_TREE:
 		# A member deleted in the editor is kept for undo and never freed, so PREDELETE's detach cannot lift its
 		# stamp. Remember the host now, while the tree still says who it is; a frame later tells delete from move.
 		if _ready_done and _exit_host == null:
 			var host := _hosted_by()
+			# The boxes are what the last bake PAINTED: the child splines have already left the tree by now,
+			# so their footprints cannot be measured, and what was painted is exactly what has to come off.
+			_exit_boxes = _painted_boxes()
 			# Editor-only, like the Layer's own delete check, and switched on headless by the same hook.
 			if host != null and (Engine.is_editor_hint() or host.detect_delete_headless):
 				_exit_host = host
 				_check_member_deleted.call_deferred()
-			# Not a Layer member: the same delete, with no host to rebuild the layer. The boxes are what the
-			# last bake PAINTED: the child splines have already left the tree by now, so their footprints
-			# cannot be measured, and what was painted is exactly what has to come off.
+			# Not a Layer member: the same delete, with no host.
 			elif host == null and _paints() and is_configured() \
 					and not _layer_owner.begins_with(LAYER_BRUSH_OWNER_PREFIX) \
 					and (Engine.is_editor_hint() or detect_brush_delete_headless):
-				_exit_boxes = []
-				for box: AABB in _last_paint_aabb.values():
-					if box.size != Vector3.ZERO:
-						_exit_boxes.append(box)
 				_check_standalone_deleted.call_deferred()
 		remove_from_group(BRUSH_GROUP)
 		# Before anything else: the task is holding this node's arrays.
@@ -769,14 +774,49 @@ func _notification(what: int) -> void:
 
 ## Deferred from EXIT_TREE. Back in the tree means a move (`_sync_layer_host` handles leaving a Layer). A host
 ## that is out of the tree too means a tab switch or the Layer itself going, which the Layer handles. What is
-## left is this member deleted from under a live Layer: rebuild it without this brush.
+## left is this member deleted from under a live Layer: lift what it painted. A member left on the Layer clears
+## those boxes and repaints whoever overlaps them (stage 1 included, which reports a shrunk extent through its
+## changed box); the whole Layer used to be rebuilt for it, as costly as the 16.6 s duplicate. A Layer with
+## no member left rebuilds, which is cheap then.
 func _check_member_deleted() -> void:
 	var host := _exit_host
+	var boxes := _exit_boxes
 	_exit_host = null
+	_exit_boxes = []
 	if is_inside_tree() or not is_instance_valid(host) or not host.is_inside_tree():
 		return
 	_left_host = host
-	host.rebuild_layer()
+	var mates: Array = host.members()
+	if mates.is_empty() or boxes.is_empty() or host.member_join_full_bake:
+		host.rebuild_layer()
+	else:
+		_lift_boxes_via(mates[0], host.layer_owner_id(), boxes)
+
+
+## The world boxes this brush's last bake painted, one per spline.
+func _painted_boxes() -> Array:
+	var out: Array = []
+	for box: AABB in _last_paint_aabb.values():
+		if box.size != Vector3.ZERO:
+			out.append(box)
+	return out
+
+
+## Gate control: a standalone delete (and its undo) bakes the whole layer, as it did before the rect lift.
+var delete_full_bake: bool = false
+
+
+## Clear `p_boxes` off `p_owner` and repaint the tools overlapping them, as `p_mate`'s rect bake, driven the way
+## the refresh tick drives one: inside the Layer's run when it has one, else the deferred driver, else inline.
+static func _lift_boxes_via(p_mate: Node, p_owner: String, p_boxes: Array) -> void:
+	var bake: Callable = p_mate._refresh_owner_rect.bind(p_owner, {}, false, p_boxes)
+	var run_host: Node = p_mate._layer_run_host()
+	if run_host != null:
+		run_host.bake_layer_run(false, p_mate, bake)
+	elif p_mate._wants_deferred_bake():
+		p_mate._bake_deferred(bake, p_owner, false)
+	else:
+		bake.call()
 
 
 ## Deferred from EXIT_TREE for a brush outside any Layer. An editor delete keeps the node for undo and never
@@ -795,8 +835,10 @@ func _check_standalone_deleted() -> void:
 				and n._layer_owner == owner and n._paints()):
 			mate = n
 			break
-	if mate != null:
-		# The mate's full bake clears these boxes on every layer of the owner and repaints every tool still on it.
+	if mate != null and not delete_full_bake and not boxes.is_empty():
+		# The mate's rect bake clears these boxes on every layer of the owner and repaints the tools over them.
+		_lift_boxes_via(mate, owner, boxes)
+	elif mate != null:
 		mate._refresh_owner(owner, false, boxes)
 	else:
 		# The last tool on its layer: clear and repaint nobody. Blanking the owner keeps this brush out of
