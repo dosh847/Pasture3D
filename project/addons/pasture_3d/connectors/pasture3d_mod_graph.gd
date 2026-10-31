@@ -141,9 +141,65 @@ func bake_graph(p_host: Pasture3DTerrainBrush = null) -> void:
 						brush = b as Pasture3DTerrainBrush
 						break
 	if brush != null:
-		brush.force_bake_modifiers()
+		# Only this host. The modifier is often shared (a duplicated brush shares its stack), and dropping
+		# every entry made the full layer bake re-solve every host on it: Bake to Brush baked them all.
+		drop_cache_for_host(brush)
+		brush.force_bake_modifiers(true)
 	else:
 		_touch()
+
+
+## Every brush in `p_tree` whose stack carries a Graph modifier editing `p_graph`, in tree order.
+static func hosts_of_graph(p_graph: Pasture3DTerrainGraph, p_tree: SceneTree) -> Array:
+	var out: Array = []
+	if p_graph == null or p_tree == null:
+		return out
+	for b in p_tree.get_nodes_in_group(Pasture3DTerrainBrush.BRUSH_GROUP):
+		if b is Pasture3DTerrainBrush and is_instance_valid(b):
+			for m in (b as Pasture3DTerrainBrush).modifiers:
+				if m is Pasture3DNodeGraph and (m as Pasture3DNodeGraph).graph == p_graph:
+					out.append(b)
+					break
+	return out
+
+
+## The hosts a Bake to All bakes: one per layer owner. A full bake of one tool repaints every tool on its layer,
+## so a second host on the same layer would bake the layer again for nothing.
+static func bake_all_leads(p_hosts: Array) -> Array:
+	var seen := {}
+	var out: Array = []
+	for b: Pasture3DTerrainBrush in p_hosts:
+		if not seen.has(b._layer_owner):
+			seen[b._layer_owner] = true
+			out.append(b)
+	return out
+
+
+## Bake to All: drop every cache of every Graph modifier editing `p_graph`, then bake each layer one of their
+## hosts sits on. Returns how many brushes host the graph.
+static func bake_all_hosts(p_graph: Pasture3DTerrainGraph, p_tree: SceneTree) -> int:
+	var hosts := hosts_of_graph(p_graph, p_tree)
+	for b: Pasture3DTerrainBrush in hosts:
+		for m in b.modifiers:
+			if m is Pasture3DNodeGraph and (m as Pasture3DNodeGraph).graph == p_graph:
+				(m as Pasture3DNodeGraph).drop_cache_for_bake()
+	for b: Pasture3DTerrainBrush in bake_all_leads(hosts):
+		b.force_bake_modifiers()
+	return hosts.size()
+
+
+## Drop the entries `p_host` filed, and no other host's. Each entry carries the id of the brush that solved
+## it (`store_cache`'s caller tags it); an untagged entry is left alone. Returns how many were dropped.
+func drop_cache_for_host(p_host: Object) -> int:
+	_unspill()
+	var id := p_host.get_instance_id()
+	var gone: Array = []
+	for k in _cache:
+		if int((_cache[k] as Dictionary).get("host", 0)) == id:
+			gone.append(k)
+	for k in gone:
+		_cache.erase(k)
+	return gone.size()
 
 
 ## Drop the cache WITHOUT notifying, for a caller that is about to bake the host itself. `clear_cache`

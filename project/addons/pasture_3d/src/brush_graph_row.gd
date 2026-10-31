@@ -145,7 +145,7 @@ func plural_for(p_count: int) -> String:
 	return "the graph modifier" if p_count == 1 else "all %d graph modifiers" % p_count
 
 
-## Drop every graph modifier's cache and bake the host ONCE. Separate from the press handler so a headless
+## Drop this host's entries in every graph modifier's cache and bake the host ONCE, over its own footprint. Separate from the press handler so a headless
 ## gate can call it: the bake itself is `force_bake_modifiers`, which is editor-only, but dropping the
 ## caches is the part that decides whether the next solve reads the graph or a stale answer. Returns how
 ## many modifiers were dropped, so a caller (and the gate) can tell "baked nothing" from "baked".
@@ -155,9 +155,11 @@ func bake_graphs() -> int:
 		return 0
 	# Every cache first, then one bake. Baking per modifier would re-rasterise the whole brush once per
 	# graph on the stack for a single press.
+	# Only this host's entries, and only its footprint: the modifiers may be shared with other brushes, and
+	# dropping their whole caches under a full layer bake re-solved every one of them.
 	for m in mods:
-		m.drop_cache_for_bake()
-	brush.force_bake_modifiers()
+		m.drop_cache_for_host(brush)
+	brush.force_bake_modifiers(true)
 	return mods.size()
 
 

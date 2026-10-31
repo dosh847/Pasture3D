@@ -54,6 +54,7 @@ var _frame_button: Button
 var _minimap_button: Button
 var _arrange_button: Button
 var _bake_brush_button: Button
+var _bake_all_button: Button
 var _export_all_button: Button
 var _brush_details_button: Button
 var _host_label: Label
@@ -559,13 +560,22 @@ func _on_export_dir_chosen(p_dir: String) -> void:
 				% [report["reason"] if String(report.get("reason", "")) != "" else report["skipped"]])
 
 
+## Re-solve the graph for every brush using it, one layer bake per layer they sit on.
+func _on_bake_all_pressed() -> void:
+	_ground_cache.clear()
+	if graph != null and is_inside_tree():
+		Pasture3DNodeGraph.bake_all_hosts(graph, get_tree())
+
+
 func _on_bake_brush_pressed() -> void:
 	# A rebake can reshape the ground inside an unchanged bounding box, which the memo's rect key cannot
 	# see. Drop it here rather than trusting the key alone.
 	_ground_cache.clear()
 	var mod := _find_host_modifier()
 	if mod != null:
-		mod.bake_graph()
+		# The brush the preview looks through, not the first one the scene lists: the modifier is often
+		# shared, and only this host is re-solved.
+		mod.bake_graph(_find_host_brush())
 		return
 	var brush := _find_host_brush()
 	if brush != null:
@@ -730,10 +740,17 @@ func _build_ui() -> void:
 
 	_bake_brush_button = Button.new()
 	_bake_brush_button.text = "Bake to Brush"
-	_bake_brush_button.tooltip_text = "Force full evaluation and bake this graph into the host brush terrain layer"
+	_bake_brush_button.tooltip_text = ("Re-solve this graph for the brush it is shown through and bake that brush "
+			+ "alone. Other brushes using the graph keep their cached solves.")
 	_bake_brush_button.pressed.connect(_on_bake_brush_pressed)
 	_bake_brush_button.visible = false
 	bar.add_child(_bake_brush_button)
+
+	_bake_all_button = Button.new()
+	_bake_all_button.text = "Bake to All"
+	_bake_all_button.pressed.connect(_on_bake_all_pressed)
+	_bake_all_button.visible = false
+	bar.add_child(_bake_all_button)
 
 	# EXPORT ALL (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.2). Hidden rather than disabled on a graph with
 	# no export sinks: a button that can never do anything is worse than no button, and the same reasoning
@@ -915,6 +932,11 @@ func _rebuild() -> void:
 	var brush := _find_host_brush()
 	if _bake_brush_button != null:
 		_bake_brush_button.visible = (has and mod != null)
+	if _bake_all_button != null:
+		var n := Pasture3DNodeGraph.hosts_of_graph(graph, get_tree()).size() if has and is_inside_tree() else 0
+		_bake_all_button.visible = has and mod != null
+		_bake_all_button.tooltip_text = ("Re-solve this graph for all %d brush(es) using it and bake them, one layer "
+				+ "bake per layer they are on.") % n
 	# Hidden rather than disabled when there is no host: a graph opened as a standalone .tres has no brush
 	# to show, and a button reading "Brush Details" that can never do anything is worse than no button.
 	if _brush_details_button != null:

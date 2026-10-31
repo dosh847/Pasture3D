@@ -1745,7 +1745,11 @@ func refresh(record_undo: bool = false) -> void:
 
 
 ## Force every child spline to repaint and re-evaluate modifiers immediately.
-func force_bake_modifiers() -> void:
+##
+## `p_own_footprint` bakes only this brush: a rect bake over its footprint, in which the layer-mates it overlaps
+## repaint from their own caches. The full layer bake repainted (and, with a shared modifier's cache dropped,
+## re-solved) every tool on the layer, so a Bake to Brush on one Plow baked every Plow using the graph.
+func force_bake_modifiers(p_own_footprint: bool = false) -> void:
 	if not Engine.is_editor_hint() or not is_configured():
 		return
 	for s in _get_splines():
@@ -1754,7 +1758,29 @@ func force_bake_modifiers() -> void:
 	_stamp_cache.clear()
 	# An explicit Bake is always full resolution, and stays so until the next edit.
 	_preview_full_res = true
+	if p_own_footprint and _paints():
+		bake_own_footprint()
+		return
 	refresh(false)
+
+
+## Rect-bake this brush's whole footprint now, driven as the refresh tick drives a rect bake. Every spline is
+## armed with the stack flag, so the rect path neither skips ("nothing moved") nor narrows to moved spans.
+func bake_own_footprint() -> void:
+	var ids := {}
+	for s in _get_splines():
+		if is_instance_valid(s):
+			ids[s.get_instance_id()] = true
+	_dirty_splines = {}
+	var bake := _refresh_owner_rect.bind(_layer_owner, ids, false, [], true)
+	var run_host := _layer_run_host()
+	if run_host != null:
+		await run_host.bake_layer_run(false, self, bake)
+	elif _wants_deferred_bake():
+		await _bake_deferred(bake, _layer_owner, false)
+	else:
+		bake.call()
+	_last_baked_xform = global_transform
 
 
 ## Refresh a whole tool layer: clear every bound tool's footprints (+ any extras), repaint every bound
@@ -2063,7 +2089,8 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 				if st.has("node_freeze") and st["mod"].graph != null:
 					st["mod"].graph.adopt_native_freeze(st["node_freeze"])
 				if st.has("zo"):
-					_file_solved(st["mod"], st["extent"], {"key": st["key"], "grid": st["zo"], "z": st["z"]},
+					_file_solved(st["mod"], st["extent"], {"key": st["key"], "grid": st["zo"], "z": st["z"],
+							"host": st.get("host", 0)},
 							bool(st.get("live", false)))
 				st["mod"].adopt_sink_taps(st)
 
@@ -2379,7 +2406,7 @@ func _store_solved_erosion(p_state: Dictionary) -> void:
 	var m: Pasture3DNodeErosion = p_state["mod"]
 	var z0: PackedFloat32Array = p_state["z0"]
 	var zo: PackedFloat32Array = p_state["z"]
-	var entry := {"key": int(p_state["key"]), "grid": zo, "z": z0,
+	var entry := {"key": int(p_state["key"]), "grid": zo, "z": z0, "host": p_state.get("host", 0),
 			"flow": PackedFloat32Array(), "ero": PackedFloat32Array(),
 			"dep": PackedFloat32Array(), "wet": PackedFloat32Array()}
 	var res: Dictionary = p_state["res"]
@@ -6465,6 +6492,9 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 			if not entry.is_empty():
 				# Tells the solve phases which cache the answer goes back into.
 				entry["live"] = bool(step.get("live_async", false))
+				# Which brush this solve is for: the driver files it, and the driver is not always the host.
+				# A shared modifier's cache is dropped per host (`drop_cache_for_host`) by this tag.
+				entry["host"] = get_instance_id()
 				# What this pass painted in the solve's place, when it painted a stale answer: the driver
 				# compares the solve against it and skips a pass 2 that would repaint the same ground.
 				if bool(out.get("served", false)) and bool(out.get("stale", false)):
@@ -6495,6 +6525,7 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 		if out.has("grid") and not live_async:
 			m.store_cache(p_extent, {
 				"key": out["key"], "grid": out["grid"], "z": out.get("z", PackedFloat32Array()),
+				"host": get_instance_id(),
 				"flow": out.get("flow", PackedFloat32Array()),
 				"ero": out.get("ero", PackedFloat32Array()),
 				"dep": out.get("dep", PackedFloat32Array()),

@@ -221,9 +221,12 @@ func _test_bake_button() -> void:
 	# by deleting it -- the criterion still passed. `store_cache` and `set_stale` seed it for real.
 	var grid := PackedFloat32Array()
 	grid.resize(64)
+	# Each entry tagged with the host that solved it, as the bake tags it. A second host's entry (the modifier
+	# shared by a duplicated brush) must survive the press: it bakes this brush only.
 	for m in mods:
 		var gm := m as Pasture3DNodeGraph
-		gm.store_cache("0,0,8,8", {"grid": grid})
+		gm.store_cache("0,0,8,8", {"grid": grid, "host": brush.get_instance_id()})
+		gm.store_cache("64,64,8,8", {"grid": grid, "host": brush.get_instance_id() + 1})
 		gm.set_stale(true)
 	var primed := 0
 	for m in mods:
@@ -232,10 +235,14 @@ func _test_bake_button() -> void:
 			"%d bytes" % primed)
 	var dropped: int = row.bake_graphs()
 	var left := 0
+	var others := 0
 	for m in mods:
-		left += (m as Pasture3DNodeGraph).cache_bytes()
-	_check("one press drops every graph's cache", dropped == 2 and left == 0,
-			"dropped %d, %d cache bytes left" % [dropped, left])
+		var gm := m as Pasture3DNodeGraph
+		left += gm.cache_bytes()
+		others += 1 if gm._cache.has("64,64,8,8") and not gm._cache.has("0,0,8,8") else 0
+	_check("one press drops this brush's entries in every graph's cache", dropped == 2 and left == primed / 2,
+			"dropped %d, %d of %d cache bytes left (want half: the other host's)" % [dropped, left, primed])
+	_check("another host's entries survive", others == 2, "%d of 2 modifiers kept only the other host's entry" % others)
 	r[2].free()
 	brush.free()
 	print("")
