@@ -210,6 +210,17 @@ func _structure_hash() -> int:
 			# preview_on is deliberately NOT hashed: toggling a preview must never rebuild the canvas — it is
 			# a pure show/hide handled by _on_preview_toggled, so it stays out of the structure signature.
 			h = h ^ (nd.op().hash() << (i % 16)) ^ (int(nd.collapsed) << ((i + 1) % 16))
+			# A node's ports can change without its op or wires changing: a Subgraph node's child gains an
+			# input, a Parameter's declared type moves. The slots are drawn at rebuild, so they are hashed.
+			var pt: Array = [i]
+			for p in nd.input_ports():
+				pt.append(p.type)
+				pt.append(p.label)
+			pt.append(-1)
+			for p in nd.output_ports():
+				pt.append(p.type)
+				pt.append(p.label)
+			h = h ^ hash(pt)
 	for c in graph.connections:
 		if c.size() >= 4:
 			var conn_hash := int(c[0]) | (int(c[1]) << 8) | (int(c[2]) << 16) | (int(c[3]) << 24)
