@@ -39,20 +39,11 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 3
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "noise", "mask"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.SIGNED, PortType.MASK])
-
-
-func input_unwired_default(p_port: int) -> float:
-	return 1.0 if p_port == 2 else 0.0
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.field(&"noise", PortType.SIGNED),
+	]
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, _p_rect: Rect2) -> PackedFloat32Array:
@@ -61,10 +52,10 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, _p_rect: Rect2) -
 		return Pasture3DGraphOps.zeros(n)
 	var f := func(p: int) -> PackedFloat32Array:
 		return p_inputs[p] if (p_inputs.size() > p and p_inputs[p] is PackedFloat32Array and p_inputs[p].size() == n) else PackedFloat32Array()
-	return solve(p_inputs[0], f.call(1), f.call(2))
+	return solve(p_inputs[0], f.call(1))
 
 
-func solve(p_in: PackedFloat32Array, p_noise: PackedFloat32Array, p_mask: PackedFloat32Array) -> PackedFloat32Array:
+func solve(p_in: PackedFloat32Array, p_noise: PackedFloat32Array) -> PackedFloat32Array:
 	var n := p_in.size()
 	if amount <= 0.0 or gamma <= 0.0:
 		return p_in.duplicate()
@@ -83,14 +74,7 @@ func solve(p_in: PackedFloat32Array, p_noise: PackedFloat32Array, p_mask: Packed
 		if span <= 1.0e-6 or z >= cut or z <= floor_height:
 			out[i] = z
 			continue
-		var w := amt
-		if p_mask.size() == n:
-			var m := p_mask[i]
-			w *= clampf(m, 0.0, 1.0) if not (is_nan(m) or is_inf(m)) else 0.0
-		if w <= 0.0:
-			out[i] = z
-			continue
 		var t := (z - floor_height) / span
 		var recast := floor_height + span * pow(t, gamma)
-		out[i] = z + (recast - z) * w
+		out[i] = z + (recast - z) * amt
 	return out

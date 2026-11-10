@@ -49,7 +49,7 @@ func case_name(p_cfg: Dictionary) -> String:
 
 
 func io_graph() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [[0, 0, 1, 0]]
@@ -67,7 +67,7 @@ func graph(p_cfg: Dictionary, p_feather_bump := 0.0) -> Pasture3DTerrainGraph:
 	f.invert = bool(p_cfg["invert"])
 	f.distance_noise = float(p_cfg["distance_noise"])
 	f.strength = float(p_cfg["strength"])
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), f, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	var conns: Array = [[0, 0, 1, 0], [1, 0, 2, 0]]

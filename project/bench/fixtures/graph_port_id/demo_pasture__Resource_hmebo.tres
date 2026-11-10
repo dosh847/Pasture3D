@@ -1,0 +1,93 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="4_gl3o4"]
+[ext_resource type="Script" uid="uid://ccy61yjirqc87" path="res://addons/pasture_3d/graph/pasture3d_graph_node_mountain_cone.gd" id="5_38t5y"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="6_m7w56"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="7_fpp8j"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="23_6glik"]
+[ext_resource type="Script" uid="uid://bindlf2awqi6e" path="res://addons/pasture_3d/graph/pasture3d_graph_node_blend.gd" id="25_i8fyf"]
+[ext_resource type="Script" uid="uid://dby8ulk0ecuh" path="res://addons/pasture_3d/graph/pasture3d_graph_node_const_color.gd" id="33_p5hj1"]
+[ext_resource type="Script" uid="uid://ybwedanry756" path="res://addons/pasture_3d/graph/pasture3d_graph_node_hydraulic_saleve.gd" id="34_sghyq"]
+[ext_resource type="Script" uid="uid://dknibyxuekk0m" path="res://addons/pasture_3d/graph/pasture3d_graph_node_float_to_mask.gd" id="38_nduvv"]
+[ext_resource type="Script" uid="uid://7kgetm8y0qv7" path="res://addons/pasture_3d/graph/pasture3d_graph_node_color_blend.gd" id="39_yu1tn"]
+[ext_resource type="Script" uid="uid://dk62sstiu4u2a" path="res://addons/pasture_3d/graph/pasture3d_graph_node_color_sink.gd" id="40_ygisv"]
+[ext_resource type="Script" uid="uid://c04rd15bkl8hx" path="res://addons/pasture_3d/graph/pasture3d_graph_node_fractal.gd" id="41_yu1tn"]
+
+[sub_resource type="Resource" id="Resource_bl4n7"]
+script = ExtResource("5_38t5y")
+elevation = 120.0
+peak_kw = 4.6
+rugosity = 0.13
+gamma = 0.46
+cone_alpha = 1.01
+ridge_amp = 0.95
+graph_position = Vector2(-100, 260)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_pl5il"]
+script = ExtResource("6_m7w56")
+graph_position = Vector2(1820, 60)
+
+[sub_resource type="Resource" id="Resource_d7tnw"]
+script = ExtResource("23_6glik")
+graph_position = Vector2(-780, 40)
+
+[sub_resource type="Resource" id="Resource_btvea"]
+script = ExtResource("25_i8fyf")
+graph_position = Vector2(420, 20)
+
+[sub_resource type="Resource" id="Resource_1kuw6"]
+script = ExtResource("34_sghyq")
+graph_position = Vector2(760, 100)
+
+[sub_resource type="Resource" id="Resource_p00qi"]
+script = ExtResource("33_p5hj1")
+value = Color(0.26696357, 0.3046875, 0.1649737, 1)
+graph_position = Vector2(880, 340)
+
+[sub_resource type="Resource" id="Resource_r4ki8"]
+script = ExtResource("33_p5hj1")
+value = Color(0.234375, 0.1784136, 0.14800432, 1)
+graph_position = Vector2(880, 440)
+
+[sub_resource type="Resource" id="Resource_tlvb0"]
+script = ExtResource("33_p5hj1")
+value = Color(0.78125, 0.6510416, 0.4786036, 1)
+graph_position = Vector2(880, 540)
+
+[sub_resource type="Resource" id="Resource_810lr"]
+script = ExtResource("38_nduvv")
+graph_position = Vector2(1348.4, 300.59998)
+
+[sub_resource type="Resource" id="Resource_mrul5"]
+script = ExtResource("38_nduvv")
+graph_position = Vector2(1340, 380)
+
+[sub_resource type="Resource" id="Resource_1v3s3"]
+script = ExtResource("39_yu1tn")
+graph_position = Vector2(1878.6, 401.8)
+
+[sub_resource type="Resource" id="Resource_he34u"]
+script = ExtResource("39_yu1tn")
+graph_position = Vector2(2280, 480)
+
+[sub_resource type="Resource" id="Resource_hh35j"]
+script = ExtResource("40_ygisv")
+graph_position = Vector2(3020, 340)
+
+[sub_resource type="Resource" id="Resource_ygisv"]
+script = ExtResource("25_i8fyf")
+graph_position = Vector2(-171.38332, 4.344359)
+
+[sub_resource type="Resource" id="Resource_4yc2w"]
+script = ExtResource("41_yu1tn")
+amplitude = 30.0
+graph_position = Vector2(-720, 260)
+
+[resource]
+script = ExtResource("7_fpp8j")
+format_version = 3
+nodes = Array[ExtResource("4_gl3o4")]([SubResource("Resource_bl4n7"), SubResource("Resource_pl5il"), SubResource("Resource_d7tnw"), SubResource("Resource_btvea"), SubResource("Resource_1kuw6"), SubResource("Resource_p00qi"), SubResource("Resource_r4ki8"), SubResource("Resource_tlvb0"), SubResource("Resource_810lr"), SubResource("Resource_mrul5"), SubResource("Resource_1v3s3"), SubResource("Resource_he34u"), SubResource("Resource_hh35j"), SubResource("Resource_ygisv"), SubResource("Resource_4yc2w")])
+wires = [[0, &"out", 3, &"b"], [3, &"out", 4, &"in"], [4, &"height", 1, &"result"], [4, &"eroded_rock", 8, &"in"], [4, &"sediment", 9, &"in"], [5, &"out", 10, &"a"], [8, &"out", 10, &"mask"], [6, &"out", 10, &"b"], [10, &"out", 11, &"a"], [9, &"out", 11, &"mask"], [7, &"out", 11, &"b"], [11, &"out", 12, &"color"], [2, &"footprint", 12, &"mask"], [2, &"height", 13, &"a"], [13, &"out", 3, &"a"], [14, &"out", 13, &"b"]]
+output_node = 1
+metadata/_editor_selected_node = 5

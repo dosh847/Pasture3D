@@ -110,7 +110,7 @@ func _line() -> Pasture3DGraphPath:
 ## raises the floor ABOVE the line, and MIN then keeps the ground. The first version of this fixture used
 ## -8.0 and carved nothing at all — [A] passed, comparing two routes that had both done nothing.
 func _graph(p_drape: bool, p_offset: float = 6.0) -> Dictionary:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var src := Pasture3DGraphNodeSplineSource.new()
 	src.path = _line()
 	var carve := Pasture3DGraphNodePathCarve.new()

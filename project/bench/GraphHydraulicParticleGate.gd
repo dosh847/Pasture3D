@@ -712,7 +712,7 @@ func _test_e4_channel_route() -> void:
 		node.set("seed", 7)
 		# deposit_at_death rides the LUT beside droplet_density, so this run proves that slot too.
 		node.set("deposit_at_death", true)
-		var g := Pasture3DTerrainGraph.new()
+		var g := Pasture3DTerrainGraph.create_empty()
 		var i_in := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"))
 		var i_n := g.add_node(node)
 		var i_out := g.add_node(Pasture3DGraphNodeRegistry.create(&"output"))
@@ -768,7 +768,7 @@ func _boxed_mean_abs_change(p_before: PackedFloat32Array, p_after: PackedFloat32
 
 
 func _graph_with(p_node: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var i_in := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"))
 	var i_n := g.add_node(p_node)
 	var i_out := g.add_node(Pasture3DGraphNodeRegistry.create(&"output"))

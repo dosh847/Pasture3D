@@ -159,7 +159,7 @@ func _install_preset() -> void:
 ## sharing one graph resource would each write their own resolved path onto the same Spline Source
 ## before evaluating, thrashing its revision and defeating the per-node cache for both.
 func _build_preset_graph() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var inp := Pasture3DGraphNodeInput.new()
 	var src := Pasture3DGraphNodeSplineSource.new()
 	# Empty key ON PURPOSE: that is the host fallback (§5.1), and it is what makes the preset find its

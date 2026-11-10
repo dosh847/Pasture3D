@@ -128,7 +128,7 @@ func _blend_graph() -> Pasture3DTerrainGraph:
 	red.value = Color(1.0, 0.0, 0.0, 1.0)
 	var blue := Pasture3DGraphNodeConstColor.new()
 	blue.value = Color(0.0, 0.0, 1.0, 1.0)
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeOutput.new(), red, blue,
 			Pasture3DGraphNodeColorBlend.new(), Pasture3DGraphNodeColorSink.new()]
 	g.nodes = nodes

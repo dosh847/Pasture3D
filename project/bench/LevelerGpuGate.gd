@@ -95,7 +95,7 @@ func _road() -> Pasture3DGraphPath:
 
 
 func _io_graph() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [[0, 0, 1, 0]]
@@ -120,7 +120,7 @@ func _graph(p_cfg: Dictionary, p_opts: Dictionary, p_channel := 0) -> Pasture3DT
 	tgt.value = float(p_opts.get("target", 0.0))
 	var mconst := Pasture3DGraphNodeConst.new()
 	mconst.value = float(p_opts.get("mask_const", 1.0))
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), loop_src, lev,
 			Pasture3DGraphNodeOutput.new(), road_src, pm, tgt, mconst]
 	g.nodes = nodes

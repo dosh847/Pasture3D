@@ -32,12 +32,8 @@ func edit_reach() -> float:
 	return 0.0
 
 
-func input_count() -> int:
-	return 0
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray()
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return []
 
 
 ## Never actually called — the evaluator fills an Input node's grid from the surface it was handed, before
@@ -49,16 +45,11 @@ func eval_grid(_p_inputs: Array, p_gw: int, p_gh: int, _p_mask, _p_rect: Rect2) 
 ## Two pins: the surface, and the host brush's FOOTPRINT -- the 0..1 mask the graph step composites through,
 ## feathering and Modifier Margin included. Wire the footprint into a sink's mask to confine paint to the
 ## brush rather than to the whole solved rectangle. With no host brush it is 1.0 everywhere.
-func output_count() -> int:
-	return 2
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "footprint"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"footprint", PortType.MASK),
+	]
 
 
 ## The native INPUT op writes the footprint as channel 1.

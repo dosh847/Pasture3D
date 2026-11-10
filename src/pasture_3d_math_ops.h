@@ -39,9 +39,13 @@ PackedFloat32Array falloff_grid(const PackedFloat32Array &p_surface, const Packe
 // pow() on a metre value is meaningless (and NaN for negative terrain).
 // `p_explicit_window` false = auto-window to the surface's own finite min/max for this call (the default
 // authoring mode); true = use p_range_min/p_range_max verbatim, in metres.
-PackedFloat32Array contrast_grid(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_mask,
-		int p_mode, double p_amount, double p_range_min, double p_range_max, double p_mask_amount,
-		bool p_explicit_window);
+PackedFloat32Array contrast_grid(const PackedFloat32Array &p_surface,
+		int p_mode, double p_amount, double p_range_min, double p_range_max, bool p_explicit_window);
+
+// Ridge Sharpen: in + amount * max(0, in - blur(in, radius)). The blur is a Gaussian (sigma = radius / 2)
+// truncated at the radius in metres, horizontal then vertical, skipping NaN cells.
+PackedFloat32Array ridge_sharpen_grid(const PackedFloat32Array &p_surface,
+		int p_gw, int p_gh, const Rect2 &p_rect, double p_radius_m, double p_amount);
 
 // Float to Mask. `p_params` (Pasture3DGraphNodeFloatToMask.native_lower order): 0 range mode (0 fixed,
 // 1 auto percentile), 1-2 fixed window, 3-4 auto low/high percentile (0..100), 5 invert, 6 gamma,

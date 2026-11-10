@@ -1,0 +1,48 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="10_2a5dl"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="14_b2p0t"]
+[ext_resource type="Script" uid="uid://fl2f2iwtn1vv" path="res://addons/pasture_3d/graph/pasture3d_graph_path.gd" id="24_aw4eb"]
+[ext_resource type="Script" uid="uid://t26vuji0r8wf" path="res://addons/pasture_3d/graph/pasture3d_graph_node_spline_source.gd" id="25_2k2uo"]
+[ext_resource type="Script" uid="uid://5s5nj7du18rp" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_carve.gd" id="26_tqyh8"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="32_iib3d"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="33_b2p0t"]
+
+[sub_resource type="Resource" id="Resource_djs3e"]
+script = ExtResource("32_iib3d")
+
+[sub_resource type="Resource" id="Resource_vevfu"]
+script = ExtResource("24_aw4eb")
+points = PackedVector2Array(505.40964, -24.11731, 505.40964, 15.88269)
+half_widths = PackedFloat32Array(8, 8)
+heights = PackedFloat32Array(-10, -10)
+source_label = "Trough1/Bed"
+sample_half_widths = PackedFloat32Array()
+sample_shoulders = PackedFloat32Array()
+sample_verges = PackedFloat32Array()
+sample_suppress = PackedByteArray()
+sample_skip = PackedByteArray()
+
+[sub_resource type="Resource" id="Resource_doesb"]
+script = ExtResource("25_2k2uo")
+path = SubResource("Resource_vevfu")
+
+[sub_resource type="Resource" id="Resource_k4m8b"]
+script = ExtResource("26_tqyh8")
+cross_section = 1
+offset = -6.0
+flat_width = 4.0
+flank_mode = 1
+width_source = 1
+width = 20.0
+blend = 2
+
+[sub_resource type="Resource" id="Resource_ym4nh"]
+script = ExtResource("33_b2p0t")
+
+[resource]
+script = ExtResource("14_b2p0t")
+format_version = 3
+nodes = Array[ExtResource("10_2a5dl")]([SubResource("Resource_djs3e"), SubResource("Resource_doesb"), SubResource("Resource_k4m8b"), SubResource("Resource_ym4nh")])
+wires = [[0, &"height", 2, &"surface"], [1, &"path", 2, &"path"], [2, &"height", 3, &"result"]]
+output_node = 3

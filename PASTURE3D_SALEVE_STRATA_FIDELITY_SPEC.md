@@ -1,6 +1,6 @@
 # Pasture3D Salève and Strata Fidelity Spec
 
-**Status: T1–T3 built 2026-09-18 (`GraphStrataProfileGate`; T3's mask port deferred, see T3); S1 built 2026-09-18 (`GraphSaleveNetworkGate`); S2 built 2026-09-18 (`GraphSaleveMeshGate`); S3 built 2026-09-18 (`GraphSaleveDepositionGate`); S4 built 2026-09-18 (renders not done, see S4).** Check the symbols named in each phase before planning from
+**Status: T1–T3 built 2026-09-18 (`GraphStrataProfileGate`; T3's mask port built 2026-11-09, see T3); S1 built 2026-09-18 (`GraphSaleveNetworkGate`); S2 built 2026-09-18 (`GraphSaleveMeshGate`); S3 built 2026-09-18 (`GraphSaleveDepositionGate`); S4 built 2026-09-18 (renders not done, see S4).** Check the symbols named in each phase before planning from
 this header — spec status headers go stale.
 
 The graph's **Salève Hydraulic Erosion** (`Pasture3DGraphNodeHydraulicSaleve`, `src/pasture_3d_hydraulic_saleve.cpp`)
@@ -108,14 +108,20 @@ cells with zero change and cells with full change on a 256² ramp. Route parity.
   does reach 0. The GPU fills it on the host with the same C++ function (`strata_outcrop`), in the
   extended noise buffer `[noise | outcrop | lo, hi]`, so no Voronoi runs in GLSL.
 - **The elevation-mask flag rides P[8]** as bit 1 beside the profile mode (`StrataFlags`).
-- **The `mask` port is NOT built.** The native program carries four field inputs per op (`in0..in3`);
-  ports 4+ can drive scalar params but not grids. Strata's ports 1–5 are scalars, so a mask appended
-  last (port 6) cannot reach native or GPU, and moving it to port 1 breaks saved wiring. Open: either
-  widen the program to more field inputs, or add a port migration. Until then, mask a Strata node with a
-  downstream Blend.
+- **The `mask` port is built (2026-11-09), last, on port 6**, so saved wiring keeps its indices. The
+  program's four positional field inputs could not carry it, so it gained one more per op: `in_aux` and
+  `in_aux_port` (source slot and channel), used when a node's `aux_grid_port()` is 4 or higher. It counts
+  as a real consumer for buffer lifetime. Native multiplies the mask into `t`. The GPU kernel's three
+  buffers were full, so a wired mask adds a `GKM_BLEND` MIX of the input and the strata, which is the same
+  result. A secondary channel into the mask works natively and refuses on the GPU, like every other grid
+  operand there. A non-finite mask cell is "no opinion", as on Blend.
 - Gate: `GraphStrataProfileGate` [G] (elevation window, control: mask off changes cells below Mask Low)
   and [H] (outcrop factor spans [0, 1] at strength 1). [E] parity runs at the defaults, so both masks
-  are covered on all three routes.
+  are covered on all three routes. [I]..[N] cover the mask port: the composite on all three routes against
+  a mask read from its own graph, open / zero / clamp / NaN, a mask source shared with an earlier op, a
+  secondary channel, a muted node, and the saved port layout. [K] was mutation-checked: without the
+  `in_aux` reference the native route was off by 1.77 m. The GPU halves skip under `--headless`, so run
+  this gate windowed.
 
 ---
 
@@ -366,6 +372,102 @@ calling itself, assert against the solver called independently); sediment + erod
   control 2.04 m). `SaleveMarginInvarianceProbe` now asserts the lift: offset under 1 m, with a
   border-only control at 10.1 m. E, F and `GraphSaleveNetworkGate` pin `outlet_level = 0`, because they
   test the cap and the routing to the border.
+
+### Fourth review (2026-11-05): Stage 1 discarded the input
+
+**Found.** Stage 1 set `z = z[root] + chi`, with no uplift term, then remapped to the input's range. The
+input reached it only through erodibility, the outlets and the first pass's receivers, so the terrain was
+rebuilt as a distance from the outlets. No gate measured shape: routing, rim and margin all passed. Only the
+blend at Erosion Strength < 1 kept anything of the input. A pinned Reference Relief also rescaled the output
+(`hm = zmin + zg * relief_ref`, 400 m from a 200 m input).
+
+**As built.** A vertex rises from its receiver by the larger of two allowances, and never past the input:
+
+    channel = keep * max(input[i] - input[r], 0),   keep = 1 - E * (1 - min((A_ref / A)^m, 1))
+    wall    = Max Slope * d * min(A_ref / A, 1)
+    z[i]    = max(z[r], min(z[r] + max(channel, wall), input[i]))
+
+- `channel` alone sinks a whole catchment as one block, with a cliff at every divide. `wall` lets the ground
+  beside a channel climb back to the input, so the cut is a valley and divides stay at the input's height.
+- Max Slope therefore no longer limits the terrain. It is the steepest a valley wall may rebuild. Slopes the
+  input already has are kept.
+- `channel_area` (A_ref, m^2, native LUT [8]; 0 = 8 control points' worth) is where a channel starts.
+- Receivers must be downhill in the input, within `SALEVE_ROUTE_FAN` (0.5) of the steepest input drop; among
+  those the lowest current surface wins. Otherwise a vertex drains along the contour and a cut runs round the
+  mountain.
+- Lake rerouting floods upward from the outlets by height, not ground distance. The nearest spill could fill a
+  canyon to the height of its rim, and the basin above it then rose with it (160 m input, 336 m output).
+- The remap to [0..1] is gone. The CUT is reconstructed onto the grid, not the surface, and `hm = input + cut`,
+  so detail finer than the control points is the input's own and the warp bends only the valleys. Tangent
+  planes are clamped to the triangle's range outside `reconstruct_only`, because a cut's sharp changes overshoot.
+- Reference Relief now only sets what Shape Preservation measures against and the unit of drainage lengths.
+- Defaults moved: drainage exponent 0.15 -> 0.3, shape preservation 2 -> 1, Max Slope Center 6 -> 1.5.
+
+**Measured** (Stage 1 alone, strength 1, no warp, 1024 m at 256^2; old -> new):
+
+| | old | new |
+|---|---|---|
+| moved mountain r(outputs), r(inputs) = 0.188 | 0.970 | 0.171 |
+| summit, 180 m input | 95 m | 175.5 m |
+| fine detail r, rough fixture | 0.122 | 0.795 |
+| fine detail r, canyon fixture | -0.113 | 0.741 |
+| output peak, Reference Relief pinned at 400 | 400 m (200 m input) | 163.9 m (180 m input) |
+
+It still erodes: deepest cut 46 m on the rough fixture, against 1.1 m with no drainage response.
+
+**Gates.** New `GraphSaleveRetentionGate`, whose controls include the old surface computed directly.
+`GraphSaleveDepositionGate` E and F now use closed pits, the only thing Stage 1 can raise, and G centres the V
+on a cell, because Stage 1 no longer feeds it a faceted floor. `SaleveMarginInvarianceProbe` only reports the
+lift, since its control can no longer lift; worst drift is 5.05 / 5.03 m (auto / pinned), against 5.6 / 3.3 m,
+so pinning Reference Relief now buys almost nothing. Scenes with a saved Max Slope keep their steep walls, and
+all Salève setups change look.
+
+### Fifth review (2026-11-05): the default stood fins on steep faces
+
+**Found, on Plow5's real ground (1024 m, strength 1).** Stage 1 made every spike: 0 in the input, 355 after Stage
+1, 0 from Stages 2+3 alone. Four causes:
+- Walls climbing at one slope meet in knife crests wherever two channels are close. Smoothing the cut alone took
+  a crop from 72 spikes to 0 while the mean cut stayed at 3.3-3.4 m, so the fault was the cut's sharpness and not
+  how much it removed.
+- Stage 1 bounds only the edge from a vertex to its receiver. Those edges reached 1.61 m/m; the others reached 6.81.
+- Auto Channel Area was 8 vertices, so Control Points was a hidden strength knob: mean cut on steep ground was
+  1.7 / 8.4 / 15.6 m at 4000 / 15000 / 50000 points.
+- The radial Max Slope falloff made the erosion depend on where a mountain sat in the solved area.
+
+Ruled out by measurement: the warp, the routing noise, the route fan, stopping early on Tolerance, and deep channel
+heads (mean cut at a leaf 1.9 m).
+
+**Changed, native and oracle together.**
+- `saleve_limit_edges`: every mesh edge is held to Max Slope, or to the input's own slope if steeper. It only lowers,
+  outlets stay, and the limit never falls below a fifth of Max Slope Center, since a cap of nothing would sink all the
+  flat ground joined to a channel.
+- Valley Smoothing (LUT slot 9): the cut is smoothed on the grid after reconstruction, three box passes per axis.
+  0 = auto, 1.5 x the point spacing. The cut, not the surface, so the input's detail stays.
+- Auto Channel Area is (relief / 8)², at least two control points' worth.
+- Defaults: Uniform Slope on (Max Slope Border 1.5), Drainage Exponent 0.3 → 0.2, Shape Preservation 1 → 1.5, stream
+  0.15/0.5 → 0.02/0.8 (Hesiod's).
+
+**Result on Plow5's ground, all stages, strength 0.7.**
+
+| | Spikes | p99 slope | Mean cut | Deepest cut |
+|---|---|---|---|---|
+| Old defaults | 142 | 3.02 | 3.8 m | 34.4 m |
+| New defaults | 0 | 1.01 | 1.2 m | 17.6 m |
+| New defaults, strength 1 | 0 | 1.19 | 1.7 m | 25.2 m |
+
+Drainage Exponent 0.3 with Shape Preservation 1 keeps the fix and cuts harder: 0 spikes, mean 3.3 m at strength 1.
+
+**Open.** Channel spacing still follows the mesh, because Control Points sets feature size. The amount eroded no longer
+grows with it but is not constant: 2.79 m at 4000 points against 1.23 m at 50000 on the gate's ridge, since a coarser
+mesh's valleys cannot be narrower than a point spacing. `enable_post_smoothing` and Bank Smoothing remain and still do
+almost nothing to a crest (355 → 351 spikes).
+
+**Gates.** New `GraphSaleveJaggedGate`, 8 criteria, each with a control that turns one mechanism off. Its A and D
+thresholds were set from measured values (spikes 0 against 10, field difference 0.72 against 1.34), not in advance.
+`GraphSaleveDepositionGate` B and `GraphHydraulicSaleveGate`'s warp check now pin the settings they rely on: B compared
+against the old stream defaults by number, and the warp moved a smoothed cut less than its 0.5 m threshold (0.40 m).
+`SaleveMarginInvarianceProbe` worst drift is 1.33 / 1.20 m (auto / pinned), from 5.05 / 5.03 m. Saved scenes with their
+own Salève values keep them, and all other Salève setups change look on their next bake.
 
 ## Out of scope
 

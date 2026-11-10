@@ -86,7 +86,7 @@ func _fixture() -> void:
 	var hs := _yaw_place(HOST_START)
 	_driven = _gradient(Pasture3DGraphNodeGradient.Space.WORLD, Vector2(hs.x + 30.0, hs.z), Vector2(hs.x + 300.0, hs.z))
 	var k := Pasture3DGraphNodeConst.new()
-	_graph = Pasture3DTerrainGraph.new()
+	_graph = Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), _host, Pasture3DGraphNodeOutput.new(), _world, _driven, k]
 	_graph.nodes = nodes
 	_graph.connections = [[1, 0, 2, 0], [5, 0, 4, 1]]

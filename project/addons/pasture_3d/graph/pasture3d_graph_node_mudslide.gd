@@ -99,8 +99,12 @@ func native_lower() -> Dictionary:
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, -1, 5])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.field(&"source", PortType.MASK).as_aux(),
+		Pasture3DGraphPort.value(&"amount", PortType.FLOAT, &"amount", 5),
+	]
 
 
 func role() -> Role:
@@ -111,30 +115,11 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 3
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "mask", "amount"])
-
-
-func aux_grid_port() -> int:
-	return 1 # "mask"
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.FLOAT])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		2: return amount
-		_: return 0.0
-
-
-func output_count() -> int:
-	return 2
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"deposition", PortType.MASK),
+	]
 
 
 ## The channels the NATIVE op writes, which is now every channel this node offers.
@@ -145,14 +130,6 @@ func output_count() -> int:
 ## the GDScript evaluator. The solver had already computed the field and the op was discarding it.
 func native_out_count() -> int:
 	return 2 # height, deposition
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "deposition"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK])
 
 
 ## The METRES the normalised deposition channel was divided by. A 0..1 channel is meaningless without it, so

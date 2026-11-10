@@ -1490,6 +1490,16 @@ func _rebind(old_owner: String) -> void:
 ## Set by `_can_auto_refresh` when the footprint reaches an unloaded region (the "needs bake" flag).
 var _blocked_by_unloaded: bool = false
 
+## Set when an auto-refresh was skipped because this brush's layer is hidden; the dock rebakes on show.
+var _hidden_pending: bool = false
+
+
+## True when this brush's own layer exists and is switched off in the Layers dock.
+func _layer_hidden() -> bool:
+	var layer := _resolve_layer_for(_layer_owner)
+	return layer != null and not layer.is_visible()
+
+
 func _can_auto_refresh() -> bool:
 	if _suspend_auto or _snap_in_progress or not auto_refresh or not Engine.is_editor_hint() or not is_inside_tree():
 		return false
@@ -1673,6 +1683,11 @@ func _on_refresh_timer() -> void:
 	# armed the timer was forgotten rather than deferred. Nothing may clear dirty state on a path that
 	# does not bake.
 	if not Engine.is_editor_hint() or not is_inside_tree() or not is_configured():
+		return
+	# A hidden layer composites nothing, so baking it is wasted work while the user reshapes a brush with its
+	# layer switched off. The dirty state stands, and the Layers dock rebakes the layer when it is shown again.
+	if _paints() and _layer_hidden():
+		_hidden_pending = true
 		return
 	# Snapshot + clear the queued dirty state so a refresh that re-enters scheduling is coherent.
 	var full := _full_dirty
@@ -2912,7 +2927,11 @@ func _paint_into(layer_id: int, blend: int) -> void:
 		var skey: int = _compute_stamp_key(path)
 		var sc: Dictionary = _stamp_cache.get(sid, {})
 		if layer_id >= 0 and not sc.is_empty() and not _dirty_splines.has(sid) and int(sc.get("key", 0)) == skey:
-			terrain.data.apply_sim_block(layer_id, sc["min_x"], sc["min_z"], sc["vs"], sc["gw"], sc["gh"], sc["vals"], blend)
+			# The cache holds this brush's own values. What is under them changes with its layer-mates, so the
+			# blend runs on every replay rather than being cached.
+			var replay := _blend_over_row(sc["min_x"], sc["min_z"], sc["vs"], sc["gw"], sc["gh"], sc["vals"],
+					sc.get("weights", PackedFloat32Array()), sc.get("below", PackedFloat32Array()))
+			terrain.data.apply_sim_block(layer_id, sc["min_x"], sc["min_z"], sc["vs"], sc["gw"], sc["gh"], replay, blend)
 			_last_paint_aabb[sid] = sc["bounds"]
 			continue
 		_paint_spline(path)
@@ -2996,7 +3015,18 @@ func _modifier_signature() -> Array:
 var _commit_left_pending: bool = false
 
 
-func _store_stamp_cache(path: Path3D, p_key: int, p_min_x: float, p_min_z: float, p_vs: float, p_gw: int, p_gh: int, p_vals: PackedFloat32Array, p_bounds: AABB) -> void:
+## A REPLACE member's grid faded in over what earlier members of its row wrote: the twin of the same step in
+## stamp_mound_loop, and the same native code so the two cannot drift. Empty weights mean a brush that is not
+## relative to the ground, which has no ground to measure a layer-mate's change against.
+func _blend_over_row(p_min_x: float, p_min_z: float, p_vs: float, p_gw: int, p_gh: int, p_vals: PackedFloat32Array,
+		p_weights: PackedFloat32Array, p_below: PackedFloat32Array) -> PackedFloat32Array:
+	if _blend != BLEND_REPLACE or p_weights.is_empty():
+		return p_vals
+	return terrain.data.blend_replace_over_layer(_layer_id, p_min_x, p_min_z, p_vs, p_gw, p_gh, p_vals, p_weights, p_below, _clip_aabb)
+
+
+func _store_stamp_cache(path: Path3D, p_key: int, p_min_x: float, p_min_z: float, p_vs: float, p_gw: int, p_gh: int, p_vals: PackedFloat32Array, p_bounds: AABB,
+		p_weights: PackedFloat32Array = PackedFloat32Array(), p_below: PackedFloat32Array = PackedFloat32Array()) -> void:
 	if not is_instance_valid(path) or p_vals.is_empty():
 		return
 	# A grid with solves still pending is not this key's answer. Cached, the driver's next pass hits the
@@ -3013,6 +3043,8 @@ func _store_stamp_cache(path: Path3D, p_key: int, p_min_x: float, p_min_z: float
 		"gh": p_gh,
 		"vals": p_vals,
 		"bounds": p_bounds,
+		"weights": p_weights,
+		"below": p_below,
 	}
 
 
@@ -6348,6 +6380,8 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 			# (`graph-source-resolution-is-host-side`). The second call is then a repeat, not a
 			# disagreement: one entry point still fills every scene-naming source.
 			Pasture3DGraphSources.resolve(m.graph, self)
+			# This host's parameter values, before the compile reads them (ports spec Â§10).
+			m.stamp_params()
 			# The native rasteriser needs the whole-graph program (Pasture3DUtil.graph_eval_grid reads it),
 			# the amount, and the two freeze inputs its key folds in — reads_input decides whether the input
 			# surface is in the key. GDScript's _apply_graph_step ignores these; only the native path reads them.
@@ -6355,7 +6389,7 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 			blk["strength"] = m.strength
 			blk["reads_input"] = m.graph.reads_input()
 			blk["reads_footprint"] = m.graph.reads_footprint()
-			blk["content_key"] = m.graph.content_key()
+			blk["content_key"] = m.graph_key()
 			blk["feather_mode"] = int(m.feather_mode)
 			blk["custom_falloff_width"] = m.custom_falloff_width
 			blk["custom_lut"] = _ramp_lut(m.custom_falloff_curve)
@@ -6443,9 +6477,10 @@ func _prepare_staged_graph_modifiers(p_stack: Dictionary, p_min_x: float, p_min_
 			if not g.native_supported() and g._native_supported_if_staged(g.output_index()):
 				if base_in.is_empty():
 					base_in = _base_below_grid(p_min_x, p_min_z, p_vs, p_gw, p_gh)
+				m.stamp_params()
 				g.stage_paths_for(g.output_index(), p_gw, p_gh, rect, base_in)
 				blk["graph_program"] = g.compile_graph_program()
-				blk["content_key"] = g.content_key()
+				blk["content_key"] = m.graph_key()
 				blk["reads_input"] = g.reads_input()
 				blk["reads_footprint"] = g.reads_footprint()
 	return base_in
@@ -6583,6 +6618,7 @@ func _run_stack_graph_sinks(p_stack: Dictionary) -> void:
 			# stack, or a step the compiler dropped. Skipping is correct; writing from a stale surface
 			# would paint last bake's answer onto this bake's ground.
 			continue
+		m.stamp_params()
 		_run_graph_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface,
 				m.sink_taps_for(m.last_input_surface, m.last_gw, m.last_gh))
 		_run_graph_runtime_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface)
@@ -6983,6 +7019,7 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	# preview and the inspector cannot end up resolving different sets — which would show as a graph that
 	# previews correctly and bakes empty.
 	Pasture3DGraphSources.resolve(g, self)
+	m.stamp_params()
 	var gw: int = p_ctx["gw"]
 	var gh: int = p_ctx["gh"]
 	var n := gw * gh
@@ -7063,7 +7100,8 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	var live_async: bool = p_step.get("live_async", false)
 	var frozen: bool = live_async or m.evaluation == Pasture3DNode.Evaluation.FROZEN
 	var extent: String = p_ctx.get("extent", "")
-	var key: int = hash([g.content_key(), z]) if reads else g.content_key()
+	var gk: int = m.graph_key()
+	var key: int = hash([gk, z]) if reads else gk
 	if g.reads_footprint():
 		key = hash([key, g._footprint_sig()]) # a feather or margin edit moves the footprint, not the surface
 	var entry: Dictionary = {}
@@ -8633,6 +8671,7 @@ func input_spline_polylines() -> Array:
 		# pressed on a brush that has never baked, and a stale `path` is the one input that would move the
 		# loop somewhere the spline no longer is.
 		Pasture3DGraphSources.resolve_splines(g, self)
+		(m as Pasture3DNodeGraph).stamp_params()
 		for node in g.nodes:
 			if node == null or node.op() != &"spline_source":
 				continue

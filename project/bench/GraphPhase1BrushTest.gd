@@ -26,7 +26,7 @@ func _finish() -> void:
 
 func _test_native_supported() -> void:
 	print("[A] Testing graph.native_supported() for new Phase 1 erosion nodes")
-	var g1 := Pasture3DTerrainGraph.new()
+	var g1 := Pasture3DTerrainGraph.create_empty()
 	var in1: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"input")
 	var hp: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"hydraulic_particle")
 	var out1: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"output")
@@ -40,7 +40,7 @@ func _test_native_supported() -> void:
 		_fail += 1
 		print("    !! HydraulicParticle not marked as native_supported")
 
-	var g2 := Pasture3DTerrainGraph.new()
+	var g2 := Pasture3DTerrainGraph.create_empty()
 	var in2: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"input")
 	var hsl: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"hydraulic_stream_log")
 	var out2: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"output")
@@ -54,7 +54,7 @@ func _test_native_supported() -> void:
 		_fail += 1
 		print("    !! HydraulicStreamLog not marked as native_supported")
 
-	var g3 := Pasture3DTerrainGraph.new()
+	var g3 := Pasture3DTerrainGraph.create_empty()
 	var in3: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"input")
 	var hsv: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"hydraulic_saleve")
 	var out3: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"output")

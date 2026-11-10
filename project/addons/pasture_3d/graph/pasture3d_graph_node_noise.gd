@@ -40,28 +40,14 @@ func native_lower() -> Dictionary:
 	return {"params": p, "noise": nz}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([0])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.value(&"amplitude", PortType.FLOAT, &"amplitude", 0),
+	]
 
 
 func role() -> Role:
 	return Role.GENERATOR
-
-
-func input_count() -> int:
-	return 1
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["amplitude"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.FLOAT])
-
-
-func input_unwired_default(_p_port: int) -> float:
-	return amplitude
 
 
 func eval_cell(p_wx: float, p_wz: float, p_inputs: PackedFloat32Array) -> float:

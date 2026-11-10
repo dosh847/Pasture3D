@@ -71,8 +71,8 @@ place the membership is decided; do not restate it.
 | 4 | `FLOAT` | Cyan | A general scalar: a strength, a rate, a radius. The default for a driven parameter. |
 | 5 | `INT` | Navy | A discrete count or an enum selector. |
 | 7 | `BOOL` | Lime Yellow | A toggle. |
-| 2 | `VECTOR` | Purple | A direction or angle. **See the caveat in §7.** |
-| 3 | `CURVE` | Emerald | A transfer curve. |
+| 2 | `VECTOR` | Purple | **Retired 2026-11-09.** No node declares it and it connects to nothing. See §7. |
+| 3 | `CURVE` | Emerald | **Retired 2026-11-09.** A node that takes a curve holds it as a `Curve` property. |
 | 6 | `COLOR` | Magenta/Pink | An RGBA tint. |
 
 ---
@@ -105,6 +105,14 @@ Worked examples from the audit, all decided by reading the producer rather than 
   documents them as [0,1] coverage (`pasture3d_graph_node_path_carve.gd:214`). A name-based guess was wrong
   here. Read the producer.
 
+### The standard mask input
+
+One `MASK` input is not declared by any node. Every FILTER or SOLVER whose port 0 is `HEIGHT` in and
+`HEIGHT` out gets an input with id `mask`, appended last by the base, reading 1 unwired, meaning
+`out = lerp(in, node_out, clamp(mask, 0, 1))` (a non-finite cell reads 1). The graph applies it unless the
+node answers `mask_mode()` with `OWN`. A `MASK` input the solve reads as data is a different port with a
+different id: Leveler's `area`, Mudslide's `source`, Erosion Thermal's `hardness`. Ports spec §9.
+
 ---
 
 ## 5. Choosing a type — the decision, in order
@@ -121,49 +129,74 @@ Worked examples from the audit, all decided by reading the producer rather than 
 
 ## 6. Connectivity
 
-GraphEdit permits **same-type** wires by itself. **Cross-type** wires exist only where registered, in
-`Pasture3DGraphEditor.register_connection_types()` (`project/addons/pasture_3d/src/graph_editor.gd`).
+The rule is one function, `Pasture3DGraphNode.can_connect(from_type, to_type)`. `connect_ports` refuses what
+it refuses, the editor registers its GraphEdit pairs from it
+(`Pasture3DGraphEditor.register_connection_types()`), and `graph_warnings` reports a wire that fails it.
 
-The four scalar field types — `HEIGHT`, `MASK`, `FIELD`, `SIGNED` — are **mutually connectable**. They are one
-grid of floats underneath and the type is a reading instruction, so refusing the wire would buy nothing and
-cost the author a Reroute node. `PATH` and `TERRAIN_BUS` connect **only to themselves**: a `PATH` wire carries
-a resource, so a `HEIGHT` plugged into it would be a null the consumer must defend against on every cell.
+| From | To | |
+|---|---|---|
+| field (`HEIGHT`, `MASK`, `FIELD`, `SIGNED`) | field | **Yes.** One grid of floats; the type is a reading instruction. |
+| value (`FLOAT`, `INT`, `BOOL`) | value | **Yes.** `BOOL` is 0.0 / 1.0 on both routes. |
+| value | field | **Yes.** A constant fills every cell. |
+| field | value | **No**, since 2026-11-09. See below. |
+| `COLOR`, `PATH` | themselves | **Yes**, and nothing else. A `PATH` wire carries a resource. |
+| retired (`VECTOR`, `CURVE`, `TERRAIN_BUS`) | anything | **No**, themselves included (`GraphPortIdGate [F]`). |
 
-The scalar **value** types — `FLOAT`, `INT`, `BOOL` — connect to each other and, in both directions, to the
-four field types: a constant fills every cell, and a field read by a value port is read at cell 0. `BOOL` is
-0.0 / 1.0 on both routes; until 2026-09-15 it was unregistered and Const Bool connected to nothing.
-`COLOR`, `VECTOR` and `CURVE` connect only to themselves. No node declares a `CURVE` input, so Const Curve
-drives nothing (`GraphPortTypeGate [F]` lists it as known).
+That is 39 legal ordered pairs.
+
+**Field into value.** A driven value port reads **cell 0** of its source, on the native route and in every
+GDScript `eval_grid`. Wiring a Noise into a `rotation` port therefore gave the node one arbitrary cell of the
+noise. The wire was legal from the day value ports became wireable until spec §8; it is now refused.
+
+* The node that turns a field into a number on purpose is **Measure** (min and max, two percentiles, or
+  mean and standard deviation). Its outputs are `FLOAT`.
+* In the editor, dropping a field wire on a value port (or a value port's wire on a field output) opens a
+  one-item menu, **Insert Measure**, which adds the node and both wires as one undo step.
+* A value port draws a **diamond** and a field port a circle, so the two are told apart by shape as well as
+  colour.
+* A graph that **already holds** such a wire keeps it. It evaluates exactly as before, survives save, load,
+  copy and duplicate, and `graph_warnings` names the node and the port and says it reads cell 0. Once
+  disconnected it cannot be re-made.
+
+There is no node that does arithmetic on values. Math nodes output a field, so "half of Measure's max" cannot
+reach a value port; that was possible before this rule only by reading cell 0 of a uniform field.
+
+`GraphPortTypeGate [I]`–`[L]` cover the matrix, the value sources, the stored wire and Insert Measure.
 
 **Unwired ports.** An unwired port reads `input_unwired_default`. A port with an inline property shows it as a
-spin box (`SLOT_SPINS`); a scalar port with none (a Salève's `dx`/`dy`, an optional mask) shows a **+** button
+spin box (the `property` its port descriptor names); a scalar port with none (a Salève's `dx`/`dy`, an optional mask) shows a **+** button
 that adds a Const Float wired to it, starting at the unwired value. Every input row's tooltip names its type
 and what it reads while unwired.
+
+**One wire per input, except a multi port.** Connecting a wire into an ordinary input replaces the wire
+already there. An input built with `Pasture3DGraphPort.accepts_many()` keeps every wire instead; the same wire
+twice is still one wire. Its wires are its operands **in `connections` row order**, which is the order they
+were made, and the saved `wires` keep that order (ports spec §12). Only a node the flat view lowers away may
+declare one (today, Combine), because every evaluator below the flat view reads one wire per input.
 
 Colours must stay at least 0.3 apart in RGB (`GraphPortTypeGate [G]`): the magenta `SIGNED` that sat 0.29 from
 `COLOR`'s pink was reported as "a pin I can't wire a constant into".
 
 **This is where a new type bites you.** A type nobody registers connects to nothing but itself, and the
 failure arrives late and looks unrelated — as *"I can't re-make a wire that is already in my graph"*, because
-a stored connection is a pair of **indices** and keeps evaluating either way. `GraphPortTypeGate [E]` drives
+a wire already in the graph keeps evaluating either way. `GraphPortTypeGate [E]` drives
 the real registration function rather than a copy of it, so a type left out is caught at once.
 
 ---
 
-## 7. Known rough edge: `VECTOR` as an input
+## 7. `VECTOR` and `CURVE` are retired
 
-`transform.offset` (port 1) is the **only** `VECTOR` *input* in the registry, and it is inert on **both**
-routes: `eval_grid` ignores `p_inputs[1]` and reads the `offset` property, and `native_param_ports()` maps it
-to `-1` because a `Vector2` needs two params slots and the map holds one int per port. The wire is drawable
-and does nothing.
+The graph bus is scalar floats, so a `VECTOR` wire could never carry a `Vector2` and a `CURVE` wire could
+never carry a `Curve`. Until 2026-11-09 the registry had three such ports that did nothing:
+`transform.offset` (an input neither route read), `export_normal_map.normal` (an input the writer refused
+by name when wired) and Const Curve's output (no input took it). Removing an input used to shift every later
+port index and silently rewire saved graphs; wires are stored by port id since format 2
+(`PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md` §7), so the three ports were removed, along with Const Vector
+and Const Curve. Mountain Range Radial's `angle` output, which was typed `VECTOR` and is a scalar field, is
+now `FIELD`.
 
-It is unrepresentable rather than merely unfinished: the graph bus is scalar floats, so a `VECTOR` wire cannot
-carry a `Vector2` at all. Fixing it means removing the socket, which **shifts every later port index down by
-one and silently rewires existing saved graphs**. That is a migration, not a retype, and it is deliberately
-not done here. `GraphPortTypeGate [C]` reports it.
-
-One more port is listed as known in `[C]`: `export_normal_map.normal` (declared early, refused by name when
-wired — see that node's header).
+The enum members stay so the later types keep their numbers and colours. A type with a real carrier can come
+back under a new member.
 
 Retypes approved 2026-09-15: `export_index_map.index` INT → `FIELD` (the sink taps it as a grid), and the
 `dx`/`dy` displacement inputs of the six mountain generators (and their Dev twins) HEIGHT → `SIGNED`.

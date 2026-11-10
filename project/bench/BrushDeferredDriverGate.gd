@@ -830,7 +830,7 @@ func _first_erosion_step(p_steps: Array) -> Dictionary:
 
 
 func _graph() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n := Pasture3DGraphNodeNoise.new()
 	var fn := FastNoiseLite.new()
 	fn.seed = 5

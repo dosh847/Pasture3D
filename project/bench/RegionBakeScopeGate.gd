@@ -334,7 +334,7 @@ func _rb10_graph_source_closure() -> void:
 	h.reparent(_terrain)
 	var src := Pasture3DGraphNodeShapeSource.new()
 	src.shape_key = h.shape_key()
-	var graph := Pasture3DTerrainGraph.new()
+	var graph := Pasture3DTerrainGraph.create_empty()
 	graph.add_node(src)
 	# An Output node, or the modifier is inactive (no output) and names nothing: correctly.
 	graph.add_node(Pasture3DGraphNodeOutput.new())

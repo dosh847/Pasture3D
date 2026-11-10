@@ -93,7 +93,7 @@ func _c_amount_and_mask_control() -> void:
 			mask[iz * GW + ix] = 1.0 if ix < GW / 2 else 0.0
 
 	var t_masked := _make_talus(35.0, 16, 0.5, 1.0)
-	var g_masked := Pasture3DTerrainGraph.new()
+	var g_masked := Pasture3DTerrainGraph.create_empty()
 	var in_node := Pasture3DGraphNodeInput.new()
 	var mask_const := Pasture3DGraphNodeConst.new()
 	var out_node := Pasture3DGraphNodeOutput.new()
@@ -165,7 +165,7 @@ func _make_talus(ang: float, iters: int, rate: float, amt: float) -> Pasture3DGr
 
 
 func _filter_graph(node: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var inp := Pasture3DGraphNodeInput.new()
 	var out := Pasture3DGraphNodeOutput.new()
 	g.nodes = [inp, node, out]

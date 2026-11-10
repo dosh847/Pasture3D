@@ -50,7 +50,7 @@ PackedFloat32Array smooth_fill_solve(const PackedFloat32Array &p_surface, const 
 		int p_gw, int p_gh, const Rect2 &p_rect, int p_mode, double p_radius_m, double p_k,
 		double p_amount, PackedFloat32Array *r_deposition, double *r_deposition_divisor);
 
-PackedFloat32Array recast_cliff_solve(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_mask,
+PackedFloat32Array recast_cliff_solve(const PackedFloat32Array &p_surface,
 		int p_gw, int p_gh, const Rect2 &p_rect, double p_talus_angle_deg, double p_radius_m,
 		double p_amplitude, double p_gain, double p_direction_deg, double p_direction_spread_deg,
 		double p_amount);

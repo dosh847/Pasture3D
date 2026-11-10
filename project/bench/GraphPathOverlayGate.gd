@@ -150,7 +150,7 @@ func _host(p_graph: Pasture3DTerrainGraph) -> Pasture3DTerrainBrush:
 
 ## Input -> Source -> <the PATH node under test> -> Carve -> Output, with the node previewed.
 func _graph_with(p_node: Pasture3DGraphNode, p_path: Pasture3DGraphPath) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var src := Pasture3DGraphNodeSplineSource.new()
 	src.path = p_path
 	var carve := Pasture3DGraphNodePathCarve.new()

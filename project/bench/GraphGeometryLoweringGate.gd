@@ -197,7 +197,7 @@ func _lowers(p_g: Pasture3DTerrainGraph) -> bool:
 ## criterion is the whole chain: supported, compiled, and equal to what the GDScript evaluator produces.
 func _a_a_path_reaches_the_lowered_program() -> void:
 	print("[A] a Road Source and a Path Distance lower into the native program")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		_source(_road()), Pasture3DGraphNodePathDistance.new(), Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
@@ -228,7 +228,7 @@ func _a_a_path_reaches_the_lowered_program() -> void:
 	# the kernel's own empty-geometry check — and it must read as FAR AWAY. Zero would mean every cell is
 	# on the road, which is silent, total, and looks like a working graph until a grader flattens the
 	# terrain to the crown.
-	var ge := Pasture3DTerrainGraph.new()
+	var ge := Pasture3DTerrainGraph.create_empty()
 	var nodes_e: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeRoadSource.new(), Pasture3DGraphNodePathDistance.new(),
 		Pasture3DGraphNodeOutput.new()]
@@ -261,7 +261,7 @@ func _b_the_mask_lowers_in_both_of_its_two_rules() -> void:
 	for closed in [false, true]:
 		var outline := _outline()
 		outline.closed = closed
-		var g := Pasture3DTerrainGraph.new()
+		var g := Pasture3DTerrainGraph.create_empty()
 		var mask := Pasture3DGraphNodePathMask.new()
 		mask.feather = 3.0
 		var nodes: Array[Pasture3DGraphNode] = [
@@ -315,7 +315,7 @@ func _c_the_grader_lowers_with_all_six_channels() -> void:
 	var worst_ch := ""
 	var supported := true
 	for ch in 6:
-		var g := Pasture3DTerrainGraph.new()
+		var g := Pasture3DTerrainGraph.create_empty()
 		var nodes: Array[Pasture3DGraphNode] = [
 			Pasture3DGraphNodeInput.new(), _source(_road()), Pasture3DGraphNodeRoadGrade.new(),
 			Pasture3DGraphNodeOutput.new()]
@@ -381,7 +381,7 @@ func _c_the_grader_lowers_with_all_six_channels() -> void:
 func _d_the_flagship_wiring_lowers_end_to_end() -> void:
 	print("[D] the §8 road-and-erosion wiring lowers end to end")
 	var surf := _terrain()
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var ero := Pasture3DGraphNodeErosion.new()
 	# LIVE, because a FROZEN solver owns a cache the native program knows nothing about and blocks the
 	# native path on purpose. Stated here rather than discovered as a refusal.
@@ -412,7 +412,7 @@ func _d_the_flagship_wiring_lowers_end_to_end() -> void:
 	# the erosion everywhere; a mask read as all-ones gives the graded surface everywhere. Both are
 	# plausible terrains, and the parity check alone cannot tell them apart from the right answer — only
 	# from an oracle making a different mistake.
-	var g_ero := Pasture3DTerrainGraph.new()
+	var g_ero := Pasture3DTerrainGraph.create_empty()
 	var ero2 := Pasture3DGraphNodeErosion.new()
 	ero2.evaluation = Pasture3DGraphNodeErosion.Evaluation.LIVE
 	ero2.iterations = 20
@@ -422,7 +422,7 @@ func _d_the_flagship_wiring_lowers_end_to_end() -> void:
 	g_ero.connections = [[0, 0, 1, 0], [1, 0, 2, 0]]
 	var eroded := _native(g_ero, surf)
 
-	var g_road := Pasture3DTerrainGraph.new()
+	var g_road := Pasture3DTerrainGraph.create_empty()
 	var nodes_r: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _source(_road()), Pasture3DGraphNodeRoadGrade.new(),
 		Pasture3DGraphNodeOutput.new()]
@@ -456,7 +456,7 @@ func _d_the_flagship_wiring_lowers_end_to_end() -> void:
 func _e_one_road_read_four_times_is_one_table_entry() -> void:
 	print("[E] a road read by several nodes is one table entry")
 	var road := _road()
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _source(road), Pasture3DGraphNodePathDistance.new(),
 		Pasture3DGraphNodePathMask.new(), Pasture3DGraphNodeRoadGrade.new(),
@@ -492,7 +492,7 @@ func _e_one_road_read_four_times_is_one_table_entry() -> void:
 
 	# CONTROL: two DIFFERENT roads are two entries. Deduplication that collapsed them would hand one
 	# road's geometry to the other node — and both would still produce a plausible terrain.
-	var g2 := Pasture3DTerrainGraph.new()
+	var g2 := Pasture3DTerrainGraph.create_empty()
 	var nodes2: Array[Pasture3DGraphNode] = [
 		_source(_road()), _source(_outline()), Pasture3DGraphNodePathDistance.new(),
 		Pasture3DGraphNodePathMask.new(), Pasture3DGraphNodeBlend.new(),

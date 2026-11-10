@@ -70,7 +70,7 @@ func _graph_mod() -> Pasture3DNodeGraph:
 	gn.amplitude = 4.0
 	var blend := Pasture3DGraphNodeBlend.new()
 	blend.mode = Pasture3DGraphNodeBlend.Mode.ADD
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), gn, blend, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [PackedInt32Array([0, 0, 2, 0]), PackedInt32Array([1, 0, 2, 1]), PackedInt32Array([2, 0, 3, 0])]

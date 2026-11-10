@@ -37,6 +37,11 @@ extends Resource
 ## read. See PASTURE3D_TERRAIN_GRAPH_SPEC.md (Solvers).
 enum Role { GENERATOR, FILTER, COMBINER, SOLVER }
 
+## Asks whoever is editing this graph to act on this node: `&"auto_fit"`, `&"capture"`. A node is a Resource
+## and cannot see its graph or evaluate its own upstream, so an inspector button that needs a measurement
+## emits this and the graph editor answers. With no graph editor open nobody is listening and it does nothing.
+signal editor_action_requested(p_action: StringName)
+
 ## A view onto `resource_name`, so a graph of three Blend nodes does not read as three identical rows in
 ## the editor. EDITOR-only, not stored twice: `resource_name` already serialises. Mirrors
 ## Pasture3DNode.label.
@@ -239,7 +244,7 @@ func has_output() -> bool:
 ## ---- FIELD TYPES vs VALUE TYPES ----
 ##
 ## The type says whether a port carries a GRID or a NUMBER, and that is not a convention — it is the
-## declaration every other consumer reads. FIELD types (HEIGHT, MASK, FIELD, SIGNED, TERRAIN_BUS, PATH)
+## declaration every other consumer reads. FIELD types (HEIGHT, MASK, FIELD, SIGNED, PATH)
 ## carry one value per cell; VALUE types (FLOAT, INT, BOOL, VECTOR, CURVE, COLOR) carry one value for the
 ## whole port. `native_param_ports()` must agree: a value-typed input declares a params slot >= 0, a
 ## field-typed input declares -1. GraphPortTypeGate [C] asserts exactly that correspondence.
@@ -271,13 +276,13 @@ func has_output() -> bool:
 enum PortType {
 	HEIGHT = 0,       # Scalar elevation field (meters) - Sky Blue
 	MASK = 1,         # Normalized scalar FIELD [0.0, 1.0], by construction - Amber
-	VECTOR = 2,       # Directional 2D/3D vector / angle value - Purple
-	CURVE = 3,        # Spline / transfer curve - Emerald
+	VECTOR = 2,       # RETIRED 2026-11-09 with Const Vector: the bus is scalar floats and cannot carry one.
+	CURVE = 3,        # RETIRED 2026-11-09 with Const Curve: a node that takes a curve holds it as a property.
 	FLOAT = 4,        # General scalar float VALUE / factor (never a grid) - Cyan
 	INT = 5,          # Discrete count / integer value - Navy
 	COLOR = 6,        # RGBA color / tint / gradient band - Magenta/Pink
 	BOOL = 7,         # Boolean toggle / gate switch - Lime Yellow
-	TERRAIN_BUS = 8,  # Bundled multi-channel stream - Bronze
+	TERRAIN_BUS = 8,  # RETIRED 2026-11-09: no node declares it. Kept so 9..11 and PORT_COLORS keep their indices.
 	PATH = 9,         # World-space polyline with per-vertex width (Pasture3DGraphPath) - Dark Slate
 	FIELD = 10,       # Unsigned scalar field in its OWN units, unbounded - Yellow-Green
 	SIGNED = 11,      # Signed scalar field in its own units; zero is meaningful - Crimson
@@ -426,12 +431,231 @@ func edit_reach() -> float:
 	return 0.0
 
 
-## Types for each input port. Defaults to HEIGHT for all ports.
+## Called once when the palette makes a new node, never when a saved graph loads one. For a default that new
+## nodes should get but saved nodes, which omit default values when saved, must not.
+func on_created() -> void:
+	pass
+
+
+# ---- PORTS ---------------------------------------------------------------------------------------------
+#
+# A node declares its ports ONCE, by overriding `_inputs()` and `_outputs()`, and nothing else about
+# ports. Every accessor below — `input_count`, `input_names`, `input_port_types`, `input_unwired_default`,
+# `native_param_ports`, `aux_grid_port` and the three `output_*` — is FINAL and derived from those two
+# lists. They used to be nine separate overrides matched by index, plus the editor's `SLOT_SPINS` table.
+# PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §6.
+
+## This node's input ports, in port order. Override this; do not override the accessors derived from it.
+##
+## Called again whenever the node changes, so a node whose ports depend on a property (Measure's output
+## name follows its mode) may read its own properties here — provided that property's setter calls
+## `_param_changed()`, which is what tells the cache below to ask again.
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require()]
+
+
+## This node's output ports, in port order. See `_inputs()`.
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [Pasture3DGraphPort.field(&"out", PortType.HEIGHT)]
+
+
+# The derived tables. Rebuilt when `_dirty_revision` moves, which is every `changed`. The evaluators call
+# the accessors inside per-node loops, so they must cost a comparison, not a list build.
+var _ports_revision: int = -1
+var _in_ports: Array[Pasture3DGraphPort] = []
+var _out_ports: Array[Pasture3DGraphPort] = []
+var _in_names := PackedStringArray()
+var _in_types := PackedInt32Array()
+var _in_slots := PackedInt32Array()
+var _in_aux: int = -1
+var _out_names := PackedStringArray()
+var _out_types := PackedInt32Array()
+var _mask_port: int = -1
+
+
+# ---- THE STANDARD MASK (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §9) -----------------------------
+#
+# A FILTER or SOLVER whose port 0 input and port 0 output are both HEIGHT modifies a surface, and every
+# such node gets one `mask` input from here: id `mask`, type MASK, reads 1 unwired, always the LAST input.
+# A node never declares it. What the mask does is one rule,
+#
+#     out0 = lerp(in0, node_out0, clamp(mask, 0, 1))        a non-finite mask cell reads 1
+#
+# and `mask_mode()` says who applies it.
+
+## Who applies the standard mask.
+##   FRAMEWORK  the graph does: one Blend MIX after the node. The node never sees the mask, on any route.
+##   OWN        the node receives it as its last input and applies it itself, because its solve or its
+##              secondary outputs depend on it. Same port, same meaning.
+##   NONE       no standard mask.
+enum MaskMode { FRAMEWORK, OWN, NONE }
+
+## Override to answer OWN or NONE. Ignored by a node the rule above does not select.
+func mask_mode() -> MaskMode:
+	return MaskMode.FRAMEWORK
+
+
+const MASK_PORT_ID := &"mask"
+
+
+## True when `p_in` / `p_out` are the ports of a node the standard-mask rule selects.
+func _takes_standard_mask(p_in: Array[Pasture3DGraphPort], p_out: Array[Pasture3DGraphPort]) -> bool:
+	if mask_mode() == MaskMode.NONE or not has_output():
+		return false
+	if role() != Role.FILTER and role() != Role.SOLVER:
+		return false
+	return not p_in.is_empty() and p_in[0].type == PortType.HEIGHT \
+			and not p_out.is_empty() and p_out[0].type == PortType.HEIGHT
+
+
+## FINAL. The index of the standard mask input, or -1 when this node has none.
+func standard_mask_port() -> int:
+	_ports_refresh()
+	return _mask_port
+
+
+## FINAL. The index of the standard mask input when the GRAPH applies it, else -1. Every evaluator asks
+## this one question: a port it names is never handed to the node.
+func framework_mask_port() -> int:
+	_ports_refresh()
+	return _mask_port if mask_mode() == MaskMode.FRAMEWORK else -1
+
+
+func _ports_refresh() -> void:
+	if _ports_revision == _dirty_revision:
+		return
+	_in_ports = _inputs()
+	_out_ports = _outputs()
+	_mask_port = -1
+	if _takes_standard_mask(_in_ports, _out_ports):
+		var declared := false
+		var has_aux := false
+		for p in _in_ports:
+			declared = declared or p.id == MASK_PORT_ID
+			has_aux = has_aux or p.aux
+		# A node that declares its own `mask` keeps it and gets no second one: two ports with one id would
+		# make every stored wire into either ambiguous. GraphStandardMaskGate [F] is what fails on it.
+		if not declared:
+			var mp := Pasture3DGraphPort.field(MASK_PORT_ID, PortType.MASK).unwired(1.0)
+			# An OWN mask is the node's secondary grid, so it reaches a native kernel wherever it lands.
+			if mask_mode() == MaskMode.OWN and not has_aux:
+				mp.as_aux()
+			_in_ports.append(mp)
+			_mask_port = _in_ports.size() - 1
+	_in_names = PackedStringArray()
+	_in_types = PackedInt32Array()
+	_in_slots = PackedInt32Array()
+	_in_aux = -1
+	var any_slot := false
+	for i in range(_in_ports.size()):
+		var p := _in_ports[i]
+		_in_names.append(p.label)
+		_in_types.append(p.type)
+		_in_slots.append(p.native_slot)
+		any_slot = any_slot or p.native_slot >= 0
+		if p.aux and _in_aux < 0:
+			_in_aux = i
+	# "Empty means no port is a scalar" is what `native_param_ports()` has always documented, and the
+	# lowering passes this array into the program as-is.
+	if not any_slot:
+		_in_slots = PackedInt32Array()
+	_out_names = PackedStringArray()
+	_out_types = PackedInt32Array()
+	for p in _out_ports:
+		_out_names.append(p.label)
+		_out_types.append(p.type)
+	_ports_revision = _dirty_revision
+
+
+## FINAL. The input port descriptors, in port order.
+func input_ports() -> Array[Pasture3DGraphPort]:
+	_ports_refresh()
+	return _in_ports
+
+
+## FINAL. The output port descriptors, in port order.
+func output_ports() -> Array[Pasture3DGraphPort]:
+	_ports_refresh()
+	return _out_ports
+
+
+## FINAL. The index of the input port with this id, or -1.
+func input_index_of(p_id: StringName) -> int:
+	_ports_refresh()
+	for i in range(_in_ports.size()):
+		if _in_ports[i].id == p_id:
+			return i
+	return -1
+
+
+## FINAL. The index of the output port with this id, or -1.
+func output_index_of(p_id: StringName) -> int:
+	_ports_refresh()
+	for i in range(_out_ports.size()):
+		if _out_ports[i].id == p_id:
+			return i
+	return -1
+
+
+## Whether a wire from an output of `p_from_type` into an input of `p_to_type` is legal. The ONE
+## connection matrix: `Pasture3DTerrainGraph.connect_ports` refuses what this refuses, `graph_warnings`
+## reports stored wires that fail it, and the graph editor registers its valid connection types from it.
+##
+## The scalar types are all a float underneath, and three of the four directions connect:
+##   field -> field   the per-cell case.
+##   value -> value   one number to one number.
+##   value -> field   a uniform fill, which is what a Const Float into a HEIGHT port has always been.
+##   field -> value   REFUSED (spec §8). A value port reads cell 0 of its source, so a field wired into one
+##                    hands it one arbitrary cell. Measure is the node that reduces a field to a number on
+##                    purpose, and the editor offers to insert it. A wire of this kind that is already
+##                    stored keeps evaluating and is reported by `graph_warnings` (`reads_cell_zero`).
+## COLOR and PATH connect only to themselves: each carries something one float cannot be.
+## A RETIRED type (VECTOR, CURVE, TERRAIN_BUS) connects to nothing, itself included: no node declares one,
+## and a script that does gets a port nothing can be wired to rather than a wire nothing can carry.
+static func can_connect(p_from_type: int, p_to_type: int) -> bool:
+	if is_retired_type(p_from_type) or is_retired_type(p_to_type):
+		return false
+	if p_from_type == p_to_type:
+		return true
+	if reads_cell_zero(p_from_type, p_to_type):
+		return false
+	return is_scalar_type(p_from_type) and is_scalar_type(p_to_type)
+
+
+## True for a wire from a scalar FIELD type into a VALUE type: the one scalar direction `can_connect`
+## refuses. The evaluator reads cell 0 of the field, so such a wire still means something when it is
+## already stored, which is why this is asked separately from "is the wire legal".
+static func reads_cell_zero(p_from_type: int, p_to_type: int) -> bool:
+	return is_field_type(p_from_type) and is_scalar_type(p_from_type) and is_value_type(p_to_type)
+
+
+## True for the types that carry one number for the whole port and travel as a float.
+static func is_value_type(p_type: int) -> bool:
+	return p_type == PortType.FLOAT or p_type == PortType.INT or p_type == PortType.BOOL
+
+
+## True for the enum members kept only so the others keep their numbers and colours.
+static func is_retired_type(p_type: int) -> bool:
+	return p_type == PortType.VECTOR or p_type == PortType.CURVE or p_type == PortType.TERRAIN_BUS
+
+
+## True for the types that travel as a float per cell or one float for the port, and so interconnect.
+static func is_scalar_type(p_type: int) -> bool:
+	return p_type == PortType.HEIGHT or p_type == PortType.MASK or p_type == PortType.FIELD \
+			or p_type == PortType.SIGNED or p_type == PortType.FLOAT or p_type == PortType.INT \
+			or p_type == PortType.BOOL
+
+
+## The enum key for a port type, for a message. "?" for a number that is not a type.
+static func port_type_name(p_type: int) -> String:
+	var k = PortType.find_key(p_type)
+	return String(k) if k != null else "?"
+
+
+## FINAL — declare `_inputs()`. Types for each input port.
 func input_port_types() -> PackedInt32Array:
-	var arr := PackedInt32Array()
-	arr.resize(input_count())
-	arr.fill(PortType.HEIGHT)
-	return arr
+	_ports_refresh()
+	return _in_types
 
 
 ## Output port type of the PRIMARY (port 0) output. Defaults to HEIGHT. Kept as the single-output
@@ -454,26 +678,30 @@ func output_port_type() -> int:
 ## header: this is the split `native_param_ports()` must agree with, and the gate asserts it.
 static func is_field_type(p_type: int) -> bool:
 	return p_type == PortType.HEIGHT or p_type == PortType.MASK or p_type == PortType.FIELD \
-			or p_type == PortType.SIGNED or p_type == PortType.TERRAIN_BUS or p_type == PortType.PATH
+			or p_type == PortType.SIGNED or p_type == PortType.PATH
 
 
 ## How many output ports this node exposes. 1 for every node except a multi-output SOLVER, which returns
 ## its primary height plus one grid per derived channel (e.g. Scree = [height, deposition-mask]). The
 ## connection tuple already carries `from_port`, so a consumer wires to a specific channel; the evaluator
 ## materialises port 0 into its `grids` slot and ports >= 1 into a parallel `aux` map.
+## FINAL — declare `_outputs()`.
 func output_count() -> int:
-	return 1
+	_ports_refresh()
+	return _out_ports.size()
 
 
-## Labels for each output port, for the editor's right-side slots. Length should match `output_count()`.
+## FINAL — declare `_outputs()`. Labels for each output port, for the editor's right-side slots.
 func output_names() -> PackedStringArray:
-	return PackedStringArray(["out"])
+	_ports_refresh()
+	return _out_names
 
 
-## Types for each output port, in port order. Defaults to a single HEIGHT. A multi-output node overrides
-## this so the editor colours each channel slot (a Scree's channel-1 slot is MASK-amber).
+## FINAL — declare `_outputs()`. Types for each output port, in port order; the editor colours each
+## channel slot from this (a Scree's channel-1 slot is MASK-amber).
 func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT])
+	_ports_refresh()
+	return _out_types
 
 
 ## MULTI-OUTPUT grid entry point. Returns one grid per output port, in port order (`output_count()`
@@ -484,9 +712,10 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: R
 	return [eval_grid(p_inputs, p_gw, p_gh, p_mask, p_rect)]
 
 
-## How many input ports this node reads. GENERATOR = 0; a FILTER = 1; Blend = 2.
+## FINAL — declare `_inputs()`. How many input ports this node reads. GENERATOR = 0; a FILTER = 1.
 func input_count() -> int:
-	return 1
+	_ports_refresh()
+	return _in_ports.size()
 
 
 ## Which native params SLOT each input port overrides when a wire drives it, in port order; -1 for a port
@@ -498,8 +727,11 @@ func input_count() -> int:
 ## not the native one, and anything deriving "is this a grid port" from the table got the wrong answer
 ## (see the Expand/Shrink `amount` note that entry carried). Declared here, the fact travels with the
 ## node that owns it.
+##
+## FINAL — it is each port's `native_slot`, declared in `_inputs()`.
 func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array()
+	_ports_refresh()
+	return _in_slots
 
 
 ## The scalar input a per-cell colour node (one answering `graph_color_cells`) needs tapped, or -1. The colour
@@ -545,9 +777,10 @@ func native_out_count() -> int:
 	return 1
 
 
-## Port labels, for the editor and for configuration warnings. Length should match `input_count()`.
+## FINAL — declare `_inputs()`. Port labels, for the editor and for configuration warnings.
 func input_names() -> PackedStringArray:
-	return PackedStringArray(["in"])
+	_ports_refresh()
+	return _in_names
 
 
 ## Which INPUT PORT carries this node's secondary GRID operand -- the mask, the noise field, the per-cell
@@ -560,15 +793,28 @@ func input_names() -> PackedStringArray:
 ## ignored AND a driving constant acted as one -- and nothing refused the graph.
 ##
 ## Port 0 is the primary input and is never the answer; -1 means the op has no secondary grid.
+##
+## FINAL — it is the input declared `.as_aux()` in `_inputs()`.
 func aux_grid_port() -> int:
-	return -1
+	_ports_refresh()
+	return _in_aux
 
 
 ## The value an UNWIRED input port reads. A HEIGHT port reads 0 (a missing height adds nothing); a MASK
 ## port reads 1.0 (a missing gate is fully open, so an unwired mask input is a no-op rather than a hard 0
-## that would zero the node out). Nodes with a mask/weight input override this per port.
-func input_unwired_default(_p_port: int) -> float:
-	return 0.0
+## that would zero the node out).
+##
+## FINAL. A port backed by a node property reads that property, live — which is what makes the inline
+## widget and the unwired value one number rather than two that agree. Any other port reads the
+## `.unwired()` value its descriptor declares.
+func input_unwired_default(p_port: int) -> float:
+	_ports_refresh()
+	if p_port < 0 or p_port >= _in_ports.size():
+		return 0.0
+	var p := _in_ports[p_port]
+	if p.property != &"":
+		return float(get(p.property))
+	return p.default_value
 
 
 ## CELL node entry point. `p_wx` / `p_wz` are this cell's WORLD XZ (so noise stays continuous where two

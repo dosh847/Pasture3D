@@ -45,7 +45,8 @@ static var stale_count: int = 0
 ## Node indices of every runtime sink in `p_graph`, in graph order.
 static func sinks_of(p_graph) -> PackedInt32Array:
 	var out := PackedInt32Array()
-	if p_graph == null:
+	# A refused graph (wrong format version) has no sinks: nothing of it may publish to a runtime consumer.
+	if p_graph == null or not p_graph.is_compatible():
 		return out
 	for i in range(p_graph.nodes.size()):
 		var n = p_graph.nodes[i]

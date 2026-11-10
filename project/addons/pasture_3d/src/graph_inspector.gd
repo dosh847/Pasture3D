@@ -428,6 +428,7 @@ func refresh() -> bool:
 		_refresh_labels()
 		return false
 
+	editor._stamp_host_params()
 	var compiled: Dictionary = graph.compile_graph_program_multi([node_index])
 	if compiled.is_empty():
 		last_reading = {"no_data": true, "reason": "the graph does not lower"}
@@ -438,7 +439,7 @@ func refresh() -> bool:
 		last_reading = {"no_data": true, "reason": "the node has no slot in the compiled program"}
 		_refresh_labels()
 		return false
-	var slot: int = int(slot_of[node_index])
+	var slot: int = Pasture3DTerrainGraph.tap_slot(compiled, node_index, channel)
 
 	var input_data: Dictionary = editor._get_preview_input_data(INSPECT_SIZE)
 	var input: PackedFloat32Array = input_data["grid"]
@@ -455,7 +456,7 @@ func refresh() -> bool:
 			"slot": slot, "channel": channel, "node": node_index}
 	var result: Dictionary = Pasture3DUtil.graph_eval_grid_taps(compiled["program"],
 			INSPECT_SIZE, INSPECT_SIZE, rect, input,
-			PackedInt32Array([slot]), PackedInt32Array([channel]))
+			PackedInt32Array([slot]), PackedInt32Array([Pasture3DTerrainGraph.tap_channel(compiled, node_index, channel)]))
 
 	var unserved: PackedInt32Array = result.get("unserved", PackedInt32Array())
 	var reserved: PackedInt32Array = result.get("reserved", PackedInt32Array())

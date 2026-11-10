@@ -47,8 +47,14 @@ func native_lower() -> Dictionary:
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 1])
+## Two ports, where the spec listed three. The spec's `height` port fed nothing: the water mask comes from
+## the depth, and the shore band comes from the distance to that mask. A port wired to nothing inside the
+## node is worse than a missing one — it tells the author a value matters when it does not.
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"depth", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"shore_width", PortType.FLOAT, &"shore_width", 1),
+	]
 
 
 func role() -> Role:
@@ -59,29 +65,11 @@ func needs_grid() -> bool:
 	return true
 
 
-## Two ports, where the spec listed three. The spec's `height` port fed nothing: the water mask comes from
-## the depth, and the shore band comes from the distance to that mask. A port wired to nothing inside the
-## node is worse than a missing one — it tells the author a value matters when it does not.
-func input_count() -> int:
-	return 2
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["depth", "shore_width"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.FLOAT])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		1: return shore_width
-		_: return 0.0
-
-
-func output_count() -> int:
-	return 2
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"water", PortType.MASK),
+		Pasture3DGraphPort.field(&"shore", PortType.MASK),
+	]
 
 
 ## The channels the NATIVE op writes, which is now every channel this node offers.
@@ -92,14 +80,6 @@ func output_count() -> int:
 ## the GDScript evaluator. The solver had already computed the field and the op was discarding it.
 func native_out_count() -> int:
 	return 2 # water, shore
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["water", "shore"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.MASK, PortType.MASK])
 
 
 func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> Array:

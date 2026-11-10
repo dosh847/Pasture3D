@@ -191,18 +191,31 @@ func native_lower() -> Dictionary:
 	return {"params": p, "lut": PackedFloat32Array([droplet_density, 1.0 if deposit_at_death else 0.0])}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, -1, 0, 4, 5])
+## The mask scales what the node does, cell by cell, inside the kernel; it is not a blend of the finished
+## result over the input (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §9.3.1).
+func mask_mode() -> MaskMode:
+	return MaskMode.OWN
+
+
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		# Unwired it reads the property, live. Not `backed_by`: Droplet Count is hidden in METRIC, and a
+		# backed port would put its spin on the row there.
+		Pasture3DGraphPort.value(&"droplets", PortType.INT, &"", 0).unwired(float(droplet_count)),
+		Pasture3DGraphPort.value(&"erosion_speed", PortType.FLOAT, &"erosion_speed", 4),
+		Pasture3DGraphPort.value(&"deposition_speed", PortType.FLOAT, &"deposition_speed", 5),
+	]
 
 
 ## The native freeze key: the surface and the mask grids (an unwired mask hashes as its 1.0 default, via
 ## key_defaults), plus the three drivable scalars. A mask or a wired Const moving now stales the solve.
 func freeze_key_grid_ports() -> PackedInt32Array:
-	return PackedInt32Array([0, 1])
+	return PackedInt32Array([0, 4])
 
 
 func freeze_key_scalar_ports() -> PackedInt32Array:
-	return PackedInt32Array([2, 3, 4])
+	return PackedInt32Array([1, 2, 3])
 
 
 func role() -> Role:
@@ -217,36 +230,13 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 5
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "mask", "droplets", "erosion_speed", "deposition_speed"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.HEIGHT,
-		PortType.MASK,
-		PortType.INT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return 1.0
-		2: return float(droplet_count)
-		3: return erosion_speed
-		4: return deposition_speed
-		_: return 0.0
-
-
-func output_count() -> int:
-	return 4
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"eroded", PortType.FIELD),
+		Pasture3DGraphPort.field(&"deposited", PortType.FIELD),
+		Pasture3DGraphPort.field(&"flow", PortType.FIELD),
+	]
 
 
 ## The channels the NATIVE op writes, which is now every channel this node offers.
@@ -257,14 +247,6 @@ func output_count() -> int:
 ## the GDScript evaluator. The solver had already computed the field and the op was discarding it.
 func native_out_count() -> int:
 	return 4 # height, eroded, deposited, flow
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "eroded", "deposited", "flow"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.FIELD, PortType.FIELD, PortType.FIELD])
 
 
 func _validate_property(p_property: Dictionary) -> void:
@@ -285,10 +267,10 @@ func node_warnings() -> PackedStringArray:
 func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> Array:
 	var n := p_gw * p_gh
 	var surface: PackedFloat32Array = (p_inputs[0] as PackedFloat32Array) if (p_inputs.size() > 0 and p_inputs[0] is PackedFloat32Array) else Pasture3DGraphOps.zeros(n)
-	var mask_in: PackedFloat32Array = (p_inputs[1] as PackedFloat32Array) if (p_inputs.size() > 1 and p_inputs[1] is PackedFloat32Array) else PackedFloat32Array()
-	var d_count: int = int(p_inputs[2][0]) if (p_inputs.size() > 2 and p_inputs[2] is PackedFloat32Array and p_inputs[2].size() > 0) else droplet_count
-	var es: float = float(p_inputs[3][0]) if (p_inputs.size() > 3 and p_inputs[3] is PackedFloat32Array and p_inputs[3].size() > 0) else erosion_speed
-	var ds: float = float(p_inputs[4][0]) if (p_inputs.size() > 4 and p_inputs[4] is PackedFloat32Array and p_inputs[4].size() > 0) else deposition_speed
+	var mask_in: PackedFloat32Array = (p_inputs[4] as PackedFloat32Array) if (p_inputs.size() > 4 and p_inputs[4] is PackedFloat32Array) else PackedFloat32Array()
+	var d_count: int = int(p_inputs[1][0]) if (p_inputs.size() > 1 and p_inputs[1] is PackedFloat32Array and p_inputs[1].size() > 0) else droplet_count
+	var es: float = float(p_inputs[2][0]) if (p_inputs.size() > 2 and p_inputs[2] is PackedFloat32Array and p_inputs[2].size() > 0) else erosion_speed
+	var ds: float = float(p_inputs[3][0]) if (p_inputs.size() > 3 and p_inputs[3] is PackedFloat32Array and p_inputs[3].size() > 0) else deposition_speed
 
 	if surface.size() != n:
 		surface = Pasture3DGraphOps.zeros(n)

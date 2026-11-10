@@ -139,7 +139,7 @@ func _make_eq(macro_g: float, meso_g: float, micro_g: float, macro_p: int, meso_
 
 
 func _filter_graph(node: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var inp := Pasture3DGraphNodeInput.new()
 	var out := Pasture3DGraphNodeOutput.new()
 	g.nodes = [inp, node, out]

@@ -23,9 +23,13 @@ namespace godot {
 //
 // Any of p_dx, p_dy, p_mask may be empty: an empty offset is zero and an empty mask is fully on. A NaN
 // offset or mask cell reads as no displacement.
+//
+// p_direction 0 (WORLD) reads dx / dy on world X / Z. 1 (SLOPE) reads dx ALONG the surface's own uphill
+// direction and dy across it (90 degrees counter-clockwise), so a positive dx pushes every slope outward
+// downhill whichever way it faces. Flat ground (|grad| <= 1e-4) or a NaN neighbour does not move.
 PackedFloat32Array displace_solve(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_dx,
 		const PackedFloat32Array &p_dy, const PackedFloat32Array &p_mask, int p_gw, int p_gh,
-		const Rect2 &p_rect, double p_scale, double p_amount);
+		const Rect2 &p_rect, double p_scale, double p_amount, int p_direction = 0);
 
 } // namespace godot
 

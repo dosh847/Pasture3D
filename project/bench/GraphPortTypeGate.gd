@@ -30,6 +30,10 @@
 #   [F] every declared output type reaches some declared input type and can be dragged off its socket
 #   [G] no two port colours are near-identical (SIGNED used to share COLOR's magenta)
 #   [H] DLA's coverage and detail_size ports reach the growth when wired
+#   [I] no field type connects to a value type (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §8, criterion A)
+#   [J] the constants and both Measure outputs drive a FLOAT port; a Noise does not (§8 B)
+#   [K] a field-to-value wire a graph already holds warns, survives a save, and evaluates as before (§8 C)
+#   [L] the editor offers Insert Measure for exactly that drop, and value ports draw a diamond
 #
 # CONTROLS. [A]-[D] are decided by pure predicates that this gate also runs against fabricated BAD
 # declarations, so each prints its control alongside its verdict: a criterion that only ever sees healthy
@@ -47,20 +51,20 @@ const MIN_NODES := 60
 
 ## The types that carry a grid. Kept in step with `Pasture3DGraphNode.is_field_type` by [C]'s own use of
 ## that helper — this list is only here to name them in the report.
-const FIELD_TYPE_NAMES := ["HEIGHT", "MASK", "FIELD", "SIGNED", "TERRAIN_BUS", "PATH"]
+const FIELD_TYPE_NAMES := ["HEIGHT", "MASK", "FIELD", "SIGNED", "PATH"]
 
 ## Ports that break [C] for a reason that is documented and that a retype cannot fix. An entry here is a
 ## KNOWN DEFECT, not an exemption from the rule: it is printed on every run so it cannot be forgotten, and
 ## it must name the section of the guide that explains why it stands.
 ##
-##   transform port 1 ('offset') is a VECTOR that feeds no params slot, and `eval_grid` ignores it too. A
-##   Vector2 needs two params entries and the map holds one int per port, and the graph bus is scalar
-##   floats, so the socket is unrepresentable rather than unfinished. Removing it shifts every later port
-##   index down by one and silently rewires saved graphs — a migration, not a retype.
-##   PASTURE3D_GRAPH_PORT_TYPES_GUIDE.md §7.
-##   export_normal_map port 1 ('normal') is declared now so the node's shape is final, and a wire into it is
-##   REFUSED BY NAME by the writer until the program can carry a vector grid. See that node's header.
-const KNOWN_INERT_PORTS := {"transform": [1], "export_normal_map": [1]}
+##
+##   EMPTY since 2026-11-09. It held Transform's `offset` and Export Normal Map's `normal`, two VECTOR
+##   inputs nothing could drive; both went when wires were stored by port id and removing a port stopped
+##   re-aiming the ones after it (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §7.3).
+const KNOWN_INERT_PORTS := {}
+
+## Every `_check` call on a healthy run. A criterion that throws part-way leaves the count short.
+const EXPECTED_CHECKS := 47
 
 var _fail := 0
 var _checks := 0
@@ -77,10 +81,15 @@ func _ready() -> void:
 	_f_every_output_reaches_an_input(nodes)
 	_g_type_colours_distinct()
 	_h_dla_reads_its_ports()
+	_i_no_field_into_value()
+	_j_values_drive_a_float_port()
+	_k_stored_field_to_value_wire()
+	_l_insert_measure()
 
 	# A criterion that threw before asserting increments nothing, so count completions, not just failures.
-	if _checks < 12:
-		print("\n    VACUOUS: only %d checks completed; the gate did not measure what it claims to." % _checks)
+	if _checks != EXPECTED_CHECKS:
+		print("\n    VACUOUS: %d checks completed, expected %d; the gate did not measure what it claims to."
+				% [_checks, EXPECTED_CHECKS])
 		_fail += 1
 	print("\n=== %s (%d failures, %d checks) ===\n"
 			% ["GRAPH PORT TYPE PASS" if _fail == 0 else "GRAPH PORT TYPE FAIL", _fail, _checks])
@@ -169,8 +178,8 @@ func _b_one_output_declaration(p_nodes: Array) -> void:
 
 
 class _RogueSingular extends Pasture3DGraphNode:
-	func output_port_types() -> PackedInt32Array:
-		return PackedInt32Array([PortType.MASK])
+	func _outputs() -> Array[Pasture3DGraphPort]:
+		return [Pasture3DGraphPort.field(&"out", PortType.MASK)]
 
 	func output_port_type() -> int:
 		return PortType.HEIGHT
@@ -217,7 +226,8 @@ func _c_field_value_split(p_nodes: Array) -> void:
 	_check(bad.is_empty(), "%d contradictions, %d known and documented" % [bad.size(), known.size()])
 	# An allowlist that stops matching anything is an allowlist nobody will ever delete. Fail if the known
 	# defect has been fixed, so the entry goes with the fix rather than outliving it.
-	_check(known.size() == 2, "the two known inert ports are still present (found %d)" % known.size())
+	_check(known.size() == KNOWN_INERT_PORTS.size(), "every listed inert port is still present (found %d of %d)"
+			% [known.size(), KNOWN_INERT_PORTS.size()])
 	_check(Pasture3DGraphNode.is_field_type(Pasture3DGraphNode.PortType.FIELD)
 			and Pasture3DGraphNode.is_field_type(Pasture3DGraphNode.PortType.SIGNED)
 			and not Pasture3DGraphNode.is_field_type(Pasture3DGraphNode.PortType.FLOAT)
@@ -275,8 +285,7 @@ func _e_field_types_are_wireable(p_nodes: Array) -> void:
 			declared[int(t)] = true
 	var scalars: Array[int] = []
 	for t in declared:
-		if Pasture3DGraphNode.is_field_type(t) and t != Pasture3DGraphNode.PortType.PATH \
-				and t != Pasture3DGraphNode.PortType.TERRAIN_BUS:
+		if Pasture3DGraphNode.is_field_type(t) and t != Pasture3DGraphNode.PortType.PATH:
 			scalars.append(t)
 	scalars.sort()
 
@@ -304,9 +313,9 @@ func _e_field_types_are_wireable(p_nodes: Array) -> void:
 
 
 # --- F: every declared output type can reach some declared input type, and can be dragged off -------------
-## Output types with no possible consumer, and why. CURVE carries a Resource the scalar bus cannot, and no
-## node declares a CURVE input yet, so Const Curve drives nothing. Printed every run; remove with the fix.
-const KNOWN_UNREACHABLE_OUTPUTS := {"CURVE": "no CURVE input exists; the bus cannot carry a Curve"}
+## Output types with no possible consumer, and why. EMPTY since 2026-11-09: it held CURVE, for Const Curve,
+## which was removed with the type.
+const KNOWN_UNREACHABLE_OUTPUTS := {}
 
 func _f_every_output_reaches_an_input(p_nodes: Array) -> void:
 	print("[F] every declared output type connects to at least one declared input type, and right-disconnects")
@@ -336,7 +345,9 @@ func _f_every_output_reaches_an_input(p_nodes: Array) -> void:
 	for k in known:
 		print("        KNOWN  " + k)
 	_check(dead.is_empty(), "%d output types, unreachable: %s" % [outs.size(), ", ".join(dead)])
-	_check(known.size() == 1, "the one known unreachable output type is still present (found %d)" % known.size())
+	_check(known.size() == KNOWN_UNREACHABLE_OUTPUTS.size(),
+			"every listed unreachable output type is still present (found %d of %d)"
+			% [known.size(), KNOWN_UNREACHABLE_OUTPUTS.size()])
 	_check(ge.is_valid_connection_type(Pasture3DGraphNode.PortType.BOOL, Pasture3DGraphNode.PortType.FLOAT)
 			and ge.is_valid_connection_type(Pasture3DGraphNode.PortType.FLOAT, Pasture3DGraphNode.PortType.SIGNED),
 			"BOOL -> FLOAT and FLOAT -> SIGNED are accepted (Const Bool and Const Float can drive a Salève dx)")
@@ -401,3 +412,192 @@ func _h_dla_reads_its_ports() -> void:
 			PackedFloat32Array([float(d.get("coverage"))]), PackedFloat32Array([float(d.get("detail_size"))])], gw, gw, null, rect)
 	_check(wired != un, "wiring coverage 0.3 / detail 0.4 changes the massif")
 	_check(same_as_props == un, "control: wiring the property values reproduces the unwired massif")
+
+
+# --- I: no field type connects to a value type ------------------------------------------------------------
+const SCALAR_FIELDS: Array[int] = [Pasture3DGraphNode.PortType.HEIGHT, Pasture3DGraphNode.PortType.MASK,
+		Pasture3DGraphNode.PortType.FIELD, Pasture3DGraphNode.PortType.SIGNED]
+const VALUES: Array[int] = [Pasture3DGraphNode.PortType.FLOAT, Pasture3DGraphNode.PortType.INT,
+		Pasture3DGraphNode.PortType.BOOL]
+
+func _i_no_field_into_value() -> void:
+	print("[I] no field type connects to a value type, in the editor's matrix and in the model's")
+	var ge := GraphEdit.new()
+	add_child(ge)
+	GraphEditorScript.register_connection_types(ge)
+	var open: Array[String] = []
+	var closed: Array[String] = []
+	var disagree := 0
+	for f in SCALAR_FIELDS:
+		for v in VALUES:
+			if ge.is_valid_connection_type(f, v):
+				open.append("%s -> %s" % [_type_name(f), _type_name(v)])
+			if not ge.is_valid_connection_type(v, f):
+				closed.append("%s -> %s" % [_type_name(v), _type_name(f)])
+			if ge.is_valid_connection_type(f, v) != Pasture3DGraphNode.can_connect(f, v) \
+					or ge.is_valid_connection_type(v, f) != Pasture3DGraphNode.can_connect(v, f):
+				disagree += 1
+	_check(open.is_empty(), "%d field -> value pairs, accepted: %s" % [SCALAR_FIELDS.size() * VALUES.size(), ", ".join(open)])
+	_check(closed.is_empty(), "control: all %d value -> field pairs still connect (refused: %s)"
+			% [SCALAR_FIELDS.size() * VALUES.size(), ", ".join(closed)])
+	_check(disagree == 0, "the editor's matrix and can_connect agree on all %d pairs" % (2 * SCALAR_FIELDS.size() * VALUES.size()))
+	ge.queue_free()
+
+
+# --- J: the value sources drive a FLOAT port, a field source does not ---------------------------------------
+## A Noise that produces something: the node has no FastNoiseLite until it is given one, and reads 0.
+func _noise(p_seed: int, p_amplitude: float) -> Pasture3DGraphNode:
+	var n: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"noise")
+	var fnl := FastNoiseLite.new()
+	fnl.seed = p_seed
+	n.set("noise", fnl)
+	n.set("amplitude", p_amplitude)
+	return n
+
+
+## Transform, with `p_source` (an op) beside it. Returns [graph, source index, transform index, rotation port].
+func _transform_graph(p_source: StringName) -> Array:
+	var g := Pasture3DTerrainGraph.create_empty()
+	var base := g.add_node(_noise(11, 40.0))
+	var src := g.add_node(_noise(7, 25.0) if p_source == &"noise" else Pasture3DGraphNodeRegistry.create(p_source))
+	var tr := g.add_node(Pasture3DGraphNodeRegistry.create(&"transform"))
+	var out := g.add_node(Pasture3DGraphNodeRegistry.create(&"output"))
+	g.connect_ports(base, 0, tr, 0)
+	g.connect_ports(tr, 0, out, 0)
+	g.set_output(out)
+	return [g, src, tr, g.nodes[tr].input_index_of(&"rotation")]
+
+
+func _j_values_drive_a_float_port() -> void:
+	print("[J] Const Float, Const Int, Const Bool and both Measure outputs connect to a FLOAT port")
+	var probe := _transform_graph(&"const")
+	var rot: int = probe[3]
+	_check(rot > 0 and probe[0].nodes[probe[2]].input_ports()[rot].type == Pasture3DGraphNode.PortType.FLOAT,
+			"Transform's `rotation` is input %d and is FLOAT" % rot)
+	var refused: Array[String] = []
+	var made := 0
+	for src in [[&"const", 0], [&"const_int", 0], [&"const_bool", 0], [&"measure", 0], [&"measure", 1]]:
+		var p := _transform_graph(src[0])
+		if p[0].connect_ports(p[1], src[1], p[2], rot):
+			made += 1
+		else:
+			refused.append("%s:%d" % [src[0], src[1]])
+	_check(refused.is_empty(), "%d of 5 value outputs connected (refused: %s)" % [made, ", ".join(refused)])
+	var n := _transform_graph(&"noise")
+	var before: int = n[0].connections.size()
+	var ok: bool = n[0].connect_ports(n[1], 0, n[2], rot)
+	_check(not ok and n[0].connections.size() == before,
+			"control: a Noise output into `rotation` is refused and stores nothing (returned %s)" % str(ok))
+	# ... and the refusal is about the port, not about that Noise: the same output into the field port goes in.
+	_check(n[0].connect_ports(n[1], 0, n[2], 0), "control: the same Noise output connects to Transform's field input")
+
+
+# --- K: a stored field-to-value wire warns, survives, and evaluates as before -------------------------------
+func _cell_zero_warnings(p_graph: Pasture3DTerrainGraph) -> Array[String]:
+	var out: Array[String] = []
+	for w in p_graph.graph_warnings():
+		if w.contains("cell 0"):
+			out.append(w)
+	return out
+
+
+func _k_stored_field_to_value_wire() -> void:
+	print("[K] a field-to-value wire the graph already holds warns, is kept, and evaluates as before")
+	var gw := 48
+	# Off the origin: gradient noise is exactly 0 on its lattice, and a cell 0 of 0 is the unwired rotation.
+	# The first run of this criterion found that out by failing "the wire is live".
+	var rect := Rect2(37.3, 91.7, 256, 256)
+	# The stored wire: assigned through `connections`, which is how a graph saved before this rule holds it.
+	var p := _transform_graph(&"noise")
+	var g: Pasture3DTerrainGraph = p[0]
+	var src: int = p[1]
+	var tr: int = p[2]
+	var rot: int = p[3]
+	var unwired: PackedFloat32Array = g.evaluate(gw, gw, rect)
+	var arr: Array = g.connections.duplicate()
+	arr.append(PackedInt32Array([src, 0, tr, rot]))
+	g.connections = arr
+	var warns := _cell_zero_warnings(g)
+	for w in warns:
+		print("        " + w)
+	_check(warns.size() == 1 and warns[0].contains(g.nodes[tr].display_name()) and warns[0].contains("rotation"),
+			"one warning, naming the node and the port (%d found)" % warns.size())
+
+	# "As before" is cell 0 of the source: the same graph with a Const holding that number in its place.
+	var cell0: float = g.evaluate(gw, gw, rect, null, null, src)[0]
+	_check(absf(cell0) > 1.0, "the source's cell 0 is a real rotation, %.4f degrees" % cell0)
+	var wired: PackedFloat32Array = g.evaluate(gw, gw, rect)
+	var c := _transform_graph(&"const")
+	var cg: Pasture3DTerrainGraph = c[0]
+	cg.nodes[c[1]].set("value", cell0)
+	cg.connect_ports(c[1], 0, c[2], rot)
+	var with_const: PackedFloat32Array = cg.evaluate(gw, gw, rect)
+	_check(wired == with_const and wired.size() == gw * gw,
+			"it evaluates to what a Const of the source's cell 0 (%.4f) gives, bit for bit" % cell0)
+	_check(wired != unwired, "the wire is live: the result differs from the unwired graph")
+	_check(_cell_zero_warnings(cg).is_empty(), "control: the graph with the Const in its place does not warn")
+
+	# Kept, not dropped: through a save and a load, and through a copy.
+	var path := "user://graph_port_type_gate_k.tres"
+	ResourceSaver.save(g, path)
+	var back: Pasture3DTerrainGraph = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_IGNORE)
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	_check(back != null and back.connections.size() == g.connections.size() and _cell_zero_warnings(back).size() == 1,
+			"saved and reloaded, the wire is still there and still warns (%d of %d wires)"
+			% [back.connections.size() if back != null else -1, g.connections.size()])
+	var before := g.connections.size()
+	g.duplicate_subgraph([src, tr])
+	_check(g.connections.size() == before + 1 and _cell_zero_warnings(g).size() == 2,
+			"duplicating the two nodes copies the wire between them (%d -> %d wires)" % [before, g.connections.size()])
+
+
+# --- L: Insert Measure, and the diamond -----------------------------------------------------------------
+func _l_insert_measure() -> void:
+	print("[L] the editor offers Insert Measure for a field dropped on a value port, and inserts it")
+	var p := _transform_graph(&"noise")
+	var g: Pasture3DTerrainGraph = p[0]
+	var src: int = p[1]
+	var tr: int = p[2]
+	var rot: int = p[3]
+	var konst := g.add_node(Pasture3DGraphNodeRegistry.create(&"const"))
+	var ed := Pasture3DGraphEditor.new()
+	add_child(ed)
+	ed._build_ui()
+	ed.graph = g
+	ed._rebuild()
+	_check(ed.measure_offer(src, 0, tr, rot), "a Noise output onto `rotation` is offered a Measure")
+	_check(not ed.measure_offer(konst, 0, tr, rot) and not ed.measure_offer(src, 0, tr, 0)
+			and not ed.measure_offer(src, 0, tr, 99),
+			"control: a Const onto `rotation`, a Noise onto the field input and a port that does not exist are not")
+
+	var gn := ed._graphedit.get_node_or_null("n%d" % tr) as GraphNode
+	_check(gn != null and gn.get_slot_custom_icon_left(rot) != null and gn.get_slot_custom_icon_left(0) == null,
+			"Transform draws a diamond on `rotation` and the default circle on its field input")
+	var kn := ed._graphedit.get_node_or_null("n%d" % konst) as GraphNode
+	var sn := ed._graphedit.get_node_or_null("n%d" % src) as GraphNode
+	_check(kn != null and sn != null and kn.get_slot_custom_icon_right(0) != null and sn.get_slot_custom_icon_right(0) == null,
+			"a Const's output is a diamond and a Noise's is a circle")
+
+	var nodes_before := g.nodes.size()
+	var wires_before := g.connections.size()
+	ed._action_insert_measure(src, 0, tr, rot)
+	var m := nodes_before
+	var is_measure: bool = g.nodes.size() == nodes_before + 1 and g.nodes[m] is Pasture3DGraphNodeMeasure
+	var a := false
+	var b := false
+	for c in g.connections:
+		if int(c[0]) == src and int(c[1]) == 0 and int(c[2]) == m and int(c[3]) == 0:
+			a = true
+		if int(c[0]) == m and int(c[1]) == 0 and int(c[2]) == tr and int(c[3]) == rot:
+			b = true
+	_check(is_measure and a and b and g.connections.size() == wires_before + 2,
+			"it adds one Measure wired Noise -> in and min -> rotation (%d -> %d nodes, %d -> %d wires)"
+			% [nodes_before, g.nodes.size(), wires_before, g.connections.size()])
+	_check(_cell_zero_warnings(g).is_empty(), "and the graph has no cell-0 warning")
+	ed._get_undo_redo().undo()
+	_check(g.nodes.size() == nodes_before and g.connections.size() == wires_before,
+			"one undo removes the Measure and both wires (%d nodes, %d wires)" % [g.nodes.size(), g.connections.size()])
+	# Control: asked for a wire that is legal as it stands, the action does nothing.
+	ed._action_insert_measure(konst, 0, tr, rot)
+	_check(g.nodes.size() == nodes_before, "control: Insert Measure on a Const -> rotation pair adds nothing")
+	ed.queue_free()

@@ -15,6 +15,11 @@ func role() -> Role:
 	return Role.FILTER
 
 
+## A bend in a wire has nothing to mask (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §9.3.1).
+func mask_mode() -> MaskMode:
+	return MaskMode.NONE
+
+
 func needs_grid() -> bool:
 	return false
 
@@ -23,12 +28,10 @@ func has_output() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 1
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in"])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+	]
 
 
 func eval_cell(_p_wx: float, _p_wz: float, p_inputs: PackedFloat32Array) -> float:

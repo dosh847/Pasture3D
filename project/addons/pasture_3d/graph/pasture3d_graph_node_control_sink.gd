@@ -49,24 +49,17 @@ func op() -> StringName:
 	return &"control_sink"
 
 
-func input_count() -> int:
-	return 4
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["mask", "base", "overlay", "blend"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.MASK, PortType.INT, PortType.INT, PortType.MASK])
-
-
 ## The value/field split the PortType header requires: a value-typed port names a params slot, a
 ## field-typed one names -1. This node never lowers, so no kernel reads these slots — but the
 ## declaration is what the editor and GraphPortTypeGate [C] read to decide whether a port is a grid, and
 ## a node that got it wrong would advertise `base` as wirable from a height field.
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 0, 1, -1])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"mask", PortType.MASK).require(),
+		Pasture3DGraphPort.value(&"base", PortType.INT, &"", 0),
+		Pasture3DGraphPort.value(&"overlay", PortType.INT, &"", 1),
+		Pasture3DGraphPort.field(&"blend", PortType.MASK),
+	]
 
 
 ## NOTHING is required. `base_texture` is an export and `base` is the port that overrides it, so this

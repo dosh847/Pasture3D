@@ -146,7 +146,7 @@ func _c_hillshade_shape_and_mask() -> void:
 
 ## 0 Input -> 2 Blend(ADD) <- 1 Noise ; 2 Blend -> 3 Smooth -> 4 Output.
 func _pipeline() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var noise := FastNoiseLite.new(); noise.seed = 11; noise.frequency = 0.05
 	var nz := Pasture3DGraphNodeNoise.new(); nz.noise = noise; nz.amplitude = 7.0
 	var bl := Pasture3DGraphNodeBlend.new(); bl.mode = Pasture3DGraphNodeBlend.Mode.ADD

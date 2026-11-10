@@ -8,9 +8,16 @@
 # [input_min, input_max] metres maps onto the curve's X in [0, 1], the curve's Y in [0, 1] maps back onto
 # [output_min, output_max] metres, and `amount` cross-fades input against the remap. Values outside the
 # input window clamp to the window edges.
+#
+# Output Range SAME_AS_INPUT maps curve Y back onto the input window itself, so the curve reshapes the
+# distribution of heights and keeps their scale. It follows the RESOLVED window: a wired in_min/in_max
+# (a Measure's min/max, say) moves the output with it.
 @tool
 class_name Pasture3DGraphNodeCurve
 extends Pasture3DGraphNode
+
+## Values are serialised. Append only.
+enum OutputRange { CUSTOM, SAME_AS_INPUT }
 
 ## The transfer function. X and Y are both read over [0, 1]. Unassigned = a pass-through (and a warning).
 @export var curve: Curve:
@@ -44,6 +51,14 @@ var in_max: float:
 	set(v): input_max = v
 
 @export_group("Output range (curve Y → metres)")
+## CUSTOM: curve Y spans Output Min..Max below. SAME_AS_INPUT: it spans the input window, so the scale is
+## kept and only the distribution inside it changes. The out_min/out_max ports are ignored then.
+@export var output_range: OutputRange = OutputRange.CUSTOM:
+	set(v):
+		output_range = v
+		notify_property_list_changed()
+		emit_changed()
+
 ## Height the curve's Y = 0 maps to.
 @export var output_min: float = 0.0:
 	set(v):
@@ -70,13 +85,24 @@ var out_max: float:
 		amount = clampf(v, 0.0, 1.0)
 		emit_changed()
 
-@export_tool_button("Auto Fit Range") var _auto_btn = auto_fit_range
+## Fits the input window to the upstream field's min/max. Measured by the graph editor, which is the only
+## thing that can evaluate this node's upstream; with no graph editor open it does nothing.
+@export_tool_button("Auto Fit Range") var _auto_btn = _request_auto_fit
+
+
+func _request_auto_fit() -> void:
+	editor_action_requested.emit(&"auto_fit")
 
 
 func auto_fit_range(p_min: float = 0.0, p_max: float = 100.0) -> void:
 	input_min = p_min
 	input_max = p_max
 	emit_changed()
+
+
+func _validate_property(p_property: Dictionary) -> void:
+	if output_range == OutputRange.SAME_AS_INPUT and p_property.name in ["output_min", "output_max"]:
+		p_property.usage &= ~PROPERTY_USAGE_EDITOR
 
 
 func op() -> StringName:
@@ -96,6 +122,7 @@ func native_lower() -> Dictionary:
 	p[2] = output_min
 	p[3] = output_max
 	p[4] = amount
+	p[5] = 1.0 if output_range == OutputRange.SAME_AS_INPUT else 0.0
 	var c: Curve = curve
 	if c != null:
 		lut.resize(256)
@@ -104,42 +131,19 @@ func native_lower() -> Dictionary:
 	return {"params": p, "lut": lut}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 0, 1, 2, 3, 4])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"in_min", PortType.FLOAT, &"input_min", 0),
+		Pasture3DGraphPort.value(&"in_max", PortType.FLOAT, &"input_max", 1),
+		Pasture3DGraphPort.value(&"out_min", PortType.FLOAT, &"output_min", 2),
+		Pasture3DGraphPort.value(&"out_max", PortType.FLOAT, &"output_max", 3),
+		Pasture3DGraphPort.value(&"amount", PortType.FLOAT, &"amount", 4),
+	]
 
 
 func role() -> Role:
 	return Role.FILTER
-
-
-func input_count() -> int:
-	return 6
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "in_min", "in_max", "out_min", "out_max", "amount"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.HEIGHT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return input_min
-		2: return input_max
-		3: return output_min
-		4: return output_max
-		5: return amount
-		_: return 0.0
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, _p_rect: Rect2) -> PackedFloat32Array:
@@ -149,6 +153,9 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, _p_rect: Rect2) -
 	var omin: float = float(p_inputs[3][0]) if (p_inputs.size() > 3 and p_inputs[3] is PackedFloat32Array and p_inputs[3].size() > 0) else output_min
 	var omax: float = float(p_inputs[4][0]) if (p_inputs.size() > 4 and p_inputs[4] is PackedFloat32Array and p_inputs[4].size() > 0) else output_max
 	var amt: float = float(p_inputs[5][0]) if (p_inputs.size() > 5 and p_inputs[5] is PackedFloat32Array and p_inputs[5].size() > 0) else amount
+	if output_range == OutputRange.SAME_AS_INPUT:
+		omin = imin
+		omax = imax
 
 	if curve == null:
 		return s
@@ -160,12 +167,18 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, _p_rect: Rect2) -
 
 
 func eval_cell(_p_wx: float, _p_wz: float, p_inputs: PackedFloat32Array) -> float:
-	var x: float = p_inputs[0] if (p_inputs.size() > 0 and not is_nan(p_inputs[0])) else 0.0
+	# NaN passes through, as curve_grid does: a NaN is outside the footprint, not a height of 0. This used to
+	# map it to 0 here, so the is_nan() check below could never fire and the script route painted curve(0)
+	# where the native route left the footprint's hole.
+	var x: float = p_inputs[0] if p_inputs.size() > 0 else 0.0
 	var imin: float = p_inputs[1] if (p_inputs.size() > 1 and not is_nan(p_inputs[1])) else input_min
 	var imax: float = p_inputs[2] if (p_inputs.size() > 2 and not is_nan(p_inputs[2])) else input_max
 	var omin: float = p_inputs[3] if (p_inputs.size() > 3 and not is_nan(p_inputs[3])) else output_min
 	var omax: float = p_inputs[4] if (p_inputs.size() > 4 and not is_nan(p_inputs[4])) else output_max
 	var amt: float = p_inputs[5] if (p_inputs.size() > 5 and not is_nan(p_inputs[5])) else amount
+	if output_range == OutputRange.SAME_AS_INPUT:
+		omin = imin
+		omax = imax
 
 	if curve == null or is_nan(x):
 		return x

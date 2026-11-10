@@ -73,8 +73,13 @@ func native_lower() -> Dictionary:
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 1, -1, 3])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"water_elevation", PortType.FLOAT, &"water_elevation", 1),
+		Pasture3DGraphPort.value(&"flood_percent", PortType.FLOAT, &"flood_percent", 2),
+		Pasture3DGraphPort.value(&"shoreline_width", PortType.FLOAT, &"shoreline_width", 3),
+	]
 
 
 func role() -> Role:
@@ -85,34 +90,12 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 4
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "water_elevation", "flood_percent", "shoreline_width"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.HEIGHT,
-		PortType.FLOAT,
-		PortType.MASK,
-		PortType.FLOAT,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return water_elevation
-		2: return flood_percent
-		3: return shoreline_width
-		_: return 0.0
-
-
-func output_count() -> int:
-	return 3
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"water_depth", PortType.FIELD),
+		Pasture3DGraphPort.field(&"shoreline", PortType.MASK),
+	]
 
 
 ## The channels the NATIVE op writes, which is now every channel this node offers.
@@ -123,14 +106,6 @@ func output_count() -> int:
 ## the GDScript evaluator. The solver had already computed the field and the op was discarding it.
 func native_out_count() -> int:
 	return 3 # height, water_depth, shoreline
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "water_depth", "shoreline"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.FIELD, PortType.MASK])
 
 
 func _param_changed() -> void:

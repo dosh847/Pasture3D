@@ -112,7 +112,7 @@ func _rd_parity_and_route() -> void:
 		dev.floor_height = 15.0
 		dev.gamma = gam
 		dev.amount = 0.8
-		var oracle := dev.solve(cone, _noise_field(31, 25.0), PackedFloat32Array())
+		var oracle := dev.solve(cone, _noise_field(31, 25.0))
 		var d := _max_abs_diff(native, oracle)
 		print("    gamma %.1f  max |native - oracle| = %.9f (want < %s)" % [gam, d, str(PARITY_EPS)])
 		if d > PARITY_EPS:
@@ -134,7 +134,7 @@ func _re_gpu() -> void:
 		var g: Pasture3DTerrainGraph = cases[label]
 		var gpu: PackedFloat32Array = Pasture3DUtil.graph_eval_grid_gpu(g.compile_graph_program(), GW, GH, RECT, cone)
 		if gpu.is_empty():
-			var bare := Pasture3DTerrainGraph.new()
+			var bare := Pasture3DTerrainGraph.create_empty()
 			var bn: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeOutput.new()]
 			bare.nodes = bn
 			bare.connections = [PackedInt32Array([0, 0, 1, 0])]
@@ -176,8 +176,8 @@ func _graph(p_cut: float, p_floor: float, p_gamma: float, p_amount: float, p_noi
 		var c := Pasture3DGraphNodeConst.new()
 		c.value = float(vals[k])
 		nodes.append(c)
-		conns.append(PackedInt32Array([nodes.size() - 1, 0, 1, k + 1]))
-	var g := Pasture3DTerrainGraph.new()
+		conns.append(PackedInt32Array([nodes.size() - 1, 0, 1, nodes[1].input_index_of([&"noise", &"mask"][k])]))
+	var g := Pasture3DTerrainGraph.create_empty()
 	g.nodes = nodes
 	g.connections = conns
 	return g
@@ -189,7 +189,7 @@ func _noise_graph(p_cut: float, p_floor: float, p_gamma: float, p_amount: float)
 	nz.amplitude = 25.0
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), _node(p_cut, p_floor, p_gamma, p_amount),
 			Pasture3DGraphNodeOutput.new(), nz]
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	g.nodes = nodes
 	g.connections = [PackedInt32Array([0, 0, 1, 0]), PackedInt32Array([1, 0, 2, 0]), PackedInt32Array([3, 0, 1, 1])]
 	return g

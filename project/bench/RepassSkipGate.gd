@@ -47,7 +47,7 @@ func _graph(p_with_input: bool) -> Pasture3DNodeGraph:
 	var gn := Pasture3DGraphNodeNoise.new()
 	gn.noise = fn
 	gn.amplitude = 4.0
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	if p_with_input:
 		var blend := Pasture3DGraphNodeBlend.new()
 		blend.mode = Pasture3DGraphNodeBlend.Mode.ADD
@@ -175,7 +175,7 @@ func _b() -> void:
 
 
 func _identity() -> Pasture3DNodeGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [PackedInt32Array([0, 0, 1, 0])]

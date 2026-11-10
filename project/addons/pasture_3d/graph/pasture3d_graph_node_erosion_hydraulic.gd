@@ -146,8 +146,14 @@ func native_lower() -> Dictionary:
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 0, 1, 4, 5])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"iterations", PortType.INT, &"iterations", 0),
+		Pasture3DGraphPort.value(&"rain_rate", PortType.FLOAT, &"rain_rate", 1),
+		Pasture3DGraphPort.value(&"erosion_speed", PortType.FLOAT, &"erosion_speed", 4),
+		Pasture3DGraphPort.value(&"deposition_speed", PortType.FLOAT, &"deposition_speed", 5),
+	]
 
 
 func freeze_key_grid_ports() -> PackedInt32Array:
@@ -166,36 +172,13 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 5
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "iterations", "rain_rate", "erosion_speed", "deposition_speed"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.HEIGHT,
-		PortType.INT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return float(iterations)
-		2: return rain_rate
-		3: return erosion_speed
-		4: return deposition_speed
-		_: return 0.0
-
-
-func output_count() -> int:
-	return 4
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"eroded", PortType.FIELD),
+		Pasture3DGraphPort.field(&"deposited", PortType.FIELD),
+		Pasture3DGraphPort.field(&"flow", PortType.FIELD),
+	]
 
 
 ## The channels the NATIVE op writes, which is now every channel this node offers.
@@ -206,14 +189,6 @@ func output_count() -> int:
 ## the GDScript evaluator. The solver had already computed the field and the op was discarding it.
 func native_out_count() -> int:
 	return 4 # height, eroded, deposited, flow
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "eroded", "deposited", "flow"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.FIELD, PortType.FIELD, PortType.FIELD])
 
 
 func node_warnings() -> PackedStringArray:

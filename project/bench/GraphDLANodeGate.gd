@@ -90,7 +90,9 @@ func _a_declares_two_outputs() -> void:
 			and d.role() == Pasture3DGraphNode.Role.SOLVER and d.needs_grid() \
 			and in_types.size() == d.input_count() and d.input_names().size() == d.input_count() \
 			and in_types.size() > 0 and in_types[0] == Pasture3DGraphNode.PortType.HEIGHT \
-			and _param_ports(in_types) == d.input_count() - 1
+			and _param_ports(in_types) == d.input_count() - 2 \
+			and d.standard_mask_port() == d.input_count() - 1
+	# The last port is the standard mask (ports spec P5), which is a field and not a parameter.
 	# One SEED input, at port 0. The node later grew FLOAT parameter sockets, so `input_count() == 1` stopped
 	# being the way to say that; every port after the seed must be a scalar parameter, and the three port
 	# arrays must agree on how many ports there are.
@@ -242,7 +244,7 @@ func _d_per_solver_freeze() -> void:
 
 func _e_multi_output_mask_routing() -> void:
 	print("[E] The footprint MASK (port 1) drives a Blend's mask input")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var inp := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"), Vector2.ZERO)
 	var dla_node := _new_dla(DLAScript.Evaluation.LIVE)
 	var dn := g.add_node(dla_node, Vector2(200, 0))

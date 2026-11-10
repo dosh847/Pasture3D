@@ -72,32 +72,17 @@ func native_lower() -> Dictionary:
 	return {"params": p, "noise": nz}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 0, 1, -1])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"band_height", PortType.FLOAT, &"band_height", 0),
+		Pasture3DGraphPort.value(&"hardness", PortType.FLOAT, &"hardness", 1),
+		Pasture3DGraphPort.value(&"amount", PortType.FLOAT, &"amount", 2),
+	]
 
 
 func role() -> Role:
 	return Role.FILTER
-
-
-func input_count() -> int:
-	return 4
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "band_height", "hardness", "amount"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.FLOAT, PortType.FLOAT, PortType.MASK])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		1: return band_height
-		2: return hardness
-		3: return amount
-		_: return 0.0
 
 
 func eval_cell(p_wx: float, p_wz: float, p_inputs: PackedFloat32Array) -> float:

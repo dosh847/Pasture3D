@@ -94,7 +94,7 @@ func _surface() -> PackedFloat32Array:
 ## The graph is built the same way for every criterion and only the WIRE moves, so a difference between two
 ## runs is the wire and not the fixture.
 func _graph(p_out_port: int) -> Dictionary:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var inp := Pasture3DGraphNodeRegistry.create(&"input")
 	var er := Pasture3DGraphNodeRegistry.create(&"erosion")
 	var out := Pasture3DGraphNodeRegistry.create(&"output")
@@ -349,7 +349,7 @@ func _d_a_channel_past_out_count_is_unserved() -> void:
 
 	# A node with exactly ONE output is the other half of the rule: channel 1 of a Noise is out of range in
 	# a program where some OTHER slot legitimately has five channels, so the refusal has to be per-slot.
-	var g2 := Pasture3DTerrainGraph.new()
+	var g2 := Pasture3DTerrainGraph.create_empty()
 	var n := Pasture3DGraphNodeRegistry.create(&"noise")
 	var fnl := FastNoiseLite.new()
 	fnl.seed = 4242

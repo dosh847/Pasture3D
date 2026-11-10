@@ -77,8 +77,14 @@ func native_lower() -> Dictionary:
 	# Port 2 is `amount`, which this node reads as a SCALAR (p_inputs[2][0]) and not as a grid.
 	# The entry was missing from the old table, so a driven amount reached the script path and
 	# never the native one.
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 1, 4])
+# `in` is HEIGHT, but the kernel is a pure local min/max and is equally correct on a mask. Typing it
+# HEIGHT keeps the editor's connection rules simple without restricting what it actually does.
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"radius", PortType.FLOAT, &"radius", 1),
+		Pasture3DGraphPort.value(&"amount", PortType.FLOAT, &"amount", 4),
+	]
 
 
 func role() -> Role:
@@ -87,28 +93,6 @@ func role() -> Role:
 
 func needs_grid() -> bool:
 	return true
-
-
-func input_count() -> int:
-	return 3
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "radius", "amount"])
-
-
-func input_port_types() -> PackedInt32Array:
-	# `in` is HEIGHT, but the kernel is a pure local min/max and is equally correct on a mask. Typing it
-	# HEIGHT keeps the editor's connection rules simple without restricting what it actually does.
-	return PackedInt32Array([PortType.HEIGHT, PortType.FLOAT, PortType.FLOAT])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return radius
-		2: return amount
-		_: return 0.0
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:

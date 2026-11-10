@@ -160,7 +160,7 @@ func _make_jordan(amp: float, freq: float, octs: int, gain: float, lac: float, w
 
 
 func _gen_graph(node: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var out := Pasture3DGraphNodeOutput.new()
 	g.nodes = [node, out]
 	g.connect_ports(0, 0, 1, 0)

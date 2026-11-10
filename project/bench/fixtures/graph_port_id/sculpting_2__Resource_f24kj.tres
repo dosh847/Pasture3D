@@ -1,0 +1,25 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="10_2a5dl"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="14_b2p0t"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="32_iib3d"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="33_b2p0t"]
+[ext_resource type="Script" uid="uid://c1fw3sxu0oprh" path="res://addons/pasture_3d/graph/pasture3d_graph_node_smooth.gd" id="34_aw4eb"]
+
+[sub_resource type="Resource" id="Resource_kskq1"]
+script = ExtResource("32_iib3d")
+graph_position = Vector2(-160, 200)
+
+[sub_resource type="Resource" id="Resource_lcaqx"]
+script = ExtResource("33_b2p0t")
+graph_position = Vector2(540, 220)
+
+[sub_resource type="Resource" id="Resource_x1idi"]
+script = ExtResource("34_aw4eb")
+graph_position = Vector2(180, 180)
+
+[resource]
+script = ExtResource("14_b2p0t")
+format_version = 3
+nodes = Array[ExtResource("10_2a5dl")]([SubResource("Resource_kskq1"), SubResource("Resource_lcaqx"), SubResource("Resource_x1idi")])
+wires = [[0, &"height", 2, &"in"], [2, &"out", 1, &"result"]]

@@ -1,7 +1,8 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
 # Pasture3DGraphNodeDevHydraulicSaleve — Pure GDScript Reference Oracle for Salève Hydraulic Erosion.
-# Faithful 1-to-1 implementation of Hesiod / HighMap hmap::hydraulic_saleve steady-state chi-solver.
+# Mirrors the native solve in src/pasture_3d_hydraulic_saleve.cpp, which incises the input rather than solving
+# a free steady state (PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md, fourth and fifth reviews).
 
 @tool
 class_name Pasture3DGraphNodeDevHydraulicSaleve
@@ -24,7 +25,12 @@ extends Pasture3DGraphSolverNode
 		erosion_strength = clampf(v, 0.0, 1.0)
 		_param_changed()
 
-@export_range(0.01, 0.8, 0.01) var drainage_exponent: float = 0.15:
+@export_range(0.0, 100000.0, 1.0, "or_greater", "suffix:m²") var channel_area: float = 0.0:
+	set(v):
+		channel_area = maxf(v, 0.0)
+		_param_changed()
+
+@export_range(0.01, 0.8, 0.01) var drainage_exponent: float = 0.2:
 	set(v):
 		drainage_exponent = clampf(v, 0.01, 0.8)
 		_param_changed()
@@ -34,7 +40,7 @@ extends Pasture3DGraphSolverNode
 		drainage_noise = maxf(v, 0.0)
 		_param_changed()
 
-@export_range(0.05, 4.0, 0.05) var shape_preservation: float = 2.0:
+@export_range(0.05, 4.0, 0.05) var shape_preservation: float = 1.5:
 	set(v):
 		shape_preservation = clampf(v, 0.05, 4.0)
 		_param_changed()
@@ -51,19 +57,24 @@ extends Pasture3DGraphSolverNode
 		bank_smoothing = clampf(v, 0.0, 0.5)
 		_param_changed()
 
-@export_range(0.0, 20.0, 0.1, "or_greater") var max_slope_center: float = 6.0:
+@export_range(0.0, 20.0, 0.1, "or_greater") var max_slope_center: float = 1.5:
 	set(v):
 		max_slope_center = maxf(v, 0.0)
 		_param_changed()
 
-@export_range(0.0, 20.0, 0.1, "or_greater") var max_slope_border: float = 0.0:
+@export_range(0.0, 20.0, 0.1, "or_greater") var max_slope_border: float = 1.5:
 	set(v):
 		max_slope_border = maxf(v, 0.0)
 		_param_changed()
 
-@export var uniform_slope: bool = false:
+@export var uniform_slope: bool = true:
 	set(v):
 		uniform_slope = v
+		_param_changed()
+
+@export_range(0.0, 100.0, 0.5, "or_greater") var valley_smoothing: float = 0.0:
+	set(v):
+		valley_smoothing = maxf(v, 0.0)
 		_param_changed()
 
 @export var seed: int = 0:
@@ -74,9 +85,9 @@ extends Pasture3DGraphSolverNode
 @export_group("Control Points")
 ## How many control points the drainage network is solved on. Channels are about one point apart, so
 ## more points give finer valleys. Ignored when Point Spacing is set.
-@export_range(500, 100000, 100, "or_greater") var control_points: int = 15000:
+@export_range(500, 100000, 100) var control_points: int = 15000:
 	set(v):
-		control_points = clampi(v, 16, 1000000)
+		control_points = clampi(v, 16, 100000)
 		_param_changed()
 
 ## Distance between control points, in metres. 0 derives it from Control Points over the solved area,
@@ -127,12 +138,12 @@ enum Reconstruction { LINEAR, GRADIENT }
 		_param_changed()
 
 @export_group("Fine River Incision (Stage 3)")
-@export_range(0.0, 1.0, 0.005) var stream_strength: float = 0.15:
+@export_range(0.0, 1.0, 0.005) var stream_strength: float = 0.02:
 	set(v):
 		stream_strength = clampf(v, 0.0, 1.0)
 		_param_changed()
 
-@export_range(0.01, 1.0, 0.01) var stream_exp: float = 0.5:
+@export_range(0.01, 1.0, 0.01) var stream_exp: float = 0.8:
 	set(v):
 		stream_exp = clampf(v, 0.01, 1.0)
 		_param_changed()
@@ -181,48 +192,32 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 4
+# SIGNED, not FLOAT. `dx`/`dy` are read as GRIDS — `p_inputs[1] as PackedFloat32Array` in
+# `eval_grid` below, handed straight to the solver as displacement fields — so declaring them
+# FLOAT described them as one value per port when they are one value per CELL. The consequence
+# was not cosmetic: a FLOAT port connects to nothing but another FLOAT, so these two could not be
+# wired at all, and being fields they have no inline property either. They were inert sockets.
+# SIGNED because a displacement is signed and zero is meaningful.
+## The mask scales what the node does, cell by cell, inside the kernel; it is not a blend of the finished
+## result over the input (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §9.3.1).
+func mask_mode() -> MaskMode:
+	return MaskMode.OWN
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "dx", "dy", "mask"])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.field(&"dx", PortType.SIGNED),
+		Pasture3DGraphPort.field(&"dy", PortType.SIGNED),
+	]
 
 
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.HEIGHT,
-		# SIGNED, not FLOAT. `dx`/`dy` are read as GRIDS — `p_inputs[1] as PackedFloat32Array` in
-		# `eval_grid` below, handed straight to the solver as displacement fields — so declaring them
-		# FLOAT described them as one value per port when they are one value per CELL. The consequence
-		# was not cosmetic: a FLOAT port connects to nothing but another FLOAT, so these two could not be
-		# wired at all, and being fields they have no inline property either. They were inert sockets.
-		# SIGNED because a displacement is signed and zero is meaningful.
-		PortType.SIGNED,
-		PortType.SIGNED,
-		PortType.MASK,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return 0.0
-		2: return 0.0
-		3: return 1.0
-		_: return 0.0
-
-
-func output_count() -> int:
-	return 3
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "eroded_rock", "sediment"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.FIELD, PortType.FIELD])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"eroded_rock", PortType.FIELD),
+		Pasture3DGraphPort.field(&"sediment", PortType.FIELD),
+	]
 
 
 func node_warnings() -> PackedStringArray:
@@ -268,6 +263,8 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 		"max_slope_border": max_slope_center if uniform_slope else max_slope_border,
 		"rim_width": rim_width,
 		"outlet_level": outlet_level,
+		"channel_area": channel_area,
+		"valley_smoothing": valley_smoothing,
 	}
 
 	# This node offered FROZEN, a Bake button and a stale flag over a cache that was never written:
@@ -515,6 +512,23 @@ static func _settle(p_surf: PackedFloat32Array, p_valid: PackedFloat32Array, p_g
 	return [target, flat]
 
 
+const ROUTE_FAN := 0.5 # SALEVE_ROUTE_FAN
+
+
+# One box pass of half-width p_r along p_count lines of p_len samples, the ends clamped. See saleve_box_lines.
+static func _box_lines(p_in: PackedFloat32Array, r_out: PackedFloat32Array, p_count: int, p_len: int, p_line_step: int, p_sample_step: int, p_r: int) -> void:
+	var inv: float = 1.0 / float(2 * p_r + 1)
+	for l in range(p_count):
+		var base: int = l * p_line_step
+		var acc: float = 0.0
+		for k in range(-p_r, p_r + 1):
+			acc += p_in[base + clampi(k, 0, p_len - 1) * p_sample_step]
+		for k in range(p_len):
+			r_out[base + k * p_sample_step] = acc * inv
+			acc += p_in[base + mini(k + p_r + 1, p_len - 1) * p_sample_step]
+			acc -= p_in[base + maxi(k - p_r, 0) * p_sample_step]
+
+
 static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_params: Dictionary) -> Array:
 	var n: int = p_gw * p_gh
 	if p_surface.size() != n or p_gw < 2 or p_gh < 2:
@@ -531,8 +545,8 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 
 	var iters: int = maxi(1, int(p_params.get("iterations", 200)))
 	var tolerance: float = maxf(0.0, float(p_params.get("tolerance", 1.0e-3)))
-	var slope_center: float = maxf(0.0, float(p_params.get("max_slope_center", 6.0)))
-	var slope_border: float = maxf(0.0, float(p_params.get("max_slope_border", 0.0)))
+	var slope_center: float = maxf(0.0, float(p_params.get("max_slope_center", 1.5)))
+	var slope_border: float = maxf(0.0, float(p_params.get("max_slope_border", 1.5)))
 	var reroute: bool = bool(p_params.get("reroute_lakes", true))
 	var lower_only: bool = bool(p_params.get("lower_only", true))
 	var cap_everywhere: bool = bool(p_params.get("cap_everywhere", false))
@@ -540,18 +554,19 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 	var flat_from_fill: bool = bool(p_params.get("flat_from_fill", false))
 	var stable_noise: bool = bool(p_params.get("stable_noise", true))
 	var erosion_strength: float = clampf(float(p_params.get("erosion_strength", 0.7)), 0.0, 1.0)
-	var m_exp: float = clampf(float(p_params.get("drainage_exponent", 0.15)), 0.01, 0.8)
+	var m_exp: float = clampf(float(p_params.get("drainage_exponent", 0.2)), 0.01, 0.8)
 	var noise_strength: float = maxf(0.0, float(p_params.get("drainage_noise", 0.15)))
-	var shape_preservation: float = clampf(float(p_params.get("shape_preservation", 2.0)), 0.1, 4.0)
+	var shape_preservation: float = clampf(float(p_params.get("shape_preservation", 1.5)), 0.05, 4.0)
 	var bank_smoothing: float = clampf(float(p_params.get("bank_smoothing", 0.0)), 0.0, 0.5)
 	var p_seed: int = int(p_params.get("seed", 0))
 	var reference_relief: float = maxf(0.0, float(p_params.get("reference_relief", 0.0)))
 	var dep_radius: float = maxf(0.0, float(p_params.get("deposition_radius", 0.0)))
 	var dep_strength: float = clampf(float(p_params.get("deposition_strength", 0.5)), 0.0, 1.0)
-	var str_strength: float = clampf(float(p_params.get("stream_strength", 0.15)), 0.0, 1.0)
-	var str_exp: float = clampf(float(p_params.get("stream_exp", 0.5)), 0.01, 1.0)
+	var str_strength: float = clampf(float(p_params.get("stream_strength", 0.02)), 0.0, 1.0)
+	var str_exp: float = clampf(float(p_params.get("stream_exp", 0.8)), 0.01, 1.0)
 	var enable_post_smooth: bool = bool(p_params.get("enable_post_smoothing", false))
-	var control_points: int = clampi(int(p_params.get("control_points", 15000)), 16, 1000000)
+	var control_points: int = clampi(int(p_params.get("control_points", 15000)), 16, 100000)
+	var max_control_points: int = maxi(int(p_params.get("max_control_points", 100000)), 16)
 	var point_spacing: float = maxf(0.0, float(p_params.get("point_spacing", 0.0)))
 	var recon: int = clampi(int(p_params.get("reconstruction", 1)), 0, 2)
 	var default_warp: bool = bool(p_params.get("default_warp", true))
@@ -559,6 +574,9 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 	var warp_size: float = maxf(0.0, float(p_params.get("warp_size", 0.0)))
 	var grid_solve: bool = bool(p_params.get("grid_solve", false))
 	var reconstruct_only: bool = bool(p_params.get("reconstruct_only", false))
+	var limit_edges: bool = bool(p_params.get("limit_edges", true))
+	var valley_smoothing_m: float = float(p_params.get("valley_smoothing", 0.0))
+	var mesh_spacing: float = 0.0
 
 	var zmin: float = INF
 	var zmax: float = -INF
@@ -627,6 +645,8 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 	else:
 		var s: float = point_spacing if point_spacing > 0.0 else sqrt(rw * rh / float(maxi(control_points, 16)))
 		s = maxf(s, maxf(cell_dx, cell_dz))
+		s = maxf(s, sqrt(rw * rh / float(max_control_points)))
+		mesh_spacing = s
 		var pts := PackedVector2Array()
 		var ring := PackedByteArray()
 		var ex: int = maxi(1, int(roundf(rw / s)))
@@ -718,6 +738,7 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 	var receivers := PackedInt32Array()
 	var area_acc := PackedFloat32Array()
 	var tree := {}
+	var input_z: PackedFloat32Array = z.duplicate()
 	if not reconstruct_only:
 		var fseed: int = (p_seed ^ 0x9e3779b9) & 0xffffffff
 		for i in range(nv):
@@ -736,8 +757,11 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 		# ---- Stage 1 ----
 		receivers.resize(nv)
 		area_acc.resize(nv)
-		var response_times := PackedFloat32Array()
-		response_times.resize(nv)
+		var route0: PackedFloat32Array = z.duplicate()
+		var channel_m2: float = maxf(float(p_params.get("channel_area", 0.0)), 0.0)
+		if channel_m2 <= 0.0:
+			channel_m2 = maxf(vref * vref / 64.0, 2.0 * rw * rh / float(maxi(nv, 1)))
+		var channel_ref: float = channel_m2 / (vref * vref)
 		for iter in range(iters):
 			var pass_seed: int = p_seed if stable_noise else p_seed + iter * 17
 			for idx in range(nv):
@@ -745,15 +769,20 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 					receivers[idx] = idx
 					continue
 				var z_c: float = z[idx]
-				var best_score: float = -1.0e9
-				var best: int = idx
+				var steepest: float = 0.0
 				for e in range(nbr_start[idx], nbr_start[idx + 1]):
-					var n_idx: int = nbr[e]
-					var dz_val: float = z_c - z[n_idx]
-					if dz_val > 0.0:
-						var slope: float = dz_val / nbr_len[e]
+					steepest = maxf(steepest, (route0[idx] - route0[nbr[e]]) / nbr_len[e])
+				var best_score: float = -INF
+				var best: int = idx
+				if steepest > 0.0:
+					for e in range(nbr_start[idx], nbr_start[idx + 1]):
+						var n_idx: int = nbr[e]
+						var drop: float = (route0[idx] - route0[n_idx]) / nbr_len[e]
+						if drop <= 0.0 or drop < ROUTE_FAN * steepest:
+							continue
+						var slope: float = (z_c - z[n_idx]) / nbr_len[e]
 						var noise: float = _fast_hash_to_unit(pass_seed, idx ^ (n_idx << 16))
-						var score: float = slope * (1.0 + noise_strength * noise)
+						var score: float = slope + absf(slope) * noise_strength * noise
 						if score > best_score:
 							best_score = score
 							best = n_idx
@@ -803,7 +832,7 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 						basin_drained[root_of[c]] = 1
 					for e in range(nbr_start[c], nbr_start[c + 1]):
 						var j: int = nbr[e]
-						var nd: float = d0 + nbr_len[e]
+						var nd: float = maxf(d0, route0[j])
 						if settled[j] == 0 and nd < dist[j]:
 							dist[j] = nd
 							pred[j] = c
@@ -819,26 +848,21 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 				var r: int = receivers[idx]
 				if r != idx:
 					area_acc[r] += area_acc[idx]
-			for k in range(nv):
-				var idx: int = order[k]
-				var r: int = receivers[idx]
-				if r == idx:
-					response_times[idx] = 0.0
-					continue
-				var d: float = maxf(_edge_len(nbr_start, nbr, nbr_len, idx, r), 1.0e-5)
-				var celerity: float = erodibility[idx] * pow(maxf(area_acc[idx], area[idx]), m_exp)
-				response_times[idx] = response_times[r] + (d / maxf(celerity, 1.0e-4))
 			var diff: float = 0.0
 			for k in range(nv):
 				var idx: int = order[k]
 				var r: int = receivers[idx]
 				if r == idx:
+					diff += absf(input_z[idx] - z[idx])
+					z[idx] = input_z[idx]
 					continue
-				var new_z: float = z[root_of[idx]] + response_times[idx]
+				var ratio: float = channel_ref / maxf(area_acc[idx], 1.0e-30)
+				var kept: float = 1.0 if ratio >= 1.0 else pow(ratio, m_exp)
+				var keep: float = 1.0 - erodibility[idx] * (1.0 - kept)
 				var d: float = maxf(_edge_len(nbr_start, nbr, nbr_len, idx, r), 1.0e-5)
-				var cap: float = z[r] + slope_cap[idx] * d
-				if new_z > cap:
-					new_z = cap
+				var channel_rise: float = keep * maxf(input_z[idx] - input_z[r], 0.0)
+				var wall_rise: float = slope_cap[idx] * d * minf(ratio, 1.0)
+				var new_z: float = maxf(z[r], minf(z[r] + maxf(channel_rise, wall_rise), input_z[idx]))
 				diff += absf(new_z - z[idx])
 				z[idx] = new_z
 			var zlo: float = INF
@@ -848,17 +872,38 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 				zhi = maxf(zhi, v)
 			if diff / float(nv) < tolerance * maxf(zhi - zlo, 1.0e-5):
 				break
-
-		var lo: float = INF
-		var hi: float = -INF
-		for v in z:
-			lo = minf(lo, v)
-			hi = maxf(hi, v)
-		var span: float = maxf(hi - lo, 1.0e-5)
-		for i in range(nv):
-			z[i] = (z[i] - lo) / span
+		if not grid_solve and limit_edges:
+			# Every mesh edge to the cap or the input's own slope; lowers only, outlets stay. See saleve_limit_edges.
+			var cap_floor: float = float(PackedFloat32Array([0.2 * maxf(slope_center, slope_border) * to_unit])[0])
+			var heap_k: Array = []
+			var heap_v: Array = []
+			var settled := PackedByteArray()
+			settled.resize(nv)
+			for i in range(nv):
+				_heap_push(heap_k, heap_v, z[i], i)
+			while heap_k.size() > 0:
+				var top_k: float = heap_k[0]
+				var c: int = heap_v[0]
+				_heap_pop(heap_k, heap_v)
+				if settled[c] == 1 or top_k != z[c]:
+					continue
+				settled[c] = 1
+				for e in range(nbr_start[c], nbr_start[c + 1]):
+					var j: int = nbr[e]
+					if settled[j] == 1 or outlet[j] == 1:
+						continue
+					var cap: float = maxf(0.5 * (slope_cap[c] + slope_cap[j]), cap_floor)
+					var lim: float = maxf(cap * nbr_len[e], absf(input_z[c] - input_z[j]))
+					var scratch := PackedFloat32Array([z[c] + lim])
+					if scratch[0] < z[j]:
+						z[j] = scratch[0]
+						_heap_push(heap_k, heap_v, scratch[0], j)
 
 	# ---- reconstruction ----
+	# The cut (solved less input) goes onto the grid, not the surface: see the native solve.
+	if not reconstruct_only:
+		for i in range(nv):
+			z[i] = z[i] - input_z[i]
 	var zg := PackedFloat32Array()
 	zg.resize(n)
 	if grid_solve:
@@ -984,7 +1029,21 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 						val += w * (z[vtx] + gx[vtx] * (qx - px[vtx]) + gz[vtx] * (qz - pz[vtx]))
 						ws += w
 					val /= maxf(ws, 1.0e-30)
+					if not reconstruct_only:
+						val = clampf(val, minf(z[vv[0]], minf(z[vv[1]], z[vv[2]])), maxf(z[vv[0]], maxf(z[vv[1]], z[vv[2]])))
 				zg[idx] = val
+
+	# Smooth the cut before it comes off the input (saleve_smooth_cut): three box passes per axis, the ends clamped.
+	if not grid_solve and not reconstruct_only and not bool(p_params.get("skip_stage1", false)) and valley_smoothing_m >= 0.0:
+		var radius: float = valley_smoothing_m if valley_smoothing_m > 0.0 else 1.5 * mesh_spacing
+		var rx: int = roundi(0.5 * radius / cell_dx)
+		var rz: int = roundi(0.5 * radius / cell_dz)
+		if rx >= 1 and rz >= 1:
+			for _pass in range(3):
+				var tmp := PackedFloat32Array()
+				tmp.resize(n)
+				_box_lines(zg, tmp, p_gh, p_gw, p_gw, 1, rx)
+				_box_lines(tmp, zg, p_gw, p_gh, 1, p_gw, rz)
 
 	if reconstruct_only:
 		var out := PackedFloat32Array()
@@ -1001,7 +1060,7 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 	var rim_w: float = maxf(float(p_params.get("rim_width", 0.0)), 0.0)
 	var rim: float = rim_w if rim_w > 0.0 else 0.1 * min_side
 	for i in range(n):
-		hm[i] = zmin + zg[i] * relief_ref
+		hm[i] = (p_surface[i] + zg[i] * zptp) if is_finite(p_surface[i]) else zmin
 	for i in range(n):
 		if lower_only and is_finite(p_surface[i]) and hm[i] > p_surface[i]:
 			var w := 1.0
@@ -1089,4 +1148,3 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 func _param_changed() -> void:
 	mark_dirty_since_bake()
 	emit_changed()
-

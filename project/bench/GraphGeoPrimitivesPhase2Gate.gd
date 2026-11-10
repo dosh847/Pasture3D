@@ -163,7 +163,7 @@ func _ready() -> void:
 	# [F] Whole-Graph Lowering: MountainRangeRadial -> HydraulicSaleve
 	# -------------------------------------------------------------------------
 	print("\n[F] Whole-Graph Lowering: MountainRangeRadial -> HydraulicSaleve Native Pipeline")
-	var graph := Pasture3DTerrainGraph.new()
+	var graph := Pasture3DTerrainGraph.create_empty()
 	var range_node = Pasture3DGraphNodeRegistry.create(&"mountain_range_radial")
 	var saleve = Pasture3DGraphNodeRegistry.create(&"hydraulic_saleve")
 	var output := Pasture3DGraphNodeOutput.new()

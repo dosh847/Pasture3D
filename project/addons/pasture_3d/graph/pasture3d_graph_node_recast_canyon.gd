@@ -38,7 +38,7 @@ extends Pasture3DGraphNode
 		gamma = maxf(v, 0.01)
 		emit_changed()
 
-## How much of the recast is applied, 0..1 (times the mask, if wired).
+## How much of the recast is applied, 0..1.
 @export_range(0.0, 1.0, 0.01) var amount: float = 1.0:
 	set(v):
 		amount = clampf(v, 0.0, 1.0)
@@ -59,42 +59,23 @@ func native_lower() -> Dictionary:
 	return {"params": p}
 
 
-## Ports 0..2 are fields (in0..in2); `gamma` and `amount` are driven scalars.
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, -1, -1, 2, 3])
+## Ports 0 and 1 are fields (in0, in1); `gamma` and `amount` are driven scalars.
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.field(&"noise", PortType.SIGNED),
+		Pasture3DGraphPort.value(&"gamma", PortType.FLOAT, &"gamma", 2),
+		Pasture3DGraphPort.value(&"amount", PortType.FLOAT, &"amount", 3),
+	]
 
 
 func role() -> Role:
 	return Role.FILTER
 
 
-## Pointwise, but its two optional operands are fields, which the cell fold cannot carry as "unwired".
+## Pointwise, but its optional noise is a field, which the cell fold cannot carry as "unwired".
 func needs_grid() -> bool:
 	return true
-
-
-func input_count() -> int:
-	return 5
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "noise", "mask", "gamma", "amount"])
-
-
-func aux_grid_port() -> int:
-	return 2 # "mask"
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.SIGNED, PortType.MASK, PortType.FLOAT, PortType.FLOAT])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		2: return 1.0
-		3: return gamma
-		4: return amount
-		_: return 0.0
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -105,15 +86,14 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) ->
 	else:
 		return Pasture3DGraphOps.zeros(n)
 	var noise := _field(p_inputs, 1, n)
-	var mask := _field(p_inputs, 2, n)
-	var gam: float = float(p_inputs[3][0]) if (p_inputs.size() > 3 and p_inputs[3] is PackedFloat32Array and p_inputs[3].size() > 0) else gamma
-	var amt: float = float(p_inputs[4][0]) if (p_inputs.size() > 4 and p_inputs[4] is PackedFloat32Array and p_inputs[4].size() > 0) else amount
+	var gam: float = float(p_inputs[2][0]) if (p_inputs.size() > 2 and p_inputs[2] is PackedFloat32Array and p_inputs[2].size() > 0) else gamma
+	var amt: float = float(p_inputs[3][0]) if (p_inputs.size() > 3 and p_inputs[3] is PackedFloat32Array and p_inputs[3].size() > 0) else amount
 
 	if not ClassDB.class_has_method("Pasture3DUtil", "recast_canyon_grid"):
 		push_error("[Pasture3D] Pasture3DUtil.recast_canyon_grid is not bound. Rebuild GDExtension.")
 		return in_grid.duplicate()
 
-	var res: PackedFloat32Array = Pasture3DUtil.recast_canyon_grid(in_grid, noise, mask, p_gw, p_gh,
+	var res: PackedFloat32Array = Pasture3DUtil.recast_canyon_grid(in_grid, noise, p_gw, p_gh,
 			cut_height, floor_height, gam, amt)
 	if res.size() != n:
 		push_error("[Pasture3D] Recast Canyon returned an invalid grid size.")

@@ -141,7 +141,7 @@ func _summary() -> void:
 
 # --- fixtures ------------------------------------------------------------------------------------------
 func _light() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var noise := FastNoiseLite.new(); noise.seed = 11; noise.frequency = 0.05
 	var nz := Pasture3DGraphNodeNoise.new(); nz.noise = noise; nz.amplitude = 7.0
 	var bl := Pasture3DGraphNodeBlend.new(); bl.mode = Pasture3DGraphNodeBlend.Mode.ADD
@@ -160,7 +160,7 @@ func _light() -> Pasture3DTerrainGraph:
 ## terrace. All native, no solver — a solver would dominate and tell us nothing about the resolution
 ## question.
 func _medium() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n1 := FastNoiseLite.new(); n1.seed = 11; n1.frequency = 0.05
 	var n2 := FastNoiseLite.new(); n2.seed = 27; n2.frequency = 0.17
 	var nz1 := Pasture3DGraphNodeNoise.new(); nz1.noise = n1; nz1.amplitude = 40.0
@@ -186,7 +186,7 @@ func _medium() -> Pasture3DTerrainGraph:
 ## Adds the things that actually cost: a multi-pass smooth (a stencil, so it re-reads neighbours) and a
 ## curvature (a derivative). This is the shape of a graph where the inspector's second pass would hurt.
 func _heavy() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n1 := FastNoiseLite.new(); n1.seed = 11; n1.frequency = 0.05
 	var n2 := FastNoiseLite.new(); n2.seed = 27; n2.frequency = 0.17
 	var nz1 := Pasture3DGraphNodeNoise.new(); nz1.noise = n1; nz1.amplitude = 40.0

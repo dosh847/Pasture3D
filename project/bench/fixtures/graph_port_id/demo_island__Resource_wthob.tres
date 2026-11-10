@@ -1,0 +1,47 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="4_ff8bn"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="5_hur8n"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="8_m7f8t"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="10_p4out"]
+[ext_resource type="Script" uid="uid://lp5oxart7q6x" path="res://addons/pasture_3d/graph/pasture3d_graph_node_remap.gd" id="18_kfedv"]
+[ext_resource type="Script" uid="uid://bindlf2awqi6e" path="res://addons/pasture_3d/graph/pasture3d_graph_node_blend.gd" id="18_p4out"]
+[ext_resource type="Script" uid="uid://c8cqyry7espl4" path="res://addons/pasture_3d/graph/pasture3d_graph_node_gavoronoise.gd" id="27_lhpge"]
+[ext_resource type="Script" uid="uid://ccy61yjirqc87" path="res://addons/pasture_3d/graph/pasture3d_graph_node_mountain_cone.gd" id="28_lhpge"]
+
+[sub_resource type="Resource" id="Resource_exlmg"]
+script = ExtResource("5_hur8n")
+graph_position = Vector2(-60, 60)
+
+[sub_resource type="Resource" id="Resource_f5qo5"]
+script = ExtResource("28_lhpge")
+elevation = 35.0
+graph_position = Vector2(-80, 500)
+
+[sub_resource type="Resource" id="Resource_f8ujb"]
+script = ExtResource("18_p4out")
+graph_position = Vector2(380, 60)
+
+[sub_resource type="Resource" id="Resource_kov07"]
+script = ExtResource("8_m7f8t")
+graph_position = Vector2(760, 60)
+
+[sub_resource type="Resource" id="Resource_1pmxx"]
+script = ExtResource("27_lhpge")
+frequency = 0.0086
+graph_position = Vector2(-400, 260)
+
+[sub_resource type="Resource" id="Resource_4h7ik"]
+script = ExtResource("18_kfedv")
+in_min = 12.4
+in_max = 62.7
+out_max = 25.0
+graph_position = Vector2(20, 240)
+
+[resource]
+script = ExtResource("10_p4out")
+format_version = 3
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_exlmg"), SubResource("Resource_f5qo5"), SubResource("Resource_f8ujb"), SubResource("Resource_kov07"), SubResource("Resource_1pmxx"), SubResource("Resource_4h7ik")])
+wires = [[0, &"height", 2, &"a"], [2, &"out", 3, &"result"], [4, &"out", 5, &"in"], [5, &"out", 2, &"b"]]
+output_node = 3
+metadata/_editor_selected_node = -1

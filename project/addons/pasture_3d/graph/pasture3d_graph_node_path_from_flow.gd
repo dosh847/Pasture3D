@@ -114,23 +114,14 @@ func path_input_port() -> int:
 	return -1
 
 
-func input_count() -> int:
-	return 2
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["flow", "surface"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.MASK, PortType.HEIGHT])
-
-
 ## NAN on both, so each can be told apart from a field that is genuinely zero. `flow` unwired means the
 ## node produces nothing; `surface` unwired means the traced line carries no heights, which is a
 ## perfectly good river for a `Path Carve` reading its bed from the terrain.
-func input_unwired_default(_p_port: int) -> float:
-	return NAN
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"flow", PortType.MASK).unwired(NAN),
+		Pasture3DGraphPort.field(&"surface", PortType.HEIGHT).unwired(NAN),
+	]
 
 
 ## No capture, no river. Unlike the two filters there is no input to pass through — see

@@ -490,9 +490,97 @@ PackedFloat32Array godot::value_ramp_grid(const PackedFloat32Array &p_surface, c
 	return result;
 }
 
-PackedFloat32Array godot::contrast_grid(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_mask,
-		int p_mode, double p_amount, double p_range_min, double p_range_max, double p_mask_amount,
-		bool p_explicit_window) {
+PackedFloat32Array godot::ridge_sharpen_grid(const PackedFloat32Array &p_surface,
+		int p_gw, int p_gh, const Rect2 &p_rect, double p_radius_m, double p_amount) {
+	const int n = p_gw * p_gh;
+	if (n <= 0 || p_surface.size() != n) {
+		return p_surface;
+	}
+	auto weights_of = [p_radius_m](double p_spacing) {
+		std::vector<double> w;
+		if (p_spacing <= 0.0 || p_radius_m <= 0.0) {
+			w.push_back(1.0);
+			return w;
+		}
+		const double sigma = p_radius_m * 0.5;
+		const int r = (int)std::floor(p_radius_m / p_spacing);
+		for (int k = 0; k <= r; k++) {
+			const double d = k * p_spacing / sigma;
+			w.push_back(std::exp(-0.5 * d * d));
+		}
+		return w;
+	};
+	const std::vector<double> wx = weights_of((double)p_rect.size.x / p_gw);
+	const std::vector<double> wz = weights_of((double)p_rect.size.y / p_gh);
+	const int rx = (int)wx.size() - 1;
+	const int rz = (int)wz.size() - 1;
+
+	const float *src = p_surface.ptr();
+	std::vector<double> hpass(n);
+	std::vector<double> blur(n);
+
+	Pasture3DThreadPool::parallel_for_elements(p_gh, 8, [&](int z0, int z1) {
+		for (int iz = z0; iz < z1; iz++) {
+			for (int ix = 0; ix < p_gw; ix++) {
+				double sum = 0.0;
+				double weight = 0.0;
+				for (int k = -rx; k <= rx; k++) {
+					const int x = ix + k;
+					if (x < 0 || x >= p_gw) {
+						continue;
+					}
+					const float v = src[iz * p_gw + x];
+					if (std::isnan(v)) {
+						continue;
+					}
+					sum += wx[std::abs(k)] * (double)v;
+					weight += wx[std::abs(k)];
+				}
+				hpass[iz * p_gw + ix] = weight > 0.0 ? sum / weight : (double)NAN;
+			}
+		}
+	});
+	Pasture3DThreadPool::parallel_for_elements(p_gh, 8, [&](int z0, int z1) {
+		for (int iz = z0; iz < z1; iz++) {
+			for (int ix = 0; ix < p_gw; ix++) {
+				double sum = 0.0;
+				double weight = 0.0;
+				for (int k = -rz; k <= rz; k++) {
+					const int z = iz + k;
+					if (z < 0 || z >= p_gh) {
+						continue;
+					}
+					const double v = hpass[z * p_gw + ix];
+					if (std::isnan(v)) {
+						continue;
+					}
+					sum += wz[std::abs(k)] * v;
+					weight += wz[std::abs(k)];
+				}
+				blur[iz * p_gw + ix] = weight > 0.0 ? sum / weight : (double)NAN;
+			}
+		}
+	});
+
+	PackedFloat32Array result;
+	result.resize(n);
+	float *dst = result.ptrw();
+	for (int i = 0; i < n; i++) {
+		dst[i] = src[i];
+		if (std::isnan(src[i]) || std::isnan(blur[i])) {
+			continue;
+		}
+		const double lift = (double)src[i] - blur[i];
+		if (lift <= 0.0) {
+			continue;
+		}
+		dst[i] = (float)((double)src[i] + p_amount * lift);
+	}
+	return result;
+}
+
+PackedFloat32Array godot::contrast_grid(const PackedFloat32Array &p_surface,
+		int p_mode, double p_amount, double p_range_min, double p_range_max, bool p_explicit_window) {
 	const int n = p_surface.size();
 	PackedFloat32Array result;
 	result.resize(n);
@@ -501,7 +589,6 @@ PackedFloat32Array godot::contrast_grid(const PackedFloat32Array &p_surface, con
 	}
 
 	const float *src = p_surface.ptr();
-	const float *msk = (p_mask.size() == n) ? p_mask.ptr() : nullptr;
 	float *dst = result.ptrw();
 
 	// Mirrors Pasture3DGraphNodeContrast.resolve_window: the authored metres, or the surface's own finite
@@ -533,7 +620,6 @@ PackedFloat32Array godot::contrast_grid(const PackedFloat32Array &p_surface, con
 	}
 
 	const double amount = std::max(p_amount, 0.001);
-	const double mask_amount = std::clamp(p_mask_amount, 0.0, 1.0);
 
 	Pasture3DThreadPool::parallel_for_elements(n, 1024, [&](int i0, int i1) {
 		for (int i = i0; i < i1; i++) {
@@ -557,13 +643,7 @@ PackedFloat32Array godot::contrast_grid(const PackedFloat32Array &p_surface, con
 				c = 1.0 - 0.5 * std::pow(2.0 - 2.0 * t, amount);
 			}
 
-			const double shaped = lo + c * span;
-			double w = mask_amount;
-			if (msk != nullptr && std::isfinite(msk[i])) {
-				w *= (double)msk[i];
-			}
-			w = std::clamp(w, 0.0, 1.0);
-			dst[i] = (float)(v + (shaped - v) * w);
+			dst[i] = (float)(lo + c * span);
 		}
 	});
 

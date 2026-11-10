@@ -102,7 +102,7 @@ func _c_unserved_is_visible() -> void:
 	# Built explicitly rather than through the registry: a registry-default Noise node carries no
 	# FastNoiseLite and evaluates FLAT, which makes every "differs from an all-zero field" comparison
 	# below vacuous. The non-flat control caught exactly that.
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var fnl := FastNoiseLite.new()
 	fnl.seed = 11
 	fnl.frequency = 0.05
@@ -198,7 +198,7 @@ func _make_host(p_name: String, p_graph: Pasture3DTerrainGraph, p_rect: Rect2, p
 
 
 func _one_previewable_graph() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n := Pasture3DGraphNodeRegistry.create(&"noise")
 	if n == null:
 		return null
@@ -625,8 +625,7 @@ func _a2_the_rest_of_the_taxonomy() -> void:
 	# A value type has no grid, so it must decline rather than render one. "A grid render of a non-grid
 	# is a lie shaped like data."
 	var declined := true
-	for t in [Pasture3DGraphNode.PortType.VECTOR, Pasture3DGraphNode.PortType.CURVE,
-			Pasture3DGraphNode.PortType.BOOL, Pasture3DGraphNode.PortType.FLOAT,
+	for t in [Pasture3DGraphNode.PortType.BOOL, Pasture3DGraphNode.PortType.FLOAT,
 			Pasture3DGraphNode.PortType.INT, Pasture3DGraphNode.PortType.COLOR]:
 		if GraphEditorScript.preview_repr_for_type(t) >= 0:
 			declined = false
@@ -823,7 +822,7 @@ func _d_a_non_lowering_graph_says_so() -> void:
 	# channel rule and an empty order. So a frozen solver compiles and previews through a live re-solve.
 	# That is a real disagreement between `native_supported()` and the multi-root compile, it is out of
 	# V1's scope, and changing lowering to fix it is exactly what standing constraint 1 warns against.
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var src := Pasture3DGraphNodeRegistry.create(&"noise")
 	var blocker := Pasture3DGraphNodeRegistry.create(&"dev_dla")
 	if src == null or blocker == null:
@@ -962,7 +961,7 @@ func _e_a_path_output_taps_no_grid() -> void:
 	# and that is fine for what [E] measures: the tap exclusion is driven by the declared output TYPE, not
 	# by whether the path has vertices yet — a Road Source that has not baked must not start tapping a
 	# grid just because it is empty. [E3] below exercises the drawing with explicit geometry.
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var pathnode := Pasture3DGraphNodeRegistry.create(&"shape_source")
 	if pathnode == null:
 		_check(false, "the registry could not create a `shape_source` node; nothing was measured")
@@ -1005,7 +1004,7 @@ func _e_a_path_output_taps_no_grid() -> void:
 
 	# [E2] a MIXED graph: the PATH node is excluded and the grid node is not. This is the case that would
 	# quietly regress into "taps everything" or "taps nothing", and neither pure fixture above can see it.
-	var gm := Pasture3DTerrainGraph.new()
+	var gm := Pasture3DTerrainGraph.create_empty()
 	var noise := Pasture3DGraphNodeRegistry.create(&"noise")
 	var p2 := Pasture3DGraphNodeRegistry.create(&"shape_source")
 	gm.add_node(noise, Vector2.ZERO)
@@ -1285,7 +1284,7 @@ func _f_thumbnail(p_editor, p_idx: int) -> Image:
 ## the bake compares equal because it is constant, and the two thumbnails match because both are one
 ## colour. The first run of this criterion failed on exactly that, which is why the fixture is explicit.
 func _f_graph() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n := Pasture3DGraphNodeRegistry.create(&"noise")
 	var fnl := FastNoiseLite.new()
 	fnl.seed = 12345

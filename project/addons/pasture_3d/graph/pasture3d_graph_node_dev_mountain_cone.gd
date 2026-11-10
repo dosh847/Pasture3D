@@ -77,29 +77,19 @@ func display_name() -> String:
 	return "[Dev/GD] Mountain Cone"
 
 
-func input_count() -> int:
-	return 3
+# An unwired MASK (envelope) reads 1.0 — a missing gate is fully open, matching the native path.
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"dx", PortType.SIGNED),
+		Pasture3DGraphPort.field(&"dy", PortType.SIGNED),
+		Pasture3DGraphPort.field(&"envelope", PortType.MASK).unwired(1.0),
+	]
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["dx", "dy", "envelope"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.SIGNED, PortType.SIGNED, PortType.MASK])
-
-
-func input_unwired_default(p_port: int) -> float:
-	# An unwired MASK (envelope) reads 1.0 — a missing gate is fully open, matching the native path.
-	return 1.0 if input_port_types()[p_port] == PortType.MASK else 0.0
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["out"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"out", PortType.HEIGHT),
+	]
 
 
 func _param_changed() -> void:

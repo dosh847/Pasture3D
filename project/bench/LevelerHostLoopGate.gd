@@ -155,7 +155,7 @@ func _graph(p_channel: int, p_wired) -> Pasture3DTerrainGraph:
 	var lev := Pasture3DGraphNodeLeveler.new()
 	for k in CFG:
 		lev.set(String(k), CFG[k])
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), src, lev, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	var conns: Array = [[0, 0, 2, 0], [2, p_channel, 3, 0]]

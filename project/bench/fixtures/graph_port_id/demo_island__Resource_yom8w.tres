@@ -1,0 +1,81 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="4_ff8bn"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="5_hur8n"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="8_m7f8t"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="10_p4out"]
+[ext_resource type="Script" uid="uid://c04rd15bkl8hx" path="res://addons/pasture_3d/graph/pasture3d_graph_node_fractal.gd" id="20_kfedv"]
+[ext_resource type="Script" uid="uid://bqf17lofivp" path="res://addons/pasture_3d/graph/pasture3d_graph_node_displace.gd" id="26_bd2sf"]
+[ext_resource type="Script" uid="uid://bc0174c1jwufg" path="res://addons/pasture_3d/graph/pasture3d_graph_node_reroute.gd" id="31_yo6hg"]
+[ext_resource type="Script" uid="uid://fkn4s5db7uev" path="res://addons/pasture_3d/graph/pasture3d_graph_node_const.gd" id="32_3nkqr"]
+[ext_resource type="Script" uid="uid://c1eordi0wtuiq" path="res://addons/pasture_3d/graph/pasture3d_graph_node_mask.gd" id="32_yo6hg"]
+[ext_resource type="Script" uid="uid://ybwedanry756" path="res://addons/pasture_3d/graph/pasture3d_graph_node_hydraulic_saleve.gd" id="33_3nkqr"]
+[ext_resource type="Script" uid="uid://ex1riwe31v4r" path="res://addons/pasture_3d/graph/pasture3d_graph_node_spectral_equalizer.gd" id="33_nkn6g"]
+[ext_resource type="Script" uid="uid://c1fw3sxu0oprh" path="res://addons/pasture_3d/graph/pasture3d_graph_node_smooth.gd" id="34_ni3tk"]
+
+[sub_resource type="Resource" id="Resource_nooeo"]
+script = ExtResource("5_hur8n")
+graph_position = Vector2(-1760, -120)
+
+[sub_resource type="Resource" id="Resource_p1blu"]
+script = ExtResource("8_m7f8t")
+graph_position = Vector2(800, 140)
+
+[sub_resource type="Resource" id="Resource_g1owp"]
+script = ExtResource("33_3nkqr")
+drainage_exponent = 0.05
+drainage_noise = 0.35
+max_slope_center = 1.0
+control_points = 20000
+stream_strength = 0.05
+graph_position = Vector2(240, 140)
+
+[sub_resource type="Resource" id="Resource_e06bg"]
+script = ExtResource("26_bd2sf")
+graph_position = Vector2(-1000, 140)
+
+[sub_resource type="Resource" id="Resource_soe5a"]
+script = ExtResource("31_yo6hg")
+graph_position = Vector2(-1140, 220)
+
+[sub_resource type="Resource" id="Resource_bpd6x"]
+script = ExtResource("20_kfedv")
+style = 0
+amplitude = 60.0
+feature_size = 320.0
+octaves = 3
+gain = 0.6
+graph_position = Vector2(-1760, 200)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_p83el"]
+script = ExtResource("32_yo6hg")
+property = 1
+band_min = 0.0
+band_max = 60.0
+falloff_lo = 10.0
+falloff_hi = 30.0
+graph_position = Vector2(-1380, -120)
+
+[sub_resource type="Resource" id="Resource_t0lct"]
+script = ExtResource("32_3nkqr")
+value = 40.0
+graph_position = Vector2(-1760, 600)
+
+[sub_resource type="Resource" id="Resource_3w2eb"]
+script = ExtResource("33_nkn6g")
+micro_gain = 0.0
+graph_position = Vector2(-600, 140)
+
+[sub_resource type="Resource" id="Resource_1j2t1"]
+script = ExtResource("34_ni3tk")
+passes = 10
+graph_position = Vector2(-160, 140)
+
+[resource]
+script = ExtResource("10_p4out")
+format_version = 3
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_nooeo"), SubResource("Resource_p1blu"), SubResource("Resource_g1owp"), SubResource("Resource_e06bg"), SubResource("Resource_soe5a"), SubResource("Resource_bpd6x"), SubResource("Resource_p83el"), SubResource("Resource_t0lct"), SubResource("Resource_3w2eb"), SubResource("Resource_1j2t1")])
+wires = [[4, &"out", 3, &"dx"], [4, &"out", 3, &"dy"], [0, &"height", 3, &"in"], [5, &"out", 4, &"in"], [0, &"height", 6, &"in"], [6, &"out", 2, &"mask"], [7, &"out", 6, &"falloff_lo"], [7, &"out", 6, &"falloff_hi"], [2, &"height", 1, &"result"], [3, &"out", 8, &"in"], [8, &"out", 9, &"in"], [9, &"out", 2, &"in"]]
+output_node = 8
+metadata/_editor_selected_node = -1

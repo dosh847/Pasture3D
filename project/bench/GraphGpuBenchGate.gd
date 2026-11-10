@@ -97,7 +97,7 @@ func _time_gpu(p_prog: Dictionary, p_gw: int, p_gh: int, p_surf: PackedFloat32Ar
 # ---- graph shapes ----------------------------------------------------------------------------------
 
 func _g_identity() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [_c4(0, 0, 1, 0)]
@@ -105,7 +105,7 @@ func _g_identity() -> Pasture3DTerrainGraph:
 
 
 func _g_smooth(p_passes: int) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var sm := Pasture3DGraphNodeSmooth.new(); sm.passes = p_passes
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), sm, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
@@ -114,7 +114,7 @@ func _g_smooth(p_passes: int) -> Pasture3DTerrainGraph:
 
 
 func _g_mixed() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nz := FastNoiseLite.new(); nz.seed = 5; nz.frequency = 0.01
 	var noise := Pasture3DGraphNodeNoise.new(); noise.noise = nz; noise.amplitude = 6.0
 	var blend := Pasture3DGraphNodeBlend.new(); blend.mode = Pasture3DGraphNodeBlend.Mode.ADD

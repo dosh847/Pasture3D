@@ -511,7 +511,7 @@ func _carve_graph(p_path: Pasture3DGraphPath, p_channel: int) -> Pasture3DTerrai
 	carve.flat_width = 7.0
 	carve.offset = 6.0
 	carve.blend = Pasture3DGraphNodePathCarve.Blend.REPLACE
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), src, carve, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
@@ -521,7 +521,7 @@ func _carve_graph(p_path: Pasture3DGraphPath, p_channel: int) -> Pasture3DTerrai
 
 
 func _io_graph() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes

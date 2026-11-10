@@ -175,7 +175,7 @@ func _control_sink(p_name: String, p_base: int, p_key: String) -> Pasture3DGraph
 ## The Output is wired so the graph LOWERS — a graph with no output node compiles to nothing and the
 ## native route would be unreachable for reasons that have nothing to do with sinks.
 func _graph(p_sinks: Array, p_bands: Array) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = []
 	nodes.append(Pasture3DGraphNodeInput.new())          # 0
 	nodes.append(_mask(5.0))                             # 1 — drives the Output

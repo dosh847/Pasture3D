@@ -134,10 +134,11 @@ func _b_thermal_erosion() -> void:
 	# Port 1 is the `hardness` MASK — a real grid, not a scalar: thermal erosion resists where the rock is
 	# hard. Everything past it is a driveable scalar.
 	var params := 0
+	# The last port is the standard mask (ports spec P5): a field, not a parameter.
 	for i in range(2, in_types.size()):
 		if in_types[i] == Pasture3DGraphNode.PortType.FLOAT or in_types[i] == Pasture3DGraphNode.PortType.INT:
 			params += 1
-	var ok_decl: bool = node.output_count() == 2 and node.output_names().size() == 2 			and node.output_port_types()[0] == Pasture3DGraphNode.PortType.HEIGHT 			and node.output_port_types()[1] == Pasture3DGraphNode.PortType.MASK 			and in_types.size() == node.input_count() and node.input_names().size() == node.input_count() 			and in_types.size() > 1 and in_types[0] == Pasture3DGraphNode.PortType.HEIGHT 			and in_types[1] == Pasture3DGraphNode.PortType.MASK 			and params == node.input_count() - 2
+	var ok_decl: bool = node.output_count() == 2 and node.output_names().size() == 2 			and node.output_port_types()[0] == Pasture3DGraphNode.PortType.HEIGHT 			and node.output_port_types()[1] == Pasture3DGraphNode.PortType.MASK 			and in_types.size() == node.input_count() and node.input_names().size() == node.input_count() 			and in_types.size() > 1 and in_types[0] == Pasture3DGraphNode.PortType.HEIGHT 			and in_types[1] == Pasture3DGraphNode.PortType.MASK 			and params == node.input_count() - 3 and node.standard_mask_port() == node.input_count() - 1
 	print("    inputs=%d (surface + hardness mask + %d parameters) outputs=%d ok_decl=%s"
 			% [node.input_count(), params, node.output_count(), ok_decl])
 	if not ok_decl:
@@ -195,7 +196,7 @@ func _c_domain_warp() -> void:
 	node.set("strength", 30.0)
 	node.set("octaves", 3)
 
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var w_idx := g.add_node(node, Vector2.ZERO)
 	var out := g.add_node(Pasture3DGraphNodeRegistry.create(&"output"), Vector2(200, 0))
 	g.connect_ports(w_idx, 0, out, 0)
@@ -274,7 +275,7 @@ func _e_geological_strata() -> void:
 	node.set("dip_direction_degrees", 45.0)
 
 	var inp := _mound_surface()
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var in_nd := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"), Vector2.ZERO)
 	var st_nd := g.add_node(node, Vector2(200, 0))
 	var out := g.add_node(Pasture3DGraphNodeRegistry.create(&"output"), Vector2(400, 0))
@@ -410,7 +411,7 @@ func _h_registry_and_presets() -> void:
 
 	# Test Editor Preset generation
 	var editor = GraphEditorScript.new()
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	editor.edit_graph(g)
 
 	for preset_id in [5, 6, 7]:

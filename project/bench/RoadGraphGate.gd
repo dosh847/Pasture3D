@@ -360,7 +360,7 @@ func _e_an_unresolved_path_reads_far_away_not_on_the_road() -> void:
 ## the connection and then without it.
 func _f_the_path_travels_down_the_wire() -> void:
 	print("[F] the path travels down the wire")
-	var graph := Pasture3DTerrainGraph.new()
+	var graph := Pasture3DTerrainGraph.create_empty()
 	var src := Pasture3DGraphNodeRoadSource.new()
 	src.path = _straight()
 	var dist := Pasture3DGraphNodeDevPathDistance.new()
@@ -409,7 +409,7 @@ func _f_the_path_travels_down_the_wire() -> void:
 ## serves the old field forever: the road moves in the viewport and the terrain keeps the old cut.
 func _g_a_moved_path_invalidates_the_cache() -> void:
 	print("[G] moving the path invalidates the field")
-	var graph := Pasture3DTerrainGraph.new()
+	var graph := Pasture3DTerrainGraph.create_empty()
 	var src := Pasture3DGraphNodeRoadSource.new()
 	var path := _straight()
 	src.path = path
@@ -502,7 +502,7 @@ func _h_a_real_road_resolves_into_a_graph() -> void:
 	print("    the road built a path of %d point(s), %.1f m long, half-width %.2f m at the middle"
 			% [built.points.size(), built.length(), built.half_width_at(built.length() * 0.5)])
 
-	var graph := Pasture3DTerrainGraph.new()
+	var graph := Pasture3DTerrainGraph.create_empty()
 	var named := Pasture3DGraphNodeRoadSource.new()
 	named.road_key = brush.road_key()
 	var defaulted := Pasture3DGraphNodeRoadSource.new()
@@ -1103,7 +1103,7 @@ func _n_shared_layer_stamp_cache_isolation() -> void:
 	brush_a.grade_surface(mod_a, ground, G_N, G_N, G_MIN, G_MIN, G_VS)
 	brush_b.grade_surface(mod_b, ground, G_N, G_N, G_MIN, G_MIN, G_VS)
 
-	var graph := Pasture3DTerrainGraph.new()
+	var graph := Pasture3DTerrainGraph.create_empty()
 	var src_b := Pasture3DGraphNodeRoadSource.new()
 	src_b.road_key = brush_b.road_key()
 	graph.add_node(src_b)

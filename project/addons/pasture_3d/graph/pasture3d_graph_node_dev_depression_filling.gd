@@ -38,12 +38,10 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 1
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["input"])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"input", PortType.HEIGHT).require(),
+	]
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:

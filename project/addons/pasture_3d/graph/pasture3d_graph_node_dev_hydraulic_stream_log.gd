@@ -90,28 +90,25 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 2
+## The mask scales what the node does, cell by cell, inside the kernel; it is not a blend of the finished
+## result over the input (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §9.3.1).
+func mask_mode() -> MaskMode:
+	return MaskMode.OWN
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["height", "mask"])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT).require(),
+	]
 
 
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK])
-
-
-func output_count() -> int:
-	return 4
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "channel_mask", "flow_accumulation", "erosion_depth"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.FIELD, PortType.FIELD])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"channel_mask", PortType.MASK),
+		Pasture3DGraphPort.field(&"flow_accumulation", PortType.FIELD),
+		Pasture3DGraphPort.field(&"erosion_depth", PortType.FIELD),
+	]
 
 
 ## The oracle is what this node IS, so it has to be what this node RUNS. Without these two, the class

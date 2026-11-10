@@ -11,7 +11,11 @@
 # `@export_range(0.0001, 0.5, 0.0005, "or_greater")` and the widget stopped at 0.1, so 0.3 displayed as
 # 0.1 and became 0.1.
 #
-#   [A] every property the widget table names exists on its node
+# The table that named each widget's property (`SLOT_SPINS`) is gone: the property is the port's own,
+# declared in the node's `_inputs()` (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §6), and this gate walks
+# every registered node's ports instead.
+#
+#   [A] every property a port names exists on its node
 #   [B] the built box matches the property's own hint, `or_greater` included
 #   [C] a value beyond the soft range survives the round trip — the data loss itself
 #
@@ -61,26 +65,35 @@ func _hint_of(p_node: Pasture3DGraphNode, p_prop: StringName) -> String:
 	return ""
 
 
+## Every (op, port, property) an inline widget is built for: each registered node's property-backed inputs.
+func _backed() -> Array:
+	var out: Array = []
+	for e in Pasture3DGraphNodeRegistry.entries(true):
+		var n: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(e["op"])
+		if n == null:
+			continue
+		var ports := n.input_ports()
+		for i in range(ports.size()):
+			if ports[i].property != &"":
+				out.append([e["op"], i, ports[i].property])
+	return out
+
+
 # --- A ------------------------------------------------------------------------------------------------
 func _a_table_names_real_properties() -> void:
-	print("[A] every property the widget table names exists on its node")
+	print("[A] every property a port names exists on its node")
 	var missing: Array[String] = []
 	var named := 0
-	for op in Pasture3DGraphEditor.SLOT_SPINS:
-		var n: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(op)
-		if n == null:
-			missing.append("%s: the registry cannot create it" % op)
-			continue
+	for row in _backed():
+		var n: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(row[0])
 		var have := {}
 		for prop in n.get_property_list():
 			have[StringName(prop.get("name", &""))] = true
-		for port in Pasture3DGraphEditor.SLOT_SPINS[op]:
-			for prop_name in Pasture3DGraphEditor.SLOT_SPINS[op][port]:
-				named += 1
-				if not have.has(prop_name):
-					missing.append("%s port %d -> %s" % [op, port, prop_name])
-	_check(missing.is_empty(), "%d table entries name a real property%s" % [named, "" if missing.is_empty() else " — " + "; ".join(missing)])
-	_check(named >= 80, "the table covers %d slots (the old code had 91 boxes)" % named)
+		named += 1
+		if not have.has(row[2]):
+			missing.append("%s port %d -> %s" % [row[0], row[1], row[2]])
+	_check(missing.is_empty(), "%d ports name a real property%s" % [named, "" if missing.is_empty() else " — " + "; ".join(missing)])
+	_check(named >= 80, "%d ports are property-backed (the old code had 91 boxes)" % named)
 
 
 # --- B ------------------------------------------------------------------------------------------------
@@ -89,27 +102,25 @@ func _b_the_box_matches_the_hint() -> void:
 	var wrong: Array[String] = []
 	var built := 0
 	var soft := 0
-	for op in Pasture3DGraphEditor.SLOT_SPINS:
+	for row in _backed():
+		var op: StringName = row[0]
+		var prop_name: StringName = row[2]
 		var n: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(op)
-		if n == null:
+		var hint := _hint_of(n, prop_name)
+		if hint == "":
+			continue # no declared range; [B] has nothing to compare and _spin_from_hint says so
+		var bits := hint.split(",")
+		var sb := _spin(n, prop_name)
+		built += 1
+		if sb == null:
+			wrong.append("%s.%s built no box" % [op, prop_name])
 			continue
-		for port in Pasture3DGraphEditor.SLOT_SPINS[op]:
-			for prop_name in Pasture3DGraphEditor.SLOT_SPINS[op][port]:
-				var hint := _hint_of(n, prop_name)
-				if hint == "":
-					continue # no declared range; [B] has nothing to compare and _spin_from_hint says so
-				var bits := hint.split(",")
-				var sb := _spin(n, prop_name)
-				built += 1
-				if sb == null:
-					wrong.append("%s.%s built no box" % [op, prop_name])
-					continue
-				if absf(sb.min_value - bits[0].to_float()) > 1e-9 or absf(sb.max_value - bits[1].to_float()) > 1e-9:
-					wrong.append("%s.%s is %s..%s, the node says %s..%s" % [op, prop_name, sb.min_value, sb.max_value, bits[0], bits[1]])
-				if hint.contains("or_greater"):
-					soft += 1
-					if not sb.allow_greater:
-						wrong.append("%s.%s is or_greater but the box clamps at %s" % [op, prop_name, sb.max_value])
+		if absf(sb.min_value - bits[0].to_float()) > 1e-9 or absf(sb.max_value - bits[1].to_float()) > 1e-9:
+			wrong.append("%s.%s is %s..%s, the node says %s..%s" % [op, prop_name, sb.min_value, sb.max_value, bits[0], bits[1]])
+		if hint.contains("or_greater"):
+			soft += 1
+			if not sb.allow_greater:
+				wrong.append("%s.%s is or_greater but the box clamps at %s" % [op, prop_name, sb.max_value])
 	_check(wrong.is_empty(), "%d boxes match their property%s" % [built, "" if wrong.is_empty() else " — " + "; ".join(wrong)])
 	_check(soft > 0, "%d of them are or_greater, so the clamp check ran at all" % soft)
 

@@ -141,7 +141,7 @@ func _inputs() -> PackedFloat32Array:
 
 ## Input -> node -> Output.
 func _graph(p_n: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), p_n, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [[0, 0, 1, 0], [1, 0, 2, 0]]
@@ -370,7 +370,7 @@ func _e_gpu() -> void:
 # --- F. terrain --------------------------------------------------------------------------------------
 ## Input + (Const -> [p_n]) -> Output. With p_n null the Const feeds the Blend directly.
 func _brush_graph(p_n: Pasture3DGraphNode, p_const: float) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var blend := Pasture3DGraphNodeBlend.new()
 	blend.mode = Pasture3DGraphNodeBlend.Mode.ADD
 	var k := Pasture3DGraphNodeConst.new()

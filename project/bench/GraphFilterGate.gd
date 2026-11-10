@@ -69,7 +69,7 @@ func _c_add_constant() -> void:
 	print("[C] Input -> Blend(ADD) <- Const(c) == surface + c")
 	var c := 4.0
 	# 0 Input, 1 Const(c), 2 Blend(ADD) [a=Input, b=Const], 3 Output <- Blend.
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _const(c),
 		_blend(Pasture3DGraphNodeBlend.Mode.ADD), Pasture3DGraphNodeOutput.new()]
@@ -84,7 +84,7 @@ func _c_add_constant() -> void:
 	if worst > EPS:
 		_fail += 1; print("    !! adding a Const to the Input did not shift the surface by the constant")
 	# CONTROL: c = 0 is the identity.
-	var g0 := Pasture3DTerrainGraph.new()
+	var g0 := Pasture3DTerrainGraph.create_empty()
 	var nodes0: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _const(0.0),
 		_blend(Pasture3DGraphNodeBlend.Mode.ADD), Pasture3DGraphNodeOutput.new()]
@@ -105,7 +105,7 @@ func _d_output_index_and_reads_input() -> void:
 	if g.output_index() != 1 or not g.reads_input():
 		_fail += 1; print("    !! the sink is not the output, or the Input was not detected")
 	# CONTROL: a pure generator (Const -> Output) is the output but reads no input.
-	var gen := Pasture3DTerrainGraph.new()
+	var gen := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [_const(2.0), Pasture3DGraphNodeOutput.new()]
 	gen.nodes = nodes
 	gen.connections = [_c4(0, 0, 1, 0)]
@@ -152,7 +152,7 @@ func _f_default_graph() -> void:
 
 ## Input(0) -> [mid nodes, chained] -> Output(last). No mid nodes = a bare Input -> Output.
 func _io_graph(p_mid: Array) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new()]
 	for m in p_mid:
 		nodes.append(m)

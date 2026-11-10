@@ -118,7 +118,7 @@ func _d_furrows_then_terrace_composite() -> void:
 	var f := _furrows(6.0, 14.0, 25.0, Pasture3DGraphNodeFurrows.Profile.V, 0.0, 70.0, 3)
 	var t := _terrace(2.0, 1.0, 1.0, 0.0, 40.0, 0)
 	# 0 Furrows -> 1 Terrace -> 2 Output.
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [f, t, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [_c4(0, 0, 1, 0), _c4(1, 0, 2, 0)]
@@ -152,7 +152,7 @@ func _e_categories_and_native_fallback() -> void:
 	if not cats_ok:
 		_fail += 1; print("    !! a node reported the wrong category (generator/filter)")
 	# A graph with an unlowered experimental op (DevErosion) is NOT natively supported -> falls back to GDScript.
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var dev_op := Pasture3DGraphNodeDevErosion.new()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), dev_op, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
@@ -162,7 +162,7 @@ func _e_categories_and_native_fallback() -> void:
 		_fail += 1; print("    !! an unlowered experimental graph wrongly claimed native support")
 	# CONTROL: an all-native graph (Input->Smooth->Output) IS supported — the check is not vacuous.
 	var sm := Pasture3DGraphNodeSmooth.new(); sm.passes = 1
-	var gn := Pasture3DTerrainGraph.new()
+	var gn := Pasture3DTerrainGraph.create_empty()
 	var nn: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), sm, Pasture3DGraphNodeOutput.new()]
 	gn.nodes = nn
 	gn.connections = [_c4(0, 0, 1, 0), _c4(1, 0, 2, 0)]
@@ -388,7 +388,7 @@ func _j_mask_weights_from_terrain() -> void:
 	if inv_ok > EPS or s0_off > EPS:
 		_fail += 1; print("    !! invert or strength-0 did not behave")
 	# CONTROL: Const(5) * Mask == 5 * weight — the MUL-gate workflow end to end.
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), _const(5.0),
 			_mask(Pasture3DGraphNodeMask.Property.ALTITUDE, 30.0, 80.0, 10.0, 10.0, false, 1.0),
 			_blend(Pasture3DGraphNodeBlend.Mode.MUL), Pasture3DGraphNodeOutput.new()]
@@ -476,7 +476,7 @@ func _blend(p_mode) -> Pasture3DGraphNodeBlend:
 
 
 func _mask_graph(p_mask: Pasture3DGraphNodeMask) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), p_mask, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [_c4(0, 0, 1, 0), _c4(1, 0, 2, 0)]
@@ -491,7 +491,7 @@ func _const_curve(p_y: float) -> Curve:
 
 
 func _gen_graph(p_gen: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [p_gen, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [_c4(0, 0, 1, 0)]
@@ -499,7 +499,7 @@ func _gen_graph(p_gen: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
 
 
 func _filter_graph(p_filter: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), p_filter, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [_c4(0, 0, 1, 0), _c4(1, 0, 2, 0)]

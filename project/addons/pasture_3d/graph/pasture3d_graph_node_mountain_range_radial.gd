@@ -95,33 +95,21 @@ func category() -> StringName:
 	return &"Generators"
 
 
-func input_count() -> int:
-	return 4
+# An unwired MASK (envelope) reads 1.0 — a missing gate is fully open, matching the native path.
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"ctrl", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"dx", PortType.SIGNED),
+		Pasture3DGraphPort.field(&"dy", PortType.SIGNED),
+		Pasture3DGraphPort.field(&"envelope", PortType.MASK).unwired(1.0),
+	]
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["ctrl", "dx", "dy", "envelope"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.SIGNED, PortType.SIGNED, PortType.MASK])
-
-
-func input_unwired_default(p_port: int) -> float:
-	# An unwired MASK (envelope) reads 1.0 — a missing gate is fully open, matching the native path.
-	return 1.0 if input_port_types()[p_port] == PortType.MASK else 0.0
-
-
-func output_count() -> int:
-	return 2
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "angle"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.VECTOR])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"angle", PortType.FIELD),
+	]
 
 
 func _param_changed() -> void:

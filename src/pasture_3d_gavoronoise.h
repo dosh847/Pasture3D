@@ -57,6 +57,8 @@
 #ifndef PASTURE_3D_GAVORONOISE_H
 #define PASTURE_3D_GAVORONOISE_H
 
+#include <cmath>
+
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/rect2.hpp>
 
@@ -75,6 +77,13 @@ struct GavoronoiseParams {
 	double z_cut_max = 1.0;
 	double erosion_strength = 0.1;
 	double erosion_frequency = 4.0; // erosion cells per base cell
+	// The height range the landform is read at. -INF is "from amplitude" (min 0, max min + amplitude); +INF or
+	// NaN is "measure the base's finite cells", falling back to the -INF rule when there is no base.
+	double height_min = -INFINITY;
+	double height_max = -INFINITY;
+	// 0 is off, and the result is bit-identical to a node without it. Warps the pattern by this many base
+	// cells of low-frequency noise and swings the gully depth by the same noise.
+	double variation = 0.0;
 };
 
 // The generator form. Returns a grid of metres.

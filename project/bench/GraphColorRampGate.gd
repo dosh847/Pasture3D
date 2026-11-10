@@ -192,7 +192,7 @@ func _value_ramp(p_g: Gradient, p_min: float, p_max: float) -> Pasture3DGraphNod
 
 
 func _graph(p_n: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), p_n, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [[0, 0, 1, 0], [1, 0, 2, 0]]
@@ -230,7 +230,7 @@ func _column_grid() -> PackedFloat32Array:
 
 ## Input -> Output, and Input -> [p_color_src] -> Color Sink.color.
 func _paint_graph(p_color_src: Pasture3DGraphNode, p_tapped := true) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeOutput.new(), p_color_src,
 			Pasture3DGraphNodeColorSink.new()]
 	g.nodes = nodes
@@ -297,7 +297,7 @@ func _e_native() -> void:
 	var noise := Pasture3DGraphNodeNoise.new()
 	noise.noise = FastNoiseLite.new()
 	var nodes: Array[Pasture3DGraphNode] = [noise, Pasture3DGraphNodeOutput.new(), _ramp(_opaque()), Pasture3DGraphNodeColorSink.new()]
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	g.nodes = nodes
 	g.connections = [[0, 0, 1, 0], [0, 0, 2, 0], [2, 0, 3, 1]]
 	g.set_output(1)
@@ -305,7 +305,7 @@ func _e_native() -> void:
 	_check("E", sup, "native_supported() with Noise -> Output and Noise -> Color Ramp -> Color Sink = %s" % str(sup))
 	var dev := Pasture3DGraphNodeDevValueRamp.new()
 	var nodes2: Array[Pasture3DGraphNode] = [noise, Pasture3DGraphNodeOutput.new(), _ramp(_opaque()), Pasture3DGraphNodeColorSink.new(), dev]
-	var g2 := Pasture3DTerrainGraph.new()
+	var g2 := Pasture3DTerrainGraph.create_empty()
 	g2.nodes = nodes2
 	g2.connections = [[0, 0, 4, 0], [4, 0, 1, 0], [0, 0, 2, 0], [2, 0, 3, 1]]
 	g2.set_output(1)

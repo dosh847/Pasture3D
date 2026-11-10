@@ -4798,6 +4798,7 @@ void Pasture3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("sim_pass_accumulate", "acc", "before", "after", "gate"), &Pasture3DData::sim_pass_accumulate);
 	ClassDB::bind_method(D_METHOD("sim_pass_commit", "before", "acc"), &Pasture3DData::sim_pass_commit);
 	ClassDB::bind_method(D_METHOD("apply_sim_block", "layer_id", "min_x", "min_z", "vs", "gw", "gh", "deltas", "blend"), &Pasture3DData::apply_sim_block);
+	ClassDB::bind_method(D_METHOD("blend_replace_over_layer", "layer_id", "min_x", "min_z", "vs", "gw", "gh", "vals", "weights", "below", "clip"), &Pasture3DData::blend_replace_over_layer);
 	ClassDB::bind_method(D_METHOD("sim_result_build", "parts", "target"), &Pasture3DData::sim_result_build);
 	ClassDB::bind_method(D_METHOD("sim_extract_water", "z", "params"), &Pasture3DData::sim_extract_water);
 	ClassDB::bind_method(D_METHOD("gc_layer", "layer_id"), &Pasture3DData::gc_layer);

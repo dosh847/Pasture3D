@@ -92,6 +92,12 @@ func _g_every_palette_op_is_lowerable() -> void:
 		if node != null and _all_color_outputs(node):
 			declared += 1
 			continue
+		#   * or the node FLATTENS AWAY (ports spec §11.2): a Subgraph node is replaced by its child's nodes
+		#     in the parent's flat view before any compiler runs, so no op is ever emitted for it. The control
+		#     below compiles a graph holding one natively, so the declaration cannot hide the S1 bug.
+		if node != null and node.has_method("flattens_away") and node.flattens_away():
+			declared += 1
+			continue
 		missing.append(String(op))
 	_assert(missing.is_empty(),
 			"%d palette op(s) missing from op_ids(): %s — each drops its whole graph to GDScript"
@@ -125,6 +131,30 @@ func _g_every_palette_op_is_lowerable() -> void:
 		if ids.has(op):
 			aliased.append(op)
 	_assert(aliased.is_empty(), "no colour node is aliased in op_ids() (found %s)" % str(aliased))
+
+	# CONTROL: the flatten-away exemption is earned. A graph whose output reads a Subgraph node (child:
+	# Subgraph Input -> Subgraph Output) must still be native_supported; if flattening ever stopped, the
+	# dead `subgraph` op would reach the compiler and drop the graph to GDScript.
+	var child := Pasture3DTerrainGraph.create_empty()
+	child.nodes = [Pasture3DGraphNodeRegistry.create(&"subgraph_input"),
+			Pasture3DGraphNodeRegistry.create(&"subgraph_output")] as Array[Pasture3DGraphNode]
+	child.connect_ports(0, 0, 1, 0)
+	child.output_node = 1
+	var parent := Pasture3DTerrainGraph.create_empty()
+	var sub: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"subgraph")
+	sub.graph = child
+	parent.nodes = [Pasture3DGraphNodeRegistry.create(&"const"), sub,
+			Pasture3DGraphNodeRegistry.create(&"output")] as Array[Pasture3DGraphNode]
+	parent.connect_ports(0, 0, 1, 0)
+	parent.connect_ports(1, 0, 2, 0)
+	parent.output_node = 2
+	var flat_native := parent.native_supported()
+	var other_native := Pasture3DTerrainGraph.op_ids().has(&"subgraph")
+	print("    control: a graph through a Subgraph node is native_supported %s (want true); op_ids has subgraph %s (want false)"
+			% [str(flat_native), str(other_native)])
+	_assert(flat_native and not other_native, "a Subgraph node flattens away before the native compiler")
+	_assert(not Pasture3DGraphNodeRegistry.create(&"value_ramp").has_method("flattens_away"),
+			"the flatten-away declaration is the Subgraph node's alone")
 
 
 func _all_color_outputs(p_node: Pasture3DGraphNode) -> bool:
@@ -178,7 +208,7 @@ func _a_parameter_socket_definitions() -> void:
 
 func _b_unwired_defaults_and_eval() -> void:
 	print("[B] Unwired defaults and evaluation fallbacks")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var swiss: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"noise_swiss")
 	swiss.set("amplitude", 55.0)
 	swiss.set("frequency", 0.01)
@@ -201,7 +231,7 @@ func _b_unwired_defaults_and_eval() -> void:
 
 func _c_driven_parameter_sockets() -> void:
 	print("[C] Dynamically driven parameter sockets")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 
 	# Constant 123.0 driving Swiss amplitude
 	var c_amp: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const")
@@ -230,7 +260,7 @@ func _c_driven_parameter_sockets() -> void:
 
 func _d_native_lowering_all_nodes() -> void:
 	print("[D] Native SSA program compilation support for graph with parameter nodes")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n1: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"noise_swiss")
 	var n2: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"terrace")
 	var n3: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"mask")
@@ -289,7 +319,7 @@ func _e_driven_params_all_generators() -> void:
 	# stays native. This used to decline outright, which cost a user every native op in the graph for
 	# wiring one Const to Swiss `frequency`. Both halves are asserted: the mapped port keeps acceleration
 	# AND is actually honoured, the unmapped port still declines rather than being dropped on the floor.
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var s5: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"noise_swiss")
 	var c5: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const")
 	c5.set("value", 0.05)
@@ -320,26 +350,42 @@ func _e_driven_params_all_generators() -> void:
 	_assert(agree <= maxf(1e-2, 1e-3 * moved), "port 4 agrees across evaluators (max |native - unfolded| %.4f)" % agree)
 
 	# CONTROL: a port >= 4 that `native_param_ports()` does not map is a grid input with nowhere to go, and must
-	# still decline. terrain_bus_merge's port 4 carries a `flow` channel, not a scalar. Without this the
-	# relaxation above would read as "port >= 4 is fine now", which is not what was built.
-	var gb := Pasture3DTerrainGraph.new()
-	var bm: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"terrain_bus_merge")
-	if bm != null and bm.input_count() > 4:
-		var cb: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const")
-		var i_cb := gb.add_node(cb)
-		var i_bm := gb.add_node(bm)
-		gb.connect_ports(i_cb, 0, i_bm, 4)
-		gb.connect_ports(i_bm, 0, gb.add_node(Pasture3DGraphNodeRegistry.create(&"output")), 0)
-		_assert(not gb.native_supported(), "an UNMAPPED port 4 still declines the native path")
-	else:
-		_assert(false, "control gone: terrain_bus_merge no longer has an unmapped fifth port")
+	# still decline. Without this the relaxation above would read as "port >= 4 is fine now", which is not
+	# what was built.
+	#
+	# The subject used to be terrain_bus_merge, whose port 4 carried a `flow` grid. That node is gone
+	# (ports spec P1) and no registry node has an unmapped high port any more, so the fixture is a
+	# gate-local one of the same shape: a passthrough op with a fifth GRID port and no params map.
+	var gb := Pasture3DTerrainGraph.create_empty()
+	var cb: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const")
+	var i_cb := gb.add_node(cb)
+	var i_bm := gb.add_node(_FivePortRelay.new())
+	gb.connect_ports(i_cb, 0, i_bm, 0)
+	gb.connect_ports(i_bm, 0, gb.add_node(Pasture3DGraphNodeRegistry.create(&"output")), 0)
+	# The fixture lowers natively until the high port is wired — otherwise the decline below could be the
+	# fixture itself being unsupported, and would say nothing about the port.
+	_assert(gb.native_supported(), "the five-port fixture is native-supported before port 4 is wired")
+	gb.connect_ports(i_cb, 0, i_bm, 4)
+	_assert(not gb.native_supported(), "an UNMAPPED port 4 still declines the native path")
+
+
+## A Reroute with four extra grid inputs and no `native_param_ports()` entry for any of them.
+class _FivePortRelay extends Pasture3DGraphNodeReroute:
+	func _inputs() -> Array[Pasture3DGraphPort]:
+		return [
+			Pasture3DGraphPort.field(&"in", PortType.HEIGHT),
+			Pasture3DGraphPort.field(&"b", PortType.FIELD),
+			Pasture3DGraphPort.field(&"c", PortType.FIELD),
+			Pasture3DGraphPort.field(&"d", PortType.FIELD),
+			Pasture3DGraphPort.field(&"e", PortType.FIELD),
+		]
 
 
 ## The peak |height| of a one-generator graph, optionally with port 0 driven by a Const, on either the
 ## folded/native evaluator or the unfolded reference.
 func _peak(p_op: StringName, p_prop: StringName, p_local: float, p_driven: float,
 		p_unfolded: bool) -> float:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(p_op)
 	n.set(p_prop, p_local)
 	var o: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"output")
@@ -429,7 +475,7 @@ func _f_no_native_path_ignores_a_driven_port() -> void:
 ## not made against a flat zero. 16x16, because the sweep covers 105 ports and the question it asks is
 ## binary — did the native path move at all — so resolution buys nothing.
 func _peak_port(p_op: StringName, p_port: int, p_value: float, p_drive: bool, p_unfolded: bool) -> float:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(p_op)
 	if n == null:
 		return 0.0

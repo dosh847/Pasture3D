@@ -105,20 +105,16 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 1
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.FIELD).require(),
+	]
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.FIELD])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.MASK])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"out", PortType.MASK),
+	]
 
 
 ## The kernel's parameter block, in float_to_mask_grid's order.

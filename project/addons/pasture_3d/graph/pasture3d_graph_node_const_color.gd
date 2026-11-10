@@ -28,16 +28,14 @@ func role() -> Role:
 	return Role.GENERATOR
 
 
-func input_count() -> int:
-	return 0
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return []
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray()
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.COLOR])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.value(&"out", PortType.COLOR),
+	]
 
 
 ## The COLOUR sideband's answer. Declared rather than left to be duck-typed off `value`, because that

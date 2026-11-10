@@ -22,12 +22,10 @@ func role() -> Role:
 	return Role.FILTER
 
 
-func input_count() -> int:
-	return 1
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["result"])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"result", PortType.HEIGHT).require(),
+	]
 
 
 ## The sink exposes no output port — its value is the graph's result, read by the host, not by another node.

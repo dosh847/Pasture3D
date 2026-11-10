@@ -8,7 +8,8 @@
 # World Machine's Displacement and Houdini's HeightField Distort. Wire two noise fields into `dx` and `dy`
 # to push a smooth hill's contours into lobes and spurs before an erosion pass cuts its valleys.
 #
-# dx and dy are read as METRES on world X and Z, times `scale`. A Noise node with an amplitude of 40 wired
+# dx and dy are read as METRES, times `scale`: on world X and Z (Direction WORLD), or along and across the
+# input's own slope (Direction SLOPE), where a positive dx pushes every flank outward whichever way it faces. A Noise node with an amplitude of 40 wired
 # straight in moves the surface up to 40 m. The kernel is src/pasture_3d_displace.cpp.
 @tool
 class_name Pasture3DGraphNodeDisplace
@@ -21,7 +22,17 @@ extends Pasture3DGraphNode
 		scale = v
 		emit_changed()
 
-## How much of the displacement is applied, 0..1 (times the mask, if wired).
+enum Direction { WORLD, SLOPE }
+
+## WORLD reads dx / dy on world X / Z, so one noise field pushes every slope the same way. SLOPE reads dx
+## along the input's uphill direction (positive pushes the flank outward, downhill) and dy across it, so a
+## hill's contours lobe evenly all round instead of piling up on one side.
+@export var direction: Direction = Direction.SLOPE:
+	set(v):
+		direction = v
+		emit_changed()
+
+## How much of the displacement is applied, 0..1 (times the mask, if wired: it scales the offset).
 @export_range(0.0, 1.0, 0.01) var amount: float = 1.0:
 	set(v):
 		amount = clampf(v, 0.0, 1.0)
@@ -37,12 +48,24 @@ func native_lower() -> Dictionary:
 	p.resize(16)
 	p[0] = scale
 	p[1] = amount
+	p[2] = float(direction)
 	return {"params": p}
 
 
 ## Ports 0..3 are fields and ride in0..in3; `amount` is port 4 and travels in the driven-scalar table.
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, -1, -1, -1, 1])
+## The mask scales what the node does, cell by cell, inside the kernel; it is not a blend of the finished
+## result over the input (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §9.3.1).
+func mask_mode() -> MaskMode:
+	return MaskMode.OWN
+
+
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.field(&"dx", PortType.SIGNED),
+		Pasture3DGraphPort.field(&"dy", PortType.SIGNED),
+		Pasture3DGraphPort.value(&"amount", PortType.FLOAT, &"amount", 1),
+	]
 
 
 func role() -> Role:
@@ -51,29 +74,6 @@ func role() -> Role:
 
 func needs_grid() -> bool:
 	return true
-
-
-func input_count() -> int:
-	return 5
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "dx", "dy", "mask", "amount"])
-
-
-func aux_grid_port() -> int:
-	return 3 # "mask"
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.SIGNED, PortType.SIGNED, PortType.MASK, PortType.FLOAT])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		3: return 1.0
-		4: return amount
-		_: return 0.0
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -85,15 +85,15 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) ->
 		return Pasture3DGraphOps.zeros(n)
 	var dx_g := _field(p_inputs, 1, n)
 	var dy_g := _field(p_inputs, 2, n)
-	var mask := _field(p_inputs, 3, n)
-	var amt: float = float(p_inputs[4][0]) if (p_inputs.size() > 4 and p_inputs[4] is PackedFloat32Array and p_inputs[4].size() > 0) else amount
+	var mask := _field(p_inputs, 4, n)
+	var amt: float = float(p_inputs[3][0]) if (p_inputs.size() > 3 and p_inputs[3] is PackedFloat32Array and p_inputs[3].size() > 0) else amount
 
 	if not ClassDB.class_has_method("Pasture3DUtil", "displace_grid"):
 		push_error("[Pasture3D] Pasture3DUtil.displace_grid is not bound. Rebuild GDExtension.")
 		return in_grid.duplicate()
 
 	var res: PackedFloat32Array = Pasture3DUtil.displace_grid(in_grid, dx_g, dy_g, mask, p_gw, p_gh, p_rect,
-			scale, amt)
+			scale, amt, int(direction))
 	if res.size() != n:
 		push_error("[Pasture3D] Displace returned an invalid grid size.")
 		return in_grid.duplicate()

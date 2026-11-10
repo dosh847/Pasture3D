@@ -54,6 +54,8 @@ var _watched_data: Pasture3DData = null
 func initialize(p_plugin: EditorPlugin) -> void:
 	plugin = p_plugin
 	name = "Pasture3D Layers"
+	# Lets a Layer brush's own Clear Layer Data button route through the dock's undoable clear.
+	Engine.set_meta("pasture3d_layers_dock", self)
 	# Dock first so the control is in the tree and theme icons resolve while building the toolbar.
 	plugin.add_control_to_dock(EditorPlugin.DOCK_SLOT_LEFT_BR, self)
 
@@ -133,6 +135,8 @@ func _make_tool_button(p_parent: Node, p_name: String, p_icon: String, p_tip: St
 
 
 func remove_dock() -> void:
+	if Engine.has_meta("pasture3d_layers_dock") and Engine.get_meta("pasture3d_layers_dock") == self:
+		Engine.remove_meta("pasture3d_layers_dock")
 	if plugin:
 		plugin.remove_control_from_docks(self)
 
@@ -628,6 +632,8 @@ func _set_unit_property(p_name: String, p_idxs: PackedInt32Array, p_getter: Stri
 		layer.call(p_setter, p_value)
 		if p_recomposite:
 			_data().recomposite_layer(i)
+		if p_setter == "set_visible" and p_value:
+			_rebake_if_hidden_pending(layer)
 	if olds.is_empty():
 		return
 	_mark_unsaved()
@@ -654,6 +660,8 @@ func _apply_layer_property(p_idx: int, p_setter: String, p_value: Variant, p_rec
 	layer.call(p_setter, p_value)
 	if p_recomposite:
 		d.recomposite_layer(p_idx)
+	if p_setter == "set_visible" and p_value:
+		_rebake_if_hidden_pending(layer)
 	refresh()
 	_mark_unsaved()
 
@@ -863,16 +871,14 @@ func _on_clear() -> void:
 	if layer == null or layer.is_base():
 		return
 	if _is_layer_brush_row(idx):
-		# Both rows of the pair: the base and the main row the members paint. With the node live, the rebuild
-		# re-solves the base and repaints the members that still exist, so there is nothing to undo back to.
 		var lb := _layer_brush_node(idx)
 		if lb != null:
-			lb.rebuild_layer()
+			clear_layer_brush(lb)
 		else:
 			for r in _unit_rows(idx):
 				_apply_clear(r)
-		refresh()
-		_mark_unsaved()
+			refresh()
+			_mark_unsaved()
 		return
 	var ur := EditorInterface.get_editor_undo_redo()
 	if ur == null:
@@ -890,6 +896,42 @@ func _on_clear() -> void:
 	ur.add_do_method(self, "_apply_clear", idx)
 	ur.add_undo_method(self, "_restore_tiles", idx, before, generations)
 	ur.commit_action() # runs the do
+
+
+## Clear a Layer brush: both rows emptied and every member cache dropped, with NO re-bake — a re-bake used to
+## paint frozen solves and stale stamps straight back, which is why leftover height survived Clear. Undo
+## restores both rows' tiles; the caches stay dropped, so the next bake is a fresh one either way.
+func clear_layer_brush(p_lb: Pasture3DLayerBrush) -> void:
+	var d := _data()
+	var stack := _stack()
+	if not d or not stack or p_lb == null:
+		return
+	p_lb.ensure_rows()
+	var rows := PackedInt32Array()
+	for i in stack.get_layer_count():
+		var l := stack.get_layer(i)
+		if l != null and Pasture3DLayerBrush.pair_owner_of(l) == p_lb.layer_owner_id():
+			rows.append(i)
+	var ur := EditorInterface.get_editor_undo_redo()
+	if ur == null:
+		p_lb.clear_layer_data()
+		refresh()
+		_mark_unsaved()
+		return
+	var generations: Dictionary = d.get_region_generations()
+	ur.create_action("Clear Pasture3D Layer Brush '%s'" % p_lb.name, UndoRedo.MERGE_DISABLE, terrain)
+	ur.add_do_method(self, "_apply_clear_layer_brush", p_lb)
+	for r in rows:
+		ur.add_undo_method(self, "_restore_tiles", r, _copy_tiles(stack.get_layer(r).get_tiles()), generations)
+	ur.commit_action()
+
+
+func _apply_clear_layer_brush(p_lb: Pasture3DLayerBrush) -> void:
+	if not is_instance_valid(p_lb):
+		return
+	p_lb.clear_layer_data()
+	refresh()
+	_mark_unsaved()
 
 
 ## The clear itself — one entry point so redo replays exactly what the button did.
@@ -968,6 +1010,30 @@ func _rebake_tools_on_layer(p_layer: Pasture3DLayer) -> void:
 	var brush := _find_tool_on_owner(root, owner)
 	if brush:
 		brush.refresh()
+
+
+## A brush skips its auto-refresh while its layer is hidden (Pasture3DTerrainBrush._hidden_pending). Showing
+## the layer again owes it the edits made meanwhile: one layer bake covers every tool that skipped.
+func _rebake_if_hidden_pending(p_layer: Pasture3DLayer) -> void:
+	var owner := p_layer.get_owner_id()
+	var root := EditorInterface.get_edited_scene_root()
+	if owner == "" or root == null:
+		return
+	var pending: Array[Pasture3DTerrainBrush] = []
+	_collect_hidden_pending(root, owner, pending)
+	if pending.is_empty():
+		return
+	for b in pending:
+		b._hidden_pending = false
+	pending[0]._schedule_refresh()
+
+
+func _collect_hidden_pending(p_node: Node, p_owner: String, p_out: Array[Pasture3DTerrainBrush]) -> void:
+	var brush := p_node as Pasture3DTerrainBrush
+	if brush and brush.terrain == terrain and brush._layer_owner == p_owner and brush._hidden_pending:
+		p_out.append(brush)
+	for c in p_node.get_children():
+		_collect_hidden_pending(c, p_owner, p_out)
 
 
 func _find_tool_on_owner(p_node: Node, p_owner: String) -> Pasture3DTerrainBrush:

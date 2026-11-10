@@ -32,25 +32,101 @@ signal structure_changed()
 ## emitter is not in the array.
 signal node_changed(index: int)
 
+## The declared parameter LIST changed: one added, removed, renamed, retyped, or given a new default or
+## range. A host listens to this to rebuild the inspector properties it exposes for them (ports spec §10.2).
+signal parameters_changed()
+
+## The saved layout this plugin writes, and the oldest it still reads. A graph outside that span is REFUSED:
+## it evaluates nothing, its host brush skips it, and `graph_warnings` names both versions. Nothing is
+## migrated on load (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §4). Raise both when a change makes an
+## older file mean something else, such as a port removed while wires are stored by index.
+##
+## Format 2 (2026-11-09) stores wires by PORT ID (`wires`); formats 0 and 1 stored them by port index
+## (`connections`), which meant inserting or removing a port silently re-aimed every later wire.
+##
+## Format 3 (2026-11-10) is the standard mask (spec §9): a `mask` wire into a FILTER or SOLVER now means
+## "blend the result over the input", Leveler's and Mudslide's old `mask` are `area` and `source`, and
+## Terrace's `amount` is a number. A format-2 file is converted by text, not on load.
+const FORMAT_CURRENT := 3
+const FORMAT_MIN_COMPATIBLE := 3
+
+## The layout this graph was saved in. The script default is 0 and must stay 0: a property equal to its
+## default is left out of the file, so a file with no `format_version` line loads as 0, which is what a
+## graph saved before versioning is. For that reason it is NOT set in `_init`, which also runs on load;
+## `create_default` and the first `add_node` stamp a new graph instead.
+@export var format_version: int = 0:
+	set(v):
+		if format_version == v:
+			return
+		format_version = v
+		structure_changed.emit()
+		emit_changed()
+
 ## The nodes. Order here is authoring order only — evaluation order is derived from `connections`.
 @export var nodes: Array[Pasture3DGraphNode] = []:
 	set(v):
 		_bind_nodes(nodes, false)
 		nodes = v
 		_bind_nodes(nodes, true)
+		# A Parameter node added here has no binding yet, and its port type comes from the binding.
+		_apply_params()
+		# Stored wires that arrived before their nodes did (see `wires`).
+		if _wires_pending:
+			_resolve_wires()
 		structure_changed.emit()
 		if output_index() >= 0:
 			emit_changed()
 
-## The wires, each a PackedInt32Array `[from_node, from_port, to_node, to_port]` (indices into `nodes`).
-## `from_port` is reserved for multi-output nodes (always 0 today); `to_port` is the destination input
-## port. Set programmatically here and by the later GraphEdit UI, so it is a plain untyped Array of
-## fixed-shape rows rather than an inspector-edited field.
-@export var connections: Array = []:
+## THE DECLARED PARAMETERS, in the order a host lists them (ports spec §10). A Parameter node outputs one,
+## chosen by id; the value comes from the host (`set_host_params`), and an id no host supplies reads the
+## declaration's default. Editing this list is a graph edit like any other: it emits `changed`, so every
+## host re-bakes, and `parameters_changed`, so every host rebuilds its property list.
+@export var parameters: Array[Pasture3DGraphParam] = []:
+	set(v):
+		_bind_params(parameters, false)
+		parameters = v
+		_bind_params(parameters, true)
+		_on_params_changed()
+
+## THE STORED WIRES, by port id. Each row is `[from_node: int, from_id: StringName, to_node: int,
+## to_id: StringName]`: node indices into `nodes`, and the `id` of a `Pasture3DGraphPort` on each end.
+## This is what a file holds (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §7); it is not a working form,
+## and nothing but the loader, the saver and a converter should touch it.
+##
+## SET (by the loader): the rows are resolved to `connections`, once, as soon as `nodes` is there. Property
+## load order is not something a setter may assume, so a `wires` that arrives first waits for `nodes`. A row
+## whose id its node no longer declares is DROPPED and reported by `graph_warnings`; it is never rebound to
+## whichever port now sits at that position, which is the whole reason ids are stored.
+##
+## GET (by the saver): computed from `connections` and the ports the nodes declare NOW. Not cached, because
+## a node may change its port list between the edit and the save, and the file has to name the ports the
+## author was looking at. A row naming a node or port that does not exist has no id and is left out.
+##
+## `@export_storage`: saved, and not shown in the inspector.
+@export_storage var wires: Array = []:
+	get:
+		if _wires_pending:
+			return _wires_loaded
+		return _wires_from_connections()
+	set(v):
+		_wires_loaded = v
+		_wires_pending = true
+		_resolve_wires()
+
+## THE WORKING WIRES, each a PackedInt32Array `[from_node, from_port, to_node, to_port]` (indices into
+## `nodes` and into each node's port list). Every reader, the compiler and the editor use this. It is NOT
+## stored: `wires` is, and this is rebuilt from it on load. Assigning it is how wiring is edited.
+var connections: Array = []:
 	set(v):
 		connections = v
 		structure_changed.emit()
 		emit_changed()
+
+var _wires_loaded: Array = []
+var _wires_pending: bool = false
+## What `_resolve_wires` could not place, as warning text. Kept until `wires` is assigned again: it is a
+## report of what the last load dropped.
+var _wires_dropped := PackedStringArray()
 
 ## Index into `nodes` of the node whose grid is the graph's output. -1 (or out of range) = no output, and
 ## `evaluate` returns a flat 0 field rather than guessing.
@@ -119,6 +195,7 @@ func _invalidate_topology_cache() -> void:
 	_order_cache.clear()
 	_fold_cache.clear()
 	_native_ok_cache.clear()
+	_flat_dirty = true
 
 
 ## Clears all cached output grid buffers across every node in the graph.
@@ -189,6 +266,10 @@ func _on_node_changed(p_node: Pasture3DGraphNode = null) -> void:
 	var n_idx := -1
 	if p_node != null:
 		n_idx = nodes.find(p_node)
+	# A Parameter node that was just pointed at another id has the OLD parameter's value until it is bound
+	# again, and everything below this line reads it.
+	if p_node != null and p_node.op() == &"param":
+		_apply_params()
 	
 	# A node the graph does not contain cannot feed the output — that is provable, not a guess, so it
 	# defaults to false. It used to default to true, which meant a node left wired by the dead disconnect
@@ -261,8 +342,638 @@ func _init() -> void:
 
 
 ## The current content revision — a host reads this as the staleness key for a frozen bake.
+##
+## The GRAPH's content, and nothing a host supplies: two hosts with different parameter values read the same
+## number here. A host that supplies parameters keys on `hash([content_key(), params_sig()])` after stamping
+## its own (`Pasture3DNodeGraph.graph_key`), which is why this stays a pure revision.
 func content_key() -> int:
 	return _revision
+
+
+# ---- Parameters (ports spec §10) --------------------------------------------------------------------
+#
+# The graph declares them; a host supplies the values. `host_params` is the same kind of thing as
+# `host_footprint` above it: runtime only, never saved, stamped by the host before it compiles or evaluates,
+# and read by everything that compiles after. Because a program's RESULT is never memoised
+# (`_native_ok_cache` explains why), stamping is all "substituted at compile" needs: the Parameter node
+# lowers the number it was bound to, on every compile.
+
+## `{id: value}` as the host supplied them. Ids the graph does not declare are kept here untouched and
+## simply never read; the host is the one that reports them.
+var host_params: Dictionary = {}
+
+
+func _bind_params(p_list: Array, p_connect: bool) -> void:
+	for p in p_list:
+		if p == null:
+			continue
+		if p_connect:
+			if not p.changed.is_connected(_on_params_changed):
+				p.changed.connect(_on_params_changed)
+		elif p.changed.is_connected(_on_params_changed):
+			p.changed.disconnect(_on_params_changed)
+
+
+func _on_params_changed() -> void:
+	_apply_params()
+	parameters_changed.emit()
+	# A retyped parameter changes a Parameter node's port, which is structure; a new default changes what an
+	# unsupplied host bakes, which is content.
+	structure_changed.emit()
+	emit_changed()
+
+
+## The declaration for `p_id`, or null. The FIRST one wins when two share an id; `graph_warnings` reports
+## the second.
+func find_param(p_id: StringName) -> Pasture3DGraphParam:
+	if p_id == &"":
+		return null
+	for p in parameters:
+		if p != null and p.id == p_id:
+			return p
+	return null
+
+
+## The declared ids, in order, without duplicates or blanks: what a host lists.
+func param_ids() -> Array[StringName]:
+	var out: Array[StringName] = []
+	for p in parameters:
+		if p != null and p.id != &"" and not out.has(p.id):
+			out.append(p.id)
+	return out
+
+
+## The number `p_id` evaluates to for the host stamped last: its value if it supplied one, else the declared
+## default. 0 for an id the graph does not declare.
+func param_value(p_id: StringName) -> float:
+	var decl := find_param(p_id)
+	if decl == null:
+		return 0.0
+	if host_params.has(p_id):
+		return decl.coerce(host_params[p_id])
+	return decl.default_number()
+
+
+## Stamp one host's values. Called by the host before every compile and every evaluate, exactly as
+## `set_host_footprint` is. EMITS NOTHING: `changed` is the bake signal and the graph is shared, so a stamp
+## that emitted would have each host's bake re-bake the others. Everything that must notice the values
+## reads them instead (`params_sig`, `_compute_node_inputs_hash`).
+func set_host_params(p_values: Dictionary) -> void:
+	host_params = p_values
+	_apply_params()
+
+
+## Push every Parameter node its declared type and resolved number. See Pasture3DGraphNodeParam.bind.
+func _apply_params() -> void:
+	for node in nodes:
+		if node != null and node.op() == &"param" and not node.is_pinned():
+			var decl := find_param(node.param_id)
+			if decl == null:
+				node.bind(Pasture3DGraphNode.PortType.FLOAT, 0.0, false)
+			else:
+				node.bind(decl.port_type(), param_value(decl.id), true)
+
+
+## A signature of what the Parameter nodes evaluate to RIGHT NOW, i.e. for the host stamped last. 0 for a
+## graph with no Parameter node, so a graph that uses none keys exactly as it did before parameters existed.
+## Built from the nodes rather than from `host_params`, so a value nothing reads does not move it.
+func params_sig() -> int:
+	var sig: Array = []
+	for ni in range(nodes.size()):
+		var node: Pasture3DGraphNode = nodes[ni]
+		if node != null and node.op() == &"param":
+			sig.append(ni)
+			sig.append(node.resolved_value())
+	return hash(sig) if not sig.is_empty() else 0
+
+
+# ---- Subgraphs (ports spec §11) ---------------------------------------------------------------------
+#
+# SUBGRAPHS DO NOT EXIST BELOW THE COMPILER. A graph holding a Subgraph node is evaluated through its FLAT
+# VIEW: a generated graph of ordinary nodes, built here, that every evaluator entry point hands the work to
+# (`evaluate`, both compilers, the cell compiler, `native_supported`, the block report, the path pre-pass,
+# both reaches, `reads_input`, `reads_footprint`). Nothing below those entry points knows a subgraph exists.
+#
+# The flat view keeps every top-level node at ITS OWN INDEX (the same objects, not copies), so a wire, a
+# preview root, a sink's source and a freeze report mean the same node in both. After them it appends each
+# Subgraph node's instance copies (`Pasture3DGraphNodeSubgraph.instance_nodes`) and rewires the boundary:
+#   * a consumer of a Subgraph Input copy reads what the parent wired into that port; unwired, the copy is a
+#     constant holding the input's default;
+#   * a consumer of a child Parameter copy reads what the parent wired into that parameter's port; unwired,
+#     the copy is pinned to the instance's value;
+#   * a consumer of the Subgraph node's output port k reads whatever feeds the child's k-th Subgraph Output;
+#   * with the standard mask wired, one Blend MIX of (input 0, output 0, mask) sits after it — the same op
+#     the compiler emits for every other masked node.
+# The Subgraph node itself stays at its index with no wires, so it never runs. The Subgraph Output copies
+# stay too, wired, as the ROOTS a preview or a sink tapping a Subgraph node's port uses (`_flat_roots`).
+
+## `_flat_root`'s answer for a Subgraph node with no output ports: there is nothing to evaluate.
+const FLAT_NO_ROOT := -2
+
+## True on a generated flat view. It never delegates again, and it is never saved.
+var _is_flat := false
+var _flat: Pasture3DTerrainGraph = null
+var _flat_dirty := true
+var _flat_sig: int = 0
+## Subgraph node index -> the flat node each of its output ports is read from, in port order.
+var _flat_roots: Dictionary = {}
+## Flat node index -> the top-level node it belongs to (itself, or the Subgraph node that expanded to it).
+var _flat_owner := PackedInt32Array()
+## What the last flattening refused, as warning text: cycles, mostly. Per-instance notes live on the node.
+var _flat_notes := PackedStringArray()
+## How many times this graph's flat view was rebuilt. For the gates.
+var flat_build_count: int = 0
+
+
+## True when this graph holds a Subgraph node.
+func has_subgraphs() -> bool:
+	if _is_flat:
+		return false
+	for n in nodes:
+		if n != null and n.op() == &"subgraph":
+			return true
+	return false
+
+
+## True when this graph is evaluated through `flat_view()`: it holds a Subgraph node (§11) or a node with a
+## multi-input port that the flat view lowers to a chain of Blends (a Combine, §12).
+func needs_flat() -> bool:
+	if _is_flat:
+		return false
+	for n in nodes:
+		if n != null and (n.op() == &"subgraph" or n.op() == &"combine"):
+			return true
+	return false
+
+
+## The graph every evaluator actually runs: this graph itself when it holds no Subgraph node, else its flat
+## view, rebuilt when the wiring or any Subgraph node or child has moved since the last one. Main thread
+## only, like `evaluate`: it builds resources.
+func flat_view() -> Pasture3DTerrainGraph:
+	if not needs_flat():
+		return self
+	_ensure_flat([self])
+	_sync_flat()
+	return _flat
+
+
+## The node list an INSTANCE of this graph copies: this graph, or its flat view when it holds subgraphs.
+## `p_stack` is the chain of graphs being expanded, for the cycle refusal.
+func _flat_for(p_stack: Array) -> Pasture3DTerrainGraph:
+	if not needs_flat():
+		return self
+	_ensure_flat(p_stack)
+	return _flat
+
+
+func _flat_signature() -> int:
+	var sig: Array = []
+	for i in range(nodes.size()):
+		var n: Pasture3DGraphNode = nodes[i]
+		if n != null and n.op() == &"subgraph":
+			sig.append(i)
+			sig.append(n._dirty_revision)
+			sig.append(n._child_serial)
+		elif n != null and n.op() == &"combine":
+			# The fold's Blends carry the mode, and muting cuts the fold to its first wire (§12).
+			sig.append(i)
+			sig.append(int(n.mode))
+			sig.append(n.muted)
+	return hash(sig)
+
+
+func _ensure_flat(p_stack: Array) -> void:
+	var sig := _flat_signature()
+	if _flat != null and not _flat_dirty and sig == _flat_sig:
+		return
+	_rebuild_flat(p_stack)
+	_flat_sig = sig
+	_flat_dirty = false
+
+
+## The host-supplied state a flat view must see as its own. Copied on every use, because a host stamps its
+## values onto THIS graph and the flat view is shared by every host of it.
+func _sync_flat() -> void:
+	_flat.host_params = host_params
+	_flat._apply_params()
+	_flat.host_footprint = host_footprint
+	_flat.force_gdscript_evaluation = force_gdscript_evaluation
+	_flat.force_no_path_prepass = force_no_path_prepass
+	_flat.force_no_staged_compile = force_no_staged_compile
+	_flat.max_cache_bytes = max_cache_bytes
+
+
+## A root as the flat view numbers it: the same index for every node but a Subgraph node, which is read from
+## its port 0 root; -1 stays -1 (the output). FLAT_NO_ROOT for a Subgraph node with nothing to read.
+func _flat_root(p_root: int) -> int:
+	if p_root < 0 or p_root >= nodes.size():
+		return -1
+	if not _flat_roots.has(p_root):
+		return p_root
+	var r: Array = _flat_roots[p_root]
+	return int(r[0]) if not r.is_empty() and int(r[0]) >= 0 else FLAT_NO_ROOT
+
+
+## Every flat root a list of roots expands to: each port of a Subgraph node, everything else as-is.
+func _flat_roots_of(p_roots: Array) -> Array:
+	var out: Array = []
+	for r in p_roots:
+		var ri := int(r)
+		if _flat_roots.has(ri):
+			for x in _flat_roots[ri]:
+				if int(x) >= 0 and not out.has(int(x)):
+					out.append(int(x))
+		elif not out.has(ri):
+			out.append(ri)
+	return out
+
+
+## A block report from the flat view, its `node` put back into this graph's numbering: a copy inside a
+## subgraph instance is reported as the Subgraph node that holds it.
+func _flat_report(p_rep: Dictionary) -> Dictionary:
+	var ni := int(p_rep.get("node", -1))
+	if ni >= 0 and ni < _flat_owner.size() and _flat_owner[ni] != ni:
+		p_rep["node"] = _flat_owner[ni]
+		var own: Pasture3DGraphNode = nodes[_flat_owner[ni]] if _flat_owner[ni] < nodes.size() else null
+		var where := "inside the Combine fold" if own != null and own.op() == &"combine" else "inside the subgraph"
+		p_rep["detail"] = "%s (%s)" % [String(p_rep.get("detail", "")), where]
+	return p_rep
+
+
+## `compile_graph_program_multi` on the flat view, with each Subgraph root expanded to its ports and the
+## result told how to find them again: `slot_of` / `raw_slot_of` map the Subgraph node to its port 0 root,
+## and `sub_taps` lists one slot per port, which `tap_slot` and `tap_channel` read.
+func _flat_compile_multi(p_roots: Array) -> Dictionary:
+	var fv := flat_view()
+	var froots := _flat_roots_of(p_roots)
+	if froots.is_empty():
+		return {}
+	var compiled := fv.compile_graph_program_multi(froots)
+	if compiled.is_empty():
+		return compiled
+	var so: Dictionary = compiled["slot_of"]
+	var rs: Dictionary = compiled["raw_slot_of"]
+	var taps := {}
+	for r in p_roots:
+		var ri := int(r)
+		if not _flat_roots.has(ri):
+			continue
+		var per: Array = []
+		for x in _flat_roots[ri]:
+			per.append(int(so[int(x)]) if int(x) >= 0 and so.has(int(x)) else -1)
+		taps[ri] = per
+		if not per.is_empty() and int(per[0]) >= 0:
+			so[ri] = int(per[0])
+			rs[ri] = int(per[0])
+	compiled["sub_taps"] = taps
+	return compiled
+
+
+func _release_flat() -> void:
+	if _flat == null:
+		return
+	# The old view shares this graph's node objects and parameter declarations, and is bound to their
+	# signals. Unbinding is what lets it go.
+	var none_n: Array[Pasture3DGraphNode] = []
+	var none_p: Array[Pasture3DGraphParam] = []
+	_flat.nodes = none_n
+	_flat.parameters = none_p
+	_flat = null
+
+
+func _rebuild_flat(p_stack: Array) -> void:
+	flat_build_count += 1
+	var ctx := {
+		"stack": p_stack,
+		"fn": [],          # flat nodes
+		"fc": [],          # flat wires
+		"owner": [],       # flat index -> top-level owner
+		"alias": {},       # Vector2i(subgraph node, port) -> Vector2i(flat source, port), x < 0 = unwired
+		"roots": {},       # subgraph node -> [flat root per output port]
+		"in_src": {},      # Vector2i(node, input port) -> Vector2i(source, port), this graph's wires
+		"in_multi": {},    # Vector2i(node, input port) -> [Vector2i(source, port)] in row order (§12)
+		"state": {},       # subgraph nodes already expanded (or being expanded)
+		"notes": [],
+	}
+	for i in range(nodes.size()):
+		ctx["fn"].append(nodes[i])
+		ctx["owner"].append(i)
+	for c in connections:
+		if c.size() >= 4:
+			var key := Vector2i(int(c[2]), int(c[3]))
+			var src := Vector2i(int(c[0]), int(c[1]))
+			ctx["in_src"][key] = src
+			if not ctx["in_multi"].has(key):
+				ctx["in_multi"][key] = []
+			ctx["in_multi"][key].append(src)
+	for i in range(nodes.size()):
+		if nodes[i] != null and nodes[i].op() == &"subgraph":
+			_fl_expand(ctx, i)
+		elif nodes[i] != null and nodes[i].op() == &"combine":
+			_fl_combine(ctx, i)
+	for c in connections:
+		if c.size() < 4:
+			continue
+		var t := int(c[2])
+		if t < 0 or t >= nodes.size() or nodes[t] == null or _fl_lowered(nodes[t]):
+			continue # a Subgraph or Combine node's inputs were consumed by its expansion
+		var src := _fl_res(ctx, Vector2i(int(c[0]), int(c[1])))
+		if src.x >= 0:
+			ctx["fc"].append(PackedInt32Array([src.x, src.y, t, int(c[3])]))
+
+	var f := Pasture3DTerrainGraph.new()
+	f._is_flat = true
+	f.format_version = FORMAT_CURRENT
+	f.host_params = host_params
+	f.parameters = parameters
+	var typed: Array[Pasture3DGraphNode] = []
+	typed.assign(ctx["fn"])
+	_release_flat()
+	f.nodes = typed
+	f.connections = ctx["fc"]
+	f.output_node = _flat_map_index(ctx, output_node)
+	f.output_override = _flat_map_index(ctx, output_override)
+	_flat = f
+	_flat_roots = ctx["roots"]
+	_flat_owner = PackedInt32Array(ctx["owner"])
+	_flat_notes = PackedStringArray(ctx["notes"])
+
+
+func _flat_map_index(p_ctx: Dictionary, p_i: int) -> int:
+	if p_i < 0 or p_i >= nodes.size():
+		return p_i
+	if not p_ctx["roots"].has(p_i):
+		return p_i
+	var r: Array = p_ctx["roots"][p_i]
+	return int(r[0]) if not r.is_empty() else -1
+
+
+## A wire source in this graph's numbering, as the flat view reads it: a Subgraph node's port becomes the
+## flat node behind it (expanding it first if need be).
+func _fl_res(p_ctx: Dictionary, p_src: Vector2i) -> Vector2i:
+	if p_src.x < 0 or p_src.x >= nodes.size() or nodes[p_src.x] == null:
+		return Vector2i(-1, 0)
+	if nodes[p_src.x].op() == &"subgraph":
+		_fl_expand(p_ctx, p_src.x)
+		return p_ctx["alias"].get(p_src, Vector2i(-1, 0))
+	if nodes[p_src.x].op() == &"combine":
+		_fl_combine(p_ctx, p_src.x)
+		return p_ctx["alias"].get(p_src, Vector2i(-1, 0))
+	return p_src
+
+
+## A node the flat view replaces: it stays at its index, unwired, and never runs.
+static func _fl_lowered(p_n: Pasture3DGraphNode) -> bool:
+	return p_n != null and (p_n.op() == &"subgraph" or p_n.op() == &"combine")
+
+
+## §12. A Combine node becomes a left fold of two-input Blends over its wires in row order,
+## ((w0 op w1) op w2) …: exactly the chain an author would wire by hand, so the two compile alike. One wire
+## (or a muted node) is a Reroute of the first wire; none is a Const 0. The last node is the root its
+## consumers, a preview and the output read.
+func _fl_combine(p_ctx: Dictionary, p_i: int) -> void:
+	if p_ctx["state"].has(p_i):
+		return
+	p_ctx["state"][p_i] = true
+	var cn: Pasture3DGraphNodeCombine = nodes[p_i]
+	var srcs: Array = []
+	for w in p_ctx["in_multi"].get(Vector2i(p_i, 0), []):
+		var r := _fl_res(p_ctx, w)
+		if r.x >= 0:
+			srcs.append(r)
+	if cn.muted and srcs.size() > 1:
+		srcs = [srcs[0]]
+	var fn: Array = p_ctx["fn"]
+	var fc: Array = p_ctx["fc"]
+	var root: int
+	if srcs.is_empty():
+		root = fn.size()
+		fn.append(Pasture3DGraphNodeConst.new())
+		p_ctx["owner"].append(p_i)
+	elif srcs.size() == 1:
+		root = fn.size()
+		fn.append(Pasture3DGraphNodeReroute.new())
+		p_ctx["owner"].append(p_i)
+		fc.append(PackedInt32Array([srcs[0].x, srcs[0].y, root, 0]))
+	else:
+		var acc: Vector2i = srcs[0]
+		for j in range(1, srcs.size()):
+			var b := Pasture3DGraphNodeBlend.new()
+			b.mode = cn.blend_mode()
+			var bi := fn.size()
+			fn.append(b)
+			p_ctx["owner"].append(p_i)
+			fc.append(PackedInt32Array([acc.x, acc.y, bi, 0]))
+			fc.append(PackedInt32Array([srcs[j].x, srcs[j].y, bi, 1]))
+			acc = Vector2i(bi, 0)
+		root = acc.x
+	p_ctx["alias"][Vector2i(p_i, 0)] = Vector2i(root, 0)
+	p_ctx["roots"][p_i] = [root]
+
+
+## What feeds input `p_port` of node `p_to`, in flat numbering; x < 0 when unwired.
+func _fl_src_of(p_ctx: Dictionary, p_to: int, p_port: int) -> Vector2i:
+	if p_port < 0:
+		return Vector2i(-1, 0)
+	return _fl_res(p_ctx, p_ctx["in_src"].get(Vector2i(p_to, p_port), Vector2i(-1, 0)))
+
+
+func _graph_name(p_g: Pasture3DTerrainGraph) -> String:
+	if p_g == null:
+		return "<none>"
+	if p_g.resource_name != "":
+		return p_g.resource_name
+	if p_g.resource_path != "":
+		return p_g.resource_path.get_file()
+	return "an unsaved graph"
+
+
+func _fl_expand(p_ctx: Dictionary, p_s: int) -> void:
+	if p_ctx["state"].has(p_s):
+		return
+	p_ctx["state"][p_s] = true
+	var sub: Pasture3DGraphNodeSubgraph = nodes[p_s]
+	var child: Pasture3DTerrainGraph = sub.graph
+	var n_out := sub.output_count()
+	var refused := child == null or not child.is_compatible()
+	var stack: Array = p_ctx["stack"]
+	if child != null and stack.has(child):
+		# §11.3. Named, so the author can find the loop; the Subgraph node passes its first input through.
+		var chain := PackedStringArray()
+		for g in stack.slice(stack.find(child)):
+			chain.append(_graph_name(g))
+		chain.append(_graph_name(child))
+		p_ctx["notes"].append("%s: the graph contains itself (%s), so the subgraph is refused and passes its first input through." \
+				% [sub.display_name(), " -> ".join(chain)])
+		refused = true
+	if sub.muted or refused:
+		# A muted node passes port 0 through; so does one whose child cannot run (§11.3). The other ports
+		# read nothing.
+		var r: Array = []
+		if n_out > 0:
+			var a0 := _fl_src_of(p_ctx, p_s, 0)
+			p_ctx["alias"][Vector2i(p_s, 0)] = a0
+			r.append(a0.x if a0.y == 0 else -1)
+		p_ctx["roots"][p_s] = r
+		return
+
+	var cf: Pasture3DTerrainGraph = child._flat_for(stack + [child])
+	var dups: Array = sub.instance_nodes(cf)
+	var fn: Array = p_ctx["fn"]
+	var off := fn.size()
+	for d in dups:
+		fn.append(d)
+		p_ctx["owner"].append(p_s)
+	# The child's OWN nodes are cf's first child.nodes.size() entries (cf keeps top-level indices, see the
+	# header). Only those carry this instance's boundary: a deeper copy was already rewired by the child.
+	var redirect := {} # cf index -> flat source
+	for ci in range(mini(child.nodes.size(), dups.size())):
+		var cn: Pasture3DGraphNode = cf.nodes[ci]
+		if cn == null or dups[ci] == null:
+			continue
+		if cn.op() == &"subgraph_input":
+			var port := sub.input_index_of(cn.input_id)
+			var src := _fl_src_of(p_ctx, p_s, port)
+			if src.x >= 0:
+				redirect[ci] = src
+		elif cn.op() == &"param":
+			var pid: StringName = cn.param_id
+			var port := sub.input_index_of(pid) if sub.child_param_ids().has(pid) else -1
+			var src := _fl_src_of(p_ctx, p_s, port)
+			if src.x >= 0:
+				redirect[ci] = src
+			var decl := child.find_param(pid)
+			dups[ci].pin(decl.port_type() if decl != null else Pasture3DGraphNode.PortType.FLOAT,
+					sub.param_number(pid) if decl != null else 0.0)
+	var fc: Array = p_ctx["fc"]
+	var into := {} # flat target index -> source feeding its port 0, for the outputs below
+	for c in cf.connections:
+		if c.size() < 4:
+			continue
+		var cfrom := int(c[0])
+		var cto := int(c[2])
+		if cto < 0 or cto >= dups.size() or dups[cto] == null:
+			continue
+		var src: Vector2i
+		if redirect.has(cfrom):
+			src = redirect[cfrom]
+		elif cfrom >= 0 and cfrom < dups.size() and dups[cfrom] != null:
+			src = Vector2i(off + cfrom, int(c[1]))
+		else:
+			continue
+		fc.append(PackedInt32Array([src.x, src.y, off + cto, int(c[3])]))
+		if int(c[3]) == 0:
+			into[off + cto] = src
+	var r: Array = []
+	var outs := sub.child_outputs()
+	for k in range(n_out):
+		var co := child.nodes.find(outs[k]) if k < outs.size() else -1
+		if co < 0 or co >= dups.size() or dups[co] == null:
+			p_ctx["alias"][Vector2i(p_s, k)] = Vector2i(-1, 0)
+			r.append(-1)
+			continue
+		p_ctx["alias"][Vector2i(p_s, k)] = into.get(off + co, Vector2i(-1, 0))
+		r.append(off + co)
+	# The standard mask (P5, §11.2): Blend MIX of (input 0, output 0, mask), exactly the slot the compiler
+	# emits after any other masked node, so a masked Subgraph node and its inlined equivalent agree.
+	var mp := sub.framework_mask_port()
+	var m_src := _fl_src_of(p_ctx, p_s, mp) if mp >= 0 else Vector2i(-1, 0)
+	if m_src.x >= 0 and n_out > 0:
+		var b := Pasture3DGraphNodeBlend.new()
+		b.mode = Pasture3DGraphNodeBlend.Mode.MIX
+		var bi := fn.size()
+		fn.append(b)
+		p_ctx["owner"].append(p_s)
+		var a_src := _fl_src_of(p_ctx, p_s, 0)
+		var o_src: Vector2i = p_ctx["alias"][Vector2i(p_s, 0)]
+		if a_src.x >= 0:
+			fc.append(PackedInt32Array([a_src.x, a_src.y, bi, 0]))
+		if o_src.x >= 0:
+			fc.append(PackedInt32Array([o_src.x, o_src.y, bi, 1]))
+		fc.append(PackedInt32Array([m_src.x, m_src.y, bi, 2]))
+		p_ctx["alias"][Vector2i(p_s, 0)] = Vector2i(bi, 0)
+		r[0] = bi
+	p_ctx["roots"][p_s] = r
+
+
+## False when this graph was saved in a layout this plugin does not read. An empty graph is always
+## compatible: it has no wires or ports to mean something else, and it is what the inspector's New
+## Pasture3DTerrainGraph makes, at version 0.
+func is_compatible() -> bool:
+	if nodes.is_empty() and connections.is_empty():
+		return true
+	return format_version >= FORMAT_MIN_COMPATIBLE and format_version <= FORMAT_CURRENT
+
+
+## `wires` -> `connections`. Waits (stays pending) while there are rows and no nodes yet.
+func _resolve_wires() -> void:
+	if nodes.is_empty() and not _wires_loaded.is_empty():
+		return
+	_wires_pending = false
+	_wires_dropped = PackedStringArray()
+	var rows: Array = []
+	for w in _wires_loaded:
+		if not (w is Array) or w.size() < 4:
+			_wires_dropped.append("a stored wire is not a [node, id, node, id] row")
+			continue
+		var fn := int(w[0])
+		var tn := int(w[2])
+		var from: Pasture3DGraphNode = nodes[fn] if fn >= 0 and fn < nodes.size() else null
+		var to: Pasture3DGraphNode = nodes[tn] if tn >= 0 and tn < nodes.size() else null
+		if from == null or to == null:
+			_wires_dropped.append("a stored wire names node %d, which does not exist" % (fn if from == null else tn))
+			continue
+		var fp := from.output_index_of(StringName(w[1]))
+		var tp := to.input_index_of(StringName(w[3]))
+		if fp < 0:
+			_wires_dropped.append("%s (node %d) has no output '%s'" % [from.display_name(), fn, w[1]])
+			continue
+		if tp < 0:
+			_wires_dropped.append("%s (node %d) has no input '%s'" % [to.display_name(), tn, w[3]])
+			continue
+		rows.append(PackedInt32Array([fn, fp, tn, tp]))
+	_wires_loaded = []
+	connections = rows
+
+
+## `connections` -> the rows `wires` stores.
+func _wires_from_connections() -> Array:
+	var out: Array = []
+	for c in connections:
+		if c.size() < 4:
+			continue
+		var fn := int(c[0])
+		var tn := int(c[2])
+		if fn < 0 or fn >= nodes.size() or tn < 0 or tn >= nodes.size() or nodes[fn] == null or nodes[tn] == null:
+			continue
+		var outs: Array = nodes[fn].output_ports()
+		var ins: Array = nodes[tn].input_ports()
+		var fp := int(c[1])
+		var tp := int(c[3])
+		if fp < 0 or fp >= outs.size() or tp < 0 or tp >= ins.size():
+			continue
+		out.append([fn, outs[fp].id, tn, ins[tp].id])
+	return out
+
+
+## A new, empty graph in the current format. What a script or a gate that fills `nodes` and `connections`
+## by hand starts from: `.new()` is format 0, because that is also what the loader starts from, and a
+## format-0 graph with nodes in it is refused.
+static func create_empty() -> Pasture3DTerrainGraph:
+	var g := Pasture3DTerrainGraph.new()
+	g.format_version = FORMAT_CURRENT
+	return g
+
+
+## Why this graph is refused, for a warning or a banner; empty when it is compatible.
+func format_refusal() -> String:
+	if is_compatible():
+		return ""
+	if format_version > FORMAT_CURRENT:
+		return ("Terrain graph is format %d and this plugin reads up to format %d, so it is not run. "
+				+ "Update the plugin, or rebuild the graph.") % [format_version, FORMAT_CURRENT]
+	return ("Terrain graph is format %d and this plugin reads format %d and newer, so it is not run. "
+			+ "Rebuild the graph and replace this one.") % [format_version, FORMAT_MIN_COMPATIBLE]
 
 
 # ---- Editing API -------------------------------------------------------------------------------------
@@ -275,6 +986,9 @@ func content_key() -> int:
 func add_node(p_node: Pasture3DGraphNode, p_pos: Vector2 = Vector2.ZERO) -> int:
 	if p_node == null:
 		return -1
+	# The first node of an empty graph is where it acquires a layout, so that is where it is stamped.
+	if nodes.is_empty() and connections.is_empty():
+		format_version = FORMAT_CURRENT
 	p_node.graph_position = p_pos
 	var arr := nodes.duplicate()
 	arr.append(p_node)
@@ -393,14 +1107,63 @@ func split_connection_with_node(p_from: int, p_from_port: int, p_to: int, p_to_p
 
 ## Wire `from`:`from_port` -> `to`:`to_port`. An input port takes ONE wire, so any existing wire into
 ## `(to, to_port)` is replaced.
-func connect_ports(p_from: int, p_from_port: int, p_to: int, p_to_port: int) -> void:
+##
+## Returns false and changes NOTHING when the wire is not one this graph can hold: a node index or a port
+## index that does not exist, or a pair of port types `Pasture3DGraphNode.can_connect` refuses. The editor
+## already refused those by never offering them; this is the same rule for every other caller (a preset
+## builder, a paste, a script), which used to be able to store a wire the editor would not draw.
+func connect_ports(p_from: int, p_from_port: int, p_to: int, p_to_port: int) -> bool:
+	if wire_problem(p_from, p_from_port, p_to, p_to_port) != "":
+		return false
+	# A multi port (§12) keeps every wire, appended last in its order; the same wire twice is one wire.
+	var multi: bool = nodes[p_to].input_ports()[p_to_port].multi
 	var arr: Array = []
 	for c in connections:
 		if int(c[2]) == p_to and int(c[3]) == p_to_port:
-			continue
+			if not multi:
+				continue
+			if int(c[0]) == p_from and int(c[1]) == p_from_port:
+				return true
 		arr.append(c)
 	arr.append(PackedInt32Array([p_from, p_from_port, p_to, p_to_port]))
 	connections = arr
+	return true
+
+
+## Why the wire `from`:`from_port` -> `to`:`to_port` cannot exist, or "" when it can. The ONE check:
+## `connect_ports` refuses on it and `graph_warnings` reports every stored wire that fails it.
+func wire_problem(p_from: int, p_from_port: int, p_to: int, p_to_port: int) -> String:
+	if p_from < 0 or p_from >= nodes.size() or nodes[p_from] == null:
+		return "its source node %d does not exist" % p_from
+	if p_to < 0 or p_to >= nodes.size() or nodes[p_to] == null:
+		return "its target node %d does not exist" % p_to
+	var from_node: Pasture3DGraphNode = nodes[p_from]
+	var to_node: Pasture3DGraphNode = nodes[p_to]
+	var outs := from_node.output_ports()
+	var ins := to_node.input_ports()
+	if p_from_port < 0 or p_from_port >= outs.size():
+		return "%s has no output %d" % [from_node.display_name(), p_from_port]
+	if p_to_port < 0 or p_to_port >= ins.size():
+		return "%s has no input %d" % [to_node.display_name(), p_to_port]
+	if not Pasture3DGraphNode.can_connect(outs[p_from_port].type, ins[p_to_port].type):
+		return "%s '%s' is %s and %s '%s' takes %s" % [
+				from_node.display_name(), outs[p_from_port].label, Pasture3DGraphNode.port_type_name(outs[p_from_port].type),
+				to_node.display_name(), ins[p_to_port].label, Pasture3DGraphNode.port_type_name(ins[p_to_port].type)]
+	return ""
+
+
+## True when the wire runs from a field output into a value input: the kind `connect_ports` refuses since
+## spec §8 and that a graph may still hold from before. It evaluates as it always did, reading cell 0.
+func wire_reads_cell_zero(p_from: int, p_from_port: int, p_to: int, p_to_port: int) -> bool:
+	if p_from < 0 or p_from >= nodes.size() or nodes[p_from] == null:
+		return false
+	if p_to < 0 or p_to >= nodes.size() or nodes[p_to] == null:
+		return false
+	var outs := nodes[p_from].output_ports()
+	var ins := nodes[p_to].input_ports()
+	if p_from_port < 0 or p_from_port >= outs.size() or p_to_port < 0 or p_to_port >= ins.size():
+		return false
+	return Pasture3DGraphNode.reads_cell_zero(outs[p_from_port].type, ins[p_to_port].type)
 
 
 ## Remove exactly the wire `from`:`from_port` -> `to`:`to_port`, if present.
@@ -432,7 +1195,7 @@ func serialize_subgraph(p_indices: Array) -> Dictionary:
 		if i >= 0 and i < nodes.size() and nodes[i] != null and not valid_indices.has(i):
 			valid_indices.append(i)
 	if valid_indices.is_empty():
-		return {"nodes": [], "connections": [], "center": Vector2.ZERO}
+		return {"nodes": [], "wires": [], "center": Vector2.ZERO}
 	
 	var cloned_nodes: Array[Pasture3DGraphNode] = []
 	var center_accum := Vector2.ZERO
@@ -450,11 +1213,17 @@ func serialize_subgraph(p_indices: Array) -> Dictionary:
 		var local_f := valid_indices.find(f)
 		var local_t := valid_indices.find(t)
 		if local_f != -1 and local_t != -1:
-			internal_wires.append(PackedInt32Array([local_f, int(c[1]), local_t, int(c[3])]))
+			# By port id, like the file: a clipboard outlives the port list it was copied from.
+			var outs: Array = nodes[f].output_ports()
+			var ins: Array = nodes[t].input_ports()
+			var fp := int(c[1])
+			var tp := int(c[3])
+			if fp >= 0 and fp < outs.size() and tp >= 0 and tp < ins.size():
+				internal_wires.append([local_f, outs[fp].id, local_t, ins[tp].id])
 			
 	return {
 		"nodes": cloned_nodes,
-		"connections": internal_wires,
+		"wires": internal_wires,
 		"center": center,
 	}
 
@@ -463,7 +1232,7 @@ func serialize_subgraph(p_indices: Array) -> Dictionary:
 ## to the data's center. Returns the newly created global node indices.
 func deserialize_subgraph(p_data: Dictionary, p_at_position: Vector2 = Vector2.INF) -> Array[int]:
 	var input_nodes: Array = p_data.get("nodes", [])
-	var input_wires: Array = p_data.get("connections", [])
+	var input_wires: Array = p_data.get("wires", [])
 	var original_center: Vector2 = p_data.get("center", Vector2.ZERO)
 	if input_nodes.is_empty():
 		return []
@@ -485,7 +1254,19 @@ func deserialize_subgraph(p_data: Dictionary, p_at_position: Vector2 = Vector2.I
 			var local_f := int(w[0])
 			var local_t := int(w[2])
 			if local_f >= 0 and local_f < new_indices.size() and local_t >= 0 and local_t < new_indices.size():
-				connect_ports(new_indices[local_f], int(w[1]), new_indices[local_t], int(w[3]))
+				var nf := new_indices[local_f]
+				var nt := new_indices[local_t]
+				# An id the pasted node no longer declares resolves to -1, which `connect_ports` refuses.
+				var fp := nodes[nf].output_index_of(StringName(w[1]))
+				var tp := nodes[nt].input_index_of(StringName(w[3]))
+				if wire_reads_cell_zero(nf, fp, nt, tp):
+					# A copy of a wire the original already holds. Dropping it here would make Duplicate
+					# quietly change what the copy evaluates to; it keeps its warning instead.
+					var arr: Array = connections.duplicate()
+					arr.append(PackedInt32Array([nf, fp, nt, tp]))
+					connections = arr
+				else:
+					connect_ports(nf, fp, nt, tp)
 				
 	return new_indices
 
@@ -500,10 +1281,369 @@ func duplicate_subgraph(p_indices: Array, p_offset: Vector2 = Vector2(40, 40)) -
 	return deserialize_subgraph(serialized, Vector2.INF)
 
 
+# ---- Group / Ungroup (ports spec §11.5) -------------------------------------------------------------
+#
+# Both rebuild `nodes` and `connections` whole and assign each once, so the editor can take its undo as one
+# snapshot of the two. Group COPIES the selection into a new child (the originals leave this graph); Ungroup
+# copies the child's nodes back in. Neither shares a node object between two graphs.
+
+static func _is_sink_node(p_n: Pasture3DGraphNode) -> bool:
+	return p_n is Pasture3DGraphNodeChannelSink or p_n is Pasture3DGraphNodeExportSink \
+			or p_n is Pasture3DGraphNodeRuntimeSink
+
+
+static func _unique_id(p_base: String, p_taken: Dictionary) -> StringName:
+	var id := p_base
+	var k := 2
+	while p_taken.has(StringName(id)):
+		id = "%s_%d" % [p_base, k]
+		k += 1
+	p_taken[StringName(id)] = true
+	return StringName(id)
+
+
+## Move the nodes at `p_indices` into a new child graph and put one Subgraph node in their place. Every wire
+## that crossed the selection's edge becomes a Subgraph Input (one per distinct outside source) or a Subgraph
+## Output (one per distinct inside source), and is re-made through the Subgraph node's matching port, so the
+## graph evaluates exactly as before. A Parameter node in the selection keeps reading the host: the child
+## declares the same parameter, and a new Parameter node here feeds its port.
+##
+## Returns `{"index": the Subgraph node, "child": the graph, "notes": [...]}`, or `{"error": text}` and
+## changes nothing. Refused: an Output, a sink or publish node, a subgraph boundary node, the designated
+## output, and a crossing wire carrying a PATH or COLOR (§11.1 carries scalars only in this phase).
+func group_into_subgraph(p_indices: Array) -> Dictionary:
+	var sel: Array[int] = []
+	for v in p_indices:
+		var i := int(v)
+		if i >= 0 and i < nodes.size() and nodes[i] != null and not sel.has(i):
+			sel.append(i)
+	sel.sort()
+	if sel.is_empty():
+		return {"error": "nothing selected to group"}
+	for i in sel:
+		var n: Pasture3DGraphNode = nodes[i]
+		if n.op() == &"output":
+			return {"error": "%s cannot go into a subgraph: the graph's output stays in the graph." % n.display_name()}
+		if n.op() == &"subgraph_input" or n.op() == &"subgraph_output":
+			return {"error": "%s is this graph's own boundary and cannot move into a child." % n.display_name()}
+		if _is_sink_node(n):
+			return {"error": "%s cannot go into a subgraph: sinks and publish nodes are refused there." % n.display_name()}
+	if sel.has(output_node) or sel.has(output_override):
+		return {"error": "the designated output is in the selection; set another output first."}
+
+	var in_sel := {}
+	for i in sel:
+		in_sel[i] = true
+	# The crossing sources, in wire order.
+	var ins: Array = []   # Vector2i(outside node, port)
+	var outs: Array = []  # Vector2i(inside node, port)
+	for c in connections:
+		if c.size() < 4:
+			continue
+		var f := int(c[0])
+		var t := int(c[2])
+		if in_sel.has(t) and not in_sel.has(f):
+			var k := Vector2i(f, int(c[1]))
+			if not ins.has(k):
+				ins.append(k)
+		elif in_sel.has(f) and not in_sel.has(t):
+			var k := Vector2i(f, int(c[1]))
+			if not outs.has(k):
+				outs.append(k)
+	for k: Vector2i in ins + outs:
+		var t := _out_port_type(k.x, k.y)
+		if not Pasture3DGraphNode.is_scalar_type(t):
+			return {"error": "a wire from %s carries a %s, and a subgraph boundary carries scalars only." \
+					% [nodes[k.x].display_name(), Pasture3DGraphNode.PortType.find_key(t)]}
+
+	var notes := PackedStringArray()
+	var child := Pasture3DTerrainGraph.new()
+	child.format_version = FORMAT_CURRENT
+	# Parameters the selection reads, declared the same way in the child.
+	var pids: Array[StringName] = []
+	var decls: Array[Pasture3DGraphParam] = []
+	for i in sel:
+		if nodes[i].op() == &"param":
+			var pid: StringName = nodes[i].param_id
+			var d := find_param(pid)
+			if d != null and not pids.has(pid):
+				pids.append(pid)
+				decls.append(d.duplicate(true))
+	var taken := {}
+	for pid in pids:
+		taken[pid] = true
+	taken[Pasture3DGraphNode.MASK_PORT_ID] = true
+
+	var center := Vector2.ZERO
+	for i in sel:
+		center += nodes[i].graph_position
+	center /= float(sel.size())
+
+	var cn: Array[Pasture3DGraphNode] = []
+	var local := {}
+	for i in sel:
+		var d: Pasture3DGraphNode = nodes[i].duplicate(true)
+		if d is Pasture3DGraphSolverNode and d.evaluation == Pasture3DGraphSolverNode.Evaluation.FROZEN:
+			d.evaluation = Pasture3DGraphSolverNode.Evaluation.LIVE
+			notes.append("%s was Frozen and is Live inside the subgraph: a solver inside a subgraph cannot be Frozen." \
+					% nodes[i].display_name())
+		local[i] = cn.size()
+		cn.append(d)
+	var min_x := INF
+	var max_x := -INF
+	for i in sel:
+		min_x = minf(min_x, nodes[i].graph_position.x)
+		max_x = maxf(max_x, nodes[i].graph_position.x)
+	var in_local: Array = []
+	for j in range(ins.size()):
+		var k: Vector2i = ins[j]
+		var sin := Pasture3DGraphNodeSubgraphInput.new()
+		sin.input_id = _unique_id("in", taken)
+		sin.port_type = _boundary_type(_out_port_type(k.x, k.y))
+		sin.graph_position = Vector2(min_x - 260.0, center.y + 120.0 * j)
+		in_local.append(cn.size())
+		cn.append(sin)
+	var out_local: Array = []
+	for j in range(outs.size()):
+		var k: Vector2i = outs[j]
+		var sout := Pasture3DGraphNodeSubgraphOutput.new()
+		sout.output_id = _unique_id("out", taken)
+		sout.port_type = _boundary_type(_out_port_type(k.x, k.y))
+		sout.graph_position = Vector2(max_x + 260.0, center.y + 120.0 * j)
+		out_local.append(cn.size())
+		cn.append(sout)
+	var cc: Array = []
+	for c in connections:
+		if c.size() < 4:
+			continue
+		var f := int(c[0])
+		var t := int(c[2])
+		if in_sel.has(f) and in_sel.has(t):
+			cc.append(PackedInt32Array([local[f], int(c[1]), local[t], int(c[3])]))
+		elif in_sel.has(t):
+			cc.append(PackedInt32Array([in_local[ins.find(Vector2i(f, int(c[1])))], 0, local[t], int(c[3])]))
+	for j in range(outs.size()):
+		var k: Vector2i = outs[j]
+		cc.append(PackedInt32Array([local[k.x], k.y, out_local[j], 0]))
+	child.parameters = decls
+	child.nodes = cn
+	child.connections = cc
+	if not out_local.is_empty():
+		child.output_node = out_local[0]
+
+	var sub := Pasture3DGraphNodeSubgraph.new()
+	sub.graph = child
+	sub.graph_position = center
+	# This graph's new node list: everything outside the selection, in order, then the Subgraph node, then
+	# one Parameter node per parameter the child reads.
+	var nn: Array[Pasture3DGraphNode] = []
+	var remap := {}
+	for i in range(nodes.size()):
+		if not in_sel.has(i):
+			remap[i] = nn.size()
+			nn.append(nodes[i])
+	var si := nn.size()
+	nn.append(sub)
+	var nc: Array = []
+	for c in connections:
+		if c.size() < 4:
+			continue
+		var f := int(c[0])
+		var t := int(c[2])
+		if not in_sel.has(f) and not in_sel.has(t):
+			nc.append(PackedInt32Array([remap[f], int(c[1]), remap[t], int(c[3])]))
+		elif in_sel.has(f) and not in_sel.has(t):
+			nc.append(PackedInt32Array([si, outs.find(Vector2i(f, int(c[1]))), remap[t], int(c[3])]))
+	for j in range(ins.size()):
+		var k: Vector2i = ins[j]
+		nc.append(PackedInt32Array([remap[k.x], k.y, si, j]))
+	for j in range(pids.size()):
+		var pn := Pasture3DGraphNodeParam.new()
+		pn.param_id = pids[j]
+		pn.graph_position = center + Vector2(-260.0, 120.0 * (ins.size() + j))
+		nc.append(PackedInt32Array([nn.size(), 0, si, sub.input_index_of(pids[j])]))
+		nn.append(pn)
+	var keep_out := output_node
+	var keep_ov := output_override
+	for f in frames:
+		if f != null:
+			var att := PackedInt32Array()
+			for idx in f.attached_node_indices:
+				if remap.has(idx):
+					att.append(remap[idx])
+			f.attached_node_indices = att
+	nodes = nn
+	connections = nc
+	output_node = remap.get(keep_out, -1) if keep_out >= 0 else keep_out
+	output_override = remap.get(keep_ov, -1) if keep_ov >= 0 else keep_ov
+	return {"index": si, "child": child, "notes": notes}
+
+
+func _out_port_type(p_node: int, p_port: int) -> int:
+	var ports: Array = nodes[p_node].output_ports()
+	return ports[p_port].type if p_port >= 0 and p_port < ports.size() else Pasture3DGraphNode.PortType.HEIGHT
+
+
+## The boundary node's type for a wire of type `p_type`: its own, all scalar types being available.
+static func _boundary_type(p_type: int) -> int:
+	return p_type
+
+
+## Replace the Subgraph node at `p_index` with copies of its child's nodes, wired as the flattened view
+## wires them (§11.2): a consumer of a Subgraph Input reads what fed the port (a Const of the input's
+## default when nothing did), a child Parameter becomes what fed its port (a Const of this instance's value
+## when nothing did), and a consumer of an output port reads what fed the matching Subgraph Output, through
+## one Blend MIX when the standard mask is wired. Nested Subgraph nodes stay Subgraph nodes: one level per
+## Ungroup. Returns the new nodes' indices, or [] and changes nothing.
+func ungroup_subgraph(p_index: int) -> Array[int]:
+	var none: Array[int] = []
+	if p_index < 0 or p_index >= nodes.size() or nodes[p_index] == null or nodes[p_index].op() != &"subgraph":
+		return none
+	var sub: Pasture3DGraphNodeSubgraph = nodes[p_index]
+	var child: Pasture3DTerrainGraph = sub.graph
+	if child == null or not child.is_compatible():
+		return none
+	# What fed each of the Subgraph node's input ports, in THIS graph's numbering.
+	var fed := {}
+	for c in connections:
+		if c.size() >= 4 and int(c[2]) == p_index:
+			fed[int(c[3])] = Vector2i(int(c[0]), int(c[1]))
+
+	var nn: Array[Pasture3DGraphNode] = []
+	var remap := {}
+	for i in range(nodes.size()):
+		if i != p_index:
+			remap[i] = nn.size()
+			nn.append(nodes[i])
+	# Child node -> what replaces it: a new index (copy or Const), or a redirect to a source here.
+	var cidx := {}      # child index -> new node index
+	var redirect := {}  # child index -> Vector2i(source here, port)
+	var ccenter := Vector2.ZERO
+	var counted := 0
+	for n in child.nodes:
+		if n != null:
+			ccenter += n.graph_position
+			counted += 1
+	if counted > 0:
+		ccenter /= float(counted)
+	var shift := sub.graph_position - ccenter
+	var param_ports := sub.child_param_ids()
+	for ci in range(child.nodes.size()):
+		var n: Pasture3DGraphNode = child.nodes[ci]
+		if n == null or n.op() == &"output" or n.op() == &"subgraph_output" or _is_sink_node(n):
+			continue
+		var made: Pasture3DGraphNode = null
+		if n.op() == &"subgraph_input":
+			var port := sub.input_index_of(n.input_id)
+			if fed.has(port):
+				redirect[ci] = Vector2i(remap[fed[port].x], fed[port].y)
+				continue
+			made = _const_for(n.port_type, n.default_value)
+		elif n.op() == &"param":
+			var pid: StringName = n.param_id
+			var decl := child.find_param(pid)
+			var port := sub.input_index_of(pid) if param_ports.has(pid) else -1
+			if fed.has(port):
+				redirect[ci] = Vector2i(remap[fed[port].x], fed[port].y)
+				continue
+			made = _const_for(decl.port_type() if decl != null else Pasture3DGraphNode.PortType.FLOAT,
+					sub.param_number(pid) if decl != null else 0.0)
+		elif n.op() == &"subgraph":
+			made = n.duplicate(false)
+			made.param_values = n.param_values.duplicate()
+		else:
+			made = n.duplicate(true)
+		made.graph_position = n.graph_position + shift
+		cidx[ci] = nn.size()
+		nn.append(made)
+	var src_of := func(ci: int, port: int) -> Vector2i:
+		if redirect.has(ci):
+			return redirect[ci]
+		if cidx.has(ci):
+			return Vector2i(cidx[ci], port)
+		return Vector2i(-1, 0)
+	var nc: Array = []
+	var into_out := {} # child Subgraph Output index -> source here
+	for c in connections:
+		if c.size() >= 4 and int(c[0]) != p_index and int(c[2]) != p_index:
+			nc.append(PackedInt32Array([remap[int(c[0])], int(c[1]), remap[int(c[2])], int(c[3])]))
+	for c in child.connections:
+		if c.size() < 4:
+			continue
+		var s: Vector2i = src_of.call(int(c[0]), int(c[1]))
+		if s.x < 0:
+			continue
+		var t := int(c[2])
+		if child.nodes[t] != null and child.nodes[t].op() == &"subgraph_output":
+			into_out[t] = s
+		elif cidx.has(t):
+			nc.append(PackedInt32Array([s.x, s.y, cidx[t], int(c[3])]))
+	# Output port k -> source here.
+	var alias: Array = []
+	for o in sub.child_outputs():
+		alias.append(into_out.get(child.nodes.find(o), Vector2i(-1, 0)))
+	var mp := sub.framework_mask_port()
+	if mp >= 0 and fed.has(mp) and not alias.is_empty():
+		var b := Pasture3DGraphNodeBlend.new()
+		b.mode = Pasture3DGraphNodeBlend.Mode.MIX
+		b.graph_position = sub.graph_position + Vector2(260.0, 0.0)
+		var bi := nn.size()
+		nn.append(b)
+		if fed.has(0):
+			nc.append(PackedInt32Array([remap[fed[0].x], fed[0].y, bi, 0]))
+		if alias[0].x >= 0:
+			nc.append(PackedInt32Array([alias[0].x, alias[0].y, bi, 1]))
+		nc.append(PackedInt32Array([remap[fed[mp].x], fed[mp].y, bi, 2]))
+		alias[0] = Vector2i(bi, 0)
+	for c in connections:
+		if c.size() >= 4 and int(c[0]) == p_index:
+			var k := int(c[1])
+			var s: Vector2i = alias[k] if k < alias.size() else Vector2i(-1, 0)
+			if s.x >= 0:
+				nc.append(PackedInt32Array([s.x, s.y, remap[int(c[2])], int(c[3])]))
+	var made_idx: Array[int] = []
+	for i in range(nodes.size() - 1, nn.size()):
+		made_idx.append(i)
+	var keep_out := output_node
+	var keep_ov := output_override
+	var a0: Vector2i = alias[0] if not alias.is_empty() else Vector2i(-1, 0)
+	for f in frames:
+		if f != null:
+			var att := PackedInt32Array()
+			for idx in f.attached_node_indices:
+				if remap.has(idx):
+					att.append(remap[idx])
+			f.attached_node_indices = att
+	nodes = nn
+	connections = nc
+	output_node = (a0.x if a0.y == 0 else -1) if keep_out == p_index else int(remap.get(keep_out, keep_out))
+	output_override = (a0.x if a0.y == 0 else -1) if keep_ov == p_index else int(remap.get(keep_ov, keep_ov))
+	return made_idx
+
+
+## A Const node of the right flavour for a value of type `p_type`.
+static func _const_for(p_type: int, p_value: float) -> Pasture3DGraphNode:
+	if p_type == Pasture3DGraphNode.PortType.INT:
+		var ci := Pasture3DGraphNodeConstInt.new()
+		ci.value = int(round(p_value))
+		return ci
+	if p_type == Pasture3DGraphNode.PortType.BOOL:
+		var cb := Pasture3DGraphNodeConstBool.new()
+		cb.value = p_value != 0.0
+		return cb
+	var c := Pasture3DGraphNodeConst.new()
+	c.value = p_value
+	return c
+
+
 
 ## The EFFECTIVE output node the evaluator returns: an explicit solo override (if set), else an explicit
 ## Output node (op &"output"), else the designated `output_node`.
 func output_index() -> int:
+	# A refused graph has no output. Every "is there anything to run" test in the plugin asks this, the
+	# host's `is_active` included, so answering -1 here is what takes the graph out of a brush's stack.
+	if not is_compatible():
+		return -1
 	if output_override >= 0 and output_override < nodes.size() and nodes[output_override] != null:
 		return output_override
 	for i in range(nodes.size()):
@@ -550,6 +1690,10 @@ func set_host_footprint(p_grid: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 
 ## True when some node reads an Input node's footprint pin (channel 1).
 func reads_footprint() -> bool:
+	if not is_compatible():
+		return false
+	if needs_flat():
+		return flat_view().reads_footprint()
 	for c in connections:
 		if c.size() >= 4 and int(c[1]) == 1:
 			var from := int(c[0])
@@ -561,6 +1705,10 @@ func reads_footprint() -> bool:
 ## The largest `outward_reach()` of any unmuted node: how far past the host brush's outline this graph
 ## writes at full strength. See Pasture3DGraphNode.outward_reach.
 func outward_reach() -> float:
+	if not is_compatible():
+		return 0.0
+	if needs_flat():
+		return flat_view().outward_reach()
 	var r := 0.0
 	for node in nodes:
 		if node != null and not node.muted:
@@ -573,6 +1721,8 @@ func outward_reach() -> float:
 ## its inputs'). A muted node passes its input through and adds nothing. INF as soon as any node on the
 ## chain is INF, and 0 for a graph with no usable output (a flat field cannot move).
 func edit_reach() -> float:
+	if needs_flat() and is_compatible():
+		return flat_view().edit_reach()
 	var order := _eval_order()
 	if order.is_empty():
 		return 0.0
@@ -635,6 +1785,8 @@ func _with_footprint(p_prog: Dictionary) -> Dictionary:
 
 
 func reads_input() -> bool:
+	if needs_flat() and is_compatible():
+		return flat_view().reads_input()
 	for ni in _eval_order():
 		if nodes[ni] != null and nodes[ni].op() == &"input":
 			return true
@@ -646,7 +1798,7 @@ func reads_input() -> bool:
 ## straight through), so it changes nothing until nodes are inserted between the two. Laid out left-to-right
 ## so the Add-node flow drops new nodes into the gap.
 static func create_default() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := create_empty()
 	var input := Pasture3DGraphNodeInput.new()
 	input.graph_position = Vector2(40.0, 80.0)
 	var output := Pasture3DGraphNodeOutput.new()
@@ -693,6 +1845,19 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 		push_error("Pasture3DTerrainGraph.evaluate() called off the main thread. Compile on the main "
 				+ "thread with compile_graph_program() and solve with Pasture3DUtil.graph_eval_grid.")
 		return Pasture3DGraphOps.zeros(p_gw * p_gh)
+	# An explicit root would otherwise walk past `output_index`'s refusal.
+	if not is_compatible():
+		return Pasture3DGraphOps.zeros(p_gw * p_gh)
+	if needs_flat():
+		# §11.2: the flat view runs it. Its counters are the flat view's; the ones a caller reads are here.
+		var fv := flat_view()
+		var froot := _flat_root(p_root_node)
+		if froot == FLAT_NO_ROOT:
+			return Pasture3DGraphOps.zeros(p_gw * p_gh)
+		var staged0 := fv.staged_compile_count
+		var res := fv.evaluate(p_gw, p_gh, p_rect, p_mask, p_input, froot)
+		staged_compile_count += fv.staged_compile_count - staged0
+		return res
 	var n := p_gw * p_gh
 	var out := p_root_node if (p_root_node >= 0 and p_root_node < nodes.size()) else output_index()
 	if out < 0 or out >= nodes.size() or nodes[out] == null:
@@ -866,9 +2031,9 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 				# and three unwired parameter sockets, i.e. three quarters of the per-cell work was
 				# re-reading constants. Hoist them, and loop only over what actually varies.
 				#
-				# A port BEYOND the connection list is treated as varying, not constant: a TERRAIN_BUS wire
-				# widens in_grids past input_count with real per-cell channels, and calling those constant
-				# would silently flatten them.
+				# A port BEYOND the connection list is treated as varying, not constant: with no source
+				# recorded for it there is no proof its grid is a fill, and calling it constant would
+				# silently flatten a real one.
 				var srcs_c: Array = inputs_of[ni]
 				var vary_ports := PackedInt32Array()
 				var vary_grids: Array = []
@@ -902,6 +2067,8 @@ func evaluate(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input = null
 								cell_in[vary_ports[p]] = (vary_grids[p] as PackedFloat32Array)[idx]
 							g[idx] = node.eval_cell(wx, wz, cell_in)
 			grids[ni] = g
+
+		grids[ni] = _with_standard_mask(ni, grids[ni], grids, aux, n)
 
 		# The bake does not touch 2D node previews — the graph editor owns them (see the note above).
 		if p_root_node < 0 or p_root_node == output_index():
@@ -975,6 +2142,11 @@ func _compute_node_inputs_hash(p_ni: int, p_gw: int, p_gh: int, p_rect: Rect2, p
 	# node; see p_surf_sig / p_mask_sig.
 	if node.op() == &"input":
 		sig.append(p_surf_sig)
+	# A Parameter node's value moves without its `_dirty_revision` moving (a host's stamp emits nothing, see
+	# Pasture3DGraphNodeParam), so the VALUE is in the key. Every consumer folds this node's hash into its
+	# own, which is how the change reaches a cached grid three nodes downstream.
+	if node.op() == &"param":
+		sig.append(node.resolved_value())
 	if node.needs_grid() and p_mask != null:
 		sig.append(p_mask_sig)
 
@@ -1147,6 +2319,8 @@ func _fold_plan(p_root: int = -1) -> Dictionary:
 ##                   two evaluators cannot disagree on the noise
 ##   output  int     the slot whose value is the graph output
 func compile_cell_program() -> Dictionary:
+	if needs_flat() and is_compatible():
+		return flat_view().compile_cell_program()
 	var out := output_index()
 	if out < 0 or out >= nodes.size() or nodes[out] == null:
 		return {}
@@ -1169,6 +2343,8 @@ func compile_cell_program() -> Dictionary:
 		var node: Pasture3DGraphNode = nodes[ni]
 		if node.needs_grid():
 			return {} # a grid node cannot fold into a per-cell run — stay on the GDScript path
+		if _framework_mask_wired(ni, inputs_of) >= 0:
+			return {} # the cell kernel has no mask slot; the grid program does (`_emit_program`)
 		var srcs: Array = inputs_of[ni]
 		var sa: int = int(srcs[0]) if srcs.size() > 0 else -1
 		var sb: int = int(srcs[1]) if srcs.size() > 1 else -1
@@ -1198,9 +2374,8 @@ func compile_cell_program() -> Dictionary:
 					param = float(node.get("value"))
 				&"const_int":
 					param = float(int(node.get("value")))
-				&"const_vector":
-					var cv: Vector2 = node.get("value") if node.get("value") is Vector2 else Vector2.ZERO
-					param = cv.length()
+				&"param":
+					param = node.resolved_value()
 				&"const_color":
 					var cc: Color = node.get("value") if node.get("value") is Color else Color.WHITE
 					param = cc.get_luminance()
@@ -1235,45 +2410,78 @@ func compile_cell_program() -> Dictionary:
 	}
 
 
-## Lower the WHOLE graph — any node types — into the flat program the native evaluator materialises node by
-## node (`Pasture3DUtil.graph_eval_grid`; C++ `pasture_3d_graph_ops`). One slot per node in topological
-## order, so a slot's inputs are always earlier slots. This is the materialise-every-node analogue of
-## `_eval_unfolded` (which `evaluate`, the folded path, matches to float32 rounding); the native side does
-## not fold, so it mirrors the unfolded reference. Returns {} — "stay on the GDScript path" — for a missing
-## or cyclic output, or a node whose op the native evaluator does not implement.
+## The standard-mask port of `p_ni` when the GRAPH applies it and something is wired to it, else -1
+## (spec §9.2). The one question every route asks: -1 means the node is evaluated exactly as before this
+## existed, so an unwired mask costs nothing anywhere.
+func _framework_mask_wired(p_ni: int, p_inputs_of: Dictionary) -> int:
+	var node: Pasture3DGraphNode = nodes[p_ni]
+	if node == null or node.muted:
+		return -1
+	var mp := node.framework_mask_port()
+	if mp < 0:
+		return -1
+	var srcs: Array = p_inputs_of.get(p_ni, [])
+	return mp if (mp < srcs.size() and int(srcs[mp]) >= 0) else -1
+
+
+## The standard rule, applied by the GDScript evaluators: `in + (out - in) * clamp(mask, 0, 1)`, and a
+## non-finite mask cell leaves `out`. In double, as the native Blend MIX does it.
+static func apply_standard_mask(p_in: PackedFloat32Array, p_out: PackedFloat32Array, p_mask: PackedFloat32Array) -> PackedFloat32Array:
+	var n := p_out.size()
+	if p_mask.size() != n:
+		return p_out
+	var res := p_out.duplicate()
+	var has_in := p_in.size() == n
+	for i in range(n):
+		var m: float = p_mask[i]
+		if is_finite(m):
+			var a: float = p_in[i] if has_in else 0.0
+			res[i] = a + (float(p_out[i]) - a) * clampf(m, 0.0, 1.0)
+	return res
+
+
+## The compiled slot to TAP for `p_node`'s output `p_port`, or -1. Port 0 of a masked node is its mask
+## slot, so a thumbnail shows the masked result; its other channels live on the node's own slot.
+static func tap_slot(p_compiled: Dictionary, p_node: int, p_port: int = 0) -> int:
+	# A Subgraph node's ports are separate roots in the flat view (§11.2), each read at its own channel 0.
+	var st: Dictionary = p_compiled.get("sub_taps", {})
+	if st.has(p_node):
+		var per: Array = st[p_node]
+		return int(per[p_port]) if p_port >= 0 and p_port < per.size() else -1
+	var key := "slot_of" if p_port <= 0 else "raw_slot_of"
+	var m: Dictionary = p_compiled.get(key, p_compiled.get("slot_of", {}))
+	return int(m[p_node]) if m.has(p_node) else -1
+
+
+## The channel of `tap_slot(p_compiled, p_node, p_port)`'s slot a tap reads: the port itself, except on a
+## Subgraph node, whose every port is channel 0 of its own slot.
+static func tap_channel(p_compiled: Dictionary, p_node: int, p_port: int = 0) -> int:
+	var st: Dictionary = p_compiled.get("sub_taps", {})
+	return 0 if st.has(p_node) else p_port
+
+
+## THE SHARED LOWERING. One slot per node of `p_order`, plus one Blend MIX slot after every node whose
+## standard mask is wired and applied by the graph. `compile_graph_program` and
+## `compile_graph_program_multi` are both this and nothing else, so the bake, the previews, the sinks and
+## the GPU route (which reads the same program) cannot disagree about a mask.
 ##
-## Program keys, all parallel and one entry per slot except `output`:
-##   ops      [int]     GraphCellOpType — 1 noise, 2 const, 3 blend, 4 terrace, 10 input, 11 smooth, 12 output
-##   params   [float]   amplitude | value | blend-mode | smooth-passes | band_height
-##   params_b [float]   hardness
-##   params_c [float]   amount
-##   params_d [float]   jitter
-##   in0      [int]     first input's source slot, or -1 unwired
-##   in1      [int]     second input's source slot (blend only), or -1
-##   noise    [Variant] the slot's FastNoiseLite (noise/jitter ops) or null — passed as-is, never rebuilt
-##   output   int       the slot whose grid is the graph output
-func compile_graph_program(p_root_node: int = -1) -> Dictionary:
-	var out := p_root_node if (p_root_node >= 0 and p_root_node < nodes.size()) else output_index()
-	if out < 0 or out >= nodes.size() or nodes[out] == null:
-		return {}
-	var order := _eval_order(out)
-	if order.is_empty():
-		return {}
-	# The same narrowing as native_supported: a channel the native op does not write cannot be compiled
-	# into a program, and the two must agree or a graph would report as lowerable and then fail to lower.
-	for c in connections:
-		if c.size() >= 4 and int(c[1]) > 0:
-			var to_node := int(c[2])
-			var from_node := int(c[0])
-			if order.has(to_node) and order.has(from_node) 					and (int(c[1]) >= native_out_count(from_node) or int(c[3]) >= 4):
-				return {}
-	var slot_of := {}
-	for k in range(order.size()):
-		slot_of[order[k]] = k
-	var plan: Dictionary = _fold_plan(out)
-	var inputs_of: Dictionary = plan["inputs_of"] # node -> [source node per port, -1 unwired]
-	# node -> [source PORT per input port]: which channel of the source each operand reads (P2b).
-	var input_ports_of: Dictionary = plan["input_ports_of"]
+## Returns `{}` for an op the native evaluator does not implement, else
+## `{"program", "slot_of", "raw_slot_of"}`. `slot_of[node]` is the slot a consumer of the node's PORT 0
+## reads, which is the mask slot when there is one. `raw_slot_of[node]` is the node's own op, where its
+## secondary channels are. The two are the same number for every unmasked node.
+func _emit_program(p_order: Array, p_inputs_of: Dictionary, p_input_ports_of: Dictionary) -> Dictionary:
+	var raw_slot := {}
+	var out_slot := {}
+	var next := 0
+	for ni in p_order:
+		raw_slot[ni] = next
+		next += 1
+		if _framework_mask_wired(ni, p_inputs_of) >= 0:
+			out_slot[ni] = next
+			next += 1
+		else:
+			out_slot[ni] = raw_slot[ni]
+	var blend_op := int(op_ids().get(&"blend", -1))
 	var ops := PackedInt32Array()
 	var params := PackedFloat32Array()
 	var params_b := PackedFloat32Array()
@@ -1307,6 +2515,8 @@ func compile_graph_program(p_root_node: int = -1) -> Dictionary:
 	var pdrv_node := PackedInt32Array()
 	var pdrv_param := PackedInt32Array()
 	var pdrv_src := PackedInt32Array()
+	# Which output CHANNEL of the source each pdrv entry reads (a Measure's max is channel 1).
+	var pdrv_chan := PackedInt32Array()
 	# Multi-output channels (P2b): how many grids each slot produces, and which grid of its source each of
 	# in0..in3 reads. Emitted for every program, not only ones that use them, so the native side never has
 	# to guess whether a missing array means "one channel" or "an older compiler".
@@ -1320,49 +2530,60 @@ func compile_graph_program(p_root_node: int = -1) -> Dictionary:
 	var in1_port := PackedInt32Array()
 	var in2_port := PackedInt32Array()
 	var in3_port := PackedInt32Array()
+	# The source of a secondary grid on a port past in3, and the channel it reads. See GraphProgram::in_aux.
+	var in_aux := PackedInt32Array()
+	var in_aux_port := PackedInt32Array()
 	var noise_tab: Array = []
 	var luts_tab: Array = []
+	var frozen_tab: Array = []
+	var geo := _compile_geometry(p_order, p_inputs_of)
+	var geo_in: PackedInt32Array = geo["in_g"]
+	var in_g := PackedInt32Array()
 
-	for ni in order:
+	for oi in range(p_order.size()):
+		var ni: int = p_order[oi]
 		var node: Pasture3DGraphNode = nodes[ni]
-		var srcs: Array = inputs_of[ni]
-		var s0: int = int(srcs[0]) if srcs.size() > 0 else -1
-		var s1: int = int(srcs[1]) if srcs.size() > 1 else -1
-		var s2: int = int(srcs[2]) if srcs.size() > 2 else -1
-		var s3: int = int(srcs[3]) if srcs.size() > 3 else -1
+		var iports: Array = p_input_ports_of.get(ni, [])
+		# The node's operands. A mask the graph applies is taken OUT of them here: the node's own op must
+		# not see it as a grid operand, a driven scalar or part of a frozen solve's key.
+		var srcs: Array = (p_inputs_of[ni] as Array).duplicate()
+		var mp := _framework_mask_wired(ni, p_inputs_of)
+		var mask_src := -1
+		var mask_chan := 0
+		if mp >= 0:
+			if blend_op < 0:
+				return {}
+			mask_src = int(srcs[mp])
+			mask_chan = int(iports[mp]) if iports.size() > mp else 0
+			srcs[mp] = -1
+		# Slot and channel of each of the first four operands. Port 0 of a source is its `out_slot`.
+		var s_slot := PackedInt32Array([-1, -1, -1, -1])
+		var s_chan := PackedInt32Array([0, 0, 0, 0])
+		for k in range(mini(4, srcs.size())):
+			var sk := int(srcs[k])
+			if sk >= 0:
+				s_chan[k] = int(iports[k]) if iports.size() > k else 0
+				s_slot[k] = int(out_slot[sk]) if s_chan[k] <= 0 else int(raw_slot[sk])
 		var lowered := _lower_node_op(node)
 		if lowered.is_empty():
 			return {} # an op the native evaluator does not implement
-		var op_id: int = int(lowered["op"])
 		var _pr: PackedFloat32Array = lowered["params"]
-		var p0: float = _pr[0]; var pb: float = _pr[1]; var pc: float = _pr[2]; var pd: float = _pr[3]
-		var pe: float = _pr[4]; var pf: float = _pr[5]; var pg: float = _pr[6]; var ph: float = _pr[7]
-		var pi: float = _pr[8]; var pj: float = _pr[9]; var pk: float = _pr[10]; var pl: float = _pr[11]
-		var pm: float = _pr[12] if _pr.size() > 12 else 0.0
-		var pn: float = _pr[13] if _pr.size() > 13 else 0.0
-		var po: float = _pr[14] if _pr.size() > 14 else 0.0
-		var pp: float = _pr[15] if _pr.size() > 15 else 0.0
-		var nz = lowered["noise"]
-		var lut = lowered["lut"]
-
-		ops.append(op_id)
-		params.append(p0); params_b.append(pb); params_c.append(pc); params_d.append(pd)
-		params_e.append(pe); params_f.append(pf); params_g.append(pg); params_h.append(ph)
-		params_i.append(pi); params_j.append(pj); params_k.append(pk); params_l.append(pl)
-		params_m.append(pm); params_n.append(pn); params_o.append(po); params_p.append(pp)
-		noise_tab.append(nz)
-		luts_tab.append(lut)
-		in0.append(int(slot_of[s0]) if s0 >= 0 else -1)
-		in1.append(int(slot_of[s1]) if s1 >= 0 else -1)
-		in2.append(int(slot_of[s2]) if s2 >= 0 else -1)
-		in3.append(int(slot_of[s3]) if s3 >= 0 else -1)
+		ops.append(int(lowered["op"]))
+		params.append(_pr[0]); params_b.append(_pr[1]); params_c.append(_pr[2]); params_d.append(_pr[3])
+		params_e.append(_pr[4]); params_f.append(_pr[5]); params_g.append(_pr[6]); params_h.append(_pr[7])
+		params_i.append(_pr[8]); params_j.append(_pr[9]); params_k.append(_pr[10]); params_l.append(_pr[11])
+		params_m.append(_pr[12]); params_n.append(_pr[13]); params_o.append(_pr[14]); params_p.append(_pr[15])
+		noise_tab.append(lowered["noise"])
+		luts_tab.append(lowered["lut"])
+		in0.append(s_slot[0]); in1.append(s_slot[1]); in2.append(s_slot[2]); in3.append(s_slot[3])
+		in0_port.append(s_chan[0]); in1_port.append(s_chan[1]); in2_port.append(s_chan[2]); in3_port.append(s_chan[3])
 		out_count.append(native_out_count(ni))
-		aux_port.append(node.aux_grid_port())
-		var iports: Array = input_ports_of.get(ni, [])
-		in0_port.append(int(iports[0]) if iports.size() > 0 and s0 >= 0 else 0)
-		in1_port.append(int(iports[1]) if iports.size() > 1 and s1 >= 0 else 0)
-		in2_port.append(int(iports[2]) if iports.size() > 2 and s2 >= 0 else 0)
-		in3_port.append(int(iports[3]) if iports.size() > 3 and s3 >= 0 else 0)
+		var high_aux: int = node.aux_grid_port()
+		aux_port.append(high_aux)
+		var s_aux: int = int(srcs[high_aux]) if high_aux >= 4 and srcs.size() > high_aux else -1
+		var c_aux: int = int(iports[high_aux]) if s_aux >= 0 and iports.size() > high_aux else 0
+		in_aux.append(-1 if s_aux < 0 else (int(out_slot[s_aux]) if c_aux <= 0 else int(raw_slot[s_aux])))
+		in_aux_port.append(c_aux)
 		var _pm: PackedInt32Array = lowered.get("pmap", PackedInt32Array())
 		pmap0.append(_pm[0] if _pm.size() > 0 else -1)
 		pmap1.append(_pm[1] if _pm.size() > 1 else -1)
@@ -1372,36 +2593,105 @@ func compile_graph_program(p_root_node: int = -1) -> Dictionary:
 			var pslot: int = int(_pm[k])
 			var psrc: int = int(srcs[k]) if srcs.size() > k else -1
 			if pslot >= 0 and psrc >= 0:
+				var pch: int = int(iports[k]) if iports.size() > k else 0
 				pdrv_node.append(ops.size() - 1)
 				pdrv_param.append(pslot)
-				pdrv_src.append(int(slot_of[psrc]))
+				pdrv_src.append(int(out_slot[psrc]) if pch <= 0 else int(raw_slot[psrc]))
+				pdrv_chan.append(pch)
+		frozen_tab.append(node.native_freeze_entry() if (not node.muted and node is Pasture3DGraphSolverNode) else null)
+		in_g.append(geo_in[oi] if oi < geo_in.size() else -1)
 
-	# The geometry operand, in the same slot order as everything above.
-	var _geo := _compile_geometry(order, inputs_of)
-	return _with_footprint({
-		"ops": ops, "params": params, "params_b": params_b, "params_c": params_c, "params_d": params_d,
-		"params_e": params_e, "params_f": params_f, "params_g": params_g, "params_h": params_h,
-		"params_i": params_i, "params_j": params_j, "params_k": params_k, "params_l": params_l,
-		"params_m": params_m, "params_n": params_n, "params_o": params_o, "params_p": params_p,
-		"in0": in0, "in1": in1, "in2": in2, "in3": in3,
-		"out_count": out_count, "aux_port": aux_port,
-		"in0_port": in0_port, "in1_port": in1_port, "in2_port": in2_port, "in3_port": in3_port,
-		"in_g": _geo["in_g"], "geom": _geo["geom"],
-		"pmap0": pmap0, "pmap1": pmap1, "pmap2": pmap2, "pmap3": pmap3,
-		"pdrv_node": pdrv_node, "pdrv_param": pdrv_param, "pdrv_src": pdrv_src,
-		"noise": noise_tab, "luts": luts_tab, "output": int(slot_of[out]),
-		"frozen": _freeze_table(order),
-	})
+		if mp < 0:
+			continue
+		# THE MASK SLOT: Blend MIX of (the node's input, the node's output, the mask). MIX with a mask is
+		# `a + (b - a) * clamp(mask, 0, 1)`, and a non-finite mask cell leaves `b`, which is the standard
+		# rule word for word. It is the Blend node's own op, so there is no new kernel on any route.
+		ops.append(blend_op)
+		params.append(float(Pasture3DGraphNodeBlend.Mode.MIX)); params_b.append(0.0); params_c.append(0.0); params_d.append(0.0)
+		params_e.append(0.0); params_f.append(0.0); params_g.append(0.0); params_h.append(0.0)
+		params_i.append(0.0); params_j.append(0.0); params_k.append(0.0); params_l.append(0.0)
+		params_m.append(0.0); params_n.append(0.0); params_o.append(0.0); params_p.append(0.0)
+		noise_tab.append(null)
+		luts_tab.append(PackedFloat32Array())
+		in0.append(s_slot[0]); in0_port.append(s_chan[0])
+		in1.append(int(raw_slot[ni])); in1_port.append(0)
+		in2.append(int(out_slot[mask_src]) if mask_chan <= 0 else int(raw_slot[mask_src])); in2_port.append(mask_chan)
+		in3.append(-1); in3_port.append(0)
+		out_count.append(1)
+		aux_port.append(-1)
+		in_aux.append(-1)
+		in_aux_port.append(0)
+		pmap0.append(-1); pmap1.append(-1); pmap2.append(-1); pmap3.append(-1)
+		frozen_tab.append(null)
+		in_g.append(-1)
+
+	return {
+		"program": _with_footprint({
+			"ops": ops, "params": params, "params_b": params_b, "params_c": params_c, "params_d": params_d,
+			"params_e": params_e, "params_f": params_f, "params_g": params_g, "params_h": params_h,
+			"params_i": params_i, "params_j": params_j, "params_k": params_k, "params_l": params_l,
+			"params_m": params_m, "params_n": params_n, "params_o": params_o, "params_p": params_p,
+			"in0": in0, "in1": in1, "in2": in2, "in3": in3,
+			"out_count": out_count, "aux_port": aux_port,
+			"in0_port": in0_port, "in1_port": in1_port, "in2_port": in2_port, "in3_port": in3_port,
+			"in_aux": in_aux, "in_aux_port": in_aux_port,
+			"in_g": in_g, "geom": geo["geom"],
+			"pmap0": pmap0, "pmap1": pmap1, "pmap2": pmap2, "pmap3": pmap3,
+			"pdrv_node": pdrv_node, "pdrv_param": pdrv_param, "pdrv_src": pdrv_src, "pdrv_chan": pdrv_chan,
+			"noise": noise_tab, "luts": luts_tab, "output": 0,
+			# The freeze table, parallel to the slots: each FROZEN solver's cache and key recipe, null
+			# elsewhere. A mask slot is never frozen, so a solve is cached UNMASKED and changing the mask
+			# re-runs one blend. Without the table a sink or preview tap pass re-solved every FROZEN solver
+			# from scratch -- a Saleve solve on the main thread, per bake pass.
+			"frozen": frozen_tab,
+		}),
+		"slot_of": out_slot,
+		"raw_slot_of": raw_slot,
+	}
 
 
-## The native freeze table, parallel to the compiled slots: each FROZEN solver's cache and key recipe, null
-## elsewhere. Built on the main thread at compile, which is the only time the evaluator may read a node.
-func _freeze_table(p_order: Array) -> Array:
-	var t: Array = []
-	for ni in p_order:
-		var nd: Pasture3DGraphNode = nodes[ni]
-		t.append(nd.native_freeze_entry() if (not nd.muted and nd is Pasture3DGraphSolverNode) else null)
-	return t
+## Lower the WHOLE graph — any node types — into the flat program the native evaluator materialises node by
+## node (`Pasture3DUtil.graph_eval_grid`; C++ `pasture_3d_graph_ops`). One slot per node in topological
+## order, so a slot's inputs are always earlier slots. This is the materialise-every-node analogue of
+## `_eval_unfolded` (which `evaluate`, the folded path, matches to float32 rounding); the native side does
+## not fold, so it mirrors the unfolded reference. Returns {} — "stay on the GDScript path" — for a missing
+## or cyclic output, or a node whose op the native evaluator does not implement.
+##
+## Program keys, all parallel and one entry per slot except `output`:
+##   ops      [int]     GraphCellOpType — 1 noise, 2 const, 3 blend, 4 terrace, 10 input, 11 smooth, 12 output
+##   params   [float]   amplitude | value | blend-mode | smooth-passes | band_height
+##   params_b [float]   hardness
+##   params_c [float]   amount
+##   params_d [float]   jitter
+##   in0      [int]     first input's source slot, or -1 unwired
+##   in1      [int]     second input's source slot (blend only), or -1
+##   noise    [Variant] the slot's FastNoiseLite (noise/jitter ops) or null — passed as-is, never rebuilt
+##   output   int       the slot whose grid is the graph output
+func compile_graph_program(p_root_node: int = -1) -> Dictionary:
+	if needs_flat() and is_compatible():
+		var froot := _flat_root(p_root_node)
+		return {} if froot == FLAT_NO_ROOT else flat_view().compile_graph_program(froot)
+	var out := p_root_node if (p_root_node >= 0 and p_root_node < nodes.size()) else output_index()
+	if out < 0 or out >= nodes.size() or nodes[out] == null:
+		return {}
+	var order := _eval_order(out)
+	if order.is_empty():
+		return {}
+	# The same narrowing as native_supported: a channel the native op does not write cannot be compiled
+	# into a program, and the two must agree or a graph would report as lowerable and then fail to lower.
+	for c in connections:
+		if c.size() >= 4 and int(c[1]) > 0:
+			var to_node := int(c[2])
+			var from_node := int(c[0])
+			if order.has(to_node) and order.has(from_node) and int(c[1]) >= native_out_count(from_node):
+				return {}
+	var plan: Dictionary = _fold_plan(out)
+	var emitted := _emit_program(order, plan["inputs_of"], plan["input_ports_of"])
+	if emitted.is_empty():
+		return {} # an op the native evaluator does not implement
+	var prog: Dictionary = emitted["program"]
+	prog["output"] = int(emitted["slot_of"][out])
+	return prog
 
 
 ## True when a compiled program carries a FROZEN solver. Static and resource-free, so a worker may ask.
@@ -1449,7 +2739,8 @@ func _native_eval(p_prog: Dictionary, p_gw: int, p_gh: int, p_rect: Rect2, p_inp
 ## source is already a compiled slot. Ports >= 4 that this table maps therefore travel in a flat overflow
 ## table (`pdrv_node` / `pdrv_param` / `pdrv_src`) instead, so wiring Swiss `frequency` or Dunes `sharpness`
 ## no longer costs the whole graph its acceleration. A port >= 4 that this table does NOT map is a grid port
-## with nowhere to go, and `native_supported()` still declines it rather than dropping it silently.
+## with nowhere to go, and `native_supported()` still declines it rather than dropping it silently. The one
+## exception is the node's own `aux_grid_port`, which rides `in_aux`.
 ##
 ## The values were derived by matching each node's `input_names()` against the property names its lowering
 ## reads, then checked against the node's own `eval_grid`. GraphAllNodeSocketsGate section F sweeps every
@@ -1529,6 +2820,8 @@ func _is_color_wire(p_c) -> bool:
 
 
 func _eval_order_multi(p_roots: Array) -> Array:
+	if not is_compatible():
+		return []
 	var needed := {}
 	var frontier: Array = []
 	for r in p_roots:
@@ -1583,6 +2876,8 @@ func _eval_order_multi(p_roots: Array) -> Array:
 ## `output` is set to one root's slot purely to satisfy graph_build's range check; the caller reads the
 ## tapped buffers, never the output.
 func compile_graph_program_multi(p_roots: Array) -> Dictionary:
+	if needs_flat() and is_compatible():
+		return _flat_compile_multi(p_roots)
 	var order := _eval_order_multi(p_roots)
 	if order.is_empty():
 		return {}
@@ -1596,11 +2891,8 @@ func compile_graph_program_multi(p_roots: Array) -> Dictionary:
 		if c.size() >= 4 and int(c[1]) > 0:
 			var to_node := int(c[2])
 			var from_node := int(c[0])
-			if needed.has(to_node) and needed.has(from_node) 					and (int(c[1]) >= native_out_count(from_node) or int(c[3]) >= 4):
+			if needed.has(to_node) and needed.has(from_node) and int(c[1]) >= native_out_count(from_node):
 				return {}
-	var slot_of := {}
-	for k in range(order.size()):
-		slot_of[order[k]] = k
 	# inputs_of over the union ancestor set — same construction as _fold_plan, restricted to `needed`.
 	var inputs_of := {}
 	var input_ports_of := {}
@@ -1622,122 +2914,16 @@ func compile_graph_program_multi(p_roots: Array) -> Dictionary:
 				if tp >= 0 and tp < (inputs_of[to] as Array).size():
 					inputs_of[to][tp] = from
 					input_ports_of[to][tp] = int(c[1])
-	var ops := PackedInt32Array()
-	var params := PackedFloat32Array()
-	var params_b := PackedFloat32Array()
-	var params_c := PackedFloat32Array()
-	var params_d := PackedFloat32Array()
-	var params_e := PackedFloat32Array()
-	var params_f := PackedFloat32Array()
-	var params_g := PackedFloat32Array()
-	var params_h := PackedFloat32Array()
-	var params_i := PackedFloat32Array()
-	var params_j := PackedFloat32Array()
-	var params_k := PackedFloat32Array()
-	var params_l := PackedFloat32Array()
-	var params_m := PackedFloat32Array()
-	var params_n := PackedFloat32Array()
-	var params_o := PackedFloat32Array()
-	var params_p := PackedFloat32Array()
-	var in0 := PackedInt32Array()
-	var in1 := PackedInt32Array()
-	var in2 := PackedInt32Array()
-	var in3 := PackedInt32Array()
-	# Parallel to in0..in3: the params slot each of those ports overrides when wired, or -1.
-	var pmap0 := PackedInt32Array()
-	var pmap1 := PackedInt32Array()
-	var pmap2 := PackedInt32Array()
-	var pmap3 := PackedInt32Array()
-	# The overflow table for driven scalars on ports >= 4, which have no in-slot to ride in. Three parallel
-	# arrays, one entry per such wire: which compiled slot is being driven, which of the sixteen params it
-	# overrides, and which compiled slot supplies the value. Flat rather than in4/in5/... because the next
-	# node with a seventh port should not be another schema change.
-	var pdrv_node := PackedInt32Array()
-	var pdrv_param := PackedInt32Array()
-	var pdrv_src := PackedInt32Array()
-	var out_count := PackedInt32Array()
-	# Which INPUT PORT carries each slot's secondary GRID operand (mask / noise / per-cell weight), or -1.
-	# The native and GPU evaluators cannot see a node's port list, so they used to hardcode `in1` for every
-	# op that has one -- correct for Mudslide and wrong for the other five. The node answers this itself
-	# (Pasture3DGraphNode.aux_grid_port), so a new node declares it beside its own input_names().
-	var aux_port := PackedInt32Array()
-	var in0_port := PackedInt32Array()
-	var in1_port := PackedInt32Array()
-	var in2_port := PackedInt32Array()
-	var in3_port := PackedInt32Array()
-	var noise_tab: Array = []
-	var luts_tab: Array = []
-	for ni in order:
-		var node: Pasture3DGraphNode = nodes[ni]
-		var srcs: Array = inputs_of[ni]
-		var s0: int = int(srcs[0]) if srcs.size() > 0 else -1
-		var s1: int = int(srcs[1]) if srcs.size() > 1 else -1
-		var s2: int = int(srcs[2]) if srcs.size() > 2 else -1
-		var s3: int = int(srcs[3]) if srcs.size() > 3 else -1
-		var lowered := _lower_node_op(node)
-		if lowered.is_empty():
-			return {} # an op the native evaluator does not implement
-		var _pr: PackedFloat32Array = lowered["params"]
-		ops.append(int(lowered["op"]))
-		params.append(_pr[0]); params_b.append(_pr[1]); params_c.append(_pr[2]); params_d.append(_pr[3])
-		params_e.append(_pr[4]); params_f.append(_pr[5]); params_g.append(_pr[6]); params_h.append(_pr[7])
-		params_i.append(_pr[8]); params_j.append(_pr[9]); params_k.append(_pr[10]); params_l.append(_pr[11])
-		params_m.append(_pr[12] if _pr.size() > 12 else 0.0)
-		params_n.append(_pr[13] if _pr.size() > 13 else 0.0)
-		params_o.append(_pr[14] if _pr.size() > 14 else 0.0)
-		params_p.append(_pr[15] if _pr.size() > 15 else 0.0)
-		noise_tab.append(lowered["noise"])
-		luts_tab.append(lowered["lut"])
-		in0.append(int(slot_of[s0]) if s0 >= 0 else -1)
-		in1.append(int(slot_of[s1]) if s1 >= 0 else -1)
-		in2.append(int(slot_of[s2]) if s2 >= 0 else -1)
-		in3.append(int(slot_of[s3]) if s3 >= 0 else -1)
-		out_count.append(native_out_count(ni))
-		aux_port.append(node.aux_grid_port())
-		var iports: Array = input_ports_of.get(ni, [])
-		in0_port.append(int(iports[0]) if iports.size() > 0 and s0 >= 0 else 0)
-		in1_port.append(int(iports[1]) if iports.size() > 1 and s1 >= 0 else 0)
-		in2_port.append(int(iports[2]) if iports.size() > 2 and s2 >= 0 else 0)
-		in3_port.append(int(iports[3]) if iports.size() > 3 and s3 >= 0 else 0)
-		var _pm: PackedInt32Array = lowered.get("pmap", PackedInt32Array())
-		pmap0.append(_pm[0] if _pm.size() > 0 else -1)
-		pmap1.append(_pm[1] if _pm.size() > 1 else -1)
-		pmap2.append(_pm[2] if _pm.size() > 2 else -1)
-		pmap3.append(_pm[3] if _pm.size() > 3 else -1)
-		for k in range(4, _pm.size()):
-			var pslot: int = int(_pm[k])
-			var psrc: int = int(srcs[k]) if srcs.size() > k else -1
-			if pslot >= 0 and psrc >= 0:
-				pdrv_node.append(ops.size() - 1)
-				pdrv_param.append(pslot)
-				pdrv_src.append(int(slot_of[psrc]))
-	var _geo := _compile_geometry(order, inputs_of)
-	var out_slot := 0
+	var emitted := _emit_program(order, inputs_of, input_ports_of)
+	if emitted.is_empty():
+		return {} # an op the native evaluator does not implement
+	var slot_of: Dictionary = emitted["slot_of"]
 	for r in p_roots:
 		var ri := int(r)
 		if slot_of.has(ri):
-			out_slot = int(slot_of[ri])
+			emitted["program"]["output"] = int(slot_of[ri])
 			break
-	return {
-		"program": _with_footprint({
-			"ops": ops, "params": params, "params_b": params_b, "params_c": params_c, "params_d": params_d,
-			"params_e": params_e, "params_f": params_f, "params_g": params_g, "params_h": params_h,
-			"params_i": params_i, "params_j": params_j, "params_k": params_k, "params_l": params_l,
-			"params_m": params_m, "params_n": params_n, "params_o": params_o, "params_p": params_p,
-			"in0": in0, "in1": in1, "in2": in2, "in3": in3,
-			"out_count": out_count, "aux_port": aux_port,
-			"in0_port": in0_port, "in1_port": in1_port, "in2_port": in2_port, "in3_port": in3_port,
-			"in_g": _geo["in_g"], "geom": _geo["geom"],
-		"pmap0": pmap0, "pmap1": pmap1, "pmap2": pmap2, "pmap3": pmap3,
-		"pdrv_node": pdrv_node, "pdrv_param": pdrv_param, "pdrv_src": pdrv_src,
-			"noise": noise_tab, "luts": luts_tab, "output": out_slot,
-			# The same freeze table the single-root program carries. Without it a sink or preview tap pass
-			# re-solved every FROZEN solver from scratch -- a Salève solve on the main thread, per bake pass,
-			# right after the worker had solved and cached the identical grid.
-			"frozen": _freeze_table(order),
-		}),
-		"slot_of": slot_of,
-	}
+	return emitted
 
 
 ## How many output channels the NATIVE evaluator writes for an op (P2b,
@@ -1801,6 +2987,11 @@ func _path_operand_of(p_ni: int, p_inputs_of: Dictionary) -> Pasture3DGraphPath:
 ## Costs one memoised pre-pass walk. Called from the preview refresh, which is debounced, and only for
 ## nodes whose declared output type is PATH.
 func resolved_path_of(p_ni: int) -> Pasture3DGraphPath:
+	if not is_compatible():
+		return null
+	if needs_flat():
+		var fr := _flat_root(p_ni)
+		return null if fr < 0 else flat_view().resolved_path_of(fr)
 	if p_ni < 0 or p_ni >= nodes.size() or nodes[p_ni] == null:
 		return null
 	# Same construction as `compile_graph_program_multi`'s, over every node rather than an ancestor set:
@@ -1950,6 +3141,9 @@ func stage_paths_for(p_root: int, p_gw: int, p_gh: int, p_rect: Rect2,
 		p_input: PackedFloat32Array) -> bool:
 	if p_gw <= 0 or p_gh <= 0 or p_root < 0 or p_root >= nodes.size():
 		return false
+	if needs_flat() and is_compatible():
+		var fr := _flat_root(p_root)
+		return false if fr < 0 else flat_view().stage_paths_for(fr, p_gw, p_gh, p_rect, p_input)
 	return _stage_derives(p_root, p_gw, p_gh, p_rect, null, p_input)
 
 
@@ -2117,6 +3311,9 @@ var _native_ok_cache: Dictionary = {}   # [root, revision] -> bool
 func native_supported(p_root_node: int = -1) -> bool:
 	if force_gdscript_evaluation:
 		return false
+	if needs_flat() and is_compatible():
+		var froot := _flat_root(p_root_node)
+		return false if froot == FLAT_NO_ROOT else flat_view().native_supported(froot)
 	var out := p_root_node if (p_root_node >= 0 and p_root_node < nodes.size()) else output_index()
 	if out < 0 or out >= nodes.size() or nodes[out] == null:
 		return false
@@ -2143,6 +3340,9 @@ func native_supported(p_root_node: int = -1) -> bool:
 func _native_supported_if_staged(p_out: int) -> bool:
 	if force_gdscript_evaluation or force_no_staged_compile:
 		return false
+	if needs_flat() and is_compatible():
+		var fr := _flat_root(p_out)
+		return false if fr == FLAT_NO_ROOT else flat_view()._native_supported_if_staged(fr)
 	# The cheap question first. `_native_supported_uncached` is an O(E*V) walk and it is NOT memoised on
 	# this route -- the memo is keyed on [root, revision] and would collide with `native_supported`'s own
 	# answer for the same pair, which is a different question with a different answer. A graph with no
@@ -2183,6 +3383,11 @@ func native_block_report(p_root_node: Variant = -1) -> Dictionary:
 		return {"reason": "force_gdscript_evaluation is on", "node": -1, "op": &"", "detail": ""}
 	if p_root_node is Array:
 		return native_block_report_multi(p_root_node)
+	if needs_flat() and is_compatible():
+		var froot := _flat_root(int(p_root_node))
+		if froot == FLAT_NO_ROOT:
+			return {"reason": "the subgraph has no output port", "node": int(p_root_node), "op": &"subgraph", "detail": ""}
+		return _flat_report(flat_view().native_block_report(froot))
 	var out: int = int(p_root_node) if (int(p_root_node) >= 0 and int(p_root_node) < nodes.size()) else output_index()
 	if out < 0 or out >= nodes.size() or nodes[out] == null:
 		return {"reason": "the graph has no output node", "node": -1, "op": &"", "detail": ""}
@@ -2195,6 +3400,9 @@ func native_block_report_multi(p_roots: Array, p_ignore_derives: bool = false) -
 		return {"reason": "force_gdscript_evaluation is on", "node": -1, "op": &"", "detail": ""}
 	if p_roots.is_empty():
 		return {"reason": "the root list is empty", "node": -1, "op": &"", "detail": ""}
+	if needs_flat() and is_compatible():
+		var fv := flat_view()
+		return _flat_report(fv.native_block_report_multi(_flat_roots_of(p_roots), p_ignore_derives))
 	var order := _eval_order_multi(p_roots)
 	if order.is_empty():
 		return {"reason": "the graph has no evaluation order (empty, or a cycle)",
@@ -2250,15 +3458,14 @@ func _native_block_scan_order(order: Array, p_ignore_derives: bool = false) -> D
 	# that offers five outputs in the editor and implements one in C++ still refuses — which is the whole
 	# point, because lowering it would serve a field of zeros that looks exactly like a real answer.
 	#
-	# A secondary channel driving a port >= 4 also refuses. Those ports travel in the flat pdrv_* overflow
-	# table, which records a slot and not a channel, so the evaluator would read cell 0 of the wrong
-	# buffer — a parameter wrong by a plausible amount. Widening that table is a schema change for a case
-	# nobody has wired yet; refusing costs one comparison.
+	# A secondary channel driving a port >= 4 used to refuse too, because the pdrv_* overflow table carried
+	# no channel. It carries one now (`pdrv_chan`) — Measure's max into Curve's out_max is that wire — so
+	# only the unwritten-channel case is left.
 	for c in connections:
 		if c.size() >= 4 and int(c[1]) > 0:
 			var to_node := int(c[2])
 			var from_node := int(c[0])
-			if order.has(to_node) and order.has(from_node) 					and (int(c[1]) >= native_out_count(from_node) or int(c[3]) >= 4):
+			if order.has(to_node) and order.has(from_node) and int(c[1]) >= native_out_count(from_node):
 				return {"reason": "a wire reads a secondary channel the native op does not write",
 						"node": from_node, "op": nodes[from_node].op() if nodes[from_node] != null else &"",
 						"detail": "channel %d of %d native channels, into port %d"
@@ -2273,6 +3480,10 @@ func _native_block_scan_order(order: Array, p_ignore_derives: bool = false) -> D
 			var to_node := int(c[2])
 			if not order.has(to_node) or nodes[to_node] == null:
 				continue
+			if int(c[3]) == nodes[to_node].aux_grid_port():
+				continue # a declared grid operand rides in_aux, muted or not
+			if int(c[3]) == nodes[to_node].framework_mask_port():
+				continue # the graph's own Blend slot reads it, not the node's op (`_emit_program`)
 			if nodes[to_node].muted:
 				# muted lowers to passthrough, which carries no params at all
 				return {"reason": "a wire drives a high port on a MUTED node, which lowers to passthrough",
@@ -2338,6 +3549,7 @@ func _eval_unfolded(p_gw: int, p_gh: int, p_rect: Rect2, p_mask = null, p_input 
 						cell_in[k] = (in_grids[k] as PackedFloat32Array)[row + ix]
 					g[row + ix] = node.eval_cell(w.x, w.y, cell_in)
 			grids[ni] = g
+		grids[ni] = _with_standard_mask(ni, grids[ni], grids, aux, n)
 	return grids[out]
 
 
@@ -2363,19 +3575,33 @@ func _input_grids(p_ni: int, p_grids: Dictionary, p_aux: Dictionary, p_n: int, p
 			var from_port := int(c[1])
 			if to_port >= 0 and to_port < count:
 				out[to_port] = _read_channel(from, from_port, p_grids, p_aux, p_n)
-				# A TERRAIN_BUS wire is ONE connection carrying the source's whole channel bundle, so the
-				# port-per-grid rule above cannot express it: it hands the receiver channel 0 and drops the
-				# rest. TerrainBusSplit declares a single `bus` port and reads five grids, so without this
-				# every channel past height came back as the unwired zeros — silently, since a zeroed water
-				# depth is a legitimate value. Widen the array in place so the bundle arrives whole.
-				if types.size() > to_port and types[to_port] == Pasture3DGraphNode.PortType.TERRAIN_BUS:
-					var src_channels: int = nodes[from].output_count() if nodes[from] != null else 1
-					for ch in range(1, src_channels):
-						var at := to_port + ch
-						while out.size() <= at:
-							out.append(Pasture3DGraphOps.zeros(p_n))
-						out[at] = _read_channel(from, ch, p_grids, p_aux, p_n)
+	# A mask the graph applies is never handed to the node (spec §9.1). It is always the last port, so
+	# dropping it moves no other index.
+	if node.framework_mask_port() >= 0:
+		out.resize(count - 1)
 	return out
+
+
+## `p_grid`, node `p_ni`'s port 0 as the node produced it, with the standard mask applied when the graph
+## applies it and it is wired. The GDScript half of `_emit_program`'s mask slot.
+func _with_standard_mask(p_ni: int, p_grid: PackedFloat32Array, p_grids: Dictionary, p_aux: Dictionary, p_n: int) -> PackedFloat32Array:
+	var node: Pasture3DGraphNode = nodes[p_ni]
+	var mp := node.framework_mask_port()
+	if mp < 0 or node.muted:
+		return p_grid
+	var mask_grid := PackedFloat32Array()
+	var in_grid := PackedFloat32Array()
+	for c in connections:
+		if c.size() >= 4 and int(c[2]) == p_ni:
+			if int(c[3]) == mp:
+				mask_grid = _read_channel(int(c[0]), int(c[1]), p_grids, p_aux, p_n)
+			elif int(c[3]) == 0:
+				in_grid = _read_channel(int(c[0]), int(c[1]), p_grids, p_aux, p_n)
+	if mask_grid.is_empty():
+		return p_grid
+	if in_grid.is_empty():
+		in_grid = Pasture3DGraphOps.filled(p_n, node.input_unwired_default(0))
+	return apply_standard_mask(in_grid, p_grid, mask_grid)
 
 
 ## One source node's output grid at `p_from_port`: port 0 comes from the materialised `p_grids` slot;
@@ -2393,6 +3619,10 @@ func _read_channel(p_from: int, p_from_port: int, p_grids: Dictionary, p_aux: Di
 ## unreachable or its ancestry contains a cycle (Kahn leaves nodes unresolved). Restricting to ancestors
 ## means a stray disconnected node neither runs nor breaks the sort.
 func _eval_order(p_root: int = -1) -> Array:
+	# A refused graph has no order, whatever root is named. Every compiler and the native check start here,
+	# so none of them reads a node or a wire of a layout this plugin does not understand.
+	if not is_compatible():
+		return []
 	# 1. Ancestor set: walk connections backwards from the root.
 	var root := p_root if (p_root >= 0 and p_root < nodes.size()) else output_index()
 	if root < 0 or root >= nodes.size() or nodes[root] == null:
@@ -2459,6 +3689,11 @@ func has_cycle() -> bool:
 ## landscape AND sit in a brush, so "am I in a brush" is a fact about the caller and cannot be cached here.
 func graph_warnings(p_in_brush: bool = false) -> PackedStringArray:
 	var w := PackedStringArray()
+	# The one line, and nothing else: every other check below reads nodes and wires by a layout this
+	# plugin does not understand, and "no output node" would be the wrong thing to tell the author.
+	if not is_compatible():
+		w.append(format_refusal())
+		return w
 	if output_index() < 0 or output_index() >= nodes.size():
 		w.append("Terrain graph has no output node set. Add an Output node (or Set as Output on a node), "
 			+ "or it evaluates to a flat 0.")
@@ -2466,6 +3701,10 @@ func graph_warnings(p_in_brush: bool = false) -> PackedStringArray:
 	if has_cycle():
 		w.append("Terrain graph has a cycle feeding its output, so it evaluates to a flat 0. Remove a "
 			+ "connection to break the loop.")
+	if needs_flat():
+		# Building the view is what finds a graph that contains itself (§11.3).
+		flat_view()
+		w.append_array(_flat_notes)
 	# Unwired required inputs (a filter/combiner with a port nothing connects to).
 	for ni in range(nodes.size()):
 		var node: Pasture3DGraphNode = nodes[ni]
@@ -2476,12 +3715,45 @@ func graph_warnings(p_in_brush: bool = false) -> PackedStringArray:
 		for c in connections:
 			if c.size() >= 4 and int(c[2]) == ni:
 				wired[int(c[3])] = true
-		for p in range(node.input_count()):
-			if not wired.has(p):
-				var names := node.input_names()
-				var pname: String = names[p] if p < names.size() else str(p)
-				w.append("%s: input '%s' is unconnected and reads 0." % [node.display_name(), pname])
+		# Only a port its node declares REQUIRED. A mask that reads 1 unwired, or an `amount` the node's
+		# own property supplies, is a port working as designed; warning on those buried the real ones.
+		var ports := node.input_ports()
+		for p in range(ports.size()):
+			if ports[p].required and not wired.has(p):
+				w.append("%s: input '%s' is unconnected and reads %s." % [node.display_name(), ports[p].label,
+						String.num(node.input_unwired_default(p), 3)])
 		w.append_array(node.node_warnings())
 		if p_in_brush:
 			w.append_array(node.node_warnings_in_brush())
+	# Declarations a Parameter node or a host cannot name.
+	var seen_ids := {}
+	for pi in range(parameters.size()):
+		var decl: Pasture3DGraphParam = parameters[pi]
+		if decl == null:
+			continue
+		if decl.id == &"":
+			w.append("Graph parameter %d has no id, so nothing can read it." % pi)
+		elif seen_ids.has(decl.id):
+			w.append("Graph parameter '%s' is declared twice; the second declaration is ignored." % decl.id)
+		seen_ids[decl.id] = true
+	# What the load could not place. These wires are GONE from the graph, and from the file at its next save.
+	for d in _wires_dropped:
+		w.append("A saved wire was dropped: %s." % d)
+	# Wires `connect_ports` would refuse today, assigned through `connections` directly. They still
+	# evaluate (a wire is a pair of indices), so say so rather than drop them.
+	for c in connections:
+		if c.size() < 4:
+			continue
+		var why := wire_problem(int(c[0]), int(c[1]), int(c[2]), int(c[3]))
+		if why == "":
+			continue
+		if wire_reads_cell_zero(int(c[0]), int(c[1]), int(c[2]), int(c[3])):
+			var src: Pasture3DGraphNode = nodes[int(c[0])]
+			var dst: Pasture3DGraphNode = nodes[int(c[2])]
+			w.append(("%s: input '%s' is wired to %s '%s', which is a field, and reads cell 0 of it: one "
+					+ "arbitrary cell. Put a Measure between them to choose the number.") % [
+					dst.display_name(), dst.input_ports()[int(c[3])].label,
+					src.display_name(), src.output_ports()[int(c[1])].label])
+		else:
+			w.append("A wire is not valid: %s." % why)
 	return w

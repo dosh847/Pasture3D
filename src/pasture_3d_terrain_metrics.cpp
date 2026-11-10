@@ -274,7 +274,7 @@ PackedFloat32Array godot::smooth_fill_solve(const PackedFloat32Array &p_surface,
 }
 
 PackedFloat32Array godot::recast_cliff_solve(const PackedFloat32Array &p_surface,
-		const PackedFloat32Array &p_mask, int p_gw, int p_gh, const Rect2 &p_rect,
+		int p_gw, int p_gh, const Rect2 &p_rect,
 		double p_talus_angle_deg, double p_radius_m, double p_amplitude, double p_gain,
 		double p_direction_deg, double p_direction_spread_deg, double p_amount) {
 	const int n = p_gw * p_gh;
@@ -313,9 +313,6 @@ PackedFloat32Array godot::recast_cliff_solve(const PackedFloat32Array &p_surface
 	const bool directional = (p_direction_deg >= 0.0);
 	const double dir_rad = p_direction_deg * PI_D / 180.0;
 	const double spread_rad = std::max(p_direction_spread_deg, 0.0) * PI_D / 180.0;
-
-	const bool has_mask = (p_mask.size() == n);
-	const float *msk = has_mask ? p_mask.ptr() : nullptr;
 
 	const double amplitude = p_amplitude;
 	const double gain = std::max(p_gain, 1e-6);
@@ -384,10 +381,7 @@ PackedFloat32Array godot::recast_cliff_solve(const PackedFloat32Array &p_surface
 					}
 				}
 
-				double w = amount * gate;
-				if (has_mask && std::isfinite(msk[i])) {
-					w *= std::clamp((double)msk[i], 0.0, 1.0);
-				}
+				const double w = amount * gate;
 				if (w <= 0.0) {
 					dst[i] = src[i];
 					continue;

@@ -42,7 +42,7 @@ func _max_abs_diff(a: PackedFloat32Array, b: PackedFloat32Array) -> float:
 # --- A. Multi-generator pipeline: Jordan + Swiss -> Blend(ADD) -> Terrace -> Output ------------------
 func _a_procedural_generator_pipeline() -> void:
 	print("[A] Multi-generator pipeline: Jordan + Swiss -> Blend(ADD) -> Terrace -> Output")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var jn := Pasture3DGraphNodeNoiseJordan.new(); jn.amplitude = 100.0; jn.frequency = 0.005; jn.seed = 42
 	var sn := Pasture3DGraphNodeNoiseSwiss.new(); sn.amplitude = 50.0; sn.frequency = 0.008; sn.seed = 99
 	var bl := Pasture3DGraphNodeBlend.new(); bl.mode = Pasture3DGraphNodeBlend.Mode.ADD
@@ -73,7 +73,7 @@ func _a_procedural_generator_pipeline() -> void:
 # --- B. Complex multi-branch DAG: Input + Furrows -> Dunes -> Mask -> Blend(MUL) -> Output ----------
 func _b_complex_multibranch_dag() -> void:
 	print("\n[B] Complex multi-branch DAG: Input + Furrows -> Dunes -> Mask -> Blend(MUL) -> Output")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var inp := Pasture3DGraphNodeInput.new()
 	var fur := Pasture3DGraphNodeFurrows.new(); fur.amplitude = 4.0; fur.spacing = 20.0
 	var dun := Pasture3DGraphNodeDunes.new(); dun.amplitude = 6.0; dun.wavelength = 30.0
@@ -111,7 +111,7 @@ func _b_complex_multibranch_dag() -> void:
 # --- C. Scratch arena buffer reuse verification ------------------------------------------------------
 func _c_scratch_arena_buffer_reuse() -> void:
 	print("\n[C] Scratch arena buffer reuse verification (15-node linear & diamond DAG)")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes_arr: Array[Pasture3DGraphNode] = []
 	var conns_arr: Array[PackedInt32Array] = []
 	
@@ -143,7 +143,7 @@ func _c_scratch_arena_buffer_reuse() -> void:
 # --- D. End-to-end throughput scaling benchmark ------------------------------------------------------
 func _d_end_to_end_throughput_scaling() -> void:
 	print("\n[D] End-to-end throughput scaling benchmark across resolutions")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var jn := Pasture3DGraphNodeNoiseJordan.new(); jn.amplitude = 120.0; jn.frequency = 0.004
 	var gp := Pasture3DGraphNodeGeologicalPrimitive.new(); gp.height = 80.0; gp.radius = 60.0
 	var bl := Pasture3DGraphNodeBlend.new(); bl.mode = Pasture3DGraphNodeBlend.Mode.MAX
@@ -171,7 +171,7 @@ func _d_end_to_end_throughput_scaling() -> void:
 # --- E. Hydraulic erosion in whole-graph pipeline ----------------------------------------------------
 func _e_hydraulic_erosion_pipeline() -> void:
 	print("\n[E] Hydraulic erosion in whole-graph pipeline (Noise + Blend -> ErosionHydraulic -> Output)")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var jn := Pasture3DGraphNodeNoiseJordan.new(); jn.amplitude = 120.0; jn.frequency = 0.005
 	var bl := Pasture3DGraphNodeBlend.new(); bl.mode = Pasture3DGraphNodeBlend.Mode.ADD
 	var cn := Pasture3DGraphNodeConst.new(); cn.value = 10.0

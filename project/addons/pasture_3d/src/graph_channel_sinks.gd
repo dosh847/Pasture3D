@@ -41,7 +41,8 @@ static var clear_count: int = 0
 ## caller's fast path: a graph with no sinks must cost a bake nothing at all.
 static func sinks_of(p_graph) -> PackedInt32Array:
 	var out := PackedInt32Array()
-	if p_graph == null:
+	# A refused graph (wrong format version) has no sinks: nothing of it may write to the terrain.
+	if p_graph == null or not p_graph.is_compatible():
 		return out
 	for i in range(p_graph.nodes.size()):
 		var n = p_graph.nodes[i]
@@ -227,15 +228,15 @@ static func _resolve_ports(p_graph, p_sink, p_index: int, p_gw: int, p_gh: int, 
 			if not slot_of.has(int(src["node"])):
 				continue
 			order.append(port)
-			slots.append(int(slot_of[int(src["node"])]))
-			chans.append(int(src["port"]))
+			slots.append(Pasture3DTerrainGraph.tap_slot(compiled, int(src["node"]), int(src["port"])))
+			chans.append(Pasture3DTerrainGraph.tap_channel(compiled, int(src["node"]), int(src["port"])))
 		cf_first = slots.size()
 		for cf in color_fields:
 			if not slot_of.has(int(cf["node"])):
 				continue
 			cf_keys.append(_field_key(int(cf["node"]), int(cf["port"])))
-			slots.append(int(slot_of[int(cf["node"])]))
-			chans.append(int(cf["port"]))
+			slots.append(Pasture3DTerrainGraph.tap_slot(compiled, int(cf["node"]), int(cf["port"])))
+			chans.append(Pasture3DTerrainGraph.tap_channel(compiled, int(cf["node"]), int(cf["port"])))
 		if order.is_empty() and cf_keys.is_empty():
 			return {"error": "no wired port compiled to a slot"}
 		result = Pasture3DUtil.graph_eval_grid_taps(compiled["program"], p_gw, p_gh, p_rect,
@@ -387,7 +388,7 @@ static func _tap_field(p_graph, p_to: int, p_port: int, p_ctx: Dictionary) -> Pa
 		return PackedFloat32Array()
 	var res: Dictionary = Pasture3DUtil.graph_eval_grid_taps(compiled["program"],
 			int(p_ctx["gw"]), int(p_ctx["gh"]), p_ctx["rect"], p_ctx.get("input", PackedFloat32Array()),
-			PackedInt32Array([int(slot_of[int(src["node"])])]), PackedInt32Array([int(src["port"])]))
+			PackedInt32Array([Pasture3DTerrainGraph.tap_slot(compiled, int(src["node"]), int(src["port"]))]), PackedInt32Array([Pasture3DTerrainGraph.tap_channel(compiled, int(src["node"]), int(src["port"]))]))
 	p_graph.adopt_native_freeze(res.get("frozen", []))
 	var unserved: PackedInt32Array = res.get("unserved", PackedInt32Array())
 	if unserved.has(0):

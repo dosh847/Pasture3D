@@ -349,7 +349,7 @@ func _g_the_sinks_are_terminal() -> void:
 	# CONTROL: the comparison can see a change. A Path Smooth spliced INTO the chain is an ancestor of
 	# the Output, so it moves the ops — which makes "identical" above a fact about terminality rather
 	# than about a comparison that always agrees.
-	var moved := Pasture3DTerrainGraph.new()
+	var moved := Pasture3DTerrainGraph.create_empty()
 	var src := Pasture3DGraphNodeSplineSource.new()
 	src.path = _line(false, LINE_Z)
 	var ns: Array[Pasture3DGraphNode] = [
@@ -387,7 +387,7 @@ func _g_the_sinks_are_terminal() -> void:
 ## The Carve is not decorative: it is what makes the drape an ancestor of the Output, so the graph has a
 ## program at all — which is what [G] compares.
 func _graph(p_path: Pasture3DGraphPath, p_sink) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var src := Pasture3DGraphNodeSplineSource.new()
 	src.path = p_path
 	var carve := Pasture3DGraphNodePathCarve.new()

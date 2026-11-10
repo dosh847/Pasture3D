@@ -99,7 +99,7 @@ func _a_native_matches_gdscript() -> void:
 # ---- fixtures ---------------------------------------------------------------------------------------
 
 func _graph_mod(p_noise: FastNoiseLite, p_amp: float, p_amount: float) -> Pasture3DNodeGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _noise_gn(p_noise, p_amp),
 		_blend_add(), Pasture3DGraphNodeOutput.new()]

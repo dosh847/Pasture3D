@@ -86,7 +86,7 @@ func _check(p_ok: bool, p_what: String) -> void:
 ## Noise -> Hydraulic erosion -> Output. The erosion node is the point: it is a Pasture3DGraphSolverNode,
 ## the class §3.1 is about, and its native solver is what a worker must be safe to enter.
 func _solver_graph() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var noise := Pasture3DGraphNodeNoise.new()
 	# The node's noise slot is null by default and a null slot evaluates to a FLAT field — which [E]
 	# would reject, and which would make [B] compare two identical zero grids and prove nothing.

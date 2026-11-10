@@ -30,20 +30,13 @@ func op() -> StringName:
 	return &"export_splat"
 
 
-func input_count() -> int:
-	return 4
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["r", "g", "b", "a"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.MASK, PortType.MASK, PortType.MASK, PortType.MASK])
-
-
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, -1, -1, -1])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"r", PortType.MASK),
+		Pasture3DGraphPort.field(&"g", PortType.MASK),
+		Pasture3DGraphPort.field(&"b", PortType.MASK),
+		Pasture3DGraphPort.field(&"a", PortType.MASK),
+	]
 
 
 func formats() -> PackedStringArray:

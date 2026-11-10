@@ -62,23 +62,14 @@ func op() -> StringName:
 	return &"path_drape"
 
 
-func input_count() -> int:
-	return 2
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["path", "surface"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.PATH, PortType.HEIGHT])
-
-
 ## NAN, so an unwired surface is TELLABLE from a surface that is genuinely at sea level. The evaluator
 ## fills an unwired port with a constant and there is no other way back to the question — see
 ## Pasture3DGraphNodePathDerive.port_unwired.
-func input_unwired_default(p_port: int) -> float:
-	return NAN if p_port == 1 else 0.0
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"path", PortType.PATH).require(),
+		Pasture3DGraphPort.field(&"surface", PortType.HEIGHT).unwired(NAN),
+	]
 
 
 func derive(_p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -> void:

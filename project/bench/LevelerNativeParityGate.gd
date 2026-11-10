@@ -342,7 +342,7 @@ func _leveler_graph(p_gd: Dictionary, p_channel: int, p_loop: Pasture3DGraphPath
 	pm.feather = 6.0
 	var cst := Pasture3DGraphNodeConst.new()
 	cst.value = float(p_gd["target"]) if p_gd["target"] != null else 0.0
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), src, lev,
 			Pasture3DGraphNodeOutput.new(), pm, cst]
 	g.nodes = nodes

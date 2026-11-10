@@ -195,32 +195,24 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 2
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["surface", "path"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.PATH])
-
-
-func output_count() -> int:
-	return 5
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "bed", "flank", "cut", "fill"])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"surface", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.field(&"path", PortType.PATH).require(),
+	]
 
 
 ## `height` is a surface; the four channels are [0,1] coverage and are MASKs by contract — which is what
 ## makes `bed` wire straight into a Blend's mask input, so erosion can weather AROUND a carve rather than
 ## through it.
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.MASK, PortType.MASK,
-			PortType.MASK])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"bed", PortType.MASK),
+		Pasture3DGraphPort.field(&"flank", PortType.MASK),
+		Pasture3DGraphPort.field(&"cut", PortType.MASK),
+		Pasture3DGraphPort.field(&"fill", PortType.MASK),
+	]
 
 
 func reads_paths() -> bool:

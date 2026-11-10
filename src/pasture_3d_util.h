@@ -293,6 +293,9 @@ public:
 			double p_max_distance);
 
 	// ExpandShrink (spec §5.2). Grayscale morphology; p_radius_m is METRES, not cells.
+	static PackedFloat32Array ridge_sharpen_grid(const PackedFloat32Array &p_surface,
+			const int p_gw, const int p_gh, const Rect2 &p_rect,
+			const double p_radius_m, const double p_amount);
 	static PackedFloat32Array expand_shrink_grid(const PackedFloat32Array &p_surface,
 			const PackedFloat32Array &p_mask, int p_gw, int p_gh, const Rect2 &p_rect, int p_mode,
 			double p_radius_m, int p_kernel, int p_iterations, double p_amount);
@@ -312,7 +315,7 @@ public:
 			double p_radius_m, double p_k, double p_amount);
 
 	static PackedFloat32Array recast_cliff_grid(const PackedFloat32Array &p_surface,
-			const PackedFloat32Array &p_mask, int p_gw, int p_gh, const Rect2 &p_rect,
+			int p_gw, int p_gh, const Rect2 &p_rect,
 			double p_talus_angle_deg, double p_radius_m, double p_amplitude, double p_gain,
 			double p_direction_deg, double p_direction_spread_deg, double p_amount);
 
@@ -323,11 +326,11 @@ public:
 	// Resample a surface at the point offset by two metre fields (Hesiod's Warp).
 	static PackedFloat32Array displace_grid(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_dx,
 			const PackedFloat32Array &p_dy, const PackedFloat32Array &p_mask, int p_gw, int p_gh,
-			const Rect2 &p_rect, double p_scale, double p_amount);
+			const Rect2 &p_rect, double p_scale, double p_amount, int p_direction);
 
 	// Power-curve the ground between a floor and a cut height (after Hesiod's Recast Canyon).
 	static PackedFloat32Array recast_canyon_grid(const PackedFloat32Array &p_surface,
-			const PackedFloat32Array &p_noise, const PackedFloat32Array &p_mask, int p_gw, int p_gh,
+			const PackedFloat32Array &p_noise, int p_gw, int p_gh,
 			double p_cut_height, double p_floor_height, double p_gamma, double p_amount);
 
 	static PackedFloat32Array talus_projection_grid(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_mask,
@@ -531,6 +534,10 @@ public:
 	// the native op runs. `p_params` is the node's native_lower block.
 	static PackedFloat32Array float_to_mask_grid(const PackedFloat32Array &p_surface, const int p_gw, const int p_gh,
 			const PackedFloat32Array &p_params);
+	// Measure's reduction (src/pasture_3d_measure.h), bound for the node's script route and its gate.
+	// Returns [a, b, count]. An empty `selection` (or one of the wrong size) means every finite cell.
+	static PackedFloat64Array measure_field(const PackedFloat32Array &p_values, const PackedFloat32Array &p_selection,
+			const int p_mode, const double p_low_pct, const double p_high_pct);
 	static PackedFloat32Array curvature_grid(const PackedFloat32Array &p_surface, const int p_gw, const int p_gh,
 			const int p_mode, const int p_radius, const double p_contrast);
 

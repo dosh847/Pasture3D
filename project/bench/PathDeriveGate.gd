@@ -196,7 +196,7 @@ func _carve() -> Pasture3DGraphNodePathCarve:
 ## The carve is not decorative: a derive node whose path nothing consumes is never asked for one, so
 ## `eval_path` would not run and the gate would measure an object that was only ever constructed.
 func _chain(p_derive: Pasture3DGraphNodePathDerive, p_path: Pasture3DGraphPath) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var ns: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _source(p_path), p_derive, _carve(),
 		Pasture3DGraphNodeOutput.new()]
@@ -213,7 +213,7 @@ func _chain(p_derive: Pasture3DGraphNodePathDerive, p_path: Pasture3DGraphPath) 
 
 ## The Path from Flow shape: it has no path input, so the source is gone and the flow goes to port 0.
 func _flow_chain(p_node: Pasture3DGraphNodePathFromFlow) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var ns: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), p_node, _carve(), Pasture3DGraphNodeOutput.new()]
 	g.nodes = ns
@@ -379,7 +379,7 @@ func _d_each_derive_takes_the_graph_off_native() -> void:
 
 	# The control FIRST: without it, "not native" is unfalsifiable — a graph that never lowered for an
 	# unrelated reason would report three passes and measure nothing.
-	var bare := Pasture3DTerrainGraph.new()
+	var bare := Pasture3DTerrainGraph.create_empty()
 	var ns: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _source(line), _carve(), Pasture3DGraphNodeOutput.new()]
 	bare.nodes = ns

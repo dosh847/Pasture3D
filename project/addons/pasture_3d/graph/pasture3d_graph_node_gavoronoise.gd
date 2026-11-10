@@ -19,6 +19,22 @@
 class_name Pasture3DGraphNodeGavoronoise
 extends Pasture3DGraphNode
 
+## With `base` wired, read the height range from the base's lowest and highest cells instead of Amplitude, so
+## the z-cut window and gully depth fit whatever brush this is on. Wiring a Measure node to Min and Max sets
+## the range explicitly, and also sets the generator's output range. New nodes start with this on.
+@export var fit_to_base: bool = false:
+	set(v):
+		fit_to_base = v
+		emit_changed()
+
+## Breaks up the regular pattern: warps it by up to about this many base cells of low-frequency noise, and
+## swings the gully depth with the same noise. 0 is off. The Seed changes it.
+@export_range(0.0, 2.0, 0.01, "or_greater") var variation: float = 0.0:
+	set(v):
+		variation = maxf(v, 0.0)
+		emit_changed()
+
+## Ignored while Fit To Base is on and `base` is wired, and whenever Min and Max are both wired.
 ## Height in WORLD METRES. The generator's output spans about 0..amplitude. With `base` wired it is the
 ## height scale the base is read at: set it to the height of the landform being eroded, so the z-cut window
 ## and the gully depth are fractions of that landform.
@@ -107,6 +123,11 @@ extends Pasture3DGraphNode
 		emit_changed()
 
 
+## Saved nodes omit a false `fit_to_base` and keep their amplitude-scaled look; only new ones fit.
+func on_created() -> void:
+	fit_to_base = true
+
+
 func op() -> StringName:
 	return &"gavoronoise"
 
@@ -122,16 +143,31 @@ func native_lower() -> Dictionary:
 	p[5] = angle_spread
 	p[6] = slope_strength
 	p[7] = branch_strength
+	p[8] = variation
 	p[9] = z_cut_min
 	p[10] = z_cut_max
 	p[11] = base_smoothing
 	p[12] = erosion_strength
 	p[13] = erosion_frequency
+	p[14] = _range_sentinel()
+	p[15] = _range_sentinel()
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([0, 4, 1, -1])
+## Port 3 is the only grid this node reads; it rides in3.
+# NAN, because the GDScript evaluators hand an unwired port to eval_grid as a grid FILLED with this,
+# and a filled grid of 0 is a perfectly good flat base. All-NaN is the only way back to "unwired".
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.value(&"amplitude", PortType.FLOAT, &"amplitude", 0),
+		Pasture3DGraphPort.value(&"angle", PortType.FLOAT, &"angle_deg", 4),
+		Pasture3DGraphPort.value(&"frequency", PortType.FLOAT, &"frequency", 1),
+		Pasture3DGraphPort.field(&"base", PortType.HEIGHT).unwired(NAN).as_aux(),
+		# The sentinel follows Fit To Base, whose setter emits `changed` so the port cache asks again.
+		Pasture3DGraphPort.value(&"min", PortType.FLOAT, &"", 14).unwired(_range_sentinel()),
+		Pasture3DGraphPort.value(&"max", PortType.FLOAT, &"", 15).unwired(_range_sentinel()),
+		Pasture3DGraphPort.value(&"variation", PortType.FLOAT, &"variation", 8),
+	]
 
 
 func role() -> Role:
@@ -144,32 +180,9 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 4
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["amplitude", "angle", "frequency", "base"])
-
-
-## Port 3 is the only grid this node reads; it rides in3.
-func aux_grid_port() -> int:
-	return 3 # "base"
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.FLOAT, PortType.FLOAT, PortType.FLOAT, PortType.HEIGHT])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return amplitude
-		1: return angle_deg
-		2: return frequency
-		# NAN, because the GDScript evaluators hand an unwired port to eval_grid as a grid FILLED with this,
-		# and a filled grid of 0 is a perfectly good flat base. All-NaN is the only way back to "unwired".
-		3: return NAN
-		_: return 0.0
+## An unwired Min or Max: +INF measures the base, -INF reads it from Amplitude. The kernel header has the rule.
+func _range_sentinel() -> float:
+	return INF if fit_to_base else -INF
 
 
 ## The kernel's parameters as the Dictionary Pasture3DUtil takes. Gates and the oracle use it too.
@@ -177,7 +190,8 @@ func kernel_params(p_amp: float, p_angle: float, p_freq: float) -> Dictionary:
 	return {"amplitude": p_amp, "frequency": p_freq, "octaves": octaves, "seed": seed, "angle_deg": p_angle,
 			"angle_spread": angle_spread, "slope_strength": slope_strength, "branch_strength": branch_strength,
 			"z_cut_min": z_cut_min, "z_cut_max": z_cut_max, "erosion_strength": erosion_strength,
-			"erosion_frequency": erosion_frequency}
+			"erosion_frequency": erosion_frequency, "height_min": _range_sentinel(),
+			"height_max": _range_sentinel(), "variation": variation}
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -191,6 +205,10 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) ->
 		return Pasture3DGraphOps.zeros(n)
 
 	var kp := kernel_params(amp, ang, freq)
+	if p_inputs.size() > 6:
+		for e in [[4, "height_min"], [5, "height_max"], [6, "variation"]]:
+			if p_inputs[e[0]] is PackedFloat32Array and p_inputs[e[0]].size() > 0:
+				kp[e[1]] = float(p_inputs[e[0]][0])
 	var res: PackedFloat32Array
 	if _base_is_wired(p_inputs, n):
 		res = Pasture3DUtil.gavoronoise_base_grid(p_gw, p_gh, p_rect, kp, p_inputs[3], base_smoothing)
@@ -223,6 +241,6 @@ func node_warnings() -> PackedStringArray:
 		w.append("%s: Erosion Strength is 0, so there are no gullies — only the Gabor base (or the input, unchanged)." % display_name())
 	if z_cut_max <= z_cut_min:
 		w.append("%s: Z Cut Max is not above Z Cut Min, so erosion switches on as a hard step at Z Cut Max." % display_name())
-	if is_zero_approx(amplitude):
+	if is_zero_approx(amplitude) and not fit_to_base:
 		w.append("%s: Amplitude is 0, so the output is flat (or the input, unchanged)." % display_name())
 	return w

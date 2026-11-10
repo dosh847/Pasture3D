@@ -94,15 +94,18 @@ func _a_value_ports_can_be_driven() -> void:
 	var ge := GraphEdit.new()
 	add_child(ge)
 	Pasture3DGraphEditor.register_connection_types(ge)
-	var want_valid := [[T.FLOAT, T.FLOAT], [T.FLOAT, T.HEIGHT], [T.HEIGHT, T.FLOAT], [T.INT, T.INT],
-			[T.HEIGHT, T.INT], [T.MASK, T.FLOAT], [T.SIGNED, T.SIGNED]]
+	# A field into a value port (HEIGHT -> FLOAT, HEIGHT -> INT, MASK -> FLOAT) was in this list until
+	# 2026-11-09. It reads cell 0 of the field and is refused now; GraphPortTypeGate [I] owns that rule.
+	var want_valid := [[T.FLOAT, T.FLOAT], [T.FLOAT, T.HEIGHT], [T.INT, T.INT], [T.INT, T.MASK],
+			[T.BOOL, T.FLOAT], [T.FLOAT, T.SIGNED], [T.SIGNED, T.SIGNED]]
 	for pair in want_valid:
 		var v: bool = ge.is_valid_connection_type(pair[0], pair[1])
 		print("    %d -> %d valid = %s (want true)" % [pair[0], pair[1], v])
 		_ok(v, "the matrix refuses a wire the evaluator already implements (%d -> %d)" % [pair[0], pair[1]])
 	# CONTROL: the crossing is SELECTIVE. A PATH carries a resource and a COLOR four floats; if these
 	# came back valid too, the loop above would be measuring "everything connects to everything".
-	var want_invalid := [[T.FLOAT, T.PATH], [T.PATH, T.FLOAT], [T.COLOR, T.HEIGHT], [T.HEIGHT, T.COLOR]]
+	var want_invalid := [[T.FLOAT, T.PATH], [T.PATH, T.FLOAT], [T.COLOR, T.HEIGHT], [T.HEIGHT, T.COLOR],
+			[T.HEIGHT, T.FLOAT], [T.HEIGHT, T.INT], [T.MASK, T.FLOAT]]
 	for pair in want_invalid:
 		var v: bool = ge.is_valid_connection_type(pair[0], pair[1])
 		print("    control: %d -> %d valid = %s (want false)" % [pair[0], pair[1], v])
@@ -486,7 +489,7 @@ func _const_blend_graph(p_a: float, p_b: float, p_mode) -> Pasture3DTerrainGraph
 
 
 func _graph(p_nodes: Array[Pasture3DGraphNode], p_conns: Array, p_out: int) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	g.nodes = p_nodes
 	var conns: Array = []
 	for c in p_conns:

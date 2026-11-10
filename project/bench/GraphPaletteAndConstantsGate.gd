@@ -5,7 +5,7 @@
 #
 # Asserts on:
 #   [A] PortType enum expansion & color palette integrity
-#   [B] Constant nodes evaluation (ConstInt, ConstVector, ConstColor, ConstCurve, ConstBool)
+#   [B] Constant nodes evaluation (ConstInt, ConstColor, ConstBool)
 #   [C] Node registry category indexing & categorization queries
 #   [D] Search dialog categorized tree building & filtering
 #   [E] Constant node serialization & graph integration
@@ -31,13 +31,13 @@ func _a_port_type_system() -> void:
 	print("[A] PortType enum expansion & color palette integrity")
 	_assert(Pasture3DGraphNode.PortType.HEIGHT == 0, "PortType.HEIGHT is 0")
 	_assert(Pasture3DGraphNode.PortType.MASK == 1, "PortType.MASK is 1")
-	_assert(Pasture3DGraphNode.PortType.VECTOR == 2, "PortType.VECTOR is 2")
-	_assert(Pasture3DGraphNode.PortType.CURVE == 3, "PortType.CURVE is 3")
+	_assert(Pasture3DGraphNode.PortType.VECTOR == 2, "PortType.VECTOR is still 2 (retired, never renumbered)")
+	_assert(Pasture3DGraphNode.PortType.CURVE == 3, "PortType.CURVE is still 3 (retired, never renumbered)")
 	_assert(Pasture3DGraphNode.PortType.FLOAT == 4, "PortType.FLOAT is 4")
 	_assert(Pasture3DGraphNode.PortType.INT == 5, "PortType.INT is 5")
 	_assert(Pasture3DGraphNode.PortType.COLOR == 6, "PortType.COLOR is 6")
 	_assert(Pasture3DGraphNode.PortType.BOOL == 7, "PortType.BOOL is 7")
-	_assert(Pasture3DGraphNode.PortType.TERRAIN_BUS == 8, "PortType.TERRAIN_BUS is 8")
+	_assert(Pasture3DGraphNode.PortType.TERRAIN_BUS == 8, "PortType.TERRAIN_BUS is still 8 (retired, never renumbered)")
 	_assert(Pasture3DGraphEditor.PORT_COLORS.size() >= 9, "PORT_COLORS has colors for all 9 types")
 
 
@@ -56,26 +56,12 @@ func _b_constant_nodes_eval() -> void:
 	c_int.set("value", 7)
 	_assert(c_int.eval_cell(0, 0, PackedFloat32Array()) == 7.0, "Const int eval_cell equals 7.0")
 
-	# Const Vector
-	var c_vec: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const_vector")
-	_assert(c_vec != null, "Const vector node instantiated")
-	_assert(c_vec.output_port_type() == Pasture3DGraphNode.PortType.VECTOR, "Const vector output port is PortType.VECTOR")
-	c_vec.set("value", Vector2(3.0, 4.0))
-	_assert(is_equal_approx(c_vec.eval_cell(0, 0, PackedFloat32Array()), 5.0), "Const vector eval_cell returns length 5.0")
-
 	# Const Color
 	var c_col: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const_color")
 	_assert(c_col != null, "Const color node instantiated")
 	_assert(c_col.output_port_type() == Pasture3DGraphNode.PortType.COLOR, "Const color output port is PortType.COLOR")
 	c_col.set("value", Color(1.0, 1.0, 1.0, 1.0))
 	_assert(is_equal_approx(c_col.eval_cell(0, 0, PackedFloat32Array()), 1.0), "Const color white luminance equals 1.0")
-
-	# Const Curve
-	var c_curve: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const_curve")
-	_assert(c_curve != null, "Const curve node instantiated")
-	_assert(c_curve.output_port_type() == Pasture3DGraphNode.PortType.CURVE, "Const curve output port is PortType.CURVE")
-	var curve: Curve = c_curve.get("curve")
-	_assert(curve != null, "Const curve has initialized Curve resource")
 
 	# Const Bool
 	var c_bool: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const_bool")
@@ -99,10 +85,11 @@ func _c_registry_categories() -> void:
 
 	var cat_map := Pasture3DGraphNodeRegistry.entries_by_category(true)
 	var const_entries: Array = cat_map.get("Constants", [])
-	_assert(const_entries.size() >= 6, "Constants category has at least 6 constant node types")
+	# Five since ports spec P6 added the Parameter node, a value source like the four constants.
+	_assert(const_entries.size() == 5, "Constants category has the four constants and Parameter: Float, Int, Color, Bool, Parameter (found %d)" % const_entries.size())
 
 	var search_const := Pasture3DGraphNodeRegistry.search("constant")
-	_assert(search_const.size() >= 6, "Search for 'constant' returns constant nodes")
+	_assert(search_const.size() >= 4, "Search for 'constant' returns the constant nodes (found %d)" % search_const.size())
 
 	# EVERY REGISTERED NODE MUST REACH THE PALETTE.
 	#
@@ -210,7 +197,7 @@ func _d_search_dialog_tree() -> void:
 
 func _e_graph_with_constants_eval() -> void:
 	print("[E] Constant node serialization & graph integration")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var c_float: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const")
 	c_float.set("value", 10.0)
 	var c_int: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const_int")
@@ -240,7 +227,7 @@ func _e_graph_with_constants_eval() -> void:
 	_assert(cell_prog.is_empty(), "compile_cell_program declines a graph carrying an Output sink")
 	# CONTROL: the same pointwise chain WITHOUT the sink lowers, so the check above is reporting the
 	# sink and not a cell compiler that refuses everything.
-	var g_no_sink := Pasture3DTerrainGraph.new()
+	var g_no_sink := Pasture3DTerrainGraph.create_empty()
 	var s_float: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const")
 	s_float.set("value", 10.0)
 	var s_int: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const_int")

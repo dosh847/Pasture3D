@@ -49,32 +49,18 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 2
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"field", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.field(&"hardness", PortType.MASK),
+	]
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["field", "hardness"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK])
-
-
-func input_unwired_default(_p_port: int) -> float:
-	return 0.0
-
-
-func output_count() -> int:
-	return 2
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "talus"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"talus", PortType.MASK),
+	]
 
 
 func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> Array:

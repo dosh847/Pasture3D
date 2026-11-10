@@ -59,20 +59,11 @@ func path_input_port() -> int:
 	return -1
 
 
-func input_count() -> int:
-	return 2
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["flow", "surface"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.MASK, PortType.HEIGHT])
-
-
-func input_unwired_default(_p_port: int) -> float:
-	return NAN
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"flow", PortType.MASK).unwired(NAN),
+		Pasture3DGraphPort.field(&"surface", PortType.HEIGHT).unwired(NAN),
+	]
 
 
 func derive_without_grid(_p_src: Pasture3DGraphPath) -> Pasture3DGraphPath:

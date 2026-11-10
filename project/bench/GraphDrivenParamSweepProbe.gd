@@ -115,7 +115,7 @@ func _probe_port(p_op: StringName, p_port: int) -> Dictionary:
 ## Peak |height| of a one-node graph, with port `p_port` optionally driven from a Const. A node whose port 0
 ## is a HEIGHT input is fed a real noise field, so the comparison is not made against a flat zero.
 func _peak(p_op: StringName, p_port: int, p_value: float, p_drive: bool, p_unfolded: bool) -> float:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(p_op)
 	if n == null:
 		return 0.0

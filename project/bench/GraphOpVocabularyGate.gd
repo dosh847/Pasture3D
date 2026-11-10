@@ -51,7 +51,7 @@ func _a_ids_come_from_cpp() -> void:
 	if ids.is_empty():
 		return
 
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var lowered := 0
 	var wrong: Array[String] = []
 	for entry in Pasture3DGraphNodeRegistry.entries(true):

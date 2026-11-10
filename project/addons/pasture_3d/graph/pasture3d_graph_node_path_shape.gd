@@ -49,29 +49,17 @@ func needs_grid() -> bool:
 	return false
 
 
-func input_count() -> int:
-	return 1
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["path"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.PATH])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"path", PortType.PATH).require(),
+	]
 
 
 ## One path out. Same reason as `needs_grid` for spelling out the default.
-func output_count() -> int:
-	return 1
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["path"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.PATH])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"path", PortType.PATH),
+	]
 
 
 ## A PATH producer still fills a grid slot, with zeros. See Pasture3DGraphNode.path_output.

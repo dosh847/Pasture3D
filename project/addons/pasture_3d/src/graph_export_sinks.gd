@@ -48,7 +48,8 @@ const SIDECAR_SUFFIX := ".range.json"
 ## Node indices of every export sink in `p_graph`, in graph order.
 static func sinks_of(p_graph) -> PackedInt32Array:
 	var out := PackedInt32Array()
-	if p_graph == null:
+	# A refused graph (wrong format version) has no sinks: nothing of it may write a file.
+	if p_graph == null or not p_graph.is_compatible():
 		return out
 	for i in range(p_graph.nodes.size()):
 		var n = p_graph.nodes[i]
@@ -116,14 +117,6 @@ static func export_step(p_ctx: Dictionary, p_index: int) -> void:
 	if not warn.is_empty():
 		for w in warn:
 			report["skipped"].append("%s: %s" % [label, w])
-		return
-
-	# The `normal` port's refusal (§9.2). Checked here rather than in `sink_warnings` because it is a
-	# fact about the GRAPH — whether a wire exists — and a node cannot see its own connections.
-	if sink is Pasture3DGraphNodeExportNormalMap and not source_of(graph, ni, 1).is_empty():
-		report["skipped"].append(("%s: the `normal` port is wired, and the program cannot carry a vector "
-				+ "grid yet. Refused rather than deriving from `height` and calling it yours — unwire it "
-				+ "to export the derived map.") % label)
 		return
 
 	var tapped := _tap(graph, sink, ni, p_ctx["terrain"])
@@ -211,8 +204,8 @@ static func _tap(p_graph, p_sink, p_index: int, p_terrain) -> Dictionary:
 		if not slot_of.has(int(src["node"])):
 			continue
 		order.append(i)
-		slots.append(int(slot_of[int(src["node"])]))
-		chans.append(int(src["port"]))
+		slots.append(Pasture3DTerrainGraph.tap_slot(compiled, int(src["node"]), int(src["port"])))
+		chans.append(Pasture3DTerrainGraph.tap_channel(compiled, int(src["node"]), int(src["port"])))
 	if order.is_empty():
 		return {"error": "no wired port compiled to a slot"}
 

@@ -9,15 +9,10 @@
 #
 # This probe solves the SAME dome twice at the SAME cell size — once on a tight grid, once on a grid
 # widened by a margin band of surrounding (lower) ground — and compares the overlapping core cell for
-# cell. It reports, rather than asserts, because two of the remaining couplings are inherent to the
-# algorithm and are worth seeing as numbers:
-#
-#   * Stage 1 renormalises its result to [0..1] over the WHOLE grid, and
-#   * the output is anchored at the grid's `zmin`,
-#
-# both of which see the band. Pinning `reference_relief` removes the third and largest coupling (the
-# vertical scale every length is divided by). The AUTO row is the control: it must be visibly worse
-# than the PINNED row, or this probe is measuring nothing.
+# cell. It reports, rather than asserts, because the remaining coupling is inherent to the algorithm and
+# worth seeing as a number: the control points are placed against the grid, so the band moves them. Pinning
+# `reference_relief` removes the vertical scale every length is divided by. The AUTO row is the control: it
+# must be worse than the PINNED row, or this probe is measuring nothing.
 
 extends Node
 
@@ -26,8 +21,6 @@ const DevSaleve = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_de
 const CELL := 2.0 ## metres per cell, identical in both solves — this is a footprint change, not a resize.
 const CORE := 64 ## cells across the brush's own footprint.
 const DOME_RELIEF := 90.0 ## metres, peak above the surrounding plain.
-## < 0 = the solver's default outlet level; the control sets 0 (grid border only).
-var OUTLET := -1.0
 
 
 func _ready() -> void:
@@ -49,8 +42,8 @@ func _ready() -> void:
 			"auto (control)" if r["ref"] == 0.0 else "pinned %.0f m" % r["ref"],
 			r["max"], r["rms"], r["offset"], r["max_shape"], r["rms_shape"],
 		])
-	print("\n    'offset' is a bulk vertical shift (the output is anchored at the grid's zmin, which the")
-	print("    band lowers) — a brush composites through its own blend, so a shift is far less visible")
+	print("\n    'offset' is a bulk vertical shift (the band's ground changes what the core drains to,")
+	print("    not the anchor) — a brush composites through its own blend, so a shift is far less visible")
 	print("    than RESHAPING, which is the drainage network itself moving inside the loop.")
 
 	var auto_worst := 0.0
@@ -65,22 +58,12 @@ func _ready() -> void:
 	print("    pinned          worst drift = %.3f m" % pinned_worst)
 	var ok := pinned_worst < auto_worst
 
-	# The LIFT (2026-09-19): with outlets on the grid border only, the steady state is built up from however
-	# far away the border is, so a wider margin raised the whole core. Outlets on the low ground (the
-	# default outlet_level) must hold the mean offset near 0; border-only is the control and must lift.
+	# The output is now the input less a cut, so a margin has no way left to lift the core. Reported only: the
+	# old assertion's control (border-only outlets) stopped lifting anything when Stage 1 was rebuilt.
 	var worst_offset := 0.0
 	for r in rows:
 		worst_offset = maxf(worst_offset, absf(r["offset"]))
-	OUTLET = 0.0
-	var ctl := _measure(30, DOME_RELIEF)
-	OUTLET = -1.0
-	var lift_ok := worst_offset < 1.0
-	var ctl_ok: bool = ctl["offset"] > 3.0
-	print("    lift: worst |offset| %.3f m with outlets on the low ground (want < 1.0) — %s" % [
-		worst_offset, "ok" if lift_ok else "FAIL"])
-	print("    control: border-only outlets lift the core %.3f m at 60 m of margin (want > 3.0) — %s" % [
-		ctl["offset"], "ok" if ctl_ok else "DEAD"])
-	ok = ok and lift_ok and ctl_ok
+	print("    lift: worst |offset| %.3f m (reported)" % worst_offset)
 	print("\n=== %s ===\n" % ["MARGIN INVARIANCE PASS" if ok else "MARGIN INVARIANCE FAIL"])
 	get_tree().quit(0 if ok else 1)
 
@@ -93,7 +76,7 @@ func _measure(p_margin_cells: int, p_reference_relief: float) -> Dictionary:
 	var wide_w: int = CORE + 2 * p_margin_cells
 
 	# Collect the signed differences first: a drift that is mostly a constant OFFSET (the output is
-	# anchored at the grid's zmin, which the band lowers) is a different defect from one that is a
+	# the band changing what the core drains to) is a different defect from one that is a
 	# reshaping (the drainage network itself moved). Splitting them says which is worth chasing.
 	var diffs := PackedFloat32Array()
 	var sum := 0.0
@@ -171,7 +154,5 @@ func _solve(p_core: int, p_margin_cells: int, p_reference_relief: float) -> Pack
 		"enable_post_smoothing": false,
 		"seed": 0,
 	}
-	if OUTLET >= 0.0:
-		params["outlet_level"] = OUTLET
 	var res: Dictionary = Pasture3DUtil.hydraulic_saleve_solve_grid(surface, w, w, rect, params)
 	return res.get("height", surface)

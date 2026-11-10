@@ -108,7 +108,7 @@ func _raw(p_g: Pasture3DTerrainGraph, p_x0: float, p_z0: float) -> PackedFloat32
 
 
 func _single_noise_graph(p_noise: FastNoiseLite, p_amp: float) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var node := Pasture3DGraphNodeNoise.new()
 	node.noise = p_noise
 	node.amplitude = p_amp

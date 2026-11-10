@@ -120,7 +120,7 @@ func _give_graph(p_brush: Pasture3DTerrainBrush,
 		p_key: String) -> Pasture3DGraphNodeSplineSource:
 	var src := Pasture3DGraphNodeSplineSource.new()
 	src.spline_key = p_key
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [src]
 	g.nodes = nodes
 	var mod := Pasture3DNodeGraph.new()
@@ -367,13 +367,13 @@ func _f_a_spline_is_offered_in_exactly_one_dropdown() -> void:
 	var ssrc := Pasture3DGraphNodeSplineSource.new()
 	var told := [0]
 	ssrc.property_list_changed.connect(func() -> void: told[0] += 1)
-	var g1 := Pasture3DTerrainGraph.new()
+	var g1 := Pasture3DTerrainGraph.create_empty()
 	var n1: Array[Pasture3DGraphNode] = [ssrc]
 	g1.nodes = n1
 	Pasture3DGraphSources.resolve_splines(g1, host)
 
 	var shsrc := Pasture3DGraphNodeShapeSource.new()
-	var g2 := Pasture3DTerrainGraph.new()
+	var g2 := Pasture3DTerrainGraph.create_empty()
 	var n2: Array[Pasture3DGraphNode] = [shsrc]
 	g2.nodes = n2
 	Pasture3DGraphSources.resolve_shapes(g2, host)

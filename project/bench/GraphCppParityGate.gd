@@ -98,7 +98,7 @@ func _c_grid_node_refuses_to_lower() -> void:
 func _d_unwired_input_reads_zero() -> void:
 	print("[D] an unwired blend input reads 0, native and oracle agree")
 	# 0 noise -> 1 blend ADD, only port A wired; port B is unwired and must read 0 on both sides.
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var noise := _noise(_make_noise(7, 0.05), 5.0)
 	var blend := _blend(Pasture3DGraphNodeBlend.Mode.ADD)
 	var nodes: Array[Pasture3DGraphNode] = [noise, blend]
@@ -111,7 +111,7 @@ func _d_unwired_input_reads_zero() -> void:
 		_fail += 1; print("    !! native and oracle disagree on an unwired input")
 	# CONTROL: wire B to a const and the field moves — so the unwired port was really reading 0, not the
 	# same value the wired one would give.
-	var g2 := Pasture3DTerrainGraph.new()
+	var g2 := Pasture3DTerrainGraph.create_empty()
 	var noise2 := _noise(_make_noise(7, 0.05), 5.0)
 	var konst := _const(3.0)
 	var blend2 := _blend(Pasture3DGraphNodeBlend.Mode.ADD)
@@ -128,7 +128,7 @@ func _d_unwired_input_reads_zero() -> void:
 # --- E. Terrace node: native C++ == GDScript oracle ---------------------------------------------------
 func _e_terrace_matches_native() -> void:
 	print("[E] terrace node: native == GDScript evaluate")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var noise := _noise(_make_noise(11, 0.04), 25.0)
 	var ter := Pasture3DGraphNodeRegistry.create(&"terrace")
 	ter.set("band_height", 8.0)
@@ -254,7 +254,7 @@ func _grid_barrier(p_noise: FastNoiseLite, p_a: float, p_c: float) -> Pasture3DT
 
 
 func _graph(p_nodes: Array[Pasture3DGraphNode], p_conns: Array, p_out: int) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	g.nodes = p_nodes
 	var conns: Array = []
 	for c in p_conns:

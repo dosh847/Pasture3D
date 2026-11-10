@@ -38,13 +38,14 @@ func native_lower() -> Dictionary:
 
 
 ## Port 3 (`target_height`) drives slot 2. Ports 0-2 are grids or the path.
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, -1, -1, 2])
-
-
 ## The mask is the secondary grid, on port 2.
-func aux_grid_port() -> int:
-	return 2
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.field(&"loop", PortType.PATH).require(),
+		Pasture3DGraphPort.field(&"area", PortType.MASK).unwired(1.0).as_aux(),
+		Pasture3DGraphPort.value(&"target_height", PortType.FLOAT, &"target_height", 2),
+	]
 
 
 func native_out_count() -> int:

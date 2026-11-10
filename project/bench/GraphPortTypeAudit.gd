@@ -15,7 +15,7 @@
 #   2. `output_port_type()` and `output_port_types()[0]` disagreeing. Two declarations of one fact, and
 #      only some nodes override both.
 #   3. the SCALAR/FIELD split contradicting itself: `native_param_ports()[i] >= 0` says port i carries one
-#      number into a params slot, and a field type (HEIGHT / MASK / FIELD / SIGNED / TERRAIN_BUS / PATH) on the same port
+#      number into a params slot, and a field type (HEIGHT / MASK / FIELD / SIGNED / PATH) on the same port
 #      says it carries a grid. Both cannot be true.
 #   4. a names array shorter than its port count — the editor labels the port "" or "out".
 #   5. a type index outside PORT_COLORS, which per PASTURE3D_TERRAIN_GRAPH_GUIDE.md §9 silently reuses
@@ -31,7 +31,6 @@ const FIELD_TYPES: Array[int] = [
 	Pasture3DGraphNode.PortType.MASK,
 	Pasture3DGraphNode.PortType.FIELD,
 	Pasture3DGraphNode.PortType.SIGNED,
-	Pasture3DGraphNode.PortType.TERRAIN_BUS,
 	Pasture3DGraphNode.PortType.PATH,
 ]
 

@@ -61,8 +61,18 @@ func native_lower() -> Dictionary:
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 1, 2, -1])
+## The mask scales what the node does, cell by cell, inside the kernel; it is not a blend of the finished
+## result over the input (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §9.3.1).
+func mask_mode() -> MaskMode:
+	return MaskMode.OWN
+
+
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"radius", PortType.FLOAT, &"radius", 1),
+		Pasture3DGraphPort.value(&"k", PortType.FLOAT, &"k", 2),
+	]
 
 
 func role() -> Role:
@@ -73,25 +83,11 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 4
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "radius", "k", "mask"])
-
-
-func aux_grid_port() -> int:
-	return 3 # "mask"
-
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.FLOAT, PortType.FLOAT, PortType.MASK])
-
-
-func output_count() -> int:
-	return 2
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"deposition", PortType.MASK),
+	]
 
 
 ## The channels the NATIVE op writes, which is now every channel this node offers.
@@ -102,23 +98,6 @@ func output_count() -> int:
 ## the GDScript evaluator. The solver had already computed the field and the op was discarding it.
 func native_out_count() -> int:
 	return 2 # height, deposition
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "deposition"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return radius
-		2: return k
-		3: return 1.0
-		_: return 0.0
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:

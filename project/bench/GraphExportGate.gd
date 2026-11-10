@@ -1,4 +1,4 @@
-# Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
+﻿# Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
 # GraphExportGate — V6 of PASTURE3D_GRAPH_VISUALIZATION_SPEC.md: the B2 export sinks and `Export All`
 # (§9.2).
@@ -156,7 +156,7 @@ func _ramp_input() -> PackedFloat32Array:
 ## The Output is wired STRAIGHT from Input, not through the Mask. That is [E]'s control built into the
 ## fixture: muting the Mask changes what the sink sees and cannot change what the Output produces.
 func _export_graph(p_sinks: Array) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var inp := Pasture3DGraphNodeInput.new()
 	var mask := Pasture3DGraphNodeMask.new()
 	mask.property = Pasture3DGraphNodeMask.Property.ALTITUDE
@@ -270,7 +270,7 @@ func _a_a_sink_costs_the_program_nothing() -> void:
 	# CONTROL: the SAME subtree wired into a NON-terminal node, which is an ancestor of the output. If
 	# the compiler were simply ignoring everything, this would be unchanged too and [A] would measure
 	# nothing at all.
-	var nonterm := Pasture3DTerrainGraph.new()
+	var nonterm := Pasture3DTerrainGraph.create_empty()
 	var inp := Pasture3DGraphNodeInput.new()
 	var mask := Pasture3DGraphNodeMask.new()
 	var blend := Pasture3DGraphNodeBlend.new()
@@ -552,20 +552,20 @@ func _e_the_tap_reads_the_sinks_input() -> void:
 
 
 # ---------------------------------------------------------------------------------------------------
-# [F] A wired `normal` port is refused
+# [F] The normal map is derived from `height`, and the sink has no other input
 # ---------------------------------------------------------------------------------------------------
 func _f_a_wired_normal_port_is_refused() -> void:
-	print("[F] a wired `normal` port is refused by name, never silently ignored (§9.2 Q3)")
+	print("[F] the normal map is derived from `height`; the `normal` port is gone, not ignored")
 	_reset_dir()
 	var sink := _configure(Pasture3DGraphNodeExportNormalMap.new(), "n.png", "png8")
 	var g := _export_graph([sink])
 
-	# CONTROL FIRST: unwired, it exports. Without this the refusal below could be "this sink never works".
+	# It exports, and what it exports is a real normal map.
 	var ok := Pasture3DGraphExportSinks.export_graph_outputs(g, OUT_DIR, _make_terrain())
-	_check(int(ok["written"]) == 1, "control: with `normal` unwired the sink exports (%s)" % [ok["skipped"]])
+	_check(int(ok["written"]) == 1, "the sink exports (%s)" % [ok["skipped"]])
 	var derived := Pasture3DGraphPng.decode(FileAccess.get_file_as_bytes(OUT_DIR + "/n.png"))
 	_check(not derived.has("error") and int(derived.get("channels", 0)) == 4,
-			"control: the derived map is a 4-channel image (%s)" % [derived.get("error", "ok")])
+			"the derived map is a 4-channel image (%s)" % [derived.get("error", "ok")])
 	# A derived normal map of a ramp is not flat: the surface tilts, so X moves off 0.5.
 	var varied := false
 	if not derived.has("error"):
@@ -574,17 +574,14 @@ func _f_a_wired_normal_port_is_refused() -> void:
 			if absf(sm[i] - 0.5) > 0.01:
 				varied = true
 				break
-	_check(varied, "control: the derived normals are not flat, so the export is not writing a blank")
+	_check(varied, "the derived normals are not flat, so the export is not writing a blank")
 
-	# THE REFUSAL. Wire ANY field into port 1 and the sink must decline by name rather than deriving one
-	# from `height` and presenting it as the author's vector field (§4.4's zeros-impostor in a hat).
-	_reset_dir()
-	g.connect_ports(1, 0, 3, 1) # Mask -> normal
-	var refused := Pasture3DGraphExportSinks.export_graph_outputs(g, OUT_DIR, _make_terrain())
-	_check(int(refused["written"]) == 0, "the wired sink wrote %d file(s) (want 0)" % refused["written"])
-	_check(_files().is_empty(), "no file and no sidecar were left behind (%d)" % _files().size())
-	_check(refused["skipped"].size() == 1 and String(refused["skipped"][0]).contains("normal"),
-			"the refusal names the port: %s" % [refused["skipped"]])
+	# The `normal` VECTOR input this criterion used to wire and see refused by the writer was removed with
+	# the type. What is left to hold: nothing can be wired where it was, so nothing can be silently ignored.
+	_check(sink.input_count() == 1 and sink.input_index_of(&"normal") == -1,
+			"the sink declares %d input(s) and no `normal`" % sink.input_count())
+	_check(not g.connect_ports(1, 0, 3, 1), "a wire into the old `normal` position is refused by the graph")
+
 
 
 # ---------------------------------------------------------------------------------------------------

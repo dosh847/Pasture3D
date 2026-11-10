@@ -71,28 +71,16 @@ func category() -> StringName:
 	return &"Generators"
 
 
-func input_count() -> int:
-	return 1
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"noise", PortType.HEIGHT),
+	]
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["noise"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT])
-
-
-func output_count() -> int:
-	return 1
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["out"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"out", PortType.HEIGHT),
+	]
 
 
 func _param_changed() -> void:

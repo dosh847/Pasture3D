@@ -209,12 +209,13 @@ bench/GraphRampPresetGate.tscn
 bench/GraphGradientGizmoGate.tscn
 # --- Terrain graph, hybrid parameter sockets & smart socket collapse ---
 bench/GraphHybridSocketsGate.tscn
-# --- Terrain graph, multi-channel terrain bus (merge & split) ---
-bench/GraphTerrainBusGate.tscn
 # --- Terrain graph, Hesiod Phase 1 solvers: Particle Hydraulic, Logarithmic Stream & Salève Erosion ---
 bench/GraphHydraulicParticleGate.tscn
 bench/GraphHydraulicStreamLogGate.tscn
 bench/GraphHydraulicSaleveGate.tscn
+bench/GraphSaleveRetentionGate.tscn
+bench/GraphSaleveJaggedGate.tscn
+bench/GraphStrataProfileGate.tscn
 bench/GraphPhase1BrushTest.tscn
 # --- Terrain graph, universal node parameter sockets & inline controls ---
 # [G] walks the PALETTE rather than a graph: every op the user can add must be in graph_op_ids(), or be
@@ -225,6 +226,11 @@ bench/GraphPhase1BrushTest.tscn
 # under test was fine and the node beside it was the one un-accelerating everything.
 bench/GraphAllNodeSocketsGate.tscn
 bench/GraphPortTypeGate.tscn
+# Ports and structure P0: a graph in a format this plugin does not read is refused, not run
+# (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §4).
+bench/GraphFormatVersionGate.tscn
+bench/GraphPortDescriptorGate.tscn
+bench/GraphPortIdGate.tscn
 # Brushes follow ground moved under them: stamp key, stale Frozen rebase, and a stale or unset row.
 bench/BrushAccumulationGate.tscn
 bench/GraphPreviewReprGate.tscn
@@ -816,8 +822,8 @@ bench/GraphOperatorGate.tscn
 # and its cost was graph-wide: wiring `flow` out of a Stream Log dropped the WHOLE graph, erosion
 # included, onto the GDScript evaluator with no error. Reading a solver's diagnostic is the normal way to
 # use one, so most interesting graphs paid it.
-# EXCLUDED, on purpose: dla and the two terrain_bus nodes have no kernel op at all, so 1 is right for
-# them; mountain_range_radial's second output is a VECTOR, not a grid; path_distance is left out of the
+# EXCLUDED, on purpose: dla has no kernel op at all, so 1 is right for
+# it; mountain_range_radial's second output is a VECTOR, not a grid; path_distance is left out of the
 # table because its four channels are all zero without a PATH wired, and a fixture that cannot make a
 # field move measures nothing.
 #
@@ -906,3 +912,14 @@ bench/RoadComplexJunctionGate.tscn
 # with degenerate quad filtering producing 0 overlapping triangles, delta_parallel >= 0.0, and positive normals in C++ & GDScript.
 bench/RoadSharpCornerSmoothingGate.tscn
 
+# A later member of a REPLACE layer fades in over earlier members with no cliff at its rim, on both routes, and an uncovered write stays bit-identical.
+bench/LayerMemberBlendGate.tscn
+
+# The Invert node reflects a field about its pivot on both routes, and a graph holding it stays native.
+bench/GraphInvertGate.tscn
+
+# Ridge Sharpen raises and narrows crests, leaves valleys and unmasked ground untouched, keeps its look across resolutions, and native matches the oracle.
+bench/GraphRidgeSharpenGate.tscn
+
+# Gavoronoise fits the brush: gullies scale with the measured or wired range, saved nodes keep their look, Variation moves the pattern, native == oracle == GPU (windowed).
+bench/GraphGavoronoiseFitGate.tscn

@@ -153,7 +153,7 @@ func _warp_noise() -> Pasture3DGraphNodeNoise:
 
 ## Gradient -> Output; optionally a Noise on warp and a Const on `p_port`.
 func _graph(p_n: Pasture3DGraphNode, p_warp := false, p_port := -1, p_value := 0.0) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [p_n, Pasture3DGraphNodeOutput.new()]
 	var conns := [[0, 0, 1, 0]]
 	if p_warp:
@@ -179,7 +179,7 @@ func _gpu(p_g: Pasture3DTerrainGraph) -> PackedFloat32Array:
 
 
 func _warp_grid() -> PackedFloat32Array:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [_warp_noise(), Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [[0, 0, 1, 0]]
@@ -398,7 +398,7 @@ func _e_swap() -> void:
 
 # --- F. fold ----------------------------------------------------------------------------------------
 func _fold_graph(p_n: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var blend := Pasture3DGraphNodeBlend.new()
 	blend.mode = Pasture3DGraphNodeBlend.Mode.ADD
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), p_n, blend, Pasture3DGraphNodeOutput.new()]

@@ -33,8 +33,10 @@ func op() -> StringName:
 
 
 ## FLOAT, not HEIGHT. See the header — this is what makes the registry's 107 scalar ports reachable.
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.FLOAT])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.value(&"out", PortType.FLOAT),
+	]
 
 
 func native_lower() -> Dictionary:
@@ -48,12 +50,8 @@ func role() -> Role:
 	return Role.GENERATOR
 
 
-func input_count() -> int:
-	return 0
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray()
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return []
 
 
 func eval_cell(_p_wx: float, _p_wz: float, _p_inputs: PackedFloat32Array) -> float:

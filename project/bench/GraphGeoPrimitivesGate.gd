@@ -138,7 +138,7 @@ func _test_c_cone_features() -> void:
 
 func _test_d_whole_graph_lowering() -> void:
 	print("\n[D] Whole-Graph Lowering: MountainCone -> HydraulicSaleve Native Pipeline")
-	var graph := Pasture3DTerrainGraph.new()
+	var graph := Pasture3DTerrainGraph.create_empty()
 
 	var cone_node = Pasture3DGraphNodeRegistry.create(&"mountain_cone")
 	var saleve_node = Pasture3DGraphNodeRegistry.create(&"hydraulic_saleve")

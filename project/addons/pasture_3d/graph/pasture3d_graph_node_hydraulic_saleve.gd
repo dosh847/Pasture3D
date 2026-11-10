@@ -3,9 +3,11 @@
 # Pasture3DGraphNodeHydraulicSaleve — Salève large-scale hydraulic erosion SOLVER.
 #
 # Four stages (PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md, S1-S3):
-#   1  steady-state stream-power incision over a drainage network: one tree per border outlet, lakes
-#      rerouted, iterated to convergence. Solved on jittered control points (Delaunay-triangulated), then
-#      reconstructed onto the grid, as Hesiod does
+#   1  incision of the input over a drainage network: one tree per border outlet, lakes spilling at their
+#      lowest point, iterated to convergence. Channels lose height as water collects and the ground beside
+#      them climbs back to the input, so the input stays the shape. Solved on jittered control points
+#      (Delaunay-triangulated), every edge held to Max Slope; the cut is reconstructed onto the grid, smoothed,
+#      and taken off the input
 #   2  deposition: pits filled and concave valley floors raised toward a blur, on flat ground only
 #   3  fine incision: the Stream Log solver itself, run on the result
 #   4  optional smoothing, then composite over the input by Erosion Strength x mask
@@ -31,33 +33,40 @@ extends Pasture3DGraphSolverNode
 		erosion_strength = clampf(v, 0.0, 1.0)
 		_param_changed()
 
-## The drainage-area exponent m in the stream power law (erosion ∝ A^m). Higher values cut the big trunk
-## valleys deeper relative to the small branches.
-@export_range(0.01, 0.8, 0.01) var drainage_exponent: float = 0.15:
+## How fast a channel loses the input's slope as water collects: its slope falls with (Channel Area / area)^m.
+## Higher values cut every valley deeper, the big trunk valleys most of all.
+@export_range(0.01, 0.8, 0.01) var drainage_exponent: float = 0.2:
 	set(v):
 		drainage_exponent = clampf(v, 0.01, 0.8)
+		_param_changed()
+
+## How much ground must drain through a point before it starts to cut, in square metres. Smaller gives more
+## and finer valleys, and this has a strong effect: doubling it can halve the erosion. 0 is auto: (relief / 8)²,
+## so 560 m² on 190 m of relief, and at least the area of two control points.
+@export_range(0.0, 100000.0, 1.0, "or_greater", "suffix:m²") var channel_area: float = 0.0:
+	set(v):
+		channel_area = maxf(v, 0.0)
 		_param_changed()
 
 ## How much seeded noise bends the flow routing, 0..1, so valleys branch dendritically instead of running
 ## straight downhill. The noise is fixed across passes, so the network still converges.
 @export_range(0.0, 1.0, 0.01) var drainage_noise: float = 0.15:
 	set(v):
-		drainage_noise = maxf(v, 0.0)
+		drainage_noise = clampf(v, 0.0, 1.0)
 		_param_changed()
 
 ## How strongly high ground resists erosion (an exponent on the height below Reference Relief). Higher
 ## keeps the summit silhouette; lower lets the valleys cut all the way up.
-@export_range(0.05, 4.0, 0.05) var shape_preservation: float = 2.0:
+@export_range(0.05, 4.0, 0.05) var shape_preservation: float = 1.5:
 	set(v):
 		shape_preservation = clampf(v, 0.05, 4.0)
 		_param_changed()
 
-## The vertical scale, in metres, every length in the solver is measured against — set it and the drainage
-## network becomes a property of the TERRAIN rather than of the grid it is solved on. 0 takes it from the
-## input's own relief, which moves whenever the solved extent does: a brush's Modifier Margin brings the
-## surrounding ground into range without moving one vertex of the shape, and the pattern rescales. Pin it
-## to roughly the relief you are eroding (a 90 m mound → 90) to hold a shape steady across margins,
-## footprint edits and re-bakes.
+## The height, in metres, Shape Preservation measures high ground against, and the scale drainage lengths are
+## taken in. It does not scale the output. 0 takes it from the input's own relief, which moves whenever the
+## solved extent does: a brush's Modifier Margin brings the surrounding ground into range without moving one
+## vertex of the shape, and the pattern shifts. Pin it to roughly the relief you are eroding (a 90 m mound
+## → 90) to hold a shape steady across margins, footprint edits and re-bakes.
 @export_range(0.0, 500.0, 1.0, "or_greater", "suffix:m") var reference_relief: float = 0.0:
 	set(v):
 		reference_relief = maxf(v, 0.0)
@@ -70,23 +79,35 @@ extends Pasture3DGraphSolverNode
 		_param_changed()
 
 @export_group("Slope Limit")
-## Steepest slope the drainage solve allows at the centre of the solved area, in metres per metre. It falls
-## along a smooth radial pulse to Max Slope Border at a distance of the smaller side.
-@export_range(0.0, 20.0, 0.1, "or_greater", "suffix:m/m") var max_slope_center: float = 6.0:
+## The steepest the eroded ground may stand, in metres per metre. Slopes the input already has are kept. Valley
+## walls climb at this slope, so lower gives wider valleys that remove more, and higher gives narrow slots that
+## remove less. Used everywhere while Uniform Slope is on; otherwise it applies at the centre of the solved area
+## and falls along a smooth radial pulse to Max Slope Border at a distance of the smaller side.
+@export_range(0.0, 20.0, 0.1, "or_greater", "suffix:m/m") var max_slope_center: float = 1.5:
 	set(v):
 		max_slope_center = maxf(v, 0.0)
 		_param_changed()
 
-## Steepest slope allowed toward the border of the solved area, in metres per metre.
-@export_range(0.0, 20.0, 0.1, "or_greater", "suffix:m/m") var max_slope_border: float = 0.0:
+## The steepest the eroded ground may stand toward the border of the solved area, in metres per metre. Only used
+## when Uniform Slope is off. The limit between neighbouring points never falls below a fifth of Max Slope Center.
+@export_range(0.0, 20.0, 0.1, "or_greater", "suffix:m/m") var max_slope_border: float = 1.5:
 	set(v):
 		max_slope_border = maxf(v, 0.0)
 		_param_changed()
 
-## Use Max Slope Center everywhere, with no radial falloff.
-@export var uniform_slope: bool = false:
+## Use Max Slope Center everywhere, with no radial falloff. Off, the same mountain erodes differently depending on
+## where it sits in the solved area.
+@export var uniform_slope: bool = true:
 	set(v):
 		uniform_slope = v
+		_param_changed()
+
+## How wide the cut is smoothed before it comes off the input, in metres. Walls from neighbouring channels meet in
+## knife crests, and this rounds them; the input's own detail is untouched and the amount removed stays about the
+## same. 0 = auto: 1.5 x the distance between control points. Well below auto the fins start to come back.
+@export_range(0.0, 100.0, 0.5, "or_greater", "suffix:m") var valley_smoothing: float = 0.0:
+	set(v):
+		valley_smoothing = maxf(v, 0.0)
 		_param_changed()
 
 @export_group("Convergence")
@@ -100,20 +121,22 @@ extends Pasture3DGraphSolverNode
 ## Convergence threshold: mean height change per pass, as a fraction of the current relief.
 @export_range(0.0, 0.01, 0.0001) var tolerance: float = 1.0e-3:
 	set(v):
-		tolerance = maxf(v, 0.0)
+		tolerance = clampf(v, 0.0, 0.01)
 		_param_changed()
 
 @export_group("Control Points")
-## How many control points the drainage network is solved on. Channels are about one point apart, so
-## more points give finer valleys. Ignored when Point Spacing is set.
-@export_range(500, 100000, 100, "or_greater") var control_points: int = 15000:
+## How many control points the drainage network is solved on. Channels are a few points apart, so more points
+## give finer valleys. Ignored when Point Spacing is set. At most 100000.
+@export_range(500, 100000, 100) var control_points: int = 15000:
 	set(v):
-		control_points = clampi(v, 16, 1000000)
+		control_points = clampi(v, 16, 100000)
 		_param_changed()
 
 ## Distance between control points, in metres. 0 derives it from Control Points over the solved area,
 ## which moves when the area does (a Modifier Margin). Set it to hold the network steady across margins:
-## the point lattice is anchored to the world, so a wider area adds points without moving any.
+## the point lattice is anchored to the world, so a wider area adds points without moving any. This sets the
+## point count: 1 m over a 1 x 1 km area asks for a million. Past 100000 points the spacing widens to fit, with a
+## warning, and stops holding steady across margins.
 @export_range(0.0, 50.0, 0.1, "or_greater", "suffix:m") var point_spacing: float = 0.0:
 	set(v):
 		point_spacing = maxf(v, 0.0)
@@ -163,13 +186,13 @@ enum Reconstruction { LINEAR, GRADIENT }
 
 @export_group("Fine Incision")
 ## Fine incision is the Stream Log solver run on the result: this is its incision_rate. 0 skips it.
-@export_range(0.0, 1.0, 0.005) var stream_strength: float = 0.15:
+@export_range(0.0, 1.0, 0.005) var stream_strength: float = 0.02:
 	set(v):
 		stream_strength = clampf(v, 0.0, 1.0)
 		_param_changed()
 
 ## The Stream Log solver's area_exponent (m in A^m S^n).
-@export_range(0.01, 1.0, 0.01) var stream_exp: float = 0.5:
+@export_range(0.01, 1.0, 0.01) var stream_exp: float = 0.8:
 	set(v):
 		stream_exp = clampf(v, 0.01, 1.0)
 		_param_changed()
@@ -183,11 +206,11 @@ enum Reconstruction { LINEAR, GRADIENT }
 		_param_changed()
 
 ## Where Stage 1's water leaves: every cell within this fraction of the grid's relief above its lowest
-## point is an outlet, as well as the grid border. It sets the brush's level where it meets the ground, so a
-## wider Modifier Margin does not lift it. 0 = the grid border only.
+## point is an outlet, as well as the grid border. Outlets are never cut, so this ground keeps the input's
+## height exactly. 0 = the grid border only.
 @export_range(0.0, 0.5, 0.005) var outlet_level: float = 0.1:
 	set(v):
-		outlet_level = clampf(v, 0.0, 1.0)
+		outlet_level = clampf(v, 0.0, 0.5)
 		_param_changed()
 
 @export_group("Post-Processing")
@@ -242,7 +265,7 @@ func native_lower() -> Dictionary:
 	p[15] = reference_relief
 	# The 16 slots are full; the S2 settings ride the LUT (read by the native op in this order).
 	var ext := PackedFloat32Array([float(control_points), point_spacing, float(reconstruction),
-			1.0 if default_warp else 0.0, warp_amount, warp_size, rim_width, outlet_level])
+			1.0 if default_warp else 0.0, warp_amount, warp_size, rim_width, outlet_level, channel_area, valley_smoothing])
 	return {"params": p, "lut": ext}
 
 
@@ -264,40 +287,32 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 4
+# SIGNED, not FLOAT. `dx`/`dy` are read as GRIDS — `p_inputs[1] as PackedFloat32Array` in
+# `eval_grid` below, handed straight to the solver as displacement fields — so declaring them
+# FLOAT described them as one value per port when they are one value per CELL. The consequence
+# was not cosmetic: a FLOAT port connects to nothing but another FLOAT, so these two could not be
+# wired at all, and being fields they have no inline property either. They were inert sockets.
+# SIGNED because a displacement is signed and zero is meaningful.
+## The mask scales what the node does, cell by cell, inside the kernel; it is not a blend of the finished
+## result over the input (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §9.3.1).
+func mask_mode() -> MaskMode:
+	return MaskMode.OWN
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "dx", "dy", "mask"])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.field(&"dx", PortType.SIGNED),
+		Pasture3DGraphPort.field(&"dy", PortType.SIGNED),
+	]
 
 
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.HEIGHT,
-		# SIGNED, not FLOAT. `dx`/`dy` are read as GRIDS — `p_inputs[1] as PackedFloat32Array` in
-		# `eval_grid` below, handed straight to the solver as displacement fields — so declaring them
-		# FLOAT described them as one value per port when they are one value per CELL. The consequence
-		# was not cosmetic: a FLOAT port connects to nothing but another FLOAT, so these two could not be
-		# wired at all, and being fields they have no inline property either. They were inert sockets.
-		# SIGNED because a displacement is signed and zero is meaningful.
-		PortType.SIGNED,
-		PortType.SIGNED,
-		PortType.MASK,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return 0.0
-		2: return 0.0
-		3: return 1.0
-		_: return 0.0
-
-
-func output_count() -> int:
-	return 3
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"eroded_rock", PortType.FIELD),
+		Pasture3DGraphPort.field(&"sediment", PortType.FIELD),
+	]
 
 
 ## The channels the NATIVE op writes, which is now every channel this node offers.
@@ -308,14 +323,6 @@ func output_count() -> int:
 ## the GDScript evaluator. The solver had already computed the field and the op was discarding it.
 func native_out_count() -> int:
 	return 3 # height, eroded_rock, sediment
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "eroded_rock", "sediment"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.FIELD, PortType.FIELD])
 
 
 func node_warnings() -> PackedStringArray:
@@ -381,6 +388,8 @@ func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect:
 		"max_slope_border": max_slope_center if uniform_slope else max_slope_border,
 		"rim_width": rim_width,
 		"outlet_level": outlet_level,
+		"channel_area": channel_area,
+		"valley_smoothing": valley_smoothing,
 	}
 
 	if not ClassDB.class_has_method("Pasture3DUtil", "hydraulic_saleve_solve_grid"):

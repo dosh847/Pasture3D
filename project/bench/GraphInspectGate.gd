@@ -86,7 +86,7 @@ func _check(p_ok: bool, p_what: String) -> void:
 ## flat 0 — and on a flat field every check in this gate passes for the wrong reason. That exact fixture
 ## bug cost three false failures in V1 [F]; it is not repeated here.
 func _noise_graph() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n := Pasture3DGraphNodeRegistry.create(&"noise")
 	var out := Pasture3DGraphNodeRegistry.create(&"output")
 	if n == null or out == null:
@@ -108,7 +108,7 @@ func _noise_graph() -> Pasture3DTerrainGraph:
 ## which only the GDScript evaluator can do, so the whole graph would answer `native_supported()` false and
 ## every criterion would pass while measuring an evaluator this phase does not touch (the V2 gate's lesson).
 func _erosion_graph() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var inp := Pasture3DGraphNodeRegistry.create(&"input")
 	var er := Pasture3DGraphNodeRegistry.create(&"erosion")
 	var out := Pasture3DGraphNodeRegistry.create(&"output")

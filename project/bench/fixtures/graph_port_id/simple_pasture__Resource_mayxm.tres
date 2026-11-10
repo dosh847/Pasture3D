@@ -1,0 +1,128 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="4_4khcl"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="4_6pcwc"]
+[ext_resource type="Script" uid="uid://d2cw8j1wtpqsw" path="res://addons/pasture_3d/graph/pasture3d_graph_node_noise.gd" id="6_cad7k"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="6_ii4qc"]
+[ext_resource type="Script" uid="uid://bindlf2awqi6e" path="res://addons/pasture_3d/graph/pasture3d_graph_node_blend.gd" id="7_r5vgm"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="7_wv1iv"]
+[ext_resource type="Script" uid="uid://xya0fdv0c734" path="res://addons/pasture_3d/graph/pasture3d_graph_node_warp.gd" id="9_ft08i"]
+[ext_resource type="Script" uid="uid://dsg073dgc4m11" path="res://addons/pasture_3d/graph/pasture3d_graph_node_erosion_thermal.gd" id="10_67nn0"]
+[ext_resource type="Script" uid="uid://uaa2iiq8h0cs" path="res://addons/pasture_3d/graph/pasture3d_graph_node_hydraulic_stream_log.gd" id="11_ddf1r"]
+[ext_resource type="Script" uid="uid://ex1riwe31v4r" path="res://addons/pasture_3d/graph/pasture3d_graph_node_spectral_equalizer.gd" id="12_cad7k"]
+[ext_resource type="Script" uid="uid://dk62sstiu4u2a" path="res://addons/pasture_3d/graph/pasture3d_graph_node_color_sink.gd" id="17_x65ay"]
+[ext_resource type="Script" uid="uid://dby8ulk0ecuh" path="res://addons/pasture_3d/graph/pasture3d_graph_node_const_color.gd" id="18_mayxm"]
+[ext_resource type="Script" uid="uid://becbt7y4p6twa" path="res://addons/pasture_3d/graph/pasture3d_graph_node_curvature.gd" id="18_nnq34"]
+[ext_resource type="Script" uid="uid://bc0174c1jwufg" path="res://addons/pasture_3d/graph/pasture3d_graph_node_reroute.gd" id="21_mayxm"]
+[ext_resource type="Script" uid="uid://7kgetm8y0qv7" path="res://addons/pasture_3d/graph/pasture3d_graph_node_color_blend.gd" id="22_h4fvm"]
+
+[sub_resource type="Resource" id="Resource_201xj"]
+script = ExtResource("4_6pcwc")
+graph_position = Vector2(-440, 320)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_6fins"]
+script = ExtResource("6_ii4qc")
+graph_position = Vector2(3960, 320)
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_8seea"]
+frequency = 0.004
+fractal_type = 3
+
+[sub_resource type="Resource" id="Resource_3ucqc"]
+script = ExtResource("6_cad7k")
+noise = SubResource("FastNoiseLite_8seea")
+amplitude = 20.0
+graph_position = Vector2(-60, 700)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_xk4pu"]
+script = ExtResource("7_r5vgm")
+graph_position = Vector2(300, 320)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_jc6ve"]
+script = ExtResource("9_ft08i")
+frequency = 0.0081
+strength = 60.0
+amplitude = 12.0
+graph_position = Vector2(-60, 320)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_xq5ji"]
+script = ExtResource("10_67nn0")
+graph_position = Vector2(680, 320)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_x65ay"]
+script = ExtResource("11_ddf1r")
+incision_rate = 0.1
+area_exponent = 0.85
+graph_position = Vector2(1120, 320)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_r5vgm"]
+script = ExtResource("12_cad7k")
+micro_gain = 0.4
+graph_position = Vector2(1880, 320)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_ow0y2"]
+script = ExtResource("7_r5vgm")
+graph_position = Vector2(1120, 720)
+
+[sub_resource type="Resource" id="Resource_gmhxr"]
+script = ExtResource("18_mayxm")
+value = Color(0.41015625, 0.17037246, 0.09617941, 1)
+graph_position = Vector2(2900, 860)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_yr4lm"]
+script = ExtResource("17_x65ay")
+graph_position = Vector2(4380, 1020)
+
+[sub_resource type="Resource" id="Resource_s856v"]
+script = ExtResource("18_nnq34")
+mode = 1
+radius = 12
+graph_position = Vector2(2800, 480)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_fkyag"]
+script = ExtResource("18_nnq34")
+radius = 3
+graph_position = Vector2(2520, 1120)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_8odna"]
+script = ExtResource("21_mayxm")
+graph_position = Vector2(2440, 720)
+
+[sub_resource type="Resource" id="Resource_r045v"]
+script = ExtResource("18_mayxm")
+value = Color(0.59375, 0.5067615, 0.3336119, 1)
+graph_position = Vector2(3060, 1100)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_7rah1"]
+script = ExtResource("18_mayxm")
+value = Color(0.5034574, 0.72127134, 0.84375, 1)
+graph_position = Vector2(3000, 1360)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_xoefv"]
+script = ExtResource("22_h4fvm")
+graph_position = Vector2(3500, 860)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_rh2s1"]
+script = ExtResource("22_h4fvm")
+graph_position = Vector2(3920, 1060)
+preview_on = true
+
+[resource]
+script = ExtResource("7_wv1iv")
+format_version = 3
+nodes = Array[ExtResource("4_4khcl")]([SubResource("Resource_201xj"), SubResource("Resource_6fins"), SubResource("Resource_3ucqc"), SubResource("Resource_xk4pu"), SubResource("Resource_jc6ve"), SubResource("Resource_xq5ji"), SubResource("Resource_x65ay"), SubResource("Resource_r5vgm"), SubResource("Resource_ow0y2"), SubResource("Resource_gmhxr"), SubResource("Resource_yr4lm"), SubResource("Resource_s856v"), SubResource("Resource_fkyag"), SubResource("Resource_8odna"), SubResource("Resource_r045v"), SubResource("Resource_7rah1"), SubResource("Resource_xoefv"), SubResource("Resource_rh2s1")])
+wires = [[2, &"out", 3, &"b"], [4, &"out", 3, &"a"], [3, &"out", 5, &"in"], [5, &"height", 6, &"in"], [6, &"height", 7, &"in"], [0, &"height", 4, &"in"], [5, &"talus", 8, &"mask"], [7, &"out", 13, &"in"], [13, &"out", 11, &"in"], [13, &"out", 12, &"in"], [11, &"mask", 16, &"mask"], [9, &"out", 16, &"a"], [15, &"out", 17, &"b"], [16, &"out", 17, &"a"], [14, &"out", 16, &"b"], [12, &"mask", 17, &"mask"], [17, &"out", 10, &"color"], [7, &"out", 1, &"result"]]
+metadata/_editor_selected_node = 10

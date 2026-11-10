@@ -168,7 +168,7 @@ func _source(p_path: Pasture3DGraphPath) -> Pasture3DGraphNodeRoadSource:
 
 ## Input → Output: no geometry at all, for the availability probe.
 func _plain_graph() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
@@ -177,7 +177,7 @@ func _plain_graph() -> Pasture3DTerrainGraph:
 
 
 func _distance_graph(p_path: Pasture3DGraphPath, p_max: float = 0.0) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var q := Pasture3DGraphNodePathDistance.new()
 	q.max_distance = p_max
 	var nodes: Array[Pasture3DGraphNode] = [_source(p_path), q, Pasture3DGraphNodeOutput.new()]
@@ -188,7 +188,7 @@ func _distance_graph(p_path: Pasture3DGraphPath, p_max: float = 0.0) -> Pasture3
 
 func _mask_graph(p_path: Pasture3DGraphPath, p_invert: bool, p_feather: float,
 		p_scale: float = 1.0) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var m := Pasture3DGraphNodePathMask.new()
 	m.invert = p_invert
 	m.feather = p_feather
@@ -327,7 +327,7 @@ func _b_the_corridor_mask_matches_the_cpu_op() -> void:
 func _c_an_empty_path_reads_far_away_on_the_gpu() -> void:
 	print("[C] an unresolved Road Source reads unreachable on the GPU")
 	var surf := _terrain()
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeRoadSource.new(), Pasture3DGraphNodePathDistance.new(),
 		Pasture3DGraphNodeOutput.new()]
@@ -377,7 +377,7 @@ func _d_what_the_shader_cannot_do_it_refuses() -> void:
 	var surf := _terrain()
 
 	var g_closed := _mask_graph(_outline(), false, 3.0)
-	var g_grade := Pasture3DTerrainGraph.new()
+	var g_grade := Pasture3DTerrainGraph.create_empty()
 	var nodes_g: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _source(_road_with_profile()),
 		Pasture3DGraphNodeRoadGrade.new(), Pasture3DGraphNodeOutput.new()]
@@ -385,7 +385,7 @@ func _d_what_the_shader_cannot_do_it_refuses() -> void:
 	g_grade.connections = [[0, 0, 2, 0], [1, 0, 2, 1], [2, 0, 3, 0]]
 
 	# Path Distance's port 1 is `s`, a channel the shader does not write.
-	var g_chan := Pasture3DTerrainGraph.new()
+	var g_chan := Pasture3DTerrainGraph.create_empty()
 	var nodes_c: Array[Pasture3DGraphNode] = [
 		_source(_hairpin()), Pasture3DGraphNodePathDistance.new(), Pasture3DGraphNodeOutput.new()]
 	g_chan.nodes = nodes_c
@@ -436,7 +436,7 @@ func _e_one_road_shared_and_two_roads_kept_apart() -> void:
 	var road := _hairpin()
 
 	# One road, two consumers, combined so both reach the output.
-	var g1 := Pasture3DTerrainGraph.new()
+	var g1 := Pasture3DTerrainGraph.create_empty()
 	var mask := Pasture3DGraphNodePathMask.new()
 	mask.feather = 3.0
 	var nodes1: Array[Pasture3DGraphNode] = [
@@ -448,7 +448,7 @@ func _e_one_road_shared_and_two_roads_kept_apart() -> void:
 	var one_worst := _worst(one_gpu, _cpu(g1, surf))
 
 	# Two DIFFERENT roads in one graph, each read by its own query and summed.
-	var g2 := Pasture3DTerrainGraph.new()
+	var g2 := Pasture3DTerrainGraph.create_empty()
 	var nodes2: Array[Pasture3DGraphNode] = [
 		_source(_hairpin()), _source(_lane()), Pasture3DGraphNodePathDistance.new(),
 		Pasture3DGraphNodePathDistance.new(), Pasture3DGraphNodeBlend.new(),

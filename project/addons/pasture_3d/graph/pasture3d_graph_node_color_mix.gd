@@ -66,20 +66,17 @@ func role() -> Role:
 	return Role.COMBINER
 
 
-func input_count() -> int:
-	return 2
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.value(&"a", PortType.COLOR),
+		Pasture3DGraphPort.value(&"b", PortType.COLOR),
+	]
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["a", "b"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.COLOR, PortType.COLOR])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.COLOR])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.value(&"out", PortType.COLOR),
+	]
 
 
 ## Fold this node's colour. `p_upstream` maps input NAMES to the Colors resolved from the wires; a name

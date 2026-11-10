@@ -264,7 +264,7 @@ func _gen_at(p_over: Dictionary, p_n: int) -> PackedFloat32Array:
 
 
 func _build_graph(p_gen: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [p_gen, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [PackedInt32Array([0, 0, 1, 0])]
@@ -272,7 +272,7 @@ func _build_graph(p_gen: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
 
 
 func _io_graph() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [PackedInt32Array([0, 0, 1, 0])]

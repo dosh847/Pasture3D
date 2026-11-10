@@ -77,7 +77,7 @@ func _f_spec_and_static_helpers() -> void:
 func _a_const_color_preview() -> void:
 	print("\n[A] ConstColor renders solid square + #RRGGBB chip")
 
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var c_node := Pasture3DGraphNodeConstColor.new()
 	c_node.value = Color(0.2, 0.8, 0.4, 1.0)
 	c_node.preview_on = true
@@ -116,7 +116,7 @@ func _a_const_color_preview() -> void:
 func _b_color_mix_preview() -> void:
 	print("\n[B] ColorMix renders folded solid square + mode & hex chip")
 
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var c1 := Pasture3DGraphNodeConstColor.new()
 	c1.value = Color(1.0, 0.0, 0.0, 1.0) # Red
 	var c2 := Pasture3DGraphNodeConstColor.new()
@@ -167,7 +167,7 @@ func _b_color_mix_preview() -> void:
 func _c_color_blend_unwired() -> void:
 	print("\n[C] ColorBlend with unwired mask falls back to uniform preview + 'BLEND (unwired)' chip")
 
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var blend := Pasture3DGraphNodeColorBlend.new()
 	blend.color_a = Color(0.1, 0.8, 0.3, 1.0)
 	blend.color_b = Color(0.9, 0.2, 0.1, 1.0)
@@ -200,7 +200,7 @@ func _c_color_blend_unwired() -> void:
 func _d_color_blend_wired_mask() -> void:
 	print("\n[D] ColorBlend with wired mask piggybacks tap and renders 2D blended field")
 
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	# Node 0: Noise generator to feed mask
 	var fnl := FastNoiseLite.new()
 	fnl.seed = 42
@@ -277,7 +277,7 @@ func _d_color_blend_wired_mask() -> void:
 func _e_nested_color_blend() -> void:
 	print("\n[E] Nested ColorBlend chaining evaluates in topological order")
 
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var fnl := FastNoiseLite.new()
 	fnl.seed = 99
 	var noise := Pasture3DGraphNodeNoise.new()

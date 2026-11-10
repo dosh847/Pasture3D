@@ -206,7 +206,7 @@ func _worst_gpu_cpu(p_gpu: PackedFloat32Array, p_cpu: PackedFloat32Array) -> flo
 
 
 func _refused_graph(p_channel: int) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeLeveler.new(),
 			Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes

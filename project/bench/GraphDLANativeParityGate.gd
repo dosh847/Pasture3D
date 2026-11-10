@@ -263,7 +263,7 @@ func _n_node(p_props: Dictionary, p_eval: int) -> Pasture3DGraphNode:
 
 
 func _n_graph(p_node: Pasture3DGraphNode, p_port: int, p_amp: float) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var i_in := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"))
 	var i_n := g.add_node(p_node)
 	var i_out := g.add_node(Pasture3DGraphNodeRegistry.create(&"output"))

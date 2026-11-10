@@ -38,7 +38,7 @@ func _a_parameter_socket_defaults() -> void:
 	# Terrace node
 	var terr_node: Pasture3DGraphNodeTerrace = Pasture3DGraphNodeRegistry.create(&"terrace")
 	_assert(terr_node != null, "Terrace node created")
-	_assert(terr_node.input_count() == 4, "Terrace has 4 input ports (in, band_height, hardness, amount)")
+	_assert(terr_node.input_count() == 5 and terr_node.standard_mask_port() == 4, "Terrace has 5 input ports (in, band_height, hardness, amount, standard mask)")
 	terr_node.band_height = 25.0
 	terr_node.hardness = 0.9
 	terr_node.amount = 0.5
@@ -49,7 +49,7 @@ func _a_parameter_socket_defaults() -> void:
 	# Remap node
 	var remap_node: Pasture3DGraphNodeRemap = Pasture3DGraphNodeRegistry.create(&"remap")
 	_assert(remap_node != null, "Remap node created")
-	_assert(remap_node.input_count() == 5, "Remap has 5 input ports (in, in_min, in_max, out_min, out_max)")
+	_assert(remap_node.input_count() == 6 and remap_node.standard_mask_port() == 5, "Remap has 6 input ports (in, in_min, in_max, out_min, out_max, standard mask)")
 	remap_node.in_min = 10.0
 	remap_node.in_max = 50.0
 	_assert(remap_node.input_unwired_default(1) == 10.0, "Unwired in_min returns 10.0")
@@ -58,7 +58,7 @@ func _a_parameter_socket_defaults() -> void:
 
 func _b_parameter_socket_modulation() -> void:
 	print("[B] Parameter socket wire modulation")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 
 	# Noise node whose amplitude is driven by a ConstFloat node
 	var const_amp: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const")
@@ -97,7 +97,7 @@ func _b_parameter_socket_modulation() -> void:
 
 func _c_editor_smart_collapse() -> void:
 	print("[C] Smart socket collapse in GraphEditor slot row population")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var const_node: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const")
 	var nz_node: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"noise")
 	var out_node: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"output")
@@ -143,7 +143,7 @@ func _c_editor_smart_collapse() -> void:
 
 func _d_native_ssa_lowering() -> void:
 	print("[D] Single-call native C++ SSA program lowering")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var const_node: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const")
 	const_node.set("value", 20.0)
 	var nz_node: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"noise")

@@ -1,0 +1,54 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="5_oym70"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="6_ku6im"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="7_g7ymd"]
+[ext_resource type="Script" uid="uid://dk62sstiu4u2a" path="res://addons/pasture_3d/graph/pasture3d_graph_node_color_sink.gd" id="8_rerle"]
+[ext_resource type="Script" uid="uid://dkwo3nwbq1d7n" path="res://addons/pasture_3d/graph/pasture3d_graph_node_erosion_hydraulic.gd" id="9_x6ti2"]
+[ext_resource type="Script" uid="uid://dby8ulk0ecuh" path="res://addons/pasture_3d/graph/pasture3d_graph_node_const_color.gd" id="10_46586"]
+[ext_resource type="Script" uid="uid://dknibyxuekk0m" path="res://addons/pasture_3d/graph/pasture3d_graph_node_float_to_mask.gd" id="11_2cqlq"]
+[ext_resource type="Script" uid="uid://7kgetm8y0qv7" path="res://addons/pasture_3d/graph/pasture3d_graph_node_color_blend.gd" id="12_psqu1"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="13_usllu"]
+
+[sub_resource type="Resource" id="Resource_oosue"]
+script = ExtResource("6_ku6im")
+graph_position = Vector2(40, 80)
+
+[sub_resource type="Resource" id="Resource_qqb7p"]
+script = ExtResource("7_g7ymd")
+graph_position = Vector2(1720, 80)
+
+[sub_resource type="Resource" id="Resource_qybwt"]
+script = ExtResource("8_rerle")
+graph_position = Vector2(1740, 240)
+
+[sub_resource type="Resource" id="Resource_6e2ac"]
+script = ExtResource("9_x6ti2")
+graph_position = Vector2(540, 80)
+
+[sub_resource type="Resource" id="Resource_sr7so"]
+script = ExtResource("10_46586")
+value = Color(1, 0, 0.48647738, 1)
+graph_position = Vector2(540, 360)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_2x2br"]
+script = ExtResource("10_46586")
+value = Color(0, 1, 0.9640789, 1)
+graph_position = Vector2(560, 600)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_ytgr8"]
+script = ExtResource("11_2cqlq")
+graph_position = Vector2(920, 480)
+
+[sub_resource type="Resource" id="Resource_y67v4"]
+script = ExtResource("12_psqu1")
+graph_position = Vector2(1300, 360)
+
+[resource]
+script = ExtResource("13_usllu")
+format_version = 3
+nodes = Array[ExtResource("5_oym70")]([SubResource("Resource_oosue"), SubResource("Resource_qqb7p"), SubResource("Resource_qybwt"), SubResource("Resource_6e2ac"), SubResource("Resource_sr7so"), SubResource("Resource_2x2br"), SubResource("Resource_ytgr8"), SubResource("Resource_y67v4")])
+wires = [[0, &"height", 3, &"in"], [3, &"height", 1, &"result"], [0, &"footprint", 2, &"mask"], [3, &"eroded", 6, &"in"], [4, &"out", 7, &"a"], [5, &"out", 7, &"b"], [6, &"out", 7, &"mask"], [7, &"out", 2, &"color"]]
+metadata/_editor_selected_node = 1

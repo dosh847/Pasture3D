@@ -192,37 +192,25 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 4
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["height", "loop", "mask", "target_height"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.PATH, PortType.MASK, PortType.FLOAT])
-
-
 ## An unwired mask is fully open; an unwired target reads the inspector value, so a wire overrides it and
 ## nothing else has to ask whether the port is connected (the Contrast `amount` idiom).
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		2: return 1.0
-		3: return target_height
-	return 0.0
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.field(&"loop", PortType.PATH).require(),
+		Pasture3DGraphPort.field(&"area", PortType.MASK).unwired(1.0),
+		Pasture3DGraphPort.value(&"target_height", PortType.FLOAT, &"target_height"),
+	]
 
 
-func output_count() -> int:
-	return 5
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "level_mask", "level_value", "delta", "walls"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.FLOAT, PortType.SIGNED, PortType.MASK])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"level_mask", PortType.MASK),
+		Pasture3DGraphPort.value(&"level_value", PortType.FLOAT),
+		Pasture3DGraphPort.field(&"delta", PortType.SIGNED),
+		Pasture3DGraphPort.field(&"walls", PortType.MASK),
+	]
 
 
 func reads_paths() -> bool:

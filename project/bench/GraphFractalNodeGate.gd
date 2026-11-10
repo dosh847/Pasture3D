@@ -262,7 +262,7 @@ func _cell_world(p_ix: int, p_iz: int) -> Vector2:
 
 
 func _gen_graph(p_gen: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [p_gen, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [_c4(0, 0, 1, 0)]

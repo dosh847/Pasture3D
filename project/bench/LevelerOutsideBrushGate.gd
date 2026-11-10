@@ -159,7 +159,7 @@ func _graph_mod(p_target: float) -> Pasture3DNodeGraph:
 	lev.target_height = p_target
 	lev.feather_side = Pasture3DGraphNodeLevelerBase.FeatherSide.OUTSIDE
 	lev.feather = FEATHER
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), lev, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [PackedInt32Array([0, 0, 1, 0]), PackedInt32Array([1, 0, 2, 0])]

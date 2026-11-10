@@ -1,0 +1,44 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="10_2a5dl"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="14_b2p0t"]
+[ext_resource type="Script" uid="uid://fl2f2iwtn1vv" path="res://addons/pasture_3d/graph/pasture3d_graph_path.gd" id="24_aw4eb"]
+[ext_resource type="Script" uid="uid://t26vuji0r8wf" path="res://addons/pasture_3d/graph/pasture3d_graph_node_spline_source.gd" id="25_2k2uo"]
+[ext_resource type="Script" uid="uid://5s5nj7du18rp" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_carve.gd" id="26_tqyh8"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="32_iib3d"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="33_b2p0t"]
+
+[sub_resource type="Resource" id="Resource_51stu"]
+script = ExtResource("32_iib3d")
+
+[sub_resource type="Resource" id="Resource_ur26b"]
+script = ExtResource("24_aw4eb")
+points = PackedVector2Array(211.50476, -38.781906, 211.50476, 1.2180939)
+half_widths = PackedFloat32Array(12, 12)
+heights = PackedFloat32Array(19.999939, 19.999939)
+source_label = "Ridge1/Crest"
+sample_half_widths = PackedFloat32Array()
+sample_shoulders = PackedFloat32Array()
+sample_verges = PackedFloat32Array()
+sample_suppress = PackedByteArray()
+sample_skip = PackedByteArray()
+
+[sub_resource type="Resource" id="Resource_xebvu"]
+script = ExtResource("25_2k2uo")
+path = SubResource("Resource_ur26b")
+
+[sub_resource type="Resource" id="Resource_icw06"]
+script = ExtResource("26_tqyh8")
+offset = 20.0
+width_source = 1
+width = 20.0
+
+[sub_resource type="Resource" id="Resource_ipgf3"]
+script = ExtResource("33_b2p0t")
+
+[resource]
+script = ExtResource("14_b2p0t")
+format_version = 3
+nodes = Array[ExtResource("10_2a5dl")]([SubResource("Resource_51stu"), SubResource("Resource_xebvu"), SubResource("Resource_icw06"), SubResource("Resource_ipgf3")])
+wires = [[0, &"height", 2, &"surface"], [1, &"path", 2, &"path"], [2, &"height", 3, &"result"]]
+output_node = 3

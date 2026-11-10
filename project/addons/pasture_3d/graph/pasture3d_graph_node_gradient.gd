@@ -155,40 +155,25 @@ func needs_grid() -> bool:
 	return false
 
 
-func input_count() -> int:
-	return 7
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"warp", PortType.FIELD),
+		# One Vector2 property backs two ports, so neither can name it as its `property`; the unwired
+		# value is read here instead, and the setters emit `changed` so the port cache asks again.
+		Pasture3DGraphPort.value(&"start_x", PortType.FLOAT, &"", 1).unwired(start.x),
+		Pasture3DGraphPort.value(&"start_z", PortType.FLOAT, &"", 2).unwired(start.y),
+		Pasture3DGraphPort.value(&"end_x", PortType.FLOAT, &"", 3).unwired(end.x),
+		Pasture3DGraphPort.value(&"end_z", PortType.FLOAT, &"", 4).unwired(end.y),
+		Pasture3DGraphPort.value(&"height_min", PortType.FLOAT, &"height_min", 5),
+		Pasture3DGraphPort.value(&"height_max", PortType.FLOAT, &"height_max", 6),
+	]
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["warp", "start_x", "start_z", "end_x", "end_z", "height_min", "height_max"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.FIELD, PortType.FLOAT, PortType.FLOAT, PortType.FLOAT, PortType.FLOAT,
-			PortType.FLOAT, PortType.FLOAT])
-
-
-func output_port_type() -> int:
-	return PortType.HEIGHT if output_mode == OutputMode.HEIGHT else PortType.MASK
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([output_port_type()])
-
-
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 1, 2, 3, 4, 5, 6])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		1: return start.x
-		2: return start.y
-		3: return end.x
-		4: return end.y
-		5: return height_min
-		6: return height_max
-	return 0.0
+# The output's type follows Output Mode, so the socket recolours when the mode changes.
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"out", PortType.HEIGHT if output_mode == OutputMode.HEIGHT else PortType.MASK),
+	]
 
 
 func curve_lut() -> PackedFloat32Array:

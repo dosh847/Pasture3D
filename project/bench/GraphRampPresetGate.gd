@@ -101,7 +101,7 @@ func _value_ramp_native(p_g: Gradient, p_h: PackedFloat32Array) -> PackedFloat32
 	v.gradient = p_g
 	v.channel = Pasture3DGraphNodeValueRamp.Channel.LUMINANCE
 	v.output_mode = Pasture3DGraphNodeValueRamp.OutputMode.MASK
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), v, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [[0, 0, 1, 0], [1, 0, 2, 0]]

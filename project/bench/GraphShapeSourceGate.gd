@@ -77,7 +77,7 @@ func _fixture() -> Dictionary:
 
 
 func _mask_graph(p_src: Pasture3DGraphNode, p_mask: Pasture3DGraphNodePathMask) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [p_src, p_mask, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [[0, 0, 1, 0], [1, 0, 2, 0]]
@@ -172,7 +172,7 @@ func _c_the_dropdown_lists_the_brushes_and_notifies() -> void:
 	var told := [0]
 	src.property_list_changed.connect(func() -> void: told[0] += 1)
 
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [src]
 	g.nodes = nodes
 	Pasture3DGraphSources.resolve_shapes(g, brush)
@@ -202,7 +202,7 @@ func _c_the_dropdown_lists_the_brushes_and_notifies() -> void:
 	rsp.curve = rc
 	road.add_child(rsp)
 	var src2 := Pasture3DGraphNodeShapeSource.new()
-	var g2 := Pasture3DTerrainGraph.new()
+	var g2 := Pasture3DTerrainGraph.create_empty()
 	var nodes2: Array[Pasture3DGraphNode] = [src2]
 	g2.nodes = nodes2
 	Pasture3DGraphSources.resolve_shapes(g2, brush)
@@ -226,7 +226,7 @@ func _d_every_host_site_resolves_the_same_set() -> void:
 	var shape := Pasture3DGraphNodeShapeSource.new()
 	shape.shape_key = brush.shape_key()
 	var road := Pasture3DGraphNodeRoadSource.new()
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [shape, road]
 	g.nodes = nodes
 
@@ -243,7 +243,7 @@ func _d_every_host_site_resolves_the_same_set() -> void:
 	var missing := Pasture3DGraphNodeShapeSource.new()
 	missing.shape_key = "NoSuchBrush"
 	missing.path = brush.graph_shape_path(0)
-	var g2 := Pasture3DTerrainGraph.new()
+	var g2 := Pasture3DTerrainGraph.create_empty()
 	var nodes2: Array[Pasture3DGraphNode] = [missing]
 	g2.nodes = nodes2
 	Pasture3DGraphSources.resolve(g2, brush)
@@ -257,7 +257,7 @@ func _d_every_host_site_resolves_the_same_set() -> void:
 	# normal state, not a broken one — §4.3's empty-path rule is what keeps it from being a crash.
 	var lone := Pasture3DGraphNodeShapeSource.new()
 	lone.shape_key = brush.shape_key()
-	var g3 := Pasture3DTerrainGraph.new()
+	var g3 := Pasture3DTerrainGraph.create_empty()
 	var nodes3: Array[Pasture3DGraphNode] = [lone]
 	g3.nodes = nodes3
 	var none := Pasture3DGraphSources.resolve(g3, null)
@@ -279,7 +279,7 @@ func _e_resolving_twice_changes_nothing() -> void:
 	var brush: Pasture3DTerrainBrush = fx["brush"]
 	var src := Pasture3DGraphNodeShapeSource.new()
 	src.shape_key = brush.shape_key()
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [src]
 	g.nodes = nodes
 	Pasture3DGraphSources.resolve(g, brush)

@@ -13,6 +13,11 @@ extends Pasture3DGraphNode
 		scale = v
 		_param_changed()
 
+@export var direction: int = 1:
+	set(v):
+		direction = v
+		_param_changed()
+
 @export_range(0.0, 1.0, 0.01) var amount: float = 1.0:
 	set(v):
 		amount = v
@@ -31,20 +36,18 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 4
+## The mask scales what the node does, cell by cell, inside the kernel; it is not a blend of the finished
+## result over the input (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §9.3.1).
+func mask_mode() -> MaskMode:
+	return MaskMode.OWN
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "dx", "dy", "mask"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.SIGNED, PortType.SIGNED, PortType.MASK])
-
-
-func input_unwired_default(p_port: int) -> float:
-	return 1.0 if p_port == 3 else 0.0
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.field(&"dx", PortType.SIGNED),
+		Pasture3DGraphPort.field(&"dy", PortType.SIGNED),
+	]
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -85,6 +88,29 @@ func solve(p_in: PackedFloat32Array, p_dx: PackedFloat32Array, p_dy: PackedFloat
 			if w <= 0.0 or is_nan(ux) or is_nan(uz) or is_inf(ux) or is_inf(uz):
 				out[i] = z
 				continue
+			if direction == 1:
+				var xm := maxi(ix - 1, 0)
+				var xp := mini(ix + 1, p_gw - 1)
+				var zm := maxi(iz - 1, 0)
+				var zp := mini(iz + 1, p_gh - 1)
+				var sxm := p_in[iz * p_gw + xm]
+				var sxp := p_in[iz * p_gw + xp]
+				var szm := p_in[zm * p_gw + ix]
+				var szp := p_in[zp * p_gw + ix]
+				if is_nan(sxm) or is_nan(sxp) or is_nan(szm) or is_nan(szp):
+					out[i] = z
+					continue
+				var gx := (sxp - sxm) / (float(xp - xm) * cdx) if xp > xm else 0.0
+				var gz := (szp - szm) / (float(zp - zm) * cdz) if zp > zm else 0.0
+				var mag := sqrt(gx * gx + gz * gz)
+				if mag <= 1.0e-4:
+					out[i] = z
+					continue
+				var tx := gx / mag
+				var tz := gz / mag
+				var along := ux
+				ux = along * tx - uz * tz
+				uz = along * tz + uz * tx
 			out[i] = sampler._sample(p_in, float(ix) + ux * scale * w / cdx, float(iz) + uz * scale * w / cdz,
 					p_gw, p_gh)
 	return out

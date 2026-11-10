@@ -1,0 +1,44 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="4_gl3o4"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="6_m7w56"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="7_fpp8j"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="23_6glik"]
+[ext_resource type="Script" uid="uid://fl2f2iwtn1vv" path="res://addons/pasture_3d/graph/pasture3d_graph_path.gd" id="24_410mk"]
+[ext_resource type="Script" uid="uid://t26vuji0r8wf" path="res://addons/pasture_3d/graph/pasture3d_graph_node_spline_source.gd" id="25_537cq"]
+[ext_resource type="Script" uid="uid://5s5nj7du18rp" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_carve.gd" id="26_i8fyf"]
+
+[sub_resource type="Resource" id="Resource_lq5s0"]
+script = ExtResource("23_6glik")
+
+[sub_resource type="Resource" id="Resource_g2m5x"]
+script = ExtResource("24_410mk")
+points = PackedVector2Array(342.9136, -767.0561, 342.9136, -727.0561)
+half_widths = PackedFloat32Array(12, 12)
+heights = PackedFloat32Array(20, 20)
+source_label = "Ridge/Crest"
+sample_half_widths = PackedFloat32Array()
+sample_shoulders = PackedFloat32Array()
+sample_verges = PackedFloat32Array()
+sample_suppress = PackedByteArray()
+sample_skip = PackedByteArray()
+
+[sub_resource type="Resource" id="Resource_khkuw"]
+script = ExtResource("25_537cq")
+path = SubResource("Resource_g2m5x")
+
+[sub_resource type="Resource" id="Resource_78038"]
+script = ExtResource("26_i8fyf")
+offset = 20.0
+width_source = 1
+width = 20.0
+
+[sub_resource type="Resource" id="Resource_jgamb"]
+script = ExtResource("6_m7w56")
+
+[resource]
+script = ExtResource("7_fpp8j")
+format_version = 3
+nodes = Array[ExtResource("4_gl3o4")]([SubResource("Resource_lq5s0"), SubResource("Resource_khkuw"), SubResource("Resource_78038"), SubResource("Resource_jgamb")])
+wires = [[0, &"height", 2, &"surface"], [1, &"path", 2, &"path"], [2, &"height", 3, &"result"]]
+output_node = 3

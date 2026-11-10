@@ -34,6 +34,7 @@
 #include "pasture_3d_lake_flooding.h"
 #include "pasture_3d_distance_metric.h"
 #include "pasture_3d_math_ops.h"
+#include "pasture_3d_measure.h"
 #include "pasture_3d_noise_jordan.h"
 #include "pasture_3d_noise_swiss.h"
 #include "pasture_3d_ramp_eval.h"
@@ -1238,6 +1239,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "noise", GRAPH_OP_NOISE },
 		{ "const", GRAPH_OP_CONST },
 		{ "const_int", GRAPH_OP_CONST },
+		{ "param", GRAPH_OP_CONST }, // a graph parameter: the host's value, substituted at compile
 		{ "const_vector", GRAPH_OP_CONST },
 		// No colour node is listed. A COLOR output is a sideband resolved by walking upstream
 		// (graph_channel_sinks.gd _color_of) and never enters a compile, so an id here would be a tag no
@@ -1277,8 +1279,12 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "smooth", GRAPH_OP_SMOOTH },
 		{ "output", GRAPH_OP_OUTPUT },
 		{ "reroute", GRAPH_OP_OUTPUT },
-		{ "terrain_bus_merge", GRAPH_OP_OUTPUT },
-		{ "terrain_bus_split", GRAPH_OP_OUTPUT },
+		// Subgraph boundaries (ports spec §11). A flattened graph rewires around both, so they only run as a
+		// child's own unwired input (a constant holding its default) or as the root a tap of a Subgraph
+		// node's port reads (a passthrough). "subgraph" itself is deliberately absent: it is flattened before
+		// any compile, and a route that forgot to flatten must fail to lower rather than pass through.
+		{ "subgraph_input", GRAPH_OP_CONST },
+		{ "subgraph_output", GRAPH_OP_OUTPUT },
 		{ "noise_jordan", GRAPH_OP_NOISE_JORDAN },
 		{ "noise_swiss", GRAPH_OP_NOISE_SWISS },
 		{ "geological_primitive", GRAPH_OP_GEOLOGICAL_PRIMITIVE },
@@ -1290,6 +1296,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "const_curve", GRAPH_OP_CURVE },
 		{ "curve", GRAPH_OP_CURVE },
 		{ "remap", GRAPH_OP_REMAP },
+		{ "invert", GRAPH_OP_REMAP }, // an unclamped inverted remap; see pasture3d_graph_node_invert.gd
 		{ "mask", GRAPH_OP_MASK },
 		{ "curvature", GRAPH_OP_CURVATURE },
 		{ "talus_projection", GRAPH_OP_TALUS_PROJECTION },
@@ -1336,6 +1343,8 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "float_to_mask", GRAPH_OP_FLOAT_TO_MASK },
 		{ "displace", GRAPH_OP_DISPLACE },
 		{ "recast_canyon", GRAPH_OP_RECAST_CANYON },
+		{ "measure", GRAPH_OP_MEASURE },
+		{ "ridge_sharpen", GRAPH_OP_RIDGE_SHARPEN },
 	};
 	Dictionary d;
 	for (const auto &e : k_ops) {
@@ -1776,6 +1785,12 @@ Dictionary Pasture3DUtil::distance_transform_grid(const PackedFloat32Array &p_ma
 	return out;
 }
 
+PackedFloat32Array Pasture3DUtil::ridge_sharpen_grid(const PackedFloat32Array &p_surface,
+		const int p_gw, const int p_gh, const Rect2 &p_rect,
+		const double p_radius_m, const double p_amount) {
+	return godot::ridge_sharpen_grid(p_surface, p_gw, p_gh, p_rect, p_radius_m, p_amount);
+}
+
 PackedFloat32Array Pasture3DUtil::expand_shrink_grid(const PackedFloat32Array &p_surface,
 		const PackedFloat32Array &p_mask, const int p_gw, const int p_gh, const Rect2 &p_rect,
 		const int p_mode, const double p_radius_m, const int p_kernel, const int p_iterations,
@@ -1809,11 +1824,11 @@ Dictionary Pasture3DUtil::smooth_fill_grid(const PackedFloat32Array &p_surface,
 }
 
 PackedFloat32Array Pasture3DUtil::recast_cliff_grid(const PackedFloat32Array &p_surface,
-		const PackedFloat32Array &p_mask, const int p_gw, const int p_gh, const Rect2 &p_rect,
+		const int p_gw, const int p_gh, const Rect2 &p_rect,
 		const double p_talus_angle_deg, const double p_radius_m, const double p_amplitude,
 		const double p_gain, const double p_direction_deg, const double p_direction_spread_deg,
 		const double p_amount) {
-	return godot::recast_cliff_solve(p_surface, p_mask, p_gw, p_gh, p_rect, p_talus_angle_deg,
+	return godot::recast_cliff_solve(p_surface, p_gw, p_gh, p_rect, p_talus_angle_deg,
 			p_radius_m, p_amplitude, p_gain, p_direction_deg, p_direction_spread_deg, p_amount);
 }
 
@@ -1827,14 +1842,14 @@ PackedFloat32Array Pasture3DUtil::warp_downslope_grid(const PackedFloat32Array &
 
 PackedFloat32Array Pasture3DUtil::displace_grid(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_dx,
 		const PackedFloat32Array &p_dy, const PackedFloat32Array &p_mask, const int p_gw, const int p_gh,
-		const Rect2 &p_rect, const double p_scale, const double p_amount) {
-	return godot::displace_solve(p_surface, p_dx, p_dy, p_mask, p_gw, p_gh, p_rect, p_scale, p_amount);
+		const Rect2 &p_rect, const double p_scale, const double p_amount, const int p_direction) {
+	return godot::displace_solve(p_surface, p_dx, p_dy, p_mask, p_gw, p_gh, p_rect, p_scale, p_amount, p_direction);
 }
 
 PackedFloat32Array Pasture3DUtil::recast_canyon_grid(const PackedFloat32Array &p_surface,
-		const PackedFloat32Array &p_noise, const PackedFloat32Array &p_mask, const int p_gw, const int p_gh,
+		const PackedFloat32Array &p_noise, const int p_gw, const int p_gh,
 		const double p_cut_height, const double p_floor_height, const double p_gamma, const double p_amount) {
-	return godot::recast_canyon_solve(p_surface, p_noise, p_mask, p_gw, p_gh, p_cut_height, p_floor_height,
+	return godot::recast_canyon_solve(p_surface, p_noise, p_gw, p_gh, p_cut_height, p_floor_height,
 			p_gamma, p_amount);
 }
 
@@ -2362,6 +2377,18 @@ PackedFloat32Array Pasture3DUtil::float_to_mask_grid(const PackedFloat32Array &p
 	return godot::float_to_mask_grid(p_surface, p_gw, p_gh, p_params);
 }
 
+PackedFloat64Array Pasture3DUtil::measure_field(const PackedFloat32Array &p_values,
+		const PackedFloat32Array &p_selection, const int p_mode, const double p_low_pct, const double p_high_pct) {
+	const float *sel = p_selection.size() == p_values.size() ? p_selection.ptr() : nullptr;
+	const MeasureResult r = godot::measure_field(p_values.ptr(), sel, (int)p_values.size(), p_mode, p_low_pct,
+			p_high_pct);
+	PackedFloat64Array out;
+	out.push_back(r.a);
+	out.push_back(r.b);
+	out.push_back((double)r.count);
+	return out;
+}
+
 PackedFloat32Array Pasture3DUtil::curvature_grid(const PackedFloat32Array &p_surface, const int p_gw, const int p_gh,
 		const int p_mode, const int p_radius, const double p_contrast) {
 	return godot::curvature_solve(p_surface, p_gw, p_gh, (godot::CurvatureMode)p_mode, p_radius, p_contrast);
@@ -2437,6 +2464,9 @@ static GavoronoiseParams gavoronoise_params_from(const Dictionary &p_d) {
 	g.z_cut_max = (double)p_d.get("z_cut_max", g.z_cut_max);
 	g.erosion_strength = (double)p_d.get("erosion_strength", g.erosion_strength);
 	g.erosion_frequency = (double)p_d.get("erosion_frequency", g.erosion_frequency);
+	g.height_min = (double)p_d.get("height_min", g.height_min);
+	g.height_max = (double)p_d.get("height_max", g.height_max);
+	g.variation = (double)p_d.get("variation", g.variation);
 	return g;
 }
 
@@ -3333,6 +3363,9 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("expand_shrink_grid", "surface", "mask", "gw", "gh", "rect", "mode", "radius_m", "kernel", "iterations", "amount"),
 			&Pasture3DUtil::expand_shrink_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("ridge_sharpen_grid", "surface", "gw", "gh", "rect", "radius_m", "amount"),
+			&Pasture3DUtil::ridge_sharpen_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("box_mean_grid", "surface", "gw", "gh", "rect", "radius_m"),
 			&Pasture3DUtil::box_mean_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
@@ -3345,13 +3378,13 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("warp_downslope_grid", "surface", "mask", "gw", "gh", "rect", "displacement_m", "radius_m", "reverse", "amount"),
 			&Pasture3DUtil::warp_downslope_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
-			D_METHOD("displace_grid", "surface", "dx", "dy", "mask", "gw", "gh", "rect", "scale", "amount"),
+			D_METHOD("displace_grid", "surface", "dx", "dy", "mask", "gw", "gh", "rect", "scale", "amount", "direction"),
 			&Pasture3DUtil::displace_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
-			D_METHOD("recast_canyon_grid", "surface", "noise", "mask", "gw", "gh", "cut_height", "floor_height", "gamma", "amount"),
+			D_METHOD("recast_canyon_grid", "surface", "noise", "gw", "gh", "cut_height", "floor_height", "gamma", "amount"),
 			&Pasture3DUtil::recast_canyon_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
-			D_METHOD("recast_cliff_grid", "surface", "mask", "gw", "gh", "rect", "talus_angle_deg", "radius_m", "amplitude", "gain", "direction_deg", "direction_spread_deg", "amount"),
+			D_METHOD("recast_cliff_grid", "surface", "gw", "gh", "rect", "talus_angle_deg", "radius_m", "amplitude", "gain", "direction_deg", "direction_spread_deg", "amount"),
 			&Pasture3DUtil::recast_cliff_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("talus_projection_grid", "surface", "mask", "gw", "gh", "rect", "talus_angle_deg", "iterations", "transfer_rate", "amount"),
@@ -3480,6 +3513,9 @@ void Pasture3DUtil::_bind_methods() {
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("float_to_mask_grid", "surface", "gw", "gh", "params"),
 			&Pasture3DUtil::float_to_mask_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("measure_field", "values", "selection", "mode", "low_pct", "high_pct"),
+			&Pasture3DUtil::measure_field);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("curvature_grid", "surface", "gw", "gh", "mode", "radius", "contrast"),
 			&Pasture3DUtil::curvature_grid);

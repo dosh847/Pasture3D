@@ -133,7 +133,7 @@ func _run(p_node: Pasture3DGraphNodeLevelerBase, p_h: PackedFloat32Array, p_path
 		mconst.value = float(p_mask[0]) if p_mask != null else 1.0
 		var tconst := Pasture3DGraphNodeConst.new()
 		tconst.value = float(p_target) if p_target != null else 0.0
-		var g := Pasture3DTerrainGraph.new()
+		var g := Pasture3DTerrainGraph.create_empty()
 		var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), p_node, Pasture3DGraphNodeOutput.new(),
 				src, mconst, tconst]
 		g.nodes = nodes

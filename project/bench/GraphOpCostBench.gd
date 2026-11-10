@@ -19,7 +19,7 @@ func _ready() -> void:
 
 
 func _build() -> Dictionary:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var idx := {}
 	idx["input"] = g.add_node(Pasture3DGraphNodeInput.new())
 	idx["noise"] = g.add_node(Pasture3DGraphNodeNoise.new())

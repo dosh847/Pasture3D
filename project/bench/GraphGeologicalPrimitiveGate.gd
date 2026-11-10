@@ -89,7 +89,7 @@ func _d_mapping_parity() -> void:
 	gp.height = 60.0
 	gp.radius = 1.0
 
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	g.nodes = [gp]
 	g.output_node = 0
 
@@ -112,7 +112,7 @@ func _e_plow_graph_integration() -> void:
 	var plow := Pasture3DPlow.new()
 	if not plow._supports_modifiers():
 		_fail += 1; print("    !! plow does not report modifier support")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var gp := Pasture3DGraphNodeGeologicalPrimitive.new()
 	gp.height = 40.0
 	g.nodes = [gp]

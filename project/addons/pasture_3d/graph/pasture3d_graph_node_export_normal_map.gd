@@ -4,22 +4,16 @@
 #
 # Read Pasture3DGraphNodeExportSink's header first.
 #
-# ---- BOTH PORTS ARE DECLARED; ONLY THE DERIVED ONE WORKS ----
+# ---- THE NORMALS ARE DERIVED ----
 #
-# Decided 2026-09-06 (§9.2): derive from `height` by default, and declare the optional `normal` VECTOR
-# port NOW so the node's shape is final and no graph has to be rewired when authored normals land. The
-# SSA program cannot carry a vector grid — giving it one is a compiler and buffer-layout change, not a
-# node — so until that lands:
+# There is one input, `height`. The node used to declare a second, a `normal` VECTOR port that the writer
+# refused by name when wired, so that the node's shape would not change when authored normals landed. Wires
+# are stored by port id since format 2, so adding a port later moves nothing, and the placeholder went with
+# the VECTOR type (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §7.3). The program cannot carry a vector
+# grid; that is a compiler and buffer-layout change, not a node.
 #
-#   A WIRED `normal` PORT IS REFUSED BY NAME. It is never silently ignored.
-#
-# An optional input that quietly falls back to deriving is the zeros-impostor pattern (§4.4) wearing a
-# different hat: the author wires a vector field, gets a plausible normal map derived from something else
-# entirely, and has no way to tell it apart from the one they asked for. Refusing costs one warning.
-#
-# Deriving stays the recommended path regardless. A normal map derived from the exact height field you
-# exported is consistent with that file by construction, which is the property that actually matters at
-# the other end.
+# A normal map derived from the exact height field you exported is consistent with that file by
+# construction, which is the property that actually matters at the other end.
 #
 # ---- WHY THERE IS NO RANGE ----
 #
@@ -48,20 +42,10 @@ func op() -> StringName:
 	return &"export_normal_map"
 
 
-func input_count() -> int:
-	return 2
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["height", "normal"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.VECTOR])
-
-
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, -1])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT).require(),
+	]
 
 
 func formats() -> PackedStringArray:
@@ -72,7 +56,5 @@ func channels() -> int:
 	return 4
 
 
-## Only the height port is tapped. The `normal` port is checked for a wire by the writer and refused
-## there — a port this method omitted would be indistinguishable from one that is not declared.
 func source_ports() -> PackedInt32Array:
 	return PackedInt32Array([0])

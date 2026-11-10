@@ -65,8 +65,14 @@ func native_lower() -> Dictionary:
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 0, 1, 2, 5])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"macro_gain", PortType.FLOAT, &"macro_gain", 0),
+		Pasture3DGraphPort.value(&"meso_gain", PortType.FLOAT, &"meso_gain", 1),
+		Pasture3DGraphPort.value(&"micro_gain", PortType.FLOAT, &"micro_gain", 2),
+		Pasture3DGraphPort.value(&"amount", PortType.FLOAT, &"amount", 5),
+	]
 
 
 func role() -> Role:
@@ -75,34 +81,6 @@ func role() -> Role:
 
 func needs_grid() -> bool:
 	return true
-
-
-func input_count() -> int:
-	return 5
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "macro_gain", "meso_gain", "micro_gain", "amount"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.HEIGHT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return macro_gain
-		2: return meso_gain
-		3: return micro_gain
-		4: return amount
-		_: return 0.0
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, _p_rect: Rect2) -> PackedFloat32Array:

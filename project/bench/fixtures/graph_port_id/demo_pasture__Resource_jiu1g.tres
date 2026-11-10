@@ -1,0 +1,20 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="4_gl3o4"]
+[ext_resource type="Script" uid="uid://ccy61yjirqc87" path="res://addons/pasture_3d/graph/pasture3d_graph_node_mountain_cone.gd" id="5_38t5y"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="6_m7w56"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="7_fpp8j"]
+
+[sub_resource type="Resource" id="Resource_duxig"]
+script = ExtResource("5_38t5y")
+elevation = 35.0
+
+[sub_resource type="Resource" id="Resource_na0p3"]
+script = ExtResource("6_m7w56")
+
+[resource]
+script = ExtResource("7_fpp8j")
+format_version = 3
+nodes = Array[ExtResource("4_gl3o4")]([SubResource("Resource_duxig"), SubResource("Resource_na0p3")])
+wires = [[0, &"out", 1, &"result"]]
+output_node = 1

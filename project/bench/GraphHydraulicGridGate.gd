@@ -363,7 +363,7 @@ func _g3_channel_route() -> void:
 		var node: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"erosion_hydraulic")
 		node.set("iterations", 12)
 		node.set("settle_at_end", true)
-		var gr := Pasture3DTerrainGraph.new()
+		var gr := Pasture3DTerrainGraph.create_empty()
 		var i_in := gr.add_node(Pasture3DGraphNodeRegistry.create(&"input"))
 		var i_n := gr.add_node(node)
 		var i_out := gr.add_node(Pasture3DGraphNodeRegistry.create(&"output"))
@@ -479,7 +479,7 @@ func _terrain(p_g: int, p_rect: Rect2) -> PackedFloat32Array:
 
 
 func _graph_with(p_node: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var i_in := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"))
 	var i_n := g.add_node(p_node)
 	var i_out := g.add_node(Pasture3DGraphNodeRegistry.create(&"output"))

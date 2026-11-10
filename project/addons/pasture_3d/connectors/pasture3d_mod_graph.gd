@@ -33,9 +33,14 @@ extends Pasture3DNode
 	set(v):
 		if graph != null and graph.changed.is_connected(_on_graph_changed):
 			graph.changed.disconnect(_on_graph_changed)
+		if graph != null and graph.parameters_changed.is_connected(_on_graph_params_changed):
+			graph.parameters_changed.disconnect(_on_graph_params_changed)
 		graph = v
 		if graph != null and not graph.changed.is_connected(_on_graph_changed):
 			graph.changed.connect(_on_graph_changed)
+		if graph != null and not graph.parameters_changed.is_connected(_on_graph_params_changed):
+			graph.parameters_changed.connect(_on_graph_params_changed)
+		notify_property_list_changed()
 		_touch()
 
 func _on_graph_changed() -> void:
@@ -45,6 +50,159 @@ func _on_graph_changed() -> void:
 			emit_changed.call_deferred()
 		return
 	_touch()
+
+# ---- Graph parameters (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §10.2) ---------------------------
+#
+# The graph DECLARES its parameters; this modifier SUPPLIES their values, so two brushes sharing one graph
+# can bake different terrain from it. Each declared parameter is an inspector property `parameters/<id>`
+# (`_get_property_list`), and what is stored is only the values set here, in `param_overrides`. An id with
+# no entry reads the graph's declared default.
+#
+# The values reach the graph by STAMPING (`stamp_params`), the way the footprint does: the brush stamps
+# before every compile and evaluate of this graph, and keys every cache on `graph_key()`, which hashes the
+# graph's revision together with what its Parameter nodes now read.
+
+## A parameter value was set or cleared on this host. The graph editor listens to refresh its previews,
+## which read this host's values but hear nothing from the graph when only a value moved.
+signal params_edited()
+
+const PARAM_PREFIX := "parameters/"
+
+## `{id: value}`, set through the `parameters/<id>` properties or `set_param`. Saved, not shown: the
+## inspector shows the per-parameter properties instead. An entry whose id the graph no longer declares is
+## kept (renaming a parameter back restores it) but ignored, and reported by `modifier_warnings`.
+@export_storage var param_overrides: Dictionary = {}:
+	set(v):
+		param_overrides = v.duplicate() if v != null else {}
+		_touch()
+
+
+func _on_graph_params_changed() -> void:
+	notify_property_list_changed()
+
+
+func _get_property_list() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	if graph == null:
+		return out
+	for id in graph.param_ids():
+		out.append(graph.find_param(id).property_info(PARAM_PREFIX + String(id)))
+	return out
+
+
+func _param_of(p_name: StringName) -> Pasture3DGraphParam:
+	var s := String(p_name)
+	if graph == null or not s.begins_with(PARAM_PREFIX):
+		return null
+	return graph.find_param(StringName(s.substr(PARAM_PREFIX.length())))
+
+
+func _get(p_name: StringName) -> Variant:
+	var decl := _param_of(p_name)
+	if decl == null:
+		return null
+	return decl.typed(param_number(decl.id))
+
+
+func _set(p_name: StringName, p_value: Variant) -> bool:
+	var decl := _param_of(p_name)
+	if decl == null:
+		return false
+	set_param(decl.id, p_value)
+	return true
+
+
+func _property_can_revert(p_name: StringName) -> bool:
+	return _param_of(p_name) != null
+
+
+func _property_get_revert(p_name: StringName) -> Variant:
+	var decl := _param_of(p_name)
+	return decl.typed(decl.default_number()) if decl != null else null
+
+
+## The number parameter `p_id` evaluates to on this host: its override, coerced to the declared type, or
+## the declared default. 0 for an id the graph does not declare.
+func param_number(p_id: StringName) -> float:
+	var decl := graph.find_param(p_id) if graph != null else null
+	if decl == null:
+		return 0.0
+	return decl.coerce(param_overrides[p_id]) if param_overrides.has(p_id) else decl.default_number()
+
+
+## Set parameter `p_id` on this host. Stored as typed, so the saved file reads as what the inspector shows.
+## An id the graph does not declare is stored all the same (a graph may be swapped in that declares it) and
+## reported.
+func set_param(p_id: StringName, p_value: Variant) -> void:
+	var decl := graph.find_param(p_id) if graph != null else null
+	var v: Variant = decl.typed(decl.coerce(p_value)) if decl != null else p_value
+	if param_overrides.has(p_id) and param_overrides[p_id] == v:
+		return
+	param_overrides[p_id] = v
+	_on_override_changed(p_id)
+
+
+## Drop parameter `p_id`'s value on this host, so it reads the declared default.
+func clear_param(p_id: StringName) -> void:
+	if not param_overrides.has(p_id):
+		return
+	param_overrides.erase(p_id)
+	_on_override_changed(p_id)
+
+
+## An override is a HOST edit, like Strength, not a graph edit: it re-bakes this host and no other, so it
+## emits this modifier's `changed` and never the graph's.
+##
+## Two caches are keyed on the value and would only report the change as stale, which is the right answer
+## for an edit the author has not asked to see and the wrong one here, where the value IS the edit:
+##  * this modifier's own frozen cache, keyed on `graph_key()`;
+##  * a FROZEN solver node downstream of a Parameter node reading `p_id`, whose freeze key hashes the value.
+## Both are dropped, so the bake re-solves. A solver NOT downstream of that Parameter keeps its solve.
+func _on_override_changed(p_id: StringName) -> void:
+	if graph != null:
+		var hit := {}
+		for ni in range(graph.nodes.size()):
+			var pn: Pasture3DGraphNode = graph.nodes[ni]
+			if pn == null or pn.op() != &"param" or StringName(pn.get("param_id")) != p_id:
+				continue
+			for di in graph.get_downstream_nodes(ni):
+				var dn: Pasture3DGraphNode = graph.nodes[di]
+				if dn is Pasture3DGraphSolverNode and not hit.has(di):
+					hit[di] = true
+					(dn as Pasture3DGraphSolverNode).forget_solve()
+	drop_cache_for_bake()
+	params_edited.emit()
+	_touch()
+
+
+## Push this host's values onto the graph. Called before every compile and evaluate on this host's behalf.
+func stamp_params() -> void:
+	if graph != null:
+		graph.set_host_params(param_overrides)
+
+
+## The graph's key FOR THIS HOST: its revision, plus what its Parameter nodes read with this host's values
+## stamped. Stamps as a side effect, so a caller can compile straight after. Equal to `graph.content_key()`
+## for a graph with no Parameter node, so such a graph keys exactly as it did before parameters existed.
+func graph_key() -> int:
+	if graph == null:
+		return 0
+	stamp_params()
+	var ps := graph.params_sig()
+	return graph.content_key() if ps == 0 else hash([graph.content_key(), ps])
+
+
+## Overrides naming a parameter the graph does not declare.
+func unknown_overrides() -> Array[StringName]:
+	var out: Array[StringName] = []
+	if graph == null:
+		return out
+	var ids := graph.param_ids()
+	for k in param_overrides:
+		if not ids.has(StringName(k)):
+			out.append(StringName(k))
+	return out
+
 
 ## How strongly the graph's output replaces the incoming surface, 0..1, feathered further by the brush's
 ## interior profile so the rim stays clean. 0 = the graph does nothing; 1 = its output fully applies at the
@@ -415,7 +573,7 @@ func _validate_property(property: Dictionary) -> void:
 
 
 func content_key() -> int:
-	var ck := graph.content_key() if graph != null else 0
+	var ck := graph_key()
 	var curve_pts := Pasture3DTerrainBrush._curve_signature(custom_falloff_curve)
 	return hash([ck, strength, enabled, int(feather_mode), custom_falloff_width, curve_pts])
 
@@ -429,6 +587,9 @@ func modifier_warnings(_p_host) -> PackedStringArray:
 		return w
 	if is_zero_approx(strength):
 		w.append("%s: Strength is 0 m, so the graph contributes nothing." % display_name())
+	for id in unknown_overrides():
+		w.append("%s: a value is set for parameter '%s', which the graph does not declare, so it is ignored."
+				% [display_name(), id])
 	if _stale:
 		w.append(("%s is FROZEN and the graph has changed since it was baked, so the terrain is showing "
 			+ "the OLD graph. Press Bake Graph to re-evaluate, or set Evaluation to Live.") % display_name())
@@ -458,6 +619,7 @@ func forces_gdscript(_p_host) -> bool:
 func make_pending(p_out: Dictionary, p_extent: String) -> Dictionary:
 	if not p_out.has("pending") or graph == null:
 		return {}
+	stamp_params()
 	var entry := {
 		"mod": self,
 		"prog": graph.compile_graph_program(),
@@ -498,13 +660,13 @@ func _add_sink_taps(r_entry: Dictionary) -> void:
 		if not slot_of.has(int(r["node"])):
 			continue
 		keys.append(Pasture3DGraphChannelSinks._field_key(int(r["node"]), int(r["port"])))
-		slots.append(int(slot_of[int(r["node"])]))
-		chans.append(int(r["port"]))
+		slots.append(Pasture3DTerrainGraph.tap_slot(compiled, int(r["node"]), int(r["port"])))
+		chans.append(Pasture3DTerrainGraph.tap_channel(compiled, int(r["node"]), int(r["port"])))
 	r_entry["taps_prog"] = compiled["program"]
 	r_entry["tap_slots"] = slots
 	r_entry["tap_chans"] = chans
 	r_entry["tap_keys"] = keys
-	r_entry["tap_content"] = hash([graph.content_key(), graph._footprint_sig()])
+	r_entry["tap_content"] = hash([graph_key(), graph._footprint_sig()])
 
 
 ## The worker's sink fields, filed on the main thread with the surface they were solved over.
@@ -521,7 +683,7 @@ func sink_taps_for(p_z: PackedFloat32Array, p_gw: int, p_gh: int) -> Dictionary:
 		return {}
 	if int(sink_taps["gw"]) != p_gw or int(sink_taps["gh"]) != p_gh:
 		return {}
-	if int(sink_taps["content"]) != hash([graph.content_key(), graph._footprint_sig()]) or int(sink_taps["z_hash"]) != hash(p_z):
+	if int(sink_taps["content"]) != hash([graph_key(), graph._footprint_sig()]) or int(sink_taps["z_hash"]) != hash(p_z):
 		return {}
 	return sink_taps["fields"]
 

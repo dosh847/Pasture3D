@@ -107,7 +107,7 @@ func _curves() -> Array:
 
 
 func _io_graph() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [[0, 0, 1, 0]]
@@ -127,7 +127,7 @@ func _curve_node(p_curve: Curve, p_cfg: Dictionary) -> Pasture3DGraphNodeCurve:
 
 ## Input -> Curve -> Output, optionally with a Const driving out_max (Curve input port 4).
 func _graph(p_curve: Curve, p_cfg: Dictionary, p_driven_out_max = null) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), _curve_node(p_curve, p_cfg),
 			Pasture3DGraphNodeOutput.new()]
 	var conns := [[0, 0, 1, 0], [1, 0, 2, 0]]
@@ -142,7 +142,7 @@ func _graph(p_curve: Curve, p_cfg: Dictionary, p_driven_out_max = null) -> Pastu
 
 
 func _refused_graph(p_channel: int) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeLeveler.new(),
 			Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes

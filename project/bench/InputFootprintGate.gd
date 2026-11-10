@@ -71,7 +71,7 @@ func _diff(p_a: PackedFloat32Array, p_b: PackedFloat32Array) -> float:
 
 ## A graph whose Output is the Input node's footprint pin.
 func _fp_graph() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [[0, 1, 1, 0]]
@@ -183,7 +183,7 @@ func _bake(p_m: Pasture3DMound) -> void:
 
 ## Input -> Output, with a Color Sink whose mask is the footprint pin (or unwired).
 func _sink_graph(p_masked: bool) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var sink := Pasture3DGraphNodeColorSink.new()
 	sink.color = RED
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeOutput.new(), sink]

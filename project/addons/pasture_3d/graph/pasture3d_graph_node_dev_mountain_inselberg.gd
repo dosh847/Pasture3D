@@ -67,24 +67,17 @@ func display_name() -> String:
 	return "[Dev/GD] Mountain Inselberg"
 
 
-func input_count() -> int:
-	return 2
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"dx", PortType.SIGNED),
+		Pasture3DGraphPort.field(&"dy", PortType.SIGNED),
+	]
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["dx", "dy"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.SIGNED, PortType.SIGNED])
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["out"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"out", PortType.HEIGHT),
+	]
 
 
 func _param_changed() -> void:

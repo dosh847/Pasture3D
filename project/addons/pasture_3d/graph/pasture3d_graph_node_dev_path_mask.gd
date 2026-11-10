@@ -58,24 +58,16 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 1
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"path", PortType.PATH).require(),
+	]
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["path"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.PATH])
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["mask"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.MASK])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"mask", PortType.MASK),
+	]
 
 
 func reads_paths() -> bool:

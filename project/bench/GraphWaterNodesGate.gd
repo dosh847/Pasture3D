@@ -396,7 +396,7 @@ func _count_ponds() -> int:
 
 
 func _build_graph(p_mid: Array) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new()]
 	for mnode in p_mid:
 		nodes.append(mnode)

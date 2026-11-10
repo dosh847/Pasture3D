@@ -27,16 +27,14 @@ func role() -> Role:
 	return Role.GENERATOR
 
 
-func input_count() -> int:
-	return 0
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return []
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray()
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.BOOL])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.value(&"out", PortType.BOOL),
+	]
 
 
 func eval_cell(_p_wx: float, _p_wz: float, _p_inputs: PackedFloat32Array) -> float:

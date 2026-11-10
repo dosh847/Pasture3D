@@ -204,23 +204,27 @@ func role() -> Role:
 func needs_grid() -> bool:
 	return true
 
-func input_count() -> int:
-	return 2
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"input", PortType.HEIGHT).require(),
+	]
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["input", "mask"])
+# No `mask` port is declared and the kernel takes no mask. A FILTER or SOLVER with HEIGHT in and HEIGHT
+# out on port 0 is given one by the base (id `mask`, last input, reads 1 unwired), and the graph applies
+# it as out = lerp(in, node_out, clamp(mask, 0, 1)) on every route. Override `mask_mode()` to return
+# `MaskMode.OWN` only when the solve or a secondary output has to see the mask; the node then reads it at
+# `standard_mask_port()` and a native kernel receives it as the aux grid. See the ports spec §9.
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:
 	var n := p_gw * p_gh
 	var in_grid: PackedFloat32Array = p_inputs[0] if (p_inputs.size() > 0 and p_inputs[0] is PackedFloat32Array) else Pasture3DGraphOps.zeros(n)
-	var mask: PackedFloat32Array = p_inputs[1] if (p_inputs.size() > 1 and p_inputs[1] is PackedFloat32Array) else Pasture3DGraphOps.filled(n, 1.0)
 
 	# Tier 2 GDExtension Dispatch (Fail-fast if missing or failed)
 	if not ClassDB.class_has_method("Pasture3DUtil", "example_filter_grid"):
 		push_error("[Pasture3D] Pasture3DUtil.example_filter_grid is not bound. Rebuild GDExtension.")
 		return in_grid.duplicate()
 
-	var res: PackedFloat32Array = Pasture3DUtil.example_filter_grid(in_grid, mask, p_gw, p_gh, intensity)
+	var res: PackedFloat32Array = Pasture3DUtil.example_filter_grid(in_grid, p_gw, p_gh, intensity)
 	if res.size() != n:
 		push_error("[Pasture3D] Example filter native solve returned invalid grid size.")
 		return in_grid.duplicate()
@@ -398,7 +402,7 @@ func _test_parity() -> void:
 	var gw := 128
 	var gh := 128
 	var rect := Rect2(-100.0, -100.0, 200.0, 200.0)
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty() # `.new()` is format 0 and is refused once it has nodes
 	var inp := Pasture3DGraphNodeNoise.new()
 	var flt := Pasture3DGraphNodeExampleFilter.new(); flt.intensity = 0.75
 	var out := Pasture3DGraphNodeOutput.new()

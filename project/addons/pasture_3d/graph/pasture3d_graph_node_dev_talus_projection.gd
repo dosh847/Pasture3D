@@ -43,20 +43,10 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 2
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["input", "mask"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK])
-
-
-func input_unwired_default(p_port: int) -> float:
-	return 1.0 if p_port == 1 else 0.0
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"input", PortType.HEIGHT).require(),
+	]
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -70,16 +60,10 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) ->
 	if is_zero_approx(amount) or iterations <= 0:
 		return in_grid.duplicate()
 
-	var mask: PackedFloat32Array
-	if p_inputs.size() > 1 and p_inputs[1] is PackedFloat32Array and (p_inputs[1] as PackedFloat32Array).size() == n:
-		mask = p_inputs[1]
-	else:
-		mask = Pasture3DGraphOps.filled(n, 1.0)
-
-	return _eval_grid_gdscript(in_grid, mask, p_gw, p_gh, p_rect)
+	return _eval_grid_gdscript(in_grid, p_gw, p_gh, p_rect)
 
 
-func _eval_grid_gdscript(in_grid: PackedFloat32Array, mask: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2) -> PackedFloat32Array:
+func _eval_grid_gdscript(in_grid: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2) -> PackedFloat32Array:
 	var n := p_gw * p_gh
 	var h := in_grid.duplicate()
 	var dx := p_rect.size.x / maxf(float(p_gw - 1), 1.0) if (p_rect.size.x > 0.0 and p_gw > 1) else 2.0
@@ -140,8 +124,7 @@ func _eval_grid_gdscript(in_grid: PackedFloat32Array, mask: PackedFloat32Array, 
 
 	for i in range(n):
 		if is_finite(in_grid[i]) and is_finite(h[i]):
-			var m := clampf(mask[i], 0.0, 1.0)
-			h[i] = lerpf(in_grid[i], h[i], amount * m)
+			h[i] = lerpf(in_grid[i], h[i], amount)
 
 	return h
 

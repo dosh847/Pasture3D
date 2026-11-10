@@ -75,8 +75,12 @@ func native_lower() -> Dictionary:
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 0, 2, -1])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"talus", PortType.FLOAT, &"talus_angle_deg", 0),
+		Pasture3DGraphPort.value(&"amplitude", PortType.FLOAT, &"amplitude", 2),
+	]
 
 
 func role() -> Role:
@@ -85,32 +89,6 @@ func role() -> Role:
 
 func needs_grid() -> bool:
 	return true
-
-
-func input_count() -> int:
-	return 4
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "talus", "amplitude", "mask"])
-
-
-func aux_grid_port() -> int:
-	return 3 # "mask"
-
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.FLOAT, PortType.FLOAT, PortType.MASK])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return talus_angle_deg
-		2: return amplitude
-		3: return 1.0
-		_: return 0.0
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -123,7 +101,6 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) ->
 
 	var talus: float = float(p_inputs[1][0]) if (p_inputs.size() > 1 and p_inputs[1] is PackedFloat32Array and p_inputs[1].size() > 0) else talus_angle_deg
 	var amp: float = float(p_inputs[2][0]) if (p_inputs.size() > 2 and p_inputs[2] is PackedFloat32Array and p_inputs[2].size() > 0) else amplitude
-	var mask: PackedFloat32Array = (p_inputs[3] as PackedFloat32Array) if (p_inputs.size() > 3 and p_inputs[3] is PackedFloat32Array and (p_inputs[3] as PackedFloat32Array).size() == n) else PackedFloat32Array()
 
 	if is_zero_approx(amount) or is_zero_approx(amp):
 		return in_grid.duplicate()
@@ -132,7 +109,7 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) ->
 		push_error("[Pasture3D] Pasture3DUtil.recast_cliff_grid is not bound. Rebuild GDExtension.")
 		return in_grid.duplicate()
 
-	var res: PackedFloat32Array = Pasture3DUtil.recast_cliff_grid(in_grid, mask, p_gw, p_gh, p_rect,
+	var res: PackedFloat32Array = Pasture3DUtil.recast_cliff_grid(in_grid, p_gw, p_gh, p_rect,
 			talus, radius, amp, gain, direction_deg, direction_spread_deg, amount)
 	if res.size() != n:
 		push_error("[Pasture3D] Recast cliff returned an invalid grid size.")

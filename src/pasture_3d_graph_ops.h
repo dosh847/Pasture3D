@@ -97,8 +97,10 @@ enum GraphCellOpType {
 	GRAPH_OP_DLA = 64, // SOLVER grid: a DLA massif, optionally seeded by in0's ridges (2 outputs: height, mask)
 	GRAPH_OP_FLOAT_TO_MASK = 66, // FILTER grid: a unit-ful field to a 0..1 mask over a fixed or percentile window
 	GRAPH_OP_FRACTAL = 65, // GENERATOR grid: the relief FRACTAL material — fBm / ridged / billow, optionally domain-warped
-	GRAPH_OP_DISPLACE = 67, // FILTER grid: resample in0 at the point offset by the in1/in2 metre fields (in3 mask)
-	GRAPH_OP_RECAST_CANYON = 68, // FILTER: power-curve the band between a floor and a cut (in1 cut noise, in2 mask)
+	GRAPH_OP_DISPLACE = 67, // FILTER grid: resample in0 at the point offset by the in1/in2 metre fields (mask on the node's aux port)
+	GRAPH_OP_RECAST_CANYON = 68, // FILTER: power-curve the band between a floor and a cut (in1 cut noise)
+	GRAPH_OP_RIDGE_SHARPEN = 70, // FILTER grid: unsharp mask that only lifts, radius in metres (aux mask)
+	GRAPH_OP_MEASURE = 69, // FILTER grid: in0 reduced to two uniform channels (range / percentiles / mean), in1 selection
 };
 
 // Blend modes — sync with Pasture3DGraphNodeBlend.Mode { ADD, SUB, MUL, MAX, MIN } (0..4). Prefixed
@@ -232,7 +234,7 @@ struct GraphFrozenSlot {
 	int64_t node_id = 0; // the solver node's instance id, so a report cannot land on a renumbered slot
 	int64_t key = 0; // the key the cached channels were solved for
 	bool dirty = false; // a parameter moved since the bake; served is then stale regardless of the key
-	PackedInt32Array key_ports; // input ports (0..3) whose GRIDS form the key, in order
+	PackedInt32Array key_ports; // input ports whose GRIDS form the key, in order: 0..3, or the aux port
 	// Each key port's unwired default. The GDScript evaluator fills an unwired port with it (Salève's mask is
 	// 1.0), so the key hashes that grid rather than the zero buffer the op itself reads.
 	PackedFloat32Array key_defaults;
@@ -294,6 +296,12 @@ struct GraphProgram {
 	PackedInt32Array in1_port;
 	PackedInt32Array in2_port;
 	PackedInt32Array in3_port;
+	// The source slot of a secondary grid on a port PAST in3, or -1; `in_aux_port` is the channel it reads.
+	// aux_port says which port that is, and a node has at most one, so one slot per op is enough. It exists
+	// because in0..in3 are positional: a node whose first ports are scalars (Strata) cannot gain a mask on
+	// port 1 without renumbering saved wiring. Absent on an older program, which reads as "not wired".
+	PackedInt32Array in_aux;
+	PackedInt32Array in_aux_port;
 	// ---- The geometry operand (P2c) ----
 	//
 	// Per slot: an index into `geom`, or -1 for "no geometry". PARALLEL to in0..in3 and read the same
@@ -323,6 +331,9 @@ struct GraphProgram {
 	PackedInt32Array pdrv_node;
 	PackedInt32Array pdrv_param;
 	PackedInt32Array pdrv_src;
+	// Which CHANNEL of pdrv_src each entry reads (a Measure's max is channel 1). Parallel to the three
+	// above; empty on programs compiled before it existed, which read as channel 0 throughout.
+	PackedInt32Array pdrv_chan;
 	std::vector<Ref<FastNoiseLite>> noise; // parallel to slots; null unless NOISE or JITTER
 	std::vector<PackedFloat32Array> luts; // parallel to slots; for CURVE
 	// The native freeze (see GraphFrozenSlot). Parallel to slots when present; empty on every program with

@@ -400,7 +400,7 @@ func _chain(p_mid: Array, p_surf: PackedFloat32Array) -> PackedFloat32Array:
 
 
 func _build_graph(p_mid: Array) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new()]
 	for m in p_mid:
 		nodes.append(m)

@@ -81,38 +81,17 @@ func native_lower() -> Dictionary:
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([0, 1, 2, 4])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.value(&"amplitude", PortType.FLOAT, &"amplitude", 0),
+		Pasture3DGraphPort.value(&"spacing", PortType.FLOAT, &"spacing", 1),
+		Pasture3DGraphPort.value(&"direction", PortType.FLOAT, &"direction_degrees", 2),
+		Pasture3DGraphPort.value(&"wobble", PortType.FLOAT, &"wobble_amount", 4),
+	]
 
 
 func role() -> Role:
 	return Role.GENERATOR
-
-
-func input_count() -> int:
-	return 4
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["amplitude", "spacing", "direction", "wobble"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return amplitude
-		1: return spacing
-		2: return direction_degrees
-		3: return wobble_amount
-		_: return 0.0
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:

@@ -1343,6 +1343,107 @@ static bool _apply_control_coarse(Pasture3DLayer *p_layer, const Pasture3DRegion
 	return touched;
 }
 
+static inline float _replace_over_row(const float p_own, const float p_row, const float p_weight, const float p_below) {
+	if (p_weight >= 1.f) {
+		return p_own;
+	}
+	const float w = MAX(p_weight, 0.f);
+	// No ground to measure the row's change against, so the plain cross-fade: it still meets the row at this edge.
+	return std::isfinite(p_below) ? p_own + (1.f - w) * (p_row - p_below) : p_row + w * (p_own - p_row);
+}
+
+void Pasture3DData::_blend_replace_over_row(const Pasture3DLayer *p_layer, const int p_min_px, const int p_min_pz,
+		const int p_gw, const int p_gh, float *r_vals, const float *p_weights, const float *p_below) const {
+	const int rs = _region_size;
+	const int ts = p_layer ? p_layer->get_tile_size() : 0;
+	if (rs < 1 || ts < 1) {
+		return;
+	}
+	const int px_hi = p_min_px + p_gw;
+	const int pz_hi = p_min_pz + p_gh;
+	const int rx0 = _floordiv(p_min_px, rs), rx1 = _floordiv(px_hi - 1, rs);
+	const int rz0 = _floordiv(p_min_pz, rs), rz1 = _floordiv(pz_hi - 1, rs);
+	for (int rz = rz0; rz <= rz1; rz++) {
+		for (int rx = rx0; rx <= rx1; rx++) {
+			const Vector2i region_loc(rx, rz);
+			const Pasture3DRegion *region = get_region_ptr(region_loc);
+			if (!region || region->is_deleted()) {
+				continue;
+			}
+			const int gx = rx * rs, gz = rz * rs;
+			const int lpx0 = MAX(0, p_min_px - gx), lpx1 = MIN(rs, px_hi - gx);
+			const int lpz0 = MAX(0, p_min_pz - gz), lpz1 = MIN(rs, pz_hi - gz);
+			if (lpx0 >= lpx1 || lpz0 >= lpz1) {
+				continue;
+			}
+			if (region->is_coarse()) {
+				// Its texels are sparser than the grid, so a vertex reads the texel that holds it.
+				for (int py = lpz0; py < lpz1; py++) {
+					const size_t row = (size_t)(gz + py - p_min_pz) * p_gw;
+					for (int px = lpx0; px < lpx1; px++) {
+						const size_t i = row + (gx + px - p_min_px);
+						Vector2i texel;
+						if (std::isnan(r_vals[i]) || !_layer_pixel(region, Vector2i(px, py), false, texel)) {
+							continue;
+						}
+						if (p_layer->get_weight(region_loc, texel) > 0.f) {
+							r_vals[i] = _replace_over_row(r_vals[i], p_layer->get_value(region_loc, texel), p_weights[i], p_below[i]);
+						}
+					}
+				}
+				continue;
+			}
+			for (int tz = lpz0 / ts; tz <= (lpz1 - 1) / ts; tz++) {
+				for (int tx = lpx0 / ts; tx <= (lpx1 - 1) / ts; tx++) {
+					const Ref<Image> tile = p_layer->get_tile(region_loc, Vector2i(tx, tz));
+					if (tile.is_null() || tile->get_format() != Image::FORMAT_RGF) {
+						continue; // Nothing written here this bake
+					}
+					const float *f = reinterpret_cast<const float *>(tile->ptr());
+					if (!f) {
+						continue;
+					}
+					const int bx = tx * ts, bz = tz * ts;
+					const int x0 = MAX(lpx0, bx), x1 = MIN(lpx1, bx + ts);
+					const int z0 = MAX(lpz0, bz), z1 = MIN(lpz1, bz + ts);
+					for (int py = z0; py < z1; py++) {
+						const size_t row = (size_t)(gz + py - p_min_pz) * p_gw;
+						const int ly = py - bz;
+						for (int px = x0; px < x1; px++) {
+							const size_t i = row + (gx + px - p_min_px);
+							const int li = (ly * ts + (px - bx)) * 2;
+							if (f[li + 1] > 0.f && !std::isnan(r_vals[i])) {
+								r_vals[i] = _replace_over_row(r_vals[i], f[li], p_weights[i], p_below[i]);
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+PackedFloat32Array Pasture3DData::blend_replace_over_layer(const int p_layer_id, const double p_min_x, const double p_min_z,
+		const double p_vs, const int p_gw, const int p_gh, const PackedFloat32Array &p_vals, const PackedFloat32Array &p_weights,
+		const PackedFloat32Array &p_below, const AABB &p_clip) const {
+	const int64_t n = (int64_t)p_gw * p_gh;
+	const Pasture3DLayer *layer = _layer_stack.is_null() ? nullptr : _layer_stack->get_layer_ptr(p_layer_id);
+	if (!layer || layer->is_base() || p_vs <= 0.0 || p_vals.size() != n || p_weights.size() != n || p_below.size() != n) {
+		return p_vals;
+	}
+	std::vector<float> vals(p_vals.ptr(), p_vals.ptr() + n);
+	if (p_clip.size != Vector3()) {
+		_blank_outside_clip(vals, p_gw, p_gh, p_min_x, p_min_z, p_vs, p_clip.position.x, p_clip.position.x + p_clip.size.x,
+				p_clip.position.z, p_clip.position.z + p_clip.size.z);
+	}
+	_blend_replace_over_row(layer, (int)std::lround(p_min_x / p_vs), (int)std::lround(p_min_z / p_vs), p_gw, p_gh, vals.data(),
+			p_weights.ptr(), p_below.ptr());
+	PackedFloat32Array out;
+	out.resize(n);
+	std::copy(vals.begin(), vals.end(), out.ptrw());
+	return out;
+}
+
 void Pasture3DData::_apply_stamp_block(Pasture3DLayer *p_layer, const int p_min_px, const int p_min_pz,
 		const int p_gw, const int p_gh, const float *p_vals, const int p_blend) {
 	if (!p_layer) {
@@ -2264,6 +2365,24 @@ void Pasture3DData::stamp_mound_loop(const int p_layer_id, const PackedVector2Ar
 		}
 		const int min_px = (int)std::lround(min_x / vs);
 		const int min_pz = (int)std::lround(min_z / vs);
+		// Batched only: this is the deferred bake, which clears the row first. A composite stamp has not, so
+		// what it would read back is this brush's own last result.
+		if (blend == 0 && relative) {
+			std::vector<float> weights(n);
+			Pasture3DThreadPool::parallel_for_rows(gh, 16, [&](int z0, int z1) {
+				for (int iz = z0; iz < z1; iz++) {
+					const int row = iz * gw;
+					for (int ix = 0; ix < gw; ix++) {
+						// The same ramp the stack feathers with: translated by the margin, so a band cell has weight.
+						double a = 0.0;
+						double pr = 0.0;
+						const bool on = host_profile_at((double)field[row + ix] + edge_offset + modifier_margin, a, pr);
+						weights[(size_t)row + ix] = on ? (float)pr : 0.f;
+					}
+				}
+			});
+			_blend_replace_over_row(wlayer, min_px, min_pz, gw, gh, vals.data(), weights.data(), basey.data());
+		}
 		_apply_stamp_block(wlayer, min_px, min_pz, gw, gh, vals.data(), blend);
 	} else {
 		for (int iz = 0; iz < gh; iz++) {

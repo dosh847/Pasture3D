@@ -72,33 +72,24 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 1
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["path"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.PATH])
-
-
-func output_count() -> int:
-	return 4
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"path", PortType.PATH).require(),
+	]
 
 
 ## APPENDED, never inserted. Port indices are what a saved graph's wires are stored as, so putting
 ## `height` anywhere but last would silently re-aim every existing wire one port along.
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["distance", "s", "t", "height"])
-
-
 ## `distance` and `s` are metres, so HEIGHT-typed rather than MASK: a mask is [0,1] by contract and these
 ## two are not. `t` is normalised but SIGNED and unbounded off the carriageway, which is also not a mask.
 ## `height` is metres above sea level, which is what HEIGHT means most literally of the four.
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.FIELD, PortType.FIELD, PortType.SIGNED, PortType.HEIGHT])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"distance", PortType.FIELD),
+		Pasture3DGraphPort.field(&"s", PortType.FIELD),
+		Pasture3DGraphPort.field(&"t", PortType.SIGNED),
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+	]
 
 
 func reads_paths() -> bool:

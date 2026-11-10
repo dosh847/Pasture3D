@@ -355,7 +355,7 @@ func _graph_mod() -> Pasture3DNodeGraph:
 	var node := Pasture3DGraphNodeNoise.new()
 	node.noise = noise
 	node.amplitude = 10.0
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var typed: Array[Pasture3DGraphNode] = [node]
 	g.nodes = typed
 	g.output_node = 0

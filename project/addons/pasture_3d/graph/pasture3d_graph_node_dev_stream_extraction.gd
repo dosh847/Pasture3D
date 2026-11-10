@@ -56,24 +56,18 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 1
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"terrain", PortType.HEIGHT).require(),
+	]
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["terrain"])
-
-
-func output_count() -> int:
-	return 3
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "channel_mask", "flow_rate"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK, PortType.MASK])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"channel_mask", PortType.MASK),
+		Pasture3DGraphPort.field(&"flow_rate", PortType.MASK),
+	]
 
 
 func _param_changed() -> void:

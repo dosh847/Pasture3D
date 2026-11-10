@@ -126,7 +126,7 @@ func _a_declares_two_outputs() -> void:
 
 func _b_scree_height_parity() -> void:
 	print("[B] Scree height channel matches an independent field re-derivation")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var inp := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"), Vector2.ZERO)
 	var scree_node = ScreeScript.new()
 	scree_node.amplitude = 2.5
@@ -169,7 +169,7 @@ func _b_scree_height_parity() -> void:
 
 func _c_multi_output_mask_routing() -> void:
 	print("[C] Scree shed MASK (port 1) gates a Blend's mask input")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var inp := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"), Vector2.ZERO)
 	var scree_node = ScreeScript.new()
 	scree_node.min_slope_degrees = 18.0
@@ -220,7 +220,7 @@ func _c_multi_output_mask_routing() -> void:
 
 func _d_per_solver_freeze() -> void:
 	print("[D] Per-solver freeze: FROZEN serves the cache and reports stale; Bake re-solves")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var inp := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"), Vector2.ZERO)
 	var scree_node = ScreeScript.new()
 	scree_node.evaluation = ScreeScript.Evaluation.FROZEN
@@ -270,7 +270,7 @@ func _d_per_solver_freeze() -> void:
 
 func _e_nan_boundary() -> void:
 	print("[E] NaN in the surface passes through as NaN height / 0 shed")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var inp := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"), Vector2.ZERO)
 	var scree_node = ScreeScript.new()
 	var sc := g.add_node(scree_node, Vector2(200, 0))
@@ -298,7 +298,7 @@ func _e_nan_boundary() -> void:
 
 func _f_masked_blend_refuses_native() -> void:
 	print("[F] A masked Blend refuses to lower to the native path")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var noise := g.add_node(Pasture3DGraphNodeRegistry.create(&"noise"), Vector2.ZERO)
 	var cmask = Pasture3DGraphNodeRegistry.create(&"const"); cmask.set("value", 0.5)
 	var ncm := g.add_node(cmask, Vector2(0, 200))
@@ -325,7 +325,7 @@ func _f_masked_blend_refuses_native() -> void:
 		_fail += 1; print("    !! masked blend graph failed to lower with 3 inputs")
 
 	# Control: unlowered experimental dev op falls back to GDScript.
-	var dev_g := Pasture3DTerrainGraph.new()
+	var dev_g := Pasture3DTerrainGraph.create_empty()
 	var dev_op := Pasture3DGraphNodeDevErosion.new()
 	var d_in := dev_g.add_node(Pasture3DGraphNodeRegistry.create(&"input"), Vector2.ZERO)
 	var d_node := dev_g.add_node(dev_op, Vector2(200, 0))

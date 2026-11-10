@@ -120,7 +120,7 @@ func _carve_graph(p_path: Pasture3DGraphPath, p_cfg: Dictionary, p_channel: int 
 	var carve := Pasture3DGraphNodePathCarve.new()
 	for k in p_cfg:
 		carve.set(String(k), p_cfg[k])
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), src, carve, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
@@ -129,7 +129,7 @@ func _carve_graph(p_path: Pasture3DGraphPath, p_cfg: Dictionary, p_channel: int 
 
 
 func _io_graph() -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes

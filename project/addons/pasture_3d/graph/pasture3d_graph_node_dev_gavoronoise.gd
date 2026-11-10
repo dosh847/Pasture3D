@@ -87,6 +87,46 @@ const EROSION_SEED := 0x9e3779b9
 		_param_changed()
 
 
+@export var height_min: float = -INF:
+	set(v):
+		height_min = v
+		_param_changed()
+
+@export var height_max: float = -INF:
+	set(v):
+		height_max = v
+		_param_changed()
+
+@export var variation: float = 0.0:
+	set(v):
+		variation = v
+		_param_changed()
+
+
+## [lo, hi]. The rule is on GavoronoiseParams::height_min.
+func _range(p_base: PackedFloat32Array) -> Array:
+	var bmin := INF
+	var bmax := -INF
+	for v in p_base:
+		if is_finite(v):
+			bmin = minf(bmin, v)
+			bmax = maxf(bmax, v)
+	var has := bmax >= bmin
+	var lo := height_min if is_finite(height_min) else (bmin if (height_min != -INF and has) else 0.0)
+	var hi := height_max if is_finite(height_max) else (bmax if (height_max != -INF and has) else lo + amplitude)
+	return [lo, hi]
+
+
+## [x, z, gain]. Off at 0.
+func _vary(p_x: float, p_z: float) -> Array:
+	if variation <= 0.0:
+		return [p_x, p_z, 1.0]
+	var nx := _gabor(p_x * 0.5, p_z * 0.5, 1.0, 0.0, 1.0, (seed + 101) & U32)
+	var nz := _gabor(p_x * 0.5, p_z * 0.5, 0.0, 1.0, 1.0, (seed + 211) & U32)
+	var ns := _gabor(p_x * 0.25, p_z * 0.25, 1.0, 0.0, 1.0, (seed + 307) & U32)
+	return [p_x + variation * nx, p_z + variation * nz, maxf(0.0, 1.0 + 2.0 * variation * ns)]
+
+
 func op() -> StringName:
 	return &"dev_gavoronoise"
 
@@ -99,16 +139,10 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 1
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["base"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"base", PortType.HEIGHT).require(),
+	]
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -121,8 +155,11 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) ->
 func solve(p_gw: int, p_gh: int, p_rect: Rect2) -> PackedFloat32Array:
 	var out := PackedFloat32Array()
 	out.resize(p_gw * p_gh)
-	if absf(amplitude) <= 1e-7 or frequency <= 0.0:
-		out.fill(0.0)
+	var rng := _range(PackedFloat32Array())
+	var lo: float = rng[0]
+	var hr: float = rng[1] - lo
+	if absf(hr) <= 1e-7 or frequency <= 0.0:
+		out.fill(lo)
 		return out
 	var theta := angle_deg * TAU / 360.0
 	var kx := -sin(theta)
@@ -131,27 +168,31 @@ func solve(p_gw: int, p_gh: int, p_rect: Rect2) -> PackedFloat32Array:
 	for iz in p_gh:
 		for ix in p_gw:
 			var w := Pasture3DTerrainGraph.cell_to_world(ix, iz, p_gw, p_gh, p_rect)
-			var px := w.x * frequency
-			var pz := w.y * frequency
+			var vy := _vary(w.x * frequency, w.y * frequency)
+			var px: float = vy[0]
+			var pz: float = vy[1]
 			var b := _base(px, pz, kx, kz, spread)
 			var mx := _base(px + GRAD_EPS, pz, kx, kz, spread) - _base(px - GRAD_EPS, pz, kx, kz, spread)
 			var mz := _base(px, pz + GRAD_EPS, kx, kz, spread) - _base(px, pz - GRAD_EPS, kx, kz, spread)
 			var dx := mz / GRAD_EPS * 0.5 * slope_strength
 			var dz := -mx / GRAD_EPS * 0.5 * slope_strength
-			var v := b + erosion_strength * _erosion(px, pz, b, dx, dz)
-			out[iz * p_gw + ix] = amplitude * (0.5 * v + 0.5)
+			var v: float = b + erosion_strength * vy[2] * _erosion(px, pz, b, dx, dz)
+			out[iz * p_gw + ix] = lo + hr * (0.5 * v + 0.5)
 	return out
 
 
 ## The base-input form: erode p_base along its own slope.
 func solve_base(p_gw: int, p_gh: int, p_rect: Rect2, p_base: PackedFloat32Array) -> PackedFloat32Array:
-	if absf(amplitude) <= 1e-7 or frequency <= 0.0 or erosion_strength == 0.0:
+	var rng := _range(p_base)
+	var lo: float = rng[0]
+	var hr: float = rng[1] - lo
+	if absf(hr) <= 1e-7 or frequency <= 0.0 or erosion_strength == 0.0:
 		return p_base
 	var sm: PackedFloat32Array = Pasture3DGraphNodeDevTerrainMetrics.new().box_mean(p_base, p_gw, p_gh, p_rect,
 			base_smoothing) if base_smoothing > 0.0 else p_base
 	var cdx := p_rect.size.x / float(p_gw)
 	var cdz := p_rect.size.y / float(p_gh)
-	var to_n := 2.0 / (amplitude * frequency)
+	var to_n := 2.0 / (hr * frequency)
 	var out := PackedFloat32Array()
 	out.resize(p_gw * p_gh)
 	for iz in p_gh:
@@ -175,9 +216,10 @@ func solve_base(p_gw: int, p_gh: int, p_rect: Rect2, p_base: PackedFloat32Array)
 				gx = (a1 - a0) / (float(xp - xm) * cdx) * to_n
 				gz = (b1 - b0) / (float(zp - zm) * cdz) * to_n
 			var w := Pasture3DTerrainGraph.cell_to_world(ix, iz, p_gw, p_gh, p_rect)
-			var bn := 2.0 * z / amplitude - 1.0
-			var e := _erosion(w.x * frequency, w.y * frequency, bn, gz * slope_strength, -gx * slope_strength)
-			out[i] = z + erosion_strength * e * amplitude * 0.5
+			var bn := 2.0 * (z - lo) / hr - 1.0
+			var vy := _vary(w.x * frequency, w.y * frequency)
+			var e := _erosion(vy[0], vy[1], bn, gz * slope_strength, -gx * slope_strength)
+			out[i] = z + erosion_strength * vy[2] * e * hr * 0.5
 	return out
 
 

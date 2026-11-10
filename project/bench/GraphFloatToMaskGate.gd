@@ -142,7 +142,7 @@ func _b_window() -> void:
 
 # --- C. native route ---------------------------------------------------------------------------------
 func _graph(p_node: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), p_node, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [[0, 0, 1, 0], [1, 0, 2, 0]]

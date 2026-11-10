@@ -44,7 +44,7 @@ func _test_a_plow_modifier_support() -> void:
 
 	var mg := Pasture3DNodeGraph.new()
 	mg.resource_name = "Terrain Graph"
-	mg.graph = Pasture3DTerrainGraph.new()
+	mg.graph = Pasture3DTerrainGraph.create_empty()
 	var cone = Pasture3DGraphNodeRegistry.create(&"mountain_cone")
 	if cone != null:
 		cone.set("elevation", 40.0)
@@ -72,7 +72,7 @@ func _test_b_plow_graph_editor_binding_and_bake() -> void:
 	var plow := Pasture3DPlow.new()
 	var mg := Pasture3DNodeGraph.new()
 	mg.resource_name = "Terrain Graph"
-	var graph := Pasture3DTerrainGraph.new()
+	var graph := Pasture3DTerrainGraph.create_empty()
 	var cone = Pasture3DGraphNodeRegistry.create(&"mountain_cone")
 	var saleve = Pasture3DGraphNodeRegistry.create(&"hydraulic_saleve")
 	var out_n = Pasture3DGraphNodeRegistry.create(&"output")
@@ -104,7 +104,7 @@ func _test_b_plow_graph_editor_binding_and_bake() -> void:
 
 func _test_c_plow_mountain_cone_eval() -> void:
 	print("\n[C] Plow Modifier Evaluation of MountainCone Graph")
-	var graph := Pasture3DTerrainGraph.new()
+	var graph := Pasture3DTerrainGraph.create_empty()
 	var cone = Pasture3DGraphNodeRegistry.create(&"mountain_cone")
 	cone.set("elevation", 50.0)
 	cone.set("scale", 1.0)
@@ -135,7 +135,7 @@ func _test_d_legacy_migration() -> void:
 	print("
 [D] A graph reaches the Plow only as a modifier")
 	var plow := Pasture3DPlow.new()
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var cone = Pasture3DGraphNodeRegistry.create(&"mountain_cone")
 	g.add_node(cone)
 
@@ -178,7 +178,7 @@ func _test_e_disconnected_graph_performance() -> void:
 	var plow := Pasture3DPlow.new()
 	var mg := Pasture3DNodeGraph.new()
 	mg.resource_name = "Terrain Graph"
-	var graph := Pasture3DTerrainGraph.new()
+	var graph := Pasture3DTerrainGraph.create_empty()
 	var cone = Pasture3DGraphNodeRegistry.create(&"mountain_cone")
 	var out_n = Pasture3DGraphNodeRegistry.create(&"output")
 	graph.add_node(cone)

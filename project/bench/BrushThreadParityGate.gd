@@ -249,7 +249,7 @@ func _stack() -> Array[Pasture3DNode]:
 	var gnoise := FastNoiseLite.new()
 	gnoise.seed = 4242
 	gnoise.frequency = 0.035
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var gn := Pasture3DGraphNodeNoise.new()
 	gn.noise = gnoise
 	gn.amplitude = 5.0

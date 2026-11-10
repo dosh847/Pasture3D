@@ -1,0 +1,44 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="4_4khcl"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="4_6pcwc"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="6_ii4qc"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="7_wv1iv"]
+[ext_resource type="Script" uid="uid://fl2f2iwtn1vv" path="res://addons/pasture_3d/graph/pasture3d_graph_path.gd" id="18_ddf1r"]
+[ext_resource type="Script" uid="uid://t26vuji0r8wf" path="res://addons/pasture_3d/graph/pasture3d_graph_node_spline_source.gd" id="19_vfv27"]
+[ext_resource type="Script" uid="uid://5s5nj7du18rp" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_carve.gd" id="20_cyndd"]
+
+[sub_resource type="Resource" id="Resource_ba6c1"]
+script = ExtResource("4_6pcwc")
+
+[sub_resource type="Resource" id="Resource_7f7fp"]
+script = ExtResource("18_ddf1r")
+points = PackedVector2Array(-146.16754, 94.89958, -146.16754, 134.89958)
+half_widths = PackedFloat32Array(12, 12)
+heights = PackedFloat32Array(20, 20)
+source_label = "Ridge/Crest"
+sample_half_widths = PackedFloat32Array()
+sample_shoulders = PackedFloat32Array()
+sample_verges = PackedFloat32Array()
+sample_suppress = PackedByteArray()
+sample_skip = PackedByteArray()
+
+[sub_resource type="Resource" id="Resource_ayy5u"]
+script = ExtResource("19_vfv27")
+path = SubResource("Resource_7f7fp")
+
+[sub_resource type="Resource" id="Resource_ah624"]
+script = ExtResource("20_cyndd")
+offset = 20.0
+width_source = 1
+width = 20.0
+
+[sub_resource type="Resource" id="Resource_c2a6q"]
+script = ExtResource("6_ii4qc")
+
+[resource]
+script = ExtResource("7_wv1iv")
+format_version = 3
+nodes = Array[ExtResource("4_4khcl")]([SubResource("Resource_ba6c1"), SubResource("Resource_ayy5u"), SubResource("Resource_ah624"), SubResource("Resource_c2a6q")])
+wires = [[0, &"height", 2, &"surface"], [1, &"path", 2, &"path"], [2, &"height", 3, &"result"]]
+output_node = 3

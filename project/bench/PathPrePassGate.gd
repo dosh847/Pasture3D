@@ -128,7 +128,7 @@ func _carve() -> Pasture3DGraphNodePathCarve:
 
 ## Input -> Carve.surface, Source -> [Width ->] Carve.path, Carve -> Output.
 func _chain(p_path: Pasture3DGraphPath, p_half: float, p_filtered: bool) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	if p_filtered:
 		var nodes: Array[Pasture3DGraphNode] = [
 			Pasture3DGraphNodeInput.new(), _source(p_path), _width(p_half), _carve(),
@@ -223,7 +223,7 @@ func _b_fanout_is_one_geometry_entry() -> void:
 	var path := _spline()
 
 	# Input, Source, Width, CarveA, CarveB, Add, Output.
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _source(path), _width(14.0), _carve(), _carve(),
 		Pasture3DGraphNodeBlend.new(), Pasture3DGraphNodeOutput.new()]
@@ -240,7 +240,7 @@ func _b_fanout_is_one_geometry_entry() -> void:
 			named[in_g[i]] = true
 
 	# CONTROL: a second Path Width, so the two carves read two produced paths.
-	var g2 := Pasture3DTerrainGraph.new()
+	var g2 := Pasture3DTerrainGraph.create_empty()
 	var nodes2: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _source(path), _width(14.0), _width(9.0), _carve(), _carve(),
 		Pasture3DGraphNodeBlend.new(), Pasture3DGraphNodeOutput.new()]

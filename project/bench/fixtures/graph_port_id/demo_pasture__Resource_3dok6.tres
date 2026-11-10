@@ -1,0 +1,43 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="4_gl3o4"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="6_m7w56"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="7_fpp8j"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="23_6glik"]
+[ext_resource type="Script" uid="uid://bindlf2awqi6e" path="res://addons/pasture_3d/graph/pasture3d_graph_node_blend.gd" id="25_i8fyf"]
+[ext_resource type="Script" uid="uid://xya0fdv0c734" path="res://addons/pasture_3d/graph/pasture3d_graph_node_warp.gd" id="25_w2cmt"]
+[ext_resource type="Script" uid="uid://ybwedanry756" path="res://addons/pasture_3d/graph/pasture3d_graph_node_hydraulic_saleve.gd" id="34_sghyq"]
+[ext_resource type="Script" uid="uid://c04rd15bkl8hx" path="res://addons/pasture_3d/graph/pasture3d_graph_node_fractal.gd" id="41_yu1tn"]
+
+[sub_resource type="Resource" id="Resource_tuye1"]
+script = ExtResource("23_6glik")
+graph_position = Vector2(40, 80)
+
+[sub_resource type="Resource" id="Resource_oogmn"]
+script = ExtResource("6_m7w56")
+graph_position = Vector2(1720, 120)
+
+[sub_resource type="Resource" id="Resource_jsg35"]
+script = ExtResource("41_yu1tn")
+feature_size = 156.0
+graph_position = Vector2(160, 300)
+
+[sub_resource type="Resource" id="Resource_g1akn"]
+script = ExtResource("25_i8fyf")
+graph_position = Vector2(420, 80)
+
+[sub_resource type="Resource" id="Resource_d7g6p"]
+script = ExtResource("25_w2cmt")
+graph_position = Vector2(829, 141)
+
+[sub_resource type="Resource" id="Resource_0td84"]
+script = ExtResource("34_sghyq")
+stream_strength = 0.075
+graph_position = Vector2(1200, 200)
+
+[resource]
+script = ExtResource("7_fpp8j")
+format_version = 3
+nodes = Array[ExtResource("4_gl3o4")]([SubResource("Resource_tuye1"), SubResource("Resource_oogmn"), SubResource("Resource_jsg35"), SubResource("Resource_g1akn"), SubResource("Resource_d7g6p"), SubResource("Resource_0td84")])
+wires = [[0, &"height", 3, &"a"], [2, &"out", 3, &"b"], [3, &"out", 4, &"in"], [4, &"out", 5, &"in"], [5, &"height", 1, &"result"]]
+metadata/_editor_selected_node = -1

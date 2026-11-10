@@ -1,0 +1,27 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="4_gl3o4"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="6_m7w56"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="7_fpp8j"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="23_6glik"]
+[ext_resource type="Script" uid="uid://82lkphq4dfon" path="res://addons/pasture_3d/graph/pasture3d_graph_node_hydraulic_particle.gd" id="35_34frt"]
+
+[sub_resource type="Resource" id="Resource_jmm5x"]
+script = ExtResource("23_6glik")
+graph_position = Vector2(-80, 80)
+
+[sub_resource type="Resource" id="Resource_q8by0"]
+script = ExtResource("6_m7w56")
+graph_position = Vector2(840, 80)
+
+[sub_resource type="Resource" id="Resource_ovby7"]
+script = ExtResource("35_34frt")
+bedrock_gap = 2.0
+graph_position = Vector2(280, 80)
+
+[resource]
+script = ExtResource("7_fpp8j")
+format_version = 3
+nodes = Array[ExtResource("4_gl3o4")]([SubResource("Resource_jmm5x"), SubResource("Resource_q8by0"), SubResource("Resource_ovby7")])
+wires = [[0, &"height", 2, &"in"], [2, &"height", 1, &"result"]]
+metadata/_editor_selected_node = 2

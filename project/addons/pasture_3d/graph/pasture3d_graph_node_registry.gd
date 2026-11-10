@@ -37,12 +37,12 @@ const NoiseSwissScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_
 const WarpScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_warp.gd")
 const ConstScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_const.gd")
 const ConstIntScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_const_int.gd")
-const ConstVectorScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_const_vector.gd")
 const ConstColorScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_const_color.gd")
 const ColorMixScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_color_mix.gd")
 const ColorBlendScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_color_blend.gd")
-const ConstCurveScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_const_curve.gd")
+const CombineScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_combine.gd")
 const ConstBoolScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_const_bool.gd")
+const ParamScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_param.gd")
 const FurrowsScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_furrows.gd")
 const DunesScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_dunes.gd")
 const FractalScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_fractal.gd")
@@ -79,6 +79,7 @@ const WaterMaskScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_n
 const MudslideScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_mudslide.gd")
 const RecastCliffScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_recast_cliff.gd")
 const RecastCanyonScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_recast_canyon.gd")
+const MeasureScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_measure.gd")
 const BlendScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_blend.gd")
 const SmoothScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_smooth.gd")
 const TalusProjectionScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_talus_projection.gd")
@@ -88,6 +89,9 @@ const TerraceScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_nod
 const StrataScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_strata.gd")
 const CurveScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_curve.gd")
 const RemapScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_remap.gd")
+const InvertScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_invert.gd")
+const RidgeSharpenScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_ridge_sharpen.gd")
+const DevRidgeSharpenScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_dev_ridge_sharpen.gd")
 const MaskScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_mask.gd")
 const CurvatureScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_curvature.gd")
 const LakeFloodingScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_lake_flooding.gd")
@@ -101,6 +105,9 @@ const ScreeScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_
 const ErosionScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_erosion.gd")
 const DLAScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_dla.gd")
 const RerouteScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_reroute.gd")
+const SubgraphScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_subgraph.gd")
+const SubgraphInputScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_subgraph_input.gd")
+const SubgraphOutputScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_subgraph_output.gd")
 const OutputScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd")
 const ControlSinkScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_control_sink.gd")
 const ColorSinkScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_color_sink.gd")
@@ -113,8 +120,6 @@ const ExportSplatScript = preload("res://addons/pasture_3d/graph/pasture3d_graph
 const ExportIndexMapScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_export_index_map.gd")
 const PathPublishScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_path_publish.gd")
 const WaterSurfacePublishScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_water_surface_publish.gd")
-const TerrainBusMergeScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_terrain_bus_merge.gd")
-const TerrainBusSplitScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_terrain_bus_split.gd")
 
 # --- Developer / Reference [Dev/GD] Node Scripts ---
 const DevErosionHydraulicScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_dev_erosion_hydraulic.gd")
@@ -145,6 +150,7 @@ const DevGavoronoiseScript = preload("res://addons/pasture_3d/graph/pasture3d_gr
 const DevWarpDownslopeScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_dev_warp_downslope.gd")
 const DevDisplaceScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_dev_displace.gd")
 const DevRecastCanyonScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_dev_recast_canyon.gd")
+const DevMeasureScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_dev_measure.gd")
 const DevFloodingUniformLevelScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_dev_flooding_uniform_level.gd")
 const DevWaterMaskScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_dev_water_mask.gd")
 const DevMudslideScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_dev_mudslide.gd")
@@ -235,8 +241,10 @@ static func entries(p_include_dev: bool = false) -> Array[Dictionary]:
 		{"op": &"path_publish", "title": "Path Publish", "category": "Routing & Structural", "role": "Sink", "script": PathPublishScript, "tags": ["publish", "sink", "runtime", "road", "route", "locate", "output"], "description": "Publishes the wired path into a road network's runtime as a run a game can load."},
 		{"op": &"water_surface_publish", "title": "Water Surface Publish", "category": "Routing & Structural", "role": "Sink", "script": WaterSurfacePublishScript, "tags": ["publish", "sink", "runtime", "water", "river", "lake", "pool", "stream", "output"], "description": "Publishes the wired path to a water body: a closed loop fills a Pool, an open course runs a Stream."},
 		{"op": &"reroute", "title": "Reroute", "category": "Routing & Structural", "role": "Utility", "script": RerouteScript, "tags": ["dot", "relay", "wire", "route", "passthrough", "clean"], "description": "1-in / 1-out transparent wire routing dot."},
-		{"op": &"terrain_bus_merge", "title": "Terrain Bus Merge", "category": "Routing & Structural", "role": "Combiner", "script": TerrainBusMergeScript, "tags": ["bus", "merge", "pack", "bundle", "channels", "multichannel"], "description": "Bundles individual height, mask, water_depth, sediment, and flow channels into a single TERRAIN_BUS connection."},
-		{"op": &"terrain_bus_split", "title": "Terrain Bus Split", "category": "Routing & Structural", "role": "Filter", "script": TerrainBusSplitScript, "tags": ["bus", "split", "unpack", "unbundle", "channels", "multichannel"], "description": "Unbundles a TERRAIN_BUS wire into separate height, mask, water_depth, sediment, and flow channel outputs."},
+		# Subgraphs (ports spec §11): a node that IS another graph, and the two boundary nodes that give it ports.
+		{"op": &"subgraph", "title": "Subgraph", "category": "Routing & Structural", "role": "Utility", "script": SubgraphScript, "tags": ["subgraph", "group", "nest", "macro", "reuse", "function", "child", "graph"], "description": "Runs another graph as one node: its Subgraph Inputs and parameters become ports, its Subgraph Outputs become outputs."},
+		{"op": &"subgraph_input", "title": "Subgraph Input", "category": "Routing & Structural", "role": "Utility", "script": SubgraphInputScript, "tags": ["subgraph", "input", "port", "boundary", "group", "argument"], "description": "One input port of this graph when it is used as a subgraph. Reads its default when the graph runs on its own."},
+		{"op": &"subgraph_output", "title": "Subgraph Output", "category": "Routing & Structural", "role": "Utility", "script": SubgraphOutputScript, "tags": ["subgraph", "output", "port", "boundary", "group", "result"], "description": "One output port of this graph when it is used as a subgraph."},
 		
 		{"op": &"noise", "title": "Noise", "category": "Generators", "role": "Generator", "script": NoiseScript, "tags": ["perlin", "simplex", "fractal", "fbm", "height"], "description": "Coherent multi-octave FastNoiseLite terrain generator."},
 		{"op": &"noise_jordan", "title": "Jordan Noise", "category": "Generators", "role": "Generator", "script": NoiseJordanScript, "tags": ["jordan", "derivative", "gradient", "fbm", "fluting", "warp", "ridges", "mountain"], "description": "Derivative-feedback fractal noise with slope-attenuated octave warping for natural mountain fluting."},
@@ -244,9 +252,8 @@ static func entries(p_include_dev: bool = false) -> Array[Dictionary]:
 		{"op": &"warp", "title": "Domain Warp", "category": "Generators", "role": "Generator", "script": WarpScript, "tags": ["warp", "distortion", "coordinate", "vector", "noise", "swirl", "meander", "folds", "glacier", "strata"], "description": "Warps coordinates with vector noise fields for swirling striations and meanders."},
 		{"op": &"const", "title": "Const Float", "category": "Constants", "role": "Constant", "script": ConstScript, "tags": ["constant", "flat", "height", "value", "bias", "float"], "description": "A scalar float constant. Drives any value port, and fills every cell so it also reads as a flat field."},
 		{"op": &"const_int", "title": "Const Int", "category": "Constants", "role": "Constant", "script": ConstIntScript, "tags": ["constant", "int", "integer", "count", "value"], "description": "Generates a discrete integer constant value."},
-		{"op": &"const_vector", "title": "Const Vector", "category": "Constants", "role": "Constant", "script": ConstVectorScript, "tags": ["constant", "vector", "vec2", "direction", "offset"], "description": "Generates a 2D vector / direction constant."},
 		{"op": &"const_color", "title": "Const Color", "category": "Constants", "role": "Constant", "script": ConstColorScript, "tags": ["constant", "color", "tint", "rgba", "palette"], "description": "Generates a Color constant value."},
-		{"op": &"const_curve", "title": "Const Curve", "category": "Constants", "role": "Constant", "script": ConstCurveScript, "tags": ["constant", "curve", "spline", "ramp", "profile"], "description": "Provides a Curve profile resource constant."},
+		{"op": &"param", "title": "Parameter", "category": "Constants", "role": "Constant", "script": ParamScript, "tags": ["parameter", "param", "expose", "host", "override", "variable", "value", "input"], "description": "Outputs one of the graph's declared parameters, whose value each host brush sets for itself."},
 		{"op": &"const_bool", "title": "Const Bool", "category": "Constants", "role": "Constant", "script": ConstBoolScript, "tags": ["constant", "bool", "boolean", "toggle", "switch", "flag"], "description": "Generates a boolean true/false toggle constant."},
 		{"op": &"furrows", "title": "Furrows", "category": "Generators", "role": "Generator", "script": FurrowsScript, "tags": ["ridges", "grooves", "stripes", "waves", "corrugation"], "description": "Directional corrugated ridge and furrow waves."},
 		{"op": &"fractal", "title": "Fractal", "category": "Generators", "role": "Generator", "script": FractalScript, "tags": ["fbm", "ridged", "billow", "multifractal", "noise", "craggy", "hills", "lumpy", "warp", "relief"], "description": "The relief Fractal material: multi-octave rolling hills (fBm), craggy ridged rock, or lumpy billow, with optional domain warping."},
@@ -287,10 +294,14 @@ static func entries(p_include_dev: bool = false) -> Array[Dictionary]:
 		{"op": &"strata", "title": "Strata", "category": "Filters & Modifiers", "role": "Filter", "script": StrataScript, "tags": ["layers", "geology", "bands", "sediment", "dip", "strike", "cliff"], "description": "Applies tilted geological sedimentary layering to slopes."},
 		{"op": &"curve", "title": "Curve", "category": "Filters & Modifiers", "role": "Filter", "script": CurveScript, "tags": ["remap", "ramp", "profile", "transfer", "shaping", "spline"], "description": "Remaps input heights through a custom Curve resource."},
 		{"op": &"remap", "title": "Remap", "category": "Filters & Modifiers", "role": "Filter", "script": RemapScript, "tags": ["remap", "range", "clamp", "softknee", "invert", "scale", "normalize", "shaping"], "description": "Linearly remaps elevation ranges with soft-knee clamping and inversion."},
+		{"op": &"invert", "title": "Invert", "category": "Filters & Modifiers", "role": "Filter", "script": InvertScript, "tags": ["invert", "flip", "negate", "reverse", "reflect", "one minus", "mask"], "description": "Reflects a field about a pivot: 2 * pivot - input. The default pivot of 0.5 turns a mask into 1 - mask; a pivot in metres flips terrain about that height."},
+		{"op": &"ridge_sharpen", "title": "Ridge Sharpen", "category": "Filters & Modifiers", "role": "Filter", "script": RidgeSharpenScript, "tags": ["sharpen", "ridge", "crest", "peak", "unsharp", "arete", "steepen", "mountain"], "description": "Lifts ground that stands above its surroundings by how far it stands above them, so crests rise and steepen while valleys stay untouched. Radius in metres, with an optional mask."},
 		{"op": &"mask", "title": "Mask", "category": "Filters & Modifiers", "role": "Filter", "script": MaskScript, "tags": ["selector", "slope", "altitude", "weight", "gate"], "description": "Gates height by slope, elevation, or curvature masks."},
 		{"op": &"curvature", "title": "Curvature Mask", "category": "Filters & Modifiers", "role": "Filter", "script": CurvatureScript, "tags": ["curvature", "convexity", "concavity", "ridge", "valley", "basin", "laplacian", "hessian", "mask", "crests"], "description": "Calculates local terrain convexity/concavity to mask mountain ridges vs valley basins."},
 		
+		{"op": &"measure", "title": "Measure", "category": "Math & Combiners", "role": "Filter", "script": MeasureScript, "tags": ["measure", "range", "min", "max", "statistic", "percentile", "median", "mean", "average", "std", "deviation", "auto fit", "normalize", "normalise", "reduce"], "description": "Reduces a field to two numbers for any scalar port: min and max, two percentiles, or mean and standard deviation, optionally over a selection mask. Wire min/max into a Curve's input window for a live Auto Fit."},
 		{"op": &"blend", "title": "Blend", "category": "Math & Combiners", "role": "Combiner", "script": BlendScript, "tags": ["math", "add", "sub", "mul", "max", "min", "combine", "mix", "divide", "power", "difference", "screen", "overlay"], "description": "Combines two fields per cell: add, sub, mul, max, min, mix, div, pow, difference, screen or overlay, gated by an optional mask. Its ports accept any scalar field — height, mask, signed or field."},
+		{"op": &"combine", "title": "Combine", "category": "Math & Combiners", "role": "Combiner", "script": CombineScript, "tags": ["math", "add", "sum", "max", "min", "mul", "multiply", "combine", "many", "union", "stack"], "description": "Folds ANY number of wired fields into one by add, max, min or multiply. Wire as many inputs as you like into its one port; it is the same as a chain of Blends."},
 		{"op": &"color_ramp", "title": "Color Ramp", "category": "Math & Combiners", "role": "Combiner", "script": ColorRampScript, "tags": ["color", "colour", "ramp", "gradient", "tint", "rgba", "stops", "height", "paint"], "description": "Maps a scalar field through a Gradient's stops to a Color PER CELL, for a Color Sink. Evaluated exactly, natively."},
 		{"op": &"color_blend", "title": "Color Blend", "category": "Math & Combiners", "role": "Combiner", "script": ColorBlendScript, "tags": ["color", "blend", "mask", "mix", "tint", "rgba", "combine", "stencil"], "description": "Chooses between two Colors PER CELL from a mask field \u2014 snow above the line, rock below. Unlike Color Mix, whose result is one colour for the whole footprint."},
 		{"op": &"color_mix", "title": "Color Mix", "category": "Math & Combiners", "role": "Combiner", "script": ColorMixScript, "tags": ["color", "tint", "mix", "blend", "rgba", "palette", "combine"], "description": "Combines two Colors into one — mix, add, sub, mul, screen or overlay, by a factor. The colour is uniform over the footprint; the Color Sink's mask decides where it lands."},
@@ -338,6 +349,7 @@ static func _dev_entries() -> Array[Dictionary]:
 		{"op": &"dev_gradient", "title": "[Dev/GD] Gradient", "category": "Dev / Reference", "role": "Dev / Reference", "script": DevGradientScript, "tags": ["dev", "gdscript", "oracle", "gradient", "linear", "radial", "spherical", "angular", "ramp", "distance"], "description": "The GDScript definition the Gradient's C++ and GPU kernels are measured against."},
 		{"op": &"dev_color_ramp", "title": "[Dev/GD] Color Ramp", "category": "Dev / Reference", "role": "Dev / Reference", "script": DevColorRampScript, "tags": ["dev", "gdscript", "oracle", "ramp", "gradient", "color", "colour"], "description": "The Color Ramp mapped through Gradient.sample per cell, the reference color_ramp_cells is measured against."},
 		{"op": &"dev_color_blend", "title": "[Dev/GD] Color Blend", "category": "Dev / Reference", "role": "Dev / Reference", "script": DevColorBlendScript, "tags": ["dev", "gdscript", "oracle", "blend", "color", "colour"], "description": "The Color Blend folded per cell in GDScript, the reference color_blend_cells is measured against."},
+		{"op": &"dev_measure", "title": "[Dev/GD] Measure", "category": "Dev / Reference", "role": "Dev / Reference", "script": DevMeasureScript, "tags": ["dev", "gdscript", "oracle", "measure", "range", "percentile"], "description": "Measure in GDScript, the reference measure_field is measured against."},
 		{"op": &"dev_float_to_mask", "title": "[Dev/GD] Float to Mask", "category": "Dev / Reference", "role": "Dev / Reference", "script": DevFloatToMaskScript, "tags": ["dev", "gdscript", "oracle", "mask", "normalize"], "description": "Float to Mask in GDScript, the reference float_to_mask_grid is measured against."},
 		{"op": &"dev_value_ramp", "title": "[Dev/GD] Value Ramp", "category": "Dev / Reference", "role": "Dev / Reference", "script": DevValueRampScript, "tags": ["dev", "gdscript", "oracle", "ramp", "gradient", "stops", "band"], "description": "The Value Ramp through Gradient.sample, the reference its C++ and GPU kernels are measured against."},
 		{"op": &"dev_leveler", "title": "[Dev/GD] Leveler", "category": "Dev / Reference", "role": "Dev / Reference", "script": DevLevelerScript, "tags": ["dev", "gdscript", "oracle", "level", "flatten", "pad", "platform", "plateau", "mean", "median", "cut", "fill", "loop"], "description": "The GDScript definition the Leveler's C++ kernel is measured against: flatten an area to its mean/median/min/max, or level it to a height, with a feathered wall outside."},
@@ -363,6 +375,7 @@ static func _dev_entries() -> Array[Dictionary]:
 		{"op": &"dev_spectral_equalizer", "title": "[Dev/GD] Spectral Equalizer", "category": "Dev / Reference", "role": "Dev / Reference", "script": DevSpectralEqualizerScript, "tags": ["dev", "gdscript", "oracle", "spectral", "equalizer", "frequency", "blur"], "description": "Pure GDScript reference oracle for 3-band spatial spectral equalizer."},
 		{"op": &"dev_transform", "title": "[Dev/GD] Transform", "category": "Dev / Reference", "role": "Dev / Reference", "script": DevTransformScript, "tags": ["dev", "gdscript", "oracle", "transform", "affine", "bilinear", "resample"], "description": "Pure GDScript reference oracle for the Transform affine resample."},
 		{"op": &"dev_distance_transform", "title": "[Dev/GD] Distance Transform", "category": "Dev / Reference", "role": "Dev / Reference", "script": DevDistanceTransformScript, "tags": ["dev", "gdscript", "oracle", "distance", "jfa", "jump", "flooding"], "description": "Pure GDScript reference oracle for the distance transform. Runs jump flooding, matching the native kernel rather than being exact."},
+		{"op": &"dev_ridge_sharpen", "title": "[Dev/GD] Ridge Sharpen", "category": "Dev / Reference", "role": "Dev / Reference", "script": DevRidgeSharpenScript, "tags": ["dev", "gdscript", "oracle", "sharpen", "ridge"], "description": "Pure GDScript reference oracle for Ridge Sharpen."},
 		{"op": &"dev_expand_shrink", "title": "[Dev/GD] Expand / Shrink", "category": "Dev / Reference", "role": "Dev / Reference", "script": DevExpandShrinkScript, "tags": ["dev", "gdscript", "oracle", "morphology", "dilate", "erode"], "description": "Pure GDScript reference oracle for grayscale morphology. The naive O(r^2) gather, on purpose."},
 		{"op": &"dev_gavoronoise", "title": "[Dev/GD] Gavoronoise", "category": "Dev / Reference", "role": "Dev / Reference", "script": DevGavoronoiseScript, "tags": ["dev", "gdscript", "oracle", "voronoi", "gavoronoise"], "description": "Pure GDScript reference oracle for Gavoronoise. A generator with derivative feedback has no closed form to check against, so the specification is written out a second time and compared."},
 		{"op": &"dev_warp_downslope", "title": "[Dev/GD] Warp Downslope", "category": "Dev / Reference", "role": "Dev / Reference", "script": DevWarpDownslopeScript, "tags": ["dev", "gdscript", "oracle", "warp", "downslope", "gradient"], "description": "Pure GDScript reference oracle for Warp Downslope. Reuses the Phase 3 oracle's box mean so the blur the gradient is read from cannot drift."},
@@ -405,7 +418,9 @@ static func entries_by_category(p_include_dev: bool = false) -> Dictionary:
 static func create(p_op: StringName) -> Pasture3DGraphNode:
 	for e in entries(true):
 		if e["op"] == p_op:
-			return (e["script"] as GDScript).new()
+			var node: Pasture3DGraphNode = (e["script"] as GDScript).new()
+			node.on_created()
+			return node
 	return null
 
 

@@ -87,16 +87,10 @@ func derives_path_from_grid() -> bool:
 	return true
 
 
-func output_count() -> int:
-	return 1
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["path"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.PATH])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"path", PortType.PATH),
+	]
 
 
 ## A PATH producer still fills a grid slot, with zeros.

@@ -2,6 +2,7 @@
 #include "pasture_3d_data.h"
 #include "pasture_3d_leveler.h"
 #include "pasture_3d_math_ops.h"
+#include "pasture_3d_measure.h"
 #include "pasture_3d_path_carve.h"
 #include "pasture_3d_strata.h"
 
@@ -234,6 +235,14 @@ float gavErosion(vec2 q, float bn, vec2 d, int oct, uint sd, float branch, float
 	}
 	return h.x;
 }
+// xy: the moved coordinate, z: the gully-depth gain. See apply_variation in the kernel.
+vec3 gavVary(vec2 q, float amount, uint sd) {
+	if (amount <= 0.0) { return vec3(q, 1.0); }
+	float nx = gavGabor(q * 0.5, vec2(1.0, 0.0), 1.0, sd + 101u);
+	float nz = gavGabor(q * 0.5, vec2(0.0, 1.0), 1.0, sd + 211u);
+	float ns = gavGabor(q * 0.25, vec2(1.0, 0.0), 1.0, sd + 307u);
+	return vec3(q + amount * vec2(nx, nz), max(0.0, 1.0 + 2.0 * amount * ns));
+}
 )"
 
 // The GLSL twin of pasture_3d_distance_metric.h (PASTURE3D_GRADIENT_AND_COLOR_RAMP_SPEC.md §3). A MACRO, not a
@@ -391,7 +400,7 @@ layout(push_constant, std430) uniform Params {
 	// bits 4-5 blend. `ip` carries the vertex count, as it does for the other two path modes.
 	// f8 / f9 were two pad ints; GRADIENT ran the eight float slots out. Same 4-byte offsets, and an
 	// unset float encodes as the zero bits the pads always sent.
-	int ip2; float f8; float f9; int pad2;
+	int ip2; float f8; float f9; float f10;
 } p;
 
 // The Gavoronoise hash. INTEGER arithmetic, matching hash_u32/hash_cell in pasture_3d_gavoronoise.cpp
@@ -651,7 +660,8 @@ static const char *GRAPH_GRID_GLSL_1B = R"(	if (p.mode == GKM_FALLOFF) { // FALL
 		o[i] = v * (1.0 + (at - 1.0) * p.f4);
 		return;
 	}
-	if (p.mode == GKM_CONTRAST) { // CONTRAST: f0 amount, f1 range_min, f2 range_max, f3 mask_amount. b = mask grid.
+	if (p.mode == GKM_CONTRAST) { // CONTRAST: f0 amount, f1 range_min, f2 range_max. No mask: the graph's
+	                   // Blend slot applies the standard one (ports spec P5).
 	                   // f6 = 0 means AUTO: the window was reduced into cbuf[0], cbuf[1] by modes 22/23
 	                   // and f1/f2 are ignored. f6 = 1 means the authored metres are used verbatim.
 		float v = a[i];
@@ -667,13 +677,7 @@ static const char *GRAPH_GRID_GLSL_1B = R"(	if (p.mode == GKM_FALLOFF) { // FALL
 		if (p.ip == 1) { cv = pow(t, p.f0); }
 		else if (t < 0.5) { cv = 0.5 * pow(2.0 * t, p.f0); }
 		else { cv = 1.0 - 0.5 * pow(2.0 - 2.0 * t, p.f0); }
-		float shaped = lo + cv * span;
-		float w = p.f3;
-		// f7 flags whether a mask is actually wired. Without it an unwired port would bind the zero
-		// buffer and multiply the shaping away entirely, which is the opposite of "no mask".
-		if (p.f7 > 0.5) { float mv = b[i]; if (!isnan(mv)) { w *= mv; } }
-		w = clamp(w, 0.0, 1.0);
-		o[i] = v + (shaped - v) * w;
+		o[i] = lo + cv * span;
 		return;
 	}
 
@@ -859,9 +863,9 @@ static const char *GRAPH_GRID_GLSL_1B = R"(	if (p.mode == GKM_FALLOFF) { // FALL
 		o[i] = z + (h - z) * w;
 		return;
 	}
-	if (p.mode == GKM_RECAST_CLIFF) { // RECAST_CLIFF: a = z, b = blurred z, c = mask.
+	if (p.mode == GKM_RECAST_CLIFF) { // RECAST_CLIFF: a = z, b = blurred z.
 	                    // f0 tan(talus), f1 amplitude, f2 gain, f3 direction rad (<0 = omni),
-	                    // f4 spread rad, f5 amount, f6 mask wired.
+	                    // f4 spread rad, f5 amount.
 		float z = a[i];
 		if (isnan(z)) { o[i] = z; return; }
 		int xm = max(ix - 1, 0);
@@ -901,7 +905,6 @@ static const char *GRAPH_GRID_GLSL_1B = R"(	if (p.mode == GKM_FALLOFF) { // FALL
 		}
 
 		float w = p.f5 * gate;
-		if (p.f6 > 0.5) { float mv = c[i]; if (!isnan(mv)) { w *= clamp(mv, 0.0, 1.0); } }
 		if (w <= 0.0) { o[i] = z; return; }
 		float dev = z - b[i];
 		float sg = 1.0 / (1.0 + exp(-p.f2 * dev / p.f1));
@@ -915,8 +918,13 @@ static const char *GRAPH_GRID_GLSL_1B = R"(	if (p.mode == GKM_FALLOFF) { // FALL
 static const char *GRAPH_GRID_GLSL_2 = R"(	if (p.mode == GKM_GAVORONOISE) { // GAVORONOISE, generator form: no input buffers are read.
 	                    // ip = erosion octaves, ip2 = seed. f0 amplitude, f1 frequency, f2 strike radians,
 	                    // f3 angle spread, f4 slope strength, f5 branch strength, f6/f7 z-cut window,
-	                    // f8 erosion strength, f9 erosion frequency. Defined in src/pasture_3d_gavoronoise.h.
+	                    // f8 erosion strength, f9 erosion frequency, f10 variation, c[0]/c[1] height range.
+	                    // Defined in src/pasture_3d_gavoronoise.h.
+		float hr = c[1] - c[0];
+		if (abs(hr) <= 1e-7) { o[i] = c[0]; return; }
 		vec2 q = vec2(p.ox + (float(ix) + 0.5) * p.dx, p.oz + (float(iz) + 0.5) * p.dz) * p.f1;
+		vec3 vy = gavVary(q, p.f10, uint(p.ip2));
+		q = vy.xy;
 		vec2 k = vec2(-sin(p.f2), cos(p.f2));
 		float sp = clamp(p.f3, 0.0, 1.0);
 		uint sd = uint(p.ip2);
@@ -924,8 +932,8 @@ static const char *GRAPH_GRID_GLSL_2 = R"(	if (p.mode == GKM_GAVORONOISE) { // G
 		float mx = gavBase(q + vec2(0.1, 0.0), k, sp, sd) - gavBase(q - vec2(0.1, 0.0), k, sp, sd);
 		float mz = gavBase(q + vec2(0.0, 0.1), k, sp, sd) - gavBase(q - vec2(0.0, 0.1), k, sp, sd);
 		vec2 d = vec2(mz, -mx) / 0.1 * 0.5 * p.f4;
-		float v = bv + p.f8 * gavErosion(q, bv, d, p.ip, sd, p.f5, p.f6, p.f7, p.f9);
-		o[i] = p.f0 * (0.5 * v + 0.5);
+		float v = bv + p.f8 * vy.z * gavErosion(q, bv, d, p.ip, sd, p.f5, p.f6, p.f7, p.f9);
+		o[i] = c[0] + hr * (0.5 * v + 0.5);
 		return;
 	}
 	if (p.mode == GKM_WARP_DOWNSLOPE) { // WARP_DOWNSLOPE: a = z, b = z smoothed at radius, c = mask.
@@ -992,6 +1000,27 @@ static const char *GRAPH_GRID_GLSL_2 = R"(	if (p.mode == GKM_GAVORONOISE) { // G
 		float ux = ((p.ip & 1) != 0) ? b[i] : 0.0;
 		float uz = ((p.ip & 2) != 0) ? c[i] : 0.0;
 		if (w <= 0.0 || isnan(ux) || isnan(uz) || isinf(ux) || isinf(uz)) { o[i] = z; return; }
+		if ((p.ip & 8) != 0) { // SLOPE: dx along the uphill direction, dy across it -- displace_solve's frame.
+			int xm = max(ix - 1, 0);
+			int xp = min(ix + 1, p.gw - 1);
+			int zm = max(iz - 1, 0);
+			int zp = min(iz + 1, p.gh - 1);
+			float sxm = a[iz * p.gw + xm];
+			float sxp = a[iz * p.gw + xp];
+			float szm = a[zm * p.gw + ix];
+			float szp = a[zp * p.gw + ix];
+			if (isnan(sxm) || isnan(sxp) || isnan(szm) || isnan(szp)) { o[i] = z; return; }
+			float gx = (xp > xm) ? (sxp - sxm) / (float(xp - xm) * p.dx) : 0.0;
+			float gz = (zp > zm) ? (szp - szm) / (float(zp - zm) * p.dz) : 0.0;
+			float mag = sqrt(gx * gx + gz * gz);
+			if (mag <= 1.0e-4) { o[i] = z; return; }
+			float tx = gx / mag;
+			float tz = gz / mag;
+			float along = ux;
+			float across = uz;
+			ux = along * tx - across * tz;
+			uz = along * tz + across * tx;
+		}
 		// Metres to cells, as displace_solve does: the same field must push the same distance at any
 		// bake resolution.
 		float fx = float(ix) + ux * p.f0 * w / p.dx;
@@ -1018,8 +1047,8 @@ static const char *GRAPH_GRID_GLSL_2 = R"(	if (p.mode == GKM_GAVORONOISE) { // G
 		o[i] = (wsum <= 0.0) ? 0.0 : (acc / wsum);
 		return;
 	}
-	if (p.mode == GKM_RECAST_CANYON) { // RECAST_CANYON: a = z, b = cut noise, c = mask.
-	                    // f0 cut, f1 floor, f2 gamma, f3 amount; ip bit0 noise wired, bit1 mask wired.
+	if (p.mode == GKM_RECAST_CANYON) { // RECAST_CANYON: a = z, b = cut noise.
+	                    // f0 cut, f1 floor, f2 gamma, f3 amount; ip bit0 noise wired.
 		float z = a[i];
 		if (isnan(z)) { o[i] = z; return; }
 		float cut = p.f0;
@@ -1027,7 +1056,6 @@ static const char *GRAPH_GRID_GLSL_2 = R"(	if (p.mode == GKM_GAVORONOISE) { // G
 		float span = cut - p.f1;
 		if (span <= 1.0e-6 || z >= cut || z <= p.f1) { o[i] = z; return; }
 		float w = p.f3;
-		if ((p.ip & 2) != 0) { float mv = c[i]; w = isnan(mv) ? 0.0 : w * clamp(mv, 0.0, 1.0); }
 		if (w <= 0.0) { o[i] = z; return; }
 		float t = (z - p.f1) / span;
 		float recast = p.f1 + span * pow(t, p.f2);
@@ -1038,6 +1066,8 @@ static const char *GRAPH_GRID_GLSL_2 = R"(	if (p.mode == GKM_GAVORONOISE) { // G
 	                    // a = that surface smoothed for its slope. Push constants as GAVORONOISE.
 		float z = b[i];
 		if (isnan(z) || isinf(z)) { o[i] = z; return; }
+		float hr = c[1] - c[0]; // the height range: measured or uploaded, see the plan
+		if (abs(hr) <= 1e-7) { o[i] = z; return; }
 		int xm = max(ix - 1, 0);
 		int xp = min(ix + 1, p.gw - 1);
 		int zm = max(iz - 1, 0);
@@ -1048,12 +1078,13 @@ static const char *GRAPH_GRID_GLSL_2 = R"(	if (p.mode == GKM_GAVORONOISE) { // G
 		float b1 = a[zp * p.gw + ix];
 		vec2 gr = vec2(0.0);
 		if (!isnan(a0) && !isnan(a1) && !isnan(b0) && !isnan(b1) && !isinf(a0) && !isinf(a1) && !isinf(b0) && !isinf(b1)) {
-			gr = vec2((a1 - a0) / (float(xp - xm) * p.dx), (b1 - b0) / (float(zp - zm) * p.dz)) * (2.0 / (p.f0 * p.f1));
+			gr = vec2((a1 - a0) / (float(xp - xm) * p.dx), (b1 - b0) / (float(zp - zm) * p.dz)) * (2.0 / (hr * p.f1));
 		}
 		vec2 q = vec2(p.ox + (float(ix) + 0.5) * p.dx, p.oz + (float(iz) + 0.5) * p.dz) * p.f1;
-		float bn = 2.0 * z / p.f0 - 1.0;
-		float e = gavErosion(q, bn, vec2(gr.y, -gr.x) * p.f4, p.ip, uint(p.ip2), p.f5, p.f6, p.f7, p.f9);
-		o[i] = z + p.f8 * e * p.f0 * 0.5;
+		float bn = 2.0 * (z - c[0]) / hr - 1.0;
+		vec3 vy = gavVary(q, p.f10, uint(p.ip2));
+		float e = gavErosion(vy.xy, bn, vec2(gr.y, -gr.x) * p.f4, p.ip, uint(p.ip2), p.f5, p.f6, p.f7, p.f9);
+		o[i] = z + p.f8 * vy.z * e * hr * 0.5;
 		return;
 	}
 	if (p.mode == GKM_MORPH_BLEND) { // MORPH_BLEND: a input, b morphed, c mask. f0 amount, f1 = is a mask wired.
@@ -1826,7 +1857,7 @@ struct GraphDispatch {
 	// Op-specific scalars, mirroring the shader's push-constant block. All zero for COPY/BLEND/SMOOTH.
 	float f0 = 0, f1 = 0, f2 = 0, f3 = 0, f4 = 0, f5 = 0, f6 = 0, f7 = 0;
 	int ip2 = 0; // GAVORONOISE: the seed. See the push-constant block.
-	float f8 = 0, f9 = 0;
+	float f8 = 0, f9 = 0, f10 = 0;
 	// The geometry SSBO this dispatch reads, or invalid for the dispatches that read none (all of them
 	// but the two path modes). Bound at binding 4 either way.
 	RID geo;
@@ -1892,12 +1923,39 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 		const PackedInt32Array *ports[4] = { &p_prog.in0_port, &p_prog.in1_port, &p_prog.in2_port,
 			&p_prog.in3_port };
 		const PackedInt32Array *srcs[4] = { &p_prog.in0, &p_prog.in1, &p_prog.in2, &p_prog.in3 };
+		const PackedInt32Array *pmaps[4] = { &p_prog.pmap0, &p_prog.pmap1, &p_prog.pmap2, &p_prog.pmap3 };
+		// The one exception: a Measure's channel 1 read as a SCALAR. It is a single number this plan holds
+		// on the host (measure_b below), so serving it needs no second buffer. Read as a grid it would, and
+		// still refuses.
+		auto measure_scalar = [&](int p_src, int p_chan) -> bool {
+			return p_src >= 0 && p_src < p_prog.count && p_prog.ops[p_src] == GRAPH_OP_MEASURE && p_chan == 1;
+		};
 		for (int k = 0; k < 4; k++) {
 			if (ports[k]->size() != p_prog.count || srcs[k]->size() != p_prog.count) {
 				continue;
 			}
 			for (int s = 0; s < p_prog.count; s++) {
-				if ((*srcs[k])[s] >= 0 && (*ports[k])[s] > 0) {
+				const int src = (*srcs[k])[s];
+				const int port = (*ports[k])[s];
+				if (src >= 0 && port > 0) {
+					const bool as_scalar = pmaps[k]->size() == p_prog.count && (*pmaps[k])[s] >= 0;
+					if (!(as_scalar && measure_scalar(src, port))) {
+						return fail();
+					}
+				}
+			}
+		}
+		if (p_prog.pdrv_chan.size() == p_prog.pdrv_node.size()) {
+			for (int k = 0; k < p_prog.pdrv_chan.size(); k++) {
+				if (p_prog.pdrv_chan[k] > 0 && !measure_scalar(p_prog.pdrv_src[k], p_prog.pdrv_chan[k])) {
+					return fail();
+				}
+			}
+		}
+		// A grid operand past in3 reading a secondary channel: the same one-buffer-per-slot limit.
+		if (p_prog.in_aux_port.size() == p_prog.count) {
+			for (int s = 0; s < p_prog.count; s++) {
+				if (p_prog.in_aux_port[s] > 0) {
 					return fail();
 				}
 			}
@@ -2018,7 +2076,10 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 			return -1;
 		}
 		const int port = aux_port[p_slot];
-		if (port < 1 || port > 3) {
+		if (port >= 4) {
+			return p_prog.in_aux.size() == p_prog.count ? (int)p_prog.in_aux[p_slot] : -1;
+		}
+		if (port < 1) {
 			return -1;
 		}
 		const int32_t *srcs[4] = { in0, in1, in2, in3 };
@@ -2143,7 +2204,7 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 			push.encode_s32(64, plan[k].ip2);
 			push.encode_float(68, plan[k].f8);
 			push.encode_float(72, plan[k].f9);
-			push.encode_s32(76, 0);
+			push.encode_float(76, plan[k].f10);
 			_rd->compute_list_bind_uniform_set(cl, sets[k - executed], 0);
 			_rd->compute_list_set_push_constant(cl, push, push.size());
 			_rd->compute_list_dispatch(cl, gx, gy, 1);
@@ -2167,9 +2228,15 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 	float P[16];
 	bool PH[16];
 	bool param_fetch_failed = false;
+	// Each Measure slot's channel 1, kept on the host: the guard above lets it be read only as a scalar.
+	std::vector<float> measure_b((size_t)p_prog.count, 0.f);
 	auto resolve_params = [&](int p_slot) {
 		param_fetch_failed = false;
 		graph_resolve_op_params(p_prog, p_slot, P, PH, [&](int p_src, int p_chan, float &r_value) -> bool {
+			if (p_chan == 1 && p_src >= 0 && p_src < p_prog.count && p_prog.ops[p_src] == GRAPH_OP_MEASURE) {
+				r_value = measure_b[(size_t)p_src];
+				return true;
+			}
 			// Channels above 0 are already refused for this whole evaluator by the guard near the top of
 			// eval_grid, so a non-zero channel here means the guard has been weakened and the plan holds
 			// one buffer per slot regardless. Fail the fetch rather than serve channel 0's value.
@@ -2287,10 +2354,11 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				}
 				const RID out = empty_buf();
 				GraphDispatch d{ out, src, zero_buf, lut_buf, GKM_VALUE_RAMP, stops };
+				const bool follow = P[11] > 0.5f; // Output Range SAME_AS_INPUT
 				d.f0 = P[4];
 				d.f1 = P[5];
-				d.f2 = P[8];
-				d.f3 = P[9];
+				d.f2 = follow ? P[4] : P[8];
+				d.f3 = follow ? P[5] : P[9];
 				d.f4 = P[10];
 				d.ip2 = (std::clamp((int)P[1], 0, 3)) | (std::clamp((int)P[2], 0, 3) << 2) |
 						(std::clamp((int)P[3], 0, 15) << 4) | (std::clamp((int)P[6], 0, 3) << 8) |
@@ -2346,8 +2414,9 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 					GraphDispatch d{ out, src, zero_buf, lut_buf, GKM_CURVE, lut_n };
 					d.f0 = P[0]; // input_min
 					d.f1 = P[1]; // input_max
-					d.f2 = P[2]; // output_min
-					d.f3 = P[3]; // output_max
+					const bool follow = P[5] > 0.5f; // Output Range SAME_AS_INPUT
+					d.f2 = follow ? P[0] : P[2]; // output_min
+					d.f3 = follow ? P[1] : P[3]; // output_max
 					d.f4 = P[4]; // amount
 					plan.push_back(d);
 				}
@@ -2435,9 +2504,45 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;
+			case GRAPH_OP_MEASURE: {
+				// Reduced on the HOST with the CPU's own measure_field, so the two routes cannot disagree about
+				// a percentile's rank or a sum's order. The cost is one sync and one readback per live Measure,
+				// which is the price of a statistic no pointwise kernel can see.
+				float va = P[4];
+				float vb = P[5];
+				if (P[3] <= 0.5f) {
+					if (!run_pending()) {
+						return fail();
+					}
+					std::vector<float> hv((size_t)n, 0.f);
+					if (in0[s] >= 0) {
+						const PackedByteArray hb = _rd->buffer_get_data(slot_buf[in0[s]]);
+						if (hb.size() < (int64_t)bytes) {
+							return fail();
+						}
+						std::memcpy(hv.data(), hb.ptr(), (size_t)bytes);
+					}
+					std::vector<float> sv;
+					const int sel = aux_src(s);
+					if (sel >= 0) {
+						const PackedByteArray sb = _rd->buffer_get_data(slot_buf[sel]);
+						if (sb.size() < (int64_t)bytes) {
+							return fail();
+						}
+						sv.resize((size_t)n);
+						std::memcpy(sv.data(), sb.ptr(), (size_t)bytes);
+					}
+					const MeasureResult r = measure_field(hv.data(), sv.empty() ? nullptr : sv.data(), n, (int)P[0],
+							(double)P[1], (double)P[2]);
+					va = (float)r.a;
+					vb = (float)r.b;
+				}
+				std::fill(host.begin(), host.end(), va);
+				slot_buf[s] = buf_from(host.data());
+				measure_b[(size_t)s] = vb;
+			} break;
 			case GRAPH_OP_CONTRAST: {
-				// Spec §4.3. An unwired mask port binds the zero buffer; the shader reads a 0 there as
-				// "no shaping", matching the CPU kernel's behaviour for a wired but empty mask.
+				// Spec §4.3. The node has no mask of its own: the graph's Blend slot applies the standard one.
 				const RID src = in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf;
 				const bool explicit_window = P[5] > 0.5f;
 
@@ -2464,14 +2569,11 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				}
 
 				const RID out = empty_buf();
-				GraphDispatch d{ out, src,
-					aux_src(s) >= 0 ? slot_buf[aux_src(s)] : zero_buf, window, GKM_CONTRAST, (int)P[0] };
+				GraphDispatch d{ out, src, zero_buf, window, GKM_CONTRAST, (int)P[0] };
 				d.f0 = std::max(P[1], 0.001f); // amount
 				d.f1 = P[2]; // range_min
 				d.f2 = P[3]; // range_max
-				d.f3 = std::clamp(P[4], 0.0f, 1.0f); // mask_amount
 				d.f6 = explicit_window ? 1.0f : 0.0f;
-				d.f7 = (aux_src(s) >= 0) ? 1.0f : 0.0f; // mask wired?
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;
@@ -2676,7 +2778,7 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				}
 				const RID blurred = blur_plan(src, (double)P[1]);
 				const RID out = empty_buf();
-				GraphDispatch d{ out, src, blurred, aux_src(s) >= 0 ? slot_buf[aux_src(s)] : zero_buf, GKM_RECAST_CLIFF, 0 };
+				GraphDispatch d{ out, src, blurred, zero_buf, GKM_RECAST_CLIFF, 0 };
 				const double kPi = 3.14159265358979323846;
 				d.f0 = (float)std::tan((double)P[0] * kPi / 180.0); // tan(talus)
 				d.f1 = amplitude;
@@ -2686,16 +2788,16 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 						: -1.0f; // direction, or omnidirectional
 				d.f4 = (float)(std::max((double)P[5], 0.0) * kPi / 180.0); // spread
 				d.f5 = amount;
-				d.f6 = (aux_src(s) >= 0) ? 1.0f : 0.0f;
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;
 			case GRAPH_OP_DISPLACE: {
-				// params: 0 scale, b amount. Four field operands; the mask rides the geometry binding.
+				// params: 0 scale, b amount, c direction (1 = SLOPE, ip bit3). Three field operands and the
+				// node's own mask (its aux port), which rides the geometry binding.
 				const RID src = in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf;
 				const int s_dx = in1[s];
 				const int s_dy = in2 ? in2[s] : -1;
-				const int s_mk = in3 ? in3[s] : -1;
+				const int s_mk = aux_src(s);
 				const float amount = std::clamp(P[1], 0.0f, 1.0f);
 				if (amount <= 0.0f || P[0] == 0.0f || (s_dx < 0 && s_dy < 0)) {
 					const RID out = empty_buf();
@@ -2705,7 +2807,7 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				}
 				const RID out = empty_buf();
 				GraphDispatch d{ out, src, s_dx >= 0 ? slot_buf[s_dx] : zero_buf, s_dy >= 0 ? slot_buf[s_dy] : zero_buf,
-					GKM_DISPLACE, (s_dx >= 0 ? 1 : 0) | (s_dy >= 0 ? 2 : 0) | (s_mk >= 0 ? 4 : 0) };
+					GKM_DISPLACE, (s_dx >= 0 ? 1 : 0) | (s_dy >= 0 ? 2 : 0) | (s_mk >= 0 ? 4 : 0) | (P[2] > 0.5f ? 8 : 0) };
 				if (s_mk >= 0) {
 					d.geo = slot_buf[s_mk];
 				}
@@ -2718,7 +2820,6 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				// params: 0 cut, b floor, c gamma, d amount. Pointwise.
 				const RID src = in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf;
 				const int s_nz = in1[s];
-				const int s_mk = in2 ? in2[s] : -1;
 				const float amount = std::clamp(P[3], 0.0f, 1.0f);
 				if (amount <= 0.0f || P[2] <= 0.0f) {
 					const RID out = empty_buf();
@@ -2727,8 +2828,8 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 					break;
 				}
 				const RID out = empty_buf();
-				GraphDispatch d{ out, src, s_nz >= 0 ? slot_buf[s_nz] : zero_buf, s_mk >= 0 ? slot_buf[s_mk] : zero_buf,
-					GKM_RECAST_CANYON, (s_nz >= 0 ? 1 : 0) | (s_mk >= 0 ? 2 : 0) };
+				GraphDispatch d{ out, src, s_nz >= 0 ? slot_buf[s_nz] : zero_buf, zero_buf,
+					GKM_RECAST_CANYON, s_nz >= 0 ? 1 : 0 };
 				d.f0 = P[0];
 				d.f1 = P[1];
 				d.f2 = P[2];
@@ -2770,15 +2871,53 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				const float amp = P[0];
 				const float freq = P[1];
 				const float es = PH[12] ? P[12] : 0.1f;
-				if (std::abs(amp) <= 1e-7f || freq <= 0.0f || (base_src >= 0 && es == 0.0f)) {
-					// The kernel's early-outs: a generator writes zeros, the base form returns its input.
+				if (freq <= 0.0f || (base_src >= 0 && es == 0.0f)) {
+					// The kernel's early-outs that need no height range. A flat range is the shader's.
 					plan.push_back({ out, base_src >= 0 ? slot_buf[base_src] : zero_buf, zero_buf, zero_buf, GKM_COPY, 0 });
 					slot_buf[s] = out;
 					break;
 				}
 				const RID base_buf = (base_src >= 0) ? slot_buf[base_src] : zero_buf;
 				const RID base_sm = (base_src >= 0) ? blur_plan(base_buf, (double)(PH[11] ? P[11] : 0.0f)) : zero_buf;
-				GraphDispatch d{ out, base_sm, base_buf, zero_buf,
+				// The height range rides binding 3 as c[0], c[1]: measured by the reduction Contrast uses, or
+				// uploaded. A range measured on one side only would need both, so it declines the GPU; only a
+				// half-wired Min/Max pays for that.
+				const float lo_p = PH[14] ? P[14] : -INFINITY;
+				const float hi_p = PH[15] ? P[15] : -INFINITY;
+				const bool lo_m = std::isnan(lo_p) || lo_p == INFINITY;
+				const bool hi_m = std::isnan(hi_p) || hi_p == INFINITY;
+				const bool measure = base_src >= 0 && (lo_m || hi_m);
+				if (measure && lo_m != hi_m) {
+					return fail();
+				}
+				RID range_buf;
+				if (measure) {
+					const int nwg = ((p_gw + 7) / 8) * ((p_gh + 7) / 8);
+					const RID partials = empty_buf();
+					range_buf = empty_buf();
+					if (!partials.is_valid() || !range_buf.is_valid()) {
+						return fail();
+					}
+					GraphDispatch r1{ partials, base_buf, zero_buf, zero_buf, GKM_MINMAX_PARTIAL, 0 };
+					r1.f0 = (float)nwg;
+					plan.push_back(r1);
+					GraphDispatch r2{ range_buf, partials, zero_buf, zero_buf, GKM_MINMAX_FINAL, 0 };
+					r2.f0 = (float)nwg;
+					plan.push_back(r2);
+				} else {
+					const float lo = std::isfinite(lo_p) ? lo_p : 0.0f;
+					const float hi = std::isfinite(hi_p) ? hi_p : lo + amp;
+					PackedByteArray pb;
+					pb.resize(std::max(bytes, 16));
+					pb.encode_float(0, lo);
+					pb.encode_float(4, hi);
+					range_buf = _rd->storage_buffer_create(pb.size(), pb);
+					if (!range_buf.is_valid()) {
+						return fail();
+					}
+					to_free.push_back(range_buf);
+				}
+				GraphDispatch d{ out, base_sm, base_buf, range_buf,
 					(base_src >= 0) ? GKM_GAVORONOISE_BASE : GKM_GAVORONOISE,
 					std::clamp((int)P[2], 1, 12) };
 				d.ip2 = (int)P[3]; // seed
@@ -2792,6 +2931,7 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				d.f7 = PH[10] ? P[10] : 1.0f; // z cut max
 				d.f8 = es; // erosion strength
 				d.f9 = PH[13] ? P[13] : 4.0f; // erosion frequency
+				d.f10 = PH[8] ? P[8] : 0.0f; // variation
 				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;

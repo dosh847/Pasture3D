@@ -28,7 +28,7 @@ func _ready() -> void:
 
 func _a_add_via_registry() -> void:
 	print("[A] add_node via the registry")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var i0 := g.add_node(Pasture3DGraphNodeRegistry.create(&"noise"))
 	var i1 := g.add_node(Pasture3DGraphNodeRegistry.create(&"smooth"))
 	var ok := i0 == 0 and i1 == 1 and g.nodes.size() == 2 and g.nodes[0].op() == &"noise" \
@@ -47,7 +47,7 @@ func _a_add_via_registry() -> void:
 
 func _b_connect_one_wire_per_port() -> void:
 	print("[B] connect_ports: one wire per input port (replace)")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	g.add_node(Pasture3DGraphNodeRegistry.create(&"noise")) # 0
 	g.add_node(Pasture3DGraphNodeRegistry.create(&"const")) # 1
 	g.add_node(Pasture3DGraphNodeRegistry.create(&"blend")) # 2
@@ -69,7 +69,7 @@ func _b_connect_one_wire_per_port() -> void:
 
 func _c_set_output_drives_evaluate() -> void:
 	print("[C] set_output selects what evaluate returns")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var noise := Pasture3DGraphNodeRegistry.create(&"noise")
 	noise.set("amplitude", 5.0)
 	noise.set("noise", _make_noise())
@@ -90,9 +90,12 @@ func _c_set_output_drives_evaluate() -> void:
 
 func _d_remove_node_reindexes() -> void:
 	print("[D] remove_node drops touching wires, reindexes the rest, follows output")
-	var g := Pasture3DTerrainGraph.new()
-	for i in range(4):
-		g.add_node(Pasture3DGraphNodeRegistry.create(&"const")) # 0,1,2,3
+	var g := Pasture3DTerrainGraph.create_empty()
+	for i in range(3):
+		g.add_node(Pasture3DGraphNodeRegistry.create(&"const")) # 0,1,2
+	# 3 is a Blend. It was a fourth Const, which has no inputs: `connect_ports` stored a wire into a port
+	# that does not exist, and since the port descriptors (2026-11-09) it refuses one.
+	g.add_node(Pasture3DGraphNodeRegistry.create(&"blend")) # 3
 	g.connect_ports(1, 0, 3, 0)
 	g.connect_ports(2, 0, 3, 1)
 	g.set_output(3)
@@ -119,7 +122,7 @@ func _d_remove_node_reindexes() -> void:
 
 func _e_node_change_forwards() -> void:
 	print("[E] a node param change forwards through graph.changed")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var noise := Pasture3DGraphNodeRegistry.create(&"noise")
 	g.add_node(noise)
 	var cnt := [0]

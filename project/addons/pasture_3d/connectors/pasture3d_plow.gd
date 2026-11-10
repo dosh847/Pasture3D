@@ -298,10 +298,11 @@ func _paint_spline(path: Path3D) -> void:
 					vals[k] = basey[k]
 
 	vals = _blur_grid(vals, gw, gh, smooth_passes)
-	_store_stamp_cache(path, _compute_stamp_key(path), min_x, min_z, vs, gw, gh, vals, _spline_footprint_aabb(path))
+	var over: PackedFloat32Array = PackedFloat32Array(Array(profile_ext if margin_m > 0.0 else profile)) if relative_to_terrain else PackedFloat32Array()
+	_store_stamp_cache(path, _compute_stamp_key(path), min_x, min_z, vs, gw, gh, vals, _spline_footprint_aabb(path), over, basey)
 
 	if _layer_id >= 0 and terrain.data.has_method("apply_sim_block"):
-		terrain.data.apply_sim_block(_layer_id, min_x, min_z, vs, gw, gh, vals, _blend)
+		terrain.data.apply_sim_block(_layer_id, min_x, min_z, vs, gw, gh, _blend_over_row(min_x, min_z, vs, gw, gh, vals, over, basey), _blend)
 	else:
 		for iz in range(gh):
 			var z := min_z + iz * vs

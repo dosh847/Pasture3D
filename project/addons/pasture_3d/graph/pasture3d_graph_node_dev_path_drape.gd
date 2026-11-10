@@ -29,20 +29,11 @@ func op() -> StringName:
 	return &"dev_path_drape"
 
 
-func input_count() -> int:
-	return 2
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["path", "surface"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.PATH, PortType.HEIGHT])
-
-
-func input_unwired_default(p_port: int) -> float:
-	return NAN if p_port == 1 else 0.0
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"path", PortType.PATH).require(),
+		Pasture3DGraphPort.field(&"surface", PortType.HEIGHT).unwired(NAN),
+	]
 
 
 func derive(_p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -> void:

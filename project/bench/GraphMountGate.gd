@@ -115,7 +115,7 @@ func _c_grid_node_in_graph() -> void:
 	var noise := _make_noise(11, 0.09)
 	var amp := 10.0
 	# graph: Noise -> Smooth(3)
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var typed: Array[Pasture3DGraphNode] = []
 	typed.append(_noise_gn(noise, amp))
 	var sm := Pasture3DGraphNodeSmooth.new(); sm.passes = 3
@@ -156,7 +156,7 @@ func _d_native_supported_runs_native() -> void:
 
 	# CONTROL 1: an UNSUPPORTED graph (a cycle -> native_supported false) DOES fall back to GDScript, so
 	# native never silently drops it.
-	var cyc := Pasture3DTerrainGraph.new()
+	var cyc := Pasture3DTerrainGraph.create_empty()
 	var cn: Array[Pasture3DGraphNode] = [_blend_add()]
 	cyc.nodes = cn
 	cyc.connections = [PackedInt32Array([0, 0, 0, 0])] # blend feeds itself -> a cycle
@@ -185,7 +185,7 @@ func _e_filter_reads_surface() -> void:
 	var c := 3.0
 	var amount := 0.5
 	# graph: 0 Input, 1 Const(c), 2 Blend(ADD)[a=Input,b=Const], 3 Output.
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var typed: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _const_node(c),
 		_blend_add(), Pasture3DGraphNodeOutput.new()]
@@ -209,7 +209,7 @@ func _e_filter_reads_surface() -> void:
 
 	# CONTROL: a graph that IGNORES the input (Const -> Output, no Input) does NOT reproduce the surface —
 	# it replaces toward the constant, proving [E]'s match came from actually reading the surface.
-	var gen := Pasture3DTerrainGraph.new()
+	var gen := Pasture3DTerrainGraph.create_empty()
 	var gtyped: Array[Pasture3DGraphNode] = [_const_node(c), Pasture3DGraphNodeOutput.new()]
 	gen.nodes = gtyped
 	gen.connections = [PackedInt32Array([0, 0, 1, 0])]
@@ -265,7 +265,7 @@ func _graph_node(p_graph: Pasture3DTerrainGraph, p_strength: float) -> Pasture3D
 
 
 func _single_noise_graph(p_noise: FastNoiseLite, p_amp: float) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var typed: Array[Pasture3DGraphNode] = []
 	typed.append(_noise_gn(p_noise, p_amp))
 	g.nodes = typed

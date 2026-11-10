@@ -117,7 +117,7 @@ func _erosion() -> Pasture3DGraphNodeErosion:
 ## and the number this gate compares, so a channel that was subtly wrong could be blended into looking
 ## right.
 func _graph_reading(p_channel: int) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _erosion(), Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
@@ -292,7 +292,7 @@ func _c_reading_a_channel_does_not_change_the_others() -> void:
 
 	# The same graph, but with the flow channel ALSO consumed — so the diagnostics branch is on. Erosion
 	# feeds both the Output (height) and a Blend that reads flow, and the Output is what is compared.
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _erosion(), Pasture3DGraphNodeBlend.new(),
 		Pasture3DGraphNodeOutput.new()]
@@ -336,7 +336,7 @@ func _c_reading_a_channel_does_not_change_the_others() -> void:
 func _d_an_unimplemented_channel_still_refuses() -> void:
 	print("[D] reading a channel the native op does not write still refuses to lower")
 	# Lake Flooding publishes secondary channels in the editor and writes only its primary grid natively.
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var lake := Pasture3DGraphNodeLakeFlooding.new()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), lake, Pasture3DGraphNodeOutput.new()]
@@ -352,7 +352,7 @@ func _d_an_unimplemented_channel_still_refuses() -> void:
 	# CONTROL: the SAME graph reading port 0 must lower. Without this, [D] would pass on a Lake Flooding
 	# node that could not be lowered for some entirely unrelated reason — a missing op, a blocking flag —
 	# and would then be testing nothing about channels at all.
-	var g0 := Pasture3DTerrainGraph.new()
+	var g0 := Pasture3DTerrainGraph.create_empty()
 	var lake0 := Pasture3DGraphNodeLakeFlooding.new()
 	var nodes0: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), lake0, Pasture3DGraphNodeOutput.new()]

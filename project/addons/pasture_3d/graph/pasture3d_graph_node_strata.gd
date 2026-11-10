@@ -212,42 +212,21 @@ func profile_lut() -> PackedFloat32Array:
 	return lut
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 0, 1, 3, 4, 2])
+## Port 6 is past in3, so the mask rides in_aux. Last, because connections are stored by port index.
+# an unwired mask is fully open
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"band_height", PortType.FLOAT, &"band_height", 0),
+		Pasture3DGraphPort.value(&"hardness", PortType.FLOAT, &"hardness", 1),
+		Pasture3DGraphPort.value(&"dip", PortType.FLOAT, &"dip", 3),
+		Pasture3DGraphPort.value(&"direction", PortType.FLOAT, &"dip_direction_degrees", 4),
+		Pasture3DGraphPort.value(&"amount", PortType.FLOAT, &"amount", 2),
+	]
 
 
 func role() -> Role:
 	return Role.FILTER
-
-
-func input_count() -> int:
-	return 6
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "band_height", "hardness", "dip", "direction", "amount"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.HEIGHT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return band_height
-		2: return hardness
-		3: return dip
-		4: return dip_direction_degrees
-		5: return amount
-		_: return 0.0
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:

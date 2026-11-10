@@ -36,23 +36,14 @@ func op() -> StringName:
 	return &"color_sink"
 
 
-func input_count() -> int:
-	return 2
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["mask", "color"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.MASK, PortType.COLOR])
-
-
-func native_param_ports() -> PackedInt32Array:
-	# COLOR is a value type, so it names a slot rather than -1 — even though nothing lowers this node and
-	# no scalar slot could hold an RGBA. The declaration is read as "this port is not a grid", which is
-	# the fact the editor and GraphPortTypeGate care about; see the header for how it is actually read.
-	return PackedInt32Array([-1, 0])
+# COLOR is a value type, so it names a slot rather than -1 — even though nothing lowers this node and
+# no scalar slot could hold an RGBA. The declaration is read as "this port is not a grid", which is
+# the fact the editor and GraphPortTypeGate care about; see the header for how it is actually read.
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"mask", PortType.MASK).require(),
+		Pasture3DGraphPort.value(&"color", PortType.COLOR, &"", 0),
+	]
 
 
 ## NOTHING is required, because the payload is a colour and this node always has one: the `color` export

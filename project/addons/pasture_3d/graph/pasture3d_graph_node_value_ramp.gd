@@ -6,6 +6,9 @@
 # The gradient is evaluated EXACTLY, from its stops, never from a 256-entry table: on a 100 m window a table
 # smears a CONSTANT band edge by 0.4 m. The native kernel (src/pasture_3d_ramp_eval.h) is a transcription of
 # the pinned engine's Gradient::get_color_at_offset, and the oracle is Gradient.sample itself.
+#
+# Output Range SAME_AS_INPUT (HEIGHT output only) maps the ramp value back onto the input window, so the
+# ramp redistributes heights inside their own range. It follows the RESOLVED window, wired or not.
 @tool
 class_name Pasture3DGraphNodeValueRamp
 extends Pasture3DGraphNode
@@ -14,6 +17,7 @@ extends Pasture3DGraphNode
 enum OutputMode { MASK, HEIGHT }
 enum Channel { AVERAGE, LUMINANCE, RED, GREEN, BLUE, ALPHA }
 enum Repeat { CLAMP, REPEAT, MIRROR }
+enum OutputRange { CUSTOM, SAME_AS_INPUT }
 
 ## The stops. Unassigned or empty = the normalised input passes through (and a warning).
 @export var gradient: Gradient:
@@ -58,6 +62,14 @@ enum Repeat { CLAMP, REPEAT, MIRROR }
 		notify_property_list_changed()
 		emit_changed()
 
+## HEIGHT only. CUSTOM: the value spans Height Min..Max. SAME_AS_INPUT: it spans the input window, so the
+## scale is kept and only the distribution changes; the height_min/height_max ports are ignored then.
+@export var output_range: OutputRange = OutputRange.CUSTOM:
+	set(v):
+		output_range = v
+		notify_property_list_changed()
+		emit_changed()
+
 @export var height_min: float = 0.0:
 	set(v):
 		height_min = v
@@ -74,11 +86,31 @@ enum Repeat { CLAMP, REPEAT, MIRROR }
 		amount = clampf(v, 0.0, 1.0)
 		emit_changed()
 
-@export_tool_button("Auto Fit Range") var _auto_btn = auto_fit_range
+## Fits the input window to the upstream field's min/max. Measured by the graph editor, which is the only
+## thing that can evaluate this node's upstream; with no graph editor open it does nothing.
+@export_tool_button("Auto Fit Range") var _auto_btn = _request_auto_fit
 
 
 func _init() -> void:
 	super()
+
+
+func _request_auto_fit() -> void:
+	editor_action_requested.emit(&"auto_fit")
+
+
+func _validate_property(p_property: Dictionary) -> void:
+	var hide := false
+	if p_property.name == "output_range":
+		hide = output_mode != OutputMode.HEIGHT
+	elif p_property.name in ["height_min", "height_max"]:
+		hide = output_mode != OutputMode.HEIGHT or output_range == OutputRange.SAME_AS_INPUT
+	if hide:
+		p_property.usage &= ~PROPERTY_USAGE_EDITOR
+
+
+func _follows_input() -> bool:
+	return output_mode == OutputMode.HEIGHT and output_range == OutputRange.SAME_AS_INPUT
 
 
 func auto_fit_range(p_min: float = 0.0, p_max: float = 1.0) -> void:
@@ -98,39 +130,22 @@ func needs_grid() -> bool:
 	return false
 
 
-func input_count() -> int:
-	return 6
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"in_min", PortType.FLOAT, &"input_min", 4),
+		Pasture3DGraphPort.value(&"in_max", PortType.FLOAT, &"input_max", 5),
+		Pasture3DGraphPort.value(&"height_min", PortType.FLOAT, &"height_min", 8),
+		Pasture3DGraphPort.value(&"height_max", PortType.FLOAT, &"height_max", 9),
+		Pasture3DGraphPort.value(&"amount", PortType.FLOAT, &"amount", 10),
+	]
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "in_min", "in_max", "height_min", "height_max", "amount"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.FLOAT, PortType.FLOAT, PortType.FLOAT, PortType.FLOAT,
-			PortType.FLOAT])
-
-
-func output_port_type() -> int:
-	return PortType.HEIGHT if output_mode == OutputMode.HEIGHT else PortType.MASK
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([output_port_type()])
-
-
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 4, 5, 8, 9, 10])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		1: return input_min
-		2: return input_max
-		3: return height_min
-		4: return height_max
-		5: return amount
-	return 0.0
+# The output's type follows Output Mode, so the socket recolours when the mode changes.
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"out", PortType.HEIGHT if output_mode == OutputMode.HEIGHT else PortType.MASK),
+	]
 
 
 ## [offset, r, g, b, a] x n in the ENGINE's sorted order. Sampling once first runs Gradient::_update_sorting,
@@ -174,6 +189,7 @@ func native_lower() -> Dictionary:
 	p[8] = height_min
 	p[9] = height_max
 	p[10] = amount
+	p[11] = 1.0 if _follows_input() else 0.0
 	return {"params": p, "lut": stops}
 
 
@@ -202,6 +218,8 @@ func eval_cell(_p_wx: float, _p_wz: float, p_inputs: PackedFloat32Array) -> floa
 	if gradient != null and gradient.get_point_count() > 0:
 		v = reduce(gradient.sample(t), channel)
 	v = t + _in(p_inputs, 5, amount) * (v - t)
+	if _follows_input():
+		return imin + (imax - imin) * v
 	if output_mode == OutputMode.HEIGHT:
 		var hmin := _in(p_inputs, 3, height_min)
 		return hmin + (_in(p_inputs, 4, height_max) - hmin) * v
@@ -222,6 +240,6 @@ func node_warnings() -> PackedStringArray:
 		w.append("%s: no Gradient stops, so the normalised input passes through." % display_name())
 	if absf(input_max - input_min) <= 1.0e-9:
 		w.append("%s: the input window is empty (min == max), so every value samples offset 0." % display_name())
-	if output_mode == OutputMode.HEIGHT and is_equal_approx(height_min, height_max):
+	if output_mode == OutputMode.HEIGHT and not _follows_input() and is_equal_approx(height_min, height_max):
 		w.append("%s: Height Min equals Height Max, so the output is flat." % display_name())
 	return w

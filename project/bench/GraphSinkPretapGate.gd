@@ -65,7 +65,7 @@ func _dome() -> PackedFloat32Array:
 
 ## Input -> Salève -> Output, and a Color Sink masked by Salève's eroded_rock (port 1).
 func _graph(p_sink: bool) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var sal := Pasture3DGraphNodeHydraulicSaleve.new()
 	sal.iterations = 4
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), sal, Pasture3DGraphNodeOutput.new()]
@@ -169,7 +169,7 @@ func _c_frozen_served() -> void:
 	var z := _dome()
 	# Erosion stands in for any solver with a native freeze key (Salève included; GraphNativeFreezeGate
 	# covers each one's key parity). A and B cover the LIVE case, which no freeze can serve.
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var ero := Pasture3DGraphNodeErosion.new()
 	ero.evaluation = Pasture3DGraphSolverNode.Evaluation.FROZEN
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), ero, Pasture3DGraphNodeOutput.new()]

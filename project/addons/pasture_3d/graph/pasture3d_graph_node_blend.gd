@@ -45,21 +45,13 @@ func role() -> Role:
 	return Role.COMBINER
 
 
-func input_count() -> int:
-	return 3
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["a", "b", "mask"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.HEIGHT, PortType.MASK])
-
-
 ## The mask (port 2) reads 1.0 when unwired, so a Blend with no mask is the plain two-input combine.
-func input_unwired_default(p_port: int) -> float:
-	return 1.0 if p_port == 2 else 0.0
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"a", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.field(&"b", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.field(&"mask", PortType.MASK).unwired(1.0),
+	]
 
 
 func eval_cell(_p_wx: float, _p_wz: float, p_inputs: PackedFloat32Array) -> float:

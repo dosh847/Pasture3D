@@ -25,6 +25,18 @@
 #       CONTROL: the ratio is against the same call at strength 0, so an outcrop mask that never reached the
 #       profile reads [1, 1] and fails `lo < 0.6`.
 #   [E] runs at the node's defaults (elevation mask 0..100 m, outcrop 0.4), so route parity covers both masks.
+#   [I] The wired mask port: output = input + (unmasked - input) * mask on GDScript, native and GPU, with the
+#       mask read from its own graph. CONTROL: the expected field must differ from the unmasked one, so a mask
+#       that never arrived fails.
+#   [J] An unwired mask is open, Const 0 is the input, out-of-range masks clamp, a non-finite cell is no
+#       opinion. CONTROL: the unwired node must still move the ground.
+#   [K] A mask source that also feeds an earlier op stays alive until Strata reads it. Compared against the
+#       GDScript route, which has no buffer pool. Mutation-checked by removing the in_aux reference (see spec).
+#   [L] A secondary channel reaches the mask: Measure's max and min give different answers, and the GPU
+#       refuses rather than serving channel 0.
+#   [M] Muting a masked Strata keeps the graph native and passes the input through.
+#   [N] Saved wiring: ports 0..5 keep their indices, and a Const driving band_height (port 1) and amount
+#       (port 5) still equals the inline property with a mask wired. CONTROL: the driven value must matter.
 #
 # Counts completed criteria; a criterion that throws before asserting cannot pass by silence.
 extends Node
@@ -32,7 +44,8 @@ extends Node
 const RECT := Rect2(-200.0, -200.0, 400.0, 400.0)
 const EPS := 1.0e-5
 const EPS_GPU := 2.0e-3 # float32 world coordinates and tilt at +-200 m, a pow() chain in the shader
-const CRITERIA := 8
+const CRITERIA := 14
+const GW := 128 # the thread pool runs serial below 128 rows
 
 var _fail := 0
 var _done := 0
@@ -48,6 +61,12 @@ func _ready() -> void:
 	_f_octaves_nest_beds()
 	_g_elevation_mask()
 	_h_outcrop_mask()
+	_i_mask_composites()
+	_j_mask_edges()
+	_k_mask_source_stays_alive()
+	_l_mask_reads_a_channel()
+	_m_muted_stays_native()
+	_n_saved_wiring()
 	if _done != CRITERIA:
 		_fail += 1; print("!! only %d of %d criteria completed" % [_done, CRITERIA])
 	print("\n=== %s (%d failures, %d/%d criteria) ===\n" % ["STRATA PROFILE PASS" if _fail == 0 else "STRATA PROFILE FAIL", _fail, _done, CRITERIA])
@@ -325,8 +344,242 @@ func _h_outcrop_mask() -> void:
 	_done += 1
 
 
+## Every mask, pinned: the node's own defaults are not what these criteria are about.
+func _mask_strata() -> Pasture3DGraphNodeStrata:
+	var st := _strata(0.8, 0.7, 0)
+	st.elevation_mask = true; st.mask_low = 0.0; st.mask_high = 100.0
+	st.outcrop_strength = 0.4; st.outcrop_size = 120.0
+	return st
+
+
+## Input(0) -> Strata(1) -> Output(2), with p_extra appended from index 3 and p_wires added.
+func _wired(p_strata: Pasture3DGraphNode, p_extra: Array, p_wires: Array) -> Pasture3DTerrainGraph:
+	var g := Pasture3DTerrainGraph.create_empty()
+	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), p_strata, Pasture3DGraphNodeOutput.new()]
+	for e in p_extra:
+		nodes.append(e)
+	g.nodes = nodes
+	var wires: Array = [PackedInt32Array([1, 0, 2, 0])]
+	var feeds_in := false
+	for w in p_wires:
+		wires.append(PackedInt32Array(w))
+		feeds_in = feeds_in or (int(w[2]) == 1 and int(w[3]) == 0)
+	if not feeds_in:
+		wires.append(PackedInt32Array([0, 0, 1, 0]))
+	g.connections = wires
+	return g
+
+
+func _ramp_mask() -> Pasture3DGraphNode:
+	var m: Pasture3DGraphNodeGradient = Pasture3DGraphNodeRegistry.create(&"gradient")
+	m.shape = Pasture3DGraphNodeGradient.Shape.LINEAR
+	m.space = Pasture3DGraphNodeGradient.Space.WORLD
+	m.start = Vector2(-200.0, 0.0)
+	m.end = Vector2(200.0, 0.0)
+	m.profile = Pasture3DGraphNodeGradient.Profile.LINEAR
+	m.repeat = Pasture3DGraphNodeGradient.Repeat.CLAMP
+	m.output_mode = Pasture3DGraphNodeGradient.OutputMode.MASK
+	return m
+
+
+func _const(p_value: float) -> Pasture3DGraphNode:
+	var c: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const")
+	c.set("value", p_value)
+	return c
+
+
+## The ramp mask by itself, so the expected field does not come through the path under test.
+func _mask_field() -> PackedFloat32Array:
+	var g := Pasture3DTerrainGraph.create_empty()
+	var nodes: Array[Pasture3DGraphNode] = [_ramp_mask(), Pasture3DGraphNodeOutput.new()]
+	g.nodes = nodes
+	g.connections = [PackedInt32Array([0, 0, 1, 0])]
+	return Pasture3DUtil.graph_eval_grid(g.compile_graph_program(), GW, GW, RECT, PackedFloat32Array())
+
+
+## One graph on all three routes. "gpu" is empty when the GPU refused.
+func _routes(p_g: Pasture3DTerrainGraph, p_surf: PackedFloat32Array) -> Dictionary:
+	var prog: Dictionary = p_g.compile_graph_program()
+	var r := {"native": Pasture3DUtil.graph_eval_grid(prog, GW, GW, RECT, p_surf)}
+	p_g.force_gdscript_evaluation = true
+	r["gd"] = p_g.evaluate(GW, GW, RECT, null, p_surf)
+	p_g.force_gdscript_evaluation = false
+	r["gpu"] = Pasture3DUtil.graph_eval_grid_gpu(prog, GW, GW, RECT, p_surf)
+	return r
+
+
+## Compares a route against a target and reports it. An empty GPU answer is a skip headless, a failure windowed.
+func _check_route(p_label: String, p_route: String, p_r: Dictionary, p_want: PackedFloat32Array) -> void:
+	var got: PackedFloat32Array = p_r[p_route]
+	if p_route == "gpu" and got.is_empty():
+		print("    %s gpu: SKIPPED (no RenderingDevice, or the GPU refused)" % p_label)
+		if DisplayServer.get_name() != "headless":
+			_fail += 1; print("    !! windowed, yet the GPU refused")
+		return
+	var limit := EPS_GPU if p_route == "gpu" else 1.0e-3
+	var d := _max_abs_diff(got, p_want)
+	print("    %s %s: max diff %.6f (want < %.6f)" % [p_label, p_route, d, limit])
+	if d > limit:
+		_fail += 1; print("    !! %s disagrees on the %s route" % [p_label, p_route])
+
+
+func _check_routes(p_label: String, p_r: Dictionary, p_want: PackedFloat32Array) -> void:
+	for route in ["native", "gd", "gpu"]:
+		_check_route(p_label, route, p_r, p_want)
+
+
+func _i_mask_composites() -> void:
+	print("[I] wired mask: input + (unmasked - input) * mask, on all three routes")
+	var surf := _field(GW, GW)
+	var w := _mask_field()
+	var lo := INF
+	var hi := -INF
+	for v in w:
+		lo = minf(lo, v); hi = maxf(hi, v)
+	print("    mask spans [%.3f, %.3f] (want < 0.05 and > 0.95)" % [lo, hi])
+	if lo >= 0.05 or hi <= 0.95:
+		_fail += 1; print("    !! the mask fixture does not span the range, so nothing below can read it")
+	var open: PackedFloat32Array = _routes(_wired(_mask_strata(), [], []), surf)["native"]
+	var want := PackedFloat32Array()
+	want.resize(surf.size())
+	for i in surf.size():
+		want[i] = surf[i] + (open[i] - surf[i]) * clampf(w[i], 0.0, 1.0)
+	var g := _wired(_mask_strata(), [_ramp_mask()], [[3, 0, 1, 6]])
+	if not g.native_supported():
+		_fail += 1; print("    !! a wired mask dropped the graph off the native route")
+	_check_routes("masked", _routes(g, surf), want)
+	var seen := _max_abs_diff(want, open)
+	print("    control: expected differs from unmasked by %.3f m (want > 0.5)" % seen)
+	if seen <= 0.5:
+		_fail += 1; print("    !! a mask that never arrived would pass")
+	_done += 1
+
+
+func _j_mask_edges() -> void:
+	print("[J] unwired is open, 0 is the input, out-of-range clamps, non-finite is no opinion")
+	var surf := _field(GW, GW)
+	var r_open := _routes(_wired(_mask_strata(), [], []), surf)
+	var open: PackedFloat32Array = r_open["native"]
+	_check_routes("unwired", r_open, open)
+	_check_routes("Const 1", _routes(_wired(_mask_strata(), [_const(1.0)], [[3, 0, 1, 6]]), surf), open)
+	_check_routes("Const 3", _routes(_wired(_mask_strata(), [_const(3.0)], [[3, 0, 1, 6]]), surf), open)
+	_check_routes("Const 0", _routes(_wired(_mask_strata(), [_const(0.0)], [[3, 0, 1, 6]]), surf), surf)
+	_check_routes("Const -1", _routes(_wired(_mask_strata(), [_const(-1.0)], [[3, 0, 1, 6]]), surf), surf)
+	var moved := _max_abs_diff(open, surf)
+	print("    control: the unwired node moves the ground %.3f m (want > 0.5)" % moved)
+	if moved <= 0.5:
+		_fail += 1; print("    !! an unwired mask reading 0 would pass")
+	# NaN on the kernel and the cell, against the same call with no mask at all.
+	var nan_mask := PackedFloat32Array()
+	nan_mask.resize(surf.size())
+	nan_mask.fill(NAN)
+	var st := _mask_strata()
+	var with_nan := st.eval_grid([surf, [], [], [], [], [], nan_mask], GW, GW, null, RECT)
+	var bare := st.eval_grid([surf], GW, GW, null, RECT)
+	var d_nan := _max_abs_diff(with_nan, bare)
+	var w0 := Pasture3DTerrainGraph.cell_to_world(40, 90, GW, GW, RECT)
+	var i0 := 90 * GW + 40
+	var cell_nan := st.eval_cell(w0.x, w0.y, PackedFloat32Array([surf[i0], NAN, NAN, NAN, NAN, NAN, NAN]))
+	var cell_bare := st.eval_cell(w0.x, w0.y, PackedFloat32Array([surf[i0]]))
+	print("    NaN mask: grid diff %.7f, cell diff %.7f (want 0)" % [d_nan, absf(cell_nan - cell_bare)])
+	if d_nan > EPS or absf(cell_nan - cell_bare) > EPS:
+		_fail += 1; print("    !! a non-finite mask cell is not read as no opinion")
+	_done += 1
+
+
+func _k_mask_source_stays_alive() -> void:
+	print("[K] a mask source that also feeds an earlier op stays alive until Strata reads it")
+	var surf := _field(GW, GW)
+	var add: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"blend")
+	add.set("mode", 0) # ADD
+	var smooth: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"smooth")
+	smooth.set("passes", 1)
+	# Input -> Blend(a), mask -> Blend(b), Blend -> Smooth -> Strata in, mask -> Strata mask. Blend releases the
+	# mask, Smooth then takes a free buffer and writes it.
+	var g := _wired(_mask_strata(), [_ramp_mask(), add, smooth],
+			[[0, 0, 4, 0], [3, 0, 4, 1], [4, 0, 5, 0], [5, 0, 1, 0], [3, 0, 1, 6]])
+	var r := _routes(g, surf)
+	_check_route("fanned mask", "native", r, r["gd"])
+	_check_route("fanned mask", "gpu", r, r["gd"])
+	_done += 1
+
+
+func _l_mask_reads_a_channel() -> void:
+	print("[L] a secondary channel reaches the mask port")
+	var surf := _field(GW, GW)
+	var w := _mask_field()
+	var lo := INF
+	var hi := -INF
+	for v in w:
+		lo = minf(lo, v); hi = maxf(hi, v)
+	var open: PackedFloat32Array = _routes(_wired(_mask_strata(), [], []), surf)["native"]
+	var answers := {}
+	for chan in [0, 1]:
+		var measure: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"measure")
+		measure.set("mode", 0) # RANGE: channel 0 min, channel 1 max
+		var g := _wired(_mask_strata(), [_ramp_mask(), measure], [[3, 0, 4, 0], [4, chan, 1, 6]])
+		var r := _routes(g, surf)
+		var level: float = lo if chan == 0 else hi
+		var want := PackedFloat32Array()
+		want.resize(surf.size())
+		for i in surf.size():
+			want[i] = surf[i] + (open[i] - surf[i]) * level
+		_check_route("channel %d" % chan, "native", r, want)
+		_check_route("channel %d" % chan, "gd", r, want)
+		if chan == 1 and not (r["gpu"] as PackedFloat32Array).is_empty():
+			_fail += 1; print("    !! the GPU answered a secondary channel it holds no buffer for")
+		answers[chan] = r["native"]
+	var apart := _max_abs_diff(answers[0], answers[1])
+	print("    control: channel 0 and channel 1 differ by %.3f m (want > 0.5)" % apart)
+	if apart <= 0.5:
+		_fail += 1; print("    !! the mask port is being served one channel for both")
+	_done += 1
+
+
+func _m_muted_stays_native() -> void:
+	print("[M] a muted Strata with a mask wired stays native and passes through")
+	var surf := _field(GW, GW)
+	var st := _mask_strata()
+	st.muted = true
+	var g := _wired(st, [_ramp_mask()], [[3, 0, 1, 6]])
+	if not g.native_supported():
+		_fail += 1; print("    !! muting a masked Strata dropped the graph off the native route")
+	var r := _routes(g, surf)
+	_check_route("muted", "native", r, surf)
+	_check_route("muted", "gd", r, surf)
+	_done += 1
+
+
+func _n_saved_wiring() -> void:
+	print("[N] saved wiring keeps its port indices")
+	var st := Pasture3DGraphNodeStrata.new()
+	var names := st.input_names()
+	var want_names := PackedStringArray(["in", "band_height", "hardness", "dip", "direction", "amount", "mask"])
+	var pmap := st.native_param_ports()
+	var want_map := PackedInt32Array([-1, 0, 1, 3, 4, 2, -1])
+	print("    names %s ; aux port %d ; param ports %s" % [names, st.aux_grid_port(), pmap])
+	# The mask is the standard one since P5: same id, same index, applied by the graph, so no aux grid.
+	if names != want_names or pmap != want_map or st.framework_mask_port() != 6 or st.aux_grid_port() != -1:
+		_fail += 1; print("    !! the port layout moved, which renumbers saved connections")
+	if st.input_port_types()[6] != Pasture3DGraphNode.PortType.MASK or st.input_unwired_default(6) != 1.0:
+		_fail += 1; print("    !! the mask port is not a MASK port open by default")
+	var surf := _field(GW, GW)
+	var inline_st := _mask_strata()
+	inline_st.band_height = 11.0; inline_st.amount = 0.6
+	var want: PackedFloat32Array = _routes(_wired(inline_st, [_ramp_mask()], [[3, 0, 1, 6]]), surf)["native"]
+	var g := _wired(_mask_strata(), [_ramp_mask(), _const(11.0), _const(0.6)],
+			[[3, 0, 1, 6], [4, 0, 1, 1], [5, 0, 1, 5]])
+	_check_routes("driven ports", _routes(g, surf), want)
+	var undriven: PackedFloat32Array = _routes(_wired(_mask_strata(), [_ramp_mask()], [[3, 0, 1, 6]]), surf)["native"]
+	var seen := _max_abs_diff(want, undriven)
+	print("    control: driving those ports moves the output %.3f m (want > 0.5)" % seen)
+	if seen <= 0.5:
+		_fail += 1; print("    !! the driven values do not matter on this fixture")
+	_done += 1
+
+
 func _filter_graph(p_filter: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), p_filter, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [PackedInt32Array([0, 0, 1, 0]), PackedInt32Array([1, 0, 2, 0])]

@@ -52,20 +52,11 @@ func op() -> StringName:
 	return &"dev_path_width_field"
 
 
-func input_count() -> int:
-	return 2
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["path", "field"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.PATH, PortType.MASK])
-
-
-func input_unwired_default(p_port: int) -> float:
-	return NAN if p_port == 1 else 0.0
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"path", PortType.PATH).require(),
+		Pasture3DGraphPort.field(&"field", PortType.MASK).unwired(NAN),
+	]
 
 
 func derive(_p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -> void:

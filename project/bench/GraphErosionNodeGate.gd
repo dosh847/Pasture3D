@@ -95,7 +95,9 @@ func _a_declares_five_outputs() -> void:
 			and e.role() == Pasture3DGraphNode.Role.SOLVER and e.needs_grid() \
 			and in_types.size() == e.input_count() and e.input_names().size() == e.input_count() \
 			and in_types.size() > 0 and in_types[0] == Pasture3DGraphNode.PortType.HEIGHT \
-			and _param_ports(in_types) == e.input_count() - 1
+			and _param_ports(in_types) == e.input_count() - 2 \
+			and e.standard_mask_port() == e.input_count() - 1
+	# The last port is the standard mask (ports spec P5), which is a field and not a parameter.
 	# One SURFACE input, at port 0. The node later grew INT/FLOAT parameter sockets, so `input_count() == 1`
 	# stopped being the way to say that; every port after the surface must be a scalar parameter.
 	print("    output_count=%d names=%s types=%s role=%d needs_grid=%s input_count=%d in_types=%s" % [
@@ -191,7 +193,7 @@ func _d_per_solver_freeze() -> void:
 	if e.evaluation != ErosionScript.Evaluation.FROZEN:
 		_fail += 1; print("    !! Erosion did not default to FROZEN")
 
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var inp := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"), Vector2.ZERO)
 	var er := g.add_node(e, Vector2(200, 0))
 	var out := g.add_node(Pasture3DGraphNodeRegistry.create(&"output"), Vector2(400, 0))
@@ -268,7 +270,7 @@ func _e_nan_boundary() -> void:
 
 func _f_multi_output_mask_routing() -> void:
 	print("[F] The erosion channel (port 2) drives a Blend's mask input")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var inp := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"), Vector2.ZERO)
 	var er_node := _new_erosion(ErosionScript.Evaluation.LIVE)
 	er_node.erosion_rate = 0.12

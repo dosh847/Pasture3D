@@ -165,7 +165,7 @@ func _e_unwired_input_reads_zero() -> void:
 # ---- helpers ----------------------------------------------------------------------------------------
 
 func _graph(p_nodes: Array, p_conns: Array, p_out: int) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var typed: Array[Pasture3DGraphNode] = []
 	for n in p_nodes:
 		typed.append(n)

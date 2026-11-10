@@ -253,7 +253,7 @@ func _e_an_undeclared_channel_is_still_refused(p_surf: PackedFloat32Array) -> vo
 # --- fixtures ------------------------------------------------------------------------------------------
 ## Input -> node -> Output. The solver reads the host surface, which is how every one of them is used.
 func _graph_of(p_node: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), p_node,
 			Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes

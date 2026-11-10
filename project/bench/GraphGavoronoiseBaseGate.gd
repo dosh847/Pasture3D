@@ -167,7 +167,7 @@ func _be_gpu() -> void:
 		var g := _wired(n)
 		var gpu: PackedFloat32Array = Pasture3DUtil.graph_eval_grid_gpu(g.compile_graph_program(), GW, GH, RECT, cone)
 		if gpu.is_empty():
-			var bare := Pasture3DTerrainGraph.new()
+			var bare := Pasture3DTerrainGraph.create_empty()
 			var bn: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), Pasture3DGraphNodeOutput.new()]
 			bare.nodes = bn
 			bare.connections = [PackedInt32Array([0, 0, 1, 0])]
@@ -201,7 +201,7 @@ func _gav() -> Pasture3DGraphNodeGavoronoise:
 
 
 func _standalone(p_node: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [p_node, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [PackedInt32Array([0, 0, 1, 0])]
@@ -210,7 +210,7 @@ func _standalone(p_node: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
 
 ## Input -> Gavoronoise.base (port 3) -> Output.
 func _wired(p_node: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), p_node, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [PackedInt32Array([0, 0, 1, 3]), PackedInt32Array([1, 0, 2, 0])]

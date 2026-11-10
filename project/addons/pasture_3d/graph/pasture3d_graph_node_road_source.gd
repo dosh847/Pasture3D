@@ -110,20 +110,14 @@ func role() -> Role:
 	return Role.GENERATOR
 
 
-func input_count() -> int:
-	return 0
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return []
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray()
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["path"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.PATH])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"path", PortType.PATH),
+	]
 
 
 func path_output() -> Pasture3DGraphPath:

@@ -138,7 +138,7 @@ func _grid_chain(p_noise: FastNoiseLite) -> Pasture3DTerrainGraph:
 
 
 func _graph(p_nodes: Array[Pasture3DGraphNode], p_conns: Array, p_out: int) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	g.nodes = p_nodes
 	var conns: Array = []
 	for c in p_conns:

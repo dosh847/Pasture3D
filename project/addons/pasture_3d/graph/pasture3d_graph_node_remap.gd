@@ -52,7 +52,13 @@ extends Pasture3DGraphNode
 		invert = v
 		emit_changed()
 
-@export_tool_button("Auto Fit Range") var _auto_btn = auto_fit_range
+## Fits the input window to the upstream field's min/max. Measured by the graph editor, which is the only
+## thing that can evaluate this node's upstream; with no graph editor open it does nothing.
+@export_tool_button("Auto Fit Range") var _auto_btn = _request_auto_fit
+
+
+func _request_auto_fit() -> void:
+	editor_action_requested.emit(&"auto_fit")
 
 
 func auto_fit_range(p_min: float = 0.0, p_max: float = 1.0) -> void:
@@ -74,11 +80,19 @@ func native_lower() -> Dictionary:
 	p[3] = out_max
 	p[4] = 1.0 if bool(clamp_output) else 0.0
 	p[5] = soft_knee
+	# remap_grid reads invert from P[6]; it was never written, so Invert worked on the script route only.
+	p[6] = 1.0 if invert else 0.0
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 0, 1, 2, 3])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"in_min", PortType.FLOAT, &"in_min", 0),
+		Pasture3DGraphPort.value(&"in_max", PortType.FLOAT, &"in_max", 1),
+		Pasture3DGraphPort.value(&"out_min", PortType.FLOAT, &"out_min", 2),
+		Pasture3DGraphPort.value(&"out_max", PortType.FLOAT, &"out_max", 3),
+	]
 
 
 func role() -> Role:
@@ -87,27 +101,6 @@ func role() -> Role:
 
 func needs_grid() -> bool:
 	return false
-
-
-func input_count() -> int:
-	return 5
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "in_min", "in_max", "out_min", "out_max"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.FLOAT, PortType.FLOAT, PortType.FLOAT, PortType.FLOAT])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		1: return in_min
-		2: return in_max
-		3: return out_min
-		4: return out_max
-		_: return 0.0
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, _p_rect: Rect2) -> PackedFloat32Array:

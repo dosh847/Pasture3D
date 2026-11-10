@@ -214,7 +214,7 @@ func _m_wired_mask() -> void:
 		for frozen in [true, false]:
 			var node := _make(&"hydraulic_particle", frozen)
 			node.set("droplet_count", 2000)
-			var built := _graph_with_const(node, 1, 1.0)
+			var built := _graph_with_const(node, node.standard_mask_port(), 1.0)
 			var g: Pasture3DTerrainGraph = built[0]
 			var c: Pasture3DGraphNode = built[1]
 			g.force_gdscript_evaluation = route == "gdscript"
@@ -260,7 +260,7 @@ func _make(p_op: StringName, p_frozen: bool) -> Pasture3DGraphNode:
 
 
 func _graph_with(p_node: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var i_in := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"))
 	var i_n := g.add_node(p_node)
 	var i_out := g.add_node(Pasture3DGraphNodeRegistry.create(&"output"))

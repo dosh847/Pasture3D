@@ -78,8 +78,15 @@ func native_lower() -> Dictionary:
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 1, 2, 3, 4, 6])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"band_min", PortType.FLOAT, &"band_min", 1),
+		Pasture3DGraphPort.value(&"band_max", PortType.FLOAT, &"band_max", 2),
+		Pasture3DGraphPort.value(&"falloff_lo", PortType.FLOAT, &"falloff_lo", 3),
+		Pasture3DGraphPort.value(&"falloff_hi", PortType.FLOAT, &"falloff_hi", 4),
+		Pasture3DGraphPort.value(&"strength", PortType.FLOAT, &"strength", 6),
+	]
 
 
 func role() -> Role:
@@ -93,38 +100,10 @@ func needs_grid() -> bool:
 ## MASK, and it used to say so only through the singular `output_port_type()` while inheriting `[HEIGHT]`
 ## from the plural. The editor colours a socket from the plural and the preview typed it from the
 ## singular, so this node's output port was drawn HEIGHT-blue and rendered as a mask.
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.MASK])
-
-
-func input_count() -> int:
-	return 6
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "band_min", "band_max", "falloff_lo", "falloff_hi", "strength"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.HEIGHT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return band_min
-		2: return band_max
-		3: return falloff_lo
-		4: return falloff_hi
-		5: return strength
-		_: return 0.0
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"out", PortType.MASK),
+	]
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:

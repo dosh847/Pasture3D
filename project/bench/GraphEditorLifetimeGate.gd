@@ -48,7 +48,7 @@ func _ready() -> void:
 # graph no longer has. It is provably "changes nothing the bake would see", so it defaults to false.
 func _b_a_foreign_node_does_not_rebake() -> void:
 	print("[B] a node the graph does not contain does not trigger a bake (§5.1)")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var member := Pasture3DGraphNodeNoise.new()
 	var o := Pasture3DGraphNodeOutput.new()
 	var nodes: Array[Pasture3DGraphNode] = [member, o]
@@ -83,7 +83,7 @@ func _b_a_foreign_node_does_not_rebake() -> void:
 # is not asserted here (see the header); the shape that causes it is, because that is what regresses.
 func _c_the_revision_hook_is_a_named_method() -> void:
 	print("[C] `changed` is wired to a named method, not a self-capturing lambda (§5.2)")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var lambdas := 0
 	var named := 0
 	for c in g.changed.get_connections():
@@ -116,7 +116,7 @@ func _c_the_revision_hook_is_a_named_method() -> void:
 # script failed to load, i.e. a renamed script or a dev-flag script absent from a build.
 func _d_a_null_node_degrades_to_zeros() -> void:
 	print("[D] a null node reachable from the output evaluates to zeros (§5.3)")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n := Pasture3DGraphNodeNoise.new()
 	var fnl := FastNoiseLite.new()
 	fnl.seed = 3
@@ -165,7 +165,7 @@ func _d_a_null_node_degrades_to_zeros() -> void:
 # override does.
 func _e_undo_must_carry_the_output_override() -> void:
 	print("[E] restoring nodes/connections/output_node alone does not restore the output (§5.4)")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var a := Pasture3DGraphNodeNoise.new()
 	var b := Pasture3DGraphNodeNoise.new()
 	var c := Pasture3DGraphNodeNoise.new()

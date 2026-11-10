@@ -86,6 +86,15 @@ func _clear_solver_cache() -> void:
 	emit_changed()
 
 
+## Drop the frozen solve WITHOUT emitting `changed`, so the next evaluation re-solves. For a host whose graph
+## parameter moved (Pasture3DNodeGraph._on_override_changed): the graph is shared, and emitting would re-bake,
+## and stale-flag, every other host of it for a value only this one changed.
+func forget_solve() -> void:
+	_cache.clear()
+	_dirty_since_bake = false
+	_stale = false
+
+
 ## Call from a parameter setter: a frozen solve no longer reflects the parameters, and must say so.
 func mark_dirty_since_bake() -> void:
 	if not _cache.is_empty():

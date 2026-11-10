@@ -94,7 +94,9 @@ func _test_b_talus_projection_parity() -> void:
 	var mask := PackedFloat32Array()
 	mask.resize(n)
 	for i in range(n):
-		mask[i] = 1.0 if (i % gw < gw / 2) else 0.5
+		# All ones: the dev twin lost its `mask` in ports spec P5 (the primary never had the port), so the
+		# kernel's mask argument is checked at its only reachable value.
+		mask[i] = 1.0
 
 	var rect := Rect2(-100, -100, 200, 200)
 	var node := Pasture3DGraphNodeDevTalusProjection.new()
@@ -103,7 +105,7 @@ func _test_b_talus_projection_parity() -> void:
 	node.transfer_rate = 0.5
 	node.amount = 0.85
 
-	var gd_res: PackedFloat32Array = node._eval_grid_gdscript(surf, mask, gw, gh, rect)
+	var gd_res: PackedFloat32Array = node._eval_grid_gdscript(surf, gw, gh, rect)
 	var cpp_res: PackedFloat32Array = Pasture3DUtil.talus_projection_grid(surf, mask, gw, gh, rect, 35.0, 12, 0.5, 0.85)
 
 	_assert_max_diff("Talus projection height", cpp_res, gd_res)
@@ -127,7 +129,7 @@ func _test_c_spectral_equalizer_parity() -> void:
 	node.meso_passes = 3
 	node.amount = 0.9
 
-	var gd_res: PackedFloat32Array = node._eval_grid_gdscript(surf, mask, gw, gh)
+	var gd_res: PackedFloat32Array = node._eval_grid_gdscript(surf, gw, gh)
 	var cpp_res: PackedFloat32Array = Pasture3DUtil.spectral_equalizer_grid(surf, mask, gw, gh, 1.5, 0.8, 2.0, 12, 3, 0.9)
 
 	_assert_max_diff("Spectral equalizer height", cpp_res, gd_res)
@@ -217,7 +219,7 @@ func _run_benchmarks() -> void:
 		node.macro_passes = 12; node.meso_passes = 3; node.amount = 0.9
 
 		var t0 := Time.get_ticks_usec()
-		node._eval_grid_gdscript(surf, mask, sz, sz)
+		node._eval_grid_gdscript(surf, sz, sz)
 		var t_gd := (Time.get_ticks_usec() - t0) / 1000.0
 
 		var t1 := Time.get_ticks_usec()

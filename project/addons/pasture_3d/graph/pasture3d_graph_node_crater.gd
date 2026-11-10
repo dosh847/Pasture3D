@@ -74,8 +74,13 @@ func native_lower() -> Dictionary:
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([0, 1, 2, 3])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.value(&"amplitude", PortType.FLOAT, &"amplitude", 0),
+		Pasture3DGraphPort.value(&"floor_depth", PortType.FLOAT, &"floor_depth", 1),
+		Pasture3DGraphPort.value(&"rim_height", PortType.FLOAT, &"rim_height", 2),
+		Pasture3DGraphPort.value(&"rim_width", PortType.FLOAT, &"rim_width", 3),
+	]
 
 
 func role() -> Role:
@@ -84,32 +89,6 @@ func role() -> Role:
 
 func needs_grid() -> bool:
 	return true
-
-
-func input_count() -> int:
-	return 4
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["amplitude", "floor_depth", "rim_height", "rim_width"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return amplitude
-		1: return floor_depth
-		2: return rim_height
-		3: return rim_width
-		_: return 0.0
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:

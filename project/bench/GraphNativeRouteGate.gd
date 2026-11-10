@@ -193,7 +193,7 @@ func _recast_cliff() -> Pasture3DGraphNode:
 ## else entirely. Same two claims, different wiring.
 func _check_generator(p_name: String, p_node: Pasture3DGraphNode) -> void:
 	print("[%s]" % p_name)
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [p_node, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
 	g.connections = [PackedInt32Array([0, 0, 1, 0])]
@@ -298,7 +298,7 @@ func _depth_field() -> PackedFloat32Array:
 
 # --- helpers ------------------------------------------------------------------------------------------
 func _build_graph(p_mid: Array) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new()]
 	for mnode in p_mid:
 		nodes.append(mnode)

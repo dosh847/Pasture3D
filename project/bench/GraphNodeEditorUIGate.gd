@@ -15,7 +15,7 @@ func _ready() -> void:
 	editor.set_script(editor_script)
 	add_child(editor)
 
-	var graph = Pasture3DTerrainGraph.new()
+	var graph = Pasture3DTerrainGraph.create_empty()
 	editor.graph = graph
 
 	for entry in entries:
@@ -74,7 +74,7 @@ Testing standalone evaluate for all nodes...")
 		if node == null:
 			continue
 
-		var test_graph := Pasture3DTerrainGraph.new()
+		var test_graph := Pasture3DTerrainGraph.create_empty()
 		var out_node := Pasture3DGraphNodeOutput.new()
 		test_graph.nodes = [node, out_node]
 		test_graph.connections = [PackedInt32Array([0, 0, 1, 0])]

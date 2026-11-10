@@ -138,6 +138,18 @@ func _max_bake_scale_index() -> int:
 ## so this is that button scoped to this Layer.
 @export_tool_button("Bake All Brushes") var _bake_all_btn = bake_all_brushes
 
+## Empty this Layer's rows and drop its members' caches without re-baking: the way to get rid of height a
+## removed or moved brush left behind. Bake All Brushes paints the members back from scratch.
+@export_tool_button("Clear Layer Data") var _clear_layer_btn = _clear_layer_button
+
+
+func _clear_layer_button() -> void:
+	var dock = Engine.get_meta("pasture3d_layers_dock") if Engine.has_meta("pasture3d_layers_dock") else null
+	if dock != null and is_instance_valid(dock) and dock.has_method("clear_layer_brush"):
+		dock.clear_layer_brush(self)
+	else:
+		clear_layer_data()
+
 ## The last Bake All Brushes run's report. Not stored in the scene: it describes a run, not a setting. Set by
 ## both entry points, so the editor button and a script see the same thing.
 var last_bake_report: Dictionary = {}
@@ -501,6 +513,38 @@ func rebuild_layer() -> void:
 		bake_layer_run(false)
 	else:
 		bake_layer(false)
+
+
+## Wipe both rows of this Layer and drop every cache that could paint them back, WITHOUT re-baking. Unlike
+## `rebuild_layer`, which repaints the members straight away (and so serves a frozen solve or a stale stamp
+## right back into the rows), this leaves the Layer empty until Bake All Brushes or the next edit. Undo
+## lives with the caller (the Layers dock snapshots the tiles), so this is the bare operation.
+func clear_layer_data() -> void:
+	if not is_configured() or _layer_run_active or _erosion_running:
+		return
+	ensure_rows()
+	var stack := _stack()
+	if stack == null:
+		return
+	for b in ([self] as Array) + members():
+		if not is_instance_valid(b):
+			continue
+		b.clear_erosion_caches()
+		b.clear_relief_growth()
+		b._stamp_cache.clear()
+		b._curve_cache.clear()
+	var regions := {}
+	for i in _owned_row_indices():
+		var l := stack.get_layer(i)
+		for loc in l.get_region_locations():
+			regions[loc] = true
+		l.set_tiles({})
+	_base_key = ""
+	_base_box = AABB()
+	_base_change = AABB()
+	for loc in regions:
+		terrain.data.composite_region(loc, Rect2i(), false)
+	terrain.data.update_maps()
 
 
 func refresh(record_undo: bool = false) -> void:

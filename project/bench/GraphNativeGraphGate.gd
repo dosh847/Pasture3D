@@ -74,7 +74,7 @@ func _c_add_over_surface() -> void:
 	print("[C] Input -> Blend(ADD) <- Noise -> Output: native == oracle (adds noise over surface)")
 	var noise := _make_noise(7, 0.05)
 	# 0 Input, 1 Noise, 2 Blend(ADD)[a=Input,b=Noise], 3 Output.
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _noise(noise, 6.0),
 		_blend(Pasture3DGraphNodeBlend.Mode.ADD), Pasture3DGraphNodeOutput.new()]
@@ -92,7 +92,7 @@ func _c_add_over_surface() -> void:
 # --- D. A generator with a grid barrier (no Input): Noise -> Smooth -> Output --------------------------
 func _d_generator_with_grid_barrier() -> void:
 	print("[D] Noise -> Smooth -> Output (no Input): native == oracle")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var sm := Pasture3DGraphNodeSmooth.new(); sm.passes = 2
 	var nodes: Array[Pasture3DGraphNode] = [_noise(_make_noise(3, 0.06), 9.0), sm, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
@@ -115,7 +115,7 @@ func _e_structure_and_scope() -> void:
 	if not g.native_supported() or g.compile_graph_program().is_empty():
 		_fail += 1; print("    !! a fully supported graph did not lower")
 	# CONTROL: a cycle refuses to lower and is not native-supported.
-	var cyc := Pasture3DTerrainGraph.new()
+	var cyc := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		_blend(Pasture3DGraphNodeBlend.Mode.ADD), Pasture3DGraphNodeOutput.new()]
 	cyc.nodes = nodes
@@ -150,7 +150,7 @@ func _native(p_g: Pasture3DTerrainGraph, p_surf: PackedFloat32Array) -> PackedFl
 
 ## Input(0) -> [mid nodes chained] -> Output(last).
 func _io(p_mid: Array) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new()]
 	for m in p_mid:
 		nodes.append(m)

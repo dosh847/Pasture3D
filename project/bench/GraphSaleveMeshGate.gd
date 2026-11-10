@@ -121,8 +121,10 @@ func _e_lowering() -> void:
 	node.warp_size = 40.0
 	node.rim_width = 7.5
 	node.outlet_level = 0.125
+	node.channel_area = 640.0
+	node.valley_smoothing = 12.5
 	var ext: PackedFloat32Array = node.native_lower().get("lut", PackedFloat32Array())
-	var want := PackedFloat32Array([4321.0, 3.5, 0.0, 0.0, 2.25, 40.0, 7.5, 0.125])
+	var want := PackedFloat32Array([4321.0, 3.5, 0.0, 0.0, 2.25, 40.0, 7.5, 0.125, 640.0, 12.5])
 	print("    lut %s (want %s)" % [ext, want])
 	node.warp_size = 41.0
 	var moved: PackedFloat32Array = node.native_lower().get("lut", PackedFloat32Array())
@@ -140,7 +142,7 @@ func _e_lowering() -> void:
 func _f_native_route() -> void:
 	print("
 [F] the compiled program reads the LUT (native route == dictionary route)")
-	var graph := Pasture3DTerrainGraph.new()
+	var graph := Pasture3DTerrainGraph.create_empty()
 	var cone = Pasture3DGraphNodeRegistry.create(&"mountain_cone")
 	var node = Pasture3DGraphNodeRegistry.create(&"hydraulic_saleve")
 	node.control_points = 2500

@@ -1,0 +1,69 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="4_4khcl"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="4_6pcwc"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="6_ii4qc"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="7_wv1iv"]
+[ext_resource type="Script" uid="uid://fl2f2iwtn1vv" path="res://addons/pasture_3d/graph/pasture3d_graph_path.gd" id="18_ddf1r"]
+[ext_resource type="Script" uid="uid://t26vuji0r8wf" path="res://addons/pasture_3d/graph/pasture3d_graph_node_spline_source.gd" id="19_vfv27"]
+[ext_resource type="Script" uid="uid://5s5nj7du18rp" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_carve.gd" id="20_cyndd"]
+[ext_resource type="Script" uid="uid://d3p6vrby77tq" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_resample.gd" id="22_cyndd"]
+[ext_resource type="Script" uid="uid://cnx7rm2l1gvp2" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_drape.gd" id="26_fdeh7"]
+
+[sub_resource type="Resource" id="Resource_enavu"]
+script = ExtResource("4_6pcwc")
+graph_position = Vector2(-300, 80)
+
+[sub_resource type="Resource" id="Resource_bg7w4"]
+script = ExtResource("18_ddf1r")
+points = PackedVector2Array(392.6773, 115.527145, 238.80637, 93.45754, 131.38019, 113.76169)
+half_widths = PackedFloat32Array(8, 8, 8)
+heights = PackedFloat32Array(25.14283, 19.144005, 11.639793)
+source_label = "Trough2/Bed"
+sample_half_widths = PackedFloat32Array()
+sample_shoulders = PackedFloat32Array()
+sample_verges = PackedFloat32Array()
+sample_suppress = PackedByteArray()
+sample_skip = PackedByteArray()
+
+[sub_resource type="Resource" id="Resource_ue3bv"]
+script = ExtResource("19_vfv27")
+path = SubResource("Resource_bg7w4")
+graph_position = Vector2(-720, 240)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_p8a78"]
+script = ExtResource("20_cyndd")
+cross_section = 1
+offset = 6.0
+flat_width = 4.0
+flank_mode = 1
+width_source = 1
+width = 20.0
+blend = 2
+graph_position = Vector2(500, 20)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_llyc4"]
+script = ExtResource("6_ii4qc")
+graph_position = Vector2(980, 20)
+
+[sub_resource type="Resource" id="Resource_pmwfd"]
+script = ExtResource("26_fdeh7")
+force_downhill = true
+graph_position = Vector2(140, 220)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_lrpqy"]
+script = ExtResource("22_cyndd")
+step = 8.0
+graph_position = Vector2(-300, 260)
+preview_on = true
+
+[resource]
+script = ExtResource("7_wv1iv")
+format_version = 3
+nodes = Array[ExtResource("4_4khcl")]([SubResource("Resource_enavu"), SubResource("Resource_ue3bv"), SubResource("Resource_p8a78"), SubResource("Resource_llyc4"), SubResource("Resource_pmwfd"), SubResource("Resource_lrpqy")])
+wires = [[0, &"height", 2, &"surface"], [2, &"height", 3, &"result"], [0, &"height", 4, &"surface"], [4, &"path", 2, &"path"], [1, &"path", 5, &"path"], [5, &"path", 4, &"path"]]
+output_node = 3
+metadata/_editor_selected_node = 4

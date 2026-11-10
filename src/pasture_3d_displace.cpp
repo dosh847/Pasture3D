@@ -9,9 +9,13 @@
 
 using namespace godot;
 
+// The SAME epsilon as GRADIENT_EPSILON in pasture_3d_warp_downslope.cpp: below it the uphill direction is
+// numerical noise.
+static constexpr double SLOPE_EPSILON = 1.0e-4;
+
 PackedFloat32Array godot::displace_solve(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_dx,
 		const PackedFloat32Array &p_dy, const PackedFloat32Array &p_mask, int p_gw, int p_gh,
-		const Rect2 &p_rect, double p_scale, double p_amount) {
+		const Rect2 &p_rect, double p_scale, double p_amount, int p_direction) {
 	const int n = p_gw * p_gh;
 	PackedFloat32Array out;
 	if (p_gw <= 0 || p_gh <= 0 || p_surface.size() != n) {
@@ -48,11 +52,35 @@ PackedFloat32Array godot::displace_solve(const PackedFloat32Array &p_surface, co
 					const double m = (double)mk[i];
 					w *= std::isfinite(m) ? std::clamp(m, 0.0, 1.0) : 0.0;
 				}
-				const double ux = ox_f ? (double)ox_f[i] : 0.0;
-				const double uz = oz_f ? (double)oz_f[i] : 0.0;
+				double ux = ox_f ? (double)ox_f[i] : 0.0;
+				double uz = oz_f ? (double)oz_f[i] : 0.0;
 				if (w <= 0.0 || !std::isfinite(ux) || !std::isfinite(uz)) {
 					dst[i] = (float)z;
 					continue;
+				}
+				if (p_direction == 1) {
+					// SLOPE: rotate the offset into the surface's frame. Central differences, one-sided at
+					// the edge -- the stencil Warp Downslope uses.
+					const int xm = std::max(ix - 1, 0), xp = std::min(ix + 1, p_gw - 1);
+					const int zm = std::max(iz - 1, 0), zp = std::min(iz + 1, p_gh - 1);
+					const double sxm = src[iz * p_gw + xm], sxp = src[iz * p_gw + xp];
+					const double szm = src[zm * p_gw + ix], szp = src[zp * p_gw + ix];
+					if (!std::isfinite(sxm) || !std::isfinite(sxp) || !std::isfinite(szm) || !std::isfinite(szp)) {
+						dst[i] = (float)z;
+						continue;
+					}
+					const double gx = (xp > xm) ? (sxp - sxm) / ((double)(xp - xm) * dx) : 0.0;
+					const double gz = (zp > zm) ? (szp - szm) / ((double)(zp - zm) * dz) : 0.0;
+					const double mag = std::sqrt(gx * gx + gz * gz);
+					if (mag <= SLOPE_EPSILON) {
+						dst[i] = (float)z;
+						continue;
+					}
+					const double tx = gx / mag, tz = gz / mag;
+					// Reading UPHILL brings higher ground down onto this cell: the slope moves outward.
+					const double along = ux, across = uz;
+					ux = along * tx - across * tz;
+					uz = along * tz + across * tx;
 				}
 				// The offset is METRES, converted to cells for the tap. Offsetting in cells would make the
 				// same dx field push further every time the bake resolution rose.

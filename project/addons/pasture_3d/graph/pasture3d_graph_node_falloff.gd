@@ -84,8 +84,13 @@ func native_lower() -> Dictionary:
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 5, 3, -1])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"strength", PortType.FLOAT, &"strength", 5),
+		Pasture3DGraphPort.value(&"radius", PortType.FLOAT, &"radius", 3),
+		Pasture3DGraphPort.field(&"noise", PortType.HEIGHT).as_aux(),
+	]
 
 
 func role() -> Role:
@@ -94,37 +99,6 @@ func role() -> Role:
 
 func needs_grid() -> bool:
 	return false
-
-
-func input_count() -> int:
-	return 4
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "strength", "radius", "noise"])
-
-
-func aux_grid_port() -> int:
-	return 3 # "noise" -- a distance-perturbation field, not a mask
-
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.HEIGHT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.HEIGHT,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return strength
-		2: return radius
-		3: return 0.0
-		_: return 0.0
 
 
 ## The 0..1 attenuation at a world point. Shared by eval_cell and by the gate, so a criterion that checks

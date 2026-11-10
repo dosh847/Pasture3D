@@ -191,7 +191,7 @@ func _graph(p_op: StringName, p_frozen: bool) -> Pasture3DTerrainGraph:
 ## Input -> solver -> Output. The Input node matters: these are filters over a surface, and a graph that
 ## reads no surface would let a solver look correct while ignoring the thing it is meant to act on.
 func _graph_with(p_node: Pasture3DGraphNode) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var i_in := g.add_node(Pasture3DGraphNodeRegistry.create(&"input"))
 	var i_n := g.add_node(p_node)
 	var i_out := g.add_node(Pasture3DGraphNodeRegistry.create(&"output"))

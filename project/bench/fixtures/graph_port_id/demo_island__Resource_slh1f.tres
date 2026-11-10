@@ -1,0 +1,84 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="4_ff8bn"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="5_hur8n"]
+[ext_resource type="Script" uid="uid://fl2f2iwtn1vv" path="res://addons/pasture_3d/graph/pasture3d_graph_path.gd" id="8_ff8bn"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="8_m7f8t"]
+[ext_resource type="Script" uid="uid://t26vuji0r8wf" path="res://addons/pasture_3d/graph/pasture3d_graph_node_spline_source.gd" id="9_hur8n"]
+[ext_resource type="Script" uid="uid://rqm81y572bqi" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_fractalize.gd" id="9_l4h5e"]
+[ext_resource type="Script" uid="uid://c85myeafjuo6g" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_meanderize.gd" id="9_lmt3e"]
+[ext_resource type="Script" uid="uid://ba4778g8emikc" path="res://addons/pasture_3d/graph/pasture3d_graph_node_leveler.gd" id="9_yof5q"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="10_p4out"]
+[ext_resource type="Script" uid="uid://d3p6vrby77tq" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_resample.gd" id="11_lmt3e"]
+
+[sub_resource type="Resource" id="Resource_4img5"]
+script = ExtResource("5_hur8n")
+graph_position = Vector2(-440, 60)
+
+[sub_resource type="Resource" id="Resource_lhpge"]
+script = ExtResource("8_m7f8t")
+graph_position = Vector2(520, 60)
+
+[sub_resource type="Resource" id="Resource_7kbp8"]
+script = ExtResource("9_yof5q")
+mode = 1
+feather_side = 1
+feather = 300.0
+path_width_scale = 100.0
+wall_depth = 50.0
+graph_position = Vector2(60, 100)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_p4out"]
+script = ExtResource("8_ff8bn")
+points = PackedVector2Array(-614.51105, 9.549316, -357.29413, -150.56027, -327.19302, -516.2191, -185.65352, -715.3364, 35.82495, -700.2245, 247.15558, -454.24088, 462.64124, -579.4906, 272.98987, -865.7379, 936.2432, -1312.276, 641.21893, -1614.0234, 401.72412, -1500.8685, 323.01007, -1885.5529, 93.092285, -1679.1794, -276.63217, -1568.7283, -464.6325, -1852.662, -721.19495, -1631.619, -1037.9944, -1998.6359, -1607.1824, -1928.4984, -1287.5133, -759.0294, -1188.4287, -291.52017, -903.43945, 518.3517, -1143.5924, 1010.2428, -1008.9799, 1928.2375, -610.3425, 2189.468, -120.34387, 2051.6145, 511.617, 1876.326, 575.08966, 1572.9292, 845.6611, 1510.9131, 1040.6858, 1713.0674, 1042.4956, 1409.8927, 883.2653, 1123.8319, 799.3016, 753.3181, 906.0997, 413.38232, 1169.675, 173.67444, 1524.0989, 284.45435, 1386.709, -8.985962, 1198.6284, -87.30353, 772.34467, 170.49031, 514.45184, 363.1171, 636.55975, 452.7248, 496.90033, 752.2138, 254.00873, 854.01465, 16.570435, 1036.3796, -415.359, 898.13135, -636.9426, 558.6739, -596.7398, 253.34729)
+half_widths = PackedFloat32Array(25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25)
+heights = PackedFloat32Array(34.87588, 51.128075, 51.113617, 51.381466, 51.308483, 51.336426, 52.533035, 38.426933, 1.6700058, 1.4027214, 51.502308, 1.2004929, 46.280502, 50.20802, 42.67968, 49.56661, 31.090693, 8.165508, 51.794872, 40.10144, 51.60724, 33.84069, 43.779, 22.409409, 1.2632942, 46.14677, 45.239357, 73.01214, 50.58742, 49.97204, 39.706177, 46.293983, 48.59536, 50.89644, 8.8052635, 3.5512962, 42.86126, 51.693226, 51.310417, 70.34323, 56.24195, 50.89046, 56.44394, 54.351284, 51.60813, 42.682423)
+closed = true
+source_label = "IslandBase/IslandSpline"
+sample_half_widths = PackedFloat32Array()
+sample_shoulders = PackedFloat32Array()
+sample_verges = PackedFloat32Array()
+sample_suppress = PackedByteArray()
+sample_skip = PackedByteArray()
+
+[sub_resource type="Resource" id="Resource_lmt3e"]
+script = ExtResource("9_hur8n")
+spline_key = "IslandBase/IslandSpline"
+path = SubResource("Resource_p4out")
+graph_position = Vector2(-1160, 280)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_yof5q"]
+script = ExtResource("9_lmt3e")
+wavelength = 300.0
+amplitude = 60.0
+ratio = 0.097
+noise_ratio = 0.187
+graph_position = Vector2(-320, 540)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_m7f8t"]
+script = ExtResource("9_l4h5e")
+wavelength = 220.0
+iterations = 5
+sigma = 40.0
+persistence = 0.878
+seed = 97668
+pin_ends = false
+graph_position = Vector2(-360, 240)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_kfedv"]
+script = ExtResource("11_lmt3e")
+step = 25.0
+graph_position = Vector2(-800, 220)
+preview_on = true
+
+[resource]
+script = ExtResource("10_p4out")
+format_version = 3
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_7kbp8"), SubResource("Resource_lmt3e"), SubResource("Resource_yof5q"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv")])
+wires = [[0, &"height", 2, &"height"], [2, &"height", 1, &"result"], [3, &"path", 4, &"path"], [5, &"path", 2, &"loop"], [3, &"path", 6, &"path"], [6, &"path", 5, &"path"], [0, &"footprint", 2, &"area"]]
+output_node = 1
+metadata/_editor_selected_node = 1

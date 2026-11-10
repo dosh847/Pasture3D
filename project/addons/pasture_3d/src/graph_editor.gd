@@ -21,7 +21,7 @@ const PORT_COLORS: Array[Color] = [
 	Color(0.10, 0.35, 0.70), # 5: INT (#1a59b3) - Navy. Was cobalt, 0.24 from HEIGHT's sky blue
 	Color(1.00, 0.42, 0.51), # 6: COLOR (#ff6b81) - Magenta/Pink
 	Color(0.66, 0.90, 0.81), # 7: BOOL (#a8e6cf) - Lime Yellow
-	Color(0.62, 0.42, 0.28), # 8: TERRAIN_BUS (#9e6b47) - Bronze. Was gold, 0.17 from MASK's amber (GraphPortTypeGate [G])
+	Color(0.62, 0.42, 0.28), # 8: TERRAIN_BUS, retired, slot kept (#9e6b47) - Bronze. Was gold, 0.17 from MASK's amber (GraphPortTypeGate [G])
 	Color(0.35, 0.40, 0.45), # 9: PATH (#596673) - Dark Slate: road-coloured, and the only non-field port. Was a light slate within 0.3 of three pastels
 	Color(0.65, 0.85, 0.25), # 10: FIELD (#a6d940) - Yellow-Green: an unsigned quantity, not a mask
 	Color(0.86, 0.20, 0.24), # 11: SIGNED (#db333d) - Crimson: signed, so zero is mid-ramp. Was magenta, 0.29 from COLOR's pink
@@ -60,6 +60,18 @@ var _brush_details_button: Button
 var _host_label: Label
 var _graph_picker: OptionButton
 var _hint: Label
+var _group_sub_button: Button
+var _ungroup_button: Button
+
+# ---- Subgraph navigation (ports spec §11.5) ----------------------------------------------------------
+# Double-clicking a Subgraph node opens its child IN THIS PANEL; the breadcrumb leads back. Each entry is the
+# graph that was on screen and the host it was shown through, restored as it was on the way back out.
+var _graph_stack: Array = []
+var _crumb_bar: HBoxContainer
+## Set while the breadcrumb itself is switching graphs, so `edit_graph` keeps the trail.
+var _navigating := false
+## What the last Group or Ungroup refused or changed, for the gates.
+var last_group_report: Dictionary = {}
 
 var _last_structure_hash: int = 0
 
@@ -80,6 +92,9 @@ var _pending_drag_connection: Dictionary = {}
 # (Pasture3DUtil.graph_eval_grid_taps), over a fixed canonical domain that never depends on the brush. So a
 # refresh costs a single eval regardless of how many previews are open, it runs off the main thread, and
 # toggling a preview is a pure show/hide of an already-built TextureRect that never triggers evaluation.
+const NO_GRAPH_HINT := "No graph open. Select a Pasture3DTerrainGraph (or a graph modifier) and press " \
+		+ "\"Edit in Graph Editor\"."
+
 const PREVIEW_SIZE: int = 128
 ## The floor the 1:4 option may not go under. Below this a hillshade is no longer a picture of a terrain,
 ## it is four grey squares, and an option that produces nothing legible is worse than no option.
@@ -159,6 +174,9 @@ func edit_graph(p_graph: Pasture3DTerrainGraph, p_mod: Pasture3DNodeGraph = null
 	if graph == p_graph:
 		_on_graph_changed()
 		return
+	if not _navigating:
+		# Opened from outside (the Inspector, the picker): a new root, so the trail no longer leads anywhere.
+		_graph_stack.clear()
 	if graph != null and graph.changed.is_connected(_on_graph_changed):
 		graph.changed.disconnect(_on_graph_changed)
 	if graph != null and graph.has_signal(&"structure_changed") and graph.structure_changed.is_connected(_on_graph_changed):
@@ -166,6 +184,7 @@ func edit_graph(p_graph: Pasture3DTerrainGraph, p_mod: Pasture3DNodeGraph = null
 	if graph != null and graph.has_meta(&"_editor_selected_node"):
 		graph.set_meta(&"_editor_selected_node", -1)
 	graph = p_graph
+	_refresh_crumbs()
 	_preview_color_roots.clear()
 	_preview_blend_mask_slot.clear()
 	if graph != null:
@@ -245,20 +264,22 @@ func _refresh_nodes_state() -> void:
 			gn.modulate = Color.WHITE
 
 
-func _auto_fit_node_range(p_index: int) -> void:
-	if graph == null or p_index < 0 or p_index >= graph.nodes.size():
-		return
-	var node: Pasture3DGraphNode = graph.nodes[p_index]
-	if node == null:
-		return
-	
-	# Find what is wired into input port 0 of this node
+## The field wired into input `p_port` of node `p_index`, evaluated at preview resolution over the preview
+## rect; the brush input itself when nothing is wired to port 0, and an EMPTY array when nothing is wired
+## to any other port (an unwired selection is "every cell", not the brush input). `evaluate` serves a root's
+## channel 0 only, so a wire from a SECONDARY output answers empty with a warning rather than measuring the
+## source's height in place of its flow.
+func _upstream_field(p_index: int, p_port: int = 0) -> PackedFloat32Array:
 	var src_node := -1
+	var src_port := 0
 	for c in graph.connections:
-		if int(c[2]) == p_index and int(c[3]) == 0:
+		if int(c[2]) == p_index and int(c[3]) == p_port:
 			src_node = int(c[0])
+			src_port = int(c[1])
 			break
-			
+	if src_node < 0 and p_port != 0:
+		return PackedFloat32Array()
+
 	var input_data := _get_preview_input_data(PREVIEW_SIZE)
 	var in_grid: PackedFloat32Array = input_data.get("grid", PackedFloat32Array())
 	var in_gw: int = input_data.get("gw", 0)
@@ -272,15 +293,30 @@ func _auto_fit_node_range(p_index: int) -> void:
 	else:
 		sample_input = Pasture3DUtil.sample_brush_input(PREVIEW_SIZE, PREVIEW_SIZE, in_rect)
 		
-	var field: PackedFloat32Array
-	if src_node >= 0:
-		# Previews resolve their scene-naming sources too, or a road in a graph previews as the unreachable
-		# fill and reads as a broken node rather than as an unresolved one.
-		Pasture3DGraphSources.resolve(graph, host_brush)
-		field = graph.evaluate(PREVIEW_SIZE, PREVIEW_SIZE, in_rect, null, sample_input, src_node)
-	else:
-		field = sample_input
-		
+	if src_node < 0:
+		return sample_input
+	# Previews resolve their scene-naming sources too, or a road in a graph previews as the unreachable
+	# fill and reads as a broken node rather than as an unresolved one.
+	Pasture3DGraphSources.resolve(graph, host_brush)
+	_stamp_host_params()
+	if src_port > 0:
+		push_warning("Pasture3D: cannot measure '%s' output %d in the preview (secondary outputs are not "
+				% [graph.nodes[src_node].display_name(), src_port]
+				+ "previewable). Wire a Measure node to it instead.")
+		return PackedFloat32Array()
+	return graph.evaluate(PREVIEW_SIZE, PREVIEW_SIZE, in_rect, null, sample_input, src_node)
+
+
+func _auto_fit_node_range(p_index: int) -> void:
+	if graph == null or p_index < 0 or p_index >= graph.nodes.size():
+		return
+	var node: Pasture3DGraphNode = graph.nodes[p_index]
+	if node == null:
+		return
+	var field := _upstream_field(p_index, 0)
+	if field.is_empty():
+		return # unmeasurable (already warned); writing the 0..100 fallback would look like a fit
+
 	var min_val := INF
 	var max_val := -INF
 	for v in field:
@@ -296,7 +332,7 @@ func _auto_fit_node_range(p_index: int) -> void:
 		max_val = ceilf(max_val * 10.0) / 10.0
 		
 	_ur_create_action("Auto Fit Range")
-	if node.op() == &"curve":
+	if node.op() == &"curve" or node.op() == &"value_ramp" or node.op() == &"dev_value_ramp":
 		_ur_add_do_property(node, &"input_min", min_val)
 		_ur_add_do_property(node, &"input_max", max_val)
 		_ur_add_undo_property(node, &"input_min", node.get("input_min"))
@@ -308,6 +344,47 @@ func _auto_fit_node_range(p_index: int) -> void:
 		_ur_add_undo_property(node, &"in_max", node.get("in_max"))
 	_ur_commit()
 	_refresh_nodes_state()
+
+
+## Measure's Capture: measure the upstream field (and its selection) in the preview, through the node's own
+## `measure`, write Locked A/B and lock it -- one undo step.
+func _capture_measure(p_index: int) -> void:
+	if graph == null or p_index < 0 or p_index >= graph.nodes.size():
+		return
+	var node := graph.nodes[p_index] as Pasture3DGraphNodeMeasure
+	if node == null:
+		return
+	# An unwired `in` is the zero field in the graph, so it is the zero field here too -- not the brush input
+	# Auto Fit falls back to, which would capture numbers the live node never produces.
+	var wired_in := false
+	for c in graph.connections:
+		if int(c[2]) == p_index and int(c[3]) == 0:
+			wired_in = true
+			break
+	var field := _upstream_field(p_index, 0) if wired_in else Pasture3DGraphOps.zeros(PREVIEW_SIZE * PREVIEW_SIZE)
+	if field.is_empty():
+		return
+	var r: PackedFloat64Array = node.measure(field, _upstream_field(p_index, 1))
+	_ur_create_action("Capture Measure")
+	for pair in [[&"locked_a", r[0]], [&"locked_b", r[1]], [&"locked", true]]:
+		_ur_add_do_property(node, pair[0], pair[1])
+		_ur_add_undo_property(node, pair[0], node.get(pair[0]))
+	_ur_commit()
+	_refresh_nodes_state()
+
+
+## The inspector half of Auto Fit and Capture: a node cannot evaluate its upstream, so its tool button emits
+## `editor_action_requested` and this answers it. Looked up by identity, because an index bound at connect
+## time goes stale the moment a node above it is deleted.
+func _on_node_editor_action(p_action: StringName, p_node: Pasture3DGraphNode) -> void:
+	if graph == null:
+		return
+	var idx := graph.nodes.find(p_node)
+	if idx < 0:
+		return
+	match p_action:
+		&"auto_fit": _auto_fit_node_range(idx)
+		&"capture": _capture_measure(idx)
 
 
 func _find_brush_for_modifier(p_mod: Pasture3DNodeGraph) -> Pasture3DTerrainBrush:
@@ -387,6 +464,21 @@ func host_ambiguous() -> bool:
 	if host_brush != null or host_modifier != null:
 		return false
 	return _host_candidate_count > 1
+
+
+## Stamp the host's graph parameter values before a preview compiles or evaluates (ports spec §10), and
+## listen to that host for value edits: those move the previews and emit nothing on the graph, so
+## `_on_graph_changed` never hears them. No host stamps nothing, which reads every declared default.
+func _stamp_host_params() -> void:
+	if graph == null:
+		return
+	var m := _find_host_modifier()
+	if m == null:
+		graph.set_host_params({})
+		return
+	if not m.params_edited.is_connected(_schedule_preview_refresh):
+		m.params_edited.connect(_schedule_preview_refresh)
+	m.stamp_params()
 
 
 func _find_host_modifier() -> Pasture3DNodeGraph:
@@ -694,6 +786,10 @@ func _build_ui() -> void:
 	
 	var bar := HBoxContainer.new()
 	add_child(bar)
+
+	_crumb_bar = HBoxContainer.new()
+	_crumb_bar.visible = false
+	bar.add_child(_crumb_bar)
 	
 	_add_button = Button.new()
 	_add_button.text = "Add Node"
@@ -725,6 +821,19 @@ func _build_ui() -> void:
 	_frame_button.tooltip_text = "Group selected nodes into a visual GraphFrame (Ctrl+J or C)"
 	_frame_button.pressed.connect(group_selected_in_frame)
 	bar.add_child(_frame_button)
+
+	_group_sub_button = Button.new()
+	_group_sub_button.text = "Group Subgraph"
+	_group_sub_button.tooltip_text = ("Move the selected nodes into a new child graph behind one Subgraph node; "
+			+ "wires crossing the selection become its ports (Ctrl+G)")
+	_group_sub_button.pressed.connect(group_selected_into_subgraph)
+	bar.add_child(_group_sub_button)
+
+	_ungroup_button = Button.new()
+	_ungroup_button.text = "Ungroup"
+	_ungroup_button.tooltip_text = "Replace the selected Subgraph node with its child's nodes (Ctrl+Shift+G)"
+	_ungroup_button.pressed.connect(ungroup_selected_subgraph)
+	bar.add_child(_ungroup_button)
 
 	_minimap_button = Button.new()
 	_minimap_button.text = "Minimap"
@@ -828,8 +937,7 @@ func _build_ui() -> void:
 	add_child(_search_dialog)
 
 	_hint = Label.new()
-	_hint.text = "No graph open. Select a Pasture3DTerrainGraph (or a graph modifier) and press " \
-			+ "\"Edit in Graph Editor\"."
+	_hint.text = NO_GRAPH_HINT
 	_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_graphedit.add_child(_hint)
 
@@ -928,15 +1036,22 @@ func _rebuild() -> void:
 	if _add_button != null: _add_button.disabled = not has
 	if _presets_button != null: _presets_button.disabled = not has
 	if _frame_button != null: _frame_button.disabled = not has
+	if _group_sub_button != null: _group_sub_button.disabled = not has
+	if _ungroup_button != null: _ungroup_button.disabled = not has
 	if _minimap_button != null: _minimap_button.disabled = not has
 	if _arrange_button != null: _arrange_button.disabled = not has
 	var mod := _find_host_modifier()
 	var brush := _find_host_brush()
+	# A graph in a format this plugin does not read is NOT drawn. Its wires are port indices from another
+	# layout, so the canvas would show them landing on ports they were never made for, and every editing
+	# gesture would write into a graph nothing will run. The banner says which versions, and the buttons
+	# that would add to it, or bake it, are off.
+	var refused := has and not graph.is_compatible()
 	if _bake_brush_button != null:
-		_bake_brush_button.visible = (has and mod != null)
+		_bake_brush_button.visible = (has and mod != null and not refused)
 	if _bake_all_button != null:
 		var n := Pasture3DNodeGraph.hosts_of_graph(graph, get_tree()).size() if has and is_inside_tree() else 0
-		_bake_all_button.visible = has and mod != null
+		_bake_all_button.visible = has and mod != null and not refused
 		_bake_all_button.tooltip_text = ("Re-solve this graph for all %d brush(es) using it and bake them, one layer "
 				+ "bake per layer they are on.") % n
 	# Hidden rather than disabled when there is no host: a graph opened as a standalone .tres has no brush
@@ -947,10 +1062,15 @@ func _rebuild() -> void:
 		_export_all_button.visible = has and not Pasture3DGraphExportSinks.sinks_of(graph).is_empty()
 	_update_host_label(brush)
 	_populate_graph_picker(brush)
-	if _hint != null: _hint.visible = not has
-	if not has:
+	if _hint != null:
+		_hint.visible = not has or refused
+		_hint.text = (graph.format_refusal() if refused else NO_GRAPH_HINT)
+	if refused:
+		for b in [_add_button, _presets_button, _frame_button, _arrange_button]:
+			if b != null: b.disabled = true
+	if not has or refused:
 		return
-		
+
 	# 1. Recreate Frames
 	for f_idx in range(graph.frames.size()):
 		var fdata = graph.frames[f_idx]
@@ -1064,6 +1184,23 @@ func _make_graphnode(p_index: int, p_node: Pasture3DGraphNode) -> GraphNode:
 		gn.modulate = Color.WHITE
 
 	var thbox: HBoxContainer = gn.get_titlebar_hbox()
+
+	if p_node.op() == &"subgraph":
+		# §11.5: double-click opens the child here. On the node, because the canvas's own double-click
+		# (`_on_graphedit_gui_input`) is the reroute split and only sees the background.
+		gn.tooltip_text = "Double-click to open %s" % _graph_title(p_node.graph)
+		gn.gui_input.connect(func(e: InputEvent):
+			if e is InputEventMouseButton and e.pressed and e.double_click and e.button_index == MOUSE_BUTTON_LEFT:
+				open_subgraph.call_deferred(p_index))
+	if not _graph_stack.is_empty() and p_node is Pasture3DGraphSolverNode:
+		# §11.4. One node resource cannot hold a freeze per instance, so a solver in a graph opened as a
+		# subgraph runs Live wherever the graph is used as one. Shown, disabled, so it is not a surprise.
+		var fz := Button.new()
+		fz.text = "Live"
+		fz.disabled = true
+		fz.tooltip_text = ("A solver inside a subgraph cannot be Frozen: it runs Live in every graph that uses "
+				+ "this one as a subgraph.")
+		thbox.add_child(fz)
 
 	# Tier Badge ([CELL] / [GRID])
 	var tier_lbl := Label.new()
@@ -1189,6 +1326,12 @@ func _populate_node_slots_and_controls(p_gn: GraphNode, p_index: int, p_node: Pa
 
 		p_gn.add_child(row_box)
 		p_gn.set_slot(r, r < n_in, in_type, in_color, r < n_out, row_out_type, row_out_color)
+		# A value port is a diamond and a field port keeps the circle, so "one number" and "a grid" are
+		# told apart by shape as well as by colour.
+		if r < n_in and Pasture3DGraphNode.is_value_type(in_type):
+			p_gn.set_slot_custom_icon_left(r, value_port_icon(_port_icon_size(p_gn)))
+		if r < n_out and Pasture3DGraphNode.is_value_type(row_out_type):
+			p_gn.set_slot_custom_icon_right(r, value_port_icon(_port_icon_size(p_gn)))
 
 	# Additional node-level inline parameter controls (if node is not collapsed)
 	if not p_node.collapsed:
@@ -1240,44 +1383,19 @@ func _populate_node_slots_and_controls(p_gn: GraphNode, p_index: int, p_node: Pa
 		_preview_badges[p_index] = badge
 
 
-## Which property each inline port widget edits, as `{op: {port: [property, ...]}}`.
-##
-## The RANGE is deliberately not here. It comes from the property's own `@export_range`, read at build
-## time by `_spin_from_hint` below. This used to be 542 lines of 91 near-identical SpinBox blocks
-## restating min/max/step that the nodes already declared, and by the time it was measured 37 of the 41
-## comparable pairs had drifted. Sixteen were the destructive kind: the node declares `or_greater` and the
-## widget clamped, so a Warp authored at frequency 0.3 displayed as 0.1 and was WRITTEN BACK as 0.1 on the
-## next interaction. Two numbers that must agree, kept in two places, is the same shape as §6.1's five op
-## tables.
-const SLOT_SPINS := {
-	&"const": {0: [&"value"]},
-	&"const_int": {0: [&"value"]},
-	&"noise": {0: [&"amplitude"]},
-	&"noise_swiss": {0: [&"amplitude"], 1: [&"ridge_offset"], 2: [&"erosion_accent"], 3: [&"gain"], 4: [&"frequency"]},
-	&"noise_jordan": {0: [&"amplitude"], 1: [&"warp_strength"], 2: [&"damp_strength"], 3: [&"gain"], 4: [&"frequency"]},
-	&"furrows": {0: [&"amplitude"], 1: [&"spacing"], 2: [&"direction_degrees"], 3: [&"wobble_amount"]},
-	&"dunes": {0: [&"amplitude"], 1: [&"wavelength"], 2: [&"direction_degrees"], 3: [&"asymmetry"], 4: [&"crest_sharpness"]},
-	&"fractal": {0: [&"amplitude"], 1: [&"feature_size"], 2: [&"sharpness"], 3: [&"warp_amount"]},
-	&"crater": {0: [&"amplitude"], 1: [&"floor_depth"], 2: [&"rim_height"], 3: [&"rim_width"]},
-	&"geological_primitive": {0: [&"height"], 1: [&"radius"], 2: [&"steepness"], 3: [&"eccentricity"]},
-	&"warp": {1: [&"strength"], 2: [&"amplitude"], 3: [&"frequency"]},
-	&"terrace": {1: [&"band_height"], 2: [&"hardness"], 3: [&"amount"]},
-	&"strata": {1: [&"band_height"], 2: [&"hardness"], 3: [&"dip"], 4: [&"dip_direction_degrees"], 5: [&"amount"]},
-	&"curve": {1: [&"input_min"], 2: [&"input_max"], 3: [&"output_min"], 4: [&"output_max"], 5: [&"amount"]},
-	&"remap": {1: [&"in_min"], 2: [&"in_max"], 3: [&"out_min"], 4: [&"out_max"]},
-	&"mask": {1: [&"band_min"], 2: [&"band_max"], 3: [&"falloff_lo"], 4: [&"falloff_hi"], 5: [&"strength"]},
-	&"curvature": {1: [&"radius"], 2: [&"contrast"]},
-	&"talus_projection": {1: [&"talus_angle_deg"], 2: [&"iterations"], 3: [&"transfer_rate"], 4: [&"amount"]},
-	&"spectral_equalizer": {1: [&"macro_gain"], 2: [&"meso_gain"], 3: [&"micro_gain"], 4: [&"amount"]},
-	&"depression_filling": {1: [&"fill_depth_limit"], 2: [&"amount"]},
-	&"erosion_hydraulic": {1: [&"iterations"], 2: [&"rain_rate"], 3: [&"erosion_speed"], 4: [&"deposition_speed"]},
-	&"erosion_thermal": {2: [&"talus_angle"], 3: [&"iterations"], 4: [&"settling_rate"]},
-	&"erosion": {1: [&"iterations"], 2: [&"erosion_rate"], 3: [&"hillslope_diffusion"]},
-	&"scree": {1: [&"amplitude"], 2: [&"grain_size"], 3: [&"min_slope_degrees"]},
-	&"dla": {1: [&"amplitude"], 2: [&"coverage"], 3: [&"detail_size"]},
-	&"lake_flooding": {1: [&"water_elevation"], 2: [&"flood_percent"], 3: [&"shoreline_width"]},
-	&"stream_extraction": {1: [&"min_catchment_cells"], 2: [&"carve_depth"], 3: [&"channel_width"]},
-}
+# ---- INLINE PORT WIDGETS ----
+#
+# Which property an unwired port's inline widget edits is the port's own `property`, declared once in the
+# node's `_inputs()` (PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md §6). It used to be `SLOT_SPINS` here, a
+# table keyed by op and port NUMBER: a second statement of what `input_unwired_default` already said, and
+# 39 property-backed ports had no row in it, so their unwired value could only be edited in the inspector.
+#
+# The RANGE is deliberately not declared anywhere near here either. It comes from the property's own
+# `@export_range`, read at build time by `_spin_from_hint` below. That used to be 542 lines of 91
+# near-identical SpinBox blocks restating min/max/step the nodes already declared, and by the time it was
+# measured 37 of the 41 comparable pairs had drifted. Sixteen were the destructive kind: the node declares
+# `or_greater` and the widget clamped, so a Warp authored at frequency 0.3 displayed as 0.1 and was WRITTEN
+# BACK as 0.1 on the next interaction.
 
 
 ## One SpinBox for one property, configured from that property's own `@export_range`.
@@ -1290,11 +1408,13 @@ func _spin_from_hint(p_row: HBoxContainer, p_node: Pasture3DGraphNode, p_prop: S
 	var hint := ""
 	var is_int := false
 	var found := false
+	var is_number := false
 	for prop in p_node.get_property_list():
 		if StringName(prop.get("name", &"")) != p_prop:
 			continue
 		found = true
 		is_int = int(prop.get("type", TYPE_NIL)) == TYPE_INT
+		is_number = is_int or int(prop.get("type", TYPE_NIL)) == TYPE_FLOAT
 		if int(prop.get("hint", 0)) == PROPERTY_HINT_RANGE:
 			hint = String(prop.get("hint_string", ""))
 		break
@@ -1302,6 +1422,10 @@ func _spin_from_hint(p_row: HBoxContainer, p_node: Pasture3DGraphNode, p_prop: S
 		# The node does not have this property at all. Silent in the old code — `p_node.get("typo")`
 		# returned null and the box read 0 — and the same bug class as §6.1's four.
 		push_warning("Pasture3D graph editor: node '%s' has no property '%s' for its inline widget." % [p_node.op(), p_prop])
+		return
+	if not is_number:
+		# A bool or a vector backs the port's unwired value but is not something a spin box edits. No box;
+		# the row falls back to the promote button.
 		return
 
 	var sb := SpinBox.new()
@@ -1323,16 +1447,17 @@ func _spin_from_hint(p_row: HBoxContainer, p_node: Pasture3DGraphNode, p_prop: S
 	p_row.add_child(sb)
 
 
-## The inline widgets for one input port: the spin boxes the table names, then whatever this op needs that
-## a spin box cannot express.
+## The inline widgets for one input port: a spin box for the property the port declares, then whatever
+## this op needs that a spin box cannot express.
 func _append_slot_inline_widget(p_row: HBoxContainer, p_node: Pasture3DGraphNode, p_port: int) -> void:
-	for prop in SLOT_SPINS.get(p_node.op(), {}).get(p_port, []):
-		_spin_from_hint(p_row, p_node, prop)
+	var ports := p_node.input_ports()
+	if p_port >= 0 and p_port < ports.size() and ports[p_port].property != &"":
+		_spin_from_hint(p_row, p_node, ports[p_port].property)
 	_append_slot_special_widget(p_row, p_node, p_port)
 
 
 ## True when an unwired input of this type can be driven by a Const Float: every scalar field and value
-## port. PATH, TERRAIN_BUS, VECTOR, CURVE and COLOR carry something a float constant cannot be.
+## port. PATH, VECTOR, CURVE and COLOR carry something a float constant cannot be.
 static func _promotable(p_types: PackedInt32Array, p_port: int) -> bool:
 	var t: int = p_types[p_port] if p_port < p_types.size() else Pasture3DGraphNode.PortType.HEIGHT
 	return t in [Pasture3DGraphNode.PortType.HEIGHT, Pasture3DGraphNode.PortType.MASK,
@@ -1381,25 +1506,10 @@ func _action_promote_constant(p_index: int, p_port: int) -> void:
 
 
 ## The widgets that are not a number in a range: colour pickers, checkboxes, enum dropdowns, the seed dice,
-## the curve preset, and Const Vector's paired X/Y (two boxes editing one Vector2).
+## and the curve preset.
 func _append_slot_special_widget(p_row: HBoxContainer, p_node: Pasture3DGraphNode, p_port: int) -> void:
 	var op := p_node.op()
 	match op:
-		&"const_vector":
-			if p_port == 0:
-				var v: Vector2 = p_node.get("value") if p_node.get("value") is Vector2 else Vector2.ZERO
-				var sb_x := SpinBox.new(); sb_x.min_value = -10000.0; sb_x.max_value = 10000.0; sb_x.step = 0.1; sb_x.value = v.x
-				var sb_y := SpinBox.new(); sb_y.min_value = -10000.0; sb_y.max_value = 10000.0; sb_y.step = 0.1; sb_y.value = v.y
-				sb_x.value_changed.connect(func(val: float):
-					var cur: Vector2 = p_node.get("value") if p_node.get("value") is Vector2 else Vector2.ZERO
-					p_node.set("value", Vector2(val, cur.y))
-				)
-				sb_y.value_changed.connect(func(val: float):
-					var cur: Vector2 = p_node.get("value") if p_node.get("value") is Vector2 else Vector2.ZERO
-					p_node.set("value", Vector2(cur.x, val))
-				)
-				p_row.add_child(sb_x); p_row.add_child(sb_y)
-
 		&"const_color":
 			if p_port == 0:
 				var cp := ColorPickerButton.new()
@@ -1414,19 +1524,6 @@ func _append_slot_special_widget(p_row: HBoxContainer, p_node: Pasture3DGraphNod
 				cb.button_pressed = bool(p_node.get("value"))
 				cb.toggled.connect(func(val: bool): p_node.set("value", val))
 				p_row.add_child(cb)
-
-		&"const_curve":
-			if p_port == 0:
-				var btn := Button.new(); btn.text = "Linear / Ease"
-				btn.pressed.connect(func():
-					var c: Curve = p_node.get("curve")
-					if c != null and c.point_count >= 2:
-						c.clear_points()
-						c.add_point(Vector2(0, 0))
-						c.add_point(Vector2(0.5, 0.2))
-						c.add_point(Vector2(1, 1))
-				)
-				p_row.add_child(btn)
 
 		&"noise":
 			if p_port == 0:
@@ -1498,8 +1595,23 @@ func _append_slot_special_widget(p_row: HBoxContainer, p_node: Pasture3DGraphNod
 
 func _add_inline_node_controls(p_gn: GraphNode, p_index: int, p_node: Pasture3DGraphNode) -> void:
 	var op := p_node.op()
+	# One connection per node, whatever its op: is_connected ignores binds, so this check is per signal,
+	# which is per node.
+	if not p_node.editor_action_requested.is_connected(_on_node_editor_action):
+		p_node.editor_action_requested.connect(_on_node_editor_action.bind(p_node))
 	match op:
-		&"remap", &"curve":
+		&"measure", &"dev_measure":
+			var btn_row := HBoxContainer.new()
+			var cap_btn := Button.new()
+			cap_btn.text = "Capture"
+			cap_btn.tooltip_text = "Measure the upstream field in the preview, store it in Locked A/B and lock"
+			cap_btn.pressed.connect(func():
+				_capture_measure(p_index)
+			)
+			btn_row.add_child(cap_btn)
+			p_gn.add_child(btn_row)
+
+		&"remap", &"curve", &"value_ramp", &"dev_value_ramp":
 			var btn_row := HBoxContainer.new()
 			var auto_btn := Button.new()
 			auto_btn.text = "Auto Fit Range"
@@ -1814,12 +1926,103 @@ func _on_add_button_pressed() -> void:
 
 
 func _on_popup_request(p_at_position: Vector2) -> void:
-	if graph == null:
+	if graph == null or not graph.is_compatible():
 		return
 	_pending_drag_connection.clear()
 	var screen_pos := _graphedit.get_screen_transform() * p_at_position
 	var graph_pos := (p_at_position + _graphedit.scroll_offset) / _graphedit.zoom
 	_search_dialog.open_at(screen_pos, graph_pos)
+
+
+## The slot icon for a VALUE port: a white diamond the slot colour tints. One texture per size.
+static var _value_port_icons: Dictionary = {}
+
+static func value_port_icon(p_size: int) -> Texture2D:
+	var size := maxi(p_size, 8)
+	if _value_port_icons.has(size):
+		return _value_port_icons[size]
+	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	var c := float(size - 1) * 0.5
+	for y in range(size):
+		for x in range(size):
+			# Coverage of a diamond of radius c + 0.5, one pixel of falloff at the edge.
+			var d := absf(float(x) - c) + absf(float(y) - c)
+			img.set_pixel(x, y, Color(1.0, 1.0, 1.0, clampf(c + 1.0 - d, 0.0, 1.0)))
+	var tex := ImageTexture.create_from_image(img)
+	_value_port_icons[size] = tex
+	return tex
+
+
+## A diamond has half the area of the square it sits in, so it is drawn a little larger than the round port.
+func _port_icon_size(p_gn: GraphNode) -> int:
+	var port := p_gn.get_theme_icon(&"port")
+	return (port.get_width() if port != null else 10) + 4
+
+
+## How far from a port a released wire still counts as dropped on it, in pixels at zoom 1.
+const PORT_DROP_REACH := 28.0
+
+## The port a wire was released on, as (node index, port), or (-1, -1). `p_position` is GraphEdit-local,
+## which is what `connection_to_empty` and `connection_from_empty` report. GraphEdit only tells us a drop
+## missed; it does not say that it missed because the port under the cursor has a type the wire may not
+## enter, and that is the case Insert Measure is for.
+func _port_at(p_position: Vector2, p_inputs: bool) -> Vector2i:
+	var best := Vector2i(-1, -1)
+	var best_d := PORT_DROP_REACH * _graphedit.zoom
+	for child in _graphedit.get_children():
+		var gn := child as GraphNode
+		if gn == null or _idx(gn.name) < 0:
+			continue
+		var count := gn.get_input_port_count() if p_inputs else gn.get_output_port_count()
+		for p in range(count):
+			var local := gn.get_input_port_position(p) if p_inputs else gn.get_output_port_position(p)
+			var d := (local * _graphedit.zoom + gn.position).distance_to(p_position)
+			if d < best_d:
+				best_d = d
+				best = Vector2i(_idx(gn.name), p)
+	return best
+
+
+## True when a wire from this output into this input is refused ONLY because it runs field -> value, so a
+## Measure between the two makes it legal.
+func measure_offer(p_from: int, p_from_port: int, p_to: int, p_to_port: int) -> bool:
+	return graph != null and graph.is_compatible() and graph.wire_reads_cell_zero(p_from, p_from_port, p_to, p_to_port)
+
+
+var _measure_menu: PopupMenu
+var _measure_pending: PackedInt32Array = PackedInt32Array()
+
+func _offer_insert_measure(p_from: int, p_from_port: int, p_to: int, p_to_port: int, p_screen_pos: Vector2) -> void:
+	_measure_pending = PackedInt32Array([p_from, p_from_port, p_to, p_to_port])
+	if _measure_menu == null:
+		_measure_menu = PopupMenu.new()
+		_measure_menu.add_item("Insert Measure", 0)
+		_measure_menu.set_item_tooltip(0, "This port takes one number and that output is a field. "
+				+ "Measure reduces the field to a number (min, max, a percentile or the mean).")
+		_measure_menu.id_pressed.connect(func(_id: int):
+			if _measure_pending.size() == 4:
+				_action_insert_measure(_measure_pending[0], _measure_pending[1], _measure_pending[2], _measure_pending[3]))
+		add_child(_measure_menu)
+	_measure_menu.popup(Rect2i(Vector2i(p_screen_pos), Vector2i.ZERO))
+
+
+## Add a Measure between a field output and a value input and wire both sides, as one undo step. The
+## Measure's first output is used (min, low or mean by its mode); the second is one drag away.
+func _action_insert_measure(p_from: int, p_from_port: int, p_to: int, p_to_port: int) -> void:
+	if not measure_offer(p_from, p_from_port, p_to, p_to_port):
+		return
+	var m := Pasture3DGraphNodeRegistry.create(&"measure")
+	if m == null:
+		return
+	var new_idx := graph.nodes.size()
+	var pos: Vector2 = (graph.nodes[p_from].graph_position + graph.nodes[p_to].graph_position) * 0.5
+	_ur_create_action("Insert Measure")
+	_ur_add_do_method(graph, &"add_node", [m, pos])
+	_ur_add_do_method(graph, &"connect_ports", [p_from, p_from_port, new_idx, 0])
+	_ur_add_do_method(graph, &"connect_ports", [new_idx, 0, p_to, p_to_port])
+	_ur_add_undo_property(graph, &"nodes", graph.nodes.duplicate())
+	_ur_add_undo_property(graph, &"connections", graph.connections.duplicate())
+	_ur_commit()
 
 
 func _on_connection_to_empty(p_from: StringName, p_from_port: int, p_release_position: Vector2) -> void:
@@ -1829,6 +2032,10 @@ func _on_connection_to_empty(p_from: StringName, p_from_port: int, p_release_pos
 	if f_idx < 0:
 		return
 	var screen_pos := (_graphedit.get_screen_transform() * p_release_position) if _graphedit.is_inside_tree() else p_release_position
+	var onto := _port_at(p_release_position, true)
+	if onto.x >= 0 and measure_offer(f_idx, p_from_port, onto.x, onto.y):
+		_offer_insert_measure(f_idx, p_from_port, onto.x, onto.y, screen_pos)
+		return
 	var graph_pos := (p_release_position + _graphedit.scroll_offset) / _graphedit.zoom
 	_pending_drag_connection = {
 		"mode": "from",
@@ -1846,6 +2053,10 @@ func _on_connection_from_empty(p_to: StringName, p_to_port: int, p_release_posit
 	if t_idx < 0:
 		return
 	var screen_pos := (_graphedit.get_screen_transform() * p_release_position) if _graphedit.is_inside_tree() else p_release_position
+	var onto := _port_at(p_release_position, false)
+	if onto.x >= 0 and measure_offer(onto.x, onto.y, t_idx, p_to_port):
+		_offer_insert_measure(onto.x, onto.y, t_idx, p_to_port, screen_pos)
+		return
 	var graph_pos := (p_release_position + _graphedit.scroll_offset) / _graphedit.zoom
 	_pending_drag_connection = {
 		"mode": "to",
@@ -1857,7 +2068,7 @@ func _on_connection_from_empty(p_to: StringName, p_to_port: int, p_release_posit
 
 
 func _on_search_node_selected(p_op: StringName, p_position: Vector2) -> void:
-	if graph == null:
+	if graph == null or not graph.is_compatible():
 		return
 	var node := Pasture3DGraphNodeRegistry.create(p_op)
 	if node == null:
@@ -1952,9 +2163,12 @@ func _action_connect(p_from: int, p_from_port: int, p_to: int, p_to_port: int) -
 
 
 func _action_disconnect(p_from: int, p_from_port: int, p_to: int, p_to_port: int) -> void:
+	# Undo restores the rows, not a reconnect: a reconnect appends, and on a multi port (spec §12) the
+	# position of a wire is its operand order.
+	var old_conns := graph.connections.duplicate()
 	_ur_create_action("Disconnect Terrain Graph Ports")
 	_ur_add_do_method(graph, &"disconnect_ports", [p_from, p_from_port, p_to, p_to_port])
-	_ur_add_undo_method(graph, &"connect_ports", [p_from, p_from_port, p_to, p_to_port])
+	_ur_add_undo_property(graph, &"connections", old_conns)
 	_ur_commit()
 
 
@@ -2076,8 +2290,7 @@ func _schedule_preview_refresh() -> void:
 ## audit that separated field types from value types; `INDEX_PALETTE` stays in the taxonomy for a future
 ## INT-typed FIELD (a material-index grid) and is reachable today only as a manual override.
 ##
-## TERRAIN_BUS taps its channel 0, which is a height, so it hillshades. That is the bus's primary channel
-## and the only one V1 can address — V2's channel-addressable taps are what make the rest reachable.
+## TERRAIN_BUS is retired and no port declares it, so it has no row here and reads -1 like a value type.
 static func preview_repr_for_type(p_type: int) -> int:
 	match p_type:
 		Pasture3DGraphNode.PortType.HEIGHT:
@@ -2088,8 +2301,6 @@ static func preview_repr_for_type(p_type: int) -> int:
 			return Pasture3DUtil.PREVIEW_RAMP_SEQ
 		Pasture3DGraphNode.PortType.SIGNED:
 			return Pasture3DUtil.PREVIEW_RAMP_DIV
-		Pasture3DGraphNode.PortType.TERRAIN_BUS:
-			return Pasture3DUtil.PREVIEW_HILLSHADE
 		Pasture3DGraphNode.PortType.PATH:
 			return Pasture3DUtil.PREVIEW_PATH_GEOM
 	return -1
@@ -2343,6 +2554,7 @@ func _refresh_previews() -> void:
 		_render_color_previews(color_roots, {}, {}, _preview_pixels())
 		_clear_previews_stale()
 		return
+	_stamp_host_params()
 	var compiled: Dictionary = graph.compile_graph_program_multi(compile_roots)
 	if compiled.is_empty():
 		# THE bail §5.5 is about. `compile_graph_program_multi` returning empty means this graph does not
@@ -2984,6 +3196,135 @@ func group_selected_in_frame() -> void:
 	_ur_commit()
 
 
+# ---- Subgraphs (ports spec §11.5) -----------------------------------------------------------------
+
+## Open the child of the Subgraph node at `p_index` in this panel, keeping the way back on the breadcrumb.
+func open_subgraph(p_index: int) -> void:
+	if graph == null or p_index < 0 or p_index >= graph.nodes.size():
+		return
+	var n: Pasture3DGraphNode = graph.nodes[p_index]
+	if n == null or n.op() != &"subgraph" or n.graph == null:
+		return
+	_graph_stack.append({"graph": graph, "mod": host_modifier, "brush": host_brush})
+	_navigating = true
+	edit_graph(n.graph)
+	_navigating = false
+	_refresh_crumbs()
+
+
+## Back out to breadcrumb entry `p_depth` (0 = the graph the trail started from).
+func close_subgraph_to(p_depth: int) -> void:
+	if p_depth < 0 or p_depth >= _graph_stack.size():
+		return
+	var e: Dictionary = _graph_stack[p_depth]
+	_graph_stack.resize(p_depth)
+	_navigating = true
+	edit_graph(e["graph"], e["mod"], e["brush"])
+	_navigating = false
+	_refresh_crumbs()
+
+
+func subgraph_depth() -> int:
+	return _graph_stack.size()
+
+
+func _graph_title(p_g: Pasture3DTerrainGraph) -> String:
+	if p_g == null:
+		return "(no graph)"
+	if p_g.resource_name != "":
+		return p_g.resource_name
+	if p_g.resource_path != "" and not p_g.resource_path.contains("::"):
+		return p_g.resource_path.get_file().get_basename()
+	return "Subgraph"
+
+
+func _refresh_crumbs() -> void:
+	if _crumb_bar == null:
+		return
+	for c in _crumb_bar.get_children():
+		_crumb_bar.remove_child(c)
+		c.queue_free()
+	_crumb_bar.visible = not _graph_stack.is_empty()
+	if _graph_stack.is_empty():
+		return
+	for i in range(_graph_stack.size()):
+		var b := Button.new()
+		b.text = _graph_title(_graph_stack[i]["graph"])
+		if i == 0:
+			b.text = "‹ " + b.text
+		b.flat = true
+		b.tooltip_text = "Back to this graph"
+		b.pressed.connect(close_subgraph_to.bind(i))
+		_crumb_bar.add_child(b)
+		var sep := Label.new()
+		sep.text = "›"
+		_crumb_bar.add_child(sep)
+	var here := Label.new()
+	here.text = _graph_title(graph)
+	_crumb_bar.add_child(here)
+
+
+## The whole wiring state Group and Ungroup rewrite, for one undo step.
+func _wiring_snapshot() -> Dictionary:
+	var att := []
+	for f in graph.frames:
+		att.append(f.attached_node_indices.duplicate() if f != null else PackedInt32Array())
+	return {"nodes": graph.nodes.duplicate(), "connections": graph.connections.duplicate(),
+			"output_node": graph.output_node, "output_override": graph.output_override, "frames": att}
+
+
+func _wiring_step(p_name: String, p_old: Dictionary, p_new: Dictionary) -> void:
+	_ur_create_action(p_name)
+	for key in ["nodes", "connections", "output_node", "output_override"]:
+		_ur_add_do_property(graph, StringName(key), p_new[key])
+		_ur_add_undo_property(graph, StringName(key), p_old[key])
+	for i in range(graph.frames.size()):
+		var f = graph.frames[i]
+		if f != null and i < p_old["frames"].size():
+			_ur_add_do_property(f, &"attached_node_indices", p_new["frames"][i])
+			_ur_add_undo_property(f, &"attached_node_indices", p_old["frames"][i])
+	# Already applied: the graph did the work, and the step only records it.
+	_ur_commit(false)
+
+
+## Group into Subgraph (§11.5): one undo step.
+func group_selected_into_subgraph() -> void:
+	if graph == null or not graph.is_compatible():
+		return
+	var sel := _get_selected_node_indices()
+	if sel.is_empty():
+		return
+	var old := _wiring_snapshot()
+	var r := graph.group_into_subgraph(sel)
+	last_group_report = r
+	if r.has("error"):
+		push_warning("Group into Subgraph: %s" % r["error"])
+		return
+	for n in r.get("notes", PackedStringArray()):
+		push_warning("Group into Subgraph: %s" % n)
+	_wiring_step("Group into Subgraph", old, _wiring_snapshot())
+
+
+## Ungroup (§11.5): the selected Subgraph node's child, inlined, as one undo step.
+func ungroup_selected_subgraph() -> void:
+	if graph == null or not graph.is_compatible():
+		return
+	var target := -1
+	for i in _get_selected_node_indices():
+		if graph.nodes[i] != null and graph.nodes[i].op() == &"subgraph":
+			target = i
+			break
+	if target < 0:
+		return
+	var old := _wiring_snapshot()
+	var made := graph.ungroup_subgraph(target)
+	last_group_report = {"made": made}
+	if made.is_empty():
+		push_warning("Ungroup: the Subgraph node has no usable graph to inline.")
+		return
+	_wiring_step("Ungroup Subgraph", old, _wiring_snapshot())
+
+
 func duplicate_selected() -> void:
 	if graph == null:
 		return
@@ -3017,7 +3358,8 @@ func cut_selected() -> void:
 
 
 func paste() -> void:
-	if graph == null or _clipboard.is_empty() or _clipboard.get("nodes", []).is_empty():
+	if graph == null or not graph.is_compatible() or _clipboard.is_empty() \
+			or _clipboard.get("nodes", []).is_empty():
 		return
 	var mouse_pos := _graphedit.get_local_mouse_position() if _graphedit.is_inside_tree() else Vector2.ZERO
 	var graph_pos := (mouse_pos + _graphedit.scroll_offset) / _graphedit.zoom
@@ -3166,6 +3508,12 @@ func _on_graphedit_gui_input(p_event: InputEvent) -> void:
 				KEY_J:
 					group_selected_in_frame()
 					_accept_event()
+				KEY_G:
+					if p_event.shift_pressed:
+						ungroup_selected_subgraph()
+					else:
+						group_selected_into_subgraph()
+					_accept_event()
 			return
 			
 		# Non-Ctrl Shortcuts
@@ -3220,68 +3568,47 @@ static func register_connection_types(p_graphedit: GraphEdit) -> void:
 	# than as a list of pairs. GraphEdit permits same-type wires on its own; `add_valid_connection_type` is
 	# only for CROSS-type pairs. So a new PortType that nobody adds here connects to nothing but itself —
 	# and the failure arrives late and looks unrelated, as "I can't re-make a wire that is already in my
-	# graph", because a stored connection is a pair of indices and keeps evaluating either way.
+	# graph", because a wire already in the graph keeps evaluating either way.
 	#
 	# The four scalar FIELD types are one grid of floats underneath and interconvert freely; the type says
 	# how to READ and RENDER the numbers (PASTURE3D_GRAPH_PORT_TYPES_GUIDE.md), not how they are stored, so
 	# refusing the wire would buy nothing and cost the author a Reroute.
+	#
+	# The matrix itself is `Pasture3DGraphNode.can_connect`, which `Pasture3DTerrainGraph.connect_ports` and
+	# `graph_warnings` also read, so what the editor offers and what the model accepts are one rule. The
+	# reasoning for each pair lives there and in the notes below.
+	#
+	# ---- THE SCALAR VALUE TYPES ----
+	#
+	# A value (FLOAT, INT, BOOL) connects to another value and to any scalar field, where it is a uniform
+	# fill. A FIELD INTO A VALUE IS NOT REGISTERED: the evaluator reads a driven value port as cell 0 of its
+	# source, so a Noise wired into a `direction` port gave a number nobody chose. That pair was legal until
+	# spec §8; a drop onto such a port now reaches `_on_connection_to_empty`, which offers Insert Measure.
+	#
+	# PATH connects ONLY to itself. Every scalar pair is float-to-float underneath and a mismatch is merely
+	# wrong-looking; a PATH wire carries a resource, so a HEIGHT plugged into it would be a null the
+	# consumer has to defend against on every cell.
+	for from_t in Pasture3DGraphNode.PortType.values():
+		for to_t in Pasture3DGraphNode.PortType.values():
+			# Same-type pairs too: GraphEdit lets a type wire to itself without this, but
+			# `is_valid_connection_type` only answers for what was registered, and the gates ask it.
+			if Pasture3DGraphNode.can_connect(from_t, to_t):
+				p_graphedit.add_valid_connection_type(from_t, to_t)
+
 	var scalar_fields: Array[int] = [
 		Pasture3DGraphNode.PortType.HEIGHT,
 		Pasture3DGraphNode.PortType.MASK,
 		Pasture3DGraphNode.PortType.FIELD,
 		Pasture3DGraphNode.PortType.SIGNED,
 	]
-	for from_t in scalar_fields:
-		for to_t in scalar_fields:
-			p_graphedit.add_valid_connection_type(from_t, to_t)
-	# ---- THE SCALAR VALUE TYPES, AND WHY THEY CROSS WITH THE FIELDS ----
-	#
-	# A driven VALUE port has always been read as CELL 0 of the source buffer — by the native evaluator
-	# through `native_param_ports()`, and by every GDScript `eval_grid` as `p_inputs[n][0]`. So a wire
-	# from a field into a FLOAT port is not a new semantic being invented here; it is the semantic the
-	# evaluator already implements, finally reachable.
-	#
-	# Until this existed, FLOAT connected to nothing. Measured across the registry: 107 input ports of
-	# type FLOAT, and ZERO nodes producing one — so every scalar port in the plugin could only ever be set
-	# inline, and the 2 that have no inline property (a Salève's `dx`/`dy`, since fixed) could not be set
-	# at all. INT is in the same shape but had `Const Int` to drive it.
-	#
-	# The footgun is real and is accepted deliberately: cell 0 of a NOISE field is an arbitrary number,
-	# so wiring a generator into a `direction` port gives a value nobody chose. The alternative is 107
-	# ports that no wire can reach, and the node's own inline property remains the obvious way to set one.
-	# BOOL is a scalar value too: Const Bool writes 0.0 / 1.0 on both routes, so it drives a FLOAT, INT or
-	# field port exactly as a Const Float of 0 or 1 would. Left out, it connected to nothing at all.
 	var scalar_values: Array[int] = [
 		Pasture3DGraphNode.PortType.FLOAT,
 		Pasture3DGraphNode.PortType.INT,
 		Pasture3DGraphNode.PortType.BOOL,
 	]
-	for from_t in scalar_values:
-		for to_t in scalar_values:
-			p_graphedit.add_valid_connection_type(from_t, to_t)
-		for to_t in scalar_fields:
-			# A constant fills every cell, so it is a legal flat FIELD. This is the direction `Const
-			# Float` has always been used in, and it is why changing that node's output type to FLOAT
-			# does not break a graph that already wires it into a HEIGHT port.
-			p_graphedit.add_valid_connection_type(from_t, to_t)
-	for from_t in scalar_fields:
-		for to_t in scalar_values:
-			p_graphedit.add_valid_connection_type(from_t, to_t)
-
-	p_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.VECTOR, Pasture3DGraphNode.PortType.VECTOR)
-	p_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.CURVE, Pasture3DGraphNode.PortType.CURVE)
-	# PATH and TERRAIN_BUS connect ONLY to themselves. Every pair above is float-to-float underneath and a
-	# mismatch is merely wrong-looking; a PATH wire carries a resource, so a HEIGHT plugged into it would be
-	# a null the consumer has to defend against on every cell, and a BUS is a bundle rather than a field.
-	p_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.PATH, Pasture3DGraphNode.PortType.PATH)
-	p_graphedit.add_valid_connection_type(Pasture3DGraphNode.PortType.TERRAIN_BUS, Pasture3DGraphNode.PortType.TERRAIN_BUS)
-
 	for t in scalar_fields:
 		p_graphedit.add_valid_right_disconnect_type(t)
 	for t in scalar_values:
 		p_graphedit.add_valid_right_disconnect_type(t)
-	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.VECTOR)
-	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.CURVE)
 	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.COLOR)
 	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.PATH)
-	p_graphedit.add_valid_right_disconnect_type(Pasture3DGraphNode.PortType.TERRAIN_BUS)

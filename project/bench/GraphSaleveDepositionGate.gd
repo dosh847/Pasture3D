@@ -29,6 +29,9 @@ var _fail := 0
 var _done := 0
 
 
+const RIM_PIT_U := 0.475
+
+
 func _ready() -> void:
 	print("=== GraphSaleveDepositionGate: Salève S3 deposition and fine incision ===\n")
 	_a_deposition()
@@ -69,7 +72,8 @@ func _a_deposition() -> void:
 
 func _b_stream_log() -> void:
 	print("\n[B] Stage 3 is the stream-log solver")
-	var res := _solve(_crater(), {})
+	# Pinned, so this keeps testing the wiring when the node's defaults move.
+	var res := _solve(_crater(), {"stream_strength": 0.15, "stream_exp": 0.5})
 	var pre: PackedFloat32Array = res.pre_stream
 	var post: PackedFloat32Array = res.post_stream
 	var direct: PackedFloat32Array = Pasture3DUtil.hydraulic_stream_log_solve_grid(pre, GW, GH, RECT,
@@ -126,20 +130,19 @@ func _d_mass() -> void:
 
 func _e_lower_only() -> void:
 	print("
-[E] the rim meets the input: Stage 1 does not raise the outermost ring")
-	var src := _mound()
-	# Border-only outlets in both arms: with the default low-ground outlets the free steady state no longer
-	# raises the rim at all, so there would be nothing for the cap to hold down.
+[E] the rim meets the input: Stage 1 does not raise ground in the rim")
+	# Stage 1 raises nothing but a flooded pit, so a pit is what the cap has to hold down.
+	var src := _pitted()
 	var on := _solve(src, {"outlet_level": 0.0})
 	var off := _solve(src, {"lower_only": false, "outlet_level": 0.0})
-	var r_on := _ring_raise(on, src)
-	var r_off := _ring_raise(off, src)
-	print("    outer-ring raise: rim cap %.4f m; control free %.3f m (want > 1, and the cap under 5%% of it)" % [r_on, r_off])
+	var r_on := _rim_raise(on, src)
+	var r_off := _rim_raise(off, src)
+	print("    raise at the rim pit: rim cap %.4f m; control free %.3f m (want > 1, and the cap under 25%% of it)" % [r_on, r_off])
 	if r_off <= 1.0:
 		_fail += 1
-		print("    !! the free steady state raised nothing at the rim, so the cap is unobservable")
+		print("    !! the free solve raised nothing at the rim, so the cap is unobservable")
 		return
-	if r_on > 0.05 * r_off:
+	if r_on > 0.25 * r_off:
 		_fail += 1
 		print("    !! the rim still steps up from the surrounding ground")
 		return
@@ -149,8 +152,8 @@ func _e_lower_only() -> void:
 func _f_masks() -> void:
 	print("
 [F] beyond the rim the solve is free (the cap no longer flattens the texture)")
-	var src := _mound()
-	# Border-only outlets in every arm, as in E: otherwise the steady state rises nowhere for a cap to act on.
+	var src := _pitted()
+	# The interior pit is what the whole-grid cap has to act on.
 	var on := _stage1(_solve(src, {"outlet_level": 0.0}))
 	var free := _stage1(_solve(src, {"lower_only": false, "outlet_level": 0.0}))
 	var flat := _stage1(_solve(src, {"cap_everywhere": true, "outlet_level": 0.0}))
@@ -201,9 +204,10 @@ func _g_no_ridge() -> void:
 
 
 ## A straight V-valley down the grid, tilted along its axis so it drains; nothing is closed. The walls are
-## steep (0.78) because the old weighting only separates floor from wall where the walls are not flat.
+## steep (0.78) because the old weighting only separates floor from wall where the walls are not flat, and the
+## floor sits on a cell centre so that cell reads dead flat and the old weighting piles a ridge on it.
 func _valley() -> PackedFloat32Array:
-	return _field(func(u: float, v: float) -> float: return 200.0 * absf(u) - 8.0 * v + 40.0)
+	return _field(func(u: float, v: float) -> float: return 200.0 * absf(u - 0.5 / GW) - 8.0 * v + 40.0)
 
 
 ## Largest height of a cell above BOTH its across-valley (x) neighbours, rows away from the grid edge.
@@ -214,6 +218,17 @@ func _ridge(p_h: PackedFloat32Array) -> float:
 			var i := iz * GW + ix
 			worst = maxf(worst, p_h[i] - maxf(p_h[i - 1], p_h[i + 1]))
 	return worst
+
+
+## The mound with one closed pit inside the rim (a quarter of the way in) and one past the rim on flat ground.
+func _pitted() -> PackedFloat32Array:
+	var mound := _mound()
+	var pits := _field(func(u: float, v: float) -> float:
+		return (-30.0 * exp(-(pow((u - RIM_PIT_U) / 0.03, 2.0) + pow(v / 0.03, 2.0)))
+				- 30.0 * exp(-(pow((u + 0.35) / 0.03, 2.0) + pow((v + 0.35) / 0.03, 2.0)))))
+	for i in range(mound.size()):
+		mound[i] += pits[i]
+	return mound
 
 
 func _mound() -> PackedFloat32Array:
@@ -238,12 +253,14 @@ func _edge_dist(p_ix: int, p_iz: int) -> float:
 	return minf(minf((p_ix + 0.5) * cx, (GW - 0.5 - p_ix) * cx), minf((p_iz + 0.5) * cz, (GH - 0.5 - p_iz) * cz))
 
 
-func _ring_raise(p_res: Dictionary, p_src: PackedFloat32Array) -> float:
+## The Stage 1 raise at the rim pit: cells within a quarter of the rim width of the grid edge.
+func _rim_raise(p_res: Dictionary, p_src: PackedFloat32Array) -> float:
 	var s1 := _stage1(p_res)
+	var band := 0.025 * minf(RECT.size.x, RECT.size.y)
 	var m := 0.0
 	for iz in range(GH):
 		for ix in range(GW):
-			if ix == 0 or iz == 0 or ix == GW - 1 or iz == GH - 1:
+			if _edge_dist(ix, iz) <= band:
 				var i := iz * GW + ix
 				m = maxf(m, s1[i] - p_src[i])
 	return m

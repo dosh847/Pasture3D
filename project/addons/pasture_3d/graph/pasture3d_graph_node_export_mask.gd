@@ -25,20 +25,10 @@ func op() -> StringName:
 	return &"export_mask"
 
 
-func input_count() -> int:
-	return 1
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["mask"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.MASK])
-
-
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"mask", PortType.MASK).require(),
+	]
 
 
 func formats() -> PackedStringArray:

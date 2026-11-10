@@ -83,8 +83,13 @@ func native_lower() -> Dictionary:
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, -1, 2, 3, 7])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"rotation", PortType.FLOAT, &"rotation_deg", 2),
+		Pasture3DGraphPort.value(&"scale", PortType.FLOAT, &"scale", 3),
+		Pasture3DGraphPort.value(&"amount", PortType.FLOAT, &"amount", 7),
+	]
 
 
 func role() -> Role:
@@ -95,34 +100,6 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 5
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "offset", "rotation", "scale", "amount"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.HEIGHT,
-		PortType.VECTOR,
-		PortType.FLOAT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return 0.0
-		2: return rotation_deg
-		3: return scale
-		4: return amount
-		_: return 0.0
-
-
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -> PackedFloat32Array:
 	var n := p_gw * p_gh
 	var in_grid: PackedFloat32Array
@@ -131,9 +108,9 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) ->
 	else:
 		return Pasture3DGraphOps.zeros(n)
 
-	var rot: float = float(p_inputs[2][0]) if (p_inputs.size() > 2 and p_inputs[2] is PackedFloat32Array and p_inputs[2].size() > 0) else rotation_deg
-	var scl: float = float(p_inputs[3][0]) if (p_inputs.size() > 3 and p_inputs[3] is PackedFloat32Array and p_inputs[3].size() > 0) else scale
-	var amt: float = float(p_inputs[4][0]) if (p_inputs.size() > 4 and p_inputs[4] is PackedFloat32Array and p_inputs[4].size() > 0) else amount
+	var rot: float = float(p_inputs[1][0]) if (p_inputs.size() > 1 and p_inputs[1] is PackedFloat32Array and p_inputs[1].size() > 0) else rotation_deg
+	var scl: float = float(p_inputs[2][0]) if (p_inputs.size() > 2 and p_inputs[2] is PackedFloat32Array and p_inputs[2].size() > 0) else scale
+	var amt: float = float(p_inputs[3][0]) if (p_inputs.size() > 3 and p_inputs[3] is PackedFloat32Array and p_inputs[3].size() > 0) else amount
 
 	# The identity affine is a bit-for-bit pass-through, not a resample. A resample through the identity
 	# would still cost a bilinear tap per cell and would round-trip through float, so the gate's TA

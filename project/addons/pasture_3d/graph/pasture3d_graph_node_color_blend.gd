@@ -64,20 +64,18 @@ func role() -> Role:
 	return Role.COMBINER
 
 
-func input_count() -> int:
-	return 3
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.value(&"a", PortType.COLOR),
+		Pasture3DGraphPort.value(&"b", PortType.COLOR),
+		Pasture3DGraphPort.field(&"mask", PortType.MASK).require(),
+	]
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["a", "b", "mask"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.COLOR, PortType.COLOR, PortType.MASK])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.COLOR])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.value(&"out", PortType.COLOR),
+	]
 
 
 ## Which input port carries the field this node needs tapped. The resolver asks rather than assuming a

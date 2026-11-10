@@ -9,7 +9,7 @@
 #       replays the old absolute heights and the mound sits the ground's rise lower than it should
 #   [E] a stale FROZEN erosion cache is served as its change carried onto today's ground, on both rasterisers;
 #       control: `stale_cache_pins_absolute` serves the old heights
-#   [G] the same for a FROZEN graph (the default Input -> Output filter), on both rasterisers; same control
+#   [G] the same for a FROZEN filter graph (Input + a constant), on both rasterisers; same control
 #   [L] a row deleted below a brush leaves its cached `_layer_id` pointing at its own row; the snap still reads
 #       the ground below the brush's real row; control: `seat_trusts_cached_layer_id` climbs onto its own height
 #   [R] after a reload (`_layer_id` = -1) the snap reads below the brush's row, not the full composite; same control
@@ -326,7 +326,17 @@ func _e() -> void:
 
 func _g() -> void:
 	var mod := Pasture3DNodeGraph.new()
-	mod.graph = Pasture3DTerrainGraph.create_default()
+	# Not `create_default()`: Input -> Output is an identity graph, which is_active() drops from the stack
+	# (524fcc35), so no cache exists to go stale and the pinned control has nothing to pin.
+	var lift := Pasture3DGraphNodeConst.new()
+	lift.value = 2.0
+	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), lift, Pasture3DGraphNodeBlend.new(),
+			Pasture3DGraphNodeOutput.new()]
+	var g := Pasture3DTerrainGraph.create_empty()
+	g.nodes = nodes
+	g.connections = [PackedInt32Array([0, 0, 2, 0]), PackedInt32Array([1, 0, 2, 1]),
+			PackedInt32Array([2, 0, 3, 0])]
+	mod.graph = g
 	mod.evaluation = Pasture3DNode.Evaluation.FROZEN
 	await _frozen("G", mod)
 	_ran += 1

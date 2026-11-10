@@ -65,20 +65,16 @@ func role() -> Role:
 	return Role.COMBINER
 
 
-func input_count() -> int:
-	return 1
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+	]
 
 
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.COLOR])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.value(&"out", PortType.COLOR),
+	]
 
 
 func color_field_port() -> int:

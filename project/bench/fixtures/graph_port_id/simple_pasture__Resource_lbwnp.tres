@@ -1,0 +1,89 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="4_4khcl"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="4_6pcwc"]
+[ext_resource type="Script" uid="uid://ccy61yjirqc87" path="res://addons/pasture_3d/graph/pasture3d_graph_node_mountain_cone.gd" id="5_wej47"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="6_ii4qc"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="7_wv1iv"]
+[ext_resource type="Script" uid="uid://fl2f2iwtn1vv" path="res://addons/pasture_3d/graph/pasture3d_graph_path.gd" id="18_ddf1r"]
+[ext_resource type="Script" uid="uid://t26vuji0r8wf" path="res://addons/pasture_3d/graph/pasture3d_graph_node_spline_source.gd" id="19_vfv27"]
+[ext_resource type="Script" uid="uid://5s5nj7du18rp" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_carve.gd" id="20_cyndd"]
+[ext_resource type="Script" uid="uid://c85myeafjuo6g" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_meanderize.gd" id="21_vfv27"]
+[ext_resource type="Script" uid="uid://d3p6vrby77tq" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_resample.gd" id="22_cyndd"]
+[ext_resource type="Script" uid="uid://rqm81y572bqi" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_fractalize.gd" id="23_cyndd"]
+
+[sub_resource type="Resource" id="Resource_2wp0u"]
+script = ExtResource("5_wej47")
+elevation = 35.0
+graph_position = Vector2(-1480, 180)
+
+[sub_resource type="Resource" id="Resource_fdeh7"]
+script = ExtResource("6_ii4qc")
+graph_position = Vector2(1120, 40)
+
+[sub_resource type="Resource" id="Resource_8q01q"]
+script = ExtResource("18_ddf1r")
+points = PackedVector2Array(410.2227, -177.21188, 338.0525, -171.49728, 303.80728, -153.86865, 344.149, -113.17014, 315.41992, -64.36581, 233.5808, -30.644508)
+half_widths = PackedFloat32Array(30, 30, 30, 30, 30, 30)
+heights = PackedFloat32Array(1.1830721, 23.40717, 20.793844, 12.439098, 36.440216, 1)
+source_label = "Plow1/Pasture3DSpline"
+sample_half_widths = PackedFloat32Array()
+sample_shoulders = PackedFloat32Array()
+sample_verges = PackedFloat32Array()
+sample_suppress = PackedByteArray()
+sample_skip = PackedByteArray()
+
+[sub_resource type="Resource" id="Resource_nync1"]
+script = ExtResource("19_vfv27")
+spline_key = "Plow1/Pasture3DSpline"
+path = SubResource("Resource_8q01q")
+graph_position = Vector2(-1020, 280)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_rup21"]
+script = ExtResource("20_cyndd")
+offset = 8.7
+flank_mode = 1
+width_source = 1
+width = 30.0
+graph_position = Vector2(560, 40)
+preview_on = true
+preview_range_locked = true
+preview_range_max = 45.153908
+
+[sub_resource type="Resource" id="Resource_umoq4"]
+script = ExtResource("4_6pcwc")
+graph_position = Vector2(-600, 20)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_qe7gh"]
+script = ExtResource("22_cyndd")
+step = 16.0
+graph_position = Vector2(-600, 280)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_eudfm"]
+script = ExtResource("23_cyndd")
+orientation = 2
+wavelength = 60.0
+sigma = 24.61
+persistence = 0.678
+graph_position = Vector2(-120, 160)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_wnovj"]
+script = ExtResource("21_vfv27")
+wavelength = 129.0
+amplitude = 50.0
+edge_divisions = 2
+graph_position = Vector2(-120, 460)
+preview_on = true
+
+[resource]
+script = ExtResource("7_wv1iv")
+format_version = 3
+nodes = Array[ExtResource("4_4khcl")]([SubResource("Resource_2wp0u"), SubResource("Resource_fdeh7"), SubResource("Resource_nync1"), SubResource("Resource_rup21"), SubResource("Resource_umoq4"), SubResource("Resource_qe7gh"), SubResource("Resource_eudfm"), SubResource("Resource_wnovj")])
+wires = [[3, &"height", 1, &"result"], [4, &"height", 3, &"surface"], [2, &"path", 5, &"path"], [5, &"path", 6, &"path"], [5, &"path", 7, &"path"], [6, &"path", 3, &"path"]]
+output_node = 3
+output_override = 3
+metadata/_editor_selected_node = -1

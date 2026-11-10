@@ -88,7 +88,7 @@ func _b_smooth() -> void:
 func _c_add_noise() -> void:
 	print("[C] Input -> Blend(ADD) <- Noise -> Output: GPU == CPU")
 	var noise := _make_noise(7, 0.05)
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _noise(noise, 6.0),
 		_blend(Pasture3DGraphNodeBlend.Mode.ADD), Pasture3DGraphNodeOutput.new()]
@@ -100,7 +100,7 @@ func _c_add_noise() -> void:
 # --- D. A generator with a grid barrier (Noise -> Smooth -> Output) ------------------------------------
 func _d_generator_with_grid_barrier() -> void:
 	print("[D] Noise -> Smooth -> Output (no Input): GPU == CPU")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var sm := Pasture3DGraphNodeSmooth.new(); sm.passes = 2
 	var nodes: Array[Pasture3DGraphNode] = [_noise(_make_noise(3, 0.06), 9.0), sm, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes
@@ -118,7 +118,7 @@ func _e_blend_modes() -> void:
 	}
 	var surf := _ramp(4.0)
 	for name in modes:
-		var g := Pasture3DTerrainGraph.new()
+		var g := Pasture3DTerrainGraph.create_empty()
 		var nodes: Array[Pasture3DGraphNode] = [
 			Pasture3DGraphNodeInput.new(), _noise(_make_noise(9, 0.06), 5.0),
 			_blend(modes[name]), Pasture3DGraphNodeOutput.new()]
@@ -149,7 +149,7 @@ func _f_the_mask_port_and_mix() -> void:
 	}
 	for name in modes:
 		# A, B and a MASK, all three wired: Input into a, noise into b, and a second noise as the mask.
-		var g := Pasture3DTerrainGraph.new()
+		var g := Pasture3DTerrainGraph.create_empty()
 		var nodes: Array[Pasture3DGraphNode] = [
 			Pasture3DGraphNodeInput.new(), _noise(_make_noise(9, 0.06), 5.0),
 			_noise(_make_noise(3, 0.04), 0.5), _blend(modes[name]),
@@ -166,7 +166,7 @@ func _f_the_mask_port_and_mix() -> void:
 		# CONTROL: the mask CHANGED the answer. Without this the criterion passes on a shader that
 		# ignores the mask and a CPU op that ignores it too — and the old shader did ignore it, for
 		# years, while every unmasked mode above agreed perfectly.
-		var g2 := Pasture3DTerrainGraph.new()
+		var g2 := Pasture3DTerrainGraph.create_empty()
 		var nodes2: Array[Pasture3DGraphNode] = [
 			Pasture3DGraphNodeInput.new(), _noise(_make_noise(9, 0.06), 5.0),
 			_blend(modes[name]), Pasture3DGraphNodeOutput.new()]
@@ -352,7 +352,7 @@ func _k_a_non_finite_mask_is_no_opinion() -> void:
 		print("    !! the fixture has no NaN in it, so this criterion measured nothing")
 		return
 
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		_noise(_make_noise(11, 0.05), 6.0), _const(3.0), Pasture3DGraphNodeInput.new(),
 		_blend(Pasture3DGraphNodeBlend.Mode.ADD), Pasture3DGraphNodeOutput.new()]
@@ -395,7 +395,7 @@ func _cpu(p_g: Pasture3DTerrainGraph, p_surf: PackedFloat32Array) -> PackedFloat
 
 
 func _io(p_mid: Array) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new()]
 	for m in p_mid:
 		nodes.append(m)
@@ -456,7 +456,7 @@ func _flood_graph(p_level: float) -> Pasture3DTerrainGraph:
 	# THAT and the criterion fails loudly rather than by a plausible amount.
 	var fl := Pasture3DGraphNodeFloodingUniformLevel.new()
 	fl.water_level = -999.0
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		Pasture3DGraphNodeInput.new(), _const(p_level), fl, Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes

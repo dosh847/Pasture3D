@@ -17,20 +17,10 @@ func op() -> StringName:
 	return &"export_heightmap"
 
 
-func input_count() -> int:
-	return 1
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["height"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT])
-
-
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT).require(),
+	]
 
 
 func formats() -> PackedStringArray:

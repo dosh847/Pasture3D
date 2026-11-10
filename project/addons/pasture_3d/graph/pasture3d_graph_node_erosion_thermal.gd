@@ -57,8 +57,14 @@ func native_lower() -> Dictionary:
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, -1, 0, 1, 2])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.field(&"hardness", PortType.MASK),
+		Pasture3DGraphPort.value(&"talus_angle", PortType.FLOAT, &"talus_angle", 0),
+		Pasture3DGraphPort.value(&"iterations", PortType.INT, &"iterations", 1),
+		Pasture3DGraphPort.value(&"settling_rate", PortType.FLOAT, &"settling_rate", 2),
+	]
 
 
 func freeze_key_grid_ports() -> PackedInt32Array:
@@ -77,36 +83,11 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 5
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "hardness", "talus_angle", "iterations", "settling_rate"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.HEIGHT,
-		PortType.MASK,
-		PortType.FLOAT,
-		PortType.INT,
-		PortType.FLOAT,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return 0.0
-		2: return talus_angle
-		3: return float(iterations)
-		4: return settling_rate
-		_: return 0.0
-
-
-func output_count() -> int:
-	return 2
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"talus", PortType.MASK),
+	]
 
 
 ## The channels the NATIVE op writes, which is now every channel this node offers.
@@ -117,14 +98,6 @@ func output_count() -> int:
 ## the GDScript evaluator. The solver had already computed the field and the op was discarding it.
 func native_out_count() -> int:
 	return 2 # height, talus
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "talus"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.MASK])
 
 
 func node_warnings() -> PackedStringArray:

@@ -86,20 +86,10 @@ func role() -> Role:
 	return Role.FILTER
 
 
-func input_count() -> int:
-	return 1
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["path"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.PATH])
-
-
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"path", PortType.PATH).require(),
+	]
 
 
 ## The class name a consumer must be for this sink to publish into it. Used by the host-side resolver to

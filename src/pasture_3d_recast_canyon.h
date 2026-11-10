@@ -24,11 +24,10 @@
 namespace godot {
 
 // p_noise, when supplied, is added to the cut height per cell (metres), as HighMap's noise overload does,
-// so the rim line need not be a contour. p_mask scales the change per cell, times p_amount (both clamped to
-// [0,1]). Either may be empty. A NaN noise cell reads as 0; a NaN mask cell as 0 (no change).
+// so the rim line need not be a contour. It may be empty, and a NaN noise cell reads as 0. p_amount is
+// clamped to [0,1].
 PackedFloat32Array recast_canyon_solve(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_noise,
-		const PackedFloat32Array &p_mask, int p_gw, int p_gh, double p_cut_height, double p_floor_height,
-		double p_gamma, double p_amount);
+		int p_gw, int p_gh, double p_cut_height, double p_floor_height, double p_gamma, double p_amount);
 
 } // namespace godot
 

@@ -5,8 +5,10 @@
 #include "pasture_3d_thread_pool.h"
 
 #include <godot_cpp/classes/geometry2d.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -61,6 +63,15 @@ HydraulicSaleveParams HydraulicSaleveParams::from_dict(const Dictionary &p_dict)
 	} else if (p_dict.has("incision_rate")) {
 		p.erosion_strength = std::clamp((float)p_dict["incision_rate"], 0.0f, 1.0f);
 	}
+	if (p_dict.has("valley_smoothing")) {
+		p.valley_smoothing = (float)p_dict["valley_smoothing"];
+	}
+	if (p_dict.has("limit_edges")) {
+		p.limit_edges = (bool)p_dict["limit_edges"];
+	}
+	if (p_dict.has("channel_area")) {
+		p.channel_area = std::max(0.0f, (float)p_dict["channel_area"]);
+	}
 	if (p_dict.has("drainage_exponent")) {
 		p.drainage_exponent = std::clamp((float)p_dict["drainage_exponent"], 0.01f, 0.8f);
 	}
@@ -80,7 +91,7 @@ HydraulicSaleveParams HydraulicSaleveParams::from_dict(const Dictionary &p_dict)
 		p.rim_width = std::max(0.0f, (float)p_dict["rim_width"]);
 	}
 	if (p_dict.has("outlet_level")) {
-		p.outlet_level = std::max(0.0f, (float)p_dict["outlet_level"]);
+		p.outlet_level = std::clamp((float)p_dict["outlet_level"], 0.0f, 1.0f);
 	}
 	if (p_dict.has("flat_from_fill")) {
 		p.flat_from_fill = (bool)p_dict["flat_from_fill"];
@@ -101,7 +112,7 @@ HydraulicSaleveParams HydraulicSaleveParams::from_dict(const Dictionary &p_dict)
 		p.debug_network = (bool)p_dict["debug_network"];
 	}
 	if (p_dict.has("shape_preservation")) {
-		p.shape_preservation = std::clamp((float)p_dict["shape_preservation"], 0.1f, 4.0f);
+		p.shape_preservation = std::clamp((float)p_dict["shape_preservation"], 0.05f, 4.0f);
 	}
 	if (p_dict.has("bank_smoothing")) {
 		p.bank_smoothing = std::clamp((float)p_dict["bank_smoothing"], 0.0f, 0.5f);
@@ -134,7 +145,10 @@ HydraulicSaleveParams HydraulicSaleveParams::from_dict(const Dictionary &p_dict)
 		p.stream_exp = std::clamp((float)p_dict["stream_exp"], 0.01f, 1.0f);
 	}
 	if (p_dict.has("control_points")) {
-		p.control_points = std::clamp((int)p_dict["control_points"], 16, 1000000);
+		p.control_points = std::clamp((int)p_dict["control_points"], 16, 100000);
+	}
+	if (p_dict.has("max_control_points")) {
+		p.max_control_points = std::max((int)p_dict["max_control_points"], 16);
 	}
 	if (p_dict.has("point_spacing")) {
 		p.point_spacing = std::max(0.0f, (float)p_dict["point_spacing"]);
@@ -185,6 +199,8 @@ Dictionary HydraulicSaleveResult::to_dict() const {
 	}
 	if (!vertices.is_empty()) {
 		d["vertices"] = vertices;
+		d["vertex_height"] = vertex_height;
+		d["vertex_neighbors"] = vertex_neighbors;
 	}
 	if (!receivers.is_empty()) {
 		d["receivers"] = receivers;
@@ -349,9 +365,22 @@ struct SaleveStage1 {
 	int iterations = 0;
 };
 
-// Stage 1: steady-state fluvial incision over any drainage graph (S1 of the fidelity spec).
-void saleve_stage1(const SaleveGraph &g, std::vector<float> &z, const std::vector<float> &erodibility,
-		const std::vector<float> &slope_cap, const HydraulicSaleveParams &p_params, SaleveStage1 &r_out) {
+// A Stage 1 receiver's input drop must be at least this fraction of the vertex's steepest input drop.
+constexpr float SALEVE_ROUTE_FAN = 0.5f;
+
+// Stage 1: fluvial incision of the INPUT over any drainage graph. `z` arrives holding the routing surface
+// (`p_input` plus the flat-breaking noise) and leaves holding the incised surface.
+//
+// A vertex rises from its receiver by the larger of two allowances, and never past the input:
+//     channel = keep * max(input[i] - input[r], 0),   keep = 1 - E * (1 - min((A_ref / A)^m, 1))
+//     wall    = Max Slope * d * min(A_ref / A, 1)
+// So the input is the ceiling and the shape. Only where water collects does the surface fall below it, and the
+// ground beside a channel climbs straight back up to the input. A free steady state (z = z[root] + the chi
+// integral) never read the input's height at all: it rebuilt the terrain as a distance from the outlets, and
+// moving a mountain barely changed the result (r 0.970 against inputs at 0.188).
+void saleve_stage1(const SaleveGraph &g, std::vector<float> &z, const std::vector<float> &p_input,
+		const std::vector<float> &erodibility, const std::vector<float> &slope_cap, double p_channel_area,
+		const HydraulicSaleveParams &p_params, SaleveStage1 &r_out) {
 	const int n = g.nv;
 	const int iterations = std::max(1, p_params.iterations);
 	const float m_exp = p_params.drainage_exponent;
@@ -366,7 +395,7 @@ void saleve_stage1(const SaleveGraph &g, std::vector<float> &z, const std::vecto
 	root_of.assign(n, 0);
 	area_acc.assign(n, 0.0f);
 	order.reserve(n);
-	std::vector<float> response_times(n, 0.0f);
+	const std::vector<float> route0 = z; // the input with the flat-breaking noise: what "downhill" means.
 	std::vector<int> child_start(n + 1);
 	std::vector<int> child_fill(n);
 	std::vector<int> children(n);
@@ -416,7 +445,10 @@ void saleve_stage1(const SaleveGraph &g, std::vector<float> &z, const std::vecto
 		// settle. `stable_noise` off re-rolls it every pass (the old behaviour; it never converges).
 		const uint32_t pass_seed = p_params.stable_noise ? seed : seed + (uint32_t)iter * 17;
 
-		// 1. Steepest descent receivers with routing noise. Each vertex writes only its own receiver.
+		// 1. Receivers with routing noise, each vertex writing only its own. A receiver must be downhill in the
+		// INPUT, within SALEVE_ROUTE_FAN of the steepest input drop; among those the lowest current surface wins,
+		// which is what lets channels capture their neighbours. Without the fan a vertex drains along the contour
+		// for no input drop, takes its neighbour's height, and one cut runs round the whole mountain.
 		Pasture3DThreadPool::parallel_for_elements(n, 1024, [&](int i0, int i1) {
 			for (int idx = i0; idx < i1; idx++) {
 				if (g.outlet[idx]) {
@@ -424,19 +456,24 @@ void saleve_stage1(const SaleveGraph &g, std::vector<float> &z, const std::vecto
 					continue;
 				}
 				const float z_c = z[idx];
-				float best_score = -1.0e9f;
-				int best = idx;
+				float steepest = 0.0f;
 				for (int e = g.nbr_start[idx]; e < g.nbr_start[idx + 1]; e++) {
+					steepest = std::max(steepest, (route0[idx] - route0[g.nbr[e]]) / (float)g.nbr_len[e]);
+				}
+				float best_score = -std::numeric_limits<float>::max();
+				int best = idx;
+				for (int e = g.nbr_start[idx]; steepest > 0.0f && e < g.nbr_start[idx + 1]; e++) {
 					const int n_idx = g.nbr[e];
-					const float dz_val = z_c - z[n_idx];
-					if (dz_val > 0.0f) {
-						const float slope = dz_val / (float)g.nbr_len[e];
-						const float noise = fast_hash_to_unit(pass_seed, (uint32_t)(idx ^ (n_idx << 16)));
-						const float score = slope * (1.0f + noise_strength * noise);
-						if (score > best_score) {
-							best_score = score;
-							best = n_idx;
-						}
+					const float drop = (route0[idx] - route0[n_idx]) / (float)g.nbr_len[e];
+					if (drop <= 0.0f || drop < SALEVE_ROUTE_FAN * steepest) {
+						continue;
+					}
+					const float slope = (z_c - z[n_idx]) / (float)g.nbr_len[e];
+					const float noise = fast_hash_to_unit(pass_seed, (uint32_t)(idx ^ (n_idx << 16)));
+					const float score = slope + std::abs(slope) * noise_strength * noise;
+					if (score > best_score) {
+						best_score = score;
+						best = n_idx;
 					}
 				}
 				receivers[idx] = best;
@@ -445,10 +482,11 @@ void saleve_stage1(const SaleveGraph &g, std::vector<float> &z, const std::vecto
 
 		build_tree();
 
-		// 2. Lake rerouting. A shortest-path search (ground distance) grows outward from the outlets; the
-		// first time it steps into an undrained basin, the receiver chain from that vertex down to the pit
-		// is reversed so the basin spills into the vertex the search arrived from, which already drains.
-		// Ties break on (distance, index), so the result is independent of heap internals.
+		// 2. Lake rerouting. A flood rises from the outlets over the input; the first time it steps into an
+		// undrained basin it has found the basin's lowest spill, and the receiver chain from that vertex down to
+		// the pit is reversed so the basin drains over it. It has to be the lowest: the chain floods level with
+		// the spill, so the nearest one (this was ground distance) could fill a canyon to the height of its rim.
+		// Ties break on (level, index), so the result is independent of heap internals.
 		bool any_pit = false;
 		for (int i = 0; i < n; i++) {
 			basin_drained[i] = g.outlet[i];
@@ -492,7 +530,7 @@ void saleve_stage1(const SaleveGraph &g, std::vector<float> &z, const std::vecto
 				}
 				for (int e = g.nbr_start[c]; e < g.nbr_start[c + 1]; e++) {
 					const int j = g.nbr[e];
-					const double nd = top.first + g.nbr_len[e];
+					const double nd = std::max(top.first, (double)route0[j]);
 					if (!settled[j] && nd < dist[j]) {
 						dist[j] = nd;
 						pred[j] = c;
@@ -515,33 +553,29 @@ void saleve_stage1(const SaleveGraph &g, std::vector<float> &z, const std::vecto
 			}
 		}
 
-		// 4. Response times (the chi integral), outlet -> leaves.
-		for (int k = 0; k < n; k++) {
-			const int idx = order[k];
-			const int r = receivers[idx];
-			if (r == idx) {
-				response_times[idx] = 0.0f;
-				continue;
-			}
-			const float d = std::max((float)saleve_edge_len(g, idx, r), 1.0e-5f);
-			const float celerity = erodibility[idx] * std::pow(std::max(area_acc[idx], (float)g.area[idx]), m_exp);
-			response_times[idx] = response_times[r] + (d / std::max(celerity, 1.0e-4f));
-		}
-
-		// 5. Steady-state heights, outlet -> leaves, held under the radial slope cap against the receiver.
+		// 4. Heights, outlet -> leaves, held under the slope cap against the receiver. A rerouted pit has no
+		// input drop along its way out, so it floods level with its spill point.
 		float diff = 0.0f;
 		for (int k = 0; k < n; k++) {
 			const int idx = order[k];
 			const int r = receivers[idx];
 			if (r == idx) {
+				diff += std::abs(p_input[idx] - z[idx]);
+				z[idx] = p_input[idx];
 				continue;
 			}
-			float new_z = z[root_of[idx]] + response_times[idx];
+			const double ratio = p_channel_area / std::max((double)area_acc[idx], 1.0e-30);
+			const double kept = ratio >= 1.0 ? 1.0 : std::pow(ratio, (double)m_exp);
+			const double keep = 1.0 - (double)erodibility[idx] * (1.0 - kept);
 			const float d = std::max((float)saleve_edge_len(g, idx, r), 1.0e-5f);
-			const float cap = z[r] + slope_cap[idx] * d;
-			if (new_z > cap) {
-				new_z = cap;
-			}
+			// A channel keeps a fraction of the input's drop. A hillslope may also climb back toward the input
+			// at up to the slope cap, fading as water collects: that is what makes a cut a valley with walls. If
+			// every vertex only inherited its receiver's loss, a whole catchment would sink as one block and
+			// each divide would become a cliff between two neighbours sunk by different amounts.
+			const double channel_rise = keep * std::max((double)p_input[idx] - (double)p_input[r], 0.0);
+			const double wall_rise = (double)slope_cap[idx] * (double)d * std::min(ratio, 1.0);
+			// Never above the input unless flooded: a vertex's receiver may be a lake surface.
+			const float new_z = std::max(z[r], std::min(z[r] + (float)std::max(channel_rise, wall_rise), p_input[idx]));
 			diff += std::abs(new_z - z[idx]);
 			z[idx] = new_z;
 		}
@@ -555,6 +589,73 @@ void saleve_stage1(const SaleveGraph &g, std::vector<float> &z, const std::vecto
 		if (diff / (float)n < p_params.tolerance * std::max(zhi - zlo, 1.0e-5f)) {
 			break;
 		}
+	}
+}
+
+// Holds every mesh edge to the slope cap, or to the input's own slope along it if that is steeper. Stage 1 only
+// bounds the edge to a vertex's receiver, so two neighbours draining to different channels can differ by anything.
+// Only ever lowers, and outlets stay put. The cap is held off zero because a cap of nothing on flat ground would
+// sink everything connected to a channel to the channel's level.
+// Dijkstra from the lowest vertex finds the fixed point in one pass; ties break on (height, index).
+void saleve_limit_edges(const SaleveGraph &g, std::vector<float> &z, const std::vector<float> &p_input,
+		const std::vector<float> &slope_cap, float p_floor) {
+	using Entry = std::pair<float, int>;
+	std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> heap;
+	std::vector<uint8_t> settled(g.nv, 0);
+	for (int i = 0; i < g.nv; i++) {
+		heap.push({ z[i], i });
+	}
+	while (!heap.empty()) {
+		const Entry top = heap.top();
+		heap.pop();
+		const int c = top.second;
+		if (settled[c] || top.first != z[c]) {
+			continue;
+		}
+		settled[c] = 1;
+		for (int e = g.nbr_start[c]; e < g.nbr_start[c + 1]; e++) {
+			const int j = g.nbr[e];
+			if (settled[j] || g.outlet[j]) {
+				continue;
+			}
+			const double cap = std::max(0.5 * ((double)slope_cap[c] + (double)slope_cap[j]), (double)p_floor);
+			const double lim = std::max(cap * g.nbr_len[e], std::abs((double)p_input[c] - (double)p_input[j]));
+			const float cand = (float)((double)z[c] + lim);
+			if (cand < z[j]) {
+				z[j] = cand;
+				heap.push({ cand, j });
+			}
+		}
+	}
+}
+
+// One separable box pass of half-width `p_r` along `p_count` lines of `p_len` samples, the ends clamped.
+void saleve_box_lines(const std::vector<float> &p_in, std::vector<float> &r_out, int p_count, int p_len, int p_line_step,
+		int p_sample_step, int p_r) {
+	const double inv = 1.0 / (double)(2 * p_r + 1);
+	Pasture3DThreadPool::parallel_for_elements(p_count, 8, [&](int l0, int l1) {
+		for (int l = l0; l < l1; l++) {
+			const int base = l * p_line_step;
+			double acc = 0.0;
+			for (int k = -p_r; k <= p_r; k++) {
+				acc += (double)p_in[base + std::clamp(k, 0, p_len - 1) * p_sample_step];
+			}
+			for (int k = 0; k < p_len; k++) {
+				r_out[base + k * p_sample_step] = (float)(acc * inv);
+				acc += (double)p_in[base + std::min(k + p_r + 1, p_len - 1) * p_sample_step];
+				acc -= (double)p_in[base + std::max(k - p_r, 0) * p_sample_step];
+			}
+		}
+	});
+}
+
+// Three box passes per axis, a close Gaussian: its slope is continuous, so no crest survives it. A blur of a field
+// that obeys a slope limit obeys it too, so this keeps what saleve_limit_edges did.
+void saleve_smooth_cut(std::vector<float> &r_cut, int p_gw, int p_gh, int p_rx, int p_rz) {
+	std::vector<float> tmp(r_cut.size());
+	for (int pass = 0; pass < 3; pass++) {
+		saleve_box_lines(r_cut, tmp, p_gh, p_gw, p_gw, 1, p_rx);
+		saleve_box_lines(tmp, r_cut, p_gw, p_gh, 1, p_gw, p_rz);
 	}
 }
 
@@ -621,6 +722,7 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 	// ---- THE DRAINAGE GRAPH ----------------------------------------------------------------------
 	SaleveGraph g;
 	std::vector<double> vh; // input height at each vertex, metres (NaN outside the data)
+	double mesh_spacing = 0.0; // metres between control points; stays 0 on the grid control
 	const bool mesh = !p_params.grid_solve;
 	if (!mesh) {
 		// The 8-connected grid, vertex == cell (the S1 solver; kept as a gate control).
@@ -661,6 +763,17 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 		double s = (p_params.point_spacing > 0.0f) ? (double)p_params.point_spacing
 												   : std::sqrt(rw * rh / (double)std::max(p_params.control_points, 16));
 		s = std::max(s, std::max(cell_dx, cell_dz));
+		const double s_cap = std::sqrt(rw * rh / (double)std::max(p_params.max_control_points, 16));
+		if (s < s_cap) {
+			// Once per requested spacing: a Live graph re-solves on every edit and this would repeat each time.
+			static std::atomic<float> warned_spacing{ -1.0f };
+			if (warned_spacing.exchange(p_params.point_spacing) != p_params.point_spacing) {
+				UtilityFunctions::push_warning(vformat(String::utf8("Salève: Point Spacing %.2f m needs more than %d points over this %.0f x %.0f m area, so it is using %.2f m."),
+						p_params.point_spacing, p_params.max_control_points, rw, rh, s_cap));
+			}
+			s = s_cap;
+		}
+		mesh_spacing = s;
 		std::vector<float> fx, fz; // float positions: the exact values the triangulation sees
 		std::vector<uint8_t> ring;
 		auto add = [&](double x, double z, bool b) {
@@ -771,10 +884,11 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 		erodibility[i] = std::pow(std::clamp(1.0f - zr, 0.01f, 1.0f), p_params.shape_preservation);
 	}
 
+	const std::vector<float> input_z = z; // the clean unit-elevation input, before the routing noise
 	SaleveStage1 st;
 	if (!p_params.reconstruct_only && !p_params.skip_stage1) {
 		const uint32_t seed = (uint32_t)p_params.seed;
-		// Break flats: 1e-3 of the unit relief of value noise on a fixed 50 m world lattice. Working copy only.
+		// Break flats: 1e-3 of the unit relief of value noise on a fixed 50 m world lattice. Routing only.
 		const uint32_t fseed = seed ^ 0x9e3779b9u;
 		for (int i = 0; i < nv; i++) {
 			if (std::isfinite(vh[i])) {
@@ -791,26 +905,34 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 			slope_cap[i] = (float)(sl * to_unit);
 		}
 
-		saleve_stage1(g, z, erodibility, slope_cap, p_params, st);
+		// A channel starts where this much ground drains through a vertex. Auto is (relief / 8)^2, the same in
+		// the solver's unit area whatever the mountain's size, and two vertices' worth at the least: below that
+		// the graph cannot tell a channel from a single edge.
+		const double vertex_area = rw * rh / (double)std::max(nv, 1);
+		const double channel_m2 = p_params.channel_area > 0.0f ? (double)p_params.channel_area
+															   : std::max(vref * vref / 64.0, 2.0 * vertex_area);
+		saleve_stage1(g, z, input_z, erodibility, slope_cap, channel_m2 / (vref * vref), p_params, st);
 		res.iterations = st.iterations;
-
-		// Remap Stage 1 back to [0..1].
-		float lo = std::numeric_limits<float>::max();
-		float hi = -std::numeric_limits<float>::max();
-		for (int i = 0; i < nv; i++) {
-			lo = std::min(lo, z[i]);
-			hi = std::max(hi, z[i]);
-		}
-		const float span = std::max(hi - lo, 1.0e-5f);
-		for (int i = 0; i < nv; i++) {
-			z[i] = (z[i] - lo) / span;
+		if (mesh && p_params.limit_edges) {
+			const float center_cap = (float)((double)std::max(p_params.max_slope_center, p_params.max_slope_border) * to_unit);
+			saleve_limit_edges(g, z, input_z, slope_cap, 0.2f * center_cap);
 		}
 	}
 	if (p_params.debug_network) {
 		res.cell_area = (float)((cell_dx / vref) * (cell_dz / vref));
 		res.vertices.resize(nv);
+		res.vertex_height.resize(nv);
 		for (int i = 0; i < nv; i++) {
 			res.vertices.set(i, Vector2((real_t)g.px[i], (real_t)g.pz[i]));
+			res.vertex_height.set(i, (float)((double)zmin + (double)z[i] * (double)zptp));
+		}
+		for (int i = 0; i < nv; i++) {
+			for (int e = g.nbr_start[i]; e < g.nbr_start[i + 1]; e++) {
+				if (g.nbr[e] > i) {
+					res.vertex_neighbors.push_back(i);
+					res.vertex_neighbors.push_back(g.nbr[e]);
+				}
+			}
 		}
 		if (!st.receivers.empty()) {
 			res.receivers.resize(nv);
@@ -823,6 +945,15 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 	}
 
 	// ---- RECONSTRUCTION onto the grid ------------------------------------------------------------
+	// What goes onto the grid is the CUT (solved less input), not the surface. The mesh is coarser than the grid,
+	// so a surface rebuilt from it would lose the input's fine shape, and a warped one would move it. This way
+	// the warp bends the valleys and the input's own detail stays where it was. `reconstruct_only` is the
+	// reconstruction test harness: it still rebuilds the surface.
+	if (!p_params.reconstruct_only) {
+		for (int i = 0; i < nv; i++) {
+			z[i] -= input_z[i];
+		}
+	}
 	std::vector<float> zg(n);
 	if (!mesh) {
 		std::copy(z.begin(), z.end(), zg.begin());
@@ -982,6 +1113,13 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 							ws += w;
 						}
 						val /= std::max(ws, 1.0e-30);
+						if (!p_params.reconstruct_only) {
+							// A cut changes sharply across a channel, so its tangent planes overshoot by far more
+							// than the cut itself. Metres of false peak otherwise: hold it to the triangle's range.
+							const double lo = std::min((double)z[vv[0]], std::min((double)z[vv[1]], (double)z[vv[2]]));
+							const double hi = std::max((double)z[vv[0]], std::max((double)z[vv[1]], (double)z[vv[2]]));
+							val = std::clamp(val, lo, hi);
+						}
 					}
 					zg[idx] = (float)val;
 				}
@@ -1002,11 +1140,22 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 		return res;
 	}
 
-	// From here on the grid is in METRES: the Stage 1 field scaled by the reference relief, anchored at the
-	// input's low point. Stage 3 (the stream-log solver) is metric, and so are the Stage 2 slopes.
+	// Smooth the cut before it comes off the input. It is at or below zero wherever the ground is cut, so a blur of
+	// it never lifts ground above the input and leaves the input's own detail alone.
+	if (mesh && !p_params.skip_stage1 && p_params.valley_smoothing >= 0.0f) {
+		const double radius = p_params.valley_smoothing > 0.0f ? (double)p_params.valley_smoothing : 1.5 * mesh_spacing;
+		const int rx = (int)std::lround(0.5 * radius / cell_dx);
+		const int rz = (int)std::lround(0.5 * radius / cell_dz);
+		if (rx >= 1 && rz >= 1) {
+			saleve_smooth_cut(zg, p_gw, p_gh, rx, rz);
+		}
+	}
+
+	// From here on the grid is in METRES: the input less Stage 1's cut. Stage 3 (the stream-log solver) is
+	// metric, and so are the Stage 2 slopes. No-data cells rest at the low point.
 	std::vector<float> hm(n);
 	for (int i = 0; i < n; i++) {
-		hm[i] = zmin + zg[i] * relief_ref;
+		hm[i] = std::isfinite(src_height[i]) ? src_height[i] + zg[i] * zptp : zmin;
 	}
 	const double rim = (p_params.rim_width > 0.0f) ? (double)p_params.rim_width : 0.1 * min_side;
 	for (int i = 0; i < n; i++) {

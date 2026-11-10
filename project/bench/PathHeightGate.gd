@@ -149,7 +149,7 @@ func _nan_count(p_v: PackedFloat32Array) -> int:
 func _channel_graph(p_path: Pasture3DGraphPath, p_channel: int) -> Pasture3DTerrainGraph:
 	var src := Pasture3DGraphNodeRoadSource.new()
 	src.path = p_path
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [
 		src, Pasture3DGraphNodePathDistance.new(), Pasture3DGraphNodeOutput.new()]
 	g.nodes = nodes

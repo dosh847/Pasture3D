@@ -73,16 +73,10 @@ func needs_grid() -> bool:
 	return false
 
 
-func input_count() -> int:
-	return 1
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["field"])
-
-
-func input_unwired_default(_p_port: int) -> float:
-	return 0.0
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"field", PortType.HEIGHT).require(),
+	]
 
 
 func eval_cell(p_wx: float, p_wz: float, p_inputs: PackedFloat32Array) -> float:

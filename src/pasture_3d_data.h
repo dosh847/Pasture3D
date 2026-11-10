@@ -609,6 +609,11 @@ public:
 	// caller composites the box and pushes to the GPU once.
 	void apply_sim_block(const int p_layer_id, const double p_min_x, const double p_min_z, const double p_vs,
 			const int p_gw, const int p_gh, const PackedFloat32Array &p_deltas, const int p_blend);
+	// `_blend_replace_over_row` for the GDScript route, which holds its grid in script. Cells outside a non-empty
+	// `clip` come back NaN, because the row out there was not cleared for this bake and still holds this brush.
+	PackedFloat32Array blend_replace_over_layer(const int p_layer_id, const double p_min_x, const double p_min_z, const double p_vs,
+			const int p_gw, const int p_gh, const PackedFloat32Array &p_vals, const PackedFloat32Array &p_weights,
+			const PackedFloat32Array &p_below, const AABB &p_clip) const;
 	// §8.2 — the four Pasture3DSimResult channels. Each entry of `parts` is one solved loop
 	// {sw, sh, min_x, min_z, cell, z0, z1, flow, lake, write_min_x/z, write_max_x/z}; `target` is the
 	// grid they are merged onto {min_x, min_z, cell_size, width, height}. Returns
@@ -637,6 +642,13 @@ public:
 	// already include base height + noise. Deferred-composite path only (orchestration composites the box).
 	void _apply_stamp_block(class Pasture3DLayer *p_layer, const int p_min_px, const int p_min_pz,
 			const int p_gw, const int p_gh, const float *p_vals, const int p_blend);
+	// A REPLACE member fading in over what earlier members of its row wrote this bake:
+	//     own + (1 - weight) * (row - below)
+	// which is the row at this brush's edge and this brush at the row's own edge, so neither ends on a cliff.
+	// Only cells the row already holds move, and a full-weight cell stays an exact replace. Every caller's row
+	// must have been cleared for this bake inside the grid, or the brush fades in over its own last result.
+	void _blend_replace_over_row(const class Pasture3DLayer *p_layer, const int p_min_px, const int p_min_pz,
+			const int p_gw, const int p_gh, float *r_vals, const float *p_weights, const float *p_below) const;
 	// Splat's Phase 1d analogue: batched control apply. Writes packed uint32 control words (where
 	// p_mask != 0) into the TYPE_CONTROL overlay's RGF tiles (R = control bits as float, G = weight 1),
 	// resolving each tile once. Control is REPLACE (no numeric blend); the skip mask is separate from the

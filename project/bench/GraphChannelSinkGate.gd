@@ -133,7 +133,7 @@ func _make_brush(p_terrain: Pasture3D, p_name: String) -> Pasture3DTerrainBrush:
 ## Input -> Mask(ALTITUDE, band 50..1e6, no falloff) -> sink.mask, plus an Output so the graph lowers.
 ## The mask is 1 right of STEP_X and 0 left of it, exactly, which is the whole fixture.
 func _sink_graph(p_sink: Pasture3DGraphNodeChannelSink) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var inp := Pasture3DGraphNodeInput.new()
 	var mask := Pasture3DGraphNodeMask.new()
 	mask.property = Pasture3DGraphNodeMask.Property.ALTITUDE
@@ -652,7 +652,7 @@ func _new_nav_sink() -> Pasture3DGraphNodeChannelSink:
 # ---------------------------------------------------------------------------------------------------
 func _e_the_sinks_cost_the_graph_nothing() -> void:
 	print("[E] a graph containing every sink still lowers, with the same op count (§9.1 / §10)")
-	var plain := Pasture3DTerrainGraph.new()
+	var plain := Pasture3DTerrainGraph.create_empty()
 	var inp := Pasture3DGraphNodeInput.new()
 	var mask := Pasture3DGraphNodeMask.new()
 	var outp := Pasture3DGraphNodeOutput.new()
@@ -665,7 +665,7 @@ func _e_the_sinks_cost_the_graph_nothing() -> void:
 	_check(plain.native_supported(), "control: the sink-free graph lowers")
 	_check(base_ops > 0, "control: the sink-free graph compiled %d op words" % base_ops)
 
-	var withs := Pasture3DTerrainGraph.new()
+	var withs := Pasture3DTerrainGraph.create_empty()
 	var inp2 := Pasture3DGraphNodeInput.new()
 	var mask2 := Pasture3DGraphNodeMask.new()
 	var out2 := Pasture3DGraphNodeOutput.new()
@@ -685,7 +685,7 @@ func _e_the_sinks_cost_the_graph_nothing() -> void:
 	_check(ops == base_ops, "the compiled op count is unchanged (%d vs %d)" % [ops, base_ops])
 
 	# CONTROL: a graph with a KNOWN blocker returns false, so "true" is not this function's only answer.
-	var blocked := Pasture3DTerrainGraph.new()
+	var blocked := Pasture3DTerrainGraph.create_empty()
 	var inp3 := Pasture3DGraphNodeInput.new()
 	var out3 := Pasture3DGraphNodeOutput.new()
 	blocked.nodes = [inp3, out3] as Array[Pasture3DGraphNode]

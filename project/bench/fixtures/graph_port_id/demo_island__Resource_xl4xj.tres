@@ -1,0 +1,21 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="4_ff8bn"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="5_hur8n"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="8_m7f8t"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="10_p4out"]
+
+[sub_resource type="Resource" id="Resource_18xb3"]
+script = ExtResource("5_hur8n")
+graph_position = Vector2(40, 80)
+
+[sub_resource type="Resource" id="Resource_bd2sf"]
+script = ExtResource("8_m7f8t")
+graph_position = Vector2(900, 80)
+
+[resource]
+script = ExtResource("10_p4out")
+format_version = 3
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_18xb3"), SubResource("Resource_bd2sf")])
+wires = [[0, &"height", 1, &"result"]]
+metadata/_editor_selected_node = 2

@@ -34,24 +34,15 @@ func op() -> StringName:
 	return &"export_index_map"
 
 
-func input_count() -> int:
-	return 1
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["index"])
-
-
-func input_port_types() -> PackedInt32Array:
-	# INT, as §9.2's table declares. The port is read as a per-cell FIELD here, unlike the Control Sink's
-	# `base`/`overlay` INT ports which are read from cell 0: a texture index is one value for a whole
-	# sink, an index MAP is one per cell. The tap returns the source slot's entire grid either way, so
-	# the difference is in what the consumer does with it, not in what the wire carries.
-	return PackedInt32Array([PortType.FIELD]) # a grid of indices, tapped per cell: a field, not a value
-
-
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1])
+# INT, as §9.2's table declares. The port is read as a per-cell FIELD here, unlike the Control Sink's
+# `base`/`overlay` INT ports which are read from cell 0: a texture index is one value for a whole
+# sink, an index MAP is one per cell. The tap returns the source slot's entire grid either way, so
+# the difference is in what the consumer does with it, not in what the wire carries.
+# a grid of indices, tapped per cell: a field, not a value
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"index", PortType.FIELD).require(),
+	]
 
 
 func formats() -> PackedStringArray:

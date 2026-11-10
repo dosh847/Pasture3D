@@ -42,6 +42,7 @@ func _test_single_pass_parity() -> void:
 		"iterations": 1,
 		"erosion_strength": 0.7,
 		"drainage_exponent": 0.2,
+		"channel_area": 900.0,
 		"drainage_noise": 0.15,
 		"shape_preservation": 2.0,
 		"bank_smoothing": 0.1,
@@ -187,6 +188,7 @@ func _test_dx_dy_domain_distortion() -> void:
 		"iterations": 10,
 		"erosion_strength": 0.7,
 		"default_warp": false,
+		"valley_smoothing": -1.0, # the warp itself, not how much of it survives the smoothing after it
 		"seed": 303,
 	})
 
@@ -196,6 +198,7 @@ func _test_dx_dy_domain_distortion() -> void:
 		"dx": dx_arr,
 		"dy": dy_arr,
 		"default_warp": false,
+		"valley_smoothing": -1.0,
 		"seed": 303,
 	})
 

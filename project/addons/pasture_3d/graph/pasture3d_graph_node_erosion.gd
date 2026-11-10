@@ -103,8 +103,13 @@ func native_lower() -> Dictionary:
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 0, 1, 3])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"iterations", PortType.INT, &"iterations", 0),
+		Pasture3DGraphPort.value(&"erosion_rate", PortType.FLOAT, &"erosion_rate", 1),
+		Pasture3DGraphPort.value(&"diffusion", PortType.FLOAT, &"hillslope_diffusion", 3),
+	]
 
 
 func freeze_key_grid_ports() -> PackedInt32Array:
@@ -127,42 +132,14 @@ func needs_grid() -> bool:
 	return true
 
 
-func input_count() -> int:
-	return 4
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "iterations", "erosion_rate", "diffusion"])
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.HEIGHT,
-		PortType.INT,
-		PortType.FLOAT,
-		PortType.FLOAT,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return float(iterations)
-		2: return erosion_rate
-		3: return hillslope_diffusion
-		_: return 0.0
-
-
-func output_count() -> int:
-	return 5
-
-
-func output_names() -> PackedStringArray:
-	return PackedStringArray(["height", "flow", "erosion", "deposition", "wetness"])
-
-
-func output_port_types() -> PackedInt32Array:
-	return PackedInt32Array([PortType.HEIGHT, PortType.FIELD, PortType.FIELD, PortType.FIELD, PortType.FIELD])
+func _outputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"height", PortType.HEIGHT),
+		Pasture3DGraphPort.field(&"flow", PortType.FIELD),
+		Pasture3DGraphPort.field(&"erosion", PortType.FIELD),
+		Pasture3DGraphPort.field(&"deposition", PortType.FIELD),
+		Pasture3DGraphPort.field(&"wetness", PortType.FIELD),
+	]
 
 
 func node_warnings() -> PackedStringArray:

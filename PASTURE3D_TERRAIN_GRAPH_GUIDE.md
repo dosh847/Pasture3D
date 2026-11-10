@@ -32,18 +32,25 @@ build plan and finishes, this describes the thing that was built.
 
 ## 2. The data model
 
-A graph is a DAG held in three exported fields:
+A graph is a DAG held in three fields:
 
 - **`nodes: Array[Pasture3DGraphNode]`** — authoring order only. Evaluation order is derived.
 - **`connections: Array`** — each entry a `PackedInt32Array` of `[from_node, from_port, to_node, to_port]`.
   Wire them with `connect_ports(from, from_port, to, to_port)`. There is no `connect_nodes`; a gate once
   called it, the call errored, and what the gate then timed was a graph with no wires in it at all.
+  This is the working form and is **not saved**. The file holds `wires`, the same rows with each port named
+  by its id (`[from_node, &"out", to_node, &"in"]`), and `connections` is rebuilt from it on load. A stored
+  id its node no longer declares is dropped and reported by `graph_warnings`, never rebound.
+- **`format_version: int`** — 3 today (format 3 is the standard mask: ports spec §9). A graph outside `FORMAT_MIN_COMPATIBLE..FORMAT_CURRENT` is refused
+  whole. `Pasture3DTerrainGraph.new()` is format 0 (what the loader starts from), so a graph filled by hand
+  starts from `Pasture3DTerrainGraph.create_empty()`; `add_node` on an empty graph stamps it too.
 - **`output_node: int`** — index of the node whose grid is the result. `-1` means no output, and
   `evaluate()` returns a flat 0 field rather than guessing.
 
 ### Ports and types
 
-`PortType` is `HEIGHT, MASK, VECTOR, CURVE, FLOAT, INT, COLOR, BOOL, TERRAIN_BUS, PATH`. Types colour the
+`PortType` is `HEIGHT, MASK, FLOAT, INT, COLOR, BOOL, PATH, FIELD, SIGNED`, plus three retired members
+(`VECTOR`, `CURVE`, `TERRAIN_BUS`) that no node declares. Types colour the
 slots and validate wiring; the evaluator moves a `PackedFloat32Array` per port regardless — with one
 exception.
 
@@ -122,9 +129,8 @@ func _init() -> void:
 func op() -> StringName: return &"example"
 func role() -> Role: return Role.FILTER
 func needs_grid() -> bool: return false
-func input_count() -> int: return 1
-func input_names() -> PackedStringArray: return PackedStringArray(["height"])
-func input_port_types() -> PackedInt32Array: return PackedInt32Array([PortType.HEIGHT])
+func _inputs() -> Array[Pasture3DGraphPort]:
+    return [Pasture3DGraphPort.field(&"height", PortType.HEIGHT).require()]
 func eval_cell(p_wx: float, p_wz: float, p_inputs: Array) -> float:
     return p_inputs[0] * amplitude
 ```
@@ -274,8 +280,26 @@ filter are worth knowing, because both were once wrong:
 - The editor's inline previews render nodes the bake filter excludes, which is exactly what previews are
   for. That is why `node_changed` exists as a second signal rather than the filter being widened.
 
-`content_key()` is the host's staleness key: a monotonic revision, bumped on every `changed`. Absolute
+`content_key()` is the graph's staleness key: a monotonic revision, bumped on every `changed`. Absolute
 value does not matter, only that it moves.
+
+**Graph parameters change what a key must cover.** A graph declares parameters and a host
+(`Pasture3DNodeGraph`) supplies their values, so one graph compiles to different programs for different
+hosts (ports spec §10). The host stamps its values with `set_host_params` before every compile and evaluate,
+and the stamp emits nothing. A host-side key is therefore `Pasture3DNodeGraph.graph_key()`, never the bare
+`content_key()`: anything new that caches a graph result per host must key on it, and anything that
+compiles or evaluates a hosted graph must stamp first (`stamp_params()`, or `graph_key()`, which stamps).
+
+**Subgraphs and Combine do not exist below the compiler** (ports spec §11, §12). A graph that holds a
+Subgraph or a Combine node (`needs_flat()`) hands every evaluator entry point to `flat_view()`, where a
+Combine becomes a left fold of two-input Blends over its wires in row order. The flat view is a
+generated graph whose top-level nodes are the parent's own objects at their own indices, followed by
+per-instance copies of each child's nodes and each fold's Blends, with the boundary rewired. Anything new
+that evaluates, compiles, reports on or measures the reach of a graph must either go through one of the
+existing entry points or delegate the same way, or it will see a dead Subgraph or Combine node, and a
+Combine's several wires into one input.
+A tap on a Subgraph node's output port k is its own root, so pass `tap_channel(compiled, node, port)` and
+not the raw port. Inside a child, a solver cannot be Frozen and sinks are not run.
 
 **What not to memoise.** `native_supported()` is memoised on `[root, revision]` because it derives a
 *bool* from structure. `compile_graph_program()`'s result is deliberately **not** memoised: a compiled
@@ -324,14 +348,19 @@ as an `@export` — they are the same value, and the wire wins.
 ### The two tables that fill those widgets
 
 ```gdscript
-const SLOT_SPINS := {
-    &"warp": {1: [&"strength"], 2: [&"amplitude"], 3: [&"frequency"]},
-    …
-}
+# in the node
+func _inputs() -> Array[Pasture3DGraphPort]:
+    return [
+        Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+        Pasture3DGraphPort.value(&"strength", PortType.FLOAT, &"strength", 0),
+        …
+    ]
 ```
 
-`SLOT_SPINS` says **which property** each port edits, and nothing else. **The range is deliberately not
-there** — `_spin_from_hint()` reads it from the property's own `@export_range` at build time. This
+The port's own descriptor says **which property** it edits (the third argument of `value()`), and that
+same property is what the port reads unwired. Until 2026-11-09 this was a `SLOT_SPINS` table in the
+editor keyed by op and port number; it is gone (`PASTURE3D_GRAPH_PORTS_AND_STRUCTURE_SPEC.md` §6).
+**The range is deliberately not there** — `_spin_from_hint()` reads it from the property's own `@export_range` at build time. This
 replaced 542 lines of 91 near-identical `SpinBox` blocks restating min/max/step the nodes already
 declared, and by the time anyone measured, **37 of the 41 comparable pairs had drifted**. Sixteen of those
 were the destructive kind: the node declared `or_greater`, the widget clamped, and a Warp authored at
@@ -342,7 +371,7 @@ frequency 0.3 displayed as 0.1 — then wrote 0.1 back on the next interaction. 
   constraint, and inventing one here is how the second table grows back.
 - **`or_greater` / `or_lesser` must survive** into `allow_greater` / `allow_lesser`, or a soft range
   becomes a hard clamp on a value the graph was already authored with.
-- **A name in `SLOT_SPINS` that the node does not have pushes a warning.** It used to be silent —
+- **A port naming a property the node does not have pushes a warning**, and fails `GraphPortDescriptorGate` [D]. It used to be silent —
   `p_node.get("typo")` returned null and the box read 0, which is indistinguishable from a real zero.
 
 What a spin box cannot express (a Vector2 pair, a colour, a bool, a curve or noise sub-resource, a seed
@@ -360,8 +389,11 @@ Inspector.
 ### Adding an inline parameter — the short version
 
 1. Declare the `@export` with a real `@export_range`, and a setter that calls `_param_changed()`.
-2. If it should also be wirable, add it to `input_names()` / `input_port_types()` at the right index.
-3. Add `{op: {port: [property]}}` to `SLOT_SPINS` — **the property name only, never the range**.
+2. If it should also be wirable, add one `Pasture3DGraphPort.value(&"id", PortType.FLOAT, &"property", slot)`
+   to the node's `_inputs()`. That one line is the port, its unwired value, its native slot and its
+   inline widget; there is no other table to edit.
+3. A new port changes `bench/golden/graph_port_table.txt`. Regenerate it with `GraphPortTableWrite.gd`
+   and read the diff before keeping it.
 4. Non-numeric? Add a case in `_append_slot_inline_widget`. Not port-bound? `_add_inline_node_controls`.
 5. If the hint changes at runtime, call `notify_property_list_changed()` (§8).
 

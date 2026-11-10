@@ -1,0 +1,63 @@
+[gd_resource type="Resource" format=3]
+
+[ext_resource type="Script" uid="uid://3s1gobo5lmt7" path="res://addons/pasture_3d/graph/pasture3d_graph_node.gd" id="4_gl3o4"]
+[ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="6_m7w56"]
+[ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="7_fpp8j"]
+[ext_resource type="Script" uid="uid://dduqg8qestuvt" path="res://addons/pasture_3d/graph/pasture3d_graph_node_input.gd" id="23_6glik"]
+[ext_resource type="Script" uid="uid://bindlf2awqi6e" path="res://addons/pasture_3d/graph/pasture3d_graph_node_blend.gd" id="25_i8fyf"]
+[ext_resource type="Script" uid="uid://xya0fdv0c734" path="res://addons/pasture_3d/graph/pasture3d_graph_node_warp.gd" id="25_w2cmt"]
+[ext_resource type="Script" uid="uid://dbvt4w4rnlb6k" path="res://addons/pasture_3d/graph/pasture3d_graph_node_noise_swiss.gd" id="33_81dmx"]
+[ext_resource type="Script" uid="uid://dby8ulk0ecuh" path="res://addons/pasture_3d/graph/pasture3d_graph_node_const_color.gd" id="33_p5hj1"]
+[ext_resource type="Script" uid="uid://dkwo3nwbq1d7n" path="res://addons/pasture_3d/graph/pasture3d_graph_node_erosion_hydraulic.gd" id="34_kj31n"]
+[ext_resource type="Script" uid="uid://ybwedanry756" path="res://addons/pasture_3d/graph/pasture3d_graph_node_hydraulic_saleve.gd" id="34_sghyq"]
+[ext_resource type="Script" uid="uid://82lkphq4dfon" path="res://addons/pasture_3d/graph/pasture3d_graph_node_hydraulic_particle.gd" id="35_34frt"]
+
+[sub_resource type="Resource" id="Resource_wlcl8"]
+script = ExtResource("23_6glik")
+graph_position = Vector2(40, 80)
+
+[sub_resource type="Resource" id="Resource_gfte7"]
+script = ExtResource("6_m7w56")
+graph_position = Vector2(2580, 120)
+
+[sub_resource type="Resource" id="Resource_kn8qo"]
+script = ExtResource("25_i8fyf")
+graph_position = Vector2(400, 80)
+muted = true
+
+[sub_resource type="Resource" id="Resource_vkylo"]
+script = ExtResource("33_81dmx")
+amplitude = 40.0
+graph_position = Vector2(-20, 200)
+muted = true
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_rua3w"]
+script = ExtResource("25_w2cmt")
+graph_position = Vector2(760, 100)
+muted = true
+
+[sub_resource type="Resource" id="Resource_cgf8m"]
+script = ExtResource("34_sghyq")
+shape_preservation = 0.05
+graph_position = Vector2(1080, 480)
+
+[sub_resource type="Resource" id="Resource_fnn6v"]
+script = ExtResource("33_p5hj1")
+graph_position = Vector2(1660, 520)
+
+[sub_resource type="Resource" id="Resource_ax1cy"]
+script = ExtResource("34_kj31n")
+graph_position = Vector2(1260, 200)
+
+[sub_resource type="Resource" id="Resource_1uu62"]
+script = ExtResource("35_34frt")
+bedrock_gap = 2.0
+graph_position = Vector2(1280, -40)
+
+[resource]
+script = ExtResource("7_fpp8j")
+format_version = 3
+nodes = Array[ExtResource("4_gl3o4")]([SubResource("Resource_wlcl8"), SubResource("Resource_gfte7"), SubResource("Resource_kn8qo"), SubResource("Resource_vkylo"), SubResource("Resource_rua3w"), SubResource("Resource_cgf8m"), SubResource("Resource_fnn6v"), SubResource("Resource_ax1cy"), SubResource("Resource_1uu62")])
+wires = [[0, &"height", 2, &"a"], [3, &"out", 2, &"b"], [2, &"out", 4, &"in"], [4, &"out", 5, &"in"], [4, &"out", 7, &"in"], [4, &"out", 8, &"in"], [5, &"height", 1, &"result"]]
+metadata/_editor_selected_node = 5

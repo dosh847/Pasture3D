@@ -128,6 +128,36 @@ void eroder(double p_x, double p_z, double p_dx, double p_dz, uint32_t p_seed, d
 	r_gz = vz / wt;
 }
 
+// The height range. See GavoronoiseParams::height_min.
+void resolve_range(const GavoronoiseParams &p, const float *p_base, int p_n, double &r_lo, double &r_hi) {
+	double bmin = INFINITY;
+	double bmax = -INFINITY;
+	if (p_base) {
+		for (int i = 0; i < p_n; i++) {
+			if (std::isfinite(p_base[i])) {
+				bmin = std::min(bmin, (double)p_base[i]);
+				bmax = std::max(bmax, (double)p_base[i]);
+			}
+		}
+	}
+	const bool has = bmax >= bmin;
+	r_lo = std::isfinite(p.height_min) ? p.height_min : ((p.height_min != -INFINITY && has) ? bmin : 0.0);
+	r_hi = std::isfinite(p.height_max) ? p.height_max : ((p.height_max != -INFINITY && has) ? bmax : r_lo + p.amplitude);
+}
+
+// Moves the pattern coordinate and returns the gully-depth gain. Off (returns 1, moves nothing) at 0.
+double apply_variation(double &r_x, double &r_z, double p_variation, uint32_t p_seed) {
+	if (p_variation <= 0.0) {
+		return 1.0;
+	}
+	const double nx = gabor(r_x * 0.5, r_z * 0.5, 1.0, 0.0, 1.0, p_seed + 101u);
+	const double nz = gabor(r_x * 0.5, r_z * 0.5, 0.0, 1.0, 1.0, p_seed + 211u);
+	const double ns = gabor(r_x * 0.25, r_z * 0.25, 1.0, 0.0, 1.0, p_seed + 307u);
+	r_x += p_variation * nx;
+	r_z += p_variation * nz;
+	return std::max(0.0, 1.0 + 2.0 * p_variation * ns);
+}
+
 // The erosion stage's value channel. p_base is the normalised base height (about -1..1), p_d* its
 // along-contour direction in p units.
 double erosion(double p_x, double p_z, double p_base, double p_dx, double p_dz, const GavoronoiseParams &p) {
@@ -159,8 +189,11 @@ PackedFloat32Array godot::gavoronoise_grid(int p_gw, int p_gh, const Rect2 &p_re
 		return out;
 	}
 	out.resize(n);
-	if (std::abs(p.amplitude) <= 1e-7 || p.frequency <= 0.0) {
-		out.fill(0.f);
+	double lo, hi;
+	resolve_range(p, nullptr, 0, lo, hi);
+	const double range = hi - lo;
+	if (std::abs(range) <= 1e-7 || p.frequency <= 0.0) {
+		out.fill((float)lo);
 		return out;
 	}
 	const double theta = p.angle_deg * kTau / 360.0;
@@ -176,8 +209,9 @@ PackedFloat32Array godot::gavoronoise_grid(int p_gw, int p_gh, const Rect2 &p_re
 			for (int ix = 0; ix < p_gw; ix++) {
 				double wx, wz;
 				graph_cell_to_world(ix, iz, p_gw, p_gh, p_rect, wx, wz);
-				const double px = wx * p.frequency;
-				const double pz = wz * p.frequency;
+				double px = wx * p.frequency;
+				double pz = wz * p.frequency;
+				const double gain = apply_variation(px, pz, p.variation, seed);
 				const double b = base_fbm(px, pz, kx, kz, spread, seed);
 				const double mx = base_fbm(px + kGradEps, pz, kx, kz, spread, seed)
 						- base_fbm(px - kGradEps, pz, kx, kz, spread, seed);
@@ -185,8 +219,8 @@ PackedFloat32Array godot::gavoronoise_grid(int p_gw, int p_gh, const Rect2 &p_re
 						- base_fbm(px, pz - kGradEps, kx, kz, spread, seed);
 				const double dx = mz / kGradEps * 0.5 * p.slope_strength;
 				const double dz = -mx / kGradEps * 0.5 * p.slope_strength;
-				const double v = b + p.erosion_strength * erosion(px, pz, b, dx, dz, p);
-				w[iz * p_gw + ix] = (float)(p.amplitude * (0.5 * v + 0.5));
+				const double v = b + p.erosion_strength * gain * erosion(px, pz, b, dx, dz, p);
+				w[iz * p_gw + ix] = (float)(lo + range * (0.5 * v + 0.5));
 			}
 		}
 	});
@@ -199,7 +233,10 @@ PackedFloat32Array godot::gavoronoise_base_grid(int p_gw, int p_gh, const Rect2 
 	if (p_gw <= 0 || p_gh <= 0 || p_base.size() != n) {
 		return PackedFloat32Array();
 	}
-	if (std::abs(p.amplitude) <= 1e-7 || p.frequency <= 0.0 || p.erosion_strength == 0.0) {
+	double lo, hi;
+	resolve_range(p, p_base.ptr(), n, lo, hi);
+	const double range = hi - lo;
+	if (std::abs(range) <= 1e-7 || p.frequency <= 0.0 || p.erosion_strength == 0.0) {
 		return p_base;
 	}
 	const PackedFloat32Array smoothed = p_base_smoothing_m > 0.0
@@ -209,8 +246,8 @@ PackedFloat32Array godot::gavoronoise_base_grid(int p_gw, int p_gh, const Rect2 
 	const float *sm = smoothed.ptr();
 	const double cell_dx = (double)p_rect.size.x / (double)p_gw;
 	const double cell_dz = (double)p_rect.size.y / (double)p_gh;
-	// Metres-per-metre slope into base-units per p-unit: base = 2 z / amplitude - 1, p = world * frequency.
-	const double to_n = 2.0 / (p.amplitude * p.frequency);
+	// Metres-per-metre slope into base-units per p-unit: base = 2 (z - lo) / range - 1, p = world * frequency.
+	const double to_n = 2.0 / (range * p.frequency);
 
 	PackedFloat32Array out;
 	out.resize(n);
@@ -240,10 +277,12 @@ PackedFloat32Array godot::gavoronoise_base_grid(int p_gw, int p_gh, const Rect2 
 				}
 				double wx, wz;
 				graph_cell_to_world(ix, iz, p_gw, p_gh, p_rect, wx, wz);
-				const double bn = 2.0 * z / p.amplitude - 1.0;
-				const double e = erosion(wx * p.frequency, wz * p.frequency, bn, gz * p.slope_strength,
-						-gx * p.slope_strength, p);
-				w[i] = (float)(z + p.erosion_strength * e * p.amplitude * 0.5);
+				const double bn = 2.0 * (z - lo) / range - 1.0;
+				double px = wx * p.frequency;
+				double pz = wz * p.frequency;
+				const double gain = apply_variation(px, pz, p.variation, (uint32_t)p.seed);
+				const double e = erosion(px, pz, bn, gz * p.slope_strength, -gx * p.slope_strength, p);
+				w[i] = (float)(z + p.erosion_strength * gain * e * range * 0.5);
 			}
 		}
 	});

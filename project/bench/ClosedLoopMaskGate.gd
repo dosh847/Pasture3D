@@ -101,7 +101,7 @@ func _audit_graph_feather_modes() -> void:
 	add_child(brush)
 
 	# Graph: Input + Constant 20m offset
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n_in := Pasture3DGraphNodeInput.new()
 	var n_const := Pasture3DGraphNodeConst.new(); n_const.value = 20.0
 	var n_add := Pasture3DGraphNodeBlend.new(); n_add.mode = Pasture3DGraphNodeBlend.Mode.ADD
@@ -181,7 +181,7 @@ func _audit_boundary_continuity() -> void:
 	var brush := Pasture3DMound.new()
 	add_child(brush)
 
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n_in := Pasture3DGraphNodeInput.new()
 	var n_const := Pasture3DGraphNodeConst.new(); n_const.value = 50.0
 	var n_add := Pasture3DGraphNodeBlend.new(); n_add.mode = Pasture3DGraphNodeBlend.Mode.ADD

@@ -356,7 +356,7 @@ func _h_a_solver_key_carries_its_dimensions() -> void:
 # by GraphNodeParamGate, not by this key.
 func _i_the_native_path_keys_on_the_graph() -> void:
 	print("[I] the native path stores a key that knows the graph shape (§4.4)")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n := Pasture3DGraphNodeNoise.new()
 	var fnl := FastNoiseLite.new(); fnl.seed = 3; fnl.frequency = 0.03
 	n.noise = fnl; n.amplitude = 20.0
@@ -390,7 +390,7 @@ func _i_the_native_path_keys_on_the_graph() -> void:
 
 ## Builds a 4-node pipeline: Noise(0) -> Smooth(1) -> Terrace(2) -> Output(3).
 func _create_test_pipeline(p_amp: float, p_passes: int, p_band: float, p_hardness: float) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	
 	var fnl := FastNoiseLite.new()
 	fnl.seed = 1234

@@ -60,14 +60,6 @@ enum Mode { GAIN, GAMMA }
 		range_max = v
 		emit_changed()
 
-@export_group("Masking")
-## Cross-fade between the untouched input (0.0) and the fully shaped result (1.0), multiplied by the
-## `mask` port when one is wired.
-@export_range(0.0, 1.0, 0.01) var mask_amount: float = 1.0:
-	set(v):
-		mask_amount = clampf(v, 0.0, 1.0)
-		emit_changed()
-
 
 func op() -> StringName:
 	return &"contrast"
@@ -80,13 +72,15 @@ func native_lower() -> Dictionary:
 	p[1] = amount
 	p[2] = range_min
 	p[3] = range_max
-	p[4] = mask_amount
 	p[5] = 1.0 if bool(explicit_window) else 0.0
 	return {"params": p}
 
 
-func native_param_ports() -> PackedInt32Array:
-	return PackedInt32Array([-1, 1, -1])
+func _inputs() -> Array[Pasture3DGraphPort]:
+	return [
+		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
+		Pasture3DGraphPort.value(&"amount", PortType.FLOAT, &"amount", 1),
+	]
 
 
 func role() -> Role:
@@ -97,35 +91,6 @@ func role() -> Role:
 ## grids in both modes rather than only when auto, so there is one code path and not two that can drift.
 func needs_grid() -> bool:
 	return true
-
-
-func input_count() -> int:
-	return 3
-
-
-func input_names() -> PackedStringArray:
-	return PackedStringArray(["in", "amount", "mask"])
-
-
-func aux_grid_port() -> int:
-	return 2 # "mask"
-
-
-
-func input_port_types() -> PackedInt32Array:
-	return PackedInt32Array([
-		PortType.HEIGHT,
-		PortType.FLOAT,
-		PortType.MASK,
-	])
-
-
-func input_unwired_default(p_port: int) -> float:
-	match p_port:
-		0: return 0.0
-		1: return amount
-		2: return 1.0
-		_: return 0.0
 
 
 ## The curve on a normalised [0,1] value. Split out so the gate can assert the curve itself rather than
@@ -141,7 +106,7 @@ func curve_value(p_t: float, p_amount: float) -> float:
 
 
 ## One cell, given a window that has already been resolved. Both evaluators go through here.
-func shape_value(p_in: float, p_amount: float, p_lo: float, p_hi: float, p_mask: float) -> float:
+func shape_value(p_in: float, p_amount: float, p_lo: float, p_hi: float) -> float:
 	if is_nan(p_in):
 		return NAN
 	var span: float = p_hi - p_lo
@@ -152,8 +117,7 @@ func shape_value(p_in: float, p_amount: float, p_lo: float, p_hi: float, p_mask:
 	if p_in <= p_lo or p_in >= p_hi:
 		return p_in
 	var t: float = (p_in - p_lo) / span
-	var shaped: float = p_lo + curve_value(t, maxf(p_amount, 0.001)) * span
-	return lerpf(p_in, shaped, clampf(p_mask * mask_amount, 0.0, 1.0))
+	return p_lo + curve_value(t, maxf(p_amount, 0.001)) * span
 
 
 ## The window this bake will use: the authored metres, or the input's own finite extremes. Returned as a
@@ -176,26 +140,20 @@ func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, _p_rect: Rect2) -
 	var n := p_gw * p_gh
 	var h: PackedFloat32Array = (p_inputs[0] as PackedFloat32Array) if (p_inputs.size() > 0 and p_inputs[0] is PackedFloat32Array) else Pasture3DGraphOps.zeros(n)
 	var amt: float = float(p_inputs[1][0]) if (p_inputs.size() > 1 and p_inputs[1] is PackedFloat32Array and p_inputs[1].size() > 0) else amount
-	var has_mask: bool = p_inputs.size() > 2 and p_inputs[2] is PackedFloat32Array and p_inputs[2].size() == n
-	var msk: PackedFloat32Array = p_inputs[2] if has_mask else PackedFloat32Array()
 	var win := resolve_window(h)
 	var out := PackedFloat32Array()
 	out.resize(n)
 	for i in range(n):
-		var m: float = 1.0
-		if has_mask and is_finite(msk[i]):
-			m = msk[i]
-		out[i] = shape_value(h[i], amt, win.x, win.y, m)
+		out[i] = shape_value(h[i], amt, win.x, win.y)
 	return out
 
 
 func eval_cell(_p_wx: float, _p_wz: float, p_inputs: PackedFloat32Array) -> float:
 	var base_in: float = p_inputs[0] if (p_inputs.size() > 0) else 0.0
 	var amt: float = p_inputs[1] if (p_inputs.size() > 1 and not is_nan(p_inputs[1])) else amount
-	var msk: float = p_inputs[2] if (p_inputs.size() > 2 and not is_nan(p_inputs[2])) else 1.0
 	# A single cell has no extremes to auto-window against, so this path can only honour the authored
 	# window. `needs_grid()` is true precisely so nothing routes an auto-windowed node through here.
-	return shape_value(base_in, amt, range_min, range_max, msk)
+	return shape_value(base_in, amt, range_min, range_max)
 
 
 func node_warnings() -> PackedStringArray:
@@ -204,6 +162,4 @@ func node_warnings() -> PackedStringArray:
 		w.append("%s: Height Window is empty (Range Max <= Range Min), so it passes the input through unchanged." % display_name())
 	elif is_equal_approx(amount, 1.0):
 		w.append("%s: Amount is 1.0, which is the identity curve in both modes." % display_name())
-	elif is_zero_approx(mask_amount):
-		w.append("%s: Mask Amount is 0, so it passes the input through unchanged." % display_name())
 	return w

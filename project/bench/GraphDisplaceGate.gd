@@ -119,6 +119,7 @@ func _de_parity_and_route() -> void:
 		return
 	var native := g.evaluate(GW, GH, RECT, null, cone)
 	var dev := Pasture3DGraphNodeDevDisplace.new()
+	dev.direction = 0
 	dev.scale = 1.3
 	dev.amount = 1.0
 	var oracle := dev.solve(cone, _noise_field(11, 40.0), _noise_field(23, 40.0), PackedFloat32Array(), GW, GH, RECT)
@@ -164,6 +165,7 @@ func _df_gpu() -> void:
 ## Input -> Displace -> Output, with Const nodes on dx / dy / mask for each value that is not null.
 func _displace_graph(p_dx, p_dy, p_mask, p_scale: float, p_amount: float) -> Pasture3DTerrainGraph:
 	var dn := Pasture3DGraphNodeDisplace.new()
+	dn.direction = Pasture3DGraphNodeDisplace.Direction.WORLD
 	dn.scale = p_scale
 	dn.amount = p_amount
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), dn, Pasture3DGraphNodeOutput.new()]
@@ -176,7 +178,7 @@ func _displace_graph(p_dx, p_dy, p_mask, p_scale: float, p_amount: float) -> Pas
 		c.value = float(vals[k])
 		nodes.append(c)
 		conns.append(PackedInt32Array([nodes.size() - 1, 0, 1, k + 1]))
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	g.nodes = nodes
 	g.connections = conns
 	return g
@@ -184,11 +186,12 @@ func _displace_graph(p_dx, p_dy, p_mask, p_scale: float, p_amount: float) -> Pas
 
 func _noise_graph(p_amp: float, p_scale: float, p_amount: float) -> Pasture3DTerrainGraph:
 	var dn := Pasture3DGraphNodeDisplace.new()
+	dn.direction = Pasture3DGraphNodeDisplace.Direction.WORLD
 	dn.scale = p_scale
 	dn.amount = p_amount
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new(), dn, Pasture3DGraphNodeOutput.new(),
 			_noise_node(11, p_amp), _noise_node(23, p_amp)]
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	g.nodes = nodes
 	g.connections = [PackedInt32Array([0, 0, 1, 0]), PackedInt32Array([1, 0, 2, 0]),
 			PackedInt32Array([3, 0, 1, 1]), PackedInt32Array([4, 0, 1, 2])]
@@ -223,7 +226,7 @@ func _noise_field(p_seed: int, p_amp: float) -> PackedFloat32Array:
 
 
 func _build_chain(p_mid: Array) -> Pasture3DTerrainGraph:
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var nodes: Array[Pasture3DGraphNode] = [Pasture3DGraphNodeInput.new()]
 	for m in p_mid:
 		nodes.append(m)

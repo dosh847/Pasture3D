@@ -78,7 +78,7 @@ func _a_registry_search_and_tags() -> void:
 
 func _b_subgraph_duplication_and_wire_remapping() -> void:
 	print("[B] Subgraph duplication & internal wire remapping")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n0 := g.add_node(Pasture3DGraphNodeRegistry.create(&"noise"), Vector2(100, 100)) # 0
 	var n1 := g.add_node(Pasture3DGraphNodeRegistry.create(&"const"), Vector2(100, 200)) # 1
 	var n2 := g.add_node(Pasture3DGraphNodeRegistry.create(&"blend"), Vector2(300, 150)) # 2
@@ -118,14 +118,14 @@ func _b_subgraph_duplication_and_wire_remapping() -> void:
 
 func _c_clipboard_serialize_deserialize() -> void:
 	print("[C] Subgraph clipboard serialize / deserialize round-trip")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var n0 := g.add_node(Pasture3DGraphNodeRegistry.create(&"noise"), Vector2(100, 100))
 	var n1 := g.add_node(Pasture3DGraphNodeRegistry.create(&"smooth"), Vector2(300, 100))
 	g.connect_ports(n0, 0, n1, 0)
 	
 	var clip := g.serialize_subgraph([n0, n1])
 	var nodes_in_clip: Array = clip.get("nodes", [])
-	var wires_in_clip: Array = clip.get("connections", [])
+	var wires_in_clip: Array = clip.get("wires", [])
 	
 	var serialize_ok := nodes_in_clip.size() == 2 and wires_in_clip.size() == 1
 	print("    serialized nodes=%d, internal wires=%d" % [nodes_in_clip.size(), wires_in_clip.size()])
@@ -154,7 +154,7 @@ func _c_clipboard_serialize_deserialize() -> void:
 
 func _d_undo_redo_actions() -> void:
 	print("[D] Undo/Redo action sequences")
-	var g := Pasture3DTerrainGraph.new()
+	var g := Pasture3DTerrainGraph.create_empty()
 	var editor := Pasture3DGraphEditor.new()
 	editor._build_ui()
 	editor.edit_graph(g)
@@ -228,7 +228,7 @@ func _d_undo_redo_actions() -> void:
 
 func _e_keyboard_shortcuts_and_selection() -> void:
 	print("[E] Keyboard shortcuts & multi-selection")
-	var g = Pasture3DTerrainGraph.new()
+	var g = Pasture3DTerrainGraph.create_empty()
 	var n0 = g.add_node(Pasture3DGraphNodeRegistry.create(&"noise"), Vector2(100, 100)) # 0
 	var n1 = g.add_node(Pasture3DGraphNodeRegistry.create(&"const"), Vector2(100, 200)) # 1
 	
@@ -285,7 +285,7 @@ func _e_keyboard_shortcuts_and_selection() -> void:
 
 func _f_graph_frames_and_grouping() -> void:
 	print("[F] GraphFrame grouping, serialization & node attachment")
-	var g = Pasture3DTerrainGraph.new()
+	var g = Pasture3DTerrainGraph.create_empty()
 	var n0 = g.add_node(Pasture3DGraphNodeRegistry.create(&"noise"), Vector2(100, 100)) # 0
 	var n1 = g.add_node(Pasture3DGraphNodeRegistry.create(&"const"), Vector2(100, 200)) # 1
 	var n2 = g.add_node(Pasture3DGraphNodeRegistry.create(&"smooth"), Vector2(300, 150)) # 2
@@ -326,7 +326,7 @@ func _f_graph_frames_and_grouping() -> void:
 
 func _g_reroute_node_and_connection_splitting() -> void:
 	print("[G] Reroute node transparent passthrough & connection splitting")
-	var g = Pasture3DTerrainGraph.new()
+	var g = Pasture3DTerrainGraph.create_empty()
 	var c0 = Pasture3DGraphNodeRegistry.create(&"const")
 	c0.set("value", 10.0)
 	var n0 = g.add_node(c0, Vector2(100, 100)) # 0
@@ -380,7 +380,7 @@ func _g_reroute_node_and_connection_splitting() -> void:
 
 func _h_mute_bypass_evaluation() -> void:
 	print("[H] Mute bypass evaluation across Filters & Combiners")
-	var g = Pasture3DTerrainGraph.new()
+	var g = Pasture3DTerrainGraph.create_empty()
 	var c10 = Pasture3DGraphNodeRegistry.create(&"const")
 	c10.set("value", 10.0)
 	var n0 = g.add_node(c10, Vector2(100, 100)) # 0
@@ -433,7 +433,7 @@ func _h_mute_bypass_evaluation() -> void:
 
 func _i_inline_controls_and_live_updates() -> void:
 	print("[I] Inline parameter mutation & live update signal propagation")
-	var g = Pasture3DTerrainGraph.new()
+	var g = Pasture3DTerrainGraph.create_empty()
 	var c_node = Pasture3DGraphNodeRegistry.create(&"const")
 	c_node.set("value", 3.0)
 	var n0 = g.add_node(c_node, Vector2(100, 100))
@@ -470,7 +470,7 @@ func _i_inline_controls_and_live_updates() -> void:
 
 func _j_solo_output_override() -> void:
 	print("[J] Solo output override evaluation and toggling")
-	var g = Pasture3DTerrainGraph.new()
+	var g = Pasture3DTerrainGraph.create_empty()
 	var c10 = Pasture3DGraphNodeRegistry.create(&"const")
 	c10.set("value", 10.0)
 	var n0 = g.add_node(c10, Vector2(100, 100)) # 0
@@ -525,14 +525,15 @@ func _k_port_type_system_and_colors() -> void:
 	var blend_in_types: PackedInt32Array = blend_node.input_port_types()
 	
 	var mask_ok: bool = mask_out_type == Pasture3DGraphNode.PortType.MASK
-	var const_ok: bool = const_out_type == Pasture3DGraphNode.PortType.HEIGHT
+	# FLOAT, not HEIGHT: Const is the one node that drives a scalar value port by wire (see its header).
+	var const_ok: bool = const_out_type == Pasture3DGraphNode.PortType.FLOAT
 	# Blend is A, B (HEIGHT) + an optional mask (MASK) weight port.
 	var blend_ok: bool = blend_in_types.size() == 3 \
 			and blend_in_types[0] == Pasture3DGraphNode.PortType.HEIGHT \
 			and blend_in_types[2] == Pasture3DGraphNode.PortType.MASK
 
 	print("    mask out type=%d (want %d), const out type=%d (want %d), blend in count=%d (want 3, [2]=MASK)" % [
-		mask_out_type, Pasture3DGraphNode.PortType.MASK, const_out_type, Pasture3DGraphNode.PortType.HEIGHT, blend_in_types.size()
+		mask_out_type, Pasture3DGraphNode.PortType.MASK, const_out_type, Pasture3DGraphNode.PortType.FLOAT, blend_in_types.size()
 	])
 	if not mask_ok or not const_ok or not blend_ok:
 		_fail += 1; print("    !! port types incorrectly reported")
@@ -540,7 +541,7 @@ func _k_port_type_system_and_colors() -> void:
 
 func _l_drag_to_create_wiring() -> void:
 	print("[L] Drag-to-create wiring & rapid disconnection")
-	var g = Pasture3DTerrainGraph.new()
+	var g = Pasture3DTerrainGraph.create_empty()
 	var n0 = g.add_node(Pasture3DGraphNodeRegistry.create(&"const"), Vector2(100, 100))
 	
 	var editor = Pasture3DGraphEditor.new()
@@ -581,7 +582,7 @@ func _l_drag_to_create_wiring() -> void:
 
 func _n_preset_template_networks() -> void:
 	print("[N] Preset template network insertion & grouping")
-	var g = Pasture3DTerrainGraph.new()
+	var g = Pasture3DTerrainGraph.create_empty()
 	var editor = Pasture3DGraphEditor.new()
 	add_child(editor)
 	editor._build_ui()
