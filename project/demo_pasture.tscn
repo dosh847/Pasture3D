@@ -116,8 +116,9 @@ script = ExtResource("6_m7w56")
 
 [sub_resource type="Resource" id="Resource_jiu1g"]
 script = ExtResource("7_fpp8j")
+format_version = 3
 nodes = Array[ExtResource("4_gl3o4")]([SubResource("Resource_duxig"), SubResource("Resource_na0p3")])
-connections = [PackedInt32Array(0, 0, 1, 0)]
+wires = [[0, &"out", 1, &"result"]]
 output_node = 1
 
 [sub_resource type="Resource" id="Resource_u2m2j"]
@@ -872,8 +873,9 @@ script = ExtResource("6_m7w56")
 
 [sub_resource type="Resource" id="Resource_tb013"]
 script = ExtResource("7_fpp8j")
+format_version = 3
 nodes = Array[ExtResource("4_gl3o4")]([SubResource("Resource_lq5s0"), SubResource("Resource_khkuw"), SubResource("Resource_78038"), SubResource("Resource_jgamb")])
-connections = [[0, 0, 2, 0], [1, 0, 2, 1], [2, 0, 3, 0]]
+wires = [[0, &"height", 2, &"surface"], [1, &"path", 2, &"path"], [2, &"height", 3, &"result"]]
 output_node = 3
 
 [sub_resource type="Resource" id="Resource_ref6i"]
@@ -941,8 +943,9 @@ graph_position = Vector2(1280, -40)
 
 [sub_resource type="Resource" id="Resource_jboxs"]
 script = ExtResource("7_fpp8j")
+format_version = 3
 nodes = Array[ExtResource("4_gl3o4")]([SubResource("Resource_wlcl8"), SubResource("Resource_gfte7"), SubResource("Resource_kn8qo"), SubResource("Resource_vkylo"), SubResource("Resource_rua3w"), SubResource("Resource_cgf8m"), SubResource("Resource_fnn6v"), SubResource("Resource_ax1cy"), SubResource("Resource_1uu62")])
-connections = [PackedInt32Array(0, 0, 2, 0), PackedInt32Array(3, 0, 2, 1), PackedInt32Array(2, 0, 4, 0), PackedInt32Array(4, 0, 5, 0), PackedInt32Array(4, 0, 7, 0), PackedInt32Array(4, 0, 8, 0), PackedInt32Array(5, 0, 1, 0)]
+wires = [[0, &"height", 2, &"a"], [3, &"out", 2, &"b"], [2, &"out", 4, &"in"], [4, &"out", 5, &"in"], [4, &"out", 7, &"in"], [4, &"out", 8, &"in"], [5, &"height", 1, &"result"]]
 metadata/_editor_selected_node = 5
 
 [sub_resource type="Resource" id="Resource_tv1yo"]
@@ -1032,8 +1035,9 @@ graph_position = Vector2(-720, 260)
 
 [sub_resource type="Resource" id="Resource_hmebo"]
 script = ExtResource("7_fpp8j")
+format_version = 3
 nodes = Array[ExtResource("4_gl3o4")]([SubResource("Resource_bl4n7"), SubResource("Resource_pl5il"), SubResource("Resource_d7tnw"), SubResource("Resource_btvea"), SubResource("Resource_1kuw6"), SubResource("Resource_p00qi"), SubResource("Resource_r4ki8"), SubResource("Resource_tlvb0"), SubResource("Resource_810lr"), SubResource("Resource_mrul5"), SubResource("Resource_1v3s3"), SubResource("Resource_he34u"), SubResource("Resource_hh35j"), SubResource("Resource_ygisv"), SubResource("Resource_4yc2w")])
-connections = [PackedInt32Array(0, 0, 3, 1), PackedInt32Array(3, 0, 4, 0), PackedInt32Array(4, 0, 1, 0), PackedInt32Array(4, 1, 8, 0), PackedInt32Array(4, 2, 9, 0), PackedInt32Array(5, 0, 10, 0), PackedInt32Array(8, 0, 10, 2), PackedInt32Array(6, 0, 10, 1), PackedInt32Array(10, 0, 11, 0), PackedInt32Array(9, 0, 11, 2), PackedInt32Array(7, 0, 11, 1), PackedInt32Array(11, 0, 12, 1), PackedInt32Array(2, 1, 12, 0), PackedInt32Array(2, 0, 13, 0), PackedInt32Array(13, 0, 3, 0), PackedInt32Array(14, 0, 13, 1)]
+wires = [[0, &"out", 3, &"b"], [3, &"out", 4, &"in"], [4, &"height", 1, &"result"], [4, &"eroded_rock", 8, &"in"], [4, &"sediment", 9, &"in"], [5, &"out", 10, &"a"], [8, &"out", 10, &"mask"], [6, &"out", 10, &"b"], [10, &"out", 11, &"a"], [9, &"out", 11, &"mask"], [7, &"out", 11, &"b"], [11, &"out", 12, &"color"], [2, &"footprint", 12, &"mask"], [2, &"height", 13, &"a"], [13, &"out", 3, &"a"], [14, &"out", 13, &"b"]]
 output_node = 1
 metadata/_editor_selected_node = 5
 
@@ -1116,8 +1120,9 @@ graph_position = Vector2(2020, 20)
 
 [sub_resource type="Resource" id="Resource_85beu"]
 script = ExtResource("7_fpp8j")
+format_version = 3
 nodes = Array[ExtResource("4_gl3o4")]([SubResource("Resource_oj5bb"), SubResource("Resource_apa32"), SubResource("Resource_m8bbo"), SubResource("Resource_gmkoy"), SubResource("Resource_5xegr"), SubResource("Resource_ct15y"), SubResource("Resource_tna5s"), SubResource("Resource_yu1tn"), SubResource("Resource_6rbax"), SubResource("Resource_m8pks"), SubResource("Resource_rkxsl"), SubResource("Resource_6j2ya")])
-connections = [PackedInt32Array(0, 0, 3, 0), PackedInt32Array(2, 0, 3, 1), PackedInt32Array(3, 0, 4, 0), PackedInt32Array(4, 0, 5, 0), PackedInt32Array(5, 0, 6, 0), PackedInt32Array(6, 0, 1, 0), PackedInt32Array(8, 0, 9, 1), PackedInt32Array(0, 1, 10, 0), PackedInt32Array(10, 0, 11, 0), PackedInt32Array(11, 0, 9, 0), PackedInt32Array(6, 3, 7, 0), PackedInt32Array(7, 0, 8, 2)]
+wires = [[0, &"height", 3, &"a"], [2, &"out", 3, &"b"], [3, &"out", 4, &"in"], [4, &"out", 5, &"in"], [5, &"height", 6, &"in"], [6, &"height", 1, &"result"], [8, &"out", 9, &"color"], [0, &"footprint", 10, &"in"], [10, &"out", 11, &"in"], [11, &"out", 9, &"mask"], [6, &"erosion_depth", 7, &"in"], [7, &"out", 8, &"mask"]]
 metadata/_editor_selected_node = 9
 
 [sub_resource type="Resource" id="Resource_ndbfu"]
@@ -1151,8 +1156,9 @@ graph_position = Vector2(420, 20)
 
 [sub_resource type="Resource" id="Resource_kii1d"]
 script = ExtResource("7_fpp8j")
+format_version = 3
 nodes = Array[ExtResource("4_gl3o4")]([SubResource("Resource_l0apx"), SubResource("Resource_mjnp5"), SubResource("Resource_tui0i")])
-connections = [PackedInt32Array(0, 0, 2, 0), PackedInt32Array(2, 0, 1, 0)]
+wires = [[0, &"height", 2, &"height"], [2, &"height", 1, &"result"]]
 output_node = 1
 metadata/_editor_selected_node = 2
 
@@ -1184,8 +1190,9 @@ graph_position = Vector2(380, 100)
 
 [sub_resource type="Resource" id="Resource_6l5nb"]
 script = ExtResource("7_fpp8j")
+format_version = 3
 nodes = Array[ExtResource("4_gl3o4")]([SubResource("Resource_p5hj1"), SubResource("Resource_kj31n"), SubResource("Resource_58www")])
-connections = [PackedInt32Array(0, 0, 2, 0), PackedInt32Array(2, 0, 1, 0)]
+wires = [[0, &"height", 2, &"in"], [2, &"height", 1, &"result"]]
 metadata/_editor_selected_node = -1
 
 [sub_resource type="Resource" id="Resource_s8uir"]
@@ -1217,8 +1224,9 @@ graph_position = Vector2(280, 80)
 
 [sub_resource type="Resource" id="Resource_hkr3o"]
 script = ExtResource("7_fpp8j")
+format_version = 3
 nodes = Array[ExtResource("4_gl3o4")]([SubResource("Resource_jmm5x"), SubResource("Resource_q8by0"), SubResource("Resource_ovby7")])
-connections = [PackedInt32Array(0, 0, 2, 0), PackedInt32Array(2, 0, 1, 0)]
+wires = [[0, &"height", 2, &"in"], [2, &"height", 1, &"result"]]
 metadata/_editor_selected_node = 2
 
 [sub_resource type="Resource" id="Resource_66rn2"]
@@ -1263,8 +1271,9 @@ graph_position = Vector2(1200, 200)
 
 [sub_resource type="Resource" id="Resource_3dok6"]
 script = ExtResource("7_fpp8j")
+format_version = 3
 nodes = Array[ExtResource("4_gl3o4")]([SubResource("Resource_tuye1"), SubResource("Resource_oogmn"), SubResource("Resource_jsg35"), SubResource("Resource_g1akn"), SubResource("Resource_d7g6p"), SubResource("Resource_0td84")])
-connections = [PackedInt32Array(0, 0, 3, 0), PackedInt32Array(2, 0, 3, 1), PackedInt32Array(3, 0, 4, 0), PackedInt32Array(4, 0, 5, 0), PackedInt32Array(5, 0, 1, 0)]
+wires = [[0, &"height", 3, &"a"], [2, &"out", 3, &"b"], [3, &"out", 4, &"in"], [4, &"out", 5, &"in"], [5, &"height", 1, &"result"]]
 metadata/_editor_selected_node = -1
 
 [sub_resource type="Resource" id="Resource_gw4sy"]

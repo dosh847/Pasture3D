@@ -238,8 +238,9 @@ graph_position = Vector2(1261.48, 568.88)
 
 [sub_resource type="Resource" id="Resource_33wnw"]
 script = ExtResource("20_hsdmo")
+format_version = 3
 nodes = Array[ExtResource("15_suwub")]([SubResource("Resource_qxpsq"), SubResource("Resource_xhfrm"), SubResource("Resource_vhsu2"), SubResource("Resource_ykh4n"), SubResource("Resource_0ccg0"), SubResource("Resource_suwub"), SubResource("Resource_dlw8b"), SubResource("Resource_bc7q8")])
-connections = [PackedInt32Array(0, 0, 3, 0), PackedInt32Array(2, 0, 3, 1), PackedInt32Array(3, 0, 4, 0), PackedInt32Array(5, 0, 4, 1), PackedInt32Array(4, 0, 6, 0), PackedInt32Array(6, 0, 1, 0)]
+wires = [[0, &"height", 3, &"a"], [2, &"out", 3, &"b"], [3, &"out", 4, &"a"], [5, &"out", 4, &"b"], [4, &"out", 6, &"in"], [6, &"height", 1, &"result"]]
 
 [sub_resource type="Resource" id="Resource_dps7c"]
 script = ExtResource("21_ybyu5")

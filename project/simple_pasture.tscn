@@ -231,8 +231,9 @@ preview_on = true
 
 [sub_resource type="Resource" id="Resource_mayxm"]
 script = ExtResource("7_wv1iv")
+format_version = 3
 nodes = Array[ExtResource("4_4khcl")]([SubResource("Resource_201xj"), SubResource("Resource_6fins"), SubResource("Resource_3ucqc"), SubResource("Resource_xk4pu"), SubResource("Resource_jc6ve"), SubResource("Resource_xq5ji"), SubResource("Resource_x65ay"), SubResource("Resource_r5vgm"), SubResource("Resource_ow0y2"), SubResource("Resource_gmhxr"), SubResource("Resource_yr4lm"), SubResource("Resource_s856v"), SubResource("Resource_fkyag"), SubResource("Resource_8odna"), SubResource("Resource_r045v"), SubResource("Resource_7rah1"), SubResource("Resource_xoefv"), SubResource("Resource_rh2s1")])
-connections = [PackedInt32Array(2, 0, 3, 1), PackedInt32Array(4, 0, 3, 0), PackedInt32Array(3, 0, 5, 0), PackedInt32Array(5, 0, 6, 0), PackedInt32Array(6, 0, 7, 0), PackedInt32Array(0, 0, 4, 0), PackedInt32Array(5, 1, 8, 2), PackedInt32Array(7, 0, 13, 0), PackedInt32Array(13, 0, 11, 0), PackedInt32Array(13, 0, 12, 0), PackedInt32Array(11, 0, 16, 2), PackedInt32Array(9, 0, 16, 0), PackedInt32Array(15, 0, 17, 1), PackedInt32Array(16, 0, 17, 0), PackedInt32Array(14, 0, 16, 1), PackedInt32Array(12, 0, 17, 2), PackedInt32Array(17, 0, 10, 1), PackedInt32Array(7, 0, 1, 0)]
+wires = [[2, &"out", 3, &"b"], [4, &"out", 3, &"a"], [3, &"out", 5, &"in"], [5, &"height", 6, &"in"], [6, &"height", 7, &"in"], [0, &"height", 4, &"in"], [5, &"talus", 8, &"mask"], [7, &"out", 13, &"in"], [13, &"out", 11, &"in"], [13, &"out", 12, &"in"], [11, &"mask", 16, &"mask"], [9, &"out", 16, &"a"], [15, &"out", 17, &"b"], [16, &"out", 17, &"a"], [14, &"out", 16, &"b"], [12, &"mask", 17, &"mask"], [17, &"out", 10, &"color"], [7, &"out", 1, &"result"]]
 metadata/_editor_selected_node = 10
 
 [sub_resource type="Resource" id="Resource_h4fvm"]
@@ -266,8 +267,9 @@ preview_on = true
 
 [sub_resource type="Resource" id="Resource_67nn0"]
 script = ExtResource("7_wv1iv")
+format_version = 3
 nodes = Array[ExtResource("4_4khcl")]([SubResource("Resource_5q6a7"), SubResource("Resource_ft08i"), SubResource("Resource_4up8b")])
-connections = [PackedInt32Array(0, 0, 1, 0)]
+wires = [[0, &"out", 1, &"result"]]
 output_node = 1
 
 [sub_resource type="Resource" id="Resource_ddf1r"]
@@ -377,8 +379,9 @@ preview_on = true
 
 [sub_resource type="Resource" id="Resource_lbwnp"]
 script = ExtResource("7_wv1iv")
+format_version = 3
 nodes = Array[ExtResource("4_4khcl")]([SubResource("Resource_2wp0u"), SubResource("Resource_fdeh7"), SubResource("Resource_nync1"), SubResource("Resource_rup21"), SubResource("Resource_umoq4"), SubResource("Resource_qe7gh"), SubResource("Resource_eudfm"), SubResource("Resource_wnovj")])
-connections = [PackedInt32Array(3, 0, 1, 0), PackedInt32Array(4, 0, 3, 0), PackedInt32Array(2, 0, 5, 0), PackedInt32Array(5, 0, 6, 0), PackedInt32Array(5, 0, 7, 0), PackedInt32Array(6, 0, 3, 1)]
+wires = [[3, &"height", 1, &"result"], [4, &"height", 3, &"surface"], [2, &"path", 5, &"path"], [5, &"path", 6, &"path"], [5, &"path", 7, &"path"], [6, &"path", 3, &"path"]]
 output_node = 3
 output_override = 3
 metadata/_editor_selected_node = -1
@@ -434,8 +437,9 @@ script = ExtResource("6_ii4qc")
 
 [sub_resource type="Resource" id="Resource_kou8i"]
 script = ExtResource("7_wv1iv")
+format_version = 3
 nodes = Array[ExtResource("4_4khcl")]([SubResource("Resource_ba6c1"), SubResource("Resource_ayy5u"), SubResource("Resource_ah624"), SubResource("Resource_c2a6q")])
-connections = [[0, 0, 2, 0], [1, 0, 2, 1], [2, 0, 3, 0]]
+wires = [[0, &"height", 2, &"surface"], [1, &"path", 2, &"path"], [2, &"height", 3, &"result"]]
 output_node = 3
 
 [sub_resource type="Resource" id="Resource_lsmas"]
@@ -541,8 +545,9 @@ graph_position = Vector2(1640, 340)
 
 [sub_resource type="Resource" id="Resource_dt286"]
 script = ExtResource("7_wv1iv")
+format_version = 3
 nodes = Array[ExtResource("4_4khcl")]([SubResource("Resource_jdtgh"), SubResource("Resource_di0j4"), SubResource("Resource_kbnun"), SubResource("Resource_g8xwh"), SubResource("Resource_ssc7m"), SubResource("Resource_pakvy"), SubResource("Resource_ju5qj"), SubResource("Resource_d3r78"), SubResource("Resource_iuov5"), SubResource("Resource_n1wg4"), SubResource("Resource_6fny5"), SubResource("Resource_2w51q")])
-connections = [PackedInt32Array(1, 0, 3, 0), PackedInt32Array(0, 0, 4, 0), PackedInt32Array(5, 0, 7, 1), PackedInt32Array(7, 0, 2, 0), PackedInt32Array(3, 0, 5, 0), PackedInt32Array(5, 0, 8, 0), PackedInt32Array(4, 0, 9, 0), PackedInt32Array(8, 0, 6, 2), PackedInt32Array(9, 0, 5, 1), PackedInt32Array(4, 0, 6, 0), PackedInt32Array(9, 0, 6, 1), PackedInt32Array(6, 0, 7, 0), PackedInt32Array(8, 0, 10, 0), PackedInt32Array(11, 0, 10, 1)]
+wires = [[1, &"path", 3, &"path"], [0, &"height", 4, &"in"], [5, &"path", 7, &"path"], [7, &"height", 2, &"result"], [3, &"path", 5, &"path"], [5, &"path", 8, &"path"], [4, &"out", 9, &"in"], [8, &"mask", 6, &"mask"], [9, &"out", 5, &"surface"], [4, &"out", 6, &"a"], [9, &"out", 6, &"b"], [6, &"out", 7, &"surface"], [8, &"mask", 10, &"mask"], [11, &"out", 10, &"color"]]
 output_node = 6
 metadata/_editor_selected_node = 12
 
@@ -647,8 +652,9 @@ preview_range_locked = true
 
 [sub_resource type="Resource" id="Resource_4h40e"]
 script = ExtResource("7_wv1iv")
+format_version = 3
 nodes = Array[ExtResource("4_4khcl")]([SubResource("Resource_vtbgk"), SubResource("Resource_ilag5"), SubResource("Resource_8xder"), SubResource("Resource_pawj2"), SubResource("Resource_8c57d"), SubResource("Resource_psm5m"), SubResource("Resource_sirnw"), SubResource("Resource_eiwf1"), SubResource("Resource_58ibl"), SubResource("Resource_jt0j5")])
-connections = [PackedInt32Array(0, 0, 2, 0), PackedInt32Array(2, 0, 3, 0), PackedInt32Array(4, 0, 5, 0), PackedInt32Array(1, 0, 6, 0), PackedInt32Array(1, 0, 7, 0), PackedInt32Array(6, 0, 4, 0), PackedInt32Array(1, 0, 8, 0), PackedInt32Array(8, 0, 9, 0), PackedInt32Array(0, 0, 9, 1), PackedInt32Array(4, 0, 2, 1)]
+wires = [[0, &"height", 2, &"surface"], [2, &"height", 3, &"result"], [4, &"path", 5, &"path"], [1, &"path", 6, &"path"], [1, &"path", 7, &"path"], [6, &"path", 4, &"path"], [1, &"path", 8, &"path"], [8, &"path", 9, &"path"], [0, &"height", 9, &"surface"], [4, &"path", 2, &"path"]]
 metadata/_editor_selected_node = -1
 
 [sub_resource type="Resource" id="Resource_hg8ye"]
@@ -723,8 +729,9 @@ preview_on = true
 
 [sub_resource type="Resource" id="Resource_m5233"]
 script = ExtResource("7_wv1iv")
+format_version = 3
 nodes = Array[ExtResource("4_4khcl")]([SubResource("Resource_enavu"), SubResource("Resource_ue3bv"), SubResource("Resource_p8a78"), SubResource("Resource_llyc4"), SubResource("Resource_pmwfd"), SubResource("Resource_lrpqy")])
-connections = [PackedInt32Array(0, 0, 2, 0), PackedInt32Array(2, 0, 3, 0), PackedInt32Array(0, 0, 4, 1), PackedInt32Array(4, 0, 2, 1), PackedInt32Array(1, 0, 5, 0), PackedInt32Array(5, 0, 4, 0)]
+wires = [[0, &"height", 2, &"surface"], [2, &"height", 3, &"result"], [0, &"height", 4, &"surface"], [4, &"path", 2, &"path"], [1, &"path", 5, &"path"], [5, &"path", 4, &"path"]]
 output_node = 3
 metadata/_editor_selected_node = 4
 

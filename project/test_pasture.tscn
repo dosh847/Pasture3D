@@ -104,8 +104,9 @@ graph_position = Vector2(1300, 360)
 
 [sub_resource type="Resource" id="Resource_qybkr"]
 script = ExtResource("13_usllu")
+format_version = 3
 nodes = Array[ExtResource("5_oym70")]([SubResource("Resource_oosue"), SubResource("Resource_qqb7p"), SubResource("Resource_qybwt"), SubResource("Resource_6e2ac"), SubResource("Resource_sr7so"), SubResource("Resource_2x2br"), SubResource("Resource_ytgr8"), SubResource("Resource_y67v4")])
-connections = [PackedInt32Array(0, 0, 3, 0), PackedInt32Array(3, 0, 1, 0), PackedInt32Array(0, 1, 2, 0), PackedInt32Array(3, 1, 6, 0), PackedInt32Array(4, 0, 7, 0), PackedInt32Array(5, 0, 7, 1), PackedInt32Array(6, 0, 7, 2), PackedInt32Array(7, 0, 2, 1)]
+wires = [[0, &"height", 3, &"in"], [3, &"height", 1, &"result"], [0, &"footprint", 2, &"mask"], [3, &"eroded", 6, &"in"], [4, &"out", 7, &"a"], [5, &"out", 7, &"b"], [6, &"out", 7, &"mask"], [7, &"out", 2, &"color"]]
 metadata/_editor_selected_node = 1
 
 [sub_resource type="Resource" id="Resource_00jdg"]

@@ -101,8 +101,9 @@ preview_on = true
 
 [sub_resource type="Resource" id="Resource_1bslq"]
 script = ExtResource("7_q4m1o")
+format_version = 3
 nodes = Array[ExtResource("4_8hs7f")]([SubResource("Resource_c24tk"), SubResource("Resource_t0wjs"), SubResource("Resource_u7xi1")])
-connections = [PackedInt32Array(0, 0, 2, 0), PackedInt32Array(2, 0, 1, 0)]
+wires = [[0, &"height", 2, &"in"], [2, &"height", 1, &"result"]]
 metadata/_editor_selected_node = 2
 
 [sub_resource type="Resource" id="Resource_4uqqw"]
@@ -128,8 +129,9 @@ script = ExtResource("6_j26y8")
 
 [sub_resource type="Resource" id="Resource_lsxs5"]
 script = ExtResource("7_q4m1o")
+format_version = 3
 nodes = Array[ExtResource("4_8hs7f")]([SubResource("Resource_o7wqc"), SubResource("Resource_6fsik")])
-connections = [PackedInt32Array(0, 0, 1, 0)]
+wires = [[0, &"out", 1, &"result"]]
 output_node = 1
 
 [sub_resource type="Resource" id="Resource_rhsk0"]
@@ -5825,8 +5827,9 @@ graph_position = Vector2(1000, 60)
 
 [sub_resource type="Resource" id="Resource_vkjpt"]
 script = ExtResource("7_q4m1o")
+format_version = 3
 nodes = Array[ExtResource("4_8hs7f")]([SubResource("Resource_n8y73"), SubResource("Resource_fm8ro")])
-connections = [PackedInt32Array(0, 0, 1, 0)]
+wires = [[0, &"height", 1, &"result"]]
 metadata/_editor_selected_node = -1
 
 [sub_resource type="Resource" id="Resource_crryu"]
