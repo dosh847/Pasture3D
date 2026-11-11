@@ -48,6 +48,8 @@
 [ext_resource type="Script" uid="uid://cfpxlr1nx1i5x" path="res://addons/pasture_3d/graph/pasture3d_graph_node_expand_shrink.gd" id="39_b685y"]
 [ext_resource type="Script" uid="uid://dwc1xyw0tp6ik" path="res://addons/pasture_3d/graph/pasture3d_graph_node_mountain_range_radial.gd" id="43_1p3tm"]
 [ext_resource type="Script" uid="uid://b6fg15pksq0y2" path="res://addons/pasture_3d/graph/pasture3d_graph_node_mountain_tibesti.gd" id="44_wn1x5"]
+[ext_resource type="Script" uid="uid://bj10ochgiqrlg" path="res://addons/pasture_3d/connectors/pasture3d_ridge.gd" id="49_7qmf4"]
+[ext_resource type="Script" uid="uid://bbgjfav0p7rhm" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_range.gd" id="50_0h8r1"]
 
 [sub_resource type="Pasture3DMaterial" id="Pasture3DMaterial_4515p"]
 _shader_parameters = {
@@ -915,6 +917,74 @@ _data = {
 }
 point_count = 4
 
+[sub_resource type="Resource" id="Resource_rqwuq"]
+script = ExtResource("5_hur8n")
+graph_position = Vector2(0, 140)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_7k57c"]
+script = ExtResource("8_ff8bn")
+points = PackedVector2Array(-514.67096, -1552.772, -630.1058, -1138.0265, -867.99915, -1056.2037, -768.681, -821.4809, -762.45544, -564.9245, -780.6066, -402.94513)
+half_widths = PackedFloat32Array(12, 12, 12, 12, 12, 12)
+heights = PackedFloat32Array(43.654213, 147.56032, 97.975685, 148.98206, 105.094444, 95.69457)
+source_label = "MountainRanges/Ridge/Crest"
+sample_half_widths = PackedFloat32Array()
+sample_shoulders = PackedFloat32Array()
+sample_verges = PackedFloat32Array()
+sample_suppress = PackedByteArray()
+sample_skip = PackedByteArray()
+
+[sub_resource type="Resource" id="Resource_tt66w"]
+script = ExtResource("9_hur8n")
+spline_key = "MountainRanges/Ridge/Crest"
+path = SubResource("Resource_7k57c")
+graph_position = Vector2(-20, -80)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_a1o0c"]
+script = ExtResource("8_m7f8t")
+graph_position = Vector2(880, 0)
+
+[sub_resource type="Resource" id="Resource_4k064"]
+script = ExtResource("50_0h8r1")
+peak_height = 60.0
+peak_spacing = 420.0
+peak_variation = 0.55
+end_taper = 250.0
+end_height = 0.44
+spur_spacing = 120.0
+spur_length = 360.0
+spur_angle = 0.0
+graph_position = Vector2(480, 0)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_b41or"]
+script = ExtResource("10_p4out")
+format_version = 3
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_rqwuq"), SubResource("Resource_tt66w"), SubResource("Resource_a1o0c"), SubResource("Resource_4k064")])
+wires = [[0, &"height", 3, &"height"], [1, &"path", 3, &"path"], [3, &"height", 2, &"result"]]
+output_node = 2
+metadata/_editor_selected_node = 3
+
+[sub_resource type="Resource" id="Resource_xwa3r"]
+script = ExtResource("11_kfedv")
+graph = SubResource("Resource_b41or")
+
+[sub_resource type="Curve3D" id="Curve3D_b0u5i"]
+closed = true
+_data = {
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -179.37335, -83.77165, -478.62476, 0, 0, 0, 0, 0, 0, 261.03827, -81.63199, -693.96826, 0, 0, 0, 0, 0, 0, 398.68823, -74.93889, -339.32104, 0, 0, 0, 0, 0, 0, 405.01575, -83.684906, 215.71393, 0, 0, 0, 0, 0, 0, 254.30188, -81.629585, 597.2621, 0, 0, 0, 0, 0, 0, 105.67322, -76.63195, 863.39343, 0, 0, 0, 0, 0, 0, -231.18237, -84.50673, 887.13257, 0, 0, 0, 0, 0, 0, -445.41803, -82.22429, 741.85144, 0, 0, 0, 0, 0, 0, -521.5157, -83.109146, 105.581665, 0, 0, 0, 0, 0, 0, -646.9847, -81.4078, -161.13489),
+"tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+}
+point_count = 10
+
+[sub_resource type="Curve3D" id="Curve3D_ahukp"]
+_data = {
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, 204.8518, -72.525925, -517.9236, 0, 0, 0, 0, 0, 0, 89.41699, 31.38018, -103.1781, 0, 0, 0, 0, 0, 0, -148.47638, -18.204453, -21.355347, 0, 0, 0, 0, 0, 0, -49.158264, 32.801918, 213.3675, 0, 0, 0, 0, 0, 0, -42.93268, -11.085693, 469.9239, 0, 0, 0, 0, 0, 0, -61.083862, -20.485565, 631.90326),
+"tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0)
+}
+point_count = 6
+
 [node name="DemoIsland" type="Node3D" unique_id=915459138]
 
 [node name="Pasture3D" type="Pasture3D" parent="." unique_id=2142097867]
@@ -1471,9 +1541,11 @@ snap_to_surface = false
 metadata/_custom_type_script = "uid://bb60it81vfrir"
 
 [node name="MountainRanges" type="Node3D" parent="Pasture3D" unique_id=1064614146 node_paths=PackedStringArray("terrain")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -487.463, 0, -959.8301)
 script = ExtResource("1_r5rvi")
 _layer_uid = "596b704fc5d2a01"
-_base_key = "11ce477b7ff1cb8447c0e785ab7f8118"
+extent_mode = 1
+_base_key = "0e1a9add928711749c938022fb187d1c"
 terrain = NodePath("..")
 modifier_margin = 0.0
 live_preview_resolution = 0
@@ -1481,6 +1553,29 @@ _preview_coarse_baked = false
 bake_scale = 0
 modifiers = Array[ExtResource("2_cbjtu")]([])
 metadata/_custom_type_script = "uid://cmrjbbng0gxfi"
+
+[node name="Ridge" type="Node3D" parent="Pasture3D/MountainRanges" unique_id=1721592338 node_paths=PackedStringArray("terrain")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -232.05975, 116.18014, -75.01831)
+script = ExtResource("49_7qmf4")
+terrain = NodePath("../..")
+_layer_owner = "pasture3d_layerbrush:596b704fc5d2a01"
+modifier_margin = 0.0
+live_preview_resolution = 0
+_preview_coarse_baked = false
+bake_scale = 0
+modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_xwa3r")])
+
+[node name="Area1" type="Path3D" parent="Pasture3D/MountainRanges/Ridge" unique_id=1045539019]
+curve = SubResource("Curve3D_b0u5i")
+
+[node name="Crest" type="Node3D" parent="Pasture3D/MountainRanges/Ridge" unique_id=1841199032 node_paths=PackedStringArray("terrain")]
+script = ExtResource("12_l4h5e")
+half_width = 12.0
+terrain = NodePath("../../..")
+snap_to_surface = false
+
+[node name="Line1" type="Path3D" parent="Pasture3D/MountainRanges/Ridge/Crest" unique_id=2098873218]
+curve = SubResource("Curve3D_ahukp")
 
 [node name="Pasture3DPoolManager" type="Pasture3DPoolManager" parent="." unique_id=67587526]
 
