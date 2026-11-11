@@ -4,6 +4,7 @@
 
 #include "pasture_3d_coast_profile.h"
 #include "pasture_3d_wave_exposure.h"
+#include "pasture_3d_coastal_erosion.h"
 
 #include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/engine.hpp>
@@ -1350,6 +1351,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "ridge_sharpen", GRAPH_OP_RIDGE_SHARPEN },
 		{ "coast_profile", GRAPH_OP_COAST_PROFILE },
 		{ "wave_exposure", GRAPH_OP_WAVE_EXPOSURE },
+		{ "coastal_erosion", GRAPH_OP_COASTAL_EROSION },
 	};
 	Dictionary d;
 	for (const auto &e : k_ops) {
@@ -2005,6 +2007,13 @@ Dictionary Pasture3DUtil::leveler_grid(const PackedVector2Array &p_points,
 		const PackedFloat32Array &p_lut, const PackedFloat32Array &p_params) {
 	return godot::leveler_grid(p_points, p_widths, p_closed, p_height, p_mask, p_gw, p_gh, p_rect, p_lut,
 			leveler_params_from(p_params.ptr(), p_params.size()));
+}
+
+Dictionary Pasture3DUtil::coastal_erosion_grid(const PackedFloat32Array &p_height,
+		const PackedFloat32Array &p_exposure, const int p_gw, const int p_gh, const Rect2 &p_rect,
+		const PackedFloat32Array &p_params) {
+	return godot::coastal_erosion_grid(p_height, p_exposure, p_gw, p_gh, p_rect,
+			coastal_erosion_params_from(p_params.ptr(), p_params.size()));
 }
 
 Dictionary Pasture3DUtil::wave_exposure_grid(const PackedFloat32Array &p_height, const int p_gw, const int p_gh,
@@ -3433,6 +3442,9 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("leveler_grid", "points", "widths", "closed", "height", "mask", "gw", "gh", "rect",
 					"lut", "params"),
 			&Pasture3DUtil::leveler_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("coastal_erosion_grid", "height", "exposure", "gw", "gh", "rect", "params"),
+			&Pasture3DUtil::coastal_erosion_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("wave_exposure_grid", "height", "gw", "gh", "rect", "params"),
 			&Pasture3DUtil::wave_exposure_grid);

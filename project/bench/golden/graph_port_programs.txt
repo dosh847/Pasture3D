@@ -162,6 +162,8 @@ hydraulic_saleve|unwired|3271504172
 hydraulic_saleve|wired|3840771886
 erosion_thermal|unwired|3294576449
 erosion_thermal|wired|2614888966
+coastal_erosion|unwired|1523424029
+coastal_erosion|wired|335894501
 scree|unwired|379111314
 scree|wired|4078088992
 erosion|unwired|2963411850
