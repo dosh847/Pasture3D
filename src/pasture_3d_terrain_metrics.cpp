@@ -1,6 +1,9 @@
 // Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 
 #include "pasture_3d_terrain_metrics.h"
+
+#include <godot_cpp/variant/string.hpp>
+#include <godot_cpp/variant/variant.hpp>
 #include "pasture_3d_morphology.h"
 #include "pasture_3d_thread_pool.h"
 
@@ -273,6 +276,83 @@ PackedFloat32Array godot::smooth_fill_solve(const PackedFloat32Array &p_surface,
 	return result;
 }
 
+void godot::slope_solve(const PackedFloat32Array &p_surface, int p_gw, int p_gh, const Rect2 &p_rect,
+		double p_scale_m, PackedFloat32Array *r_degrees, PackedFloat32Array *r_aspect) {
+	const int n = p_gw * p_gh;
+	if (n <= 0 || p_surface.size() != n) return;
+	// Scale 0 reads the raw surface; otherwise a hillside-scale slope from the shared box mean.
+	const PackedFloat32Array smooth = p_scale_m > 0.0 ? box_mean_solve(p_surface, p_gw, p_gh, p_rect, p_scale_m)
+													  : p_surface;
+	const PackedFloat32Array &surf = smooth.size() == n ? smooth : p_surface;
+	const float *src = surf.ptr();
+	float *dg = nullptr;
+	float *as = nullptr;
+	if (r_degrees) {
+		r_degrees->resize(n);
+		dg = r_degrees->ptrw();
+	}
+	if (r_aspect) {
+		r_aspect->resize(n);
+		as = r_aspect->ptrw();
+	}
+	const double dx = (double)p_rect.size.x / (double)p_gw;
+	const double dz = (double)p_rect.size.y / (double)p_gh;
+	Pasture3DThreadPool::parallel_for_rows(p_gh, 16, [&](int zz0, int zz1) {
+		for (int iz = zz0; iz < zz1; iz++) {
+			for (int ix = 0; ix < p_gw; ix++) {
+				const int i = iz * p_gw + ix;
+				double gx = 0.0, gz = 0.0;
+				if (!metric_gradient(src, p_gw, p_gh, ix, iz, dx, dz, gx, gz)) {
+					if (dg) dg[i] = NAN;
+					if (as) as[i] = NAN;
+					continue;
+				}
+				const double g = std::sqrt(gx * gx + gz * gz);
+				if (dg) dg[i] = (float)(std::atan(g) * 180.0 / PI_D);
+				if (as) {
+					// Downhill is -grad. North is -Z, so the downhill vector's north part is +gz.
+					double b = g > 1e-12 ? std::atan2(-gx, gz) * 180.0 / PI_D : 0.0;
+					if (b < 0.0) b += 360.0;
+					as[i] = (float)b;
+				}
+			}
+		}
+	});
+}
+
+Dictionary godot::slope_grid(const PackedFloat32Array &p_surface, int p_gw, int p_gh, const Rect2 &p_rect,
+		const float *p_params, int p_count) {
+	Dictionary out;
+	const int n = p_gw * p_gh;
+	if (n <= 0 || p_surface.size() != n) return out;
+	auto at = [&](int i, double d) -> double { return (p_params && i < p_count) ? (double)p_params[i] : d; };
+	const double lo = std::clamp(at(0, 30.0), 0.0, 90.0);
+	const double hi = std::clamp(at(1, 90.0), lo, 90.0);
+	const double fall = std::max(at(2, 5.0), 0.0);
+	const double scale = std::max(at(3, 0.0), 0.0);
+	PackedFloat32Array deg, asp, mask;
+	slope_solve(p_surface, p_gw, p_gh, p_rect, scale, &deg, &asp);
+	if (deg.size() != n) return out;
+	mask.resize(n);
+	const float *d = deg.ptr();
+	float *m = mask.ptrw();
+	auto edge = [&](double x) -> double { // 0 below, 1 above, smoothstep over `fall`
+		if (fall <= 0.0) return x >= 0.0 ? 1.0 : 0.0;
+		const double t = std::clamp(x / fall + 1.0, 0.0, 1.0);
+		return t * t * (3.0 - 2.0 * t);
+	};
+	for (int i = 0; i < n; i++) {
+		const double v = (double)d[i];
+		// Rises over falloff BELOW min_angle and falls over falloff ABOVE max_angle, so the band itself
+		// reads exactly 1.
+		m[i] = std::isfinite(v) ? (float)(edge(v - lo) * edge(hi - v)) : 0.f;
+	}
+	out["degrees"] = deg;
+	out["mask"] = mask;
+	out["aspect"] = asp;
+	return out;
+}
+
 PackedFloat32Array godot::recast_cliff_solve(const PackedFloat32Array &p_surface,
 		int p_gw, int p_gh, const Rect2 &p_rect,
 		double p_talus_angle_deg, double p_radius_m, double p_amplitude, double p_gain,
@@ -327,22 +407,11 @@ PackedFloat32Array godot::recast_cliff_solve(const PackedFloat32Array &p_surface
 					continue;
 				}
 
-				const int xm = std::max(ix - 1, 0);
-				const int xp = std::min(ix + 1, p_gw - 1);
-				const int zm = std::max(iz - 1, 0);
-				const int zp = std::min(iz + 1, p_gh - 1);
-				const double zxm = (double)src[(size_t)iz * p_gw + xm];
-				const double zxp = (double)src[(size_t)iz * p_gw + xp];
-				const double zzm = (double)src[(size_t)zm * p_gw + ix];
-				const double zzp = (double)src[(size_t)zp * p_gw + ix];
-				if (!std::isfinite(zxm) || !std::isfinite(zxp) || !std::isfinite(zzm) ||
-						!std::isfinite(zzp)) {
+				double gx = 0.0, gz = 0.0;
+				if (!metric_gradient(src, p_gw, p_gh, ix, iz, dx, dz, gx, gz)) {
 					dst[i] = src[i];
 					continue;
 				}
-
-				const double gx = (zxp - zxm) / (double)((xp - xm) * dx);
-				const double gz = (zzp - zzm) / (double)((zp - zm) * dz);
 				const double slope = std::sqrt(gx * gx + gz * gz);
 
 				// smoothstep across the talus threshold, so a cliff does not appear along a hard

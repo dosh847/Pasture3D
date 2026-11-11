@@ -1078,6 +1078,15 @@ pasture3d_graph_node_shore_character|out|1|beach|1
 pasture3d_graph_node_shore_character|out|2|hardness|1
 pasture3d_graph_node_shore_character|out|3|erosion|1
 pasture3d_graph_node_shore_character|out_extra|names=4|types=4|port0=1
+pasture3d_graph_node_slope|counts|in=3|out=3|has_output=true
+pasture3d_graph_node_slope|in|0|height|0|0.0|-1|-
+pasture3d_graph_node_slope|in|1|min_angle|4|30.0|0|-
+pasture3d_graph_node_slope|in|2|max_angle|4|90.0|1|-
+pasture3d_graph_node_slope|in_extra|aux=-1|names=3|types=3
+pasture3d_graph_node_slope|out|0|degrees|10
+pasture3d_graph_node_slope|out|1|mask|1
+pasture3d_graph_node_slope|out|2|aspect|10
+pasture3d_graph_node_slope|out_extra|names=3|types=3|port0=10
 pasture3d_graph_node_smooth|counts|in=2|out=1|has_output=true
 pasture3d_graph_node_smooth|in|0|in|0|0.0|-1|-
 pasture3d_graph_node_smooth|in|1|mask|1|1.0|-1|-

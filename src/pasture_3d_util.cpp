@@ -1354,6 +1354,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "ridge_sharpen", GRAPH_OP_RIDGE_SHARPEN },
 		{ "coast_profile", GRAPH_OP_COAST_PROFILE },
 		{ "path_range", GRAPH_OP_PATH_RANGE },
+		{ "slope", GRAPH_OP_SLOPE },
 		{ "wave_exposure", GRAPH_OP_WAVE_EXPOSURE },
 		{ "coastal_erosion", GRAPH_OP_COASTAL_EROSION },
 		{ "islet_scatter", GRAPH_OP_ISLET_SCATTER },
@@ -2049,6 +2050,11 @@ Dictionary Pasture3DUtil::coast_profile_grid(const PackedVector2Array &p_points,
 	geom.build(path_close_ring(p_points, true), PackedFloat32Array());
 	return godot::coast_profile_grid_geom(&geom, p_cliff, p_gw, p_gh, p_rect,
 			coast_profile_params_from(p_params.ptr(), p_params.size()));
+}
+
+Dictionary Pasture3DUtil::slope_grid(const PackedFloat32Array &p_surface, const int p_gw, const int p_gh,
+		const Rect2 &p_rect, const PackedFloat32Array &p_params) {
+	return godot::slope_grid(p_surface, p_gw, p_gh, p_rect, p_params.ptr(), p_params.size());
 }
 
 Dictionary Pasture3DUtil::path_range_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_heights,
@@ -3489,6 +3495,8 @@ void Pasture3DUtil::_bind_methods() {
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("coast_profile_grid", "points", "cliff", "gw", "gh", "rect", "params"),
 			&Pasture3DUtil::coast_profile_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("slope_grid", "surface", "gw", "gh", "rect", "params"), &Pasture3DUtil::slope_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("path_range_grid", "points", "heights", "closed", "base", "amount", "gw", "gh", "rect", "params"),
 			&Pasture3DUtil::path_range_grid);

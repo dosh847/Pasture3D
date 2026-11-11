@@ -1,6 +1,6 @@
 # Pasture3D Ranges Spec — hills and mountain ranges from lines and areas
 
-Status: written 2026-11-11. Step 1 (Path Range) built 2026-11-11, uncommitted; steps 2–4 unbuilt. Check the code before trusting this header.
+Status: written 2026-11-11. Steps 1 (Path Range) and 2 (Slope) built 2026-11-11; steps 3–4 unbuilt. Check the code before trusting this header.
 
 ## Goal
 
@@ -106,6 +106,12 @@ packed int slot, documented in `path_range_params_from`.
 ---
 
 ## Step 2 — Slope (op 77, Masks)
+
+**Built 2026-11-11** (slope_grid / slope_solve / metric_gradient in src/pasture_3d_terrain_metrics.*, gate
+bench/GraphSlopeGate). Recast Cliff now calls the shared `metric_gradient` and is bit-identical (hashes
+pinned in the gate). Aspect is a compass bearing: 0 north (-Z), 90 east (+X). Value ports drive min_angle and
+max_angle. Not done: three other slope formulas remain (`mask_grid` in pasture_3d_math_ops.cpp and two in
+pasture_3d_relief_ops.cpp), so "one slope in the codebase" holds only for Recast Cliff and Slope.
 
 ### What it computes
 

@@ -13,6 +13,8 @@
 #ifndef PASTURE_3D_TERRAIN_METRICS_H
 #define PASTURE_3D_TERRAIN_METRICS_H
 
+#include <cmath>
+#include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/rect2.hpp>
 
@@ -49,6 +51,38 @@ PackedFloat32Array relative_elevation_solve(const PackedFloat32Array &p_surface,
 PackedFloat32Array smooth_fill_solve(const PackedFloat32Array &p_surface, const PackedFloat32Array &p_mask,
 		int p_gw, int p_gh, const Rect2 &p_rect, int p_mode, double p_radius_m, double p_k,
 		double p_amount, PackedFloat32Array *r_deposition, double *r_deposition_divisor);
+
+// The one metric gradient: central differences in world metres, one-sided (and over one cell) at the grid
+// edge. False when the cell or any of its four neighbours is non-finite, and gx/gz are then untouched.
+// Recast Cliff and Slope both call this; a second copy would drift the moment one of them changed an edge.
+inline bool metric_gradient(const float *p_src, int p_gw, int p_gh, int p_ix, int p_iz, double p_dx, double p_dz,
+		double &r_gx, double &r_gz) {
+	const int i = p_iz * p_gw + p_ix;
+	if (!std::isfinite(p_src[i])) return false;
+	const int xm = p_ix > 0 ? p_ix - 1 : 0;
+	const int xp = p_ix + 1 < p_gw ? p_ix + 1 : p_gw - 1;
+	const int zm = p_iz > 0 ? p_iz - 1 : 0;
+	const int zp = p_iz + 1 < p_gh ? p_iz + 1 : p_gh - 1;
+	const double zxm = (double)p_src[(size_t)p_iz * p_gw + xm];
+	const double zxp = (double)p_src[(size_t)p_iz * p_gw + xp];
+	const double zzm = (double)p_src[(size_t)zm * p_gw + p_ix];
+	const double zzp = (double)p_src[(size_t)zp * p_gw + p_ix];
+	if (!std::isfinite(zxm) || !std::isfinite(zxp) || !std::isfinite(zzm) || !std::isfinite(zzp)) return false;
+	r_gx = (zxp - zxm) / (double)((xp - xm) * p_dx);
+	r_gz = (zzp - zzm) / (double)((zp - zm) * p_dz);
+	return true;
+}
+
+// Slope in degrees (0..90) and aspect (compass bearing the ground faces, 0..360: 0 north = -Z, 90 east = +X;
+// flat reads 0), from the surface optionally box-meaned at `p_scale_m` first. NaN where the gradient is
+// undefined. Either output may be null.
+void slope_solve(const PackedFloat32Array &p_surface, int p_gw, int p_gh, const Rect2 &p_rect, double p_scale_m,
+		PackedFloat32Array *r_degrees, PackedFloat32Array *r_aspect);
+
+// The Slope node (op 77): {degrees, mask, aspect}. Params: 0 min_angle, 1 max_angle, 2 falloff (degrees each
+// side of the band, smoothstep; 0 = a hard band), 3 scale (metres; 0 = raw). Mask is 0 where degrees is NaN.
+Dictionary slope_grid(const PackedFloat32Array &p_surface, int p_gw, int p_gh, const Rect2 &p_rect,
+		const float *p_params, int p_count);
 
 PackedFloat32Array recast_cliff_solve(const PackedFloat32Array &p_surface,
 		int p_gw, int p_gh, const Rect2 &p_rect, double p_talus_angle_deg, double p_radius_m,

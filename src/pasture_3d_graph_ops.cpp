@@ -1629,6 +1629,23 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				}
 			} break;
 
+			case GRAPH_OP_SLOPE: {
+				// Port 0 is degrees; nothing passes the height through.
+				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
+				Dictionary res = slope_grid(in_arr, p_gw, p_gh, p_rect, P, 16);
+				const PackedFloat32Array d_arr = res.has("degrees") ? (PackedFloat32Array)res["degrees"]
+																	: PackedFloat32Array();
+				if (d_arr.size() == n) std::copy_n(d_arr.ptr(), n, g_ptr);
+				else std::fill_n(g_ptr, n, 0.f);
+				static const char *sl_names[2] = { "mask", "aspect" };
+				for (int c = 0; c < 2; c++) {
+					float *dst = want_aux(c + 1);
+					if (!dst || !res.has(sl_names[c])) continue;
+					const PackedFloat32Array a = res[sl_names[c]];
+					if (a.size() == n) std::copy_n(a.ptr(), n, dst);
+				}
+			} break;
+
 			case GRAPH_OP_WAVE_EXPOSURE: {
 				// P[] is resolved, so a wire into `sea_level` reaches slot 0.
 				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
