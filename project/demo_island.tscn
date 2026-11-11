@@ -16,6 +16,7 @@
 [ext_resource type="Script" uid="uid://rqm81y572bqi" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_fractalize.gd" id="9_l4h5e"]
 [ext_resource type="Script" uid="uid://ba4778g8emikc" path="res://addons/pasture_3d/graph/pasture3d_graph_node_leveler.gd" id="9_yof5q"]
 [ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="10_p4out"]
+[ext_resource type="Script" uid="uid://cru60n6f8s2n1" path="res://addons/pasture_3d/graph/pasture3d_graph_node_coast_profile.gd" id="11_cbvqt"]
 [ext_resource type="Script" uid="uid://717mgmmlrimi" path="res://addons/pasture_3d/connectors/pasture3d_mod_graph.gd" id="11_kfedv"]
 [ext_resource type="Script" uid="uid://d3p6vrby77tq" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_resample.gd" id="11_lmt3e"]
 [ext_resource type="Script" uid="uid://bk833psrrlg1o" path="res://addons/pasture_3d/graph/pasture3d_graph_param.gd" id="12_cbvqt"]
@@ -88,7 +89,7 @@ graph_position = Vector2(-440, 60)
 
 [sub_resource type="Resource" id="Resource_lhpge"]
 script = ExtResource("8_m7f8t")
-graph_position = Vector2(540, 60)
+graph_position = Vector2(840, 60)
 
 [sub_resource type="Resource" id="Resource_7kbp8"]
 script = ExtResource("9_yof5q")
@@ -97,14 +98,14 @@ feather_side = 1
 feather = 300.0
 path_width_scale = 100.0
 wall_depth = 50.0
-graph_position = Vector2(120, 60)
+graph_position = Vector2(200, -120)
 preview_on = true
 
-[sub_resource type="Resource" id="Resource_p4out"]
+[sub_resource type="Resource" id="Resource_0oqof"]
 script = ExtResource("8_ff8bn")
-points = PackedVector2Array(-614.51105, 9.549316, -357.29413, -150.56027, -327.19302, -516.2191, -185.65352, -715.3364, 35.82495, -700.2245, 247.15558, -454.24088, 462.64124, -579.4906, 272.98987, -865.7379, 936.2432, -1312.276, 641.21893, -1614.0234, 401.72412, -1500.8685, 323.01007, -1885.5529, 93.092285, -1679.1794, -276.63217, -1568.7283, -464.6325, -1852.662, -721.19495, -1631.619, -1037.9944, -1998.6359, -1607.1824, -1928.4984, -1287.5133, -759.0294, -1188.4287, -291.52017, -903.43945, 518.3517, -1143.5924, 1010.2428, -1008.9799, 1928.2375, -610.3425, 2189.468, -120.34387, 2051.6145, 511.617, 1876.326, 575.08966, 1572.9292, 845.6611, 1510.9131, 1040.6858, 1713.0674, 1042.4956, 1409.8927, 883.2653, 1123.8319, 799.3016, 753.3181, 906.0997, 413.38232, 1169.675, 173.67444, 1524.0989, 284.45435, 1386.709, -8.985962, 1198.6284, -87.30353, 772.34467, 170.49031, 514.45184, 363.1171, 636.55975, 452.7248, 496.90033, 752.2138, 254.00873, 854.01465, 16.570435, 1036.3796, -415.359, 898.13135, -636.9426, 558.6739, -596.7398, 253.34729)
+points = PackedVector2Array(-614.5111, 9.549072, -357.2942, -150.56052, -327.19308, -516.21936, -185.65358, -715.3367, 35.82489, -700.22473, 247.15552, -454.24112, 462.64117, -579.49084, 272.9898, -865.73816, 936.24316, -1312.2762, 641.2189, -1614.0237, 401.72406, -1500.8688, 323.01, -1885.5531, 93.092224, -1679.1797, -276.63223, -1568.7285, -464.63257, -1852.6622, -721.195, -1631.6193, -1037.9944, -1998.6361, -1607.1824, -1928.4987, -1287.5134, -759.02966, -1188.4287, -291.52042, -903.4395, 518.35144, -1143.5925, 1010.24255, -1008.98, 1928.2373, -610.3426, 2189.4678, -120.34393, 2051.6143, 511.61694, 1876.3258, 575.0896, 1572.929, 845.661, 1510.9128, 1040.6858, 1713.0671, 1042.4956, 1409.8925, 883.26526, 1123.8317, 799.3015, 753.3179, 906.0996, 413.38208, 1169.675, 173.6742, 1524.0989, 284.4541, 1386.709, -8.986206, 1198.6284, -87.30377, 772.3446, 170.49007, 514.4518, 363.11685, 636.5597, 452.72455, 496.90027, 752.21356, 254.00867, 854.0144, 16.570374, 1036.3794, -415.35907, 898.1311, -636.9427, 558.67365, -596.73987, 253.34705)
 half_widths = PackedFloat32Array(25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25)
-heights = PackedFloat32Array(34.87588, 51.128075, 51.113617, 51.381466, 51.308483, 51.336426, 52.533035, 38.426933, 1.6700058, 1.4027214, 51.502308, 1.2004929, 46.280502, 50.20802, 42.67968, 49.56661, 31.090693, 8.165508, 51.794872, 40.10144, 51.60724, 33.84069, 43.779, 22.409409, 1.2632942, 46.14677, 45.239357, 73.01214, 50.58742, 49.97204, 39.706177, 46.293983, 48.59536, 50.89644, 8.8052635, 3.5512962, 42.86126, 51.693226, 51.310417, 70.34323, 56.24195, 50.89046, 56.44394, 54.351284, 51.60813, 42.682423)
+heights = PackedFloat32Array(-15.124123, 1.1280714, 1.1136136, 1.3814619, 1.3084792, 1.3364221, 2.5330312, -11.573069, -48.329998, -48.597282, 1.5023028, -48.79951, -3.719501, 0.20801687, -7.320325, -0.43339396, -18.909311, -41.834496, 1.7948681, -9.898563, 1.6072351, -16.159313, -6.2210045, -27.590595, -48.73671, -3.8532324, -4.760648, 23.012133, 0.5874183, -0.027963638, -10.293829, -3.7060204, -1.4046457, 0.8964343, -41.19474, -46.448708, -7.1387463, 1.6932226, 1.310413, 20.343227, 6.2419453, 0.8904562, 6.4439354, 4.351281, 1.6081271, -7.31758)
 closed = true
 source_label = "IslandBase/IslandSpline"
 sample_half_widths = PackedFloat32Array()
@@ -116,7 +117,7 @@ sample_skip = PackedByteArray()
 [sub_resource type="Resource" id="Resource_lmt3e"]
 script = ExtResource("9_hur8n")
 spline_key = "IslandBase/IslandSpline"
-path = SubResource("Resource_p4out")
+path = SubResource("Resource_0oqof")
 graph_position = Vector2(-1220, 220)
 preview_on = true
 
@@ -137,13 +138,19 @@ step = 25.0
 graph_position = Vector2(-780, 220)
 preview_on = true
 
+[sub_resource type="Resource" id="Resource_uxjvw"]
+script = ExtResource("11_cbvqt")
+shelf_depth = 24.0
+graph_position = Vector2(220, 260)
+preview_on = true
+
 [sub_resource type="Resource" id="Resource_slh1f"]
 script = ExtResource("10_p4out")
 format_version = 3
-nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_7kbp8"), SubResource("Resource_lmt3e"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv")])
-wires = [[0, &"height", 2, &"height"], [2, &"height", 1, &"result"], [4, &"path", 2, &"loop"], [3, &"path", 5, &"path"], [5, &"path", 4, &"path"], [0, &"footprint", 2, &"area"]]
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_7kbp8"), SubResource("Resource_lmt3e"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv"), SubResource("Resource_uxjvw")])
+wires = [[0, &"height", 2, &"height"], [4, &"path", 2, &"loop"], [3, &"path", 5, &"path"], [5, &"path", 4, &"path"], [0, &"footprint", 2, &"area"], [4, &"path", 6, &"outline"], [6, &"height", 1, &"result"]]
 output_node = 1
-metadata/_editor_selected_node = 2
+metadata/_editor_selected_node = 6
 
 [sub_resource type="Resource" id="Resource_fbibf"]
 resource_name = "Terrain Graph"
@@ -862,7 +869,7 @@ modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_fbibf")])
 curve = SubResource("Curve3D_aw5ld")
 
 [node name="IslandSpline" type="Node3D" parent="Pasture3D/IslandBase" unique_id=416083727 node_paths=PackedStringArray("terrain")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -530.60895, 50.000004, 223.91122)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -530.609, 0, 223.911)
 script = ExtResource("12_l4h5e")
 closed = true
 half_width = 25.0
