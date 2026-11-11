@@ -63,6 +63,18 @@ HydraulicSaleveParams HydraulicSaleveParams::from_dict(const Dictionary &p_dict)
 	} else if (p_dict.has("incision_rate")) {
 		p.erosion_strength = std::clamp((float)p_dict["incision_rate"], 0.0f, 1.0f);
 	}
+	if (p_dict.has("stage1_mode")) {
+		p.stage1_mode = std::clamp((int)p_dict["stage1_mode"], 0, 1);
+	}
+	if (p_dict.has("uplift_gradient")) {
+		p.uplift_gradient = std::max(0.0f, (float)p_dict["uplift_gradient"]);
+	}
+	if (p_dict.has("uplift_n")) {
+		p.uplift_n = std::clamp((float)p_dict["uplift_n"], 0.25f, 4.0f);
+	}
+	if (p_dict.has("uplift")) {
+		p.uplift = p_dict["uplift"];
+	}
 	if (p_dict.has("valley_smoothing")) {
 		p.valley_smoothing = (float)p_dict["valley_smoothing"];
 	}
@@ -378,9 +390,13 @@ constexpr float SALEVE_ROUTE_FAN = 0.5f;
 // ground beside a channel climbs straight back up to the input. A free steady state (z = z[root] + the chi
 // integral) never read the input's height at all: it rebuilt the terrain as a distance from the outlets, and
 // moving a mountain barely changed the result (r 0.970 against inputs at 0.188).
+//
+// UPLIFT mode (`p_uplift` non-null, one value per vertex) replaces only step 4's heights: see stage1_mode in the
+// header. `p_to_unit` turns a metric slope into the solver's unit elevation per unit length.
 void saleve_stage1(const SaleveGraph &g, std::vector<float> &z, const std::vector<float> &p_input,
 		const std::vector<float> &erodibility, const std::vector<float> &slope_cap, double p_channel_area,
-		const HydraulicSaleveParams &p_params, SaleveStage1 &r_out) {
+		const HydraulicSaleveParams &p_params, SaleveStage1 &r_out, const std::vector<float> *p_uplift = nullptr,
+		double p_to_unit = 1.0) {
 	const int n = g.nv;
 	const int iterations = std::max(1, p_params.iterations);
 	const float m_exp = p_params.drainage_exponent;
@@ -565,6 +581,21 @@ void saleve_stage1(const SaleveGraph &g, std::vector<float> &z, const std::vecto
 				continue;
 			}
 			const double ratio = p_channel_area / std::max((double)area_acc[idx], 1.0e-30);
+			if (p_uplift) {
+				const float u = (*p_uplift)[idx];
+				float new_z = p_input[idx];
+				if (u > 0.0f) {
+					const double inv_n = 1.0 / (double)p_params.uplift_n;
+					const double S = std::pow(1.0e-3 * (double)p_params.uplift_gradient * (double)u, inv_n) *
+							std::pow(ratio, (double)m_exp * inv_n);
+					const double d = (double)std::max((float)saleve_edge_len(g, idx, r), 1.0e-5f);
+					const double rise = std::min(S * p_to_unit, (double)slope_cap[idx]) * d;
+					new_z = std::max((float)((double)z[r] + rise), p_input[idx]);
+				}
+				diff += std::abs(new_z - z[idx]);
+				z[idx] = new_z;
+				continue;
+			}
 			const double kept = ratio >= 1.0 ? 1.0 : std::pow(ratio, (double)m_exp);
 			const double keep = 1.0 - (double)erodibility[idx] * (1.0 - kept);
 			const float d = std::max((float)saleve_edge_len(g, idx, r), 1.0e-5f);
@@ -911,7 +942,19 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 		const double vertex_area = rw * rh / (double)std::max(nv, 1);
 		const double channel_m2 = p_params.channel_area > 0.0f ? (double)p_params.channel_area
 															   : std::max(vref * vref / 64.0, 2.0 * vertex_area);
-		saleve_stage1(g, z, input_z, erodibility, slope_cap, channel_m2 / (vref * vref), p_params, st);
+		// UPLIFT: the uplift grid sampled at every vertex, 1 where it is unwired (empty).
+		std::vector<float> uplift_v;
+		if (p_params.stage1_mode == 1) {
+			uplift_v.assign(nv, 1.0f);
+			if (p_params.uplift.size() == n) {
+				for (int i = 0; i < nv; i++) {
+					const double u = saleve_sample(p_params.uplift.ptr(), p_gw, p_gh, x0, z0, cell_dx, cell_dz, g.px[i], g.pz[i]);
+					uplift_v[i] = std::isfinite(u) ? (float)std::clamp(u, 0.0, 1.0) : 0.0f;
+				}
+			}
+		}
+		saleve_stage1(g, z, input_z, erodibility, slope_cap, channel_m2 / (vref * vref), p_params, st,
+				p_params.stage1_mode == 1 ? &uplift_v : nullptr, to_unit);
 		res.iterations = st.iterations;
 		if (mesh && p_params.limit_edges) {
 			const float center_cap = (float)((double)std::max(p_params.max_slope_center, p_params.max_slope_border) * to_unit);
@@ -1141,7 +1184,8 @@ HydraulicSaleveResult godot::hydraulic_saleve_solve(const PackedFloat32Array &p_
 	}
 
 	// Smooth the cut before it comes off the input. It is at or below zero wherever the ground is cut, so a blur of
-	// it never lifts ground above the input and leaves the input's own detail alone.
+	// it never lifts ground above the input and leaves the input's own detail alone. In UPLIFT the "cut" is the
+	// rise, at or above zero, and the same blur rounds the crests the slope cap would otherwise leave knife-edged.
 	if (mesh && !p_params.skip_stage1 && p_params.valley_smoothing >= 0.0f) {
 		const double radius = p_params.valley_smoothing > 0.0f ? (double)p_params.valley_smoothing : 1.5 * mesh_spacing;
 		const int rx = (int)std::lround(0.5 * radius / cell_dx);

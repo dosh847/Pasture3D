@@ -92,6 +92,20 @@ struct HydraulicSaleveParams {
 	// Stage 4: Post-Processing
 	bool enable_post_smoothing = false;
 
+	// Stage 1 mode (PASTURE3D_RANGES_SPEC.md step 4). 0 INPUT: incise the input (everything above). 1 UPLIFT:
+	// grow the stream-power steady state instead, so a mask becomes a whole drained ridge-and-valley landscape.
+	// Routing, outlets and the drainage area are exactly INPUT's (the input still decides what is downhill and
+	// where the sea is); only the heights differ. A vertex rises from its receiver by
+	//     d · min(S, Max Slope),   S = (G · u)^(1/n) · (A_ch / A)^(m/n)
+	// with u the `uplift` grid (0..1; empty = 1 everywhere), G = uplift_gradient / 1000 (the slope, m/m, a fully
+	// uplifted channel head stands at), n = uplift_n, m = drainage_exponent and A_ch the channel area. A vertex
+	// with u > 0 takes max(input, that); u = 0 keeps the input. G is a gradient, not a height, so the result is
+	// local: a bigger rect or a margin adds ground without rescaling what is already there.
+	int stage1_mode = 0;
+	float uplift_gradient = 300.0f; // metres per kilometre of channel, at a channel head under full uplift
+	float uplift_n = 1.0f; // the slope exponent; relief goes as uplift_gradient^(1/n)
+	PackedFloat32Array uplift;
+
 	// Gate hooks, dictionary only. `reroute_lakes` off leaves pits as terminals; `stable_noise` off re-hashes
 	// the routing noise every pass (the old behaviour, which never settles); `debug_network` returns the
 	// final receivers and drainage areas.

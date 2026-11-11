@@ -2043,9 +2043,18 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				if (in2 && in2[s] >= 0) {
 					p.dy = get_grid_packed(in2[s], c_in2);
 				}
-				if (in3 && in3[s] >= 0) {
-					p.mask = get_grid_packed(in3[s], c_in3);
+				// ... and [10..12] the Stage 1 mode, uplift gradient (m/km) and slope exponent (ranges spec step 4).
+				if ((size_t)s < p_prog.luts.size() && p_prog.luts[(size_t)s].size() >= 13) {
+					const PackedFloat32Array &ext = p_prog.luts[(size_t)s];
+					p.stage1_mode = std::clamp((int)std::lround(ext[10]), 0, 1);
+					p.uplift_gradient = std::max(0.0f, ext[11]);
+					p.uplift_n = std::clamp(ext[12], 0.25f, 4.0f);
 				}
+				// Port 3 is `uplift` (unwired = empty = 1 everywhere); the mask, port 4, rides in_aux.
+				if (in3 && in3[s] >= 0) {
+					p.uplift = get_grid_packed(in3[s], c_in3);
+				}
+				p.mask = aux_grid_of(s);
 				HydraulicSaleveResult res = hydraulic_saleve_solve(in_arr, p_gw, p_gh, p_rect, p);
 				if (res.ok && res.height.size() == n) {
 					std::copy_n(res.height.ptr(), n, g_ptr);

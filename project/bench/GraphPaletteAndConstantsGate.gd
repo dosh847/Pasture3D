@@ -158,6 +158,8 @@ func _c_registry_categories() -> void:
 				&"path_meanderize", &"path_carve",
 				# S7a: the three grid-reading geometry nodes (spec 7.5, 8.4).
 				&"path_drape", &"path_width_field", &"path_from_flow",
+				# Ranges spec step 3: crest lines laid out inside an outline.
+				&"range_splines",
 				# Island building: a closed outline as a coastal cross-section.
 				&"coast_profile"],
 		"Roads": [&"road_source", &"road_grade"],

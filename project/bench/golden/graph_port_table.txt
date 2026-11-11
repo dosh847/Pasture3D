@@ -706,12 +706,13 @@ pasture3d_graph_node_hydraulic_particle|out|1|eroded|10
 pasture3d_graph_node_hydraulic_particle|out|2|deposited|10
 pasture3d_graph_node_hydraulic_particle|out|3|flow|10
 pasture3d_graph_node_hydraulic_particle|out_extra|names=4|types=4|port0=0
-pasture3d_graph_node_hydraulic_saleve|counts|in=4|out=3|has_output=true
+pasture3d_graph_node_hydraulic_saleve|counts|in=5|out=3|has_output=true
 pasture3d_graph_node_hydraulic_saleve|in|0|in|0|0.0|-1|-
 pasture3d_graph_node_hydraulic_saleve|in|1|dx|11|0.0|-1|-
 pasture3d_graph_node_hydraulic_saleve|in|2|dy|11|0.0|-1|-
-pasture3d_graph_node_hydraulic_saleve|in|3|mask|1|1.0|-1|aux
-pasture3d_graph_node_hydraulic_saleve|in_extra|aux=3|names=4|types=4
+pasture3d_graph_node_hydraulic_saleve|in|3|uplift|1|1.0|-1|-
+pasture3d_graph_node_hydraulic_saleve|in|4|mask|1|1.0|-1|aux
+pasture3d_graph_node_hydraulic_saleve|in_extra|aux=4|names=5|types=5
 pasture3d_graph_node_hydraulic_saleve|out|0|height|0
 pasture3d_graph_node_hydraulic_saleve|out|1|eroded_rock|10
 pasture3d_graph_node_hydraulic_saleve|out|2|sediment|10

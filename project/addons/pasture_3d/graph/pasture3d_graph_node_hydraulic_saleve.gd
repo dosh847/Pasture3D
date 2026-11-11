@@ -12,9 +12,16 @@
 #   3  fine incision: the Stream Log solver itself, run on the result
 #   4  optional smoothing, then composite over the input by Erosion Strength x mask
 #
+# Stage 1 Mode UPLIFT (PASTURE3D_RANGES_SPEC.md step 4) swaps stage 1's incision for the stream-power steady
+# state grown from the `uplift` field: same routing, outlets and drainage area (the input still decides what
+# is downhill and where the sea is), but each vertex rises from its receiver by the steady-state slope, held
+# to Max Slope. A whole area comes out as dendritic valleys and interfluves that drain to the sea. The maths
+# is in src/pasture_3d_hydraulic_saleve.h (stage1_mode).
+#
 # ---- Inputs ----
 #   port 1/2 "dx"/"dy"  SIGNED  reconstruction warp in METRES (added to Default Warp's fBm, if on)
-#   port 3   "mask"     MASK    blend of the eroded result over the input
+#   port 3   "uplift"   MASK    UPLIFT only: where, and how hard, ground rises (unwired = everywhere)
+#   port 4   "mask"     MASK    blend of the eroded result over the input (rides the native in_aux grid)
 #
 # ---- Outputs ----
 #   port 0  "height"       HEIGHT  eroded surface elevation (metres)
@@ -24,6 +31,30 @@
 class_name Pasture3DGraphNodeHydraulicSaleve
 extends Pasture3DGraphSolverNode
 
+
+enum Stage1Mode { INPUT, UPLIFT }
+
+## INPUT incises the wired height (the classic Salève). UPLIFT grows a drained ridge-and-valley landscape
+## from the Uplift port instead, on top of the input: the input sets the sea and the outlets.
+@export var stage1_mode: Stage1Mode = Stage1Mode.INPUT:
+	set(v):
+		stage1_mode = v
+		_param_changed()
+		notify_property_list_changed()
+@export_group("Uplift")
+## The slope a fully uplifted channel head stands at, in metres per kilometre of channel. Slopes fall
+## downstream as water collects (by Drainage Exponent / Uplift N), so ranges rise with their distance from
+## the sea. A gradient, not a height: a bigger area grows taller ranges, not a rescaled copy.
+@export_range(0.0, 2000.0, 1.0, "or_greater", "suffix:m/km") var uplift_gradient: float = 300.0:
+	set(v):
+		uplift_gradient = maxf(v, 0.0)
+		_param_changed()
+## The stream-power slope exponent n: relief goes as Uplift Gradient^(1/n), and higher n evens the
+## slopes out between channels and divides.
+@export_range(0.25, 4.0, 0.05) var uplift_n: float = 1.0:
+	set(v):
+		uplift_n = clampf(v, 0.25, 4.0)
+		_param_changed()
 
 @export_group("Erosion")
 ## How much of the eroded result replaces the input, 0..1 (times the mask, if wired). Every output is under
@@ -265,14 +296,15 @@ func native_lower() -> Dictionary:
 	p[15] = reference_relief
 	# The 16 slots are full; the S2 settings ride the LUT (read by the native op in this order).
 	var ext := PackedFloat32Array([float(control_points), point_spacing, float(reconstruction),
-			1.0 if default_warp else 0.0, warp_amount, warp_size, rim_width, outlet_level, channel_area, valley_smoothing])
+			1.0 if default_warp else 0.0, warp_amount, warp_size, rim_width, outlet_level, channel_area, valley_smoothing,
+			float(stage1_mode), uplift_gradient, uplift_n])
 	return {"params": p, "lut": ext}
 
 
-## The native freeze key: every grid the solve reads (surface, dx, dy, mask). No scalar port drives Salève,
+## The native freeze key: every grid the solve reads (surface, dx, dy, uplift, mask). No scalar port drives Salève,
 ## so there are no key scalars; a property edit is caught by the dirty-since-bake flag, as for every solver.
 func freeze_key_grid_ports() -> PackedInt32Array:
-	return PackedInt32Array([0, 1, 2, 3])
+	return PackedInt32Array([0, 1, 2, 3, 4])
 
 
 func role() -> Role:
@@ -304,6 +336,9 @@ func _inputs() -> Array[Pasture3DGraphPort]:
 		Pasture3DGraphPort.field(&"in", PortType.HEIGHT).require(),
 		Pasture3DGraphPort.field(&"dx", PortType.SIGNED),
 		Pasture3DGraphPort.field(&"dy", PortType.SIGNED),
+		# Before the mask, so the mask (appended by the framework) lands on port 4 and rides in_aux. Wires are
+		# stored by port id, so a saved mask wire still finds it.
+		Pasture3DGraphPort.field(&"uplift", PortType.MASK).unwired(1.0),
 	]
 
 
@@ -325,6 +360,11 @@ func native_out_count() -> int:
 	return 3 # height, eroded_rock, sediment
 
 
+func _validate_property(p_property: Dictionary) -> void:
+	if p_property.name in ["uplift_gradient", "uplift_n"] and stage1_mode != Stage1Mode.UPLIFT:
+		p_property.usage = PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_STORAGE
+
+
 func node_warnings() -> PackedStringArray:
 	var w := super()
 	if is_zero_approx(erosion_strength):
@@ -337,14 +377,15 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	var surface: PackedFloat32Array = (p_inputs[0] as PackedFloat32Array) if (p_inputs.size() > 0 and p_inputs[0] is PackedFloat32Array) else Pasture3DGraphOps.zeros(n)
 	var dx_in: PackedFloat32Array = (p_inputs[1] as PackedFloat32Array) if (p_inputs.size() > 1 and p_inputs[1] is PackedFloat32Array) else PackedFloat32Array()
 	var dy_in: PackedFloat32Array = (p_inputs[2] as PackedFloat32Array) if (p_inputs.size() > 2 and p_inputs[2] is PackedFloat32Array) else PackedFloat32Array()
-	var mask_in: PackedFloat32Array = (p_inputs[3] as PackedFloat32Array) if (p_inputs.size() > 3 and p_inputs[3] is PackedFloat32Array) else PackedFloat32Array()
+	var uplift_in: PackedFloat32Array = (p_inputs[3] as PackedFloat32Array) if (p_inputs.size() > 3 and p_inputs[3] is PackedFloat32Array) else PackedFloat32Array()
+	var mask_in: PackedFloat32Array = (p_inputs[4] as PackedFloat32Array) if (p_inputs.size() > 4 and p_inputs[4] is PackedFloat32Array) else PackedFloat32Array()
 
 	if surface.size() != n:
 		surface = Pasture3DGraphOps.zeros(n)
 
 	# Keyed through freeze_key, the recipe the native evaluator rebuilds, so a solve on either route is a hit
 	# on the other. An unwired port is zeros in both keys.
-	return solve_cached(freeze_key(p_inputs, p_gw, p_gh), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, dx_in, dy_in, mask_in))
+	return solve_cached(freeze_key(p_inputs, p_gw, p_gh), func(): return _solve_dynamic(surface, p_gw, p_gh, p_rect, dx_in, dy_in, mask_in, uplift_in))
 
 
 func eval_grid(p_inputs: Array, p_gw: int, p_gh: int, p_mask, p_rect: Rect2) -> PackedFloat32Array:
@@ -358,7 +399,7 @@ func _param_changed() -> void:
 	emit_changed()
 
 
-func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_dx: PackedFloat32Array, p_dy: PackedFloat32Array, p_mask: PackedFloat32Array) -> Array:
+func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_dx: PackedFloat32Array, p_dy: PackedFloat32Array, p_mask: PackedFloat32Array, p_uplift := PackedFloat32Array()) -> Array:
 	var n := p_gw * p_gh
 	var params := {
 		"iterations": iterations,
@@ -390,6 +431,10 @@ func _solve_dynamic(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect:
 		"outlet_level": outlet_level,
 		"channel_area": channel_area,
 		"valley_smoothing": valley_smoothing,
+		"stage1_mode": int(stage1_mode),
+		"uplift_gradient": uplift_gradient,
+		"uplift_n": uplift_n,
+		"uplift": p_uplift,
 	}
 
 	if not ClassDB.class_has_method("Pasture3DUtil", "hydraulic_saleve_solve_grid"):

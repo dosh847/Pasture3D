@@ -16,7 +16,7 @@ Four steps, in this order. Each one is useful alone and each one is the input th
 | 1 | **Path Range** — a crest line becomes a whole range: varied peaks, spurs both sides, valleys between | Generator over a PATH, C++ op 76 | erosion, step 4 |
 | 2 | **Slope** — slope (and aspect) as a field and a band mask | Mask, C++ op 77 | scatter, colour, erosion masks |
 | 3 | **Generate Range Splines** — a closed outline becomes a set of crest paths inside it | PATH → PATH SET (C++ solve) | step 1 |
-| 4 | **Salève Uplift mode** — an uplift field grows a fully drained ridge-and-valley landscape | Mode on an existing solver | the whole hinterland |
+| 4 | **Salève Uplift mode** (built) — an uplift field grows a fully drained ridge-and-valley landscape | Mode on an existing solver | the whole hinterland |
 
 Every new node follows `new-node-checklist`: spec §13 and the acceleration guide; one C++ kernel with a
 sixteen-slot `*_params_from(P, 16)` shared by the binding and the op; `graph_op_ids()` row; `_inputs()` /
@@ -247,6 +247,37 @@ worth native code (measure only with the user's go-ahead).
 ---
 
 ## Step 4 — Salève Uplift mode
+
+**Built 2026-11-11** (`stage1_mode` in src/pasture_3d_hydraulic_saleve.{h,cpp}, the native op in
+pasture_3d_graph_ops.cpp, the node's Stage 1 Mode / Uplift group; gate bench/GraphSaleveUpliftGate UA–UG).
+Departures from the plan below:
+
+- **`uplift_gradient` (m/km), not `uplift_height` (m).** The steady state needs a stream-power K, and a
+  height has nowhere to set it without a global normalisation (scale to the solve's own peak), which would
+  make a margin or a bigger rect rescale everything already there (`saleve-measured-in-grid-fractions`). A
+  gradient is local: a vertex rises from its receiver by `d · min(S, Max Slope)`, `S = (G·u)^(1/n) ·
+  (A_ch / A)^(m/n)`, G = uplift_gradient / 1000 the slope a fully uplifted channel head stands at. So a
+  bigger island grows taller ranges, not a rescaled copy. Default 300 m/km: a 1500 m island reaches ~220 m
+  at the default Erosion Strength 0.7, ~290 m at 1.0.
+- **Unwired uplift is 1 (the whole area), not 0.** INPUT ignores the port either way, so INPUT stays
+  bit-identical; in UPLIFT an unwired port meaning "nothing rises" would only be a trap.
+- **The port sits in front of the mask.** `uplift` is port 3, so the framework's mask lands on port 4 and
+  rides `in_aux` (`native-op-four-field-inputs`). Wires are stored by port id, so saved mask wires still
+  find it; GraphPortIdGate's record was re-recorded (only Salève mask rows moved, only programs at or
+  downstream of Salève changed). A baked Salève freeze key now hashes five grids, so an existing freeze
+  goes stale once.
+- **UA is pinned by hash on the pre-UPLIFT build** (0542dfb4): the direct solve's three outputs and a graph
+  with a wired mask, which proves the mask's move to `in_aux` changed no value.
+- **UB measures relief above the outlets** (the sea), not rise above the input: the input is a fixed term
+  in the rise. At 600 → 1200 m/km the ratio is 1.989 (n = 1) and 1.415 (n = 2); at 200 → 400 m/km it read
+  1.80 at n = 1, because max(input, ·) still holds the low coast.
+- **UD checks the Stage 1 network** (every receiver chain ends at an outlet, on a cratered island), with
+  lake rerouting off as the control.
+- **UE**: 96² against 192² reads 0.93 % RMS of the relief; another seed reads 1.79 %, so the threshold is
+  1.25 % (the dome dominates the field).
+- Erosion Strength still blends the result over the input (default 0.7); the GDScript dev oracle
+  (`solve_gd`) does not implement UPLIFT. The input must have low ground for outlets (`outlet_level`): a
+  flat input has no relief and returns unchanged.
 
 ### Why this comes back
 

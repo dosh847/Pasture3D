@@ -26,6 +26,12 @@
 # into Displace (its mask went last), and the one id change is Leveler `mask` -> `area`. The first run
 # of this comparison is what caught the converter missing that Leveler wire.
 #
+# RE-RECORDED 2026-11-11 for Salève's `uplift` port (ranges spec step 4): it was declared in front of the
+# standard mask, so Salève's mask moved from port 3 to 4 (in3 -> in_aux). Traced before replacing: the
+# only index rows that moved are two mask wires into Salève (3 -> 4), and every program that changed is
+# rooted at or downstream of a Salève node in all seven graphs. GraphSaleveUpliftGate [UA] pins that the
+# values did not move.
+#
 # Every criterion carries a control that must fail, on the same code path, except [B] and [E], which
 # compare against something recorded or computed outside the code under test.
 #

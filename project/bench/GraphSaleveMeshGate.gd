@@ -123,8 +123,11 @@ func _e_lowering() -> void:
 	node.outlet_level = 0.125
 	node.channel_area = 640.0
 	node.valley_smoothing = 12.5
+	node.stage1_mode = HydraulicSaleve.Stage1Mode.UPLIFT
+	node.uplift_gradient = 275.0
+	node.uplift_n = 1.5
 	var ext: PackedFloat32Array = node.native_lower().get("lut", PackedFloat32Array())
-	var want := PackedFloat32Array([4321.0, 3.5, 0.0, 0.0, 2.25, 40.0, 7.5, 0.125, 640.0, 12.5])
+	var want := PackedFloat32Array([4321.0, 3.5, 0.0, 0.0, 2.25, 40.0, 7.5, 0.125, 640.0, 12.5, 1.0, 275.0, 1.5])
 	print("    lut %s (want %s)" % [ext, want])
 	node.warp_size = 41.0
 	var moved: PackedFloat32Array = node.native_lower().get("lut", PackedFloat32Array())
