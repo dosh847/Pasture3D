@@ -394,6 +394,10 @@ public:
 	// `p_width_scale` — while a CLOSED path masks its INTERIOR by an even-odd winding test, feathering only
 	// outward, and ignores `p_width_scale` because a width says nothing about an area. An empty path masks
 	// NOTHING (0, or 1 with p_invert), so a graph mid-edit does not erase what an inverted mask protects.
+	// Wave Exposure: {exposure, fetch} from a heightfield and the 16-slot param block.
+	static Dictionary wave_exposure_grid(const PackedFloat32Array &p_height, const int p_gw, const int p_gh,
+			const Rect2 &p_rect, const PackedFloat32Array &p_params);
+
 	// Coast Profile on a closed outline (points are the ring WITHOUT its closing repeat). p_cliff may be empty.
 	static Dictionary coast_profile_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_cliff,
 			const int p_gw, const int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_params);

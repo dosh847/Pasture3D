@@ -1,6 +1,7 @@
 #include "pasture_3d_graph_ops.h"
 #include "pasture_3d_measure.h"
 #include "pasture_3d_coast_profile.h"
+#include "pasture_3d_wave_exposure.h"
 
 #include "pasture_3d_path_carve.h"
 
@@ -1565,6 +1566,21 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 																				 : PackedFloat32Array();
 				PackedFloat32Array res = value_ramp_grid(in_arr, &P[0], stops);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
+			} break;
+
+			case GRAPH_OP_WAVE_EXPOSURE: {
+				// P[] is resolved, so a wire into `sea_level` reaches slot 0.
+				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
+				Dictionary res = wave_exposure_grid(in_arr, p_gw, p_gh, p_rect, wave_exposure_params_from(P, 16));
+				const PackedFloat32Array e_arr = res.has("exposure") ? (PackedFloat32Array)res["exposure"]
+																	 : PackedFloat32Array();
+				if (e_arr.size() == n) std::copy_n(e_arr.ptr(), n, g_ptr);
+				else std::fill_n(g_ptr, n, 0.f);
+				float *ch_f = want_aux(1);
+				if (ch_f && res.has("fetch")) {
+					const PackedFloat32Array a = res["fetch"];
+					if (a.size() == n) std::copy_n(a.ptr(), n, ch_f);
+				}
 			} break;
 
 			case GRAPH_OP_COAST_PROFILE: {

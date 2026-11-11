@@ -100,6 +100,8 @@ displace|unwired|1563430735
 displace|wired|1449991384
 flooding_uniform_level|unwired|235872530
 flooding_uniform_level|wired|3118342422
+wave_exposure|unwired|2553944827
+wave_exposure|wired|1770015759
 water_mask|unwired|2186583094
 water_mask|wired|2313737142
 float_to_mask|unwired|3979003885
