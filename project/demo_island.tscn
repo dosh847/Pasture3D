@@ -969,6 +969,7 @@ metadata/_editor_selected_node = 3
 [sub_resource type="Resource" id="Resource_xwa3r"]
 script = ExtResource("11_kfedv")
 graph = SubResource("Resource_b41or")
+evaluation = 1
 
 [sub_resource type="Curve3D" id="Curve3D_b0u5i"]
 closed = true
