@@ -26,9 +26,13 @@ ErosionThermalResult erosion_thermal_solve(const PackedFloat32Array &p_surface,
 		double p_talus_angle_deg, int p_iterations, double p_settling_rate);
 
 // Angle-of-repose talus projection filter with volume conservation.
+//
+// p_tan_per_cell, when non-null, is gw*gh tangents of the repose angle, one per SENDING cell, and replaces
+// p_talus_angle_deg. Null is the scalar path, bit-identical to before the parameter existed.
 PackedFloat32Array talus_projection_solve(const PackedFloat32Array &p_surface,
 		const PackedFloat32Array &p_mask, int p_gw, int p_gh, const Rect2 &p_rect,
-		double p_talus_angle_deg, int p_iterations, double p_transfer_rate, double p_amount);
+		double p_talus_angle_deg, int p_iterations, double p_transfer_rate, double p_amount,
+		const float *p_tan_per_cell = nullptr);
 
 } // namespace godot
 

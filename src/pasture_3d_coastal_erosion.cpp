@@ -27,6 +27,8 @@ CoastalErosionParams godot::coastal_erosion_params_from(const float *p_params, i
 	r.beach_height = at(5, r.beach_height);
 	r.beach_width = std::max(at(6, r.beach_width), 0.0);
 	r.deposit = std::clamp(at(7, r.deposit), 0.0, 1.0);
+	r.slack_angle = std::clamp(at(8, r.slack_angle), 1.0, 89.0);
+	r.crest_reach = std::max(at(9, r.crest_reach), 0.0);
 	return r;
 }
 
@@ -96,7 +98,7 @@ Dictionary godot::coastal_erosion_grid(const PackedFloat32Array &p_height, const
 		}
 	});
 
-	// 3. Cliff face: talus relaxation over the cut band and its one-cell rim. Mask 1 where it may move.
+	// 3. Cliff face: talus relaxation over the cut band, its one-cell rim and the crest. Mask 1 where it may move.
 	if (P.cliff_iterations > 0) {
 		PackedFloat32Array band;
 		band.resize(n);
@@ -118,9 +120,34 @@ Dictionary godot::coastal_erosion_grid(const PackedFloat32Array &p_height, const
 				any = any || near_cut;
 			}
 		}
+		// Crest rounding: land within crest_reach of a cut joins the band, by the shared JFA transform.
+		if (any && P.crest_reach > 0.0) {
+			PackedFloat32Array cut_mask;
+			cut_mask.resize(n);
+			float *cm = cut_mask.ptrw();
+			for (int i = 0; i < n; i++) cm[i] = was_cut[i] ? 1.f : 0.f;
+			const PackedFloat32Array d_cut = distance_transform_solve(cut_mask, p_gw, p_gh, p_rect, 0.5,
+					DISTANCE_TRANSFORM_OUTSIDE, DISTANCE_TRANSFORM_EUCLIDEAN, DISTANCE_TRANSFORM_METRES, 0.0, nullptr);
+			if (d_cut.size() == n) {
+				const float *dc = d_cut.ptr();
+				for (int i = 0; i < n; i++) {
+					if (lm[i] > 0.5f && (double)dc[i] <= P.crest_reach) bw[i] = 1.f;
+				}
+			}
+		}
+		// The repose angle per cell. Equal angles take the scalar path, bit-identical to before.
+		std::vector<float> tans;
+		if (any && P.slack_angle != P.cliff_angle) {
+			tans.resize(n);
+			const double d2r = 3.14159265358979323846 / 180.0;
+			for (int i = 0; i < n; i++) {
+				const double e = exposure_at(i);
+				tans[i] = (float)std::tan((P.slack_angle + (P.cliff_angle - P.slack_angle) * e) * d2r);
+			}
+		}
 		if (any) {
 			const PackedFloat32Array relaxed = talus_projection_solve(h, band, p_gw, p_gh, p_rect, P.cliff_angle,
-					P.cliff_iterations, 0.5, 1.0);
+					P.cliff_iterations, 0.5, 1.0, tans.empty() ? nullptr : tans.data());
 			if (relaxed.size() == n) {
 				h = relaxed;
 				hw = h.ptrw();

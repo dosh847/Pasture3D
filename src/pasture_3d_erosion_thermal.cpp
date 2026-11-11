@@ -191,7 +191,8 @@ ErosionThermalResult godot::erosion_thermal_solve(const PackedFloat32Array &p_su
 
 PackedFloat32Array godot::talus_projection_solve(const PackedFloat32Array &p_surface,
 		const PackedFloat32Array &p_mask, int p_gw, int p_gh, const Rect2 &p_rect,
-		double p_talus_angle_deg, int p_iterations, double p_transfer_rate, double p_amount) {
+		double p_talus_angle_deg, int p_iterations, double p_transfer_rate, double p_amount,
+		const float *p_tan_per_cell) {
 	const int n = p_gw * p_gh;
 	if (p_surface.size() != n || n <= 0) {
 		PackedFloat32Array empty;
@@ -230,6 +231,7 @@ PackedFloat32Array godot::talus_projection_solve(const PackedFloat32Array &p_sur
 			if (!std::isfinite(hi)) {
 				continue;
 			}
+			const double tan_i = p_tan_per_cell ? (double)p_tan_per_cell[i] : tan_talus;
 
 			for (int k = 0; k < 8; k++) {
 				const int nx = ix + SCATTER_DX[k];
@@ -245,7 +247,7 @@ PackedFloat32Array godot::talus_projection_solve(const PackedFloat32Array &p_sur
 				}
 
 				const double diff = hi - hni;
-				const double max_diff = dist[k] * tan_talus;
+				const double max_diff = dist[k] * tan_i;
 
 				if (diff > max_diff) {
 					rec.excess[k] = (diff - max_diff) * rate;

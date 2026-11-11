@@ -5,8 +5,9 @@
 # src/pasture_3d_coastal_erosion.h; the maths is C++ only and reuses the shared distance transform and talus
 # projection kernels.
 #
-# Wire Wave Exposure's `exposure` into `exposure`, with its shore_reach at least twice `retreat`. Unwired,
-# the whole coast reads fully exposed. The standard mask is applied by the framework.
+# `exposure` is read as erosive energy: wire Shore Character's `erosion` (exposure x rock softness) so the
+# retreat varies along the coast, or Wave Exposure's `exposure` directly, with its shore_reach at least
+# twice `retreat`. Unwired, the whole coast reads fully exposed. The standard mask is applied by the framework.
 @tool
 class_name Pasture3DGraphNodeCoastalErosion
 extends Pasture3DGraphNode
@@ -32,6 +33,18 @@ extends Pasture3DGraphNode
 @export_range(1.0, 89.0, 0.5) var cliff_angle: float = 70.0:
 	set(v):
 		cliff_angle = clampf(v, 1.0, 89.0)
+		_param_changed()
+## Face angle where the sea is sheltered (input 0), degrees. The face angle blends from this to cliff_angle
+## as the input rises, so sheltered cliffs slacken into slopes. Equal to cliff_angle turns it off.
+@export_range(1.0, 89.0, 0.5) var slack_angle: float = 30.0:
+	set(v):
+		slack_angle = clampf(v, 1.0, 89.0)
+		_param_changed()
+## How far past the cut the cliff top may round over, metres. 0 keeps the old one-cell rim.
+## Talus moves about one cell per pass, so keep cliff_iterations at least crest_reach / cell size.
+@export_range(0.0, 200.0, 0.5, "or_greater") var crest_reach: float = 20.0:
+	set(v):
+		crest_reach = maxf(v, 0.0)
 		_param_changed()
 ## Talus relaxation passes over the cut band. 0 leaves a one-cell wall.
 @export_range(0, 64, 1) var cliff_iterations: int = 8:
@@ -77,6 +90,8 @@ func _params() -> PackedFloat32Array:
 	p[5] = beach_height
 	p[6] = beach_width
 	p[7] = deposit
+	p[8] = slack_angle
+	p[9] = crest_reach
 	return p
 
 

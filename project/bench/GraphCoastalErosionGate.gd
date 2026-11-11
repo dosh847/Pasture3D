@@ -6,8 +6,8 @@
 #
 # CA  with no talus and no deposit, every cell equals the closed-form platform cut: min(h, sea - pd(1 - d/R))
 #     for land with d_sea < R·exposure. The sheltered half is untouched. Control: retreat 0 leaves the input.
-# CB  talus relaxation only touches the cut band and its rim: land 3+ cells beyond R is bit-identical to the
-#     input. Control: iterations 8 differs from iterations 0 somewhere.
+# CB  with crest_reach 0, talus only touches the cut band and its rim: land 3+ cells beyond R is
+#     bit-identical to the input. Control: iterations 8 differs from iterations 0 somewhere.
 # CC  sheltered beach: cells within the beach band below the profile are raised exactly onto it at
 #     deposit 1. Control: exposure unwired (reads 1) deposits nothing.
 # CD  Input -> Wave Exposure -> Coastal Erosion -> Output is native_supported and the compiled program
@@ -16,6 +16,14 @@
 # CE  the framework gives it the standard mask (last input). Control: Wave Exposure, whose port 0 output is
 #     a MASK, gets none.
 # CF  the op is in graph_op_ids. Control: a bogus op is not.
+# CG  slack_angle = cliff_angle and crest_reach = 0 reproduce the pre-change kernel bit for bit (hashes pinned
+#     before the change on the default fixture). Control: the new defaults differ from the pin.
+# CH  sheltered faces slacken: on a uniform 20 m plateau coast at input 0.2, the steepest land slope is under
+#     tan(lerp(slack, cliff, 0.2)) + 0.1. Control: slack_angle = cliff_angle stands steeper than that.
+# CI  at input 0.2, crest_reach = 20 m moves land between the rim and 20 m past the cut, and leaves land 3+
+#     cells beyond that bit-identical. Control: crest_reach = 0 moves nothing past the rim.
+# CJ  an input alternating 0.2 / 1.0 in 100 m stripes along the coast cuts >= 3 coves more than 15 m deeper
+#     than the shallowest retreat. Control: a uniform 0.6 input retreats evenly (spread <= one cell).
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/GraphCoastalErosionGate.tscn
 extends Node
@@ -41,7 +49,11 @@ func _ready() -> void:
 		_cd()
 		_ce()
 		_cf()
-	_check(_ran == 6, "all 6 criteria ran (%d)" % _ran)
+		_cg()
+		_ch()
+		_ci()
+		_cj()
+	_check(_ran == 10, "all 10 criteria ran (%d)" % _ran)
 	print("\n=== %s (%d failures) ===\n" % ["COASTAL EROSION PASS" if _fail == 0 else "COASTAL EROSION FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -112,6 +124,7 @@ func _cb() -> void:
 	var h := _coast()
 	var n := _node()
 	n.deposit = 0.0
+	n.crest_reach = 0.0
 	var relaxed: PackedFloat32Array = _run(n, h, _exposure())[0]
 	var outside := 0.0
 	for i in N * N:
@@ -235,6 +248,149 @@ func _cf() -> void:
 	var ids: Dictionary = Pasture3DUtil.graph_op_ids()
 	_check(ids.has("coastal_erosion") or ids.has(&"coastal_erosion"), "coastal_erosion is a native op")
 	_check(not (ids.has("coastal_erosion_bogus") or ids.has(&"coastal_erosion_bogus")), "control: a bogus op is not")
+	_ran += 1
+
+
+# Pinned 2026-11-10 from the kernel before slack_angle / crest_reach existed: default node, _coast(), _exposure().
+const PIN_H := 3573325460
+const PIN_CUT := 3856188797
+const PIN_DEP := 1531025657
+
+
+func _cg() -> void:
+	print("[CG] the old settings reproduce the old kernel")
+	var n := _node()
+	n.slack_angle = n.cliff_angle
+	n.crest_reach = 0.0
+	var r := _run(n, _coast(), _exposure())
+	var hs := [hash(r[0].to_byte_array()), hash(r[1].to_byte_array()), hash(r[2].to_byte_array())]
+	_check(hs[0] == PIN_H and hs[1] == PIN_CUT and hs[2] == PIN_DEP, "height, cut, deposit match the pin (%s)" % str(hs))
+	var d := _run(_node(), _coast(), _exposure())
+	_check(hash(d[0].to_byte_array()) != PIN_H, "control: the new defaults differ from the pin")
+	_ran += 1
+
+
+## A straight coast at x = 0 with a uniform 20 m plateau, sea at -10 m.
+func _plateau() -> PackedFloat32Array:
+	var h := PackedFloat32Array()
+	h.resize(N * N)
+	for i in N * N:
+		h[i] = -10.0 if _w(i).x < 0.0 else 20.0
+	return h
+
+
+func _uniform(p_v: float) -> PackedFloat32Array:
+	var e := PackedFloat32Array()
+	e.resize(N * N)
+	e.fill(p_v)
+	return e
+
+
+## Steepest x-slope between cells that are both above the platform floor (-platform_depth), away from the
+## grid's z edges: the cliff face, not the fixture's -10 m sea step.
+func _steepest(p_h: PackedFloat32Array) -> float:
+	var m := 0.0
+	for iz in range(8, N - 8):
+		for ix in N - 1:
+			var a := p_h[iz * N + ix]
+			var b := p_h[iz * N + ix + 1]
+			if a < -2.0 or b < -2.0:
+				continue
+			m = maxf(m, absf(b - a) / DX)
+	return m
+
+
+func _ch() -> void:
+	print("[CH] sheltered faces slacken")
+	var n := _node()
+	n.deposit = 0.0
+	n.crest_reach = 40.0
+	n.cliff_iterations = 128
+	var e := _uniform(0.2)
+	var slack := _steepest(_run(n, _plateau(), e)[0])
+	var limit := tan(deg_to_rad(lerpf(n.slack_angle, n.cliff_angle, 0.2))) + 0.1
+	_check(slack <= limit, "steepest %.3f at input 0.2 (limit %.3f)" % [slack, limit])
+	n.slack_angle = n.cliff_angle
+	var stiff := _steepest(_run(n, _plateau(), e)[0])
+	_check(stiff > limit, "control: no slackening stands at %.3f" % stiff)
+	_ran += 1
+
+
+## Largest |change| over plateau land in an x-window past the coast, metres.
+func _moved_in(p_a: PackedFloat32Array, p_b: PackedFloat32Array, p_x0: float, p_x1: float) -> float:
+	var m := 0.0
+	for i in N * N:
+		var x := _w(i).x
+		if x >= p_x0 and x < p_x1:
+			m = maxf(m, absf(p_a[i] - p_b[i]))
+	return m
+
+
+func _ci() -> void:
+	print("[CI] crest_reach rounds the cliff top")
+	var h := _plateau()
+	# Input 0.2: a slack face, so the crest has something to round. At 1.0 the face stands at 70 degrees and
+	# talus barely reaches past the rim, which is correct and says nothing about the band.
+	var e := _uniform(0.2)
+	var n := _node()
+	n.deposit = 0.0
+	n.crest_reach = 20.0
+	n.cliff_iterations = 64
+	var out: PackedFloat32Array = _run(n, h, e)[0]
+	var r: float = n.retreat * 0.2
+	var crest := _moved_in(out, h, r + 2.0 * DX, r + n.crest_reach)
+	var far := _moved_in(out, h, r + n.crest_reach + 3.0 * DX, 1.0e9)
+	_check(crest > 0.01, "land 2 cells to crest_reach past the cut moved by %.3f m" % crest)
+	_check(far == 0.0, "land 3+ cells past crest_reach unchanged (max %.6f)" % far)
+	n.crest_reach = 0.0
+	var rim: PackedFloat32Array = _run(n, h, e)[0]
+	var past := _moved_in(rim, h, r + 2.0 * DX, 1.0e9)
+	_check(past == 0.0, "control: crest_reach 0 moves nothing past the rim (max %.6f)" % past)
+	_ran += 1
+
+
+## Per row, the furthest x the cut reached, metres past the shoreline.
+func _retreat_rows(p_cut: PackedFloat32Array) -> PackedFloat32Array:
+	var r := PackedFloat32Array()
+	r.resize(N)
+	for iz in N:
+		var far := 0.0
+		for ix in N:
+			var i := iz * N + ix
+			if p_cut[i] > 0.0:
+				far = maxf(far, _w(i).x + DX * 0.5)
+		r[iz] = far
+	return r
+
+
+func _cj() -> void:
+	print("[CJ] varied input cuts coves")
+	var h := _plateau()
+	var n := _node()
+	n.deposit = 0.0
+	var e := PackedFloat32Array()
+	e.resize(N * N)
+	for i in N * N:
+		e[i] = 1.0 if int(floor((_w(i).y + 512.0) / 100.0)) % 2 == 0 else 0.2
+	var rows := _retreat_rows(_run(n, h, e)[1])
+	var lo := INF
+	for v in rows:
+		lo = minf(lo, v)
+	var coves := 0
+	var inside := false
+	for v in rows:
+		var deep := v > lo + 15.0
+		if deep and not inside:
+			coves += 1
+		inside = deep
+	_check(coves >= 3, "%d coves deeper than %.0f m + 15 m" % [coves, lo])
+	var even := _retreat_rows(_run(n, h, _uniform(0.6))[1])
+	var a := INF
+	var b := -INF
+	for v in even:
+		a = minf(a, v)
+		b = maxf(b, v)
+	_check(b - a <= DX, "control: a uniform input spreads %.1f m" % (b - a))
 	_ran += 1
 
 

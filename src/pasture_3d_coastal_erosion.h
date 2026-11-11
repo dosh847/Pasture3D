@@ -11,14 +11,20 @@
 //          h' = min(h, sea_level - platform_depth * (1 - d_sea / R))
 //      deepest at the old shoreline, rising to sea level at the new cliff toe. The ground just beyond R is
 //      untouched, so a vertical cliff stands at the retreat line.
-//   3. Cliff face. The shared talus projection relaxes the cut band to `cliff_angle`, so the face is steep
-//      rather than a one-cell wall. Restricted to cells that were cut or border a cut.
+//   3. Cliff face. The shared talus projection relaxes the cut band so the face is steep rather than a
+//      one-cell wall. The repose angle is per cell, lerp(slack_angle, cliff_angle, exposure): sheltered faces
+//      slacken toward slack_angle, exposed ones stand at cliff_angle. The band is the cut cells, their
+//      one-cell rim, and every land cell within `crest_reach` of a cut (JFA, metres), so the cliff top can
+//      round over. Talus moves about one cell per pass: keep cliff_iterations >= crest_reach / cell size.
+//      slack_angle == cliff_angle and crest_reach == 0 reproduce the original single-angle, rim-only pass.
 //   4. Beaches. Within `beach_width` either side of the shoreline, ground below the beach profile is
 //      raised toward it by deposit * (1 - exposure):
 //          target(s) = sea_level + beach_height * s / beach_width,  s in [-beach_width/2, beach_width]
 //      with s = +d_sea on land and -d_land on water. Only raises, never cuts.
 //
-// `exposure` is 0..1 per cell, normally Wave Exposure's output; empty reads as 1 everywhere. Inland cells
+// `exposure` is 0..1 per cell and is read as EROSIVE ENERGY: normally Shore Character's `erosion`
+// (exposure x softness, so retreat varies with rock hardness), or Wave Exposure's output directly. Empty
+// reads as 1 everywhere. Inland cells
 // read the exposure Wave Exposure carried to them, which fades over its `shore_reach`, so set that to at
 // least twice `retreat` or the cut stops short of R.
 
@@ -41,6 +47,8 @@ struct CoastalErosionParams {
 	double beach_height = 1.0; // metres above sea level at the back of the beach
 	double beach_width = 30.0; // metres inland of the shoreline
 	double deposit = 1.0; // 0..1
+	double slack_angle = 30.0; // degrees, the face angle at exposure 0
+	double crest_reach = 20.0; // metres past the cut the talus may move ground
 };
 
 CoastalErosionParams coastal_erosion_params_from(const float *p_params, int p_count);
