@@ -14,7 +14,6 @@
 [ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="8_m7f8t"]
 [ext_resource type="Script" uid="uid://t26vuji0r8wf" path="res://addons/pasture_3d/graph/pasture3d_graph_node_spline_source.gd" id="9_hur8n"]
 [ext_resource type="Script" uid="uid://rqm81y572bqi" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_fractalize.gd" id="9_l4h5e"]
-[ext_resource type="Script" uid="uid://c85myeafjuo6g" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_meanderize.gd" id="9_lmt3e"]
 [ext_resource type="Script" uid="uid://ba4778g8emikc" path="res://addons/pasture_3d/graph/pasture3d_graph_node_leveler.gd" id="9_yof5q"]
 [ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="10_p4out"]
 [ext_resource type="Script" uid="uid://717mgmmlrimi" path="res://addons/pasture_3d/connectors/pasture3d_mod_graph.gd" id="11_kfedv"]
@@ -89,7 +88,7 @@ graph_position = Vector2(-440, 60)
 
 [sub_resource type="Resource" id="Resource_lhpge"]
 script = ExtResource("8_m7f8t")
-graph_position = Vector2(520, 60)
+graph_position = Vector2(540, 60)
 
 [sub_resource type="Resource" id="Resource_7kbp8"]
 script = ExtResource("9_yof5q")
@@ -98,7 +97,7 @@ feather_side = 1
 feather = 300.0
 path_width_scale = 100.0
 wall_depth = 50.0
-graph_position = Vector2(60, 100)
+graph_position = Vector2(120, 60)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_p4out"]
@@ -118,16 +117,7 @@ sample_skip = PackedByteArray()
 script = ExtResource("9_hur8n")
 spline_key = "IslandBase/IslandSpline"
 path = SubResource("Resource_p4out")
-graph_position = Vector2(-1160, 280)
-preview_on = true
-
-[sub_resource type="Resource" id="Resource_yof5q"]
-script = ExtResource("9_lmt3e")
-wavelength = 300.0
-amplitude = 60.0
-ratio = 0.097
-noise_ratio = 0.187
-graph_position = Vector2(-320, 540)
+graph_position = Vector2(-1220, 220)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_m7f8t"]
@@ -138,28 +128,27 @@ sigma = 40.0
 persistence = 0.878
 seed = 97668
 pin_ends = false
-graph_position = Vector2(-360, 240)
+graph_position = Vector2(-320, 220)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_kfedv"]
 script = ExtResource("11_lmt3e")
 step = 25.0
-graph_position = Vector2(-800, 220)
+graph_position = Vector2(-780, 220)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_slh1f"]
 script = ExtResource("10_p4out")
 format_version = 3
-nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_7kbp8"), SubResource("Resource_lmt3e"), SubResource("Resource_yof5q"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv")])
-wires = [[0, &"height", 2, &"height"], [2, &"height", 1, &"result"], [3, &"path", 4, &"path"], [5, &"path", 2, &"loop"], [3, &"path", 6, &"path"], [6, &"path", 5, &"path"], [0, &"footprint", 2, &"area"]]
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_7kbp8"), SubResource("Resource_lmt3e"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv")])
+wires = [[0, &"height", 2, &"height"], [2, &"height", 1, &"result"], [4, &"path", 2, &"loop"], [3, &"path", 5, &"path"], [5, &"path", 4, &"path"], [0, &"footprint", 2, &"area"]]
 output_node = 1
-metadata/_editor_selected_node = 1
+metadata/_editor_selected_node = 2
 
 [sub_resource type="Resource" id="Resource_fbibf"]
 resource_name = "Terrain Graph"
 script = ExtResource("11_kfedv")
 graph = SubResource("Resource_slh1f")
-evaluation = 1
 
 [sub_resource type="Curve3D" id="Curve3D_aw5ld"]
 closed = true
@@ -834,6 +823,7 @@ metadata/_editor_selected_node = 6
 resource_name = "Terrain Graph"
 script = ExtResource("11_kfedv")
 graph = SubResource("Resource_wthob")
+evaluation = 1
 
 [sub_resource type="Curve3D" id="Curve3D_tcq52"]
 closed = true
@@ -864,7 +854,7 @@ crease_smoothing = 20.0
 _layer_owner = "pasture3d_brush:IslandBase"
 modifier_margin = 0.0
 live_preview_resolution = 2
-_preview_coarse_baked = false
+_preview_coarse_baked = true
 bake_scale = 2
 modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_fbibf")])
 
@@ -884,6 +874,7 @@ metadata/_custom_type_script = "uid://bb60it81vfrir"
 curve = SubResource("Curve3D_yof5q")
 
 [node name="IslandShape" type="Node3D" parent="Pasture3D" unique_id=1329462265 node_paths=PackedStringArray("terrain")]
+visible = false
 script = ExtResource("1_r5rvi")
 _layer_uid = "6220864bf846f44"
 extent_mode = 1
@@ -1053,6 +1044,7 @@ modifiers = Array[ExtResource("2_cbjtu")]([])
 curve = SubResource("Curve3D_bd2sf")
 
 [node name="Mountains" type="Node3D" parent="Pasture3D" unique_id=1882782638 node_paths=PackedStringArray("terrain")]
+visible = false
 script = ExtResource("1_r5rvi")
 _layer_uid = "9ca9bd5f3b500cd"
 blend_mode = 1
@@ -1276,6 +1268,7 @@ material = ExtResource("7_hqvrn")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -5, 0)
 
 [node name="MountainsRelief" type="Node3D" parent="Pasture3D" unique_id=382047406 node_paths=PackedStringArray("terrain")]
+visible = false
 script = ExtResource("1_r5rvi")
 _layer_uid = "254631a553da54b"
 extent_mode = 1
@@ -1365,6 +1358,7 @@ curve = SubResource("Curve3D_q0c40")
 
 [node name="Plow" type="Node3D" parent="Pasture3D" unique_id=795140751 node_paths=PackedStringArray("terrain")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -688.5291, 10.857767, 1092.453)
+visible = false
 script = ExtResource("3_n7ivs")
 terrain = NodePath("..")
 _layer_owner = "pasture3d_brush:Plow"
@@ -1383,6 +1377,18 @@ script = ExtResource("12_l4h5e")
 terrain = NodePath("../..")
 snap_to_surface = false
 metadata/_custom_type_script = "uid://bb60it81vfrir"
+
+[node name="MountainRanges" type="Node3D" parent="Pasture3D" unique_id=1064614146 node_paths=PackedStringArray("terrain")]
+script = ExtResource("1_r5rvi")
+_layer_uid = "596b704fc5d2a01"
+_base_key = "11ce477b7ff1cb8447c0e785ab7f8118"
+terrain = NodePath("..")
+modifier_margin = 0.0
+live_preview_resolution = 0
+_preview_coarse_baked = false
+bake_scale = 0
+modifiers = Array[ExtResource("2_cbjtu")]([])
+metadata/_custom_type_script = "uid://cmrjbbng0gxfi"
 
 [node name="Pasture3DPoolManager" type="Pasture3DPoolManager" parent="." unique_id=67587526]
 
