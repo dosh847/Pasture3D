@@ -24,6 +24,7 @@
 [ext_resource type="Script" uid="uid://v8cidb2f505x" path="res://addons/pasture_3d/graph/pasture3d_graph_node_wave_exposure.gd" id="13_l2dx1"]
 [ext_resource type="Script" uid="uid://dxbr6g22moqyx" path="res://addons/pasture_3d/graph/pasture3d_graph_node_islet_scatter.gd" id="13_wn1x5"]
 [ext_resource type="Script" uid="uid://bwvpdrmih3yt6" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_mask.gd" id="15_l2dx1"]
+[ext_resource type="Script" uid="uid://dt3335up2p70l" path="res://addons/pasture_3d/graph/pasture3d_graph_node_shore_character.gd" id="16_mjtdv"]
 [ext_resource type="Script" uid="uid://lp5oxart7q6x" path="res://addons/pasture_3d/graph/pasture3d_graph_node_remap.gd" id="18_kfedv"]
 [ext_resource type="Script" uid="uid://bindlf2awqi6e" path="res://addons/pasture_3d/graph/pasture3d_graph_node_blend.gd" id="18_p4out"]
 [ext_resource type="Script" uid="uid://dieimrnhn18o6" path="res://addons/pasture_3d/graph/pasture3d_graph_node_strata.gd" id="20_4img5"]
@@ -92,7 +93,7 @@ graph_position = Vector2(-880, 80)
 
 [sub_resource type="Resource" id="Resource_lhpge"]
 script = ExtResource("8_m7f8t")
-graph_position = Vector2(1740, 260)
+graph_position = Vector2(2680, 280)
 
 [sub_resource type="Resource" id="Resource_0oqof"]
 script = ExtResource("8_ff8bn")
@@ -137,34 +138,28 @@ shelf_width = 180.0
 beach_height = 3.0
 cliff_height = 15.0
 cliff_width = 20.0
-graph_position = Vector2(220, 260)
-preview_on = true
-
-[sub_resource type="Resource" id="Resource_c5hbv"]
-script = ExtResource("12_wn1x5")
-graph_position = Vector2(1360, 260)
-preview_on = true
+graph_position = Vector2(280, 460)
 
 [sub_resource type="Resource" id="Resource_b18ah"]
 script = ExtResource("13_l2dx1")
 wind_direction = 315.0
 wind_strength = 0.75
-graph_position = Vector2(580, 360)
+graph_position = Vector2(640, 560)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_6vjxx"]
 script = ExtResource("13_wn1x5")
 stack_fraction = 0.8
-graph_position = Vector2(980, 260)
+graph_position = Vector2(1920, 280)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_kg4qs"]
 script = ExtResource("31_yo6hg")
-graph_position = Vector2(980, 600)
+graph_position = Vector2(1920, 620)
 
 [sub_resource type="Resource" id="Resource_kye8j"]
 script = ExtResource("31_yo6hg")
-graph_position = Vector2(1220, 600)
+graph_position = Vector2(2160, 620)
 
 [sub_resource type="Resource" id="Resource_rcukl"]
 script = ExtResource("8_ff8bn")
@@ -192,19 +187,36 @@ invert = true
 graph_position = Vector2(-140, 540)
 preview_on = true
 
+[sub_resource type="Resource" id="Resource_bhhrn"]
+script = ExtResource("16_mjtdv")
+graph_position = Vector2(1100, 220)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_n6igq"]
+script = ExtResource("11_cbvqt")
+shelf_width = 180.0
+beach_height = 3.0
+cliff_height = 15.0
+cliff_width = 20.0
+graph_position = Vector2(1480, 20)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_c5hbv"]
+script = ExtResource("12_wn1x5")
+graph_position = Vector2(2320, 240)
+
 [sub_resource type="Resource" id="Resource_slh1f"]
 script = ExtResource("10_p4out")
 format_version = 3
-nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_lmt3e"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv"), SubResource("Resource_uxjvw"), SubResource("Resource_c5hbv"), SubResource("Resource_b18ah"), SubResource("Resource_6vjxx"), SubResource("Resource_kg4qs"), SubResource("Resource_kye8j"), SubResource("Resource_3wp7n"), SubResource("Resource_cwbmp")])
-wires = [[2, &"path", 4, &"path"], [4, &"path", 3, &"path"], [3, &"path", 5, &"outline"], [5, &"height", 7, &"height"], [6, &"height", 1, &"result"], [5, &"height", 8, &"height"], [7, &"exposure", 8, &"exposure"], [8, &"height", 6, &"height"], [7, &"exposure", 9, &"in"], [9, &"out", 10, &"in"], [10, &"out", 6, &"exposure"], [11, &"path", 12, &"path"], [12, &"mask", 5, &"cliff"]]
-output_node = 5
-metadata/_editor_selected_node = 5
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_lmt3e"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv"), SubResource("Resource_uxjvw"), SubResource("Resource_b18ah"), SubResource("Resource_6vjxx"), SubResource("Resource_kg4qs"), SubResource("Resource_kye8j"), SubResource("Resource_3wp7n"), SubResource("Resource_cwbmp"), SubResource("Resource_bhhrn"), SubResource("Resource_n6igq"), SubResource("Resource_c5hbv")])
+wires = [[2, &"path", 4, &"path"], [4, &"path", 3, &"path"], [3, &"path", 5, &"outline"], [5, &"height", 6, &"height"], [6, &"exposure", 7, &"exposure"], [6, &"exposure", 8, &"in"], [8, &"out", 9, &"in"], [10, &"path", 11, &"path"], [5, &"height", 12, &"height"], [6, &"exposure", 12, &"exposure"], [3, &"path", 13, &"outline"], [12, &"cliff", 13, &"cliff"], [13, &"height", 7, &"height"], [7, &"height", 14, &"height"], [9, &"out", 14, &"exposure"], [14, &"height", 1, &"result"]]
+output_node = 13
+metadata/_editor_selected_node = 13
 
 [sub_resource type="Resource" id="Resource_fbibf"]
 resource_name = "Terrain Graph"
 script = ExtResource("11_kfedv")
 graph = SubResource("Resource_slh1f")
-evaluation = 1
 
 [sub_resource type="Curve3D" id="Curve3D_aw5ld"]
 closed = true
@@ -918,7 +930,7 @@ crease_smoothing = 20.0
 _layer_owner = "pasture3d_brush:IslandBase"
 modifier_margin = 0.0
 live_preview_resolution = 2
-_preview_coarse_baked = false
+_preview_coarse_baked = true
 bake_scale = 2
 modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_fbibf")])
 
