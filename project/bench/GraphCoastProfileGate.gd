@@ -6,14 +6,18 @@
 # CA  the height along the +x row matches the closed-form profile. Control: the same formula fed UNSIGNED
 #     distance (sea mirrored onto land) misses by more than 20 m, so the metric sees a lost sign.
 # CB  signed_distance is R - |p|. Control: it is negative outside and positive inside (both exist).
-# CC  cliff weight 0 vs 1: the inland plateau differs by exactly cliff_height, the beach mask is empty at
-#     weight 1 and present at 0. Control: the two heights fields differ somewhere.
+# CC  cliff weight sets steepness, not height: weight 0 and 1 reach the same plateau, the beach mask is
+#     empty at weight 1 and present at 0. Controls: the old formula (cliff height dropped at weight 0)
+#     misses the weight-0 plateau by cliff_height, and the two fields differ near the shore.
 # CD  an open outline reads as open sea at -floor_depth everywhere. Control: the closed one does not.
 # CE  the op is in graph_op_ids, so a graph holding it stays native. Control: a bogus op is not.
 # CF  Spline Source -> Coast Profile -> Output: native_supported, and the COMPILED program (geometry table,
 #     aux cliff port, output channels) equals the forced GDScript evaluator, for height and for the cliff
 #     mask channel, with the cliff port unwired and wired to a Const. Controls: wiring cliff = 0 moves the
 #     height by metres (so the aux port reaches the kernel), and the channel output differs from height.
+# CG  at weight 0 the steepest slope across the rise stays under 1.5 cliff_height / slope_width. Control: at
+#     weight 1 it exceeds half of cliff_height / cliff_width.
+# CH  an unwired cliff port is bit-identical to an explicit all-1 mask. Control: an all-0.5 mask differs.
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/GraphCoastProfileGate.tscn
 extends Node
@@ -38,7 +42,9 @@ func _ready() -> void:
 		_cd()
 		_ce()
 		_cf()
-	_check(_ran == 6, "all 6 criteria ran (%d)" % _ran)
+		_cg()
+		_ch()
+	_check(_ran == 8, "all 8 criteria ran (%d)" % _ran)
 	print("\n=== %s (%d failures) ===\n" % ["COAST PROFILE PASS" if _fail == 0 else "COAST PROFILE FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -86,9 +92,10 @@ static func _ramp(x: float, w: float) -> float:
 static func _expect(n, d: float, c: float) -> float:
 	var bw: float = n.beach_width * (1.0 - c)
 	if d >= 0.0:
-		var x: float = d - bw - n.cliff_width
+		var wc: float = n.cliff_width * c + maxf(n.slope_width, n.cliff_width) * (1.0 - c)
+		var x: float = d - bw - wc
 		var inland := 0.0 if x <= 0.0 else pow(_ramp(x, n.inland_width), n.inland_curve)
-		return n.sea_level + n.beach_height * _ramp(d, bw) + n.cliff_height * c * _ramp(d - bw, n.cliff_width) \
+		return n.sea_level + n.beach_height * _ramp(d, bw) + n.cliff_height * _ramp(d - bw, wc) \
 				+ n.inland_height * inland
 	var e: float = -d
 	var fl: float = maxf(n.floor_depth, n.shelf_depth)
@@ -132,27 +139,68 @@ func _cb() -> void:
 
 
 func _cc() -> void:
-	print("[CC] the cliff weight")
+	print("[CC] the cliff weight sets steepness, not height")
 	var n := _node(_circle())
-	# A short inland ramp, so the centre sits on the saturated plateau. With the default 600 m ramp the
-	# narrower beach under a cliff also moves the centre further up the ramp, and the difference is not
-	# cliff_height alone.
+	# A short inland ramp, so the centre sits on the saturated plateau whatever the rise width.
 	n.inland_width = 100.0
 	var a := _eval(n, 0.0)
 	var b := _eval(n, 1.0)
 	var centre := (N / 2) * N + N / 2
 	var diff: float = b[0][centre] - a[0][centre]
-	_check(absf(diff - n.cliff_height) <= 0.01, "plateau rises by %.3f m (cliff_height %.1f)" % [diff, n.cliff_height])
+	_check(absf(diff) <= 0.01, "plateau differs by %.4f m between weight 0 and 1" % diff)
+	# The pre-change profile at weight 0, on the plateau: no cliff term at all.
+	var old_plateau: float = n.sea_level + n.beach_height + n.inland_height
+	var miss: float = absf(a[0][centre] - old_plateau)
+	_check(absf(miss - n.cliff_height) <= 0.01, "control: the old formula misses by %.2f m" % miss)
 	var beach_a := 0.0
 	var beach_b := 0.0
 	var cliff_b := 0.0
+	var near := 0.0
 	for i in N * N:
 		beach_a = maxf(beach_a, a[3][i])
 		beach_b = maxf(beach_b, b[3][i])
 		cliff_b = maxf(cliff_b, b[4][i])
+		near = maxf(near, absf(a[0][i] - b[0][i]))
 	_check(beach_b == 0.0 and beach_a > 0.99, "beach mask: %.2f at weight 0, %.2f at weight 1" % [beach_a, beach_b])
 	_check(cliff_b > 0.99, "cliff mask reaches %.2f at weight 1" % cliff_b)
-	_check(absf(diff) > 1.0, "control: the two fields differ")
+	_check(near > 1.0, "control: the fields differ near the shore by %.1f m" % near)
+	_ran += 1
+
+
+## Steepest slope along the +x row over land, metres per metre.
+func _max_slope(p_h: PackedFloat32Array) -> float:
+	var row := N / 2
+	var dx := RECT.size.x / N
+	var m := 0.0
+	for ix in N - 1:
+		var w := Pasture3DTerrainGraph.cell_to_world(ix, row, N, N, RECT)
+		if R - w.length() < 0.0:
+			continue
+		m = maxf(m, absf(p_h[row * N + ix + 1] - p_h[row * N + ix]) / dx)
+	return m
+
+
+func _cg() -> void:
+	print("[CG] weight 0 is a gentle slope, weight 1 a cliff")
+	var n := _node(_circle())
+	n.inland_height = 0.0
+	n.beach_height = 0.0
+	var gentle := _max_slope(_eval(n, 0.0)[0])
+	var steep := _max_slope(_eval(n, 1.0)[0])
+	var limit: float = 1.5 * n.cliff_height / n.slope_width * 1.02 # smoothstep peak slope, plus 2% for the row sampling
+	_check(gentle <= limit, "weight 0: steepest %.3f (limit %.3f)" % [gentle, limit])
+	_check(steep > 0.5 * n.cliff_height / n.cliff_width, "control: weight 1 reaches %.3f" % steep)
+	_ran += 1
+
+
+func _ch() -> void:
+	print("[CH] unwired is the all-1 mask")
+	var n := _node(_circle())
+	var un: PackedFloat32Array = _eval(n)[0]
+	var one: PackedFloat32Array = _eval(n, 1.0)[0]
+	var half: PackedFloat32Array = _eval(n, 0.5)[0]
+	_check(un == one, "unwired equals an explicit all-1 mask, bit for bit")
+	_check(un != half, "control: an all-0.5 mask differs")
 	_ran += 1
 
 

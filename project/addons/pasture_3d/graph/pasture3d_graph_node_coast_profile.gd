@@ -7,8 +7,9 @@
 # parametric rather than a free curve are in src/pasture_3d_coast_profile.h; the maths lives in C++ only.
 #
 # The optional `cliff` mask (unwired = 1) chooses cliffed coast per cell: where it is 1 the beach narrows to
-# nothing and the cliff stands in the water; where it is 0 the coast is a beach with no cliff. A future
-# Wave Exposure node is meant to drive it.
+# nothing and the cliff stands in the water; where it is 0 the coast is a beach and the land climbs to the
+# same plateau over `slope_width` instead. The mask sets steepness, never height. Shore Character is meant to
+# drive it.
 @tool
 class_name Pasture3DGraphNodeCoastProfile
 extends Pasture3DGraphNode
@@ -55,6 +56,12 @@ extends Pasture3DGraphNode
 @export_range(0.0, 200.0, 0.5, "or_greater") var cliff_width: float = 12.0:
 	set(v):
 		cliff_width = maxf(v, 0.0)
+		_param_changed()
+## Horizontal run of the rise where the cliff mask is 0, metres: a beach zone climbs to the same plateau over
+## this distance instead of a cliff. Blends toward cliff_width as the mask rises. Never below cliff_width.
+@export_range(0.0, 1000.0, 1.0, "or_greater") var slope_width: float = 150.0:
+	set(v):
+		slope_width = maxf(v, 0.0)
 		_param_changed()
 
 @export_group("Inland")
@@ -114,6 +121,7 @@ func _params() -> PackedFloat32Array:
 	p[10] = inland_curve
 	p[11] = sea_level
 	p[12] = mask_feather
+	p[13] = slope_width
 	return p
 
 

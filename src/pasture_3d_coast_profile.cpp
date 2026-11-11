@@ -51,6 +51,7 @@ CoastProfileParams godot::coast_profile_params_from(const float *p_params, int p
 	r.inland_curve = std::max(at(10, r.inland_curve), 0.01);
 	r.sea_level = at(11, r.sea_level);
 	r.mask_feather = std::max(at(12, r.mask_feather), 0.0);
+	r.slope_width = std::max(at(13, r.slope_width), r.cliff_width);
 	return r;
 }
 
@@ -104,11 +105,14 @@ Dictionary godot::coast_profile_grid_geom(const Pasture3DPathGeom *p_geom, const
 					c = std::isnan(v) ? 0.0 : sat((double)v);
 				}
 				const double bw = P.beach_width * (1.0 - c);
+				// c sets the rise's steepness, not its height: written as a weighted sum so c = 1 is exactly
+				// cliff_width and an unwired mask stays bit-identical to the old profile.
+				const double wcl = P.cliff_width * c + P.slope_width * (1.0 - c);
 				double z;
 				if (d >= 0.0) {
-					const double x = d - bw - P.cliff_width;
+					const double x = d - bw - wcl;
 					const double inland = x <= 0.0 ? 0.0 : std::pow(ramp(x, P.inland_width), P.inland_curve);
-					z = P.beach_height * ramp(d, bw) + P.cliff_height * c * ramp(d - bw, P.cliff_width)
+					z = P.beach_height * ramp(d, bw) + P.cliff_height * ramp(d - bw, wcl)
 							+ P.inland_height * inland;
 				} else {
 					const double e = -d;
@@ -120,7 +124,7 @@ Dictionary godot::coast_profile_grid_geom(const Pasture3DPathGeom *p_geom, const
 				const double f = P.mask_feather;
 				wsh[i] = (float)(d < 0.0 ? band(-d, 0.0, P.shelf_width, f) : 0.0);
 				wb[i] = (float)(band(d, 0.0, bw, f) * (1.0 - c));
-				wc[i] = (float)(band(d, bw, bw + P.cliff_width, f) * c * (P.cliff_height > 0.0 ? 1.0 : 0.0));
+				wc[i] = (float)(band(d, bw, bw + wcl, f) * c * (P.cliff_height > 0.0 ? 1.0 : 0.0));
 			}
 		}
 	});

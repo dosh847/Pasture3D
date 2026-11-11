@@ -9,12 +9,14 @@
 //   sea floor ── drop-off ── shelf ── | shoreline | ── beach ── cliff ── inland rise
 //
 //   d < 0 (sea, e = -d):  h = -shelf_depth·ss(e/shelf_width) - (floor_depth - shelf_depth)·ss((e - shelf_width)/drop_width)
-//   d ≥ 0 (land):         h =  beach_height·ss(d/bw) + cliff_height·c·ss((d - bw)/cliff_width)
-//                             + inland_height·ss(x)^inland_curve,  x = (d - bw - cliff_width)/inland_width
+//   d ≥ 0 (land):         h =  beach_height·ss(d/bw) + cliff_height·ss((d - bw)/w)
+//                             + inland_height·ss(x)^inland_curve,  x = (d - bw - w)/inland_width
 //
-// with ss the smoothstep, c the per-cell cliff weight (the aux mask, 1 when unwired) and bw = beach_width·(1 - c):
-// where the coast is cliffed the beach narrows to nothing, so the cliff stands in the water instead of
-// behind a strand. Every band meets its neighbour with zero slope, so no seam shows at a band boundary.
+// with ss the smoothstep, c the per-cell cliff weight (the aux mask, 1 when unwired), bw = beach_width·(1 - c)
+// and w = cliff_width·c + slope_width·(1 - c). Where the coast is cliffed the beach narrows to nothing, so
+// the cliff stands in the water instead of behind a strand. c sets the rise's STEEPNESS, never its height:
+// at any c the land reaches beach_height + cliff_height at d = bw + w, so a beach zone climbs to the plateau
+// over slope_width instead of sinking into a trench. Every band meets its neighbour with zero slope, so no seam shows at a band boundary.
 //
 // Only a CLOSED path has an inside. An open or empty path reads as all sea, at floor depth — "no island"
 // is open ocean, never sea level everywhere (which would be a flat continent at the waterline).
@@ -45,6 +47,7 @@ struct CoastProfileParams {
 	double inland_curve = 0.7;
 	double sea_level = 0.0;
 	double mask_feather = 4.0;
+	double slope_width = 150.0; // rise width where the cliff weight is 0; clamped >= cliff_width
 };
 
 CoastProfileParams coast_profile_params_from(const float *p_params, int p_count);
