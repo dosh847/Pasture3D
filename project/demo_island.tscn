@@ -50,6 +50,7 @@
 [ext_resource type="Script" uid="uid://b6fg15pksq0y2" path="res://addons/pasture_3d/graph/pasture3d_graph_node_mountain_tibesti.gd" id="44_wn1x5"]
 [ext_resource type="Script" uid="uid://bj10ochgiqrlg" path="res://addons/pasture_3d/connectors/pasture3d_ridge.gd" id="49_7qmf4"]
 [ext_resource type="Script" uid="uid://bbgjfav0p7rhm" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_range.gd" id="50_0h8r1"]
+[ext_resource type="Script" uid="uid://dojdh8yj7mhru" path="res://addons/pasture_3d/graph/pasture3d_graph_node_slope.gd" id="51_0h8r1"]
 
 [sub_resource type="Pasture3DMaterial" id="Pasture3DMaterial_4515p"]
 _shader_parameters = {
@@ -103,6 +104,7 @@ points = PackedVector2Array(-528.01807, -5.346863, -357.2942, -150.56052, -327.1
 half_widths = PackedFloat32Array(25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25)
 heights = PackedFloat32Array(-15.124123, 1.1280714, 1.1136136, 1.3814619, 1.3084792, 1.3364221, 2.5330312, -11.573069, -48.329998, -48.597282, 1.5023028, -48.79951, -3.719501, 0.20801687, -7.320325, -0.43339396, -18.909311, -41.834496, 1.7948681, -9.898563, 1.6072351, -16.159313, -6.2210045, -27.590595, -48.73671, -3.8532324, -4.760648, 23.012133, 0.5874183, -0.027963638, -10.293829, -3.7060204, -1.4046457, -0.30825567, 0.8964343, -11.66758, -24.201237, -41.19474, -46.448708, -7.1387463, 1.6932226, 1.310413, 20.343227, 6.2419453, 0.8904562, 6.4439354, 4.351281, 1.6081271, -7.31758)
 closed = true
+part_starts = PackedInt32Array()
 source_label = "IslandBase/IslandSpline"
 sample_half_widths = PackedFloat32Array()
 sample_shoulders = PackedFloat32Array()
@@ -166,6 +168,7 @@ points = PackedVector2Array(-37.433258, 1542.1476, 61.11711, 1159.7693, 400.4008
 half_widths = PackedFloat32Array(5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5)
 heights = PackedFloat32Array(88.60861, 45.047302, 47.717133, 42.697067, 48.12475, 37.77204, 42.995388, 37.12871, 20.428001, -0.25200272, 30.809032, 19.599972, -0.38427544, -0.8216555, -3.9200025, -0.17080724, -0.18369997, -0.19036984, 33.660973, -0.5676398, 8.297617, 29.708971, 79.74693, 83.30411)
 closed = true
+part_starts = PackedInt32Array()
 source_label = "IslandBase/BeachSpline1"
 sample_half_widths = PackedFloat32Array()
 sample_shoulders = PackedFloat32Array()
@@ -218,7 +221,7 @@ format_version = 3
 nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_lmt3e"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv"), SubResource("Resource_uxjvw"), SubResource("Resource_b18ah"), SubResource("Resource_6vjxx"), SubResource("Resource_kg4qs"), SubResource("Resource_kye8j"), SubResource("Resource_3wp7n"), SubResource("Resource_cwbmp"), SubResource("Resource_bhhrn"), SubResource("Resource_n6igq"), SubResource("Resource_c5hbv"), SubResource("Resource_elc4l"), SubResource("Resource_6rhur")])
 wires = [[2, &"path", 4, &"path"], [4, &"path", 3, &"path"], [3, &"path", 5, &"outline"], [5, &"height", 6, &"height"], [8, &"out", 9, &"in"], [10, &"path", 11, &"path"], [5, &"height", 12, &"height"], [6, &"exposure", 12, &"exposure"], [3, &"path", 13, &"outline"], [13, &"height", 7, &"height"], [7, &"height", 14, &"height"], [9, &"out", 14, &"exposure"], [14, &"height", 1, &"result"], [12, &"erosion", 8, &"in"], [6, &"exposure", 15, &"in"], [15, &"out", 16, &"in"], [16, &"out", 7, &"exposure"], [12, &"cliff", 13, &"cliff"]]
 output_node = 13
-metadata/_editor_selected_node = 13
+metadata/_editor_selected_node = -1
 
 [sub_resource type="Resource" id="Resource_fbibf"]
 resource_name = "Terrain Graph"
@@ -883,6 +886,7 @@ script = ExtResource("8_ff8bn")
 points = PackedVector2Array()
 half_widths = PackedFloat32Array()
 heights = PackedFloat32Array()
+part_starts = null
 source_label = "Plow/Pasture3DSpline"
 sample_half_widths = PackedFloat32Array()
 sample_shoulders = PackedFloat32Array()
@@ -927,6 +931,7 @@ script = ExtResource("8_ff8bn")
 points = PackedVector2Array(-514.67096, -1552.772, -630.1058, -1138.0265, -867.99915, -1056.2037, -768.681, -821.4809, -762.45544, -564.9245, -780.6066, -402.94513)
 half_widths = PackedFloat32Array(12, 12, 12, 12, 12, 12)
 heights = PackedFloat32Array(43.654213, 147.56032, 97.975685, 148.98206, 105.094444, 95.69457)
+part_starts = PackedInt32Array()
 source_label = "MountainRanges/Ridge/Crest"
 sample_half_widths = PackedFloat32Array()
 sample_shoulders = PackedFloat32Array()
@@ -943,7 +948,7 @@ preview_on = true
 
 [sub_resource type="Resource" id="Resource_a1o0c"]
 script = ExtResource("8_m7f8t")
-graph_position = Vector2(880, 0)
+graph_position = Vector2(2420, -60)
 
 [sub_resource type="Resource" id="Resource_4k064"]
 script = ExtResource("50_0h8r1")
@@ -958,18 +963,36 @@ spur_angle = 0.0
 graph_position = Vector2(480, 0)
 preview_on = true
 
+[sub_resource type="Resource" id="Resource_b0u5i"]
+script = ExtResource("51_0h8r1")
+graph_position = Vector2(940, 140)
+collapsed = true
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_ahukp"]
+script = ExtResource("33_3nkqr")
+graph_position = Vector2(1840, -100)
+
+[sub_resource type="Resource" id="Resource_heixe"]
+script = ExtResource("18_p4out")
+graph_position = Vector2(1460, -140)
+
+[sub_resource type="Resource" id="Resource_2hnkd"]
+script = ExtResource("20_kfedv")
+feature_size = 196.0
+graph_position = Vector2(1040, -80)
+
 [sub_resource type="Resource" id="Resource_b41or"]
 script = ExtResource("10_p4out")
 format_version = 3
-nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_rqwuq"), SubResource("Resource_tt66w"), SubResource("Resource_a1o0c"), SubResource("Resource_4k064")])
-wires = [[0, &"height", 3, &"height"], [1, &"path", 3, &"path"], [3, &"height", 2, &"result"]]
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_rqwuq"), SubResource("Resource_tt66w"), SubResource("Resource_a1o0c"), SubResource("Resource_4k064"), SubResource("Resource_b0u5i"), SubResource("Resource_ahukp"), SubResource("Resource_heixe"), SubResource("Resource_2hnkd")])
+wires = [[0, &"height", 3, &"height"], [1, &"path", 3, &"path"], [3, &"height", 4, &"height"], [3, &"height", 6, &"a"], [7, &"out", 6, &"b"], [3, &"footprint", 6, &"mask"], [6, &"out", 5, &"in"], [5, &"height", 2, &"result"], [3, &"footprint", 5, &"mask"]]
 output_node = 2
-metadata/_editor_selected_node = 3
+metadata/_editor_selected_node = 5
 
 [sub_resource type="Resource" id="Resource_xwa3r"]
 script = ExtResource("11_kfedv")
 graph = SubResource("Resource_b41or")
-evaluation = 1
 
 [sub_resource type="Curve3D" id="Curve3D_b0u5i"]
 closed = true
@@ -1007,7 +1030,7 @@ crease_smoothing = 20.0
 _layer_owner = "pasture3d_brush:IslandBase"
 modifier_margin = 0.0
 live_preview_resolution = 2
-_preview_coarse_baked = true
+_preview_coarse_baked = false
 bake_scale = 2
 modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_fbibf")])
 
