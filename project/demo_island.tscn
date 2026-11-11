@@ -135,10 +135,7 @@ preview_on = true
 [sub_resource type="Resource" id="Resource_uxjvw"]
 script = ExtResource("11_cbvqt")
 shelf_width = 180.0
-beach_height = 3.0
-cliff_height = 15.0
-cliff_width = 20.0
-graph_position = Vector2(280, 460)
+graph_position = Vector2(260, 400)
 
 [sub_resource type="Resource" id="Resource_b18ah"]
 script = ExtResource("13_l2dx1")
@@ -189,16 +186,13 @@ preview_on = true
 
 [sub_resource type="Resource" id="Resource_bhhrn"]
 script = ExtResource("16_mjtdv")
-graph_position = Vector2(1100, 220)
+graph_position = Vector2(1080, 200)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_n6igq"]
 script = ExtResource("11_cbvqt")
 shelf_width = 180.0
-beach_height = 3.0
-cliff_height = 15.0
-cliff_width = 20.0
-graph_position = Vector2(1480, 20)
+graph_position = Vector2(1460, 80)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_c5hbv"]
@@ -211,12 +205,13 @@ format_version = 3
 nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_lmt3e"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv"), SubResource("Resource_uxjvw"), SubResource("Resource_b18ah"), SubResource("Resource_6vjxx"), SubResource("Resource_kg4qs"), SubResource("Resource_kye8j"), SubResource("Resource_3wp7n"), SubResource("Resource_cwbmp"), SubResource("Resource_bhhrn"), SubResource("Resource_n6igq"), SubResource("Resource_c5hbv")])
 wires = [[2, &"path", 4, &"path"], [4, &"path", 3, &"path"], [3, &"path", 5, &"outline"], [5, &"height", 6, &"height"], [6, &"exposure", 7, &"exposure"], [6, &"exposure", 8, &"in"], [8, &"out", 9, &"in"], [10, &"path", 11, &"path"], [5, &"height", 12, &"height"], [6, &"exposure", 12, &"exposure"], [3, &"path", 13, &"outline"], [12, &"cliff", 13, &"cliff"], [13, &"height", 7, &"height"], [7, &"height", 14, &"height"], [9, &"out", 14, &"exposure"], [14, &"height", 1, &"result"]]
 output_node = 13
-metadata/_editor_selected_node = 13
+metadata/_editor_selected_node = 12
 
 [sub_resource type="Resource" id="Resource_fbibf"]
 resource_name = "Terrain Graph"
 script = ExtResource("11_kfedv")
 graph = SubResource("Resource_slh1f")
+evaluation = 1
 
 [sub_resource type="Curve3D" id="Curve3D_aw5ld"]
 closed = true
@@ -930,7 +925,7 @@ crease_smoothing = 20.0
 _layer_owner = "pasture3d_brush:IslandBase"
 modifier_margin = 0.0
 live_preview_resolution = 2
-_preview_coarse_baked = true
+_preview_coarse_baked = false
 bake_scale = 2
 modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_fbibf")])
 
