@@ -149,7 +149,7 @@ min_angle 30°, max_angle 90°, falloff 5°, scale 0 m (raw).
 
 **Built 2026-11-11** (parts: `Pasture3DGraphPath.part_starts` and `Pasture3DPathGeom::dead`; generator:
 src/pasture_3d_range_splines.{h,cpp} and pasture3d_graph_node_range_splines.gd; gate
-bench/GraphRangeSplinesGate RA–RF). Departures from the plan below:
+bench/GraphRangeSplinesGate RA–RH). Departures from the plan below:
 
 - **No HEIGHT input.** Every quantity the node needs (the inset, the depth that sets crest heights, the
   medial axis) is the outline's own inside distance, which `Pasture3DPathGeom` answers exactly. With no
@@ -171,6 +171,14 @@ bench/GraphRangeSplinesGate RA–RF). Departures from the plan below:
 - **FOLDS is built too** (open question 1): RC needs two parallel crests anyway.
 - Path Range rasterises one crest line per part, tapered and seeded per part; part 0 keeps the unsalted
   seed, so a one-part path is unchanged (GraphPathRangeGate).
+- **The layout is auto by default** (user decision, 2026-11-11). Fixed metre defaults (spacing 1500,
+  length 3000, wander 300) gave 0 folds and 1 ridge on a 600 m hill outline. Spacing 0 and Length 0 are now
+  derived from the outline: with U = max_depth − coast_inset, spacing = 2U / count and length = 2U.
+  Wander is a fraction of the spacing (default 0.25), so it scales with it; 0 is still straight. A positive
+  spacing or length is metres. The result reports the resolved `spacing` / `length` / `wander`, and the
+  node's `resolved_layout()` returns them (RH).
+- **SCATTER clips before accepting.** A ridge was once accepted and then clipped, so one that the clip
+  dropped still counted toward `count` and blocked its neighbours (RG).
 
 The audit (RD checks every row):
 

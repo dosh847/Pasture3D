@@ -33,9 +33,11 @@ RangeSplinesParams godot::range_splines_params_from(const float *p_params, int p
 	r.min_branch = std::max(at(6, r.min_branch), 0.0);
 	r.count = std::clamp((int)std::lround(at(7, r.count)), 0, 500);
 	r.angle = at(8, r.angle);
-	r.spacing = std::max(at(9, r.spacing), 1.0);
-	r.wander = std::max(at(10, r.wander), 0.0);
-	r.length = std::max(at(11, r.length), 1.0);
+	// 0 (or less) = auto, resolved from the outline in range_splines_solve; otherwise at least 1 m.
+	const double sp = at(9, r.spacing), ln = at(11, r.length);
+	r.spacing = sp > 0.0 ? std::max(sp, 1.0) : 0.0;
+	r.wander = std::clamp(at(10, r.wander), 0.0, 4.0);
+	r.length = ln > 0.0 ? std::max(ln, 1.0) : 0.0;
 	r.length_jitter = std::clamp(at(12, r.length_jitter), 0.0, 0.95);
 	r.angle_jitter = std::clamp(at(13, r.angle_jitter), 0.0, 180.0);
 	r.resolution = std::clamp((int)std::lround(at(14, r.resolution)), 32, 2048);
@@ -478,7 +480,9 @@ void scatter(const Pasture3DPathGeom &g, double bx0, double bz0, double bx1, dou
 	Rng rng((uint32_t)P.seed);
 	std::vector<int> scratch;
 	const int tries = P.count * SCATTER_TRIES;
-	for (int t = 0; t < tries && (int)r_out.size() < P.count; t++) {
+	int placed = 0;
+	std::vector<Poly> kept;
+	for (int t = 0; t < tries && placed < P.count; t++) {
 		// Fixed draw order per attempt, whatever the attempt's fate: x, z, length, angle, bend seed.
 		const double x = bx0 + (bx1 - bx0) * rng.next();
 		const double z = bz0 + (bz1 - bz0) * rng.next();
@@ -496,10 +500,16 @@ void scatter(const Pasture3DPathGeom &g, double bx0, double bz0, double bx1, dou
 			const double along = (u - 0.5) * len;
 			p.push_back({ x + ux * along - uz * off, z + uz * along + ux * off });
 		}
+		// Clipped BEFORE it is accepted: a ridge the shore clip would drop must neither count toward `count`
+		// nor block its neighbours' spacing, or a small outline fills with one ridge and stops.
+		kept.clear();
+		clip_to_inset(p, g, P.coast_inset, P.min_branch, scratch, kept);
+		if (kept.empty()) continue;
 		bool near = false;
 		const double sp2 = P.spacing * P.spacing;
 		for (const Poly &q : r_out) {
-			for (const P2 &a : p) {
+			for (const Poly &kp : kept) {
+			for (const P2 &a : kp) {
 				for (const P2 &b : q) {
 					const double dx = a.x - b.x, dz = a.z - b.z;
 					if (dx * dx + dz * dz < sp2) {
@@ -510,8 +520,12 @@ void scatter(const Pasture3DPathGeom &g, double bx0, double bz0, double bx1, dou
 				if (near) break;
 			}
 			if (near) break;
+			}
+			if (near) break;
 		}
-		if (!near) r_out.push_back(std::move(p));
+		if (near) continue;
+		for (Poly &kp : kept) r_out.push_back(std::move(kp));
+		placed++;
 	}
 }
 
@@ -540,15 +554,40 @@ Dictionary godot::range_splines_solve(const PackedVector2Array &p_outline, bool 
 	const double ext = std::max(bx1 - bx0, bz1 - bz0);
 	if (!(ext > 0.0)) return out;
 	const double step = P.step > 0.0 ? P.step : ext / 256.0;
+	double max_depth = 0.0;
+	{
+		std::vector<int> sc;
+		double md = 0.0;
+		for (int iz = 0; iz < 64; iz++) {
+			for (int ix = 0; ix < 64; ix++) {
+				md = std::max(md, depth_at(g, bx0 + (bx1 - bx0) * (ix + 0.5) / 64.0, bz0 + (bz1 - bz0) * (iz + 0.5) / 64.0, sc));
+			}
+		}
+		out["max_depth"] = md;
+		max_depth = md;
+	}
+	// The layout in metres. Auto sizes from the room inside the inset, U = max_depth - coast_inset (the
+	// whole depth when the inset swallows it): `count` crests share the usable width 2U, and a SCATTER ridge
+	// is as long as that width. Wander is a fraction of the spacing, so it scales with it.
+	RangeSplinesParams Q = P;
+	{
+		const double U = max_depth > P.coast_inset ? max_depth - P.coast_inset : max_depth;
+		if (Q.spacing <= 0.0) Q.spacing = std::max(2.0 * U / (double)std::max(P.count, 1), 1.0);
+		if (Q.length <= 0.0) Q.length = std::max(2.0 * U, 1.0);
+		Q.wander = P.wander * Q.spacing;
+		out["spacing"] = Q.spacing;
+		out["length"] = Q.length;
+		out["wander"] = Q.wander;
+	}
 	const uint32_t salt = wang_hash((uint32_t)P.seed * 0x85EBCA6Bu + 0x7F4A7C15u);
 
 	std::vector<Poly> lines;
 	switch (P.mode) {
 		case RANGE_SPLINES_FOLDS:
-			folds(0.5 * (bx0 + bx1), 0.5 * (bz0 + bz1), 0.5 * std::hypot(bx1 - bx0, bz1 - bz0), P, step, salt, lines);
+			folds(0.5 * (bx0 + bx1), 0.5 * (bz0 + bz1), 0.5 * std::hypot(bx1 - bx0, bz1 - bz0), Q, step, salt, lines);
 			break;
 		case RANGE_SPLINES_SCATTER:
-			scatter(g, bx0, bz0, bx1, bz1, P, step, lines);
+			scatter(g, bx0, bz0, bx1, bz1, Q, step, lines);
 			break;
 		case RANGE_SPLINES_SPINE:
 		default:

@@ -16,6 +16,14 @@
 # RF  Spline Source -> Generate Range Splines -> Path Distance -> Output is native_supported and the native
 #     route equals the forced GDScript evaluator, reading the gap midway. Control: the joined points through
 #     the same graph read near 0.
+# RG  SCATTER fills a small outline (600 x 480 m, an island's hill outline from the demo): spacing 120,
+#     length 250 places at least 3 ridges. Before the fix a ridge was accepted BEFORE the shore clip, so one
+#     the clip then dropped still counted toward `count` and blocked its neighbours: this placed 1. Control:
+#     Min Branch 2000 gives 0 parts, so candidates in this fixture really do reach the clip.
+# RH  auto layout (Spacing 0, Length 0, the defaults) fits both scales: on the 600 m hill outline and on a
+#     10 km island, FOLDS and SCATTER at Count 5 each give at least 3 crests, and the resolved spacing is
+#     2 (max_depth - coast_inset) / count. Control: the old fixed-metre island layout (spacing 1500, length
+#     3000) gives fewer than 3 on the hill outline in both modes.
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/GraphRangeSplinesGate.tscn
 extends Node
@@ -37,7 +45,9 @@ func _ready() -> void:
 		_rd()
 		_re()
 		_rf()
-	_check(_ran == 6, "all 6 criteria ran (%d)" % _ran)
+		_rg()
+		_rh()
+	_check(_ran == 8, "all 8 criteria ran (%d)" % _ran)
 	print("\n=== %s (%d failures) ===\n" % ["RANGE SPLINES PASS" if _fail == 0 else "RANGE SPLINES FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -77,6 +87,14 @@ static func _blob() -> Pasture3DGraphPath:
 		var r := 5000.0 * (1.0 + 0.25 * sin(3.0 * a) + 0.08 * sin(11.0 * a))
 		pts.append(Vector2(cos(a), sin(a)) * r)
 	return _closed(pts)
+
+
+## The demo's NorthWestHillsSpline: about 600 x 480 m, 186 m deep at its deepest.
+static func _hills() -> Pasture3DGraphPath:
+	return _closed(PackedVector2Array([Vector2(58.82245, -1178.1616), Vector2(265.3446, -1221.5282),
+			Vector2(146.76732, -1374.6617), Vector2(-86.3168, -1419.9147), Vector2(-328.31866, -1345.1998),
+			Vector2(-297.6133, -1013.2457), Vector2(-63.543976, -938.4501), Vector2(136.95718, -980.10187),
+			Vector2(58.82245, -1138.1616)]))
 
 
 ## The node, configured, and run on `p_outline`.
@@ -303,6 +321,36 @@ func _rf() -> void:
 			"angle": 90.0, "spacing": 1000.0, "wander": 0.0, "min_branch": 200.0}).points
 	var j: PackedFloat32Array = _graph(joined, false).evaluate(3, 3, rect, null, PackedFloat32Array())
 	_check(j.size() == 9 and j[4] < 20.0, "control: the joined points read %.3f m" % (j[4] if j.size() == 9 else NAN))
+	_ran += 1
+
+
+func _rg() -> void:
+	print("[RG] SCATTER fills a small outline")
+	var hills := _hills()
+	var cfg := {"mode": RangeSplines.Mode.SCATTER, "spacing": 120.0, "length": 250.0, "wander": 0.25, "count": 5}
+	var r := _gen(hills, cfg)
+	_check(r.part_count() >= 3, "%d ridges placed (>= 3)" % r.part_count())
+	cfg["min_branch"] = 2000.0
+	var c := _gen(hills, cfg)
+	_check(c.points.is_empty(), "control: Min Branch 2000 drops every candidate (%d parts)" % c.part_count())
+	_ran += 1
+
+
+func _rh() -> void:
+	print("[RH] auto layout fits a hill outline and an island")
+	for o in [["hills", _hills()], ["island", _blob()]]:
+		for m in [RangeSplines.Mode.FOLDS, RangeSplines.Mode.SCATTER]:
+			var n := RangeSplines.new()
+			n.mode = m
+			var r: Pasture3DGraphPath = n.eval_path([o[1]])
+			var lay: Dictionary = n.resolved_layout()
+			var want := 2.0 * (n._max_depth - n.coast_inset) / n.count
+			_check(r.part_count() >= 3 and absf(float(lay.get("spacing", 0.0)) - want) <= 1e-3 * want,
+					"%s mode %d: %d crests, spacing %.1f m (%.1f), length %.1f m" % [o[0], m, r.part_count(),
+					float(lay.get("spacing", 0.0)), want, float(lay.get("length", 0.0))])
+	for m in [RangeSplines.Mode.FOLDS, RangeSplines.Mode.SCATTER]:
+		var c := _gen(_hills(), {"mode": m, "spacing": 1500.0, "length": 3000.0})
+		_check(c.part_count() < 3, "control: fixed island metres, mode %d, give %d crests on the hills" % [m, c.part_count()])
 	_ran += 1
 
 

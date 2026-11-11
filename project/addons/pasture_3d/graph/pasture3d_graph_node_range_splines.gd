@@ -28,7 +28,7 @@ enum Mode { SPINE, FOLDS, SCATTER }
 		notify_property_list_changed()
 ## Metres kept clear of the shore, by the inside distance. Every vertex of every crest is at least this
 ## far inside the outline.
-@export_range(0.0, 5000.0, 1.0, "or_greater", "suffix:m") var coast_inset: float = 200.0:
+@export_range(0.0, 5000.0, 1.0, "or_greater", "suffix:m") var coast_inset: float = 50.0:
 	set(v):
 		coast_inset = maxf(v, 0.0)
 		_param_changed()
@@ -49,13 +49,13 @@ enum Mode { SPINE, FOLDS, SCATTER }
 		_param_changed()
 		notify_property_list_changed()
 ## The inside distance at which a crest reaches its full height.
-@export_range(1.0, 20000.0, 1.0, "or_greater", "suffix:m") var depth_scale: float = 2000.0:
+@export_range(1.0, 20000.0, 1.0, "or_greater", "suffix:m") var depth_scale: float = 500.0:
 	set(v):
 		depth_scale = maxf(v, 1.0)
 		_param_changed()
 @export_group("Layout")
 ## Parts shorter than this are dropped. SPINE also prunes skeleton branches shorter than this.
-@export_range(0.0, 10000.0, 1.0, "or_greater", "suffix:m") var min_branch: float = 500.0:
+@export_range(0.0, 10000.0, 1.0, "or_greater", "suffix:m") var min_branch: float = 150.0:
 	set(v):
 		min_branch = maxf(v, 0.0)
 		_param_changed()
@@ -69,20 +69,22 @@ enum Mode { SPINE, FOLDS, SCATTER }
 	set(v):
 		angle = v
 		_param_changed()
-## FOLDS: distance between crests. SCATTER: the closest two ridges may come.
-@export_range(1.0, 20000.0, 1.0, "or_greater", "suffix:m") var spacing: float = 1500.0:
+## FOLDS: distance between crests. SCATTER: the closest two ridges may come. 0 = auto: Count crests
+## share the outline's usable width, 2 × (deepest inside distance - Coast Inset) / Count.
+@export_range(0.0, 20000.0, 1.0, "or_greater", "suffix:m") var spacing: float = 0.0:
 	set(v):
-		spacing = maxf(v, 1.0)
+		spacing = maxf(v, 0.0)
 		_param_changed()
-## Sideways bend, metres. FOLDS and SCATTER.
-@export_range(0.0, 5000.0, 1.0, "or_greater", "suffix:m") var wander: float = 300.0:
+## Sideways bend as a fraction of the spacing (auto or not), so it scales with the layout. FOLDS and
+## SCATTER. 0 = straight.
+@export_range(0.0, 4.0, 0.01) var wander: float = 0.25:
 	set(v):
-		wander = maxf(v, 0.0)
+		wander = clampf(v, 0.0, 4.0)
 		_param_changed()
-## SCATTER: ridge length.
-@export_range(1.0, 50000.0, 1.0, "or_greater", "suffix:m") var length: float = 3000.0:
+## SCATTER: ridge length. 0 = auto: the outline's usable width, 2 × (deepest inside distance - Coast Inset).
+@export_range(0.0, 50000.0, 1.0, "or_greater", "suffix:m") var length: float = 0.0:
 	set(v):
-		length = maxf(v, 1.0)
+		length = maxf(v, 0.0)
 		_param_changed()
 ## SCATTER: length varies by ± this fraction.
 @export_range(0.0, 0.95, 0.01) var length_jitter: float = 0.4:
@@ -105,6 +107,13 @@ enum Mode { SPINE, FOLDS, SCATTER }
 	set(v):
 		step = maxf(v, 0.0)
 		_param_changed()
+
+
+# What the last solve saw, for node_warnings: the outline's deepest inside distance (-1 = not solved), and
+# the layout it used in metres (auto resolved), which `resolved_layout()` reports.
+var _max_depth: float = -1.0
+var _layout := {}
+var _open_input: bool = false
 
 
 func op() -> StringName:
@@ -144,15 +153,26 @@ func reshape(p_src: Pasture3DGraphPath, p_out: Pasture3DGraphPath) -> void:
 	p_out.points = PackedVector2Array()
 	p_out.heights = PackedFloat32Array()
 	p_out.part_starts = PackedInt32Array()
+	_max_depth = -1.0
+	_layout = {}
+	_open_input = not p_src.closed
 	if not p_src.closed:
 		return
 	if not ClassDB.class_has_method("Pasture3DUtil", "range_splines_solve"):
 		push_error("[Pasture3D] Pasture3DUtil.range_splines_solve is not bound. Rebuild GDExtension.")
 		return
 	var res: Dictionary = Pasture3DUtil.range_splines_solve(p_src.points, true, solve_params())
+	_max_depth = float(res.get("max_depth", -1.0))
+	_layout = {"spacing": float(res.get("spacing", 0.0)), "length": float(res.get("length", 0.0)),
+			"wander": float(res.get("wander", 0.0))}
 	p_out.points = res.get("points", PackedVector2Array())
 	p_out.heights = res.get("heights", PackedFloat32Array())
 	p_out.part_starts = res.get("part_starts", PackedInt32Array())
+
+
+## The spacing, length and wander the last solve used, in metres, with auto resolved. Empty before a solve.
+func resolved_layout() -> Dictionary:
+	return _layout
 
 
 func _validate_property(p_property: Dictionary) -> void:
@@ -166,7 +186,14 @@ func _validate_property(p_property: Dictionary) -> void:
 
 func node_warnings() -> PackedStringArray:
 	var out := PackedStringArray()
-	if _out != null and _out.points.is_empty() and eval_path_count > 0:
-		out.append("Generate Range Splines made no crests. It needs a CLOSED outline; check Coast Inset "
-				+ "and Min Branch against the outline's size.")
+	if _out == null or eval_path_count == 0 or not _out.points.is_empty():
+		return out
+	if _open_input:
+		out.append("Generate Range Splines needs a CLOSED outline; the wired path is open.")
+	elif _max_depth >= 0.0 and _max_depth <= coast_inset:
+		out.append("No crests: the outline is only %.0f m deep at its deepest, and Coast Inset is %.0f m. "
+				% [_max_depth, coast_inset] + "Lower Coast Inset below that.")
+	elif _max_depth >= 0.0:
+		out.append(("No crests: every crest is shorter than Min Branch (%.0f m). The outline is %.0f m deep at "
+				+ "its deepest; lower Min Branch or Coast Inset.") % [min_branch, _max_depth])
 	return out
