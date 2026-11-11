@@ -119,7 +119,7 @@ func eval_grid_channels(_p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect:
 	# authored" against "the line is at sea level".
 	var hts := _path.heights if _path != null else PackedFloat32Array()
 	var res: Dictionary = Pasture3DUtil.path_query_grid(pts, widths, p_gw, p_gh, p_rect,
-			unreachable_distance, max_distance, hts)
+			unreachable_distance, max_distance, hts, _path.part_starts if _path != null else PackedInt32Array())
 	if not bool(res.get("ok", false)):
 		push_error("[Pasture3D] path_query_grid failed for a %d x %d grid." % [p_gw, p_gh])
 		return _unreachable_fill(n)

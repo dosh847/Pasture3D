@@ -3208,6 +3208,10 @@ func _geom_entry(p_path: Pasture3DGraphPath) -> Dictionary:
 		# verbatim rather than padding, so `height_at` can answer NaN instead of sea level (spec §6.1).
 		"heights": p_path.heights,
 	}
+	# Only when there ARE parts, so a one-part path compiles to exactly the program it did before parts
+	# existed (GraphPortIdGate's recorded programs are the check). The native table reads a missing key as none.
+	if not p_path.part_starts.is_empty():
+		d["part_starts"] = p_path.part_starts
 	if p_path.can_grade() and p_path.alignment != null:
 		d["profile"] = {
 			"ds": p_path.alignment.ds,

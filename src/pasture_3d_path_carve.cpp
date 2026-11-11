@@ -279,11 +279,10 @@ Dictionary godot::path_carve_grid_geom(const Pasture3DPathGeom &p_geom,
 Dictionary godot::path_carve_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
 		const PackedFloat32Array &p_heights, bool p_closed, const PackedFloat32Array &p_surface, int p_gw,
 		int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_profile_lut,
-		const Pasture3DPathCarveParams &p_params) {
+		const Pasture3DPathCarveParams &p_params, const PackedInt32Array &p_part_starts) {
 	Pasture3DPathGeom geom;
-	// Closed EXACTLY as the geometry table and the mask kernel close it. Two closings that differed by
-	// one segment would put a seam across the mouth of every closed carve.
-	geom.closed = p_closed && p_points.size() >= 3;
-	geom.build(path_close_ring(p_points, p_closed), p_widths, p_heights);
+	// Closed EXACTLY as the geometry table and the mask kernel close it (path_geom_build). Two closings
+	// that differed by one segment would put a seam across the mouth of every closed carve.
+	path_geom_build(geom, p_points, p_closed, p_widths, p_heights, p_part_starts);
 	return path_carve_grid_geom(geom, p_surface, p_gw, p_gh, p_rect, p_profile_lut, p_params);
 }

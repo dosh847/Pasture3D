@@ -39,6 +39,7 @@
 
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/rect2.hpp>
 
@@ -70,6 +71,16 @@ struct Pasture3DPathGeom {
 	// which is a plausible-looking wrong answer and the harder kind to notice.
 	std::vector<float> height;
 	std::vector<double> cum; // cumulative arc length, prefix-summed once in build()
+	// ---- PARTS: one PATH carrying several disjoint polylines ----
+	// `dead[si]` is 1 for the segment joining the last vertex of one part to the first of the next. Every
+	// query skips it, so vertex indices (and every per-vertex array) stay aligned with `points`. It still
+	// counts its straight length (floored at 1 mm) in `cum`, so `s` is strictly increasing across a gap and
+	// a lookup by `s` cannot land on the wrong side of it. EMPTY for a one-part path, which is every path that
+	// existed before parts. A CLOSED path ignores parts (path_geom_build): ring-closing inserts a vertex,
+	// which per part would misalign every per-vertex array after the first part.
+	std::vector<uint8_t> dead;
+	bool is_dead(int p_seg) const { return !dead.empty() && dead[(size_t)p_seg]; }
+	bool has_parts() const { return !dead.empty(); }
 	bool closed = false;
 
 	// Uniform bucket index over the path's own bounds. Empty when segment_count() < the minimum.
@@ -87,7 +98,8 @@ struct Pasture3DPathGeom {
 	// Flatten a PATH into this struct and build the index. False (and the struct left empty) for fewer
 	// than two points, which is a normal state — an unresolved Road Source — and never an error.
 	bool build(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
-			const PackedFloat32Array &p_heights = PackedFloat32Array());
+			const PackedFloat32Array &p_heights = PackedFloat32Array(),
+			const PackedInt32Array &p_part_starts = PackedInt32Array());
 
 	// Interpolate ANY per-vertex array at arc length `p_s`, by the rule `half_width_at` and `height_at`
 	// both use: find the segment `p_s` falls in, lerp its two ends, clamp the index at both ends. NaN for
@@ -148,7 +160,7 @@ private:
 // Returns { ok: bool, distance, s, t, height }; ok is false only for a degenerate grid.
 Dictionary path_query_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
 		int p_gw, int p_gh, const Rect2 &p_rect, double p_unreachable, double p_max_distance,
-		const PackedFloat32Array &p_heights = PackedFloat32Array());
+		const PackedFloat32Array &p_heights = PackedFloat32Array(), const PackedInt32Array &p_part_starts = PackedInt32Array());
 
 // The same query against a geometry that is ALREADY BUILT (P2c). The graph evaluator holds one
 // Pasture3DPathGeom per geometry-table entry for the whole bake, so a road read by four slots is indexed
@@ -173,7 +185,7 @@ Dictionary path_query_grid_geom(const Pasture3DPathGeom &p_geom, int p_gw, int p
 // stops a graph being edited briefly erasing everything an inverted mask was protecting.
 PackedFloat32Array path_mask_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
 		bool p_closed, int p_gw, int p_gh, const Rect2 &p_rect, double p_width_scale, double p_feather,
-		bool p_invert);
+		bool p_invert, const PackedInt32Array &p_part_starts = PackedInt32Array());
 
 // The mask against an already-built geometry (P2c). `closed` is read off `p_geom`, which means the ring
 // must already have been closed by whoever built it — see path_close_ring.
@@ -185,6 +197,12 @@ PackedFloat32Array path_mask_grid_geom(const Pasture3DPathGeom &p_geom, int p_gw
 // ring exactly as the mask kernel does — two closings that differed by one segment would put a seam
 // across the mouth of every region mask.
 PackedVector2Array path_close_ring(const PackedVector2Array &p_points, bool p_closed);
+
+// THE way to turn a PATH's fields into a geom: closes the ring by the shared rule, or (open paths only)
+// marks the gaps between parts dead. Every build site calls this so they cannot disagree about either.
+void path_geom_build(Pasture3DPathGeom &r_geom, const PackedVector2Array &p_points, bool p_closed,
+		const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights = PackedFloat32Array(),
+		const PackedInt32Array &p_part_starts = PackedInt32Array());
 
 } // namespace godot
 

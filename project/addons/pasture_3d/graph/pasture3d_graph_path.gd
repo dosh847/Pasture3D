@@ -81,6 +81,17 @@ extends Resource
 		_built = false
 		emit_changed()
 
+## Vertex indices where a new PART begins: one PATH carrying several disjoint polylines (a range's crests,
+## a field of folds). Index 0 is implied and never listed. The segment ENDING at each start is a gap that
+## every query skips; it still counts its straight length (floored at 1 mm) in `s`, so `s` is strictly
+## increasing and a per-vertex lookup by `s` cannot read across the gap. Per-vertex arrays stay aligned
+## with `points`. Ignored on a CLOSED path. Mirrors `dead` in Pasture3DPathGeom (pasture_3d_path_query.h).
+@export var part_starts: PackedInt32Array = PackedInt32Array():
+	set(v):
+		part_starts = v
+		_built = false
+		emit_changed()
+
 ## Where this path came from, for warnings and for the editor. No query reads it.
 @export var source_label: String = ""
 
@@ -177,7 +188,7 @@ func grade_opts() -> Dictionary:
 ## `source_label` is excluded because no query reads it; it is a label for the inspector.
 func content_digest() -> int:
 	return hash([
-		points, half_widths, heights, closed,
+		points, half_widths, heights, closed, part_starts,
 		alignment.content_digest() if alignment != null else 0,
 		sample_half_widths, sample_shoulders, sample_verges, sample_suppress, sample_skip,
 		crown, cut_batter, fill_batter, toe_rounding, hinge_rounding, sample_section,
@@ -213,6 +224,8 @@ var _max_ring: int = 0
 var _bw: int = 0
 var _bh: int = 0
 var _built: bool = false
+# 1 at each gap segment between parts; empty for a one-part (or closed) path. See `part_starts`.
+var _dead: PackedByteArray = PackedByteArray()
 
 ## Below this many segments the index is not built and every query is brute force. Building buckets for a
 ## four-segment path costs more than checking all four, and the brute path is the definition anyway.
@@ -306,7 +319,8 @@ func nearest_brute(p_at: Vector2) -> Dictionary:
 		return {"distance": INF, "s": 0.0, "t": 0.0, "segment": -1}
 	var all := PackedInt32Array()
 	for i in n:
-		all.append(i)
+		if not _is_dead(i):
+			all.append(i)
 	return _resolve(p_at, all)
 
 
@@ -318,6 +332,8 @@ func _resolve(p_at: Vector2, p_candidates: PackedInt32Array) -> Dictionary:
 	var best_seg := -1
 	var best_f := 0.0
 	for si: int in p_candidates:
+		if _is_dead(si):
+			continue # the gap between two parts is not a segment
 		var a: Vector2 = _ring[si]
 		var ab: Vector2 = _ring[si + 1] - a
 		var len2 := ab.length_squared()
@@ -367,7 +383,8 @@ func _candidates(p_at: Vector2) -> PackedInt32Array:
 	if _index.is_empty():
 		var all := PackedInt32Array()
 		for i in n:
-			all.append(i)
+			if not _is_dead(i):
+				all.append(i)
 		return all
 	var cx := int(floor((p_at.x - _origin.x) / _cell))
 	var cy := int(floor((p_at.y - _origin.y) / _cell))
@@ -454,11 +471,23 @@ func _ensure() -> void:
 		_ring.append(points[0])
 	_cum.resize(_ring.size())
 	_index.clear()
+	_dead = PackedByteArray()
 	if _ring.is_empty():
 		return
+	# Parts, open paths only, by Pasture3DPathGeom::build's rule: starts at 0, out of range or repeated are
+	# ignored, so a malformed list degrades to fewer parts, never to a joined line.
+	if not (closed and points.size() >= 3):
+		for st in part_starts:
+			if st <= 0 or st >= _ring.size():
+				continue
+			if _dead.is_empty():
+				_dead.resize(_ring.size() - 1)
+				_dead.fill(0)
+			_dead[st - 1] = 1
 	_cum[0] = 0.0
 	for i in range(1, _ring.size()):
-		_cum[i] = _cum[i - 1] + _ring[i].distance_to(_ring[i - 1])
+		var seg_len: float = _ring[i].distance_to(_ring[i - 1])
+		_cum[i] = _cum[i - 1] + (maxf(seg_len, 0.001) if _is_dead(i - 1) else seg_len)
 	var n := maxi(_ring.size() - 1, 0)
 	if n < INDEX_MIN_SEGMENTS:
 		return
@@ -478,6 +507,8 @@ func _ensure() -> void:
 	_bw = int(floor(bounds.size.x / _cell)) + 1
 	_bh = int(floor(bounds.size.y / _cell)) + 1
 	for si in n:
+		if _is_dead(si):
+			continue
 		var a: Vector2 = _ring[si]
 		var b: Vector2 = _ring[si + 1]
 		var lo := Vector2(minf(a.x, b.x), minf(a.y, b.y)) - _origin
@@ -498,3 +529,79 @@ func _vertex_before(p_s: float) -> int:
 		if p_s <= _cum[i + 1]:
 			return i
 	return last
+
+
+func _is_dead(p_seg: int) -> bool:
+	return not _dead.is_empty() and _dead[p_seg] != 0
+
+
+## How many disjoint polylines this path carries. 1 for every path without `part_starts`, and for a
+## closed one; 0 for an empty path.
+func part_count() -> int:
+	if points.is_empty():
+		return 0
+	return part_bounds().size() - 1
+
+
+## Part boundaries as vertex indices: part k is `points[b[k] .. b[k + 1] - 1]`. Always starts with 0 and
+## ends with `points.size()`. Uses the same filtering as the gap rule, so it and the queries agree.
+func part_bounds() -> PackedInt32Array:
+	var b := PackedInt32Array([0])
+	if not (closed and points.size() >= 3):
+		var sorted := part_starts.duplicate()
+		sorted.sort()
+		for st in sorted:
+			if st > b[b.size() - 1] and st < points.size():
+				b.append(st)
+	b.append(points.size())
+	return b
+
+
+## Part `p_k` as a one-part open path: its points and the matching slice of every per-vertex array. The
+## grading arrays are indexed by alignment sample, not by vertex, so they are NOT carried.
+func part(p_k: int) -> Pasture3DGraphPath:
+	var b := part_bounds()
+	var out := Pasture3DGraphPath.new()
+	out.source_label = source_label
+	if p_k < 0 or p_k >= b.size() - 1:
+		return out
+	var lo := b[p_k]
+	var hi := b[p_k + 1]
+	out.points = points.slice(lo, hi)
+	if half_widths.size() >= hi:
+		out.half_widths = half_widths.slice(lo, hi)
+	if heights.size() >= hi:
+		out.heights = heights.slice(lo, hi)
+	return out
+
+
+## Join one-part paths into one multi-part open path, part i starting where part i-1 ended. A per-vertex
+## array is carried only when EVERY part has it at full length; otherwise it is dropped, because a
+## partial array would hand one part's values to another's vertices.
+static func join(p_parts: Array) -> Pasture3DGraphPath:
+	var out := Pasture3DGraphPath.new()
+	var pts := PackedVector2Array()
+	var hw := PackedFloat32Array()
+	var ht := PackedFloat32Array()
+	var starts := PackedInt32Array()
+	var all_w := true
+	var all_h := true
+	for p: Pasture3DGraphPath in p_parts:
+		if p == null or p.points.size() < 2:
+			continue
+		if not pts.is_empty():
+			starts.append(pts.size())
+		else:
+			out.source_label = p.source_label
+		all_w = all_w and p.half_widths.size() == p.points.size()
+		all_h = all_h and p.heights.size() == p.points.size()
+		pts.append_array(p.points)
+		hw.append_array(p.half_widths)
+		ht.append_array(p.heights)
+	out.points = pts
+	if all_w and hw.size() == pts.size():
+		out.half_widths = hw
+	if all_h and ht.size() == pts.size():
+		out.heights = ht
+	out.part_starts = starts
+	return out

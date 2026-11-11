@@ -76,6 +76,10 @@ PathRangeParams path_range_params_from(const float *p_params, int p_count);
 Dictionary path_range_grid_geom(const Pasture3DPathGeom *p_crest, const PackedFloat32Array &p_base,
 		const PackedFloat32Array &p_amount, int p_gw, int p_gh, const Rect2 &p_rect, const PathRangeParams &p_prm);
 
+// Path Range's seeded 1D value-noise fBm in [-1, 1], four octaves; `p_u` in wavelengths. Shared with
+// Generate Range Splines (fold wander, scatter bend) so the two bend lines by one rule.
+double path_range_noise1(double p_u, uint32_t p_salt);
+
 } // namespace godot
 
 #endif // PASTURE_3D_PATH_RANGE_H

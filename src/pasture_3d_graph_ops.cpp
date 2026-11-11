@@ -381,13 +381,15 @@ bool graph_build(const Dictionary &p_prog, GraphProgram &r_out) {
 			// and 0 m for the second (S2, spec §6.1).
 			const PackedFloat32Array hts = d.has("heights") ? (PackedFloat32Array)d["heights"] : PackedFloat32Array();
 			const bool closed = d.has("closed") && (bool)d["closed"];
-			e.geom.closed = closed && pts.size() >= 3;
+			const PackedInt32Array parts = d.has("part_starts") ? (PackedInt32Array)d["part_starts"] : PackedInt32Array();
 			// The heights are NOT ring-closed alongside the points. `path_close_ring` appends the first
 			// vertex, so a closed ring is one longer than its height array, and `height_at` clamps to the
 			// last entry for exactly that vertex -- which is the first vertex's height, since a closed
 			// ring's last point IS its first point. Closing both here would be a second place that has to
 			// agree about it.
-			e.geom.build(path_close_ring(pts, closed), vals, hts);
+			path_geom_build(e.geom, pts, closed, vals, hts, parts);
+			// The GPU query brute-forces every uploaded segment and has no dead flag, so it would join parts.
+			if (e.geom.has_parts()) r_out.has_parts = true;
 			if (d.has("profile")) {
 				const Dictionary pr = d["profile"];
 				e.has_profile = true;

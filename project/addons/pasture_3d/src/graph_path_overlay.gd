@@ -136,6 +136,11 @@ static func _find_upstream_path_node(g: Pasture3DTerrainGraph, p_target: int) ->
 ## One path's four contributions. Split out so the loop above reads as the SELECTION rule and this reads as
 ## the DRAWING rule; they change for different reasons.
 static func _append_path(r_out: Dictionary, p_brush, p_path: Pasture3DGraphPath, p_data) -> void:
+	# A multi-part path is drawn part by part, so no centreline or envelope is drawn across a gap.
+	if p_path.part_count() > 1:
+		for k in p_path.part_count():
+			_append_path(r_out, p_brush, p_path.part(k), p_data)
+		return
 	var pts: PackedVector2Array = p_path.points
 	var n := pts.size()
 	var has_heights := p_path.heights.size() == n

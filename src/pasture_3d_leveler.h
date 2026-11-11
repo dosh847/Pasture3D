@@ -103,7 +103,7 @@ Dictionary leveler_grid_geom(const Pasture3DPathGeom *p_loop, const PackedFloat3
 Dictionary leveler_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
 		bool p_closed, const PackedFloat32Array &p_height, const PackedFloat32Array &p_mask, int p_gw,
 		int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_lut,
-		const Pasture3DLevelerParams &p_params);
+		const Pasture3DLevelerParams &p_params, const PackedInt32Array &p_part_starts = PackedInt32Array());
 
 } // namespace godot
 

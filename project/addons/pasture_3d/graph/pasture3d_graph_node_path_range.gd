@@ -206,7 +206,8 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	var pts := _path.points if _path != null else PackedVector2Array()
 	var hts := _path.heights if _path != null else PackedFloat32Array()
 	var closed := _path.closed if _path != null else false
-	var res: Dictionary = Pasture3DUtil.path_range_grid(pts, hts, closed, base, amount, p_gw, p_gh, p_rect, prm)
+	var res: Dictionary = Pasture3DUtil.path_range_grid(pts, hts, closed, base, amount, p_gw, p_gh, p_rect, prm,
+			_path.part_starts if _path != null else PackedInt32Array())
 	var h: PackedFloat32Array = res.get("height", PackedFloat32Array())
 	if h.size() != n:
 		push_error("[Pasture3D] path_range_grid returned %d cells for a %d cell grid." % [h.size(), n])

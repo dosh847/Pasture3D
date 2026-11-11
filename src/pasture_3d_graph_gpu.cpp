@@ -1872,6 +1872,11 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 	if (p_prog.is_empty() || p_gw < 1 || p_gh < 1) {
 		return false;
 	}
+	// The shader's path query brute-forces every uploaded segment with no dead flag, so a multi-part
+	// PATH would read as one joined line. Decline; the caller's CPU route handles parts.
+	if (p_prog.has_parts) {
+		return false;
+	}
 	const int n = p_gw * p_gh;
 	const int bytes = n * (int)sizeof(float);
 	const bool have_input = p_input.size() == n;
@@ -3752,8 +3757,9 @@ static T dispatch_or_cpu(int p_gw, int p_gh, TGpu p_gpu, TCpu p_cpu) {
 
 PackedFloat32Array graph_eval_grid_best(const GraphProgram &p_prog, int p_gw, int p_gh, const Rect2 &p_rect,
 		const PackedFloat32Array &p_input) {
-	if (p_prog.has_frozen) {
-		// The GPU evaluator has no freeze table: it would re-solve a FROZEN slot rather than serve it.
+	if (p_prog.has_frozen || p_prog.has_parts) {
+		// The GPU evaluator has no freeze table: it would re-solve a FROZEN slot rather than serve it. Nor
+		// a dead-segment flag: it would join the parts of a multi-part PATH.
 		return graph_eval_grid(p_prog, p_gw, p_gh, p_rect, p_input);
 	}
 	return dispatch_or_cpu<PackedFloat32Array>(

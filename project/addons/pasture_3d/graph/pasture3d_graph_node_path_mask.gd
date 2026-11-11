@@ -103,7 +103,7 @@ func eval_grid(_p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: Rect2) -
 	var widths := _path.half_widths if _path != null else PackedFloat32Array()
 	var is_closed := _path != null and _path.closed
 	var out: PackedFloat32Array = Pasture3DUtil.path_mask_grid(pts, widths, is_closed, p_gw, p_gh,
-			p_rect, width_scale, feather, invert)
+			p_rect, width_scale, feather, invert, _path.part_starts if _path != null else PackedInt32Array())
 	if out.size() != n:
 		push_error("[Pasture3D] path_mask_grid returned %d cells for a %d cell grid." % [out.size(), n])
 		return _empty_fill(n)

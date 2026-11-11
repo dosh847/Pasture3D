@@ -4,6 +4,7 @@
 
 #include "pasture_3d_coast_profile.h"
 #include "pasture_3d_path_range.h"
+#include "pasture_3d_range_splines.h"
 #include "pasture_3d_wave_exposure.h"
 #include "pasture_3d_islet_scatter.h"
 #include "pasture_3d_shore_character.h"
@@ -1270,6 +1271,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "path_smooth", GRAPH_OP_CONST },
 		{ "path_decimate", GRAPH_OP_CONST },
 		{ "path_fractalize", GRAPH_OP_CONST },
+		{ "range_splines", GRAPH_OP_CONST }, // PATH -> PATH, resolved by the pre-pass like the reshapes
 		{ "path_meanderize", GRAPH_OP_CONST },
 		// The S7a derive family (spec 7.5, 8.4). CONST like the rest of the PATH nodes -- they produce no
 		// grid either. The tag is here even though they answer blocks_native() true and so never reach a
@@ -1883,9 +1885,10 @@ PackedFloat32Array Pasture3DUtil::spectral_equalizer_grid(const PackedFloat32Arr
 
 Dictionary Pasture3DUtil::path_query_grid(const PackedVector2Array &p_points,
 		const PackedFloat32Array &p_widths, const int p_gw, const int p_gh, const Rect2 &p_rect,
-		const double p_unreachable, const double p_max_distance, const PackedFloat32Array &p_heights) {
+		const double p_unreachable, const double p_max_distance, const PackedFloat32Array &p_heights,
+		const PackedInt32Array &p_part_starts) {
 	return godot::path_query_grid(p_points, p_widths, p_gw, p_gh, p_rect, p_unreachable, p_max_distance,
-			p_heights);
+			p_heights, p_part_starts);
 }
 
 Dictionary Pasture3DUtil::path_geom_locate(const PackedVector2Array &p_points, const Vector2 &p_at,
@@ -2003,17 +2006,17 @@ Array Pasture3DUtil::road_plan_nearest(const PackedVector2Array &p_plan, const P
 Dictionary Pasture3DUtil::path_carve_grid(const PackedVector2Array &p_points,
 		const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights, const bool p_closed,
 		const PackedFloat32Array &p_surface, const int p_gw, const int p_gh, const Rect2 &p_rect,
-		const PackedFloat32Array &p_profile, const PackedFloat32Array &p_params) {
+		const PackedFloat32Array &p_profile, const PackedFloat32Array &p_params, const PackedInt32Array &p_part_starts) {
 	return godot::path_carve_grid(p_points, p_widths, p_heights, p_closed, p_surface, p_gw, p_gh, p_rect,
-			p_profile, path_carve_params_from(p_params.ptr(), p_params.size()));
+			p_profile, path_carve_params_from(p_params.ptr(), p_params.size()), p_part_starts);
 }
 
 Dictionary Pasture3DUtil::leveler_grid(const PackedVector2Array &p_points,
 		const PackedFloat32Array &p_widths, const bool p_closed, const PackedFloat32Array &p_height,
 		const PackedFloat32Array &p_mask, const int p_gw, const int p_gh, const Rect2 &p_rect,
-		const PackedFloat32Array &p_lut, const PackedFloat32Array &p_params) {
+		const PackedFloat32Array &p_lut, const PackedFloat32Array &p_params, const PackedInt32Array &p_part_starts) {
 	return godot::leveler_grid(p_points, p_widths, p_closed, p_height, p_mask, p_gw, p_gh, p_rect, p_lut,
-			leveler_params_from(p_params.ptr(), p_params.size()));
+			leveler_params_from(p_params.ptr(), p_params.size()), p_part_starts);
 }
 
 Dictionary Pasture3DUtil::coastal_erosion_grid(const PackedFloat32Array &p_height,
@@ -2059,21 +2062,26 @@ Dictionary Pasture3DUtil::slope_grid(const PackedFloat32Array &p_surface, const 
 
 Dictionary Pasture3DUtil::path_range_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_heights,
 		const bool p_closed, const PackedFloat32Array &p_base, const PackedFloat32Array &p_amount, const int p_gw,
-		const int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_params) {
-	// Built exactly as the graph's geometry table builds an entry (pasture_3d_graph_ops.cpp): the ring
-	// closed by the shared rule, heights verbatim and NOT ring-closed.
+		const int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_params, const PackedInt32Array &p_part_starts) {
+	// Built exactly as the graph's geometry table builds an entry (path_geom_build): the ring closed by the
+	// shared rule, heights verbatim and NOT ring-closed, parts marked on an open path.
 	Pasture3DPathGeom geom;
-	geom.closed = p_closed && p_points.size() >= 3;
-	geom.build(path_close_ring(p_points, p_closed), PackedFloat32Array(), p_heights);
+	path_geom_build(geom, p_points, p_closed, PackedFloat32Array(), p_heights, p_part_starts);
 	return godot::path_range_grid_geom(&geom, p_base, p_amount, p_gw, p_gh, p_rect,
 			path_range_params_from(p_params.ptr(), p_params.size()));
 }
 
+Dictionary Pasture3DUtil::range_splines_solve(const PackedVector2Array &p_outline, const bool p_closed,
+		const PackedFloat32Array &p_params) {
+	return godot::range_splines_solve(p_outline, p_closed, range_splines_params_from(p_params.ptr(), p_params.size()));
+}
+
 PackedFloat32Array Pasture3DUtil::path_mask_grid(const PackedVector2Array &p_points,
 		const PackedFloat32Array &p_widths, const bool p_closed, const int p_gw, const int p_gh,
-		const Rect2 &p_rect, const double p_width_scale, const double p_feather, const bool p_invert) {
+		const Rect2 &p_rect, const double p_width_scale, const double p_feather, const bool p_invert,
+		const PackedInt32Array &p_part_starts) {
 	return godot::path_mask_grid(p_points, p_widths, p_closed, p_gw, p_gh, p_rect, p_width_scale,
-			p_feather, p_invert);
+			p_feather, p_invert, p_part_starts);
 }
 
 PackedFloat64Array Pasture3DUtil::layer_footprint_profile(const Array &p_points, const Array &p_widths,
@@ -3461,8 +3469,8 @@ void Pasture3DUtil::_bind_methods() {
 			&Pasture3DUtil::spectral_equalizer_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("path_query_grid", "points", "widths", "gw", "gh", "rect", "unreachable",
-					"max_distance", "heights"),
-			&Pasture3DUtil::path_query_grid, DEFVAL(PackedFloat32Array()));
+					"max_distance", "heights", "part_starts"),
+			&Pasture3DUtil::path_query_grid, DEFVAL(PackedFloat32Array()), DEFVAL(PackedInt32Array()));
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("path_geom_locate", "points", "at", "widths"),
 			&Pasture3DUtil::path_geom_locate, DEFVAL(PackedFloat32Array()));
@@ -3474,12 +3482,12 @@ void Pasture3DUtil::_bind_methods() {
 			&Pasture3DUtil::road_plan_nearest);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("path_carve_grid", "points", "widths", "heights", "closed", "surface", "gw", "gh",
-					"rect", "profile", "params"),
-			&Pasture3DUtil::path_carve_grid);
+					"rect", "profile", "params", "part_starts"),
+			&Pasture3DUtil::path_carve_grid, DEFVAL(PackedInt32Array()));
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("leveler_grid", "points", "widths", "closed", "height", "mask", "gw", "gh", "rect",
-					"lut", "params"),
-			&Pasture3DUtil::leveler_grid);
+					"lut", "params", "part_starts"),
+			&Pasture3DUtil::leveler_grid, DEFVAL(PackedInt32Array()));
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("coastal_erosion_grid", "height", "exposure", "gw", "gh", "rect", "params"),
 			&Pasture3DUtil::coastal_erosion_grid);
@@ -3498,12 +3506,15 @@ void Pasture3DUtil::_bind_methods() {
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("slope_grid", "surface", "gw", "gh", "rect", "params"), &Pasture3DUtil::slope_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
-			D_METHOD("path_range_grid", "points", "heights", "closed", "base", "amount", "gw", "gh", "rect", "params"),
-			&Pasture3DUtil::path_range_grid);
+			D_METHOD("path_range_grid", "points", "heights", "closed", "base", "amount", "gw", "gh", "rect", "params",
+					"part_starts"),
+			&Pasture3DUtil::path_range_grid, DEFVAL(PackedInt32Array()));
+	ClassDB::bind_static_method("Pasture3DUtil", D_METHOD("range_splines_solve", "outline", "closed", "params"),
+			&Pasture3DUtil::range_splines_solve);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("path_mask_grid", "points", "widths", "closed", "gw", "gh", "rect", "width_scale",
-					"feather", "invert"),
-			&Pasture3DUtil::path_mask_grid);
+					"feather", "invert", "part_starts"),
+			&Pasture3DUtil::path_mask_grid, DEFVAL(PackedInt32Array()));
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("layer_footprint_profile", "points", "widths", "closed", "gw", "gh", "min_x", "min_z", "vs",
 					"margin"),

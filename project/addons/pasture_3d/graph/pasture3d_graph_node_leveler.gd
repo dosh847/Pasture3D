@@ -69,7 +69,7 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	var pts := _path.points if _path != null else PackedVector2Array()
 	var widths := _path.half_widths if _path != null else PackedFloat32Array()
 	var res: Dictionary = Pasture3DUtil.leveler_grid(pts, widths, _path != null, h, mask, p_gw, p_gh,
-			p_rect, falloff_lut(), params)
+			p_rect, falloff_lut(), params, _path.part_starts if _path != null else PackedInt32Array())
 	if not bool(res.get("ok", false)):
 		push_error("[Pasture3D] leveler_grid failed for a %d x %d grid." % [p_gw, p_gh])
 		return _passthrough(h, n)

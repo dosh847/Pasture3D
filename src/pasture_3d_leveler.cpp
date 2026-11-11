@@ -406,13 +406,12 @@ Dictionary godot::leveler_grid_geom(const Pasture3DPathGeom *p_loop, const Packe
 Dictionary godot::leveler_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
 		bool p_closed, const PackedFloat32Array &p_height, const PackedFloat32Array &p_mask, int p_gw,
 		int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_lut,
-		const Pasture3DLevelerParams &p_params) {
+		const Pasture3DLevelerParams &p_params, const PackedInt32Array &p_part_starts) {
 	if (p_points.size() < 2) {
 		return leveler_grid_geom(nullptr, p_height, p_mask, p_gw, p_gh, p_rect, p_lut, p_params);
 	}
 	Pasture3DPathGeom geom;
 	// Closed EXACTLY as the geometry table closes it (pasture_3d_graph_ops.cpp).
-	geom.closed = p_closed && p_points.size() >= 3;
-	geom.build(path_close_ring(p_points, geom.closed), p_widths);
+	path_geom_build(geom, p_points, p_closed, p_widths, PackedFloat32Array(), p_part_starts);
 	return leveler_grid_geom(&geom, p_height, p_mask, p_gw, p_gh, p_rect, p_lut, p_params);
 }

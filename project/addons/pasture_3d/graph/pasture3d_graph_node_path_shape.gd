@@ -111,12 +111,17 @@ func eval_path(p_inputs: Array) -> Pasture3DGraphPath:
 		return src
 	if _out == null:
 		_out = Pasture3DGraphPath.new()
+	if src.part_count() > 1:
+		return _eval_parts(src)
 	# Field by field rather than `duplicate()`, which allocates a new instance every call — exactly what
 	# the kept `_out` exists to avoid — and deep-copies the alignment into a second set nobody can reach.
 	_out.points = src.points
 	_out.half_widths = src.half_widths
 	_out.heights = src.heights
 	_out.closed = src.closed
+	# A reshape changes the vertex count, so the source's part starts would point at the wrong vertices.
+	# A multi-part source never reaches here (_eval_parts); a one-part one has none to carry.
+	_out.part_starts = PackedInt32Array()
 	_out.crown = src.crown
 	_out.cut_batter = src.cut_batter
 	_out.fill_batter = src.fill_batter
@@ -139,6 +144,46 @@ func eval_path(p_inputs: Array) -> Pasture3DGraphPath:
 		_out.sample_skip = src.sample_skip
 		_out.sample_section = src.sample_section
 	reshape(src, _out)
+	return _out
+
+
+## A MULTI-PART source: each part reshaped on its own and the results joined, so no reshape ever sees
+## the gap between two parts as a segment (a smooth would round it into a bridge, a resample would put
+## vertices along it). Each part is a fresh one-part path carrying that part's slice of every per-vertex
+## array, which is exactly what a reshape sees on a one-part source. The alignment and the per-sample
+## grading arrays are dropped: they are indexed along ONE road, and a multi-part path is not one road.
+func _eval_parts(p_src: Pasture3DGraphPath) -> Pasture3DGraphPath:
+	var parts := []
+	for k in p_src.part_count():
+		var part := p_src.part(k)
+		if part.points.size() < min_vertices():
+			parts.append(part)
+			continue
+		var shaped := Pasture3DGraphPath.new()
+		shaped.points = part.points
+		shaped.half_widths = part.half_widths
+		shaped.heights = part.heights
+		shaped.source_label = part.source_label
+		reshape(part, shaped)
+		parts.append(shaped)
+	var joined := Pasture3DGraphPath.join(parts)
+	_out.points = joined.points
+	_out.half_widths = joined.half_widths
+	_out.heights = joined.heights
+	_out.part_starts = joined.part_starts
+	_out.closed = false
+	_out.crown = p_src.crown
+	_out.cut_batter = p_src.cut_batter
+	_out.fill_batter = p_src.fill_batter
+	_out.toe_rounding = p_src.toe_rounding
+	_out.hinge_rounding = p_src.hinge_rounding
+	_out.alignment = null
+	_out.sample_half_widths = PackedFloat32Array()
+	_out.sample_shoulders = PackedFloat32Array()
+	_out.sample_verges = PackedFloat32Array()
+	_out.sample_suppress = PackedByteArray()
+	_out.sample_skip = PackedByteArray()
+	_out.sample_section = {}
 	return _out
 
 

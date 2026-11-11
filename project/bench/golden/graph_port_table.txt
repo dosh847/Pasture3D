@@ -981,6 +981,11 @@ pasture3d_graph_node_path_width_field|in|1|field|1|nan|-1|-
 pasture3d_graph_node_path_width_field|in_extra|aux=-1|names=2|types=2
 pasture3d_graph_node_path_width_field|out|0|path|9
 pasture3d_graph_node_path_width_field|out_extra|names=1|types=1|port0=9
+pasture3d_graph_node_range_splines|counts|in=1|out=1|has_output=true
+pasture3d_graph_node_range_splines|in|0|path|9|0.0|-1|-
+pasture3d_graph_node_range_splines|in_extra|aux=-1|names=1|types=1
+pasture3d_graph_node_range_splines|out|0|path|9
+pasture3d_graph_node_range_splines|out_extra|names=1|types=1|port0=9
 pasture3d_graph_node_recast_canyon|counts|in=5|out=1|has_output=true
 pasture3d_graph_node_recast_canyon|in|0|in|0|0.0|-1|-
 pasture3d_graph_node_recast_canyon|in|1|noise|11|0.0|-1|-

@@ -200,6 +200,8 @@ path_fractalize|unwired|2448151921
 path_fractalize|wired|2448151921
 path_meanderize|unwired|2448151921
 path_meanderize|wired|2448151921
+range_splines|unwired|2448151921
+range_splines|wired|2448151921
 path_drape|unwired|2448151921
 path_drape|wired|235127639
 path_width_field|unwired|2448151921

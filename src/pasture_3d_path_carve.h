@@ -143,7 +143,7 @@ Dictionary path_carve_grid_geom(const Pasture3DPathGeom &p_geom, const PackedFlo
 Dictionary path_carve_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
 		const PackedFloat32Array &p_heights, bool p_closed, const PackedFloat32Array &p_surface, int p_gw,
 		int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_profile_lut,
-		const Pasture3DPathCarveParams &p_params);
+		const Pasture3DPathCarveParams &p_params, const PackedInt32Array &p_part_starts = PackedInt32Array());
 
 } // namespace godot
 

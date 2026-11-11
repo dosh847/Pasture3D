@@ -1,6 +1,6 @@
 # Pasture3D Ranges Spec — hills and mountain ranges from lines and areas
 
-Status: written 2026-11-11. Steps 1 (Path Range) and 2 (Slope) built 2026-11-11; steps 3–4 unbuilt. Check the code before trusting this header.
+Status: written 2026-11-11. Steps 1 (Path Range), 2 (Slope) and 3 (Generate Range Splines) built 2026-11-11; step 4 unbuilt. Check the code before trusting this header.
 
 ## Goal
 
@@ -15,7 +15,7 @@ Four steps, in this order. Each one is useful alone and each one is the input th
 |---|---|---|---|
 | 1 | **Path Range** — a crest line becomes a whole range: varied peaks, spurs both sides, valleys between | Generator over a PATH, C++ op 76 | erosion, step 4 |
 | 2 | **Slope** — slope (and aspect) as a field and a band mask | Mask, C++ op 77 | scatter, colour, erosion masks |
-| 3 | **Generate Range Splines** — a closed outline becomes a set of crest paths inside it | GRID+PATH → PATH SET | step 1 |
+| 3 | **Generate Range Splines** — a closed outline becomes a set of crest paths inside it | PATH → PATH SET (C++ solve) | step 1 |
 | 4 | **Salève Uplift mode** — an uplift field grows a fully drained ridge-and-valley landscape | Mode on an existing solver | the whole hinterland |
 
 Every new node follows `new-node-checklist`: spec §13 and the acceleration guide; one C++ kernel with a
@@ -147,6 +147,44 @@ min_angle 30°, max_angle 90°, falloff 5°, scale 0 m (raw).
 
 ## Step 3 — Generate Range Splines (PATH domain)
 
+**Built 2026-11-11** (parts: `Pasture3DGraphPath.part_starts` and `Pasture3DPathGeom::dead`; generator:
+src/pasture_3d_range_splines.{h,cpp} and pasture3d_graph_node_range_splines.gd; gate
+bench/GraphRangeSplinesGate RA–RF). Departures from the plan below:
+
+- **No HEIGHT input.** Every quantity the node needs (the inset, the depth that sets crest heights, the
+  medial axis) is the outline's own inside distance, which `Pasture3DPathGeom` answers exactly. With no
+  grid input the node is a pure PATH → PATH reshape (`k_ops` row `range_splines` = CONST), resolved
+  host-side by the S4 pre-pass, so it never drops a graph off the native route. The inside distance is the
+  exact path query, not a JFA raster, for the same reason.
+- **The medial-axis test is an arc test**, not a gradient-ridge test: a cell is medial when it and a
+  4-neighbour have nearest outline points more than 3·D apart along the outline. Corner branches sit at 2·D
+  and coast bumps at less, so a fractal coast gives one spine and not a tree of whiskers. Then Zhang-Suen
+  thinning, leaf pruning (the shortest short leaf per junction per round), and longest-chain-first
+  extraction. The whole trace is C++ (`range_splines_solve`); not measured.
+- **A gap keeps its straight length in `s`** (floored at 1 mm) rather than zero: at zero length the last
+  vertex of one part and the first of the next share one `s`, and every per-vertex lookup by `s` (width,
+  height, the carve's ground) read the earlier part's end value across the next part's start cap.
+- **A closed path ignores parts** (ring-closing inserts a vertex, which per part would misalign every
+  per-vertex array). The GPU evaluator declines a program with parts (`GraphProgram::has_parts`) and the
+  CPU runs it. The geometry table carries `part_starts` only when non-empty, so a one-part path compiles to
+  exactly its old program (GraphPortIdGate).
+- **FOLDS is built too** (open question 1): RC needs two parallel crests anyway.
+- Path Range rasterises one crest line per part, tapered and seeded per part; part 0 keeps the unsalted
+  seed, so a one-part path is unchanged (GraphPathRangeGate).
+
+The audit (RD checks every row):
+
+| Node | Kind | Parts handling |
+|---|---|---|
+| Path Resample, Smooth, Decimate, Fractalize, Meanderize, Width | reshape (`Pasture3DGraphNodePathShape`) | the base splits by part, reshapes each, rejoins; alignment dropped on a multi-part path |
+| Path Drape, Path Width from Field | derive (`Pasture3DGraphNodePathDerive`) | vertex count unchanged; `part_starts` copied |
+| Path Distance, Path Mask, Path Carve, Leveler, Path Range | grid consumers | `part_starts` passed to the kernel; dead segments skipped by the shared query |
+| Coast Profile | grid consumer | closed outline only; parts do not apply |
+| Path from Flow | grid → path | makes its own one-part path |
+| Viewport overlay | editor | draws each part separately |
+
+No node is "part 0 only", so nothing warns.
+
 ### Why it needs a path SET first
 
 A PATH port carries ONE polyline (`Pasture3DGraphPath`; `path_from_flow` states the limit and points at
@@ -251,6 +289,20 @@ Salève takes its params from a Dictionary, not the sixteen slots; append keys, 
 
 ---
 
+## After step 4 — re-evaluate the slope formulas
+
+The user's request (2026-11-11): once steps 1–4 are built, re-evaluate every slope formula in the codebase,
+decide whether ONE can serve them all, and which. Today there are four:
+
+- `metric_gradient` (pasture_3d_terrain_metrics.h): Recast Cliff and Slope. Central differences in metres,
+  one-sided over one cell at the edge, NaN-aware.
+- `mask_grid` (pasture_3d_math_ops.cpp ~230): the Mask node's slope band.
+- two in pasture_3d_relief_ops.cpp (~510, ~614): the relief ground's `slope_deg` for the material selectors.
+
+For each: edge rule, NaN handling, metric vs per-cell units, whether a GPU/shader twin must agree with it.
+Then pick one (or explain why a difference is load-bearing), pin each caller's output by hash before
+switching, and re-bake only where the output was meant to change. Do not start this before step 4.
+
 ## Milos wiring once built
 
 ```
@@ -265,7 +317,7 @@ the rest with drained valleys; Coastal Erosion and Islet Scatter finish the shor
 
 ## Open questions for the user
 
-1. Step 3 SPINE and SCATTER first, FOLDS later? Milos needs SCATTER; FOLDS suits other islands.
+1. ~~Step 3 SPINE and SCATTER first, FOLDS later?~~ All three built (RC needed FOLDS).
 2. Should Path Range also output its spurs as a PATH SET (for roads along ridges, or a Path Carve per
    spur)? Cheap once step 3 exists; out of scope for step 1.
 3. Performance: none of these has a budget yet. Each gets measured only when you say so.

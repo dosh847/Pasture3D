@@ -188,6 +188,7 @@ func _derive_path(p_inputs: Array) -> Pasture3DGraphPath:
 		_out.half_widths = src.half_widths
 		_out.heights = src.heights
 		_out.closed = src.closed
+		_out.part_starts = src.part_starts
 		_out.crown = src.crown
 		_out.cut_batter = src.cut_batter
 		_out.fill_batter = src.fill_batter

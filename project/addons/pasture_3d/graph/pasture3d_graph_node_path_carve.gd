@@ -259,7 +259,8 @@ func eval_grid_channels(p_inputs: Array, p_gw: int, p_gh: int, _p_mask, p_rect: 
 	var hts := _path.heights if _path != null else PackedFloat32Array()
 	var is_closed := _path.closed if _path != null else false
 	var res: Dictionary = Pasture3DUtil.path_carve_grid(pts, widths, hts, is_closed, surface, p_gw, p_gh,
-			p_rect, bake_profile_lut(), native_lower()["params"])
+			p_rect, bake_profile_lut(), native_lower()["params"],
+			_path.part_starts if _path != null else PackedInt32Array())
 	if not bool(res.get("ok", false)):
 		push_error("[Pasture3D] path_carve_grid failed for a %d x %d grid." % [p_gw, p_gh])
 		return _passthrough(surface, n)

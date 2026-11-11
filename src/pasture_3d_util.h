@@ -357,7 +357,8 @@ public:
 	// and defaulted, so every existing seven-argument call keeps its meaning and gets NaN.
 	static Dictionary path_query_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
 			const int p_gw, const int p_gh, const Rect2 &p_rect, const double p_unreachable,
-			const double p_max_distance, const PackedFloat32Array &p_heights = PackedFloat32Array());
+			const double p_max_distance, const PackedFloat32Array &p_heights = PackedFloat32Array(),
+			const PackedInt32Array &p_part_starts = PackedInt32Array());
 
 	// Single point spatial lookup on polyline path (P9h). Returns { distance, s, t, segment, side }
 	static Dictionary path_geom_locate(const PackedVector2Array &p_points, const Vector2 &p_at,
@@ -382,11 +383,12 @@ public:
 	static Dictionary path_carve_grid(const PackedVector2Array &p_points,
 			const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights, const bool p_closed,
 			const PackedFloat32Array &p_surface, const int p_gw, const int p_gh, const Rect2 &p_rect,
-			const PackedFloat32Array &p_profile, const PackedFloat32Array &p_params);
+			const PackedFloat32Array &p_profile, const PackedFloat32Array &p_params,
+			const PackedInt32Array &p_part_starts = PackedInt32Array());
 	static Dictionary leveler_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
 			const bool p_closed, const PackedFloat32Array &p_height, const PackedFloat32Array &p_mask,
 			const int p_gw, const int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_lut,
-			const PackedFloat32Array &p_params);
+			const PackedFloat32Array &p_params, const PackedInt32Array &p_part_starts = PackedInt32Array());
 
 	// Rasterise a PATH as a [0,1] mask (PASTURE3D_GRAPH_GEOMETRY_PORTS_SPEC.md §5.2). TWO RULES chosen by
 	// `p_closed`, not one rule with a parameter: an OPEN path masks a corridor — 1 on the carriageway,
@@ -417,13 +419,16 @@ public:
 
 	static Dictionary path_range_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_heights,
 			bool p_closed, const PackedFloat32Array &p_base, const PackedFloat32Array &p_amount, int p_gw, int p_gh,
-			const Rect2 &p_rect, const PackedFloat32Array &p_params);
+			const Rect2 &p_rect, const PackedFloat32Array &p_params, const PackedInt32Array &p_part_starts = PackedInt32Array());
+	static Dictionary range_splines_solve(const PackedVector2Array &p_outline, bool p_closed,
+			const PackedFloat32Array &p_params);
 	static Dictionary coast_profile_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_cliff,
 			const int p_gw, const int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_params);
 
 	static PackedFloat32Array path_mask_grid(const PackedVector2Array &p_points,
 			const PackedFloat32Array &p_widths, const bool p_closed, const int p_gw, const int p_gh,
-			const Rect2 &p_rect, const double p_width_scale, const double p_feather, const bool p_invert);
+			const Rect2 &p_rect, const double p_width_scale, const double p_feather, const bool p_invert,
+			const PackedInt32Array &p_part_starts = PackedInt32Array());
 
 	// Layer brush stage 1 (PASTURE3D_LAYER_BRUSH_SPEC.md §7.2), native so the base never walks its extent in
 	// GDScript. The grid's cell (ix, iz) sits at (p_min_x + ix * p_vs, p_min_z + iz * p_vs).

@@ -179,6 +179,10 @@ void grow_spurs(const Pasture3DPathGeom &p_parent, double p_spacing, double p_le
 
 } // namespace
 
+double godot::path_range_noise1(double p_u, uint32_t p_salt) {
+	return n1(p_u, p_salt);
+}
+
 Dictionary godot::path_range_grid_geom(const Pasture3DPathGeom *p_crest, const PackedFloat32Array &p_base,
 		const PackedFloat32Array &p_amount, int p_gw, int p_gh, const Rect2 &p_rect, const PathRangeParams &p_prm) {
 	Dictionary out;
@@ -191,59 +195,95 @@ Dictionary godot::path_range_grid_geom(const Pasture3DPathGeom *p_crest, const P
 	std::vector<double> field((size_t)n, 0.0), env((size_t)n, 0.0), crest((size_t)n, 0.0), foot((size_t)n, 0.0);
 
 	if (p_crest && !p_crest->is_empty() && p_crest->length() > 0.0) {
-		const Pasture3DPathGeom &C = *p_crest;
-		const double L = C.length();
-		const uint32_t salt = wang_hash((uint32_t)P.seed * 0x85EBCA6Bu + 0x1234567u);
-		// 1. The crest, resampled in world metres so the result does not move with the grid.
-		double step = std::max(std::min({ P.peak_spacing, P.spur_spacing, L }) / 8.0, 1.0);
-		int ns = (int)std::ceil(L / step);
-		if (ns > MAX_CREST_SAMPLES) {
-			ns = MAX_CREST_SAMPLES;
-			step = L / ns;
-		}
-		const bool heights = P.use_path_heights && !C.height.empty();
-		Line cl;
-		cl.x.resize(ns + 1);
-		cl.z.resize(ns + 1);
-		cl.h.resize(ns + 1);
-		for (int i = 0; i <= ns; i++) {
-			const double s = L * (double)i / (double)ns;
-			double b = P.peak_height;
-			if (heights) {
-				const double hp = C.height_at(s);
-				if (std::isfinite(hp)) b = hp;
+		const uint32_t salt0 = wang_hash((uint32_t)P.seed * 0x85EBCA6Bu + 0x1234567u);
+		// 0. One crest line per PART. A multi-part path (Generate Range Splines' folds, a scatter) is several
+		// ridges, each tapered over its own length and seeded on its own, and merged like any two lines.
+		// Part 0 keeps the unsalted seed, so a one-part path reads exactly as before parts existed.
+		std::vector<std::unique_ptr<Pasture3DPathGeom>> owned;
+		std::vector<const Pasture3DPathGeom *> crests;
+		if (!p_crest->has_parts()) {
+			crests.push_back(p_crest);
+		} else {
+			const int nv = (int)p_crest->px.size();
+			int lo = 0;
+			for (int v = 1; v <= nv; v++) {
+				if (v < nv && !p_crest->is_dead(v - 1)) continue;
+				const int m = v - lo;
+				if (m >= 2) {
+					PackedVector2Array pts;
+					PackedFloat32Array hh;
+					pts.resize(m);
+					for (int i = 0; i < m; i++) pts.set(i, Vector2(p_crest->px[(size_t)(lo + i)], p_crest->pz[(size_t)(lo + i)]));
+					if (p_crest->height.size() >= (size_t)nv) {
+						hh.resize(m);
+						for (int i = 0; i < m; i++) hh.set(i, p_crest->height[(size_t)(lo + i)]);
+					}
+					auto g = std::make_unique<Pasture3DPathGeom>();
+					if (g->build(pts, PackedFloat32Array(), hh)) {
+						crests.push_back(g.get());
+						owned.push_back(std::move(g));
+					}
+				}
+				lo = v;
 			}
-			const double var = std::max(0.0, 1.0 + P.peak_variation * n1(s / P.peak_spacing, salt));
-			double taper = 1.0;
-			if (!C.closed && P.end_taper > 0.0) {
-				taper = P.end_height + (1.0 - P.end_height) * ss(std::min(s, L - s) / P.end_taper);
-			}
-			cl.x[i] = (float)C.lerp_vertex(C.px, s);
-			cl.z[i] = (float)C.lerp_vertex(C.pz, s);
-			cl.h[i] = (float)std::max(b * taper * var, 0.0);
 		}
-		// 2. Lines: the crest, its spurs, and their spurs.
 		std::vector<Line> lines;
-		lines.push_back(cl);
 		std::vector<std::unique_ptr<Pasture3DPathGeom>> geoms;
-		geoms.push_back(build_geom(lines[0], P.width_ratio));
-		if (P.spur_levels >= 1 && geoms[0]) {
-			std::vector<Line> l1;
-			grow_spurs(*geoms[0], P.spur_spacing, P.spur_length, P.peak_height, step, P, salt ^ 0xA5A5A5u, l1);
-			for (auto &l : l1) {
-				lines.push_back(std::move(l));
-				geoms.push_back(build_geom(lines.back(), P.width_ratio));
+		for (size_t pi = 0; pi < crests.size(); pi++) {
+			const Pasture3DPathGeom &C = *crests[pi];
+			const double L = C.length();
+			if (!(L > 0.0)) continue;
+			const uint32_t salt = pi == 0 ? salt0 : wang_hash(salt0 ^ (uint32_t)(pi * 0x27D4EB2Du));
+			// 1. The crest, resampled in world metres so the result does not move with the grid.
+			double step = std::max(std::min({ P.peak_spacing, P.spur_spacing, L }) / 8.0, 1.0);
+			int ns = (int)std::ceil(L / step);
+			if (ns > MAX_CREST_SAMPLES) {
+				ns = MAX_CREST_SAMPLES;
+				step = L / ns;
 			}
-			if (P.spur_levels >= 2) {
-				const size_t first_l1 = 1, end_l1 = geoms.size();
-				for (size_t li = first_l1; li < end_l1; li++) {
-					if (!geoms[li]) continue;
-					std::vector<Line> l2;
-					grow_spurs(*geoms[li], 0.5 * P.spur_spacing, 0.5 * P.spur_length, P.peak_height, 0.5 * step, P,
-							wang_hash(salt ^ (uint32_t)(li * 7919u)), l2);
-					for (auto &l : l2) {
-						lines.push_back(std::move(l));
-						geoms.push_back(build_geom(lines.back(), P.width_ratio));
+			const bool heights = P.use_path_heights && !C.height.empty();
+			Line cl;
+			cl.x.resize(ns + 1);
+			cl.z.resize(ns + 1);
+			cl.h.resize(ns + 1);
+			for (int i = 0; i <= ns; i++) {
+				const double s = L * (double)i / (double)ns;
+				double b = P.peak_height;
+				if (heights) {
+					const double hp = C.height_at(s);
+					if (std::isfinite(hp)) b = hp;
+				}
+				const double var = std::max(0.0, 1.0 + P.peak_variation * n1(s / P.peak_spacing, salt));
+				double taper = 1.0;
+				if (!C.closed && P.end_taper > 0.0) {
+					taper = P.end_height + (1.0 - P.end_height) * ss(std::min(s, L - s) / P.end_taper);
+				}
+				cl.x[i] = (float)C.lerp_vertex(C.px, s);
+				cl.z[i] = (float)C.lerp_vertex(C.pz, s);
+				cl.h[i] = (float)std::max(b * taper * var, 0.0);
+			}
+			// 2. Lines: the crest, its spurs, and their spurs.
+			const size_t ci = geoms.size();
+			lines.push_back(cl);
+			geoms.push_back(build_geom(lines.back(), P.width_ratio));
+			if (P.spur_levels >= 1 && geoms[ci]) {
+				std::vector<Line> l1;
+				grow_spurs(*geoms[ci], P.spur_spacing, P.spur_length, P.peak_height, step, P, salt ^ 0xA5A5A5u, l1);
+				for (auto &l : l1) {
+					lines.push_back(std::move(l));
+					geoms.push_back(build_geom(lines.back(), P.width_ratio));
+				}
+				if (P.spur_levels >= 2) {
+					const size_t first_l1 = ci + 1, end_l1 = geoms.size();
+					for (size_t li = first_l1; li < end_l1; li++) {
+						if (!geoms[li]) continue;
+						std::vector<Line> l2;
+						grow_spurs(*geoms[li], 0.5 * P.spur_spacing, 0.5 * P.spur_length, P.peak_height, 0.5 * step, P,
+								wang_hash(salt ^ (uint32_t)(li * 7919u)), l2);
+						for (auto &l : l2) {
+							lines.push_back(std::move(l));
+							geoms.push_back(build_geom(lines.back(), P.width_ratio));
+						}
 					}
 				}
 			}

@@ -347,6 +347,9 @@ struct GraphProgram {
 	// no FROZEN solver. `has_frozen` keeps such a program off the GPU, which has no freeze table.
 	std::vector<GraphFrozenSlot> frozen;
 	bool has_frozen = false;
+	// A PATH in the geometry table carries several parts; keeps the program off the GPU, whose path query
+	// has no dead-segment flag and would join them.
+	bool has_parts = false;
 	// The host brush's footprint: the 0..1 mask its graph step composites through (feather and Modifier
 	// Margin included), over `fp_rect` at fp_gw x fp_gh. The Input node's channel 1 samples it by world
 	// position, so a preview over another domain reads the same mask the bake does. Absent (no host) reads

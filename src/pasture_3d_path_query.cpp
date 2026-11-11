@@ -15,8 +15,9 @@ using namespace godot;
 // ---- construction -----------------------------------------------------------------------------------
 
 bool Pasture3DPathGeom::build(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
-		const PackedFloat32Array &p_heights) {
+		const PackedFloat32Array &p_heights, const PackedInt32Array &p_part_starts) {
 	px.clear();
+	dead.clear();
 	pz.clear();
 	width.clear();
 	height.clear();
@@ -51,12 +52,26 @@ bool Pasture3DPathGeom::build(const PackedVector2Array &p_points, const PackedFl
 		height[i] = p_heights[i];
 	}
 
+	// Parts: the segment ending at each part's first vertex is dead. Starts out of range, at 0, or
+	// repeated are ignored, so a malformed list degrades to fewer parts, never to a joined line.
+	for (int k = 0; k < p_part_starts.size(); k++) {
+		const int st = p_part_starts[k];
+		if (st <= 0 || st >= n_pts) continue;
+		if (dead.empty()) dead.assign((size_t)(n_pts - 1), 0);
+		dead[(size_t)(st - 1)] = 1;
+	}
+
 	cum.resize(n_pts);
 	cum[0] = 0.0;
 	for (int i = 1; i < n_pts; i++) {
 		const double dx = (double)px[i] - (double)px[i - 1];
 		const double dz = (double)pz[i] - (double)pz[i - 1];
-		cum[i] = cum[i - 1] + std::sqrt(dx * dx + dz * dz);
+		// A gap between parts KEEPS its straight length (floored at 1 mm), so `s` stays strictly increasing:
+		// at zero length the last vertex of one part and the first of the next would share one `s`, and
+		// every per-vertex lookup by `s` (width, height, the carve's ground) would read the earlier part's
+		// end value across the whole start cap of the next.
+		const double len = std::sqrt(dx * dx + dz * dz);
+		cum[i] = cum[i - 1] + (is_dead(i - 1) ? std::max(len, 0.001) : len);
 	}
 
 	const int n_seg = segment_count();
@@ -117,6 +132,7 @@ bool Pasture3DPathGeom::build(const PackedVector2Array &p_points, const PackedFl
 		r_gz1 = std::min(r_gz1, bh - 1);
 	};
 	for (int si = 0; si < n_seg; si++) {
+		if (is_dead(si)) continue;
 		int gx0, gx1, gz0, gz1;
 		span(si, gx0, gx1, gz0, gz1);
 		for (int gz = gz0; gz <= gz1; gz++) {
@@ -133,6 +149,7 @@ bool Pasture3DPathGeom::build(const PackedVector2Array &p_points, const PackedFl
 	bucket_items.resize((size_t)bucket_start.back());
 	std::vector<int> cursor(bucket_start.begin(), bucket_start.end() - 1);
 	for (int si = 0; si < n_seg; si++) {
+		if (is_dead(si)) continue;
 		int gx0, gx1, gz0, gz1;
 		span(si, gx0, gx1, gz0, gz1);
 		for (int gz = gz0; gz <= gz1; gz++) {
@@ -212,6 +229,7 @@ Pasture3DPathHit Pasture3DPathGeom::resolve(double p_x, double p_z, const int *p
 	double best_f = 0.0;
 	for (int k = 0; k < p_count; k++) {
 		const int si = p_cand[k];
+		if (is_dead(si)) continue; // the gap between two parts is not a segment
 		const double ax = px[si], az = pz[si];
 		const double abx = (double)px[si + 1] - ax, abz = (double)pz[si + 1] - az;
 		const double len2 = abx * abx + abz * abz;
@@ -378,9 +396,9 @@ Pasture3DPathHit Pasture3DPathGeom::nearest(double p_x, double p_z, std::vector<
 
 Dictionary godot::path_query_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_widths,
 		int p_gw, int p_gh, const Rect2 &p_rect, double p_unreachable, double p_max_distance,
-		const PackedFloat32Array &p_heights) {
+		const PackedFloat32Array &p_heights, const PackedInt32Array &p_part_starts) {
 	Pasture3DPathGeom geom;
-	geom.build(p_points, p_widths, p_heights);
+	path_geom_build(geom, p_points, false, p_widths, p_heights, p_part_starts);
 	return path_query_grid_geom(geom, p_gw, p_gh, p_rect, p_unreachable, p_max_distance);
 }
 
@@ -470,6 +488,13 @@ Dictionary godot::path_query_grid_geom(const Pasture3DPathGeom &p_geom, int p_gw
 // segment for distance and for the winding test alike, and adding it at the boundary means no query below
 // has to remember that a path can be closed. Three points is the minimum for an area — a two-point
 // "closed" path is a line doubled back on itself, and closing it would only duplicate a segment.
+void godot::path_geom_build(Pasture3DPathGeom &r_geom, const PackedVector2Array &p_points, bool p_closed,
+		const PackedFloat32Array &p_widths, const PackedFloat32Array &p_heights, const PackedInt32Array &p_part_starts) {
+	r_geom.closed = p_closed && p_points.size() >= 3;
+	r_geom.build(path_close_ring(p_points, p_closed), p_widths, p_heights,
+			r_geom.closed ? PackedInt32Array() : p_part_starts);
+}
+
 PackedVector2Array godot::path_close_ring(const PackedVector2Array &p_points, bool p_closed) {
 	if (!p_closed || p_points.size() < 3) {
 		return p_points;
@@ -481,7 +506,7 @@ PackedVector2Array godot::path_close_ring(const PackedVector2Array &p_points, bo
 
 PackedFloat32Array godot::path_mask_grid(const PackedVector2Array &p_points,
 		const PackedFloat32Array &p_widths, bool p_closed, int p_gw, int p_gh, const Rect2 &p_rect,
-		double p_width_scale, double p_feather, bool p_invert) {
+		double p_width_scale, double p_feather, bool p_invert, const PackedInt32Array &p_part_starts) {
 	PackedFloat32Array out;
 	if (p_gw <= 0 || p_gh <= 0) {
 		return out;
@@ -489,8 +514,7 @@ PackedFloat32Array godot::path_mask_grid(const PackedVector2Array &p_points,
 	out.resize(p_gw * p_gh);
 
 	Pasture3DPathGeom geom;
-	geom.closed = p_closed && p_points.size() >= 3;
-	geom.build(path_close_ring(p_points, p_closed), p_widths);
+	path_geom_build(geom, p_points, p_closed, p_widths, PackedFloat32Array(), p_part_starts);
 	return path_mask_grid_geom(geom, p_gw, p_gh, p_rect, p_width_scale, p_feather, p_invert);
 }
 
