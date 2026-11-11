@@ -1,6 +1,6 @@
 # Pasture3D Shore Character Spec
 
-Status: steps 1–2 built 2026-11-10; step 3 unbuilt. Check the code before trusting this header.
+Status: all three steps built 2026-11-10. Step 3 used the per-cell tangent overload (no binning). 2026-11-11: Shore Character gained `carry_reach` (slot 13, default 200 m), see the addendum at the end. Check the code before trusting this header.
 
 ## Goal
 
@@ -261,3 +261,18 @@ into a slope that runs down to the beach Coast Profile built.
 1. `feat(graph): Coast Profile cliff mask sets steepness, not height`, then `chore(demo)`.
 2. `feat(graph): Shore Character node for procedural cliffs and beaches`.
 3. `feat(graph): Coastal Erosion varies retreat and slackens sheltered cliffs`, then `chore(demo)`.
+
+
+## Addendum (2026-11-11) — Shore Character `carry_reach`
+
+Wiring `cliff` into a second Coast Profile removed every cliff. Coast Profile reads `cliff` across its whole
+rise, inland of the shoreline, and inland every per-cell signal leans to beach: more land in the windows
+(shape), exposure fading over Wave Exposure's `shore_reach`, and a wider rise pulling the read further in.
+Gate SH measured it: 0.62 at the shore, 0.37 only 40 m in.
+
+Fix: the weighted score is taken at the SHORELINE (land with a 4-neighbour water cell) and every land cell
+within `carry_reach` metres takes its nearest shore cell's score, by the new shared
+`distance_transform_nearest` (the same JFA as `distance_transform_solve`, returning the nearest seed's
+index). Only cliff/beach are carried; hardness and erosion stay per cell. `carry_reach` 0 is the original
+per-cell score. Gate SH: 40 m inland equals the shore exactly, a cell beyond reach is unchanged, control
+carry 0 differs. SB runs at carry 0 because it tests the exposure signal itself.

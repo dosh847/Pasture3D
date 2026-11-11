@@ -16,6 +16,7 @@
 #define PASTURE_3D_DISTANCE_TRANSFORM_H
 
 #include <godot_cpp/variant/packed_float32_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/rect2.hpp>
 
 namespace godot {
@@ -48,6 +49,12 @@ enum DistanceTransformUnits {
 PackedFloat32Array distance_transform_solve(const PackedFloat32Array &p_mask, int p_gw, int p_gh,
 		const Rect2 &p_rect, double p_threshold, int p_direction, int p_metric, int p_units,
 		double p_max_distance, double *r_divisor_used);
+
+// The same Euclidean JFA, returning for every cell the flat index of its nearest seed (p_mask > threshold,
+// NaN never a seed), or -1 when the field has no seed. r_dist_m, when non-null, receives the distance in
+// metres. Use this to carry a value from a set of cells outward to whatever lies nearest them.
+PackedInt32Array distance_transform_nearest(const PackedFloat32Array &p_mask, int p_gw, int p_gh,
+		const Rect2 &p_rect, double p_threshold, PackedFloat32Array *r_dist_m);
 
 } // namespace godot
 

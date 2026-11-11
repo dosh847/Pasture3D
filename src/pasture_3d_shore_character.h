@@ -19,6 +19,13 @@
 //               metres, wavelength hardness_scale), so it does not move with resolution
 //   erosion   = exposure · (1 - hardness)   — what Coastal Erosion's `exposure` port is meant to read
 //
+//   carry      cliff_raw is scored at the SHORELINE (land cells touching water) and every land cell within
+//              carry_reach takes the score of its nearest shore cell (shared JFA, distance_transform_nearest).
+//              A Coast Profile reads `cliff` across its whole rise, inland of the shore, where the per-cell
+//              signals all lean to beach (more land around, less exposure). Carrying makes a cell on the
+//              rise read the coast it belongs to. carry_reach 0 is the per-cell score, as originally built.
+//              Only cliff/beach are carried; hardness and erosion stay per cell.
+//
 // The outputs are defined everywhere but only meaningful within about bay_radius of the shore.
 // Known limit: no valley-mouth signal. A native op takes one aux grid, and `exposure` uses it; fold a flow
 // mask into the exposure upstream if valley mouths should read as beaches.
@@ -47,6 +54,7 @@ struct ShoreCharacterParams {
 	double softness = 0.2;
 	double hardness_scale = 400.0; // metres
 	double hardness_variation = 0.6; // 0..1
+	double carry_reach = 200.0; // metres inland a shoreline score is carried; 0 = per cell
 };
 
 ShoreCharacterParams shore_character_params_from(const float *p_params, int p_count);

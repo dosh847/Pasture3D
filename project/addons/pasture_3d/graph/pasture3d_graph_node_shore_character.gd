@@ -67,6 +67,12 @@ extends Pasture3DGraphNode
 	set(v):
 		threshold = clampf(v, 0.0, 1.0)
 		_param_changed()
+## How far inland the shoreline's score is carried, metres. A Coast Profile reads `cliff` across its whole
+## rise; set this at least as wide as that rise so the rise reads its coast. 0 scores every cell itself.
+@export_range(0.0, 2000.0, 1.0, "or_greater") var carry_reach: float = 200.0:
+	set(v):
+		carry_reach = maxf(v, 0.0)
+		_param_changed()
 ## Width of the cliff/beach transition in score units. Small = hard switch.
 @export_range(0.001, 1.0, 0.01) var softness: float = 0.2:
 	set(v):
@@ -111,6 +117,7 @@ func _params() -> PackedFloat32Array:
 	p[10] = softness
 	p[11] = hardness_scale
 	p[12] = hardness_variation
+	p[13] = carry_reach
 	return p
 
 

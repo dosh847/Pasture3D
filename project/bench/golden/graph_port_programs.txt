@@ -102,8 +102,8 @@ flooding_uniform_level|unwired|235872530
 flooding_uniform_level|wired|3118342422
 wave_exposure|unwired|2553944827
 wave_exposure|wired|1770015759
-shore_character|unwired|119216721
-shore_character|wired|15088790
+shore_character|unwired|450969789
+shore_character|wired|730859008
 water_mask|unwired|2186583094
 water_mask|wired|2313737142
 float_to_mask|unwired|3979003885
@@ -164,8 +164,8 @@ hydraulic_saleve|unwired|3271504172
 hydraulic_saleve|wired|3840771886
 erosion_thermal|unwired|3294576449
 erosion_thermal|wired|2614888966
-coastal_erosion|unwired|1523424029
-coastal_erosion|wired|335894501
+coastal_erosion|unwired|2325444764
+coastal_erosion|wired|709334041
 islet_scatter|unwired|887524149
 islet_scatter|wired|70445824
 scree|unwired|379111314

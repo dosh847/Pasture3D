@@ -222,3 +222,37 @@ PackedFloat32Array godot::distance_transform_solve(const PackedFloat32Array &p_m
 	}
 	return result;
 }
+
+PackedInt32Array godot::distance_transform_nearest(const PackedFloat32Array &p_mask, int p_gw, int p_gh,
+		const Rect2 &p_rect, double p_threshold, PackedFloat32Array *r_dist_m) {
+	const int n = p_gw * p_gh;
+	PackedInt32Array idx;
+	if (n <= 0 || p_mask.size() != n) {
+		return idx;
+	}
+	const double dx = (double)p_rect.size.x / (double)std::max(p_gw, 1);
+	const double dz = (double)p_rect.size.y / (double)std::max(p_gh, 1);
+	const float *m = p_mask.ptr();
+	std::vector<Site> sites((size_t)n);
+	for (int i = 0; i < n; i++) {
+		const bool seed = std::isfinite(m[i]) && m[i] > (float)p_threshold;
+		sites[(size_t)i] = seed ? Site{ (int32_t)(i % p_gw), (int32_t)(i / p_gw) } : Site{ NO_SITE, NO_SITE };
+	}
+	jfa_passes(sites, p_gw, p_gh, DISTANCE_TRANSFORM_EUCLIDEAN, dx, dz);
+	idx.resize(n);
+	int32_t *iw = idx.ptrw();
+	float *dw = nullptr;
+	if (r_dist_m) {
+		r_dist_m->resize(n);
+		dw = r_dist_m->ptrw();
+	}
+	for (int i = 0; i < n; i++) {
+		const Site &st = sites[(size_t)i];
+		iw[i] = st.x == NO_SITE ? -1 : st.z * p_gw + st.x;
+		if (dw) {
+			dw[i] = st.x == NO_SITE ? INFINITY
+									: (float)metric_distance(i % p_gw, i / p_gw, st, DISTANCE_TRANSFORM_EUCLIDEAN, dx, dz);
+		}
+	}
+	return idx;
+}

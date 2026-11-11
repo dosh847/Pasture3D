@@ -17,6 +17,9 @@
 # SF  Input -> Shore Character -> Output (Wave Exposure wired and unwired) is native_supported and equals
 #     the forced GDScript evaluator for cliff and erosion. Control: the two channels differ.
 # SG  no standard mask (port 0 is a MASK), and the op is in graph_op_ids. Control: a bogus op is not.
+# SH  carry_reach: a cell 40 m inland of the west shore reads its shore cell's cliff exactly, and a cell
+#     beyond carry_reach reads the same as with carry_reach 0. Control: carry_reach 0 reads differently 40 m
+#     inland than at the shore.
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/GraphShoreCharacterGate.tscn
 extends Node
@@ -43,7 +46,8 @@ func _ready() -> void:
 		_se()
 		_sf()
 		_sg()
-	_check(_ran == 7, "all 7 criteria ran (%d)" % _ran)
+		_sh()
+	_check(_ran == 8, "all 8 criteria ran (%d)" % _ran)
 	print("\n=== %s (%d failures) ===\n" % ["SHORE CHARACTER PASS" if _fail == 0 else "SHORE CHARACTER FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -110,6 +114,7 @@ func _sb() -> void:
 		e[i] = float(i % N) / float(N - 1)
 	var n := _only("exposure")
 	n.softness = 1.0
+	n.carry_reach = 0.0 # the signal itself, not its shoreline carry
 	var c: PackedFloat32Array = _run(n, _island(), e)[0]
 	var row := N / 2
 	var falls := 0
@@ -241,6 +246,23 @@ func _sg() -> void:
 	var ids: Dictionary = Pasture3DUtil.graph_op_ids()
 	_check(ids.has("shore_character") or ids.has(&"shore_character"), "shore_character is a native op")
 	_check(not (ids.has("shore_character_bogus") or ids.has(&"shore_character_bogus")), "control: a bogus op is not")
+	_ran += 1
+
+
+func _sh() -> void:
+	print("[SH] the shoreline score is carried inland")
+	var shore := _at(-292.0, -100.0) # land, the first column inside the west shore
+	var inland := _at(-252.0, -100.0) # 40 m in
+	var deep := _at(-60.0, -100.0) # 232 m from the west shore, further from every other
+	var n := _node()
+	n.softness = 1.0
+	n.carry_reach = 100.0
+	var c: PackedFloat32Array = _run(n, _island(), PackedFloat32Array())[0]
+	_check(c[inland] == c[shore], "40 m inland %.4f, shore %.4f" % [c[inland], c[shore]])
+	n.carry_reach = 0.0
+	var o: PackedFloat32Array = _run(n, _island(), PackedFloat32Array())[0]
+	_check(c[deep] == o[deep], "beyond carry_reach unchanged (%.4f vs %.4f)" % [c[deep], o[deep]])
+	_check(absf(o[inland] - o[shore]) > 0.01, "control: carry 0 reads %.4f inland vs %.4f" % [o[inland], o[shore]])
 	_ran += 1
 
 
