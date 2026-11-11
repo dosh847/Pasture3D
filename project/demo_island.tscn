@@ -51,6 +51,7 @@
 [ext_resource type="Script" uid="uid://bj10ochgiqrlg" path="res://addons/pasture_3d/connectors/pasture3d_ridge.gd" id="49_7qmf4"]
 [ext_resource type="Script" uid="uid://bbgjfav0p7rhm" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_range.gd" id="50_0h8r1"]
 [ext_resource type="Script" uid="uid://dojdh8yj7mhru" path="res://addons/pasture_3d/graph/pasture3d_graph_node_slope.gd" id="51_0h8r1"]
+[ext_resource type="Script" uid="uid://cma5ovnlhp6t4" path="res://addons/pasture_3d/graph/pasture3d_graph_node_range_splines.gd" id="52_quisv"]
 
 [sub_resource type="Pasture3DMaterial" id="Pasture3DMaterial_4515p"]
 _shader_parameters = {
@@ -886,7 +887,7 @@ script = ExtResource("8_ff8bn")
 points = PackedVector2Array()
 half_widths = PackedFloat32Array()
 heights = PackedFloat32Array()
-part_starts = null
+part_starts = PackedInt32Array()
 source_label = "Plow/Pasture3DSpline"
 sample_half_widths = PackedFloat32Array()
 sample_shoulders = PackedFloat32Array()
@@ -993,6 +994,7 @@ metadata/_editor_selected_node = 5
 [sub_resource type="Resource" id="Resource_xwa3r"]
 script = ExtResource("11_kfedv")
 graph = SubResource("Resource_b41or")
+evaluation = 1
 
 [sub_resource type="Curve3D" id="Curve3D_b0u5i"]
 closed = true
@@ -1008,6 +1010,91 @@ _data = {
 "tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0)
 }
 point_count = 6
+
+[sub_resource type="Resource" id="Resource_vv3fa"]
+script = ExtResource("5_hur8n")
+graph_position = Vector2(-120, 0)
+
+[sub_resource type="Resource" id="Resource_twuk5"]
+script = ExtResource("8_m7f8t")
+graph_position = Vector2(1240, -20)
+
+[sub_resource type="Resource" id="Resource_lnv28"]
+script = ExtResource("8_ff8bn")
+points = PackedVector2Array(58.82245, -1178.1616, 339.7151, -1123.8817, 301.05255, -1339.5503, 145.58833, -1520.8344, -171.93439, -1531.7896, -363.8643, -1426.6394, -438.572, -1143.9685, -311.8906, -873.38745, -61.653778, -870.4561, 159.10521, -881.6533, 58.82245, -1138.1616)
+half_widths = PackedFloat32Array(5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5)
+heights = PackedFloat32Array(0, 22.493896, 32.147537, 38.52904, 32.741943, 35.57779, 84.44949, 34.86599, 35.09158, 31.684122, 0)
+closed = true
+part_starts = PackedInt32Array()
+source_label = "MountainRanges/Plow/NorthWestHillsSpline"
+sample_half_widths = PackedFloat32Array()
+sample_shoulders = PackedFloat32Array()
+sample_verges = PackedFloat32Array()
+sample_suppress = PackedByteArray()
+sample_skip = PackedByteArray()
+
+[sub_resource type="Resource" id="Resource_mv5n3"]
+script = ExtResource("9_hur8n")
+spline_key = "MountainRanges/Plow/NorthWestHillsSpline"
+path = SubResource("Resource_lnv28")
+graph_position = Vector2(-120, -240)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_g0kwx"]
+script = ExtResource("52_quisv")
+mode = 1
+coast_inset = 10.0
+peak_height = 16.0
+depth_scale = 125.0
+min_branch = 25.0
+count = 12
+spacing = 50.0
+length = 2545.0
+length_jitter = 0.95
+angle_jitter = 180.0
+graph_position = Vector2(280, -240)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_x6t63"]
+script = ExtResource("50_0h8r1")
+peak_height = 25.0
+peak_spacing = 50.0
+end_taper = 25.0
+crest_shape = 2
+use_path_heights = true
+spur_spacing = 50.0
+spur_length = 25.0
+graph_position = Vector2(700, -20)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_yoxcx"]
+script = ExtResource("10_p4out")
+format_version = 3
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_vv3fa"), SubResource("Resource_twuk5"), SubResource("Resource_mv5n3"), SubResource("Resource_g0kwx"), SubResource("Resource_x6t63")])
+wires = [[2, &"path", 3, &"path"], [3, &"path", 4, &"path"], [4, &"height", 1, &"result"], [0, &"height", 4, &"height"]]
+output_node = 1
+metadata/_editor_selected_node = 3
+
+[sub_resource type="Resource" id="Resource_0rjiy"]
+resource_name = "Terrain Graph"
+script = ExtResource("11_kfedv")
+graph = SubResource("Resource_yoxcx")
+
+[sub_resource type="Curve3D" id="Curve3D_qky07"]
+closed = true
+_data = {
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -137.5362, -45.297104, -423.37268, 0, 0, 0, 0, 0, 0, 213.75887, -43.567757, -495.7113, 0, 0, 0, 0, 0, 0, 407.48947, -66.70401, -275.37805, 0, 0, 0, 0, 0, 0, 466.77325, -64.96918, 54.159546, 0, 0, 0, 0, 0, 0, 306.0764, -64.6319, 358.35352, 0, 0, 0, 0, 0, 0, 48.825645, -75.13165, 464.62585, 0, 0, 0, 0, 0, 0, -250.0806, -65.53241, 481.758, 0, 0, 0, 0, 0, 0, -488.82144, -12.478325, 264.719, 0, 0, 0, 0, 0, 0, -386.71646, -43.820717, -395.8003),
+"tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0, 0, 0, 0)
+}
+point_count = 9
+
+[sub_resource type="Curve3D" id="Curve3D_63p0j"]
+closed = true
+_data = {
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, 0, 0, -20, 0, 0, 0, 0, 0, 0, 280.89264, 22.493896, 34.279907, 0, 0, 0, 0, 0, 0, 242.2301, 32.147537, -181.38867, 0, 0, 0, 0, 0, 0, 86.765884, 38.52904, -362.67273, 0, 0, 0, 0, 0, 0, -230.75684, 32.741943, -373.62793, 0, 0, 0, 0, 0, 0, -422.68674, 35.57779, -268.47778, 0, 0, 0, 0, 0, 0, -497.39444, 84.44949, 14.193115, 0, 0, 0, 0, 0, 0, -370.71304, 34.86599, 284.77417, 0, 0, 0, 0, 0, 0, -120.47623, 35.09158, 287.7055, 0, 0, 0, 0, 0, 0, 100.28276, 31.684122, 276.5083, 0, 0, 0, 0, 0, 0, 0, 0, 20),
+"tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+}
+point_count = 11
 
 [node name="DemoIsland" type="Node3D" unique_id=915459138]
 
@@ -1569,7 +1656,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -487.463, 0, -959.8301)
 script = ExtResource("1_r5rvi")
 _layer_uid = "596b704fc5d2a01"
 extent_mode = 1
-_base_key = "0e1a9add928711749c938022fb187d1c"
+_base_key = "7567ecb8fb1530d7215bf2b70f6afa6a"
 terrain = NodePath("..")
 modifier_margin = 0.0
 live_preview_resolution = 0
@@ -1600,6 +1687,31 @@ snap_to_surface = false
 
 [node name="Line1" type="Path3D" parent="Pasture3D/MountainRanges/Ridge/Crest" unique_id=2098873218]
 curve = SubResource("Curve3D_ahukp")
+
+[node name="Plow" type="Node3D" parent="Pasture3D/MountainRanges" unique_id=834218493 node_paths=PackedStringArray("terrain")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 439.14493, 77.15161, -185.91064)
+script = ExtResource("3_n7ivs")
+terrain = NodePath("../..")
+_layer_owner = "pasture3d_layerbrush:596b704fc5d2a01"
+modifier_margin = 0.0
+live_preview_resolution = 0
+_preview_coarse_baked = false
+bake_scale = 0
+modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_0rjiy")])
+
+[node name="Area1" type="Path3D" parent="Pasture3D/MountainRanges/Plow" unique_id=638875000]
+curve = SubResource("Curve3D_qky07")
+
+[node name="NorthWestHillsSpline" type="Node3D" parent="Pasture3D/MountainRanges/Plow" unique_id=139993746 node_paths=PackedStringArray("terrain")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 107.14053, -77.15161, -12.420898)
+script = ExtResource("12_l4h5e")
+closed = true
+terrain = NodePath("../../..")
+snap_to_surface = false
+metadata/_custom_type_script = "uid://bb60it81vfrir"
+
+[node name="Line1" type="Path3D" parent="Pasture3D/MountainRanges/Plow/NorthWestHillsSpline" unique_id=962894025]
+curve = SubResource("Curve3D_63p0j")
 
 [node name="Pasture3DPoolManager" type="Pasture3DPoolManager" parent="." unique_id=67587526]
 
