@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "pasture_3d_coast_profile.h"
+#include "pasture_3d_path_range.h"
 #include "pasture_3d_wave_exposure.h"
 #include "pasture_3d_islet_scatter.h"
 #include "pasture_3d_shore_character.h"
@@ -1352,6 +1353,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "measure", GRAPH_OP_MEASURE },
 		{ "ridge_sharpen", GRAPH_OP_RIDGE_SHARPEN },
 		{ "coast_profile", GRAPH_OP_COAST_PROFILE },
+		{ "path_range", GRAPH_OP_PATH_RANGE },
 		{ "wave_exposure", GRAPH_OP_WAVE_EXPOSURE },
 		{ "coastal_erosion", GRAPH_OP_COASTAL_EROSION },
 		{ "islet_scatter", GRAPH_OP_ISLET_SCATTER },
@@ -2047,6 +2049,18 @@ Dictionary Pasture3DUtil::coast_profile_grid(const PackedVector2Array &p_points,
 	geom.build(path_close_ring(p_points, true), PackedFloat32Array());
 	return godot::coast_profile_grid_geom(&geom, p_cliff, p_gw, p_gh, p_rect,
 			coast_profile_params_from(p_params.ptr(), p_params.size()));
+}
+
+Dictionary Pasture3DUtil::path_range_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_heights,
+		const bool p_closed, const PackedFloat32Array &p_base, const PackedFloat32Array &p_amount, const int p_gw,
+		const int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_params) {
+	// Built exactly as the graph's geometry table builds an entry (pasture_3d_graph_ops.cpp): the ring
+	// closed by the shared rule, heights verbatim and NOT ring-closed.
+	Pasture3DPathGeom geom;
+	geom.closed = p_closed && p_points.size() >= 3;
+	geom.build(path_close_ring(p_points, p_closed), PackedFloat32Array(), p_heights);
+	return godot::path_range_grid_geom(&geom, p_base, p_amount, p_gw, p_gh, p_rect,
+			path_range_params_from(p_params.ptr(), p_params.size()));
 }
 
 PackedFloat32Array Pasture3DUtil::path_mask_grid(const PackedVector2Array &p_points,
@@ -3475,6 +3489,9 @@ void Pasture3DUtil::_bind_methods() {
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("coast_profile_grid", "points", "cliff", "gw", "gh", "rect", "params"),
 			&Pasture3DUtil::coast_profile_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("path_range_grid", "points", "heights", "closed", "base", "amount", "gw", "gh", "rect", "params"),
+			&Pasture3DUtil::path_range_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("path_mask_grid", "points", "widths", "closed", "gw", "gh", "rect", "width_scale",
 					"feather", "invert"),

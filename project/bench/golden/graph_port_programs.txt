@@ -66,6 +66,8 @@ mountain_inselberg|unwired|2207217678
 mountain_inselberg|wired|3643087306
 mountain_range_radial|unwired|2856613343
 mountain_range_radial|wired|1733750300
+path_range|unwired|3592611445
+path_range|wired|2535256530
 mountain_tibesti|unwired|3190245377
 mountain_tibesti|wired|2994343858
 mountain_stump|unwired|849110380

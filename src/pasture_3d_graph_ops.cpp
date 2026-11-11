@@ -5,6 +5,7 @@
 #include "pasture_3d_coastal_erosion.h"
 #include "pasture_3d_islet_scatter.h"
 #include "pasture_3d_shore_character.h"
+#include "pasture_3d_path_range.h"
 
 #include "pasture_3d_path_carve.h"
 
@@ -1656,6 +1657,26 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 					float *dst = want_aux(c + 1);
 					if (!dst || !res.has(ch_names[c])) continue;
 					const PackedFloat32Array a = res[ch_names[c]];
+					if (a.size() == n) std::copy_n(a.ptr(), n, dst);
+				}
+			} break;
+
+			case GRAPH_OP_PATH_RANGE: {
+				// The crest is `geo`; an empty one passes the base through, decided in the kernel. The base
+				// height is port 1 (in1), the amount the declared aux port. P[] is resolved, so wires into
+				// `peak_height` and `seed` reach slots 0 and 14.
+				const PackedFloat32Array base = in1[s] >= 0 ? get_grid_packed(in1[s], c_in1) : PackedFloat32Array();
+				Dictionary res = path_range_grid_geom(geo ? &geo->geom : nullptr, base, aux_grid_of(s), p_gw, p_gh,
+						p_rect, path_range_params_from(P, 16));
+				const PackedFloat32Array h_arr = res.has("height") ? (PackedFloat32Array)res["height"]
+																   : PackedFloat32Array();
+				if (h_arr.size() == n) std::copy_n(h_arr.ptr(), n, g_ptr);
+				else std::fill_n(g_ptr, n, 0.f);
+				static const char *pr_names[3] = { "crest", "valley", "footprint" };
+				for (int c = 0; c < 3; c++) {
+					float *dst = want_aux(c + 1);
+					if (!dst || !res.has(pr_names[c])) continue;
+					const PackedFloat32Array a = res[pr_names[c]];
 					if (a.size() == n) std::copy_n(a.ptr(), n, dst);
 				}
 			} break;

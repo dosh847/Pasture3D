@@ -411,6 +411,9 @@ public:
 			const Rect2 &p_rect, const PackedFloat32Array &p_params);
 
 	// Coast Profile on a closed outline (points are the ring WITHOUT its closing repeat). p_cliff may be empty.
+	static Dictionary path_range_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_heights,
+			bool p_closed, const PackedFloat32Array &p_base, const PackedFloat32Array &p_amount, int p_gw, int p_gh,
+			const Rect2 &p_rect, const PackedFloat32Array &p_params);
 	static Dictionary coast_profile_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_cliff,
 			const int p_gw, const int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_params);
 
