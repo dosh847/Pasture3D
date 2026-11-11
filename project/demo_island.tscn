@@ -216,12 +216,13 @@ format_version = 3
 nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_lmt3e"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv"), SubResource("Resource_uxjvw"), SubResource("Resource_b18ah"), SubResource("Resource_6vjxx"), SubResource("Resource_kg4qs"), SubResource("Resource_kye8j"), SubResource("Resource_3wp7n"), SubResource("Resource_cwbmp"), SubResource("Resource_bhhrn"), SubResource("Resource_n6igq"), SubResource("Resource_c5hbv"), SubResource("Resource_elc4l"), SubResource("Resource_6rhur")])
 wires = [[2, &"path", 4, &"path"], [4, &"path", 3, &"path"], [3, &"path", 5, &"outline"], [5, &"height", 6, &"height"], [8, &"out", 9, &"in"], [10, &"path", 11, &"path"], [5, &"height", 12, &"height"], [6, &"exposure", 12, &"exposure"], [3, &"path", 13, &"outline"], [13, &"height", 7, &"height"], [7, &"height", 14, &"height"], [9, &"out", 14, &"exposure"], [14, &"height", 1, &"result"], [12, &"erosion", 8, &"in"], [6, &"exposure", 15, &"in"], [15, &"out", 16, &"in"], [16, &"out", 7, &"exposure"], [12, &"cliff", 13, &"cliff"]]
 output_node = 13
-metadata/_editor_selected_node = 12
+metadata/_editor_selected_node = 13
 
 [sub_resource type="Resource" id="Resource_fbibf"]
 resource_name = "Terrain Graph"
 script = ExtResource("11_kfedv")
 graph = SubResource("Resource_slh1f")
+evaluation = 1
 
 [sub_resource type="Curve3D" id="Curve3D_aw5ld"]
 closed = true
