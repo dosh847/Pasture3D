@@ -157,7 +157,9 @@ func _c_registry_categories() -> void:
 				&"path_resample", &"path_smooth", &"path_decimate", &"path_fractalize",
 				&"path_meanderize", &"path_carve",
 				# S7a: the three grid-reading geometry nodes (spec 7.5, 8.4).
-				&"path_drape", &"path_width_field", &"path_from_flow"],
+				&"path_drape", &"path_width_field", &"path_from_flow",
+				# Island building: a closed outline as a coastal cross-section.
+				&"coast_profile"],
 		"Roads": [&"road_source", &"road_grade"],
 	}
 	for cat in want:

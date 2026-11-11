@@ -100,6 +100,7 @@ enum GraphCellOpType {
 	GRAPH_OP_DISPLACE = 67, // FILTER grid: resample in0 at the point offset by the in1/in2 metre fields (mask on the node's aux port)
 	GRAPH_OP_RECAST_CANYON = 68, // FILTER: power-curve the band between a floor and a cut (in1 cut noise)
 	GRAPH_OP_RIDGE_SHARPEN = 70, // FILTER grid: unsharp mask that only lifts, radius in metres (aux mask)
+	GRAPH_OP_COAST_PROFILE = 71, // FILTER grid: closed in_g outline -> coastal cross-section (5 outputs, aux cliff mask)
 	GRAPH_OP_MEASURE = 69, // FILTER grid: in0 reduced to two uniform channels (range / percentiles / mean), in1 selection
 };
 

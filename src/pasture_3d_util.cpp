@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "pasture_3d_coast_profile.h"
+
 #include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
@@ -1345,6 +1347,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "recast_canyon", GRAPH_OP_RECAST_CANYON },
 		{ "measure", GRAPH_OP_MEASURE },
 		{ "ridge_sharpen", GRAPH_OP_RIDGE_SHARPEN },
+		{ "coast_profile", GRAPH_OP_COAST_PROFILE },
 	};
 	Dictionary d;
 	for (const auto &e : k_ops) {
@@ -2000,6 +2003,15 @@ Dictionary Pasture3DUtil::leveler_grid(const PackedVector2Array &p_points,
 		const PackedFloat32Array &p_lut, const PackedFloat32Array &p_params) {
 	return godot::leveler_grid(p_points, p_widths, p_closed, p_height, p_mask, p_gw, p_gh, p_rect, p_lut,
 			leveler_params_from(p_params.ptr(), p_params.size()));
+}
+
+Dictionary Pasture3DUtil::coast_profile_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_cliff,
+		const int p_gw, const int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_params) {
+	Pasture3DPathGeom geom;
+	geom.closed = p_points.size() >= 3;
+	geom.build(path_close_ring(p_points, true), PackedFloat32Array());
+	return godot::coast_profile_grid_geom(&geom, p_cliff, p_gw, p_gh, p_rect,
+			coast_profile_params_from(p_params.ptr(), p_params.size()));
 }
 
 PackedFloat32Array Pasture3DUtil::path_mask_grid(const PackedVector2Array &p_points,
@@ -3413,6 +3425,9 @@ void Pasture3DUtil::_bind_methods() {
 			D_METHOD("leveler_grid", "points", "widths", "closed", "height", "mask", "gw", "gh", "rect",
 					"lut", "params"),
 			&Pasture3DUtil::leveler_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("coast_profile_grid", "points", "cliff", "gw", "gh", "rect", "params"),
+			&Pasture3DUtil::coast_profile_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("path_mask_grid", "points", "widths", "closed", "gw", "gh", "rect", "width_scale",
 					"feather", "invert"),

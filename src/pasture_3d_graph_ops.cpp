@@ -1,5 +1,6 @@
 #include "pasture_3d_graph_ops.h"
 #include "pasture_3d_measure.h"
+#include "pasture_3d_coast_profile.h"
 
 #include "pasture_3d_path_carve.h"
 
@@ -1564,6 +1565,23 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 																				 : PackedFloat32Array();
 				PackedFloat32Array res = value_ramp_grid(in_arr, &P[0], stops);
 				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
+			} break;
+
+			case GRAPH_OP_COAST_PROFILE: {
+				// The outline is `geo`; open, empty and missing all read as open sea, decided in the kernel.
+				// The cliff weight is the declared aux port, empty when unwired, which the kernel takes as 1.
+				Dictionary res = coast_profile_grid_geom(geo ? &geo->geom : nullptr, aux_grid_of(s), p_gw, p_gh,
+						p_rect, coast_profile_params_from(P, 16));
+				const PackedFloat32Array h_arr = res.has("height") ? (PackedFloat32Array)res["height"]
+																   : PackedFloat32Array();
+				if (h_arr.size() == n) std::copy_n(h_arr.ptr(), n, g_ptr);
+				static const char *ch_names[4] = { "signed_distance", "shelf", "beach", "cliff" };
+				for (int c = 0; c < 4; c++) {
+					float *dst = want_aux(c + 1);
+					if (!dst || !res.has(ch_names[c])) continue;
+					const PackedFloat32Array a = res[ch_names[c]];
+					if (a.size() == n) std::copy_n(a.ptr(), n, dst);
+				}
 			} break;
 
 			case GRAPH_OP_PATH_MASK: {

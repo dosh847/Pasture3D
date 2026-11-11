@@ -394,6 +394,10 @@ public:
 	// `p_width_scale` — while a CLOSED path masks its INTERIOR by an even-odd winding test, feathering only
 	// outward, and ignores `p_width_scale` because a width says nothing about an area. An empty path masks
 	// NOTHING (0, or 1 with p_invert), so a graph mid-edit does not erase what an inverted mask protects.
+	// Coast Profile on a closed outline (points are the ring WITHOUT its closing repeat). p_cliff may be empty.
+	static Dictionary coast_profile_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_cliff,
+			const int p_gw, const int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_params);
+
 	static PackedFloat32Array path_mask_grid(const PackedVector2Array &p_points,
 			const PackedFloat32Array &p_widths, const bool p_closed, const int p_gw, const int p_gh,
 			const Rect2 &p_rect, const double p_width_scale, const double p_feather, const bool p_invert);
