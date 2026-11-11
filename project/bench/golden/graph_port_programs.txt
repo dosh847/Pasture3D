@@ -172,6 +172,8 @@ spline_source|unwired|2448151921
 spline_source|wired|2448151921
 path_distance|unwired|3088464967
 path_distance|wired|3088464967
+coast_profile|unwired|1887281749
+coast_profile|wired|1813752950
 path_mask|unwired|1721447235
 path_mask|wired|1721447235
 path_width|unwired|2448151921

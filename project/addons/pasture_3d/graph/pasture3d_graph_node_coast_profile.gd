@@ -18,73 +18,73 @@ extends Pasture3DGraphNode
 @export_range(0.0, 100.0, 0.1, "or_greater") var shelf_depth: float = 6.0:
 	set(v):
 		shelf_depth = maxf(v, 0.0)
-		emit_changed()
+		_param_changed()
 ## How far the shallow shelf reaches out from the shoreline, metres.
 @export_range(0.0, 2000.0, 1.0, "or_greater") var shelf_width: float = 250.0:
 	set(v):
 		shelf_width = maxf(v, 0.0)
-		emit_changed()
+		_param_changed()
 ## Open-sea floor depth, metres below sea level. Never shallower than the shelf.
 @export_range(0.0, 1000.0, 1.0, "or_greater") var floor_depth: float = 80.0:
 	set(v):
 		floor_depth = maxf(v, 0.0)
-		emit_changed()
+		_param_changed()
 ## Horizontal width of the drop-off from shelf to sea floor, metres.
 @export_range(0.0, 2000.0, 1.0, "or_greater") var drop_width: float = 150.0:
 	set(v):
 		drop_width = maxf(v, 0.0)
-		emit_changed()
+		_param_changed()
 
 @export_group("Coast")
 ## Height the beach rises to at its back, metres above sea level.
 @export_range(0.0, 20.0, 0.1, "or_greater") var beach_height: float = 1.5:
 	set(v):
 		beach_height = v
-		emit_changed()
+		_param_changed()
 ## Beach width where the coast is not cliffed, metres.
 @export_range(0.0, 500.0, 0.5, "or_greater") var beach_width: float = 25.0:
 	set(v):
 		beach_width = maxf(v, 0.0)
-		emit_changed()
+		_param_changed()
 ## Cliff height at full cliff weight, metres.
 @export_range(0.0, 300.0, 0.5, "or_greater") var cliff_height: float = 30.0:
 	set(v):
 		cliff_height = v
-		emit_changed()
+		_param_changed()
 ## Horizontal run of the cliff face, metres. Small = steep.
 @export_range(0.0, 200.0, 0.5, "or_greater") var cliff_width: float = 12.0:
 	set(v):
 		cliff_width = maxf(v, 0.0)
-		emit_changed()
+		_param_changed()
 
 @export_group("Inland")
 ## Extra height gained behind the cliff, metres.
 @export_range(0.0, 2000.0, 1.0, "or_greater") var inland_height: float = 80.0:
 	set(v):
 		inland_height = v
-		emit_changed()
+		_param_changed()
 ## Distance over which the inland rise is gained, metres.
 @export_range(0.0, 10000.0, 1.0, "or_greater") var inland_width: float = 600.0:
 	set(v):
 		inland_width = maxf(v, 0.0)
-		emit_changed()
+		_param_changed()
 ## Shape of the inland rise. Below 1 climbs early and plateaus (Milos), above 1 stays low then climbs.
 @export_range(0.05, 4.0, 0.01) var inland_curve: float = 0.7:
 	set(v):
 		inland_curve = maxf(v, 0.01)
-		emit_changed()
+		_param_changed()
 
 @export_group("Output")
 ## The shoreline's height. The whole profile is offset by it.
 @export var sea_level: float = 0.0:
 	set(v):
 		sea_level = v
-		emit_changed()
+		_param_changed()
 ## Soft edge of the shelf / beach / cliff masks, metres.
 @export_range(0.0, 50.0, 0.1, "or_greater") var mask_feather: float = 4.0:
 	set(v):
 		mask_feather = maxf(v, 0.0)
-		emit_changed()
+		_param_changed()
 
 var _path: Pasture3DGraphPath = null
 

@@ -10,6 +10,10 @@
 #     weight 1 and present at 0. Control: the two heights fields differ somewhere.
 # CD  an open outline reads as open sea at -floor_depth everywhere. Control: the closed one does not.
 # CE  the op is in graph_op_ids, so a graph holding it stays native. Control: a bogus op is not.
+# CF  Spline Source -> Coast Profile -> Output: native_supported, and the COMPILED program (geometry table,
+#     aux cliff port, output channels) equals the forced GDScript evaluator, for height and for the cliff
+#     mask channel, with the cliff port unwired and wired to a Const. Controls: wiring cliff = 0 moves the
+#     height by metres (so the aux port reaches the kernel), and the channel output differs from height.
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/GraphCoastProfileGate.tscn
 extends Node
@@ -33,7 +37,8 @@ func _ready() -> void:
 		_cc()
 		_cd()
 		_ce()
-	_check(_ran == 5, "all 5 criteria ran (%d)" % _ran)
+		_cf()
+	_check(_ran == 6, "all 6 criteria ran (%d)" % _ran)
 	print("\n=== %s (%d failures) ===\n" % ["COAST PROFILE PASS" if _fail == 0 else "COAST PROFILE FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -170,6 +175,57 @@ func _ce() -> void:
 	var ids: Dictionary = Pasture3DUtil.graph_op_ids()
 	_check(ids.has("coast_profile") or ids.has(&"coast_profile"), "coast_profile is a native op")
 	_check(not (ids.has("coast_profile_bogus") or ids.has(&"coast_profile_bogus")), "control: a bogus op is not")
+	_ran += 1
+
+
+func _graph(p_port: int, p_cliff: float) -> Pasture3DTerrainGraph:
+	var src: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"spline_source")
+	src.set("path", _circle())
+	var nodes: Array[Pasture3DGraphNode] = [src, CoastProfile.new(), Pasture3DGraphNodeRegistry.create(&"output")]
+	var conns: Array = [PackedInt32Array([0, 0, 1, 0]), PackedInt32Array([1, p_port, 2, 0])]
+	if p_cliff >= 0.0:
+		var c: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"const")
+		c.set("value", p_cliff)
+		nodes.append(c)
+		conns.append(PackedInt32Array([3, 0, 1, 1]))
+	var g := Pasture3DTerrainGraph.create_empty()
+	g.nodes = nodes
+	g.connections = conns
+	return g
+
+
+func _routes(p_port: int, p_cliff: float) -> Array:
+	var g := _graph(p_port, p_cliff)
+	var native_ok := g.native_supported()
+	var nat: PackedFloat32Array = Pasture3DUtil.graph_eval_grid(g.compile_graph_program(), 128, 128, RECT, PackedFloat32Array())
+	var g2 := _graph(p_port, p_cliff)
+	g2.force_gdscript_evaluation = true
+	var ora: PackedFloat32Array = g2.evaluate(128, 128, RECT, null, PackedFloat32Array())
+	return [native_ok, nat, ora]
+
+
+static func _worst(p_a: PackedFloat32Array, p_b: PackedFloat32Array) -> float:
+	if p_a.size() != p_b.size() or p_a.is_empty():
+		return INF
+	var w := 0.0
+	for i in p_a.size():
+		w = maxf(w, absf(p_a[i] - p_b[i]))
+	return w
+
+
+func _cf() -> void:
+	print("[CF] the compiled graph route equals the GDScript evaluator")
+	var unwired := _routes(0, -1.0)
+	var flat := _routes(0, 0.0)
+	var mask := _routes(4, -1.0)
+	_check(unwired[0] and flat[0] and mask[0], "all three graphs are native_supported")
+	for pair in [["height, cliff unwired", unwired], ["height, cliff = 0", flat], ["cliff channel", mask]]:
+		var w := _worst(pair[1][1], pair[1][2])
+		_check(w <= 1.0e-3, "%s: worst %.6f m" % [pair[0], w])
+	var moved := _worst(unwired[1], flat[1])
+	_check(moved > 10.0 and moved < INF, "control: wiring cliff = 0 moves the height by %.1f m" % moved)
+	var chan := _worst(unwired[1], mask[1])
+	_check(chan > 10.0 and chan < INF, "control: the cliff channel is not the height (%.1f)" % chan)
 	_ran += 1
 
 

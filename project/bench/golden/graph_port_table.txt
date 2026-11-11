@@ -21,6 +21,16 @@ pasture3d_graph_node_channel_sink|in|0|in|0|0.0|-1|-
 pasture3d_graph_node_channel_sink|in_extra|aux=-1|names=1|types=1
 pasture3d_graph_node_channel_sink|out|0|out|0
 pasture3d_graph_node_channel_sink|out_extra|names=1|types=1|port0=0
+pasture3d_graph_node_coast_profile|counts|in=2|out=5|has_output=true
+pasture3d_graph_node_coast_profile|in|0|outline|9|0.0|-1|-
+pasture3d_graph_node_coast_profile|in|1|cliff|1|1.0|-1|aux
+pasture3d_graph_node_coast_profile|in_extra|aux=1|names=2|types=2
+pasture3d_graph_node_coast_profile|out|0|height|0
+pasture3d_graph_node_coast_profile|out|1|signed_distance|11
+pasture3d_graph_node_coast_profile|out|2|shelf|1
+pasture3d_graph_node_coast_profile|out|3|beach|1
+pasture3d_graph_node_coast_profile|out|4|cliff|1
+pasture3d_graph_node_coast_profile|out_extra|names=5|types=5|port0=0
 pasture3d_graph_node_color_blend|counts|in=3|out=1|has_output=true
 pasture3d_graph_node_color_blend|in|0|a|6|0.0|-1|-
 pasture3d_graph_node_color_blend|in|1|b|6|0.0|-1|-
