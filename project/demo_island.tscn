@@ -21,6 +21,8 @@
 [ext_resource type="Script" uid="uid://d3p6vrby77tq" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_resample.gd" id="11_lmt3e"]
 [ext_resource type="Script" uid="uid://bk833psrrlg1o" path="res://addons/pasture_3d/graph/pasture3d_graph_param.gd" id="12_cbvqt"]
 [ext_resource type="Script" uid="uid://bb60it81vfrir" path="res://addons/pasture_3d/connectors/pasture3d_spline.gd" id="12_l4h5e"]
+[ext_resource type="Script" uid="uid://coiymb6vfvwoq" path="res://addons/pasture_3d/graph/pasture3d_graph_node_coastal_erosion.gd" id="12_wn1x5"]
+[ext_resource type="Script" uid="uid://v8cidb2f505x" path="res://addons/pasture_3d/graph/pasture3d_graph_node_wave_exposure.gd" id="13_l2dx1"]
 [ext_resource type="Script" uid="uid://lp5oxart7q6x" path="res://addons/pasture_3d/graph/pasture3d_graph_node_remap.gd" id="18_kfedv"]
 [ext_resource type="Script" uid="uid://bindlf2awqi6e" path="res://addons/pasture_3d/graph/pasture3d_graph_node_blend.gd" id="18_p4out"]
 [ext_resource type="Script" uid="uid://dieimrnhn18o6" path="res://addons/pasture_3d/graph/pasture3d_graph_node_strata.gd" id="20_4img5"]
@@ -89,7 +91,7 @@ graph_position = Vector2(-440, 60)
 
 [sub_resource type="Resource" id="Resource_lhpge"]
 script = ExtResource("8_m7f8t")
-graph_position = Vector2(840, 60)
+graph_position = Vector2(1660, 240)
 
 [sub_resource type="Resource" id="Resource_7kbp8"]
 script = ExtResource("9_yof5q")
@@ -144,13 +146,23 @@ shelf_depth = 24.0
 graph_position = Vector2(220, 260)
 preview_on = true
 
+[sub_resource type="Resource" id="Resource_c5hbv"]
+script = ExtResource("12_wn1x5")
+graph_position = Vector2(1200, 260)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_b18ah"]
+script = ExtResource("13_l2dx1")
+graph_position = Vector2(700, 420)
+preview_on = true
+
 [sub_resource type="Resource" id="Resource_slh1f"]
 script = ExtResource("10_p4out")
 format_version = 3
-nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_7kbp8"), SubResource("Resource_lmt3e"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv"), SubResource("Resource_uxjvw")])
-wires = [[0, &"height", 2, &"height"], [4, &"path", 2, &"loop"], [3, &"path", 5, &"path"], [5, &"path", 4, &"path"], [0, &"footprint", 2, &"area"], [4, &"path", 6, &"outline"], [6, &"height", 1, &"result"]]
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_7kbp8"), SubResource("Resource_lmt3e"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv"), SubResource("Resource_uxjvw"), SubResource("Resource_c5hbv"), SubResource("Resource_b18ah")])
+wires = [[0, &"height", 2, &"height"], [4, &"path", 2, &"loop"], [3, &"path", 5, &"path"], [5, &"path", 4, &"path"], [0, &"footprint", 2, &"area"], [4, &"path", 6, &"outline"], [6, &"height", 8, &"height"], [6, &"height", 7, &"height"], [8, &"exposure", 7, &"exposure"], [7, &"height", 1, &"result"]]
 output_node = 1
-metadata/_editor_selected_node = 6
+metadata/_editor_selected_node = 7
 
 [sub_resource type="Resource" id="Resource_fbibf"]
 resource_name = "Terrain Graph"
