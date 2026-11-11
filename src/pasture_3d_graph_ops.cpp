@@ -3,6 +3,7 @@
 #include "pasture_3d_coast_profile.h"
 #include "pasture_3d_wave_exposure.h"
 #include "pasture_3d_coastal_erosion.h"
+#include "pasture_3d_islet_scatter.h"
 
 #include "pasture_3d_path_carve.h"
 
@@ -1580,6 +1581,25 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				if (h_arr.size() == n) std::copy_n(h_arr.ptr(), n, g_ptr);
 				else std::copy_n(in_arr.ptr(), n, g_ptr);
 				static const char *ch_names[2] = { "cut", "deposit" };
+				for (int c = 0; c < 2; c++) {
+					float *dst = want_aux(c + 1);
+					if (!dst || !res.has(ch_names[c])) continue;
+					const PackedFloat32Array a = res[ch_names[c]];
+					if (a.size() == n) std::copy_n(a.ptr(), n, dst);
+				}
+			} break;
+
+			case GRAPH_OP_ISLET_SCATTER: {
+				// Exposure is the declared aux port, empty when unwired (reads 1). P[] is resolved, so a wire
+				// into `sea_level` reaches slot 0.
+				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
+				Dictionary res = islet_scatter_grid(in_arr, aux_grid_of(s), p_gw, p_gh, p_rect,
+						islet_scatter_params_from(P, 16));
+				const PackedFloat32Array h_arr = res.has("height") ? (PackedFloat32Array)res["height"]
+																   : PackedFloat32Array();
+				if (h_arr.size() == n) std::copy_n(h_arr.ptr(), n, g_ptr);
+				else std::copy_n(in_arr.ptr(), n, g_ptr);
+				static const char *ch_names[2] = { "islets", "stacks" };
 				for (int c = 0; c < 2; c++) {
 					float *dst = want_aux(c + 1);
 					if (!dst || !res.has(ch_names[c])) continue;

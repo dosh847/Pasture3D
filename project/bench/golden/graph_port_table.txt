@@ -738,6 +738,16 @@ pasture3d_graph_node_invert|in|1|mask|1|1.0|-1|-
 pasture3d_graph_node_invert|in_extra|aux=-1|names=2|types=2
 pasture3d_graph_node_invert|out|0|out|0
 pasture3d_graph_node_invert|out_extra|names=1|types=1|port0=0
+pasture3d_graph_node_islet_scatter|counts|in=4|out=3|has_output=true
+pasture3d_graph_node_islet_scatter|in|0|height|0|0.0|-1|-
+pasture3d_graph_node_islet_scatter|in|1|exposure|1|1.0|-1|aux
+pasture3d_graph_node_islet_scatter|in|2|sea_level|4|0.0|0|-
+pasture3d_graph_node_islet_scatter|in|3|mask|1|1.0|-1|-
+pasture3d_graph_node_islet_scatter|in_extra|aux=1|names=4|types=4
+pasture3d_graph_node_islet_scatter|out|0|height|0
+pasture3d_graph_node_islet_scatter|out|1|islets|1
+pasture3d_graph_node_islet_scatter|out|2|stacks|1
+pasture3d_graph_node_islet_scatter|out_extra|names=3|types=3|port0=0
 pasture3d_graph_node_lake_flooding|counts|in=5|out=3|has_output=true
 pasture3d_graph_node_lake_flooding|in|0|in|0|0.0|-1|-
 pasture3d_graph_node_lake_flooding|in|1|water_elevation|4|10.0|1|-

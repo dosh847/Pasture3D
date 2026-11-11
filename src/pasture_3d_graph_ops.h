@@ -103,6 +103,7 @@ enum GraphCellOpType {
 	GRAPH_OP_COAST_PROFILE = 71, // FILTER grid: closed in_g outline -> coastal cross-section (5 outputs, aux cliff mask)
 	GRAPH_OP_WAVE_EXPOSURE = 72, // FILTER grid: in0 heightfield -> open-water fetch exposure (2 outputs: exposure, fetch)
 	GRAPH_OP_COASTAL_EROSION = 73, // FILTER grid: in0 cliffs cut back by the aux exposure, beaches built in shelter (3 outputs)
+	GRAPH_OP_ISLET_SCATTER = 74, // FILTER grid: in0 raised by islets and sea stacks offshore (3 outputs, aux exposure)
 	GRAPH_OP_MEASURE = 69, // FILTER grid: in0 reduced to two uniform channels (range / percentiles / mean), in1 selection
 };
 
