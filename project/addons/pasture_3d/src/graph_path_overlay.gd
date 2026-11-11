@@ -52,7 +52,7 @@ const DRAW_LIFT: float = 0.15
 const DEFAULT_HALF_WIDTH: float = 1.0
 
 
-## Every PATH-typed, preview-on node on `p_brush`'s graphs, as viewport geometry.
+## The SELECTED PATH node on `p_brush`'s graphs, as viewport geometry.
 ##
 ## Returns, all in `p_brush`-local space:
 ##   centreline : PackedVector3Array of LINE PAIRS through the resolved vertices
@@ -105,46 +105,18 @@ static func build(p_brush) -> Dictionary:
 	return out
 
 
-## Select exactly ONE active PATH node to preview for this graph.
-## Priority:
-##   1. Explicit Solo override (g.output_override)
-##   2. Selected node in Graph Editor (_editor_selected_node metadata)
-##   3. Explicit preview_on toggle (most downstream / last previewed node)
-##   4. Fallback to output node if it is a PATH node
+## The PATH node to draw for this graph: the node selected in the Graph Editor, and only when it outputs a
+## PATH. Nothing selected, or a non-PATH node selected, draws nothing — the dots are a tool for inspecting a
+## path node, and drawn all the time they bury the terrain (2026-11-11, the user's rule). Solo, preview_on
+## and upstream tracing no longer pick a node.
 static func _pick_active_path_node(g: Pasture3DTerrainGraph) -> int:
 	if g == null or g.nodes.is_empty():
 		return -1
-
-	# 1. Solo override (highest priority)
-	if g.output_override >= 0 and g.output_override < g.nodes.size():
-		var sn: Pasture3DGraphNode = g.nodes[g.output_override]
-		if sn != null:
-			if sn.output_port_type() == Pasture3DGraphNode.PortType.PATH:
-				return g.output_override
-			var up_solo := _find_upstream_path_node(g, g.output_override)
-			if up_solo >= 0:
-				return up_solo
-
-	# 2. Selected node in Graph Editor
 	var sel: int = int(g.get_meta(&"_editor_selected_node", -1))
 	if sel >= 0 and sel < g.nodes.size():
 		var sel_node: Pasture3DGraphNode = g.nodes[sel]
-		if sel_node != null:
-			if sel_node.output_port_type() == Pasture3DGraphNode.PortType.PATH:
-				return sel
-			var up_sel := _find_upstream_path_node(g, sel)
-			if up_sel >= 0:
-				return up_sel
-
-	# 3. Explicit preview_on toggle (most downstream PATH node with preview_on)
-	var last_preview := -1
-	for ni in range(g.nodes.size()):
-		var node: Pasture3DGraphNode = g.nodes[ni]
-		if node != null and node.preview_on and node.output_port_type() == Pasture3DGraphNode.PortType.PATH:
-			last_preview = ni
-	if last_preview >= 0:
-		return last_preview
-
+		if sel_node != null and sel_node.output_port_type() == Pasture3DGraphNode.PortType.PATH:
+			return sel
 	return -1
 
 

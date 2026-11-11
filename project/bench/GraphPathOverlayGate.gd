@@ -29,7 +29,7 @@ extends Node
 #       offsets and a tapered one does not.
 #   [E] a 1 m resample draws vertices 1 m apart, and the overlay's vertex count equals the RESOLVED path's
 #       — control: the pre-resample count differs, so "drew the input" cannot pass.
-#   [F] toggling `preview_on` changes what is drawn and does NOT bump the graph revision (§12.6) — control:
+#   [F] selecting / deselecting the node changes what is drawn (preview_on alone draws nothing) and does NOT bump the graph revision (§12.6) — control:
 #       a real content edit does bump it.
 #
 # Headless. It builds a real Pasture3D with a real region so `drops` has ground to measure against, and
@@ -165,7 +165,7 @@ func _graph_with(p_node: Pasture3DGraphNode, p_path: Pasture3DGraphPath) -> Past
 		[3, 0, 4, 0],  # Carve  -> Output
 	]
 	g.output_node = 4
-	p_node.preview_on = true
+	g.set_meta(&"_editor_selected_node", 2) # the overlay draws only the selected PATH node
 	return g
 
 
@@ -505,7 +505,8 @@ func _e_a_resample_is_visible_as_spacing() -> void:
 # §12.6, the same exemption `preview_on` has everywhere: a view flag must not participate in invalidation.
 # The overlay is opt-in per node, so the toggle has to actually change what is drawn AND cost no bake.
 func _f_the_toggle_is_view_state() -> void:
-	print("\n[F] toggling preview_on changes the overlay and does NOT bump the graph revision (§12.6)")
+	print("
+[F] selecting the node changes the overlay and does NOT bump the graph revision (§12.6)")
 
 	var r := Pasture3DGraphNodePathResample.new()
 	var g := _graph_with(r, _line())
@@ -514,21 +515,24 @@ func _f_the_toggle_is_view_state() -> void:
 
 	var on: Dictionary = GraphPathOverlay.build(brush)
 	_check(PackedVector3Array(on["vertices"]).size() > 0,
-			"control: with preview_on the node is drawn (%d vertices)"
+			"control: with the node selected it is drawn (%d vertices)"
 			% PackedVector3Array(on["vertices"]).size())
 	var rev_before: int = g.content_key()
-	r.preview_on = false
+	g.set_meta(&"_editor_selected_node", -1)
+	r.preview_on = true
 	var off: Dictionary = GraphPathOverlay.build(brush)
 	_check(PackedVector3Array(off["vertices"]).is_empty()
 			and (off["drawn"] as Array).is_empty(),
-			"[F] with it off the node is not drawn (%d vertices) — the overlay is opt-in per node, not "
-			% PackedVector3Array(off["vertices"]).size() + "per brush")
+			"[F] deselected it is not drawn, even with preview_on (%d vertices)"
+			% PackedVector3Array(off["vertices"]).size())
+	g.set_meta(&"_editor_selected_node", 3) # Carve: not a PATH node, and no upstream tracing
+	_check(PackedVector3Array(GraphPathOverlay.build(brush)["vertices"]).is_empty(),
+			"[F] selecting a non-PATH node downstream draws nothing")
 	_check(g.content_key() == rev_before,
-			"[F] and the toggle did not bump the content revision (%d -> %d), so it cannot invalidate a "
-			% [rev_before, g.content_key()] + "host's frozen bake")
-	r.preview_on = true
+			"[F] and selection did not bump the content revision (%d -> %d)" % [rev_before, g.content_key()])
+	g.set_meta(&"_editor_selected_node", 2)
 	_check(PackedVector3Array(GraphPathOverlay.build(brush)["vertices"]).size() > 0,
-			"control: turning it back on redraws it, so [F] measured a toggle and not a one-way switch")
+			"control: reselecting redraws it, so [F] measured a toggle and not a one-way switch")
 	# The revision control: a real content edit DOES move it.
 	r.step = r.step + 1.0
 	_check(g.content_key() != rev_before,
