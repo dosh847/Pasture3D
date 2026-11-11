@@ -162,7 +162,7 @@ format_version = 3
 nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_7kbp8"), SubResource("Resource_lmt3e"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv"), SubResource("Resource_uxjvw"), SubResource("Resource_c5hbv"), SubResource("Resource_b18ah")])
 wires = [[0, &"height", 2, &"height"], [4, &"path", 2, &"loop"], [3, &"path", 5, &"path"], [5, &"path", 4, &"path"], [0, &"footprint", 2, &"area"], [4, &"path", 6, &"outline"], [6, &"height", 8, &"height"], [6, &"height", 7, &"height"], [8, &"exposure", 7, &"exposure"], [7, &"height", 1, &"result"]]
 output_node = 1
-metadata/_editor_selected_node = 7
+metadata/_editor_selected_node = -1
 
 [sub_resource type="Resource" id="Resource_fbibf"]
 resource_name = "Terrain Graph"
