@@ -4,6 +4,7 @@
 #include "pasture_3d_wave_exposure.h"
 #include "pasture_3d_coastal_erosion.h"
 #include "pasture_3d_islet_scatter.h"
+#include "pasture_3d_shore_character.h"
 
 #include "pasture_3d_path_carve.h"
 
@@ -1601,6 +1602,25 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				else std::copy_n(in_arr.ptr(), n, g_ptr);
 				static const char *ch_names[2] = { "islets", "stacks" };
 				for (int c = 0; c < 2; c++) {
+					float *dst = want_aux(c + 1);
+					if (!dst || !res.has(ch_names[c])) continue;
+					const PackedFloat32Array a = res[ch_names[c]];
+					if (a.size() == n) std::copy_n(a.ptr(), n, dst);
+				}
+			} break;
+
+			case GRAPH_OP_SHORE_CHARACTER: {
+				// Exposure is the declared aux port, empty when unwired (reads 1). P[] is resolved, so a wire
+				// into `sea_level` reaches slot 0. Port 0 is the cliff mask; nothing passes the height through.
+				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
+				Dictionary res = shore_character_grid(in_arr, aux_grid_of(s), p_gw, p_gh, p_rect,
+						shore_character_params_from(P, 16));
+				const PackedFloat32Array c_arr = res.has("cliff") ? (PackedFloat32Array)res["cliff"]
+																  : PackedFloat32Array();
+				if (c_arr.size() == n) std::copy_n(c_arr.ptr(), n, g_ptr);
+				else std::fill_n(g_ptr, n, 1.f);
+				static const char *ch_names[3] = { "beach", "hardness", "erosion" };
+				for (int c = 0; c < 3; c++) {
 					float *dst = want_aux(c + 1);
 					if (!dst || !res.has(ch_names[c])) continue;
 					const PackedFloat32Array a = res[ch_names[c]];

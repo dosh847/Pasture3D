@@ -402,6 +402,10 @@ public:
 	static Dictionary islet_scatter_grid(const PackedFloat32Array &p_height, const PackedFloat32Array &p_exposure,
 			const int p_gw, const int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_params);
 
+	// Shore Character: {cliff, beach, hardness, erosion}. p_exposure may be empty (reads as 1).
+	static Dictionary shore_character_grid(const PackedFloat32Array &p_height, const PackedFloat32Array &p_exposure,
+			const int p_gw, const int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_params);
+
 	// Wave Exposure: {exposure, fetch} from a heightfield and the 16-slot param block.
 	static Dictionary wave_exposure_grid(const PackedFloat32Array &p_height, const int p_gw, const int p_gh,
 			const Rect2 &p_rect, const PackedFloat32Array &p_params);

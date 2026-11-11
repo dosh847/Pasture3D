@@ -1,6 +1,6 @@
 # Pasture3D Shore Character Spec
 
-Status: step 1 built 2026-11-10 (uncommitted at time of writing); steps 2–3 unbuilt. Check the code before trusting this header.
+Status: steps 1–2 built 2026-11-10; step 3 unbuilt. Check the code before trusting this header.
 
 ## Goal
 
@@ -98,7 +98,7 @@ For every cell, a cliff weight from coastal signals. Each signal is 0..1, where 
 
 | Signal | How | Shared kernel |
 |---|---|---|
-| **Shape** (headland vs bay) | Land fraction in a disc of radius R, from the inside mask, by box blur. Under 0.5 = in a bay (beach), over 0.5 = on a headland (cliff). `shape = ss((f − 0.5)·gain + 0.5)`. Two radii, `bay_radius` (300 m) and `cove_radius` (60 m), averaged. | the existing separable box or gaussian blur. **Survey before writing:** whichever kernel Smooth uses. |
+| **Shape** (headland vs bay) | Land fraction in a disc of radius R, from the inside mask, by box blur. Over 0.5 = enclosed, in a bay (beach); under 0.5 = on a headland (cliff). `shape = ss(1 − f)`. (Built with square windows from `box_mean_solve`, not discs.) Two radii, `bay_radius` (300 m) and `cove_radius` (60 m), averaged. | the existing separable box or gaussian blur. **Survey before writing:** whichever kernel Smooth uses. |
 | **Exposure** | From the `exposure` input, read as is. Unwired reads 1. | — |
 | **Backshore** | Height of the ground `backshore_dist` (80 m) inland, as 0..1 over `backshore_height` (40 m). High ground = cliff. Sampled at the nearest land cell that far from the sea. | `distance_transform_solve` (JFA, metres) |
 | **Valley mouths** | `flow` input (MASK, unwired 0), e.g. Float to Mask of a flow output. High flow = beach. Enters as `1 − flow`. | — |

@@ -5,6 +5,7 @@
 #include "pasture_3d_coast_profile.h"
 #include "pasture_3d_wave_exposure.h"
 #include "pasture_3d_islet_scatter.h"
+#include "pasture_3d_shore_character.h"
 #include "pasture_3d_coastal_erosion.h"
 
 #include <godot_cpp/classes/dir_access.hpp>
@@ -1354,6 +1355,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "wave_exposure", GRAPH_OP_WAVE_EXPOSURE },
 		{ "coastal_erosion", GRAPH_OP_COASTAL_EROSION },
 		{ "islet_scatter", GRAPH_OP_ISLET_SCATTER },
+		{ "shore_character", GRAPH_OP_SHORE_CHARACTER },
 	};
 	Dictionary d;
 	for (const auto &e : k_ops) {
@@ -2023,6 +2025,13 @@ Dictionary Pasture3DUtil::islet_scatter_grid(const PackedFloat32Array &p_height,
 		const PackedFloat32Array &p_params) {
 	return godot::islet_scatter_grid(p_height, p_exposure, p_gw, p_gh, p_rect,
 			islet_scatter_params_from(p_params.ptr(), p_params.size()));
+}
+
+Dictionary Pasture3DUtil::shore_character_grid(const PackedFloat32Array &p_height,
+		const PackedFloat32Array &p_exposure, const int p_gw, const int p_gh, const Rect2 &p_rect,
+		const PackedFloat32Array &p_params) {
+	return godot::shore_character_grid(p_height, p_exposure, p_gw, p_gh, p_rect,
+			shore_character_params_from(p_params.ptr(), p_params.size()));
 }
 
 Dictionary Pasture3DUtil::wave_exposure_grid(const PackedFloat32Array &p_height, const int p_gw, const int p_gh,
@@ -3457,6 +3466,9 @@ void Pasture3DUtil::_bind_methods() {
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("islet_scatter_grid", "height", "exposure", "gw", "gh", "rect", "params"),
 			&Pasture3DUtil::islet_scatter_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("shore_character_grid", "height", "exposure", "gw", "gh", "rect", "params"),
+			&Pasture3DUtil::shore_character_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("wave_exposure_grid", "height", "gw", "gh", "rect", "params"),
 			&Pasture3DUtil::wave_exposure_grid);
