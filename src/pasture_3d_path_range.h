@@ -18,8 +18,7 @@
 //             analytic default), SHARP ((1 - x)²) or FLAT (1 to x = 0.4, smoothstep down to 1).
 //             Lines merge by a smooth max with radius min(blend_k, smaller value), so two ridges meet with
 //             no crease and a ridge fading to 0 adds nothing (a plain smooth max would lift the background).
-//   detail    field · (1 + detail · ridged fBm), the shared fractal_grid at peak_spacing / 4, so it scales
-//             with the range and vanishes at the foot.
+//   texture   none. Compose it downstream: a Fractal × footprint (or × height) added after the range.
 //   result    input + amount · field (ADD) or max(input, amount · field) (MAX).
 //
 // Outputs: height, crest (max line coverage, 1 on a line falling to 0 at its half-width), valley (inside
@@ -63,7 +62,7 @@ struct PathRangeParams {
 	double spur_wander = 0.3; // sideways bend as a fraction of spur length
 	int spur_levels = 1; // 0..2
 	double blend_k = 40.0; // metres
-	double detail = 0.15;
+	// slot 13 retired (was detail); ignored on read
 	int seed = 0;
 	int crest_shape = PATH_RANGE_ROUND;
 	bool max_blend = false;

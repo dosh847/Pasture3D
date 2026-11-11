@@ -3,7 +3,7 @@
 # GraphPathRangeGate — the Path Range node (PASTURE3D_RANGES_SPEC.md step 1). Fixture: 2048 m square of 16 m
 # cells, a straight crest along x from -800 to 800 m on the cell-centre row z = 8 m.
 #
-# PA  an even crest (variation 0, spurs off, detail 0) reads peak_height on the crest, and an open end
+# PA  an even crest (variation 0, spurs off) reads peak_height on the crest, and an open end
 #     reads the upper envelope: between end_height + (1 - end_height)·ss(e / end_taper) and peak_height,
 #     never falling toward the middle. Control: with variation 0.5 another seed
 #     moves crest heights by > 10 %.
@@ -60,7 +60,6 @@ func _crest() -> Pasture3DGraphPath:
 func _node() -> Pasture3DGraphNode:
 	var n := PathRange.new()
 	n.width_ratio = 1.0
-	n.detail = 0.0
 	return n
 
 
@@ -267,7 +266,6 @@ func _graph(p_port: int) -> Pasture3DTerrainGraph:
 	var src: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"spline_source")
 	src.set("path", _crest())
 	var pr := _node()
-	pr.detail = 0.2
 	pr.spur_levels = 2
 	var nodes: Array[Pasture3DGraphNode] = [src, pr, Pasture3DGraphNodeRegistry.create(&"output"),
 			Pasture3DGraphNodeRegistry.create(&"input")]

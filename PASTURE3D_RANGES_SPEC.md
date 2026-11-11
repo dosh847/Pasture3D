@@ -61,7 +61,8 @@ Input: a crest PATH (open; a closed path is treated as a ring range) and an opti
    across sizes, and `xsec` the shared ridge cross-section (`crest_shape`: ROUND / SHARP / FLAT, the same
    profiles Path Carve uses). The field is the soft max of all contributions (`blend_k` metres), so spurs
    merge into the crest without a seam and valleys form between spurs on their own.
-4. **Detail.** Optional `detail` amplitude of `fractal_grid` (RIDGED style, world metres) scaled by the
+4. **Detail — removed 2026-11-11.** Texture is composed downstream (Fractal × `footprint` or × `height`,
+   added after the range) so its style, scale and seed are the user's. Was: optional `detail` amplitude of `fractal_grid` (RIDGED style, world metres) scaled by the
    local range height, so detail dies out at the foot.
 5. Result = `input + field` (ADD) or `max(input, field)` (MAX), per `blend`.
 
@@ -84,7 +85,7 @@ range's foot).
 
 peak_height 300 m, peak_spacing 600 m, peak_variation 0.5, end_taper 400 m, end_height 0.2 (fraction),
 width_ratio 2.5, crest_shape ROUND, spur_spacing 250 m, spur_length 500 m, spur_angle 25°,
-spur_angle_jitter 15°, spur_wander 0.3, spur_levels 1, blend_k 40 m, detail 0.15, seed, plus the blend
+spur_angle_jitter 15°, spur_wander 0.3, spur_levels 1, blend_k 40 m, seed, plus the blend
 mode and `use_path_heights`. That is 18; fold `blend` and `use_path_heights` and `crest_shape` into one
 packed int slot, documented in `path_range_params_from`.
 

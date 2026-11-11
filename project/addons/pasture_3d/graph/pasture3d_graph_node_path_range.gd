@@ -7,6 +7,8 @@
 # Wiring: a Spline Source (a hand-drawn crest) or, later, Generate Range Splines into `path`; the island
 # height into `height` so the range sits on it (ADD) or rises out of it (MAX); a mask into `amount` to fade
 # the range, e.g. toward the coast. Erode the result (Salève, Stream Log) to cut drainage into the spurs.
+# Texture is not built in: add a Fractal (any style) multiplied by `footprint`, or by `height` for rock
+# that scales with the range, after this node.
 # Port 0 is a PATH, so the framework adds no standard mask.
 @tool
 class_name Pasture3DGraphNodePathRange
@@ -100,12 +102,7 @@ enum BlendMode { ADD, MAX }
 	set(v):
 		blend_k = maxf(v, 0.0)
 		_param_changed()
-## Rugged detail as a fraction of the local height; it vanishes at the foot.
-@export_range(0.0, 1.0, 0.01) var detail: float = 0.15:
-	set(v):
-		detail = clampf(v, 0.0, 1.0)
-		_param_changed()
-## Variation seed for peaks, spurs and detail. Also a value port.
+## Variation seed for peaks and spurs. Also a value port.
 @export var seed: int = 0:
 	set(v):
 		seed = v
@@ -139,7 +136,7 @@ func _params() -> PackedFloat32Array:
 	p[10] = spur_wander
 	p[11] = float(spur_levels)
 	p[12] = blend_k
-	p[13] = detail
+	p[13] = 0.0 # retired (was detail)
 	p[14] = float(seed)
 	p[15] = float(int(crest_shape) + (4 if blend == BlendMode.MAX else 0) + (8 if use_path_heights else 0))
 	return p

@@ -1,11 +1,10 @@
 // Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 //
 // Path Range kernel. The model is in pasture_3d_path_range.h. Distances are the shared Pasture3DPathGeom
-// query, noise is the shared wang_hash (1D, along arc length) and fractal_grid (2D detail); threading is
+// query, noise is the shared wang_hash (1D, along arc length); threading is
 // Pasture3DThreadPool.
 
 #include "pasture_3d_path_range.h"
-#include "pasture_3d_fractal.h"
 #include "pasture_3d_geo_primitives.h"
 #include "pasture_3d_path_query.h"
 #include "pasture_3d_thread_pool.h"
@@ -37,7 +36,7 @@ PathRangeParams godot::path_range_params_from(const float *p_params, int p_count
 	r.spur_wander = std::clamp(at(10, r.spur_wander), 0.0, 2.0);
 	r.spur_levels = std::clamp((int)std::lround(at(11, r.spur_levels)), 0, 2);
 	r.blend_k = std::max(at(12, r.blend_k), 0.0);
-	r.detail = std::clamp(at(13, r.detail), 0.0, 1.0);
+	// Slot 13 is retired (was detail): texture is composed downstream from the outputs.
 	r.seed = (int)std::lround(at(14, r.seed));
 	const int flags = std::max((int)std::lround(at(15, 0.0)), 0);
 	r.crest_shape = std::clamp(flags & 3, 0, 2);
@@ -326,17 +325,6 @@ Dictionary godot::path_range_grid_geom(const Pasture3DPathGeom *p_crest, const P
 					}
 				}
 			});
-		}
-		// 4. Detail, scaled by the local field so it dies out at the foot.
-		if (P.detail > 0.0) {
-			const PackedFloat32Array nz = fractal_grid(p_gw, p_gh, p_rect, FRACTAL_STYLE_CRAGGY, 1.0,
-					P.peak_spacing / 4.0, 5, 2.0, 0.5, 1.0, P.seed, 0.0, 1.0, 1);
-			if (nz.size() == n) {
-				const float *np = nz.ptr();
-				for (int i = 0; i < n; i++) {
-					if (field[(size_t)i] > 0.0) field[(size_t)i] = std::max(field[(size_t)i] * (1.0 + P.detail * (double)np[i]), 0.0);
-				}
-			}
 		}
 	}
 
