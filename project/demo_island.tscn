@@ -14,7 +14,6 @@
 [ext_resource type="Script" uid="uid://dvx0o4df24s75" path="res://addons/pasture_3d/graph/pasture3d_graph_node_output.gd" id="8_m7f8t"]
 [ext_resource type="Script" uid="uid://t26vuji0r8wf" path="res://addons/pasture_3d/graph/pasture3d_graph_node_spline_source.gd" id="9_hur8n"]
 [ext_resource type="Script" uid="uid://rqm81y572bqi" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_fractalize.gd" id="9_l4h5e"]
-[ext_resource type="Script" uid="uid://ba4778g8emikc" path="res://addons/pasture_3d/graph/pasture3d_graph_node_leveler.gd" id="9_yof5q"]
 [ext_resource type="Script" uid="uid://dr7vsokvx1xjs" path="res://addons/pasture_3d/graph/pasture3d_terrain_graph.gd" id="10_p4out"]
 [ext_resource type="Script" uid="uid://cru60n6f8s2n1" path="res://addons/pasture_3d/graph/pasture3d_graph_node_coast_profile.gd" id="11_cbvqt"]
 [ext_resource type="Script" uid="uid://717mgmmlrimi" path="res://addons/pasture_3d/connectors/pasture3d_mod_graph.gd" id="11_kfedv"]
@@ -23,6 +22,8 @@
 [ext_resource type="Script" uid="uid://bb60it81vfrir" path="res://addons/pasture_3d/connectors/pasture3d_spline.gd" id="12_l4h5e"]
 [ext_resource type="Script" uid="uid://coiymb6vfvwoq" path="res://addons/pasture_3d/graph/pasture3d_graph_node_coastal_erosion.gd" id="12_wn1x5"]
 [ext_resource type="Script" uid="uid://v8cidb2f505x" path="res://addons/pasture_3d/graph/pasture3d_graph_node_wave_exposure.gd" id="13_l2dx1"]
+[ext_resource type="Script" uid="uid://dxbr6g22moqyx" path="res://addons/pasture_3d/graph/pasture3d_graph_node_islet_scatter.gd" id="13_wn1x5"]
+[ext_resource type="Script" uid="uid://bwvpdrmih3yt6" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_mask.gd" id="15_l2dx1"]
 [ext_resource type="Script" uid="uid://lp5oxart7q6x" path="res://addons/pasture_3d/graph/pasture3d_graph_node_remap.gd" id="18_kfedv"]
 [ext_resource type="Script" uid="uid://bindlf2awqi6e" path="res://addons/pasture_3d/graph/pasture3d_graph_node_blend.gd" id="18_p4out"]
 [ext_resource type="Script" uid="uid://dieimrnhn18o6" path="res://addons/pasture_3d/graph/pasture3d_graph_node_strata.gd" id="20_4img5"]
@@ -87,27 +88,17 @@ mesh_list = Array[Pasture3DMeshAsset]([SubResource("Pasture3DMeshAsset_r5rvi")])
 
 [sub_resource type="Resource" id="Resource_4img5"]
 script = ExtResource("5_hur8n")
-graph_position = Vector2(-440, 60)
+graph_position = Vector2(-880, 80)
 
 [sub_resource type="Resource" id="Resource_lhpge"]
 script = ExtResource("8_m7f8t")
-graph_position = Vector2(1660, 240)
-
-[sub_resource type="Resource" id="Resource_7kbp8"]
-script = ExtResource("9_yof5q")
-mode = 1
-feather_side = 1
-feather = 300.0
-path_width_scale = 100.0
-wall_depth = 50.0
-graph_position = Vector2(200, -120)
-preview_on = true
+graph_position = Vector2(1740, 260)
 
 [sub_resource type="Resource" id="Resource_0oqof"]
 script = ExtResource("8_ff8bn")
-points = PackedVector2Array(-614.5111, 9.549072, -357.2942, -150.56052, -327.19308, -516.21936, -185.65358, -715.3367, 35.82489, -700.22473, 247.15552, -454.24112, 462.64117, -579.49084, 272.9898, -865.73816, 936.24316, -1312.2762, 641.2189, -1614.0237, 401.72406, -1500.8688, 323.01, -1885.5531, 93.092224, -1679.1797, -276.63223, -1568.7285, -464.63257, -1852.6622, -721.195, -1631.6193, -1037.9944, -1998.6361, -1607.1824, -1928.4987, -1287.5134, -759.02966, -1188.4287, -291.52042, -903.4395, 518.35144, -1143.5925, 1010.24255, -1008.98, 1928.2373, -610.3426, 2189.4678, -120.34393, 2051.6143, 511.61694, 1876.3258, 575.0896, 1572.929, 845.661, 1510.9128, 1040.6858, 1713.0671, 1042.4956, 1409.8925, 883.26526, 1123.8317, 799.3015, 753.3179, 906.0996, 413.38208, 1169.675, 173.6742, 1524.0989, 284.4541, 1386.709, -8.986206, 1198.6284, -87.30377, 772.3446, 170.49007, 514.4518, 363.11685, 636.5597, 452.72455, 496.90027, 752.21356, 254.00867, 854.0144, 16.570374, 1036.3794, -415.35907, 898.1311, -636.9427, 558.67365, -596.73987, 253.34705)
-half_widths = PackedFloat32Array(25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25)
-heights = PackedFloat32Array(-15.124123, 1.1280714, 1.1136136, 1.3814619, 1.3084792, 1.3364221, 2.5330312, -11.573069, -48.329998, -48.597282, 1.5023028, -48.79951, -3.719501, 0.20801687, -7.320325, -0.43339396, -18.909311, -41.834496, 1.7948681, -9.898563, 1.6072351, -16.159313, -6.2210045, -27.590595, -48.73671, -3.8532324, -4.760648, 23.012133, 0.5874183, -0.027963638, -10.293829, -3.7060204, -1.4046457, 0.8964343, -41.19474, -46.448708, -7.1387463, 1.6932226, 1.310413, 20.343227, 6.2419453, 0.8904562, 6.4439354, 4.351281, 1.6081271, -7.31758)
+points = PackedVector2Array(-528.01807, -5.346863, -357.2942, -150.56052, -327.19308, -516.21936, -185.65358, -715.3367, 35.82489, -700.22473, 247.15552, -454.24112, 462.64117, -579.49084, 272.9898, -865.73816, 936.24316, -1312.2762, 641.2189, -1614.0237, 401.72406, -1500.8688, 323.01, -1885.5531, 93.092224, -1679.1797, -276.63223, -1568.7285, -464.63257, -1852.6622, -721.195, -1631.6193, -1037.9944, -1998.6361, -1607.1824, -1928.4987, -1287.5134, -759.02966, -1188.4287, -291.52042, -1081.683, 503.3053, -1304.4855, 1010.24255, -1008.98, 1928.2373, -610.3426, 2189.4678, -120.34393, 2051.6143, 511.61694, 2043.7694, 575.0896, 1865.1396, 845.661, 1722.8953, 1040.6858, 1901.8181, 1268.8284, 1409.8925, 1040.4388, 1123.8317, 909.78784, 873.28235, 944.812, 413.38208, 1125.9275, 368.56335, 1143.7201, 263.2746, 1256.0038, 292.18192, 1368.2811, 236.05272, 1539.717, 256.92712, 1446.1854, -61.994537, 1198.6284, -87.30377, 772.3446, 119.72627, 496.95465, 320.38046, 566.54877, 519.25604, 496.90027, 752.21356, 254.00867, 854.0144, 16.570374, 1036.3794, -415.35907, 898.1311, -535.6965, 543.84247, -476.3051, 309.24854)
+half_widths = PackedFloat32Array(25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25)
+heights = PackedFloat32Array(-15.124123, 1.1280714, 1.1136136, 1.3814619, 1.3084792, 1.3364221, 2.5330312, -11.573069, -48.329998, -48.597282, 1.5023028, -48.79951, -3.719501, 0.20801687, -7.320325, -0.43339396, -18.909311, -41.834496, 1.7948681, -9.898563, 1.6072351, -16.159313, -6.2210045, -27.590595, -48.73671, -3.8532324, -4.760648, 23.012133, 0.5874183, -0.027963638, -10.293829, -3.7060204, -1.4046457, -0.30825567, 0.8964343, -11.66758, -24.201237, -41.19474, -46.448708, -7.1387463, 1.6932226, 1.310413, 20.343227, 6.2419453, 0.8904562, 6.4439354, 4.351281, 1.6081271, -7.31758)
 closed = true
 source_label = "IslandBase/IslandSpline"
 sample_half_widths = PackedFloat32Array()
@@ -120,7 +111,7 @@ sample_skip = PackedByteArray()
 script = ExtResource("9_hur8n")
 spline_key = "IslandBase/IslandSpline"
 path = SubResource("Resource_0oqof")
-graph_position = Vector2(-1220, 220)
+graph_position = Vector2(-900, 260)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_m7f8t"]
@@ -131,43 +122,88 @@ sigma = 40.0
 persistence = 0.878
 seed = 97668
 pin_ends = false
-graph_position = Vector2(-320, 220)
+graph_position = Vector2(-160, 260)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_kfedv"]
 script = ExtResource("11_lmt3e")
 step = 25.0
-graph_position = Vector2(-780, 220)
+graph_position = Vector2(-540, 260)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_uxjvw"]
 script = ExtResource("11_cbvqt")
-shelf_depth = 24.0
+beach_height = 3.0
+cliff_height = 15.0
+cliff_width = 20.0
 graph_position = Vector2(220, 260)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_c5hbv"]
 script = ExtResource("12_wn1x5")
-graph_position = Vector2(1200, 260)
+graph_position = Vector2(1360, 260)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_b18ah"]
 script = ExtResource("13_l2dx1")
-graph_position = Vector2(700, 420)
+wind_direction = 315.0
+wind_strength = 0.75
+graph_position = Vector2(580, 360)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_6vjxx"]
+script = ExtResource("13_wn1x5")
+stack_fraction = 0.8
+graph_position = Vector2(980, 260)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_kg4qs"]
+script = ExtResource("31_yo6hg")
+graph_position = Vector2(980, 600)
+
+[sub_resource type="Resource" id="Resource_kye8j"]
+script = ExtResource("31_yo6hg")
+graph_position = Vector2(1220, 600)
+
+[sub_resource type="Resource" id="Resource_rcukl"]
+script = ExtResource("8_ff8bn")
+points = PackedVector2Array(-37.433258, 1542.1476, 61.11711, 1159.7693, 400.40088, 958.73676, 648.3352, 841.2892, 841.52594, 1154.7286, 1020.8579, 1363.9406, 1017.3801, 1511.216, 925.4347, 1683.3391, 846.0188, 1729.0961, 904.1249, 1811.723, 1225.2183, 1570.9296, 1169.1213, 1291.5187, 944.3954, 899.8049, 1002.28735, 586.4291, 394.15573, 514.072, 310.06473, 541.0741, -40.078552, 713.88055, -455.01007, 87.397766, -1093.7211, -110.60297, -1185.5874, 22.612427, -988.08386, 147.5716, -917.3982, 729.4507, -678.7374, 1392.5773, -331.6808, 1583.1398)
+half_widths = PackedFloat32Array(5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5)
+heights = PackedFloat32Array(88.60861, 45.047302, 47.717133, 42.697067, 48.12475, 37.77204, 42.995388, 37.12871, 20.428001, -0.25200272, 30.809032, 19.599972, -0.38427544, -0.8216555, -3.9200025, -0.17080724, -0.18369997, -0.19036984, 33.660973, -0.5676398, 8.297617, 29.708971, 79.74693, 83.30411)
+closed = true
+source_label = "IslandBase/BeachSpline1"
+sample_half_widths = PackedFloat32Array()
+sample_shoulders = PackedFloat32Array()
+sample_verges = PackedFloat32Array()
+sample_suppress = PackedByteArray()
+sample_skip = PackedByteArray()
+
+[sub_resource type="Resource" id="Resource_3wp7n"]
+script = ExtResource("9_hur8n")
+spline_key = "IslandBase/BeachSpline1"
+path = SubResource("Resource_rcukl")
+graph_position = Vector2(-500, 540)
+
+[sub_resource type="Resource" id="Resource_cwbmp"]
+script = ExtResource("15_l2dx1")
+feather = 60.0
+invert = true
+graph_position = Vector2(-140, 540)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_slh1f"]
 script = ExtResource("10_p4out")
 format_version = 3
-nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_7kbp8"), SubResource("Resource_lmt3e"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv"), SubResource("Resource_uxjvw"), SubResource("Resource_c5hbv"), SubResource("Resource_b18ah")])
-wires = [[0, &"height", 2, &"height"], [4, &"path", 2, &"loop"], [3, &"path", 5, &"path"], [5, &"path", 4, &"path"], [0, &"footprint", 2, &"area"], [4, &"path", 6, &"outline"], [6, &"height", 8, &"height"], [6, &"height", 7, &"height"], [8, &"exposure", 7, &"exposure"], [7, &"height", 1, &"result"]]
-output_node = 1
-metadata/_editor_selected_node = -1
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_lmt3e"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv"), SubResource("Resource_uxjvw"), SubResource("Resource_c5hbv"), SubResource("Resource_b18ah"), SubResource("Resource_6vjxx"), SubResource("Resource_kg4qs"), SubResource("Resource_kye8j"), SubResource("Resource_3wp7n"), SubResource("Resource_cwbmp")])
+wires = [[2, &"path", 4, &"path"], [4, &"path", 3, &"path"], [3, &"path", 5, &"outline"], [5, &"height", 7, &"height"], [6, &"height", 1, &"result"], [5, &"height", 8, &"height"], [7, &"exposure", 8, &"exposure"], [8, &"height", 6, &"height"], [7, &"exposure", 9, &"in"], [9, &"out", 10, &"in"], [10, &"out", 6, &"exposure"], [11, &"path", 12, &"path"], [12, &"mask", 5, &"cliff"]]
+output_node = 5
+metadata/_editor_selected_node = 12
 
 [sub_resource type="Resource" id="Resource_fbibf"]
 resource_name = "Terrain Graph"
 script = ExtResource("11_kfedv")
 graph = SubResource("Resource_slh1f")
+evaluation = 1
 
 [sub_resource type="Curve3D" id="Curve3D_aw5ld"]
 closed = true
@@ -180,10 +216,18 @@ point_count = 4
 [sub_resource type="Curve3D" id="Curve3D_yof5q"]
 closed = true
 _data = {
-"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -180.54846, -16.935093, -274.57675, 0, 0, 0, 0, 0, 0, 76.66846, -0.6828989, -434.68634, 0, 0, 0, 0, 0, 0, 106.76956, -0.6973567, -800.3452, 0, 0, 0, 0, 0, 0, 248.30907, -0.42950845, -999.4625, 0, 0, 0, 0, 0, 0, 469.78754, -0.5024911, -984.3506, 0, 0, 0, 0, 0, 0, 681.11816, -0.47454822, -738.36694, 0, 0, 0, 0, 0, 0, 896.6038, 0.7220609, -863.6167, 0, 0, 0, 0, 0, 0, 706.95245, -13.384039, -1149.864, 0, 0, 0, 0, 0, 0, 1370.2058, -50.14097, -1596.4021, 0, 0, 0, 0, 0, 0, 1075.1815, -50.408253, -1898.1495, 0, 0, 0, 0, 0, 0, 835.6867, -0.30866754, -1784.9946, 0, 0, 0, 0, 0, 0, 756.97266, -50.61048, -2169.679, 0, 0, 0, 0, 0, 0, 527.0549, -5.5304713, -1963.3055, 0, 0, 0, 0, 0, 0, 157.33041, -1.6029534, -1852.8544, 0, 0, 0, 0, 0, 0, -30.669922, -9.131295, -2136.788, 0, 0, 0, 0, 0, 0, -287.23236, -2.2443643, -1915.7451, 0, 0, 0, 0, 0, 0, -604.0318, -20.720282, -2282.762, 0, 0, 0, 0, 0, 0, -1173.2197, -43.645466, -2212.6245, 0, 0, 0, 0, 0, 0, -853.5507, -0.016102195, -1043.1555, 0, 0, 0, 0, 0, 0, -754.4661, -11.709534, -575.64624, 0, 0, 0, 0, 0, 0, -469.47687, -0.20373523, 234.22562, 0, 0, 0, 0, 0, 0, -709.6298, -17.970284, 726.1167, 0, 0, 0, 0, 0, 0, -575.01733, -8.031975, 1644.1115, 0, 0, 0, 0, 0, 0, -176.37994, -29.401566, 1905.3419, 0, 0, 0, 0, 0, 0, 313.6187, -50.54768, 1767.4884, 0, 0, 0, 0, 0, 0, 945.5796, -5.6642027, 1592.2, 0, 0, 0, 0, 0, 0, 1009.05225, -6.571618, 1288.8031, 0, 0, 0, 0, 0, 0, 1279.6237, 21.201162, 1226.787, 0, 0, 0, 0, 0, 0, 1474.6484, -1.223552, 1428.9413, 0, 0, 0, 0, 0, 0, 1476.4583, -1.838934, 1125.7666, 0, 0, 0, 0, 0, 0, 1317.2279, -12.104799, 839.7058, 0, 0, 0, 0, 0, 0, 1233.2642, -5.5169907, 469.19205, 0, 0, 0, 0, 0, 0, 1340.0623, -3.215616, 129.25626, 0, 0, 0, 0, 0, 0, 1603.6377, -0.914536, -110.45163, 0, 0, 0, 0, 0, 0, 1958.0615, -43.00571, 0.3282776, 0, 0, 0, 0, 0, 0, 1820.6716, -48.259678, -293.11203, 0, 0, 0, 0, 0, 0, 1632.5911, -8.949717, -371.4296, 0, 0, 0, 0, 0, 0, 1206.3073, -0.117747664, -113.63576, 0, 0, 0, 0, 0, 0, 948.4144, -0.5005573, 78.99103, 0, 0, 0, 0, 0, 0, 1070.5223, 18.532257, 168.59872, 0, 0, 0, 0, 0, 0, 930.8629, 4.430975, 468.08774, 0, 0, 0, 0, 0, 0, 687.9713, -0.9205141, 569.88855, 0, 0, 0, 0, 0, 0, 450.53302, 4.632965, 752.25354, 0, 0, 0, 0, 0, 0, 18.603577, 2.5403109, 614.00525, 0, 0, 0, 0, 0, 0, -202.98004, -0.20284319, 274.54782, 0, 0, 0, 0, 0, 0, -162.77722, -9.128551, -30.778778),
-"tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -94.05542, -16.935093, -289.4727, 0, 0, 0, 0, 0, 0, 76.66846, -0.6828989, -434.68634, 0, 0, 0, 0, 0, 0, 106.76956, -0.6973567, -800.3452, 0, 0, 0, 0, 0, 0, 248.30907, -0.42950845, -999.4625, 0, 0, 0, 0, 0, 0, 469.78754, -0.5024911, -984.3506, 0, 0, 0, 0, 0, 0, 681.11816, -0.47454822, -738.36694, 0, 0, 0, 0, 0, 0, 896.6038, 0.7220609, -863.6167, 0, 0, 0, 0, 0, 0, 706.95245, -13.384039, -1149.864, 0, 0, 0, 0, 0, 0, 1370.2058, -50.14097, -1596.4021, 0, 0, 0, 0, 0, 0, 1075.1815, -50.408253, -1898.1495, 0, 0, 0, 0, 0, 0, 835.6867, -0.30866754, -1784.9946, 0, 0, 0, 0, 0, 0, 756.97266, -50.61048, -2169.679, 0, 0, 0, 0, 0, 0, 527.0549, -5.5304713, -1963.3055, 0, 0, 0, 0, 0, 0, 157.33041, -1.6029534, -1852.8544, 0, 0, 0, 0, 0, 0, -30.669922, -9.131295, -2136.788, 0, 0, 0, 0, 0, 0, -287.23236, -2.2443643, -1915.7451, 0, 0, 0, 0, 0, 0, -604.0318, -20.720282, -2282.762, 0, 0, 0, 0, 0, 0, -1173.2197, -43.645466, -2212.6245, 0, 0, 0, 0, 0, 0, -853.5507, -0.016102195, -1043.1555, 0, 0, 0, 0, 0, 0, -754.4661, -11.709534, -575.64624, 0, 0, 0, 0, 0, 0, -647.72034, -0.20373523, 219.17947, 0, 0, 0, 0, 0, 0, -870.5228, -17.970284, 726.1167, 0, 0, 0, 0, 0, 0, -575.01733, -8.031975, 1644.1115, 0, 0, 0, 0, 0, 0, -176.37994, -29.401566, 1905.3419, 0, 0, 0, 0, 0, 0, 313.6187, -50.54768, 1767.4884, 0, 0, 0, 0, 0, 0, 945.5796, -5.6642027, 1759.6436, 0, 0, 0, 0, 0, 0, 1009.05225, -6.571618, 1581.0138, 0, 0, 0, 0, 0, 0, 1279.6237, 21.201162, 1438.7694, 0, 0, 0, 0, 0, 0, 1474.6484, -1.223552, 1617.6923, 0, 0, 0, 0, 0, 0, 1702.791, -1.838934, 1125.7666, 0, 0, 0, 0, 0, 0, 1474.4015, -12.104799, 839.7058, 0, 0, 0, 0, 0, 0, 1343.7505, -5.5169907, 589.1565, 0, 0, 0, 0, 0, 0, 1378.7747, -3.215616, 129.25626, 0, 0, 0, 0, 0, 0, 1559.8901, -2.119226, 84.43753, 0, 0, 0, 0, 0, 0, 1577.6827, -0.914536, -20.851227, 0, 0, 0, 0, 0, 0, 1689.9664, -13.47855, 8.056091, 0, 0, 0, 0, 0, 0, 1802.2438, -26.012207, -48.073105, 0, 0, 0, 0, 0, 0, 1973.6797, -43.00571, -27.1987, 0, 0, 0, 0, 0, 0, 1880.1481, -48.259678, -346.12036, 0, 0, 0, 0, 0, 0, 1632.5911, -8.949717, -371.4296, 0, 0, 0, 0, 0, 0, 1206.3073, -0.117747664, -164.39955, 0, 0, 0, 0, 0, 0, 930.9173, -0.5005573, 36.25464, 0, 0, 0, 0, 0, 0, 1000.5114, 18.532257, 235.13022, 0, 0, 0, 0, 0, 0, 930.8629, 4.430975, 468.08774, 0, 0, 0, 0, 0, 0, 687.9713, -0.9205141, 569.88855, 0, 0, 0, 0, 0, 0, 450.53302, 4.632965, 752.25354, 0, 0, 0, 0, 0, 0, 18.603577, 2.5403109, 614.00525, 0, 0, 0, 0, 0, 0, -101.733826, -0.20284319, 259.71664, 0, 0, 0, 0, 0, 0, -42.34247, -9.128551, 25.122711),
+"tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 }
-point_count = 46
+point_count = 49
+
+[sub_resource type="Curve3D" id="Curve3D_wn1x5"]
+closed = true
+_data = {
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -247.71815, 86.79764, 732.3358, 0, 0, 0, 0, 0, 0, -149.16779, 43.236332, 349.95752, 0, 0, 0, 0, 0, 0, 190.11598, 45.906162, 148.92499, 0, 0, 0, 0, 0, 0, 438.0503, 40.886097, 31.477417, 0, 0, 0, 0, 0, 0, 631.241, 46.313778, 344.91687, 0, 0, 0, 0, 0, 0, 810.573, 35.96107, 554.1288, 0, 0, 0, 0, 0, 0, 807.0952, 41.184418, 701.4042, 0, 0, 0, 0, 0, 0, 715.1498, 35.31774, 873.52734, 0, 0, 0, 0, 0, 0, 635.7339, 18.617031, 919.2843, 0, 0, 0, 0, 0, 0, 693.83997, -2.062973, 1001.91125, 0, 0, 0, 0, 0, 0, 1014.93335, 28.998062, 761.1178, 0, 0, 0, 0, 0, 0, 958.8364, 17.789001, 481.7069, 0, 0, 0, 0, 0, 0, 734.1105, -2.1952457, 89.9931, 0, 0, 0, 0, 0, 0, 792.00244, -2.6326258, -223.38269, 0, 0, 0, 0, 0, 0, 183.87083, -5.730973, -295.73975, 0, 0, 0, 0, 0, 0, 99.77983, -1.9817775, -268.73767, 0, 0, 0, 0, 0, 0, -250.36345, -1.9946703, -95.93121, 0, 0, 0, 0, 0, 0, -665.295, -2.0013402, -722.414, 0, 0, 0, 0, 0, 0, -1304.006, 31.850002, -920.41473, 0, 0, 0, 0, 0, 0, -1395.8723, -2.3786101, -787.19934, 0, 0, 0, 0, 0, 0, -1198.3688, 6.486647, -662.2402, 0, 0, 0, 0, 0, 0, -1127.6831, 27.898, -80.361084, 0, 0, 0, 0, 0, 0, -889.02234, 77.93596, 582.7655, 0, 0, 0, 0, 0, 0, -541.9657, 81.49313, 773.328),
+"tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+}
+point_count = 24
 
 [sub_resource type="Resource" id="Resource_3jqu0"]
 script = ExtResource("5_hur8n")
@@ -873,7 +917,7 @@ crease_smoothing = 20.0
 _layer_owner = "pasture3d_brush:IslandBase"
 modifier_margin = 0.0
 live_preview_resolution = 2
-_preview_coarse_baked = true
+_preview_coarse_baked = false
 bake_scale = 2
 modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_fbibf")])
 
@@ -891,6 +935,17 @@ metadata/_custom_type_script = "uid://bb60it81vfrir"
 
 [node name="Line1" type="Path3D" parent="Pasture3D/IslandBase/IslandSpline" unique_id=1319995832]
 curve = SubResource("Curve3D_yof5q")
+
+[node name="BeachSpline1" type="Node3D" parent="Pasture3D/IslandBase" unique_id=1260746430 node_paths=PackedStringArray("terrain")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 113.63855, 0, 749.5969)
+script = ExtResource("12_l4h5e")
+closed = true
+terrain = NodePath("../..")
+snap_to_surface = false
+metadata/_custom_type_script = "uid://bb60it81vfrir"
+
+[node name="Line1" type="Path3D" parent="Pasture3D/IslandBase/BeachSpline1" unique_id=3847469]
+curve = SubResource("Curve3D_wn1x5")
 
 [node name="IslandShape" type="Node3D" parent="Pasture3D" unique_id=1329462265 node_paths=PackedStringArray("terrain")]
 visible = false
@@ -1284,7 +1339,6 @@ manager = NodePath("../../Pasture3DPoolManager")
 
 [node name="Pasture3DOcean" type="Pasture3DOcean" parent="Pasture3D" unique_id=1434868995]
 material = ExtResource("7_hqvrn")
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -5, 0)
 
 [node name="MountainsRelief" type="Node3D" parent="Pasture3D" unique_id=382047406 node_paths=PackedStringArray("terrain")]
 visible = false
