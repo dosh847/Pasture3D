@@ -73,6 +73,12 @@ extends Pasture3DGraphNode
 	set(v):
 		carry_reach = maxf(v, 0.0)
 		_param_changed()
+## Blurs the carried score over land, metres. Without it the seams between shore stretches are steps,
+## which a Coast Profile turns into walls inland. 0 = no blur.
+@export_range(0.0, 500.0, 1.0, "or_greater") var carry_smooth: float = 50.0:
+	set(v):
+		carry_smooth = maxf(v, 0.0)
+		_param_changed()
 ## Width of the cliff/beach transition in score units. Small = hard switch.
 @export_range(0.001, 1.0, 0.01) var softness: float = 0.2:
 	set(v):
@@ -118,6 +124,7 @@ func _params() -> PackedFloat32Array:
 	p[11] = hardness_scale
 	p[12] = hardness_variation
 	p[13] = carry_reach
+	p[14] = carry_smooth
 	return p
 
 

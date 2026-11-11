@@ -19,7 +19,9 @@
 # SG  no standard mask (port 0 is a MASK), and the op is in graph_op_ids. Control: a bogus op is not.
 # SH  carry_reach: a cell 40 m inland of the west shore reads its shore cell's cliff exactly, and a cell
 #     beyond carry_reach reads the same as with carry_reach 0. Control: carry_reach 0 reads differently 40 m
-#     inland than at the shore.
+#     inland than at the shore. (carry_smooth 0.)
+# SI  carry_smooth: under an exposure ramping west to east, the largest cliff step between neighbouring
+#     land cells 16+ m from the shore is under half the unsmoothed one. Control: carry_smooth 0 steps > 0.2.
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/GraphShoreCharacterGate.tscn
 extends Node
@@ -47,7 +49,8 @@ func _ready() -> void:
 		_sf()
 		_sg()
 		_sh()
-	_check(_ran == 8, "all 8 criteria ran (%d)" % _ran)
+		_si()
+	_check(_ran == 9, "all 9 criteria ran (%d)" % _ran)
 	print("\n=== %s (%d failures) ===\n" % ["SHORE CHARACTER PASS" if _fail == 0 else "SHORE CHARACTER FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -257,12 +260,48 @@ func _sh() -> void:
 	var n := _node()
 	n.softness = 1.0
 	n.carry_reach = 100.0
+	n.carry_smooth = 0.0
 	var c: PackedFloat32Array = _run(n, _island(), PackedFloat32Array())[0]
 	_check(c[inland] == c[shore], "40 m inland %.4f, shore %.4f" % [c[inland], c[shore]])
 	n.carry_reach = 0.0
 	var o: PackedFloat32Array = _run(n, _island(), PackedFloat32Array())[0]
 	_check(c[deep] == o[deep], "beyond carry_reach unchanged (%.4f vs %.4f)" % [c[deep], o[deep]])
 	_check(absf(o[inland] - o[shore]) > 0.01, "control: carry 0 reads %.4f inland vs %.4f" % [o[inland], o[shore]])
+	_ran += 1
+
+
+## Largest 4-neighbour cliff step between land cells at least 2 cells from any water cell.
+func _max_step(p_c: PackedFloat32Array, p_h: PackedFloat32Array) -> float:
+	var m := 0.0
+	for iz in range(2, N - 3):
+		for ix in range(2, N - 3):
+			var ok := true
+			for oz in range(-2, 3):
+				for ox in range(-2, 4):
+					if p_h[(iz + oz) * N + ix + ox] < 0.0:
+						ok = false
+			if not ok:
+				continue
+			var i := iz * N + ix
+			m = maxf(m, maxf(absf(p_c[i + 1] - p_c[i]), absf(p_c[i + N] - p_c[i])))
+	return m
+
+
+func _si() -> void:
+	print("[SI] the carried score has no seams")
+	var e := PackedFloat32Array()
+	e.resize(N * N)
+	for i in N * N:
+		e[i] = float(i % N) / float(N - 1)
+	var h := _island()
+	var n := _only("exposure")
+	n.softness = 1.0
+	n.carry_smooth = 0.0
+	var raw := _max_step(_run(n, h, e)[0], h)
+	n.carry_smooth = 50.0
+	var smooth := _max_step(_run(n, h, e)[0], h)
+	_check(smooth < 0.5 * raw, "largest step %.4f smoothed vs %.4f" % [smooth, raw])
+	_check(raw > 0.2, "control: carry_smooth 0 steps %.4f" % raw)
 	_ran += 1
 
 

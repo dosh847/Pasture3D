@@ -25,6 +25,10 @@
 //              signals all lean to beach (more land around, less exposure). Carrying makes a cell on the
 //              rise read the coast it belongs to. carry_reach 0 is the per-cell score, as originally built.
 //              Only cliff/beach are carried; hardness and erosion stay per cell.
+//              Nearest-shore carry is a step at every seam between shore cells (and at carry_reach), and
+//              Coast Profile turns a step in cliff into a step in HEIGHT everywhere inland (its inland ramp
+//              starts at beach + rise width, which cliff sets). So the carried score is then box-meaned over
+//              land cells within carry_smooth (shared box_mean_solve). carry_smooth 0 leaves the steps.
 //
 // The outputs are defined everywhere but only meaningful within about bay_radius of the shore.
 // Known limit: no valley-mouth signal. A native op takes one aux grid, and `exposure` uses it; fold a flow
@@ -55,6 +59,7 @@ struct ShoreCharacterParams {
 	double hardness_scale = 400.0; // metres
 	double hardness_variation = 0.6; // 0..1
 	double carry_reach = 200.0; // metres inland a shoreline score is carried; 0 = per cell
+	double carry_smooth = 50.0; // metres, box-mean radius over land applied to the carried score
 };
 
 ShoreCharacterParams shore_character_params_from(const float *p_params, int p_count);

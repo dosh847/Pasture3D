@@ -276,3 +276,11 @@ within `carry_reach` metres takes its nearest shore cell's score, by the new sha
 index). Only cliff/beach are carried; hardness and erosion stay per cell. `carry_reach` 0 is the original
 per-cell score. Gate SH: 40 m inland equals the shore exactly, a cell beyond reach is unchanged, control
 carry 0 differs. SB runs at carry 0 because it tests the exposure signal itself.
+
+### Follow-up (2026-11-11) — `carry_smooth`
+
+In the editor, carrying produced long walls inland. Nearest-shore carry is a step at every seam between
+shore stretches and at `carry_reach`, and Coast Profile's inland ramp starts at `beach_width + rise width`,
+which `cliff` sets, so a step in `cliff` became a step in height everywhere inland. `carry_smooth` (slot 14,
+50 m) box-means the carried score over land cells (shared `box_mean_solve`). Gate SI: the largest
+neighbour step 16+ m from shore falls from 0.27 to 0.03.

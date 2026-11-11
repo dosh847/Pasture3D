@@ -35,6 +35,7 @@ ShoreCharacterParams godot::shore_character_params_from(const float *p_params, i
 	r.hardness_scale = std::max(at(11, r.hardness_scale), 1.0);
 	r.hardness_variation = std::clamp(at(12, r.hardness_variation), 0.0, 1.0);
 	r.carry_reach = std::max(at(13, r.carry_reach), 0.0);
+	r.carry_smooth = std::max(at(14, r.carry_smooth), 0.0);
 	return r;
 }
 
@@ -161,6 +162,20 @@ Dictionary godot::shore_character_grid(const PackedFloat32Array &p_height, const
 				}
 			}
 			raw.swap(carried);
+			// Smooth the seams over land only: water is NaN, which the box mean skips.
+			if (P.carry_smooth > 0.0) {
+				PackedFloat32Array lr;
+				lr.resize(n);
+				float *lrw = lr.ptrw();
+				for (int i = 0; i < n; i++) lrw[i] = lw[i] == 1.f ? (float)raw[(size_t)i] : NAN;
+				const PackedFloat32Array sm = box_mean_solve(lr, p_gw, p_gh, p_rect, P.carry_smooth);
+				if (sm.size() == n) {
+					const float *smr = sm.ptr();
+					for (int i = 0; i < n; i++) {
+						if (lw[i] == 1.f && std::isfinite(smr[i])) raw[(size_t)i] = (double)smr[i];
+					}
+				}
+			}
 		}
 	}
 
