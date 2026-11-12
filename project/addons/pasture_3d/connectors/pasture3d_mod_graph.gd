@@ -35,13 +35,27 @@ extends Pasture3DNode
 			graph.changed.disconnect(_on_graph_changed)
 		if graph != null and graph.parameters_changed.is_connected(_on_graph_params_changed):
 			graph.parameters_changed.disconnect(_on_graph_params_changed)
+		if graph != null and graph.sinks_changed.is_connected(_on_graph_sinks_changed):
+			graph.sinks_changed.disconnect(_on_graph_sinks_changed)
 		graph = v
+		if graph != null and not graph.sinks_changed.is_connected(_on_graph_sinks_changed):
+			graph.sinks_changed.connect(_on_graph_sinks_changed)
 		if graph != null and not graph.changed.is_connected(_on_graph_changed):
 			graph.changed.connect(_on_graph_changed)
 		if graph != null and not graph.parameters_changed.is_connected(_on_graph_params_changed):
 			graph.parameters_changed.connect(_on_graph_params_changed)
 		notify_property_list_changed()
 		_touch()
+
+## Only the sinks' colours moved (Pasture3DTerrainGraph.sinks_changed). Not a `changed`: the height this
+## modifier contributes is the same, so the host re-runs the sink pass alone, Frozen or Live alike -- it
+## solves nothing, so there is no expensive work for Frozen to hold back.
+signal sinks_edited(mod: Pasture3DNodeGraph)
+
+
+func _on_graph_sinks_changed(_p_index: int) -> void:
+	sinks_edited.emit(self)
+
 
 func _on_graph_changed() -> void:
 	if evaluation == Evaluation.FROZEN:
@@ -782,9 +796,26 @@ var identity_is_active := false
 
 
 ## An identity graph is inactive: it paints the surface it was given, so it costs nothing and reaches nothing.
+## A graph with no Output is active when it has bake-time sinks (`is_sinks_only`): the Output and the sinks
+## are both terminals of a bake, and requiring the Output alone dropped a paint-only graph from the stack, so
+## its sinks never ran.
 func is_active() -> bool:
-	return (enabled and graph != null and not is_zero_approx(strength) and graph.output_index() >= 0
-			and (identity_is_active or not graph.is_identity()))
+	if not enabled or graph == null:
+		return false
+	if graph.output_index() < 0:
+		return is_sinks_only()
+	return not is_zero_approx(strength) and (identity_is_active or not graph.is_identity())
+
+
+## A graph with no Output and at least one bake-time sink (a channel or a runtime publish sink; export sinks
+## run on demand, not per bake). It paints and publishes, and contributes no height: `_apply_graph_step`
+## records the surface its sinks read and hands the grid back unchanged. Strength is a height amount, so it
+## does not apply.
+func is_sinks_only() -> bool:
+	if graph == null or not graph.is_compatible() or graph.output_index() >= 0:
+		return false
+	return (not Pasture3DGraphChannelSinks.sinks_of(graph).is_empty()
+			or not Pasture3DGraphRuntimeSinks.sinks_of(graph).is_empty())
 
 
 func _validate_property(property: Dictionary) -> void:

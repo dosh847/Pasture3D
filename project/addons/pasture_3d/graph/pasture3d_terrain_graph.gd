@@ -32,6 +32,11 @@ signal structure_changed()
 ## emitter is not in the array.
 signal node_changed(index: int)
 
+## A colour-only node that feeds a sink, and not the Output, changed. The bake's height is untouched and
+## `_revision` does not move; a host re-runs its sink pass over the surface it last baked
+## (`Pasture3DTerrainBrush._rerun_graph_sinks`). Carries the node's index.
+signal sinks_changed(index: int)
+
 ## The declared parameter LIST changed: one added, removed, renamed, retyped, or given a new default or
 ## range. A host listens to this to rebuild the inspector properties it exposes for them (ports spec §10.2).
 signal parameters_changed()
@@ -284,17 +289,55 @@ func _on_node_changed(p_node: Pasture3DGraphNode = null) -> void:
 	# The editor hears about every edit; only the bake is filtered. GraphEditModelGate [E].
 	node_changed.emit(n_idx)
 
-	var affects_output := p_node == null
-	if n_idx >= 0:
-		var out_idx := output_index()
-		# No output at all is the graph being authored, not a node proven irrelevant: there is nothing for
-		# the edit to be downstream OF, and nothing baked for a spurious re-bake to cost. Treating that as
-		# "does not affect the output" left `_revision` — and so every cache keyed on `content_key()` —
-		# frozen for the whole time a graph had no output node.
-		affects_output = get_downstream_nodes(n_idx).has(out_idx) if out_idx >= 0 else true
-
-	if affects_output:
+	if p_node == null:
 		emit_changed()
+		return
+	if n_idx < 0:
+		return
+	# A bake has TWO kinds of terminal: the Output, and every sink. An edit matters to the bake when it
+	# reaches either. Checking the Output alone was a bug: a node feeding only a Color Sink re-baked nothing,
+	# and the sink kept painting the old value until something else baked.
+	var out_idx := output_index()
+	var feeds_output := false
+	var feeds_sink := false
+	for d in get_downstream_nodes(n_idx):
+		if d == out_idx:
+			feeds_output = true
+		elif nodes[d] != null and _is_sink_node(nodes[d]):
+			feeds_sink = true
+	# No output at all is the graph being authored, not a node proven irrelevant: there is nothing for the
+	# edit to be downstream OF, and nothing baked for a spurious re-bake to cost. Treating that as "does not
+	# affect the bake" left `_revision` — and so every cache keyed on `content_key()` — frozen for the whole
+	# time a graph had no output node.
+	# A paint-only graph (sinks, no Output) is not being authored toward an Output, so an edit reaching one
+	# of its sinks takes the sink rule below rather than this blanket one.
+	if out_idx < 0 and not feeds_sink:
+		feeds_output = true
+	if not feeds_output and not feeds_sink:
+		return
+
+	# Reaching a sink but not the Output, a colour-only node takes the cheap route: a COLOR wire never enters
+	# a compiled program and `_color_of` reads node values at sink time, so no field, tap or solve is stale.
+	# `sinks_changed` asks the host to re-run its sink pass over the surface it last baked, with no revision
+	# bump, so no cache keyed on it misses. Anything else reaching a sink (a mask's source, the sink itself)
+	# is content: taps and `_native_ok_cache` key on `_revision`, so it re-bakes like an Output edit.
+	if not feeds_output and _is_colour_only(p_node):
+		sinks_changed.emit(n_idx)
+	else:
+		emit_changed()
+
+
+## Every output is COLOR. A sink has no outputs, so it is never colour-only.
+static func _is_colour_only(p_n: Pasture3DGraphNode) -> bool:
+	if p_n == null:
+		return false
+	var types := p_n.output_port_types()
+	if types.is_empty():
+		return false
+	for t in types:
+		if t != Pasture3DGraphNode.PortType.COLOR:
+			return false
+	return true
 
 
 ## Returns all downstream node indices that depend on `p_start_node` (including `p_start_node` itself).

@@ -187,6 +187,7 @@ func edit_graph(p_graph: Pasture3DTerrainGraph, p_mod: Pasture3DNodeGraph = null
 	_refresh_crumbs()
 	_preview_color_roots.clear()
 	_preview_blend_mask_slot.clear()
+	_last_slot_to_field = {}
 	if graph != null:
 		if not graph.changed.is_connected(_on_graph_changed):
 			graph.changed.connect(_on_graph_changed)
@@ -228,8 +229,76 @@ func _structure_hash() -> int:
 	return h
 
 
-func _on_node_param_changed(_p_index: int) -> void:
-	_schedule_preview_refresh()
+## What one node's edit costs the previews. NONE: nothing on screen reads the node. COLOR: only colour
+## swatches read it, and a colour edit cannot move any tapped field (COLOR wires never enter the program),
+## so the swatches redraw from the fields of the last pass. FULL: recompile and re-tap.
+enum PreviewRefresh { NONE, COLOR, FULL }
+
+
+## Answered for `_on_node_param_changed`, and public so a headless gate can assert the decision (the debounce
+## timer it feeds is editor-only).
+##
+## Every node edit used to schedule a FULL refresh: a whole-graph compile, a tap pass over every previewed
+## node, and the inspector's synchronous 512 px pass. A colour picker emits per mouse move, so editing an
+## unwired Const Color on a large graph re-solved the graph continuously.
+func preview_refresh_for_edit(p_index: int) -> PreviewRefresh:
+	if graph == null or p_index < 0 or p_index >= graph.nodes.size() or graph.nodes[p_index] == null:
+		return PreviewRefresh.FULL
+	var watched: Dictionary = {}
+	for i in _preview_rects:
+		if i is int and i >= 0 and i < graph.nodes.size() and graph.nodes[i] != null and graph.nodes[i].preview_on:
+			watched[i] = true
+	var inspected := -1
+	if inspect_dock != null and is_instance_valid(inspect_dock) and bool(inspect_dock.dock_open):
+		inspected = int(inspect_dock.node_index)
+		if inspected >= 0:
+			watched[inspected] = true
+	if watched.is_empty():
+		return PreviewRefresh.NONE
+	var hits: Array = []
+	for d in graph.get_downstream_nodes(p_index):
+		if watched.has(d):
+			hits.append(d)
+	if hits.is_empty():
+		return PreviewRefresh.NONE
+	var types: PackedInt32Array = graph.nodes[p_index].output_port_types()
+	var colour_only := not types.is_empty()
+	for t in types:
+		if t != Pasture3DGraphNode.PortType.COLOR:
+			colour_only = false
+			break
+	if not colour_only:
+		return PreviewRefresh.FULL
+	for h in hits:
+		# A swatch the last pass did not set up (a preview just switched on) has no mask slot recorded yet.
+		if h != inspected and not _preview_color_roots.has(h):
+			return PreviewRefresh.FULL
+	return PreviewRefresh.COLOR
+
+
+## The fields the last applied tap pass served, by slot: what a colour-only edit redraws from.
+var _last_slot_to_field: Dictionary = {}
+var _color_redraw_pending := false
+
+
+func _on_node_param_changed(p_index: int) -> void:
+	match preview_refresh_for_edit(p_index):
+		PreviewRefresh.NONE:
+			pass
+		PreviewRefresh.COLOR:
+			# Coalesced to once per frame: a picker drag emits faster than a Blend swatch redraws.
+			if not _color_redraw_pending:
+				_color_redraw_pending = true
+				_redraw_color_previews.call_deferred()
+		_:
+			_schedule_preview_refresh()
+
+
+func _redraw_color_previews() -> void:
+	_color_redraw_pending = false
+	if graph == null or _preview_color_roots.is_empty():
+		return
+	_render_color_previews(_preview_color_roots, _last_slot_to_field, _preview_blend_mask_slot, _preview_pixels())
 
 
 func _on_graph_changed() -> void:
@@ -2633,6 +2702,9 @@ func _refresh_previews() -> void:
 
 	_preview_color_roots = color_roots
 	_preview_blend_mask_slot = blend_mask_slot
+	# Paired with the slots above: a colour redraw while this pass is in flight must not read the old
+	# program's fields under the new program's slot numbers. It waits for the apply instead.
+	_last_slot_to_field = {}
 	last_preview_taps = {"count": tap_slots.size(), "path_count": path_roots.size(), "color_count": color_roots.size()}
 
 	var px := _preview_pixels()
@@ -3036,6 +3108,7 @@ func _apply_preview_textures(p_token: int, p_results: Dictionary, p_px: int = PR
 			tr.texture = ImageTexture.create_from_image(img)
 
 	var slot_to_field: Dictionary = p_results.get("_slot_to_field", {})
+	_last_slot_to_field = slot_to_field
 	if not _preview_color_roots.is_empty():
 		_render_color_previews(_preview_color_roots, slot_to_field, _preview_blend_mask_slot, p_px)
 	last_preview_applied = p_token

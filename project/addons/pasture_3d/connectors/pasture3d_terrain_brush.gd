@@ -2022,6 +2022,9 @@ func _has_graph_modifier() -> bool:
 		return false
 	for m in modifiers:
 		if m is Pasture3DNodeGraph and m.is_active():
+			# Nothing to solve off the main thread: its step only records a surface.
+			if m.is_sinks_only():
+				continue
 			if m.evaluation == Pasture3DNode.Evaluation.FROZEN and m.has_cache():
 				continue
 			return true
@@ -6135,6 +6138,55 @@ func _bind_modifiers(p_list: Array, p_connect: bool) -> void:
 			m.changed.connect(_on_modifier_changed)
 		elif not p_connect and live:
 			m.changed.disconnect(_on_modifier_changed)
+		if m is Pasture3DNodeGraph:
+			var sl: bool = m.sinks_edited.is_connected(_on_graph_sinks_edited)
+			if p_connect and not sl:
+				m.sinks_edited.connect(_on_graph_sinks_edited)
+			elif not p_connect and sl:
+				m.sinks_edited.disconnect(_on_graph_sinks_edited)
+
+
+## Graph modifiers whose sinks wait for `_flush_graph_sink_reruns`, keyed by instance id.
+var _pending_sink_reruns: Dictionary = {}
+
+
+## A colour that only a sink reads was edited (Pasture3DNodeGraph.sinks_edited). Re-run that modifier's sink
+## pass over the surface its graph last read -- no raster, no solve. Coalesced to once per frame, because
+## a colour picker emits per mouse move.
+func _on_graph_sinks_edited(p_mod: Pasture3DNodeGraph) -> void:
+	if p_mod == null or not modifiers.has(p_mod):
+		return
+	if _pending_sink_reruns.is_empty():
+		_flush_graph_sink_reruns.call_deferred()
+	_pending_sink_reruns[p_mod.get_instance_id()] = p_mod
+
+
+func _flush_graph_sink_reruns() -> void:
+	var mods: Array = _pending_sink_reruns.values()
+	_pending_sink_reruns.clear()
+	for m in mods:
+		_rerun_graph_sinks(m)
+
+
+## Returns true when the sink pass ran; false when there was nothing to run it over. A bake in flight needs
+## nothing from here: it ends in `_run_stack_graph_sinks`, which reads the colours as they are then.
+func _rerun_graph_sinks(p_mod: Pasture3DNodeGraph) -> bool:
+	if p_mod == null or p_mod.graph == null or not p_mod.is_active() or not modifiers.has(p_mod):
+		return false
+	if not terrain or not terrain.data:
+		return false
+	if p_mod.last_gw <= 0 or p_mod.last_gh <= 0 \
+			or p_mod.last_input_surface.size() != p_mod.last_gw * p_mod.last_gh:
+		# Never baked this session, so there is no surface to paint over. A normal bake records one and
+		# runs the sinks with it; same gate as any other modifier edit.
+		_on_modifier_changed()
+		return false
+	p_mod.stamp_params(self)
+	_run_graph_sinks(p_mod.graph, p_mod.last_gw, p_mod.last_gh, p_mod.last_rect, p_mod.last_input_surface,
+			p_mod.sink_taps_for(p_mod.last_input_surface, p_mod.last_gw, p_mod.last_gh))
+	_run_graph_runtime_sinks(p_mod.graph, p_mod.last_gw, p_mod.last_gh, p_mod.last_rect,
+			p_mod.last_input_surface)
+	return true
 
 
 func _on_modifier_changed() -> void:
@@ -7098,6 +7150,10 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 			mm, mf, profile, g.outward_reach())
 	# The Input node's footprint pin is this mask: stamped before anything below compiles or evaluates.
 	g.set_host_footprint(PackedFloat32Array(Array(mask)), gw, gh, rect)
+	# A paint-only graph (sinks, no Output) has no height to composite. The surface and footprint its sinks
+	# read are recorded above; `_run_stack_graph_sinks` runs them after the raster.
+	if m.is_sinks_only():
+		return p_vals
 
 	# ---- FROZEN cache (mirrors _apply_erosion_step §6.3) ----
 	#
