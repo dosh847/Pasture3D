@@ -34,6 +34,7 @@
 [ext_resource type="Script" uid="uid://ybwedanry756" path="res://addons/pasture_3d/graph/pasture3d_graph_node_hydraulic_saleve.gd" id="33_3nkqr"]
 [ext_resource type="Script" uid="uid://bdacqpu4t22i4" path="res://addons/pasture_3d/graph/pasture3d_graph_node_param.gd" id="33_ni3tk"]
 [ext_resource type="Script" uid="uid://cfpxlr1nx1i5x" path="res://addons/pasture_3d/graph/pasture3d_graph_node_expand_shrink.gd" id="38_7swx1"]
+[ext_resource type="Script" uid="uid://ex1riwe31v4r" path="res://addons/pasture_3d/graph/pasture3d_graph_node_spectral_equalizer.gd" id="38_b685y"]
 [ext_resource type="Script" uid="uid://br5raorbyrwhw" path="res://addons/pasture_3d/connectors/pasture3d_mound.gd" id="41_a68ip"]
 [ext_resource type="Script" uid="uid://djc6yocdtcwwh" path="res://addons/pasture_3d/graph/pasture3d_graph_node_mask_feather.gd" id="41_cx7fp"]
 [ext_resource type="Script" uid="uid://bbgjfav0p7rhm" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_range.gd" id="50_0h8r1"]
@@ -529,7 +530,7 @@ graph_position = Vector2(140, 480)
 
 [sub_resource type="Resource" id="Resource_nkn6g"]
 script = ExtResource("8_m7f8t")
-graph_position = Vector2(2600, 440)
+graph_position = Vector2(3200, 480)
 
 [sub_resource type="Resource" id="Resource_8q7wg"]
 script = ExtResource("33_ni3tk")
@@ -538,7 +539,7 @@ graph_position = Vector2(-660, 740)
 
 [sub_resource type="Resource" id="Resource_3nkqr"]
 script = ExtResource("50_0h8r1")
-peak_height = 25.0
+peak_height = 60.0
 peak_spacing = 60.0
 end_taper = 5.0
 width_ratio = 3.0
@@ -564,6 +565,9 @@ preview_on = true
 
 [sub_resource type="Resource" id="Resource_3w2eb"]
 script = ExtResource("30_7swx1")
+drainage_exponent = 0.31
+drainage_noise = 0.33
+strength = 0.47
 graph_position = Vector2(1760, 660)
 
 [sub_resource type="Resource" id="Resource_yom8w"]
@@ -571,7 +575,6 @@ script = ExtResource("38_7swx1")
 mode = 1
 radius = 30.0
 graph_position = Vector2(1020, 920)
-preview_on = true
 
 [sub_resource type="Resource" id="Resource_6rwob"]
 script = ExtResource("41_cx7fp")
@@ -581,7 +584,12 @@ graph_position = Vector2(1380, 840)
 [sub_resource type="Resource" id="Resource_o2us2"]
 script = ExtResource("18_p4out")
 mode = 3
-graph_position = Vector2(2300, 480)
+graph_position = Vector2(2780, 480)
+
+[sub_resource type="Resource" id="Resource_wn1x5"]
+script = ExtResource("38_b685y")
+micro_gain = 0.25
+graph_position = Vector2(2320, 660)
 
 [sub_resource type="Resource" id="Resource_1p3tm"]
 script = ExtResource("12_cbvqt")
@@ -591,11 +599,11 @@ type = 3
 [sub_resource type="Resource" id="Resource_a68ip"]
 script = ExtResource("10_p4out")
 format_version = 3
-nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_yo6hg"), SubResource("Resource_nkn6g"), SubResource("Resource_8q7wg"), SubResource("Resource_3nkqr"), SubResource("Resource_ukorx"), SubResource("Resource_cbvqt"), SubResource("Resource_3w2eb"), SubResource("Resource_yom8w"), SubResource("Resource_6rwob"), SubResource("Resource_o2us2")])
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_yo6hg"), SubResource("Resource_nkn6g"), SubResource("Resource_8q7wg"), SubResource("Resource_3nkqr"), SubResource("Resource_ukorx"), SubResource("Resource_cbvqt"), SubResource("Resource_3w2eb"), SubResource("Resource_yom8w"), SubResource("Resource_6rwob"), SubResource("Resource_o2us2"), SubResource("Resource_wn1x5")])
 parameters = Array[ExtResource("12_cbvqt")]([SubResource("Resource_1p3tm")])
-wires = [[0, &"height", 3, &"height"], [2, &"out", 4, &"path"], [4, &"path", 5, &"path"], [5, &"path", 3, &"path"], [3, &"height", 6, &"in"], [3, &"footprint", 7, &"in"], [7, &"out", 8, &"in"], [0, &"height", 9, &"a"], [6, &"height", 9, &"b"], [9, &"out", 1, &"result"], [8, &"out", 6, &"mask"]]
+wires = [[0, &"height", 3, &"height"], [2, &"out", 4, &"path"], [4, &"path", 5, &"path"], [5, &"path", 3, &"path"], [3, &"height", 6, &"in"], [3, &"footprint", 7, &"in"], [7, &"out", 8, &"in"], [0, &"height", 9, &"a"], [9, &"out", 1, &"result"], [6, &"height", 10, &"in"], [10, &"out", 9, &"b"], [8, &"out", 9, &"mask"], [8, &"out", 6, &"uplift"]]
 output_node = 3
-metadata/_editor_selected_node = 6
+metadata/_editor_selected_node = 5
 
 [sub_resource type="Resource" id="Resource_cx7fp"]
 resource_name = "Terrain Graph"
