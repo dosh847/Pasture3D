@@ -217,7 +217,10 @@ func _on_evaluation_pressed() -> void:
 ## This brush's graph modifiers, with every one another brush also holds replaced by this brush's own copy.
 ## The copy keeps the same graph and settings and takes over the cache entries this brush solved, so the
 ## split re-solves nothing. Returns the modifiers in stack order, as `graph_mods` does.
-static func unshare_graph_mods(p_brush: Pasture3DTerrainBrush) -> Array[Pasture3DNodeGraph]:
+##
+## `p_silent` swaps the copies in without the `modifiers` setter, so nothing re-bakes: for a scene being
+## LOADED, where the split changes no output and a re-bake of every split brush froze the editor on open.
+static func unshare_graph_mods(p_brush: Pasture3DTerrainBrush, p_silent := false) -> Array[Pasture3DNodeGraph]:
 	var out: Array[Pasture3DNodeGraph] = []
 	if p_brush == null:
 		return out
@@ -238,7 +241,9 @@ static func unshare_graph_mods(p_brush: Pasture3DTerrainBrush) -> Array[Pasture3
 				stack[i] = m
 				split = true
 			out.append(m)
-	if split:
+	if split and p_silent:
+		p_brush.swap_modifiers_silently(stack)
+	elif split:
 		p_brush.modifiers = stack
 	return out
 

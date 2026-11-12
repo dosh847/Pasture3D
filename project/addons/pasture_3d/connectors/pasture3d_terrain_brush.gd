@@ -278,9 +278,14 @@ func _ready() -> void:
 	# A duplicated brush shares its modifier RESOURCES with the original (Godot shares sub-resources), so
 	# its parameter values, Live/Frozen and modifier cache were the original's. Each brush gets its own graph
 	# modifier here, still pointing at the same GRAPH, which is the thing meant to be shared. On load as
-	# well as on duplicate: a scene saved with a share is split the first time it opens.
+	# well as on duplicate: a scene saved with a share is split the first time it opens. On LOAD it is
+	# silent (no re-bake): the copy bakes what the shared one did, and re-baking every split brush on open
+	# froze the editor for over a minute on the demo island. A duplicate into a live scene re-bakes, since
+	# it may now read its own spline.
 	if Engine.is_editor_hint():
-		Pasture3DBrushGraphRow.unshare_graph_mods(self)
+		var root := get_tree().edited_scene_root
+		var loading := root == null or not root.is_node_ready()
+		Pasture3DBrushGraphRow.unshare_graph_mods(self, loading)
 	# A scene saved with a preview toggle on should show its overlay on load, not on the next edit.
 	_queue_mask_preview()
 	# Most shape properties are plain @export (no setter), so they wouldn't auto-refresh on inspector edit.
@@ -5920,6 +5925,14 @@ func _needs_host_fields(ops: PackedInt32Array, op_selectors: PackedFloat32Array)
 ## `@export`, so it lands at the BOTTOM of the inspector, after the subclass's own shape properties. A
 ## pipeline reads in order, and the order it reads in should be the order it runs in — a base-class
 ## `@export` would have put it above every property it consumes.
+## Replace the stack with `p_stack` (same length, graph modifiers swapped for per-brush copies) without the
+## setter's re-bake. See `Pasture3DBrushGraphRow.unshare_graph_mods`.
+func swap_modifiers_silently(p_stack: Array[Pasture3DNode]) -> void:
+	_bind_modifiers(modifiers, false)
+	modifiers.assign(p_stack)
+	_bind_modifiers(modifiers, true)
+
+
 var modifiers: Array[Pasture3DNode] = []:
 	set(v):
 		_bind_modifiers(modifiers, false)
