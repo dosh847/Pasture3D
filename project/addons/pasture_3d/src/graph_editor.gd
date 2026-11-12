@@ -489,7 +489,8 @@ func _stamp_host_params() -> void:
 		return
 	if not m.params_edited.is_connected(_schedule_preview_refresh):
 		m.params_edited.connect(_schedule_preview_refresh)
-	m.stamp_params()
+	# Named, not remembered: a PATH parameter reads THIS host's spline, and the modifier may be shared.
+	m.stamp_params(_find_host_brush())
 
 
 func _find_host_modifier() -> Pasture3DNodeGraph:

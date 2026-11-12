@@ -76,9 +76,40 @@ func blocks_native() -> bool:
 	return evaluation == Evaluation.FROZEN and not native_freeze_supported()
 
 
-## Drop the cached solve, so the next evaluation re-solves. This is what the Bake button does.
+## The frozen solve is per HOST like the grid (Pasture3DGraphNode.select_host): brush B must never be served
+## brush A's solve, which the native route would do, since it serves a frozen solve by grid shape.
+func _slot_state() -> Dictionary:
+	var st := super()
+	if not _cache.is_empty() or _dirty_since_bake or _stale:
+		st["solve"] = _cache
+		st["solve_key"] = _cache_key
+		st["solve_dirty"] = _dirty_since_bake
+		st["solve_stale"] = _stale
+	return st
+
+
+func _apply_slot_state(p_st: Dictionary) -> void:
+	super(p_st)
+	_cache = p_st.get("solve", {})
+	_cache_key = int(p_st.get("solve_key", 0))
+	_dirty_since_bake = bool(p_st.get("solve_dirty", false))
+	_stale = bool(p_st.get("solve_stale", false))
+
+
+static func _drop_solve(p_st: Dictionary) -> void:
+	for k in ["solve", "solve_key", "solve_dirty", "solve_stale"]:
+		p_st.erase(k)
+
+
+## Drop the cached solve, so the next evaluation re-solves. This is what the Bake button does, and it re-solves
+## for EVERY host: the button is on the node, and the node is the same for all of them.
 func _clear_solver_cache() -> void:
-	if _cache.is_empty() and not _stale and not _dirty_since_bake:
+	var others := false
+	for h in _host_slots:
+		if (_host_slots[h] as Dictionary).has("solve"):
+			_drop_solve(_host_slots[h])
+			others = true
+	if _cache.is_empty() and not _stale and not _dirty_since_bake and not others:
 		return
 	_cache.clear()
 	_dirty_since_bake = false
@@ -95,10 +126,23 @@ func forget_solve() -> void:
 	_stale = false
 
 
+## `forget_solve` for host `p_host` only, live or not.
+func forget_solve_for(p_host: int) -> void:
+	if p_host == _host_slot:
+		forget_solve()
+	elif _host_slots.has(p_host):
+		_drop_solve(_host_slots[p_host])
+
+
 ## Call from a parameter setter: a frozen solve no longer reflects the parameters, and must say so.
 func mark_dirty_since_bake() -> void:
 	if not _cache.is_empty():
 		_dirty_since_bake = true
+	# A setting changed for every host's solve, not just the live one.
+	for h in _host_slots:
+		var st: Dictionary = _host_slots[h]
+		if not (st.get("solve", {}) as Dictionary).is_empty():
+			st["solve_dirty"] = true
 
 
 func is_stale() -> bool:

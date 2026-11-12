@@ -198,12 +198,7 @@ static func resolve_splines(p_graph: Pasture3DTerrainGraph, p_host: Node = null)
 	var filled := 0
 	# The host's own child, for the empty key. Resolved once rather than per node, and only when a host
 	# was actually handed in — a graph edited on its own has no "own child" and must simply not resolve.
-	var own: Pasture3DSpline = null
-	if p_host is Pasture3DTerrainBrush:
-		for c in (p_host as Node).get_children():
-			if c is Pasture3DSpline:
-				own = c as Pasture3DSpline
-				break
+	var own := own_spline(p_host)
 	for node in p_graph.nodes:
 		if node == null or node.op() != &"spline_source":
 			continue
@@ -231,6 +226,47 @@ static func resolve_splines(p_graph: Pasture3DTerrainGraph, p_host: Node = null)
 		_assign(src, found.graph_spline_path(src.spline_index, src.sample_points, src.sample_interval))
 		filled += 1
 	return filled
+
+
+## The host brush's own first Pasture3DSpline child: what an empty spline key means. Null for no host, a host
+## that is not a brush, or a brush with no spline child.
+static func own_spline(p_host: Node) -> Pasture3DSpline:
+	if p_host is Pasture3DTerrainBrush:
+		for c in p_host.get_children():
+			if c is Pasture3DSpline:
+				return c as Pasture3DSpline
+	return null
+
+
+## The spline a PATH graph parameter names for `p_host` (Pasture3DGraphParam's header): the empty key is the
+## host's own child, any other key is looked up under the host's terrain exactly as Spline Source's is. Null
+## when nothing matches.
+static func param_spline(p_host: Node, p_key: String) -> Pasture3DSpline:
+	if p_key.is_empty():
+		return own_spline(p_host)
+	for sp in spline_brushes(_terrain_of(p_host)):
+		if sp.spline_key() == p_key:
+			return sp
+	return null
+
+
+## The path PATH parameter `p_decl` reads on `p_host` with key `p_key`, or null when no spline matches.
+## A FRESH instance every call: the caller (Pasture3DNodeGraph.stamp_params) keeps the previous one when the
+## content is unchanged, which is what keeps downstream path caches, keyed on instance id, from re-running.
+static func param_path(p_decl: Pasture3DGraphParam, p_host: Node, p_key: String) -> Pasture3DGraphPath:
+	var sp := param_spline(p_host, p_key)
+	if sp == null:
+		return null
+	return sp.graph_spline_path(p_decl.spline_index, p_decl.sample_points, p_decl.sample_interval)
+
+
+## The spline keys under `p_host`'s terrain, sorted: the dropdown a PATH parameter offers.
+static func spline_keys(p_host: Node) -> PackedStringArray:
+	var keys := PackedStringArray()
+	for sp in spline_brushes(_terrain_of(p_host)):
+		keys.append(sp.spline_key())
+	keys.sort()
+	return keys
 
 
 ## Every Pasture3DSpline under `p_terrain`, in scene order.

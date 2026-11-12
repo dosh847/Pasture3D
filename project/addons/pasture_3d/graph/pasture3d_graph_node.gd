@@ -123,6 +123,79 @@ func _param_changed() -> void:
 	emit_changed()
 
 
+# ---- One cache slot per HOST ------------------------------------------------------------------------
+#
+# A graph is shared by every brush that hosts it, and each brush evaluates it on its own ground, so a single
+# cache slot per node meant the brushes evicting each other on every bake: host A filled it, host B's inputs
+# missed and overwrote it, A missed again. Worse, a FROZEN solver's slot was SERVED to the next host (the
+# native route serves a frozen solve by grid shape alone), so brush B baked brush A's erosion.
+#
+# The graph therefore selects a host before every evaluation (`Pasture3DTerrainGraph.set_host_params`), and
+# every node swaps its cache fields for that host's. Everything that reads `_cached_grid`, `_inputs_hash` or a
+# solver's `_cache` keeps reading one slot, which is now the current host's. 0 is "no host" (a graph edited
+# or tested on its own).
+
+## The host whose cache is in the live fields.
+var _host_slot: int = 0
+## Every other host's state, `{host id: Dictionary}` as `_slot_state` builds it.
+var _host_slots: Dictionary = {}
+## How many other hosts may keep a GRID here. Grids are the GDScript route's per-node buffers and cost a
+## full grid each; past this the oldest host's grid is dropped (it re-evaluates, nothing is wrong). A
+## solver's frozen solve is never dropped this way: it is work the author asked to keep.
+const MAX_HOST_GRIDS := 8
+
+
+## Make `p_host`'s cache the live one. Emits nothing.
+func select_host(p_host: int) -> void:
+	if p_host == _host_slot:
+		return
+	var st := _slot_state()
+	if not st.is_empty():
+		_host_slots[_host_slot] = st
+	var incoming: Dictionary = _host_slots.get(p_host, {})
+	_host_slots.erase(p_host)
+	_apply_slot_state(incoming)
+	_host_slot = p_host
+	_trim_host_grids()
+
+
+func host_slot() -> int:
+	return _host_slot
+
+
+## The live per-host state, or {} when there is nothing worth keeping. Solvers extend it.
+func _slot_state() -> Dictionary:
+	if _cached_grid.is_empty():
+		return {}
+	return {"grid": _cached_grid, "aux": _cached_aux, "baked": _last_baked_revision, "hash": _inputs_hash,
+			"tick": _last_access_tick}
+
+
+## Load a state `_slot_state` built ({} for a host never seen). Solvers extend it.
+func _apply_slot_state(p_st: Dictionary) -> void:
+	_cached_grid = p_st.get("grid", PackedFloat32Array())
+	_cached_aux = p_st.get("aux", {})
+	_last_baked_revision = int(p_st.get("baked", -1))
+	_inputs_hash = int(p_st.get("hash", 0))
+	_last_access_tick = int(p_st.get("tick", 0))
+
+
+func _trim_host_grids() -> void:
+	var with_grid: Array = []
+	for h in _host_slots:
+		if (_host_slots[h] as Dictionary).has("grid"):
+			with_grid.append(h)
+	if with_grid.size() <= MAX_HOST_GRIDS:
+		return
+	with_grid.sort_custom(func(a, b): return int(_host_slots[a].get("tick", 0)) < int(_host_slots[b].get("tick", 0)))
+	for i in range(with_grid.size() - MAX_HOST_GRIDS):
+		var st: Dictionary = _host_slots[with_grid[i]]
+		for k in ["grid", "aux", "baked", "hash", "tick"]:
+			st.erase(k)
+		if st.is_empty():
+			_host_slots.erase(with_grid[i])
+
+
 ## Returns true if the node needs re-evaluation (its properties changed, inputs signature changed, or cache empty).
 func is_dirty(p_inputs_hash: int) -> bool:
 	if _cached_grid.is_empty():
@@ -158,6 +231,13 @@ func clear_cache() -> void:
 	_cached_aux = {}
 	_last_baked_revision = -1
 	_inputs_hash = 0
+	# Every host's grid, not just the live one: the grids of all hosts are what the budget measures.
+	for h in _host_slots.keys():
+		var st: Dictionary = _host_slots[h]
+		for k in ["grid", "aux", "baked", "hash", "tick"]:
+			st.erase(k)
+		if st.is_empty():
+			_host_slots.erase(h)
 	_clear_solver_cache()
 
 
@@ -198,9 +278,18 @@ func get_cached_aux() -> Dictionary:
 
 ## Approximate memory footprint in bytes consumed by this node's cached grids.
 func get_cache_size_bytes() -> int:
-	var total := _cached_grid.size() * 4
-	for k in _cached_aux:
-		var arr = _cached_aux[k]
+	var total := _grid_bytes(_cached_grid, _cached_aux)
+	for h in _host_slots:
+		var st: Dictionary = _host_slots[h]
+		if st.has("grid"):
+			total += _grid_bytes(st["grid"], st.get("aux", {}))
+	return total
+
+
+static func _grid_bytes(p_grid: PackedFloat32Array, p_aux: Dictionary) -> int:
+	var total := p_grid.size() * 4
+	for k in p_aux:
+		var arr = p_aux[k]
 		if arr is PackedFloat32Array:
 			total += (arr as PackedFloat32Array).size() * 4
 	return total

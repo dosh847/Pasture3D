@@ -801,9 +801,87 @@ is the stale-memo bug this codebase has met before, so the gate checks each key 
 * **Not verified.** The editor by hand (the inspector properties, the preview refresh on a value edit, the
   node's port colour following the declared type).
 
+### 10.6 PATH parameters (2026-11-11)
+
+Asked for so several brushes can share one graph and each carve its own spline (four HillRange brushes,
+one Spline Source → Range Splines → Path Fractalize → Path Range graph). A shared Spline Source cannot do
+it: the node HOLDS its path, so each host's resolve writes the shared property, and each write emits
+`changed` on the shared graph, so every host's bake re-bakes every other host.
+
+* **Declaration.** `Pasture3DGraphParam.Type.PATH = 3`. It has no number: `coerce` is 0 and `port_type()`
+  is PATH. How the spline is read is part of the declaration (`spline_index`, `sample_points`,
+  `sample_interval`, the Spline Source settings). `_validate_property` hides the number settings for PATH
+  and the spline settings for the number types.
+* **Host value.** A spline KEY (String) in `param_overrides`. The empty key, which is also what an
+  unsupplied host reads, is the host brush's own first Pasture3DSpline child (Spline Source's §5.1 rule),
+  so duplicated brushes sharing one modifier each read their own child. Setting the key back to empty
+  clears the override. The inspector property is a String with the scene's spline keys as an
+  ENUM_SUGGESTION.
+* **Resolution is the host's.** `Pasture3DNodeGraph.stamp_params(p_host)` resolves each PATH parameter
+  through `Pasture3DGraphSources.param_path` and stamps the paths with the values
+  (`set_host_params(values, paths)`). The modifier is often shared, so the brush names itself at every
+  stamp site. The modifier remembers the last host (weakly) for callers that cannot name one
+  (`content_key`, the frozen cache), and the brush stamps itself before `_modifier_signature` reads
+  `content_key`. A per-host memo keeps the previous path instance when its `content_digest` is unchanged,
+  because downstream path caches and the geometry table key on the instance id.
+* **Parameter node.** Bound to a PATH, it outputs a PATH field port and returns the path from
+  `path_output()`. It lowers like Spline Source (a zero CONST slot, the path in the geometry table).
+  `value_signature()` (the path's `content_digest`, or the number for the number types, so their keys do
+  not move) replaces `resolved_value()` in `params_sig` and `_compute_node_inputs_hash`.
+* **Spline edits.** `_brush_reads_spline` also counts a PATH parameter whose key on that host names the
+  spline, or whose key is empty when the spline is that brush's own child. So an edit re-bakes the brushes
+  that read the spline and no others. `_graph_source_brushes` (scoped bake) lists a typed key's spline as an
+  input, and `input_spline_polylines` (Spline Fit) includes PATH parameter outputs.
+* **Subgraphs.** An unwired PATH parameter inside an instance is pinned to no path: the instance has no
+  host to resolve against, so wire a path into the Subgraph node's port. Ungroup replaces an unwired PATH
+  parameter with an empty-key Spline Source carrying the declaration's spline settings.
+* **Warnings.** The modifier warns when a PATH parameter resolves no spline on its host (an empty key on a
+  brush with no spline child, or a key naming nothing). The node warns when the last stamp gave it no path.
+* **Gate.** `GraphPathParamGate`, PA–PG: each host evaluates its own spline (equal to Spline Source on that
+  spline, native = GDScript); a stamp emits nothing (control: a shared empty-key Spline Source emits);
+  per-host keys and instance reuse (control: the memo dropped); a typed key; spline-edit routing (control:
+  a brush without the parameter); the inspector; `content_key` following the last stamp. PH: an unwired
+  Parameter retyped to PATH emits `structure_changed`. PI/PJ: the duplicate split below, and picking the
+  host's own spline storing the empty key.
+
+### 10.7 One graph, many brushes: per-host caches (2026-11-11)
+
+Sharing a graph shares its NODES and their settings. It does not share their results: every brush hosting
+the graph evaluates it on its own ground, so every cache inside the graph is kept per host.
+
+* **The host is named at the stamp.** `set_host_params(values, paths, host_id)` selects the host (the
+  brush's instance id; 0 = no host, a graph edited or tested on its own) on every node through
+  `Pasture3DGraphNode.select_host`, which swaps the node's cache fields for that host's slot. Code reading
+  `_cached_grid`, `_inputs_hash` or a solver's `_cache` reads one slot, the live host's. The flat view
+  (§11.2) is selected with its parent.
+* **What is per host.** The GDScript route's per-node grid (`_cached_grid`, `_cached_aux`,
+  `_inputs_hash`, `_last_baked_revision`); a solver's frozen solve (`_cache`, `_cache_key`,
+  `_dirty_since_bake`, `_stale`), which also feeds the native `frozen` table at compile; the path memo
+  (`_path_eval_cache[host][node]`). The modifier's own cache was already per host.
+* **Grid budget.** At most 8 other hosts keep a grid on a node; past that the least recently used host's grid
+  is dropped (it re-evaluates). A frozen solve is never dropped this way. `get_cache_size_bytes` counts
+  every host's grid, and `clear_cache` (eviction) drops every host's grid.
+* **Who clears whom.** A node's Bake button (`_clear_solver_cache`) and a node setting edit
+  (`mark_dirty_since_bake`) apply to every host: the node is the same for all of them. A parameter
+  override is a host edit and forgets only the solves of the hosts that modifier stamped
+  (`forget_solve_for`).
+* **Native adopt.** A worker's freeze report is adopted with the host it was compiled for
+  (`adopt_native_freeze(reports, host_id)`), so a solve landing after another host stamped files into its
+  own slot.
+* **Duplicating a brush.** Godot shares sub-resources with a duplicate, so a duplicated brush used to share
+  its graph modifier (its parameter values, Live/Frozen, modifier cache). In the editor, a brush's `_ready`
+  calls `Pasture3DBrushGraphRow.unshare_graph_mods`: each brush gets its own modifier on the SAME graph.
+  It runs on load too, so a scene saved with a share is split once. A PATH key naming the spline of another
+  brush hosting the same graph is dropped on the copy, so the duplicate reads its own spline.
+* **Gate.** `GraphHostSlotGate`: HS (both routes) host 2 gets its own frozen solve and host 1 is served its
+  own back (control: one host id serves host 2 host 1's solve); HG grids per host and counted (control:
+  one id keeps the last host's); HA adopt files by host id (control: no id files live); HO an override
+  forgets its own host's solve only (control: Bake drops both).
+
 ---
 
 ## 11. P7 — Subgraphs
+
 
 ### 11.1 Model
 

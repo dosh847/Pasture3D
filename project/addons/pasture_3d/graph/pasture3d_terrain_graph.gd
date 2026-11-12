@@ -268,9 +268,16 @@ func _on_node_changed(p_node: Pasture3DGraphNode = null) -> void:
 		n_idx = nodes.find(p_node)
 	# A Parameter node that was just pointed at another id has the OLD parameter's value until it is bound
 	# again, and everything below this line reads it.
+	# If the new id is declared with a different type, the PORT changed. That is structure, and it has to be
+	# said even when nothing below fires: a freshly added Parameter is unwired, so it feeds no output and
+	# emits no `changed`, and the editor kept drawing the slot of the type it had before. A Float slot
+	# refuses a Path wire, so a PATH parameter could never be connected.
 	if p_node != null and p_node.op() == &"param":
+		var ports_before := p_node.output_port_types()
 		_apply_params()
-	
+		if p_node.output_port_types() != ports_before:
+			structure_changed.emit()
+
 	# A node the graph does not contain cannot feed the output — that is provable, not a guess, so it
 	# defaults to false. It used to default to true, which meant a node left wired by the dead disconnect
 	# branch above unconditionally re-baked the terrain after being removed.
@@ -362,6 +369,15 @@ func content_key() -> int:
 ## simply never read; the host is the one that reports them.
 var host_params: Dictionary = {}
 
+## `{id: Pasture3DGraphPath}` for the PATH parameters, as the host RESOLVED them (Pasture3DGraphParam's header:
+## the host owns the spline lookup, a Resource cannot reach the scene). An id with no entry reads no path.
+var host_paths: Dictionary = {}
+
+## The instance id of the host stamped last, 0 for none (a graph edited or tested on its own). Every node keeps
+## one cache slot per host (Pasture3DGraphNode.select_host), and this is the slot in use: a graph shared by many
+## brushes must solve and cache for each on its own, or they evict, and worse SERVE, each other's results.
+var host_id: int = 0
+
 
 func _bind_params(p_list: Array, p_connect: bool) -> void:
 	for p in p_list:
@@ -418,9 +434,19 @@ func param_value(p_id: StringName) -> float:
 ## `set_host_footprint` is. EMITS NOTHING: `changed` is the bake signal and the graph is shared, so a stamp
 ## that emitted would have each host's bake re-bake the others. Everything that must notice the values
 ## reads them instead (`params_sig`, `_compute_node_inputs_hash`).
-func set_host_params(p_values: Dictionary) -> void:
+func set_host_params(p_values: Dictionary, p_paths: Dictionary = {}, p_host_id: int = 0) -> void:
 	host_params = p_values
+	host_paths = p_paths
+	select_host(p_host_id)
 	_apply_params()
+
+
+## Make `p_host_id`'s cache slot the live one on every node. Emits nothing (see `set_host_params`).
+func select_host(p_host_id: int) -> void:
+	host_id = p_host_id
+	for node in nodes:
+		if node != null:
+			node.select_host(p_host_id)
 
 
 ## Push every Parameter node its declared type and resolved number. See Pasture3DGraphNodeParam.bind.
@@ -431,7 +457,7 @@ func _apply_params() -> void:
 			if decl == null:
 				node.bind(Pasture3DGraphNode.PortType.FLOAT, 0.0, false)
 			else:
-				node.bind(decl.port_type(), param_value(decl.id), true)
+				node.bind(decl.port_type(), param_value(decl.id), true, host_paths.get(decl.id) as Pasture3DGraphPath)
 
 
 ## A signature of what the Parameter nodes evaluate to RIGHT NOW, i.e. for the host stamped last. 0 for a
@@ -443,7 +469,7 @@ func params_sig() -> int:
 		var node: Pasture3DGraphNode = nodes[ni]
 		if node != null and node.op() == &"param":
 			sig.append(ni)
-			sig.append(node.resolved_value())
+			sig.append(node.value_signature())
 	return hash(sig) if not sig.is_empty() else 0
 
 
@@ -555,6 +581,8 @@ func _ensure_flat(p_stack: Array) -> void:
 ## values onto THIS graph and the flat view is shared by every host of it.
 func _sync_flat() -> void:
 	_flat.host_params = host_params
+	_flat.host_paths = host_paths
+	_flat.select_host(host_id)
 	_flat._apply_params()
 	_flat.host_footprint = host_footprint
 	_flat.force_gdscript_evaluation = force_gdscript_evaluation
@@ -843,6 +871,8 @@ func _fl_expand(p_ctx: Dictionary, p_s: int) -> void:
 			if src.x >= 0:
 				redirect[ci] = src
 			var decl := child.find_param(pid)
+			# An unwired PATH parameter inside an instance is pinned to NO path: the instance has no host of
+			# its own to resolve a spline against. Wire a path into the Subgraph node's port to feed it.
 			dups[ci].pin(decl.port_type() if decl != null else Pasture3DGraphNode.PortType.FLOAT,
 					sub.param_number(pid) if decl != null else 0.0)
 	var fc: Array = p_ctx["fc"]
@@ -1546,8 +1576,18 @@ func ungroup_subgraph(p_index: int) -> Array[int]:
 			if fed.has(port):
 				redirect[ci] = Vector2i(remap[fed[port].x], fed[port].y)
 				continue
-			made = _const_for(decl.port_type() if decl != null else Pasture3DGraphNode.PortType.FLOAT,
-					sub.param_number(pid) if decl != null else 0.0)
+			if decl != null and decl.is_path():
+				# An unwired PATH parameter has no number to bake into a constant. The closest standing node
+				# is a Spline Source with the empty key: it reads this host's own spline child, which is what
+				# the parameter read for a host that supplied nothing.
+				var ss := Pasture3DGraphNodeSplineSource.new()
+				ss.spline_index = decl.spline_index
+				ss.sample_points = decl.sample_points
+				ss.sample_interval = decl.sample_interval
+				made = ss
+			else:
+				made = _const_for(decl.port_type() if decl != null else Pasture3DGraphNode.PortType.FLOAT,
+						sub.param_number(pid) if decl != null else 0.0)
 		elif n.op() == &"subgraph":
 			made = n.duplicate(false)
 			made.param_values = n.param_values.duplicate()
@@ -2146,7 +2186,7 @@ func _compute_node_inputs_hash(p_ni: int, p_gw: int, p_gh: int, p_rect: Rect2, p
 	# Pasture3DGraphNodeParam), so the VALUE is in the key. Every consumer folds this node's hash into its
 	# own, which is how the change reaches a cached grid three nodes downstream.
 	if node.op() == &"param":
-		sig.append(node.resolved_value())
+		sig.append(node.value_signature())
 	if node.needs_grid() and p_mask != null:
 		sig.append(p_mask_sig)
 
@@ -2705,10 +2745,22 @@ static func program_has_freeze(p_prog: Dictionary) -> bool:
 ## File what the native evaluator served or solved back into the solver nodes. MAIN THREAD ONLY — this is
 ## the half of the freeze a worker may not do. Reports name the node by instance id rather than slot, so a
 ## node deleted or renumbered while a worker solved is skipped instead of handed another node's solve.
-func adopt_native_freeze(p_reports: Array) -> void:
+##
+## `p_host_id` is the host the program was compiled for. A worker's solve can land after another host was
+## stamped, so the solve is filed into ITS host's slot, not whichever is live; -1 means the live one.
+func adopt_native_freeze(p_reports: Array, p_host_id: int = -1) -> void:
 	if OS.get_thread_caller_id() != OS.get_main_thread_id():
 		push_error("Pasture3DTerrainGraph.adopt_native_freeze() called off the main thread.")
 		return
+	var live := host_id
+	if p_host_id >= 0 and p_host_id != live:
+		select_host(p_host_id)
+	_adopt_reports(p_reports)
+	if host_id != live:
+		select_host(live)
+
+
+func _adopt_reports(p_reports: Array) -> void:
 	for r in p_reports:
 		var obj := instance_from_id(int((r as Dictionary).get("node_id", 0)))
 		if obj is Pasture3DGraphSolverNode and nodes.has(obj):
@@ -3021,7 +3073,7 @@ func resolved_path_of(p_ni: int) -> Pasture3DGraphPath:
 ## a no-op, and only turning the pre-pass off distinguishes them.
 var force_no_path_prepass := false
 
-# node index -> [key, path]. The key folds the node's own `_dirty_revision` and the CONTENT DIGEST of
+# host id -> node index -> [key, path], per host like every node's grid cache (`host_id`). The key folds the node's own `_dirty_revision` and the CONTENT DIGEST of
 # every resolved input path, so an edit anywhere upstream misses and everything else hits.
 var _path_eval_cache: Dictionary = {}
 
@@ -3102,13 +3154,16 @@ func _resolved_path_of_uncached(p_ni: int, p_inputs_of: Dictionary, p_stack: Dic
 	p_stack.erase(p_ni)
 
 	var key := hash(key_parts)
-	var hit = _path_eval_cache.get(p_ni)
+	if not _path_eval_cache.has(host_id):
+		_path_eval_cache[host_id] = {}
+	var memo: Dictionary = _path_eval_cache[host_id]
+	var hit = memo.get(p_ni)
 	# `hit[1] == null` is a HIT, not a miss: producing no path is a legal answer (an unresolved source
 	# above a filter), and treating it as a miss would re-run that filter every single evaluation.
 	if hit != null and int(hit[0]) == key and (hit[1] == null or is_instance_valid(hit[1])):
 		return hit[1]
 	var made := node.eval_path(ins)
-	_path_eval_cache[p_ni] = [key, made]
+	memo[p_ni] = [key, made]
 	return made
 
 

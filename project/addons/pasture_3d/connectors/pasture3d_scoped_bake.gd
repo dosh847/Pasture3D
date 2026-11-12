@@ -985,6 +985,16 @@ func _graph_source_brushes(p_brush) -> Array:
 						for sp in Pasture3DGraphSources.spline_brushes(scene_terrain):
 							if sp.spline_key() == node.spline_key:
 								out.append(sp)
+		# A PATH graph parameter names its spline through THIS host's override, with Spline Source's rule:
+		# only a typed key reaches outside the brush.
+		for id in m.graph.param_ids():
+			if not m.graph.find_param(id).is_path():
+				continue
+			var key: String = m.param_key(id)
+			if not key.is_empty():
+				var sp := Pasture3DGraphSources.param_spline(p_brush, key)
+				if sp != null:
+					out.append(sp)
 	return out
 
 

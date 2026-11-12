@@ -271,7 +271,7 @@ func instance_nodes(p_flat: Pasture3DTerrainGraph) -> Array:
 		if src.op() == &"param":
 			# A copy of the child's own copy keeps the value it was pinned to; `duplicate` does not carry the
 			# runtime binding.
-			d.pin(src._type, src.resolved_value())
+			d.pin(src._type, src.resolved_value(), src.resolved_path())
 		_inst_nodes.append(d)
 	return _inst_nodes
 

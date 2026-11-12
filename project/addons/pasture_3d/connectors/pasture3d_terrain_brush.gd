@@ -275,6 +275,12 @@ func _ready() -> void:
 	_sync_layer_host(true)
 	# A freshly added/duplicated brush may have made an existing brush's curve newly shared — refresh all.
 	_refresh_group_warnings()
+	# A duplicated brush shares its modifier RESOURCES with the original (Godot shares sub-resources), so
+	# its parameter values, Live/Frozen and modifier cache were the original's. Each brush gets its own graph
+	# modifier here, still pointing at the same GRAPH, which is the thing meant to be shared. On load as
+	# well as on duplicate: a scene saved with a share is split the first time it opens.
+	if Engine.is_editor_hint():
+		Pasture3DBrushGraphRow.unshare_graph_mods(self)
 	# A scene saved with a preview toggle on should show its overlay on load, not on the next edit.
 	_queue_mask_preview()
 	# Most shape properties are plain @export (no setter), so they wouldn't auto-refresh on inspector edit.
@@ -2102,7 +2108,7 @@ func _bake_deferred(p_bake: Callable, p_owner: String, p_record_undo: bool) -> v
 				# The worker could only report what a FROZEN solver inside the graph served or solved; filing
 				# it into the node is main-thread work, and this is the first main-thread moment after it.
 				if st.has("node_freeze") and st["mod"].graph != null:
-					st["mod"].graph.adopt_native_freeze(st["node_freeze"])
+					st["mod"].graph.adopt_native_freeze(st["node_freeze"], get_instance_id())
 				if st.has("zo"):
 					_file_solved(st["mod"], st["extent"], {"key": st["key"], "grid": st["zo"], "z": st["z"],
 							"host": st.get("host", 0)},
@@ -3005,6 +3011,10 @@ func _modifier_signature() -> Array:
 	if _supports_modifiers():
 		for m in modifiers:
 			if m != null and m.is_active():
+				# A graph modifier's key depends on WHICH host it is stamped for (a PATH parameter reads the
+				# host's own spline), and a duplicated brush shares the modifier.
+				if m is Pasture3DNodeGraph:
+					(m as Pasture3DNodeGraph).stamp_params(self)
 				var ck: int = m.content_key() if m.has_method("content_key") else 0
 				sig.append([m.display_name(), m.to_params(), ck])
 	return sig
@@ -6381,7 +6391,7 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 			# disagreement: one entry point still fills every scene-naming source.
 			Pasture3DGraphSources.resolve(m.graph, self)
 			# This host's parameter values, before the compile reads them (ports spec Â§10).
-			m.stamp_params()
+			m.stamp_params(self)
 			# The native rasteriser needs the whole-graph program (Pasture3DUtil.graph_eval_grid reads it),
 			# the amount, and the two freeze inputs its key folds in — reads_input decides whether the input
 			# surface is in the key. GDScript's _apply_graph_step ignores these; only the native path reads them.
@@ -6389,7 +6399,7 @@ func _compile_modifiers(p_extent: String = "", p_ex: float = 1.0, p_ez: float = 
 			blk["strength"] = m.strength
 			blk["reads_input"] = m.graph.reads_input()
 			blk["reads_footprint"] = m.graph.reads_footprint()
-			blk["content_key"] = m.graph_key()
+			blk["content_key"] = m.graph_key(self)
 			blk["feather_mode"] = int(m.feather_mode)
 			blk["custom_falloff_width"] = m.custom_falloff_width
 			blk["custom_lut"] = _ramp_lut(m.custom_falloff_curve)
@@ -6477,10 +6487,10 @@ func _prepare_staged_graph_modifiers(p_stack: Dictionary, p_min_x: float, p_min_
 			if not g.native_supported() and g._native_supported_if_staged(g.output_index()):
 				if base_in.is_empty():
 					base_in = _base_below_grid(p_min_x, p_min_z, p_vs, p_gw, p_gh)
-				m.stamp_params()
+				m.stamp_params(self)
 				g.stage_paths_for(g.output_index(), p_gw, p_gh, rect, base_in)
 				blk["graph_program"] = g.compile_graph_program()
-				blk["content_key"] = m.graph_key()
+				blk["content_key"] = m.graph_key(self)
 				blk["reads_input"] = g.reads_input()
 				blk["reads_footprint"] = g.reads_footprint()
 	return base_in
@@ -6554,7 +6564,7 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 		# The C++ rasteriser's inline graph solve reports what a FROZEN solver INSIDE the graph served or
 		# solved (the graph's own nodes, not this modifier's cache). Filed here because this is main thread.
 		if out.has("node_freeze") and m is Pasture3DNodeGraph and m.graph != null:
-			m.graph.adopt_native_freeze(out["node_freeze"])
+			m.graph.adopt_native_freeze(out["node_freeze"], get_instance_id())
 		# A Live step in a run never files into the modifier's cache, and has no staleness to report.
 		var live_async: bool = step.get("live_async", false)
 		if out.has("grid") and not live_async:
@@ -6618,7 +6628,7 @@ func _run_stack_graph_sinks(p_stack: Dictionary) -> void:
 			# stack, or a step the compiler dropped. Skipping is correct; writing from a stale surface
 			# would paint last bake's answer onto this bake's ground.
 			continue
-		m.stamp_params()
+		m.stamp_params(self)
 		_run_graph_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface,
 				m.sink_taps_for(m.last_input_surface, m.last_gw, m.last_gh))
 		_run_graph_runtime_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface)
@@ -7019,7 +7029,7 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	# preview and the inspector cannot end up resolving different sets — which would show as a graph that
 	# previews correctly and bakes empty.
 	Pasture3DGraphSources.resolve(g, self)
-	m.stamp_params()
+	m.stamp_params(self)
 	var gw: int = p_ctx["gw"]
 	var gh: int = p_ctx["gh"]
 	var n := gw * gh
@@ -7100,7 +7110,7 @@ func _apply_graph_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 	var live_async: bool = p_step.get("live_async", false)
 	var frozen: bool = live_async or m.evaluation == Pasture3DNode.Evaluation.FROZEN
 	var extent: String = p_ctx.get("extent", "")
-	var gk: int = m.graph_key()
+	var gk: int = m.graph_key(self)
 	var key: int = hash([gk, z]) if reads else gk
 	if g.reads_footprint():
 		key = hash([key, g._footprint_sig()]) # a feather or margin edit moves the footprint, not the surface
@@ -8251,6 +8261,14 @@ func _brush_reads_spline(p_brush: Pasture3DTerrainBrush, p_key: String) -> bool:
 				return true
 			if String(node.spline_key).is_empty() and get_parent() == p_brush:
 				return true
+		# A PATH graph parameter reads a spline by this brush's key, with the same empty-key rule. Matched
+		# per HOST, through its override: two brushes sharing one graph read two different splines.
+		for id in mg.graph.param_ids():
+			if not mg.graph.find_param(id).is_path():
+				continue
+			var k := mg.param_key(id)
+			if k == p_key or (k.is_empty() and get_parent() == p_brush):
+				return true
 	return false
 
 
@@ -8671,9 +8689,10 @@ func input_spline_polylines() -> Array:
 		# pressed on a brush that has never baked, and a stale `path` is the one input that would move the
 		# loop somewhere the spline no longer is.
 		Pasture3DGraphSources.resolve_splines(g, self)
-		(m as Pasture3DNodeGraph).stamp_params()
+		(m as Pasture3DNodeGraph).stamp_params(self)
 		for node in g.nodes:
-			if node == null or node.op() != &"spline_source":
+			if node == null or (node.op() != &"spline_source" and not (node.op() == &"param"
+					and node.output_port_type() == Pasture3DGraphNode.PortType.PATH)):
 				continue
 			var p: Pasture3DGraphPath = node.path_output()
 			if p == null or p.points.size() < 2 or seen.has(p.get_instance_id()):
