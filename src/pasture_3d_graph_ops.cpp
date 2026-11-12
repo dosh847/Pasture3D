@@ -2073,6 +2073,31 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 				}
 			} break;
 
+			case GRAPH_OP_SALEVE_STREAM_POWER: {
+				// Ports: in0 height, in1/in2 dx/dy, in3 uplift (unwired = 1 everywhere); the mask, port 4, rides
+				// in_aux. Slots and the [warp_amount, warp_size] LUT unpack in SaleveStreamPowerParams::from_slots.
+				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
+				const PackedFloat32Array no_lut;
+				const PackedFloat32Array &lut = (size_t)s < p_prog.luts.size() ? p_prog.luts[(size_t)s] : no_lut;
+				SaleveStreamPowerParams p = SaleveStreamPowerParams::from_slots(P, 16, lut);
+				if (in1 && in1[s] >= 0) {
+					p.dx = get_grid_packed(in1[s], c_in1);
+				}
+				if (in2 && in2[s] >= 0) {
+					p.dy = get_grid_packed(in2[s], c_in2);
+				}
+				if (in3 && in3[s] >= 0) {
+					p.uplift = get_grid_packed(in3[s], c_in3);
+				}
+				p.mask = aux_grid_of(s);
+				SaleveStreamPowerResult res = saleve_stream_power_solve(in_arr, p_gw, p_gh, p_rect, p);
+				if (res.ok && res.height.size() == n) {
+					std::copy_n(res.height.ptr(), n, g_ptr);
+					copy_aux(1, res.eroded_rock);
+					copy_aux(2, res.drainage_area);
+				}
+			} break;
+
 			case GRAPH_OP_MOUNTAIN_CONE: {
 				MountainConeParams p;
 				p.seed = (int)P[0];

@@ -1,6 +1,8 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
-# Pasture3DGraphNodeHydraulicSaleve — Salève large-scale hydraulic erosion SOLVER.
+# Pasture3DGraphNodeHydraulicSaleve — Salève Hydraulic Erosion Smooth, the large-scale hydraulic erosion SOLVER that
+# incises the input in place. The op id stays `hydraulic_saleve` so saved graphs load unchanged. Its sibling,
+# Salève Hydraulic Erosion (saleve_stream_power), is uplift and stream-power incision through time.
 #
 # Four stages (PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md, S1-S3):
 #   1  incision of the input over a drainage network: one tree per border outlet, lakes spilling at their
@@ -312,7 +314,7 @@ func role() -> Role:
 
 
 func display_name() -> String:
-	return "Salève Hydraulic Erosion"
+	return "Salève Hydraulic Erosion Smooth"
 
 
 func needs_grid() -> bool:

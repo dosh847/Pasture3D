@@ -213,6 +213,10 @@ public:
 	// Native Salève Structural Hydraulic Erosion solver. Returns { ok:bool, height, eroded_rock, sediment }.
 	static Dictionary hydraulic_saleve_solve_grid(const PackedFloat32Array &p_surface, const int p_gw,
 			const int p_gh, const Rect2 &p_rect, const Dictionary &p_params);
+	// Native Salève Hydraulic Erosion (uplift + stream power). Returns { ok, height, eroded_rock, drainage_area,
+	// steps, vertex_count } plus the vertex network with params.debug_network.
+	static Dictionary saleve_stream_power_solve_grid(const PackedFloat32Array &p_surface, const int p_gw,
+			const int p_gh, const Rect2 &p_rect, const Dictionary &p_params);
 
 	// Native Geological Primitives generators.
 	static PackedFloat32Array mountain_cone_generate_grid(const int p_gw, const int p_gh, const Rect2 &p_rect, const Dictionary &p_params);

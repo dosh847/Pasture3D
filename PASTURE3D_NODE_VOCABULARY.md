@@ -125,7 +125,10 @@ The graph's **Strata** node (`strata`) and the **Salève** solver (`hydraulic_sa
 vocabulary where the concept is the same. Strata has a *profile* (the ledge shape), *hardness*, *octaves*
 ("beds inside beds") and *elevation / outcrop masks*. Salève has *control points* (the coarse solve),
 *reconstruction*, *warp*, *deposition* and *fine incision*. A Salève "stage" (1–4) is a pipeline step,
-not a user-facing mode. See `PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md`.
+not a user-facing mode. There are two Salève nodes: **Salève Hydraulic Erosion Smooth** (`hydraulic_saleve`)
+incises the input in place, and **Salève Hydraulic Erosion** (`saleve_stream_power`) is uplift and stream-power
+incision through time (*uplift rate*, *duration*, *time steps*, *uplift gradient*, *channel area*). See
+`PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md`.
 
 ### Renamed (DONE 2026-08-25) — the selector is not relief-specific
 `Pasture3DReliefSelector` gated by slope / altitude / curvature / flow / erosion / deposition /

@@ -1,6 +1,6 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
-# Pasture3DGraphNodeDevHydraulicSaleve — Pure GDScript Reference Oracle for Salève Hydraulic Erosion.
+# Pasture3DGraphNodeDevHydraulicSaleve — Pure GDScript Reference Oracle for Salève Hydraulic Erosion Smooth.
 # Mirrors the native solve in src/pasture_3d_hydraulic_saleve.cpp, which incises the input rather than solving
 # a free steady state (PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md, fourth and fifth reviews).
 
@@ -185,7 +185,7 @@ func role() -> Role:
 
 
 func display_name() -> String:
-	return "[Dev/GD] Salève Hydraulic Erosion"
+	return "[Dev/GD] Salève Hydraulic Erosion Smooth"
 
 
 func needs_grid() -> bool:
@@ -529,6 +529,334 @@ static func _box_lines(p_in: PackedFloat32Array, r_out: PackedFloat32Array, p_co
 			acc -= p_in[base + maxi(k - p_r, 0) * p_sample_step]
 
 
+# The jittered control-point mesh (the native saleve_build_mesh). Lengths and areas are in units of `p_len_unit`
+# metres: the Smooth solve passes its reference relief, the stream-power solve 1 (metres).
+static func _build_mesh(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, point_spacing: float,
+		control_points: int, max_control_points: int, p_seed: int, p_len_unit: float) -> Dictionary:
+	var vref: float = p_len_unit
+	var x0: float = p_rect.position.x
+	var z0: float = p_rect.position.y
+	var rw: float = p_rect.size.x if p_rect.size.x > 0.0 else float(p_gw)
+	var rh: float = p_rect.size.y if p_rect.size.y > 0.0 else float(p_gh)
+	var cell_dx: float = rw / float(p_gw)
+	var cell_dz: float = rh / float(p_gh)
+	var nv: int = 0
+	var px := PackedFloat64Array()
+	var pz := PackedFloat64Array()
+	var outlet := PackedByteArray()
+	var area := PackedFloat64Array()
+	var vh := PackedFloat64Array()
+	var nbr_start := PackedInt32Array()
+	var nbr := PackedInt32Array()
+	var nbr_len := PackedFloat64Array()
+	var tris := PackedInt32Array()
+	var mesh_spacing: float = 0.0
+	var s: float = point_spacing if point_spacing > 0.0 else sqrt(rw * rh / float(maxi(control_points, 16)))
+	s = maxf(s, maxf(cell_dx, cell_dz))
+	s = maxf(s, sqrt(rw * rh / float(max_control_points)))
+	mesh_spacing = s
+	var pts := PackedVector2Array()
+	var ring := PackedByteArray()
+	var ex: int = maxi(1, int(roundf(rw / s)))
+	var ez: int = maxi(1, int(roundf(rh / s)))
+	for k in range(ex + 1):
+		pts.append(Vector2(x0 + rw * k / ex, z0)); ring.append(1)
+		pts.append(Vector2(x0 + rw * k / ex, z0 + rh)); ring.append(1)
+	for k in range(1, ez):
+		pts.append(Vector2(x0, z0 + rh * k / ez)); ring.append(1)
+		pts.append(Vector2(x0 + rw, z0 + rh * k / ez)); ring.append(1)
+	var jseed: int = (p_seed ^ 0x51ed27) & 0xffffffff
+	var i_lo: int = int(floor(x0 / s))
+	var i_hi: int = int(floor((x0 + rw) / s))
+	var j_lo: int = int(floor(z0 / s))
+	var j_hi: int = int(floor((z0 + rh) / s))
+	var inset: float = 0.4 * s
+	for j in range(j_lo, j_hi + 1):
+		for i in range(i_lo, i_hi + 1):
+			var key: int = _lattice_key(i, j)
+			var jx: float = 0.35 * _fast_hash_to_unit(jseed, key)
+			var jz: float = 0.35 * _fast_hash_to_unit((jseed + 1) & 0xffffffff, key)
+			var x: float = (i + 0.5 + jx) * s
+			var z: float = (j + 0.5 + jz) * s
+			if x > x0 + inset and x < x0 + rw - inset and z > z0 + inset and z < z0 + rh - inset:
+				pts.append(Vector2(x, z)); ring.append(0)
+	nv = pts.size()
+	var tri := Geometry2D.triangulate_delaunay(pts)
+	px.resize(nv)
+	pz.resize(nv)
+	outlet.resize(nv)
+	area.resize(nv)
+	vh.resize(nv)
+	for i in range(nv):
+		px[i] = pts[i].x
+		pz[i] = pts[i].y
+		outlet[i] = ring[i]
+		vh[i] = _sample(p_surface, p_gw, p_gh, x0, z0, cell_dx, cell_dz, px[i], pz[i])
+	var adj: Array = []
+	adj.resize(nv)
+	for i in range(nv):
+		adj[i] = []
+	for t in range(tri.size() / 3):
+		var a: int = tri[t * 3]
+		var b: int = tri[t * 3 + 1]
+		var c: int = tri[t * 3 + 2]
+		var ar: float = 0.5 * absf((px[b] - px[a]) * (pz[c] - pz[a]) - (px[c] - px[a]) * (pz[b] - pz[a]))
+		if ar < 1.0e-9 * s * s:
+			continue
+		tris.append(a); tris.append(b); tris.append(c)
+		var third: float = ar / 3.0 / (vref * vref)
+		area[a] += third
+		area[b] += third
+		area[c] += third
+		adj[a].append(b); adj[a].append(c)
+		adj[b].append(a); adj[b].append(c)
+		adj[c].append(a); adj[c].append(b)
+	nbr_start.resize(nv + 1)
+	for i in range(nv):
+		var l: Array = adj[i]
+		l.sort()
+		nbr_start[i] = nbr.size()
+		var last: int = -1
+		for j in l:
+			if j == last:
+				continue
+			last = j
+			nbr.append(j)
+			var ddx: float = px[j] - px[i]
+			var ddz: float = pz[j] - pz[i]
+			nbr_len.append(sqrt(ddx * ddx + ddz * ddz) / vref)
+	nbr_start[nv] = nbr.size()
+	return {"nv": nv, "px": px, "pz": pz, "outlet": outlet, "area": area, "vh": vh, "nbr_start": nbr_start,
+			"nbr": nbr, "nbr_len": nbr_len, "tris": tris, "spacing": mesh_spacing}
+
+
+# A per-vertex field onto the grid (the native saleve_reconstruct): 0 linear, 1 gradient (tangent planes, held to
+# the triangle's range with `p_clamp`), 2 nearest vertex. `p_warp` adds the seeded fBm to dx/dy.
+static func _reconstruct(p_mesh: Dictionary, z: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, recon: int,
+		dx_arr: PackedFloat32Array, dy_arr: PackedFloat32Array, p_warp: bool, warp_amount: float, warp_size: float,
+		p_seed: int, p_clamp: bool) -> PackedFloat32Array:
+	var n: int = p_gw * p_gh
+	var has_dx: bool = dx_arr.size() == n
+	var has_dy: bool = dy_arr.size() == n
+	var x0: float = p_rect.position.x
+	var z0: float = p_rect.position.y
+	var rw: float = p_rect.size.x if p_rect.size.x > 0.0 else float(p_gw)
+	var rh: float = p_rect.size.y if p_rect.size.y > 0.0 else float(p_gh)
+	var cell_dx: float = rw / float(p_gw)
+	var cell_dz: float = rh / float(p_gh)
+	var min_side: float = minf(rw, rh)
+	var nv: int = p_mesh.nv
+	var px: PackedFloat64Array = p_mesh.px
+	var pz: PackedFloat64Array = p_mesh.pz
+	var nbr_start: PackedInt32Array = p_mesh.nbr_start
+	var nbr: PackedInt32Array = p_mesh.nbr
+	var tris: PackedInt32Array = p_mesh.tris
+	var zg := PackedFloat32Array()
+	zg.resize(n)
+	var gx := PackedFloat64Array()
+	gx.resize(nv)
+	var gz := PackedFloat64Array()
+	gz.resize(nv)
+	if recon == 1:
+		for i in range(nv):
+			var sxx: float = 0.0
+			var sxz: float = 0.0
+			var szz: float = 0.0
+			var sx: float = 0.0
+			var sz: float = 0.0
+			for e in range(nbr_start[i], nbr_start[i + 1]):
+				var j: int = nbr[e]
+				var ex_: float = px[j] - px[i]
+				var ez_: float = pz[j] - pz[i]
+				var w: float = 1.0 / maxf(ex_ * ex_ + ez_ * ez_, 1.0e-12)
+				var dzv: float = z[j] - z[i]
+				sxx += w * ex_ * ex_
+				sxz += w * ex_ * ez_
+				szz += w * ez_ * ez_
+				sx += w * ex_ * dzv
+				sz += w * ez_ * dzv
+			var det: float = sxx * szz - sxz * sxz
+			if absf(det) > 1.0e-12 * maxf(sxx * szz, 1.0e-30):
+				gx[i] = (szz * sx - sxz * sz) / det
+				gz[i] = (sxx * sz - sxz * sx) / det
+	var nt: int = tris.size() / 3
+	var bs: float = maxf(sqrt(rw * rh / maxi(nv, 1)) * 1.5, 1.0e-6)
+	var bw: int = maxi(1, int(ceil(rw / bs)))
+	var bh: int = maxi(1, int(ceil(rh / bs)))
+	var buckets: Array = []
+	buckets.resize(bw * bh)
+	for i in range(bw * bh):
+		buckets[i] = []
+	for t in range(nt):
+		var mnx: float = INF
+		var mxx: float = -INF
+		var mnz: float = INF
+		var mxz: float = -INF
+		for k in range(3):
+			var v: int = tris[t * 3 + k]
+			mnx = minf(mnx, px[v]); mxx = maxf(mxx, px[v])
+			mnz = minf(mnz, pz[v]); mxz = maxf(mxz, pz[v])
+		var bx0: int = clampi(int(floor((mnx - x0) / bs)), 0, bw - 1)
+		var bx1: int = clampi(int(floor((mxx - x0) / bs)), 0, bw - 1)
+		var bz0: int = clampi(int(floor((mnz - z0) / bs)), 0, bh - 1)
+		var bz1: int = clampi(int(floor((mxz - z0) / bs)), 0, bh - 1)
+		for bz in range(bz0, bz1 + 1):
+			for bx in range(bx0, bx1 + 1):
+				buckets[bz * bw + bx].append(t)
+	var w_amp: float = warp_amount if warp_amount > 0.0 else 0.02 * min_side
+	var w_size: float = maxf(warp_size if warp_size > 0.0 else 0.25 * min_side, 1.0e-6)
+	var wseed: int = (p_seed ^ 0x7f4a7c15) & 0xffffffff
+	for iz in range(p_gh):
+		for ix in range(p_gw):
+			var idx: int = iz * p_gw + ix
+			var qx: float = x0 + (ix + 0.5) * cell_dx
+			var qz: float = z0 + (iz + 0.5) * cell_dz
+			var wx: float = dx_arr[idx] if has_dx else 0.0
+			var wz: float = dy_arr[idx] if has_dy else 0.0
+			if p_warp:
+				wx += w_amp * _fbm(qx / w_size, qz / w_size, wseed)
+				wz += w_amp * _fbm(qx / w_size, qz / w_size, (wseed + 7919) & 0xffffffff)
+			if wx != 0.0 or wz != 0.0:
+				var u: float = (qx - x0) / rw
+				var v: float = (qz - z0) / rh
+				var fade: float = clampf(16.0 * u * (1.0 - u) * v * (1.0 - v), 0.0, 1.0)
+				qx = clampf(qx + fade * wx, x0, x0 + rw)
+				qz = clampf(qz + fade * wz, z0, z0 + rh)
+			var bx: int = clampi(int(floor((qx - x0) / bs)), 0, bw - 1)
+			var bz: int = clampi(int(floor((qz - z0) / bs)), 0, bh - 1)
+			var best_t: int = -1
+			var best_min: float = -1.0e300
+			var b0: float = 0.0
+			var b1: float = 0.0
+			var b2: float = 0.0
+			for t in buckets[bz * bw + bx]:
+				var a: int = tris[t * 3]
+				var b: int = tris[t * 3 + 1]
+				var c: int = tris[t * 3 + 2]
+				var d: float = (pz[b] - pz[c]) * (px[a] - px[c]) + (px[c] - px[b]) * (pz[a] - pz[c])
+				if absf(d) < 1.0e-18:
+					continue
+				var l0: float = ((pz[b] - pz[c]) * (qx - px[c]) + (px[c] - px[b]) * (qz - pz[c])) / d
+				var l1: float = ((pz[c] - pz[a]) * (qx - px[c]) + (px[a] - px[c]) * (qz - pz[c])) / d
+				var l2: float = 1.0 - l0 - l1
+				var mn: float = minf(l0, minf(l1, l2))
+				if mn > best_min:
+					best_min = mn
+					best_t = t
+					b0 = l0; b1 = l1; b2 = l2
+					if mn >= -1.0e-9:
+						break
+			if best_t < 0:
+				zg[idx] = 0.0
+				continue
+			if best_min < 0.0:
+				b0 = maxf(b0, 0.0); b1 = maxf(b1, 0.0); b2 = maxf(b2, 0.0)
+				var sm: float = maxf(b0 + b1 + b2, 1.0e-12)
+				b0 /= sm; b1 /= sm; b2 /= sm
+			var vv: Array[int] = [tris[best_t * 3], tris[best_t * 3 + 1], tris[best_t * 3 + 2]]
+			var bb: Array[float] = [b0, b1, b2]
+			var val: float = 0.0
+			if recon == 2:
+				var m: int = 0
+				for k in range(1, 3):
+					if bb[k] > bb[m]:
+						m = k
+				val = z[vv[m]]
+			elif recon == 0:
+				val = bb[0] * z[vv[0]] + bb[1] * z[vv[1]] + bb[2] * z[vv[2]]
+			else:
+				var ws: float = 0.0
+				for k in range(3):
+					var vtx: int = vv[k]
+					var w: float = bb[k] * bb[k]
+					val += w * (z[vtx] + gx[vtx] * (qx - px[vtx]) + gz[vtx] * (qz - pz[vtx]))
+					ws += w
+				val /= maxf(ws, 1.0e-30)
+				if p_clamp:
+					val = clampf(val, minf(z[vv[0]], minf(z[vv[1]], z[vv[2]])), maxf(z[vv[0]], maxf(z[vv[1]], z[vv[2]])))
+			zg[idx] = val
+	return zg
+
+
+# Every undrained basin spills through its lowest pass (the native saleve_reroute_lakes): a Dijkstra over the level
+# max(path, p_level) from the outlets reverses each pit's chain onto the pass. `receivers` changes in place; the
+# caller rebuilds the tree.
+static func _reroute_lakes(nbr_start: PackedInt32Array, nbr: PackedInt32Array, outlet: PackedByteArray,
+		p_level: PackedFloat32Array, receivers: PackedInt32Array, root_of: PackedInt32Array) -> void:
+	var nv: int = outlet.size()
+	var basin_drained := outlet.duplicate()
+	var settled := PackedByteArray()
+	settled.resize(nv)
+	var dist := PackedFloat64Array()
+	dist.resize(nv)
+	dist.fill(INF)
+	var pred := PackedInt32Array()
+	pred.resize(nv)
+	pred.fill(-1)
+	var hk: Array = []
+	var hv: Array = []
+	for i in range(nv):
+		if outlet[i] == 1:
+			dist[i] = 0.0
+			_heap_push(hk, hv, 0.0, i)
+	while hv.size() > 0:
+		var d0: float = hk[0]
+		var c: int = hv[0]
+		_heap_pop(hk, hv)
+		if settled[c] == 1:
+			continue
+		settled[c] = 1
+		if basin_drained[root_of[c]] == 0:
+			var prev: int = pred[c]
+			var cur: int = c
+			while true:
+				var nxt: int = receivers[cur]
+				receivers[cur] = prev
+				if nxt == cur:
+					break
+				prev = cur
+				cur = nxt
+			basin_drained[root_of[c]] = 1
+		for e in range(nbr_start[c], nbr_start[c + 1]):
+			var j: int = nbr[e]
+			var nd: float = maxf(d0, p_level[j])
+			if settled[j] == 0 and nd < dist[j]:
+				dist[j] = nd
+				pred[j] = c
+				_heap_push(hk, hv, nd, j)
+
+
+# No edge steeper than its cap or the input's own slope (the native saleve_limit_edges): lowers only, outlets stay.
+# `z` changes in place.
+static func _limit_edges(nbr_start: PackedInt32Array, nbr: PackedInt32Array, nbr_len: PackedFloat64Array,
+		outlet: PackedByteArray, z: PackedFloat32Array, p_input: PackedFloat32Array, slope_cap: PackedFloat32Array,
+		p_floor: float) -> void:
+	var nv: int = z.size()
+	var heap_k: Array = []
+	var heap_v: Array = []
+	var settled := PackedByteArray()
+	settled.resize(nv)
+	for i in range(nv):
+		_heap_push(heap_k, heap_v, z[i], i)
+	while heap_k.size() > 0:
+		var top_k: float = heap_k[0]
+		var c: int = heap_v[0]
+		_heap_pop(heap_k, heap_v)
+		if settled[c] == 1 or top_k != z[c]:
+			continue
+		settled[c] = 1
+		for e in range(nbr_start[c], nbr_start[c + 1]):
+			var j: int = nbr[e]
+			if settled[j] == 1 or outlet[j] == 1:
+				continue
+			var cap: float = maxf(0.5 * (slope_cap[c] + slope_cap[j]), p_floor)
+			var lim: float = maxf(cap * nbr_len[e], absf(p_input[c] - p_input[j]))
+			var scratch := PackedFloat32Array([z[c] + lim])
+			if scratch[0] < z[j]:
+				z[j] = scratch[0]
+				_heap_push(heap_k, heap_v, scratch[0], j)
+
+
 static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2, p_params: Dictionary) -> Array:
 	var n: int = p_gw * p_gh
 	if p_surface.size() != n or p_gw < 2 or p_gh < 2:
@@ -612,6 +940,7 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 	var nbr := PackedInt32Array()
 	var nbr_len := PackedFloat64Array()
 	var tris := PackedInt32Array()
+	var mesh := {}
 	if grid_solve:
 		nv = n
 		px.resize(n)
@@ -643,81 +972,18 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 					nbr_len.append(n_dist[k])
 		nbr_start[n] = nbr.size()
 	else:
-		var s: float = point_spacing if point_spacing > 0.0 else sqrt(rw * rh / float(maxi(control_points, 16)))
-		s = maxf(s, maxf(cell_dx, cell_dz))
-		s = maxf(s, sqrt(rw * rh / float(max_control_points)))
-		mesh_spacing = s
-		var pts := PackedVector2Array()
-		var ring := PackedByteArray()
-		var ex: int = maxi(1, int(roundf(rw / s)))
-		var ez: int = maxi(1, int(roundf(rh / s)))
-		for k in range(ex + 1):
-			pts.append(Vector2(x0 + rw * k / ex, z0)); ring.append(1)
-			pts.append(Vector2(x0 + rw * k / ex, z0 + rh)); ring.append(1)
-		for k in range(1, ez):
-			pts.append(Vector2(x0, z0 + rh * k / ez)); ring.append(1)
-			pts.append(Vector2(x0 + rw, z0 + rh * k / ez)); ring.append(1)
-		var jseed: int = (p_seed ^ 0x51ed27) & 0xffffffff
-		var i_lo: int = int(floor(x0 / s))
-		var i_hi: int = int(floor((x0 + rw) / s))
-		var j_lo: int = int(floor(z0 / s))
-		var j_hi: int = int(floor((z0 + rh) / s))
-		var inset: float = 0.4 * s
-		for j in range(j_lo, j_hi + 1):
-			for i in range(i_lo, i_hi + 1):
-				var key: int = _lattice_key(i, j)
-				var jx: float = 0.35 * _fast_hash_to_unit(jseed, key)
-				var jz: float = 0.35 * _fast_hash_to_unit((jseed + 1) & 0xffffffff, key)
-				var x: float = (i + 0.5 + jx) * s
-				var z: float = (j + 0.5 + jz) * s
-				if x > x0 + inset and x < x0 + rw - inset and z > z0 + inset and z < z0 + rh - inset:
-					pts.append(Vector2(x, z)); ring.append(0)
-		nv = pts.size()
-		var tri := Geometry2D.triangulate_delaunay(pts)
-		px.resize(nv)
-		pz.resize(nv)
-		outlet.resize(nv)
-		area.resize(nv)
-		vh.resize(nv)
-		for i in range(nv):
-			px[i] = pts[i].x
-			pz[i] = pts[i].y
-			outlet[i] = ring[i]
-			vh[i] = _sample(p_surface, p_gw, p_gh, x0, z0, cell_dx, cell_dz, px[i], pz[i])
-		var adj: Array = []
-		adj.resize(nv)
-		for i in range(nv):
-			adj[i] = []
-		for t in range(tri.size() / 3):
-			var a: int = tri[t * 3]
-			var b: int = tri[t * 3 + 1]
-			var c: int = tri[t * 3 + 2]
-			var ar: float = 0.5 * absf((px[b] - px[a]) * (pz[c] - pz[a]) - (px[c] - px[a]) * (pz[b] - pz[a]))
-			if ar < 1.0e-9 * s * s:
-				continue
-			tris.append(a); tris.append(b); tris.append(c)
-			var third: float = ar / 3.0 / (vref * vref)
-			area[a] += third
-			area[b] += third
-			area[c] += third
-			adj[a].append(b); adj[a].append(c)
-			adj[b].append(a); adj[b].append(c)
-			adj[c].append(a); adj[c].append(b)
-		nbr_start.resize(nv + 1)
-		for i in range(nv):
-			var l: Array = adj[i]
-			l.sort()
-			nbr_start[i] = nbr.size()
-			var last: int = -1
-			for j in l:
-				if j == last:
-					continue
-				last = j
-				nbr.append(j)
-				var ddx: float = px[j] - px[i]
-				var ddz: float = pz[j] - pz[i]
-				nbr_len.append(sqrt(ddx * ddx + ddz * ddz) / vref)
-		nbr_start[nv] = nbr.size()
+		mesh = _build_mesh(p_surface, p_gw, p_gh, p_rect, point_spacing, control_points, max_control_points, p_seed, vref)
+		nv = mesh.nv
+		px = mesh.px
+		pz = mesh.pz
+		outlet = mesh.outlet
+		area = mesh.area
+		vh = mesh.vh
+		nbr_start = mesh.nbr_start
+		nbr = mesh.nbr
+		nbr_len = mesh.nbr_len
+		tris = mesh.tris
+		mesh_spacing = mesh.spacing
 
 	var z := PackedFloat32Array()
 	z.resize(nv)
@@ -791,52 +1057,11 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 			tree = _build_tree(receivers, nv)
 			var root_of: PackedInt32Array = tree.root_of
 			var any_pit: bool = false
-			var basin_drained := PackedByteArray()
-			basin_drained.resize(nv)
 			for i in range(nv):
-				basin_drained[i] = outlet[i]
 				if receivers[i] == i and outlet[i] == 0:
 					any_pit = true
 			if any_pit and reroute:
-				var settled := PackedByteArray()
-				settled.resize(nv)
-				var dist := PackedFloat64Array()
-				dist.resize(nv)
-				dist.fill(INF)
-				var pred := PackedInt32Array()
-				pred.resize(nv)
-				pred.fill(-1)
-				var hk: Array = []
-				var hv: Array = []
-				for i in range(nv):
-					if outlet[i] == 1:
-						dist[i] = 0.0
-						_heap_push(hk, hv, 0.0, i)
-				while hv.size() > 0:
-					var d0: float = hk[0]
-					var c: int = hv[0]
-					_heap_pop(hk, hv)
-					if settled[c] == 1:
-						continue
-					settled[c] = 1
-					if basin_drained[root_of[c]] == 0:
-						var prev: int = pred[c]
-						var cur: int = c
-						while true:
-							var nxt: int = receivers[cur]
-							receivers[cur] = prev
-							if nxt == cur:
-								break
-							prev = cur
-							cur = nxt
-						basin_drained[root_of[c]] = 1
-					for e in range(nbr_start[c], nbr_start[c + 1]):
-						var j: int = nbr[e]
-						var nd: float = maxf(d0, route0[j])
-						if settled[j] == 0 and nd < dist[j]:
-							dist[j] = nd
-							pred[j] = c
-							_heap_push(hk, hv, nd, j)
+				_reroute_lakes(nbr_start, nbr, outlet, route0, receivers, root_of)
 				tree = _build_tree(receivers, nv)
 				root_of = tree.root_of
 
@@ -875,29 +1100,7 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 		if not grid_solve and limit_edges:
 			# Every mesh edge to the cap or the input's own slope; lowers only, outlets stay. See saleve_limit_edges.
 			var cap_floor: float = float(PackedFloat32Array([0.2 * maxf(slope_center, slope_border) * to_unit])[0])
-			var heap_k: Array = []
-			var heap_v: Array = []
-			var settled := PackedByteArray()
-			settled.resize(nv)
-			for i in range(nv):
-				_heap_push(heap_k, heap_v, z[i], i)
-			while heap_k.size() > 0:
-				var top_k: float = heap_k[0]
-				var c: int = heap_v[0]
-				_heap_pop(heap_k, heap_v)
-				if settled[c] == 1 or top_k != z[c]:
-					continue
-				settled[c] = 1
-				for e in range(nbr_start[c], nbr_start[c + 1]):
-					var j: int = nbr[e]
-					if settled[j] == 1 or outlet[j] == 1:
-						continue
-					var cap: float = maxf(0.5 * (slope_cap[c] + slope_cap[j]), cap_floor)
-					var lim: float = maxf(cap * nbr_len[e], absf(input_z[c] - input_z[j]))
-					var scratch := PackedFloat32Array([z[c] + lim])
-					if scratch[0] < z[j]:
-						z[j] = scratch[0]
-						_heap_push(heap_k, heap_v, scratch[0], j)
+			_limit_edges(nbr_start, nbr, nbr_len, outlet, z, input_z, slope_cap, cap_floor)
 
 	# ---- reconstruction ----
 	# The cut (solved less input) goes onto the grid, not the surface: see the native solve.
@@ -910,128 +1113,8 @@ static func solve_gd(p_surface: PackedFloat32Array, p_gw: int, p_gh: int, p_rect
 		for i in range(n):
 			zg[i] = z[i]
 	else:
-		var gx := PackedFloat64Array()
-		gx.resize(nv)
-		var gz := PackedFloat64Array()
-		gz.resize(nv)
-		if recon == 1:
-			for i in range(nv):
-				var sxx: float = 0.0
-				var sxz: float = 0.0
-				var szz: float = 0.0
-				var sx: float = 0.0
-				var sz: float = 0.0
-				for e in range(nbr_start[i], nbr_start[i + 1]):
-					var j: int = nbr[e]
-					var ex_: float = px[j] - px[i]
-					var ez_: float = pz[j] - pz[i]
-					var w: float = 1.0 / maxf(ex_ * ex_ + ez_ * ez_, 1.0e-12)
-					var dzv: float = z[j] - z[i]
-					sxx += w * ex_ * ex_
-					sxz += w * ex_ * ez_
-					szz += w * ez_ * ez_
-					sx += w * ex_ * dzv
-					sz += w * ez_ * dzv
-				var det: float = sxx * szz - sxz * sxz
-				if absf(det) > 1.0e-12 * maxf(sxx * szz, 1.0e-30):
-					gx[i] = (szz * sx - sxz * sz) / det
-					gz[i] = (sxx * sz - sxz * sx) / det
-		var nt: int = tris.size() / 3
-		var bs: float = maxf(sqrt(rw * rh / maxi(nv, 1)) * 1.5, 1.0e-6)
-		var bw: int = maxi(1, int(ceil(rw / bs)))
-		var bh: int = maxi(1, int(ceil(rh / bs)))
-		var buckets: Array = []
-		buckets.resize(bw * bh)
-		for i in range(bw * bh):
-			buckets[i] = []
-		for t in range(nt):
-			var mnx: float = INF
-			var mxx: float = -INF
-			var mnz: float = INF
-			var mxz: float = -INF
-			for k in range(3):
-				var v: int = tris[t * 3 + k]
-				mnx = minf(mnx, px[v]); mxx = maxf(mxx, px[v])
-				mnz = minf(mnz, pz[v]); mxz = maxf(mxz, pz[v])
-			var bx0: int = clampi(int(floor((mnx - x0) / bs)), 0, bw - 1)
-			var bx1: int = clampi(int(floor((mxx - x0) / bs)), 0, bw - 1)
-			var bz0: int = clampi(int(floor((mnz - z0) / bs)), 0, bh - 1)
-			var bz1: int = clampi(int(floor((mxz - z0) / bs)), 0, bh - 1)
-			for bz in range(bz0, bz1 + 1):
-				for bx in range(bx0, bx1 + 1):
-					buckets[bz * bw + bx].append(t)
-		var w_amp: float = warp_amount if warp_amount > 0.0 else 0.02 * min_side
-		var w_size: float = maxf(warp_size if warp_size > 0.0 else 0.25 * min_side, 1.0e-6)
-		var wseed: int = (p_seed ^ 0x7f4a7c15) & 0xffffffff
-		for iz in range(p_gh):
-			for ix in range(p_gw):
-				var idx: int = iz * p_gw + ix
-				var qx: float = x0 + (ix + 0.5) * cell_dx
-				var qz: float = z0 + (iz + 0.5) * cell_dz
-				var wx: float = dx_arr[idx] if has_dx else 0.0
-				var wz: float = dy_arr[idx] if has_dy else 0.0
-				if default_warp and not reconstruct_only:
-					wx += w_amp * _fbm(qx / w_size, qz / w_size, wseed)
-					wz += w_amp * _fbm(qx / w_size, qz / w_size, (wseed + 7919) & 0xffffffff)
-				if wx != 0.0 or wz != 0.0:
-					var u: float = (qx - x0) / rw
-					var v: float = (qz - z0) / rh
-					var fade: float = clampf(16.0 * u * (1.0 - u) * v * (1.0 - v), 0.0, 1.0)
-					qx = clampf(qx + fade * wx, x0, x0 + rw)
-					qz = clampf(qz + fade * wz, z0, z0 + rh)
-				var bx: int = clampi(int(floor((qx - x0) / bs)), 0, bw - 1)
-				var bz: int = clampi(int(floor((qz - z0) / bs)), 0, bh - 1)
-				var best_t: int = -1
-				var best_min: float = -1.0e300
-				var b0: float = 0.0
-				var b1: float = 0.0
-				var b2: float = 0.0
-				for t in buckets[bz * bw + bx]:
-					var a: int = tris[t * 3]
-					var b: int = tris[t * 3 + 1]
-					var c: int = tris[t * 3 + 2]
-					var d: float = (pz[b] - pz[c]) * (px[a] - px[c]) + (px[c] - px[b]) * (pz[a] - pz[c])
-					if absf(d) < 1.0e-18:
-						continue
-					var l0: float = ((pz[b] - pz[c]) * (qx - px[c]) + (px[c] - px[b]) * (qz - pz[c])) / d
-					var l1: float = ((pz[c] - pz[a]) * (qx - px[c]) + (px[a] - px[c]) * (qz - pz[c])) / d
-					var l2: float = 1.0 - l0 - l1
-					var mn: float = minf(l0, minf(l1, l2))
-					if mn > best_min:
-						best_min = mn
-						best_t = t
-						b0 = l0; b1 = l1; b2 = l2
-						if mn >= -1.0e-9:
-							break
-				if best_t < 0:
-					zg[idx] = 0.0
-					continue
-				if best_min < 0.0:
-					b0 = maxf(b0, 0.0); b1 = maxf(b1, 0.0); b2 = maxf(b2, 0.0)
-					var sm: float = maxf(b0 + b1 + b2, 1.0e-12)
-					b0 /= sm; b1 /= sm; b2 /= sm
-				var vv: Array[int] = [tris[best_t * 3], tris[best_t * 3 + 1], tris[best_t * 3 + 2]]
-				var bb: Array[float] = [b0, b1, b2]
-				var val: float = 0.0
-				if recon == 2:
-					var m: int = 0
-					for k in range(1, 3):
-						if bb[k] > bb[m]:
-							m = k
-					val = z[vv[m]]
-				elif recon == 0:
-					val = bb[0] * z[vv[0]] + bb[1] * z[vv[1]] + bb[2] * z[vv[2]]
-				else:
-					var ws: float = 0.0
-					for k in range(3):
-						var vtx: int = vv[k]
-						var w: float = bb[k] * bb[k]
-						val += w * (z[vtx] + gx[vtx] * (qx - px[vtx]) + gz[vtx] * (qz - pz[vtx]))
-						ws += w
-					val /= maxf(ws, 1.0e-30)
-					if not reconstruct_only:
-						val = clampf(val, minf(z[vv[0]], minf(z[vv[1]], z[vv[2]])), maxf(z[vv[0]], maxf(z[vv[1]], z[vv[2]])))
-				zg[idx] = val
+		zg = _reconstruct(mesh, z, p_gw, p_gh, p_rect, recon, dx_arr, dy_arr, default_warp and not reconstruct_only,
+				warp_amount, warp_size, p_seed, not reconstruct_only)
 
 	# Smooth the cut before it comes off the input (saleve_smooth_cut): three box passes per axis, the ends clamped.
 	if not grid_solve and not reconstruct_only and not bool(p_params.get("skip_stage1", false)) and valley_smoothing_m >= 0.0:

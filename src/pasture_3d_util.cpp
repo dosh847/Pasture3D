@@ -1321,6 +1321,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "hydraulic_particle", GRAPH_OP_HYDRAULIC_PARTICLE },
 		{ "hydraulic_stream_log", GRAPH_OP_HYDRAULIC_STREAM_LOG },
 		{ "hydraulic_saleve", GRAPH_OP_HYDRAULIC_SALEVE },
+		{ "saleve_stream_power", GRAPH_OP_SALEVE_STREAM_POWER },
 		{ "mountain_cone", GRAPH_OP_MOUNTAIN_CONE },
 		{ "mountain_inselberg", GRAPH_OP_MOUNTAIN_INSELBERG },
 		{ "mountain_range_radial", GRAPH_OP_MOUNTAIN_RANGE_RADIAL },
@@ -1559,6 +1560,12 @@ Dictionary Pasture3DUtil::hydraulic_saleve_solve_grid(const PackedFloat32Array &
 	godot::HydraulicSaleveParams params = godot::HydraulicSaleveParams::from_dict(p_params);
 	godot::HydraulicSaleveResult res = godot::hydraulic_saleve_solve(p_surface, p_gw, p_gh, p_rect, params);
 	return res.to_dict();
+}
+
+Dictionary Pasture3DUtil::saleve_stream_power_solve_grid(const PackedFloat32Array &p_surface, const int p_gw,
+		const int p_gh, const Rect2 &p_rect, const Dictionary &p_params) {
+	godot::SaleveStreamPowerParams params = godot::SaleveStreamPowerParams::from_dict(p_params);
+	return godot::saleve_stream_power_solve(p_surface, p_gw, p_gh, p_rect, params).to_dict();
 }
 
 PackedFloat32Array Pasture3DUtil::mountain_cone_generate_grid(const int p_gw, const int p_gh, const Rect2 &p_rect, const Dictionary &p_params) {
@@ -3341,6 +3348,9 @@ void Pasture3DUtil::_bind_methods() {
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("hydraulic_saleve_solve_grid", "surface", "gw", "gh", "rect", "params"),
 			&Pasture3DUtil::hydraulic_saleve_solve_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("saleve_stream_power_solve_grid", "surface", "gw", "gh", "rect", "params"),
+			&Pasture3DUtil::saleve_stream_power_solve_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("mountain_cone_generate_grid", "gw", "gh", "rect", "params"),
 			&Pasture3DUtil::mountain_cone_generate_grid);

@@ -158,4 +158,73 @@ struct HydraulicSaleveResult {
 HydraulicSaleveResult hydraulic_saleve_solve(const PackedFloat32Array &p_surface,
 		int p_gw, int p_gh, const Rect2 &p_rect, const HydraulicSaleveParams &p_params);
 
+// ---- Salève Hydraulic Erosion: uplift and stream-power incision (the faithful Salève) ----------------------
+//
+// The Smooth node above incises its input and keeps it as a ceiling. This one evolves the landscape:
+//     dz/dt = U·u(x) − K·A^m·S^n
+// on the same control-point mesh, routed, rerouted and accumulated by the same kernels, but with the receivers
+// recomputed on the CURRENT surface every step (no input fan, no input ceiling). Each step is implicit along
+// the receiver (Braun & Willett 2013): n = 1 in closed form, otherwise Newton. A threshold hillslope follows:
+// every mesh edge is held to Max Slope (saleve_limit_edges). The input is the starting terrain, and the outlets
+// (the grid border, plus low ground within `outlet_level` of the input's relief) hold its height: the sea.
+//
+// K is set so the steady state is readable: at full uplift a channel draining `channel_area` stands at
+// `uplift_gradient` (m/km), K = U / (G^n · A_ch^m). So the steady state is S = u^(1/n) · G · (A_ch / A)^(m/n), a
+// local gradient, and a bigger rect adds ground without rescaling what is there. Duration 0 returns the input.
+struct SaleveStreamPowerParams {
+	float uplift_rate = 1.0f; // mm/yr at full uplift
+	float duration = 500.0f; // kyr
+	int time_steps = 100;
+	float uplift_gradient = 300.0f; // m/km: the steady-state slope where `channel_area` drains, at full uplift
+	float drainage_exponent = 0.5f; // m
+	float slope_exponent = 1.0f; // n
+	float channel_area = 10000.0f; // m^2
+	float max_slope = 1.0f; // m/m, the threshold hillslope
+	float drainage_noise = 0.15f;
+	int seed = 0;
+	float outlet_level = 0.1f; // fraction of the input's relief above its minimum that drains out
+	float strength = 1.0f; // blend of the result over the input, times the mask
+	bool never_below_input = false; // clamp the height change at 0: only adds rock
+	int control_points = 15000;
+	float point_spacing = 0.0f;
+	int max_control_points = 100000; // gates only
+	int reconstruction = 1; // 0 LINEAR, 1 GRADIENT, 2 NEAREST (gate control)
+	bool default_warp = true;
+	float warp_amount = 0.0f;
+	float warp_size = 0.0f;
+	PackedFloat32Array uplift; // 0..1 per cell; empty = 1 everywhere
+	PackedFloat32Array mask;
+	PackedFloat32Array dx;
+	PackedFloat32Array dy;
+	// Gate hooks, dictionary only.
+	bool reroute_lakes = true;
+	bool limit_edges = true;
+	bool debug_network = false;
+
+	static SaleveStreamPowerParams from_dict(const Dictionary &p_dict);
+	// The native op's layout: 16 slots and the LUT. Shared by the op and the gate, so they cannot disagree.
+	static SaleveStreamPowerParams from_slots(const float *p_P, int p_count, const PackedFloat32Array &p_lut);
+};
+
+struct SaleveStreamPowerResult {
+	bool ok = false;
+	PackedFloat32Array height; // metres
+	PackedFloat32Array eroded_rock; // metres of rock removed (fluvial + hillslope), under the blend weight
+	PackedFloat32Array drainage_area; // m^2 on the final network
+	int steps = 0;
+	int vertex_count = 0;
+	// debug_network only, on the mesh:
+	PackedVector2Array vertices;
+	PackedFloat32Array vertex_height; // metres
+	PackedInt32Array receivers;
+	PackedFloat32Array vertex_area; // drainage area, m^2
+	PackedFloat32Array vertex_uplift; // u, 0..1
+	PackedInt32Array outlets; // 1 where the vertex is an outlet
+
+	Dictionary to_dict() const;
+};
+
+SaleveStreamPowerResult saleve_stream_power_solve(const PackedFloat32Array &p_surface, int p_gw, int p_gh,
+		const Rect2 &p_rect, const SaleveStreamPowerParams &p_params);
+
 } // namespace godot

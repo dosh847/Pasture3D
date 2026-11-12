@@ -1,9 +1,10 @@
 # Pasture3D Salève and Strata Fidelity Spec
 
-**Status: T1–T3 built 2026-09-18 (`GraphStrataProfileGate`; T3's mask port built 2026-11-09, see T3); S1 built 2026-09-18 (`GraphSaleveNetworkGate`); S2 built 2026-09-18 (`GraphSaleveMeshGate`); S3 built 2026-09-18 (`GraphSaleveDepositionGate`); S4 built 2026-09-18 (renders not done, see S4).** Check the symbols named in each phase before planning from
+**Status: T1–T3 built 2026-09-18 (`GraphStrataProfileGate`; T3's mask port built 2026-11-09, see T3); S1 built 2026-09-18 (`GraphSaleveNetworkGate`); S2 built 2026-09-18 (`GraphSaleveMeshGate`); S3 built 2026-09-18 (`GraphSaleveDepositionGate`); S4 built 2026-09-18 (renders not done, see S4); the stream-power node Salève Hydraulic Erosion built 2026-11-11 (`GraphSaleveStreamPowerGate`, see its section).** Check the symbols named in each phase before planning from
 this header — spec status headers go stale.
 
-The graph's **Salève Hydraulic Erosion** (`Pasture3DGraphNodeHydraulicSaleve`, `src/pasture_3d_hydraulic_saleve.cpp`)
+The graph's **Salève Hydraulic Erosion Smooth** (`Pasture3DGraphNodeHydraulicSaleve`, op `hydraulic_saleve`,
+`src/pasture_3d_hydraulic_saleve.cpp`; named Salève Hydraulic Erosion until 2026-11-11)
 and **Strata** (`Pasture3DGraphNodeStrata`, `src/pasture_3d_strata.cpp`) nodes do not reach the fidelity of
 their Hesiod counterparts. A line-by-line comparison against HighMap/Hesiod (`hmap::hydraulic_saleve`,
 `DrainageBasin`, `hmap::gpu::strata` / `strata.cl`) found the gap is structural, not a matter of defaults.
@@ -125,7 +126,11 @@ cells with zero change and cells with full change on a 256² ramp. Route parity.
 
 ---
 
-## Salève Hydraulic Erosion
+## Salève Hydraulic Erosion Smooth
+
+The node these phases built. It was **Salève Hydraulic Erosion** until 2026-11-11, when that name went to the
+stream-power node below; its op id (`hydraulic_saleve`), class, file and output are unchanged, so saved graphs
+load and bake as before.
 
 ### Phase S1 — Correct drainage network (same grid, same look class)
 
@@ -468,6 +473,60 @@ thresholds were set from measured values (spikes 0 against 10, field difference 
 against the old stream defaults by number, and the warp moved a smoothed cut less than its 0.5 m threshold (0.40 m).
 `SaleveMarginInvarianceProbe` worst drift is 1.33 / 1.20 m (auto / pinned), from 5.05 / 5.03 m. Saved scenes with their
 own Salève values keep them, and all other Salève setups change look on their next bake.
+
+## Salève Hydraulic Erosion (stream power)
+
+**Built 2026-11-11.** `Pasture3DGraphNodeSaleveStreamPower`, op `saleve_stream_power`, native op 78
+(`GRAPH_OP_SALEVE_STREAM_POWER`); the solve is `saleve_stream_power_solve` in src/pasture_3d_hydraulic_saleve.cpp,
+the GDScript specification is `[Dev/GD] Salève Hydraulic Erosion` (`pasture3d_graph_node_dev_saleve_stream_power.gd`,
+op `dev_saleve_stream_power`), and the gate is bench/GraphSaleveStreamPowerGate (SA–SJ).
+
+The Smooth node incises the input in place: the input is the ceiling and the shape. This node is the faithful
+Salève model instead: uplift and stream-power incision over the drainage network, integrated through time, so the
+network builds its own relief.
+
+**Model.** The input is the initial surface, on the Smooth node's jittered control-point mesh (metres, not the
+reference-relief units Smooth solves in). Each of `time_steps` steps over `duration`:
+
+1. route on the current surface plus 1 mm of fixed flat-breaking noise (routing only, so a zero duration is the
+   identity): steepest descent among the lower neighbours, the score bent by Drainage Noise. There is no input
+   fan and no input ceiling;
+2. spill every closed basin through its lowest pass (the shared lake rerouting), accumulate drainage area;
+3. from the outlets upstream, raise each vertex by `dt · U · u` and solve
+   `z' = z + dt·U·u − dt·K·A^m·((z' − z_r)/d)^n` implicitly against its already-updated receiver (Braun–Willett:
+   n = 1 in closed form, Newton otherwise; unconditionally stable, so few steps stay sane);
+4. Max Slope as the threshold hillslope: the shared edge limiter, lowering only.
+
+`K = U / (G^n · A_ch^m)`, with G = Uplift Gradient / 1000 and A_ch = Channel Area, so the steady state is
+`S = u^(1/n) · G · (A_ch / A)^(m/n)`: Uplift Gradient is the slope a fully uplifted channel draining Channel Area
+keeps. A slope, not a height, so a bigger area grows taller ranges rather than a rescaled copy. Outlets (the border
+ring, low ground under Outlet Level × the input's relief, no-data) are base level and keep the input's height.
+
+**Outputs.** `height` (input + Strength × mask × the reconstructed change, so ground the solve did not move keeps
+the input's detail), `eroded_rock` (metres removed over the run, by incision and by the talus limit),
+`drainage_area` (m², the final surface's network). No deposition and no Stream Log stage: those are Smooth's.
+
+**Never Below Input** (default off; LUT slot 2, since the 16 param slots are full) clamps the reconstructed
+change at 0 before the Strength × mask blend, so the node only adds rock: a ridge raised over existing hills
+leaves the hills uncut. Ground the run raised keeps the unclamped height bit for bit; `eroded_rock` still
+reports the rock removed from the uplifted ground. Without it, unuplifted ground inside the mask is incised
+toward base level, which is the model working, not a compositing fault. Gate SJ.
+
+**Shared code.** Both nodes call one implementation of the mesh build, routing, tree, lake rerouting,
+accumulation, edge limiter and reconstruction (`saleve_build_mesh`, `saleve_route`, `saleve_build_tree`,
+`saleve_reroute_lakes`, `saleve_accumulate`, `saleve_limit_edges`, `saleve_reconstruct`), and the two oracles share
+the GDScript statics on `Pasture3DGraphNodeDevHydraulicSaleve` (`_build_mesh`, `_reconstruct`, `_reroute_lakes`,
+`_limit_edges`). The extraction was proven bit-identical on 11 native and 4 oracle configurations of the Smooth
+node before the new node was added.
+
+**Slots.** P0 time_steps, P1 strength, P2 drainage_exponent (m), P3 drainage_noise, P4 uplift_rate (mm/yr),
+P5 duration (kyr), P6 uplift_gradient (m/km), P7 slope_exponent (n), P8 channel_area (m²), P9 max_slope, P10 seed,
+P11 outlet_level, P12 control_points, P13 point_spacing, P14 reconstruction, P15 default_warp; LUT
+[warp_amount, warp_size]. Ports: in, dx, dy, uplift (MASK, unwired 1), mask (port 4, OWN, rides in_aux).
+
+**Gate.** The native dictionary route equals the oracle bit for bit (n = 1, n = 1.5 without noise, and uplift +
+mask + dx/dy + Linear); the steady state matches the law to a median error of 0 on 1334 vertices at n = 1 and 1.5
+(controls: 20 kyr reads 0.55, and the same slopes against u = 1 read 0.38). See the gate header for the rest.
 
 ## Out of scope
 

@@ -248,6 +248,10 @@ worth native code (measure only with the user's go-ahead).
 
 ## Step 4 — Salève Uplift mode
 
+The node is now **Salève Hydraulic Erosion Smooth** (renamed 2026-11-11, op id unchanged); the time-integrated
+stream-power model is the separate **Salève Hydraulic Erosion** node (`saleve_stream_power`,
+PASTURE3D_SALEVE_STRATA_FIDELITY_SPEC.md).
+
 **Built 2026-11-11** (`stage1_mode` in src/pasture_3d_hydraulic_saleve.{h,cpp}, the native op in
 pasture_3d_graph_ops.cpp, the node's Stage 1 Mode / Uplift group; gate bench/GraphSaleveUpliftGate UA–UG).
 Departures from the plan below:

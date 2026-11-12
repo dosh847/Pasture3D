@@ -107,6 +107,7 @@ enum GraphCellOpType {
 	GRAPH_OP_SHORE_CHARACTER = 75, // FILTER grid: in0 heightfield + aux exposure -> cliff/beach/hardness/erosion masks (4 outputs)
 	GRAPH_OP_PATH_RANGE = 76, // FILTER grid: in_g crest -> a range with spurs (4 outputs), in1 base height, aux amount
 	GRAPH_OP_SLOPE = 77, // FILTER grid: in0 heightfield -> slope degrees, band mask, aspect (3 outputs)
+	GRAPH_OP_SALEVE_STREAM_POWER = 78, // SOLVER grid: Salève uplift + stream-power incision (3 outputs, aux mask)
 	GRAPH_OP_MASK_FEATHER = 79, // FILTER grid: in0 mask -> distance-feathered edge in metres (signed JFA)
 	GRAPH_OP_MEASURE = 69, // FILTER grid: in0 reduced to two uniform channels (range / percentiles / mean), in1 selection
 };

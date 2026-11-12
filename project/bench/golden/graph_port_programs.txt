@@ -168,6 +168,8 @@ hydraulic_stream_log|unwired|1834009938
 hydraulic_stream_log|wired|102161890
 hydraulic_saleve|unwired|3670476330
 hydraulic_saleve|wired|3188058403
+saleve_stream_power|unwired|2524865252
+saleve_stream_power|wired|4160988610
 erosion_thermal|unwired|3294576449
 erosion_thermal|wired|2614888966
 coastal_erosion|unwired|2325444764
@@ -268,6 +270,8 @@ dev_hydraulic_stream_log|unwired|none
 dev_hydraulic_stream_log|wired|none
 dev_hydraulic_saleve|unwired|none
 dev_hydraulic_saleve|wired|none
+dev_saleve_stream_power|unwired|none
+dev_saleve_stream_power|wired|none
 dev_erosion_thermal|unwired|none
 dev_erosion_thermal|wired|none
 dev_depression_filling|unwired|none
