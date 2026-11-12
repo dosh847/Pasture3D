@@ -282,15 +282,31 @@ func _gpu() -> void:
 	if d > GPU_TOL:
 		_fail += 1; print("    !! the shader and the C++ kernel disagree beyond float32 tolerance")
 
-	# WaterMask is deliberately NOT on the GPU: its shore band runs the JFA distance transform, and the
-	# transform's plan is built inline in the DistanceTransform case rather than as a reusable sub-plan.
-	# It stays on the native C++ kernel — which is a compiled route, not a GDScript one — and that is the
-	# claim this line records so a later reader does not mistake it for an oversight.
+	# WaterMask: channel 0 (water) is pointwise and on the GPU. The shore band is channel 1, and the GPU plan
+	# holds one buffer per slot, so a graph that READS shore is declined graph-wide -- the control.
+	var depth: PackedFloat32Array = _flood_channels(surf, 20.0, true)[1]
 	var gwm := _build_graph([_water_node(0.5, 20.0)])
 	var gres: PackedFloat32Array = Pasture3DUtil.graph_eval_grid_gpu(gwm.compile_graph_program(), GW, GH,
-			RECT, surf)
-	print("    watermask GPU plan: %s (expected: declined, native C++ route)"
-			% ("declined" if gres.is_empty() else "accepted"))
+			RECT, depth)
+	if gres.is_empty():
+		_fail += 1; print("    !! the GPU declined a graph reading only WaterMask's water channel")
+	else:
+		var wcpu: PackedFloat32Array = Pasture3DUtil.graph_eval_grid(gwm.compile_graph_program(), GW, GH,
+				RECT, depth)
+		var wd := _max_abs_diff(gres, wcpu)
+		var wet := 0
+		for v in gres:
+			wet += 1 if v > 0.5 else 0
+		print("    watermask water on GPU: max |gpu - cpu| = %.7f, %d wet cells" % [wd, wet])
+		if wd > 0.0 or wet == 0 or wet == gres.size():
+			_fail += 1; print("    !! the GPU water channel is not the CPU's, or the fixture is all one side")
+	var gshore := _build_graph([_water_node(0.5, 20.0)])
+	gshore.connections = [[0, 0, 1, 0], [1, 1, 2, 0]]
+	var sres: PackedFloat32Array = Pasture3DUtil.graph_eval_grid_gpu(gshore.compile_graph_program(), GW, GH,
+			RECT, depth)
+	print("    control: a graph reading shore is %s (want declined)" % ("declined" if sres.is_empty() else "accepted"))
+	if not sres.is_empty():
+		_fail += 1; print("    !! the GPU accepted a secondary channel it holds no buffer for")
 
 
 # --- fixtures and helpers ----------------------------------------------------------------------------

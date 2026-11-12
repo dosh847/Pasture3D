@@ -17,6 +17,11 @@
 #     ~0.5 on the contour. Control: OUTWARD does reach outside.
 # MF  no edge: an empty mask reads 0 (inverted 1), a full mask 1, NaN stays NaN with finite neighbours, and
 #     feather 0 is the thresholded input. Control: feather 0 is not the feathered result.
+# MG  GPU: a graph containing Mask Feather is accepted by graph_eval_grid_gpu (the bail is graph-wide) and
+#     matches the CPU route for every side x falloff, inverted, and for an empty and a full mask with a huge
+#     feather (the no-edge case the shader reads off the resolved field per cell); a NaN cell stays NaN.
+#     Control: the CPU at 10% more feather is outside the GPU tolerance. NO-SIGNAL without a RenderingDevice:
+#     run WINDOWED to exercise it.
 #
 # Run: Godot_v4.7-stable_win64_console.exe --headless --path project res://bench/GraphMaskFeatherGate.tscn
 extends Node
@@ -40,7 +45,8 @@ func _ready() -> void:
 		_md()
 		_me()
 		_mf()
-	_check(_ran == 6, "all 6 criteria ran (%d)" % _ran)
+		_mg()
+	_check(_ran == 7, "all 7 criteria ran (%d)" % _ran)
 	print("\n=== %s (%d failures) ===\n" % ["MASK FEATHER PASS" if _fail == 0 else "MASK FEATHER FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -340,6 +346,70 @@ static func _mn(p_a: PackedFloat32Array) -> float:
 	for v in p_a:
 		m = minf(m, v)
 	return m
+
+
+## A program with the feather typed in, for both routes.
+func _program(p_f: float, p_side: int, p_falloff: int, p_inv: bool) -> Dictionary:
+	var n: Pasture3DGraphNode = Pasture3DGraphNodeRegistry.create(&"mask_feather")
+	n.set("feather", p_f)
+	n.set("side", p_side)
+	n.set("falloff", p_falloff)
+	n.set("threshold", 0.45)
+	n.set("invert", p_inv)
+	return _graph(n).compile_graph_program()
+
+
+func _mg() -> void:
+	print("[MG] the GPU route equals the CPU route")
+	const GPU_TOL := 1.0e-3
+	if not ClassDB.class_has_method("Pasture3DUtil", "graph_eval_grid_gpu"):
+		_check(false, "graph_eval_grid_gpu is not bound")
+		_ran += 1
+		return
+	var m := _soft(N)
+	var probe := Pasture3DUtil.graph_eval_grid_gpu(_program(30.0, 0, 0, false), N, N, RECT, m)
+	if probe.is_empty():
+		var io := Pasture3DTerrainGraph.create_empty()
+		io.nodes = [Pasture3DGraphNodeRegistry.create(&"input"), Pasture3DGraphNodeRegistry.create(&"output")] 				as Array[Pasture3DGraphNode]
+		io.connect_ports(0, 0, 1, 0)
+		if Pasture3DUtil.graph_eval_grid_gpu(io.compile_graph_program(), N, N, RECT, m).is_empty():
+			print("    NO-SIGNAL: no local RenderingDevice — GPU route unverified. Re-run windowed.")
+		else:
+			_check(false, "the GPU declined Mask Feather but not a bare in->out graph (graph-wide bail)")
+		_ran += 1
+		return
+	var worst := 0.0
+	for side in 3:
+		for falloff in 2:
+			for inv in [false, true]:
+				var prog := _program(30.0, side, falloff, inv)
+				var gpu := Pasture3DUtil.graph_eval_grid_gpu(prog, N, N, RECT, m)
+				var cpu := Pasture3DUtil.graph_eval_grid(prog, N, N, RECT, m)
+				worst = maxf(worst, _worst(gpu, cpu))
+	_check(worst <= GPU_TOL, "12 combinations: worst |gpu - cpu| %.7f" % worst)
+
+	var empty := PackedFloat32Array()
+	empty.resize(N * N)
+	var full := empty.duplicate()
+	full.fill(1.0)
+	var edge_worst := 0.0
+	for fld in [empty, full]:
+		for side in 3:
+			var prog := _program(1e5, side, 0, false)
+			edge_worst = maxf(edge_worst, _worst(Pasture3DUtil.graph_eval_grid_gpu(prog, N, N, RECT, fld),
+					Pasture3DUtil.graph_eval_grid(prog, N, N, RECT, fld)))
+	_check(edge_worst == 0.0, "empty and full masks, 100 km feather: worst %.7f" % edge_worst)
+
+	var holed := _disc(N, 150.0)
+	var hole := N * (N / 2) + N / 2 + 10
+	holed[hole] = NAN
+	var hg := Pasture3DUtil.graph_eval_grid_gpu(_program(20.0, 0, 0, false), N, N, RECT, holed)
+	_check(hg.size() == N * N and is_nan(hg[hole]) and is_finite(hg[hole + 1]), "a NaN cell stays NaN on the GPU")
+
+	var gpu0 := Pasture3DUtil.graph_eval_grid_gpu(_program(30.0, 0, 0, false), N, N, RECT, m)
+	var off := _worst(gpu0, Pasture3DUtil.graph_eval_grid(_program(33.0, 0, 0, false), N, N, RECT, m))
+	_check(off > GPU_TOL, "control: the CPU at 10%% more feather is %.4f off" % off)
+	_ran += 1
 
 
 func _check(p_ok: bool, p_msg: String) -> void:

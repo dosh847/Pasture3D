@@ -76,7 +76,8 @@ func solve(p_in: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2) -> Pac
 	var dz := p_rect.size.y / float(p_gh)
 
 	# NaN is neither inside nor outside — it is the brush loop mask, and seeding it either way would
-	# invent a boundary through a region the user excluded.
+	# invent a boundary through a region the user excluded. Its flag is 2, which no field wants, so it
+	# seeds neither (the C++ DT_EXCLUDED; the GPU kernel likewise never seeds NaN).
 	var inside := PackedByteArray()
 	var valid := PackedByteArray()
 	inside.resize(n)
@@ -85,7 +86,7 @@ func solve(p_in: PackedFloat32Array, p_gw: int, p_gh: int, p_rect: Rect2) -> Pac
 		var v := p_in[i]
 		if is_nan(v):
 			valid[i] = 0
-			inside[i] = 0
+			inside[i] = 2
 		else:
 			valid[i] = 1
 			inside[i] = 1 if v > threshold else 0

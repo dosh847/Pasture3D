@@ -1,4 +1,5 @@
 #include "pasture_3d_graph_gpu.h"
+#include "pasture_3d_mask_feather.h"
 #include "pasture_3d_data.h"
 #include "pasture_3d_leveler.h"
 #include "pasture_3d_math_ops.h"
@@ -82,6 +83,9 @@ enum GraphKernelMode {
 	GKM_DISPLACE = 39,
 	GKM_RECAST_CANYON = 40,
 	GKM_GAVORONOISE_BASE = 41,
+	// Mask Feather's ramp from the two resolved JFA fields, and Water Mask's channel 0.
+	GKM_MASK_FEATHER = 42,
+	GKM_WATER_MASK = 43,
 };
 
 struct GraphKernelModeName {
@@ -132,6 +136,8 @@ static const GraphKernelModeName GRAPH_KERNEL_MODES[] = {
 	{ "GKM_DISPLACE", GKM_DISPLACE },
 	{ "GKM_RECAST_CANYON", GKM_RECAST_CANYON },
 	{ "GKM_GAVORONOISE_BASE", GKM_GAVORONOISE_BASE },
+	{ "GKM_MASK_FEATHER", GKM_MASK_FEATHER },
+	{ "GKM_WATER_MASK", GKM_WATER_MASK },
 };
 
 // `#version` has to be the first line of the source, so it is prepended here rather than living in the
@@ -1107,6 +1113,41 @@ static const char *GRAPH_GRID_GLSL_3 = R"(	if (p.mode == GKM_FLOOD_LEVEL) { // F
 		// NaN is the brush-loop mask: a masked-out cell is absent, not dry land at 0 m. max() with a NaN
 		// is undefined in GLSL, so the test comes first rather than trusting the builtin.
 		o[i] = isnan(z) ? z : ((p.f1 > 0.5) ? max(z, p.f0) : z);
+	}
+	if (p.mode == GKM_WATER_MASK) { // WATER MASK channel 0: f0 depth threshold. NaN in, NaN out.
+		float d = a[i];
+		o[i] = isnan(d) ? d : ((d > p.f0) ? 1.0 : 0.0);
+	}
+
+	// MASK FEATHER (src/pasture_3d_mask_feather.cpp). a = distance TO the inside, b = distance TO the outside
+	// (both resolved JFA fields), c = the original mask. f0 feather m, f1 threshold, f2 half a cell (m),
+	// ip = side, ip2 bit 0 smooth, bit 1 invert.
+	//
+	// NO EDGE needs no reduction. The CPU returns a flat 0 or 1 when the mask has no inside or no outside
+	// cell; here a field with no seed resolves to the full diagonal at EVERY cell, and no real distance
+	// between two cell centres reaches it, so each cell can tell on its own.
+	if (p.mode == GKM_MASK_FEATHER) {
+		float mv = c[i];
+		if (isnan(mv)) { o[i] = mv; return; }
+		float fw = float(p.gw) * p.dx;
+		float fh = float(p.gh) * p.dz;
+		float diag = sqrt(fw * fw + fh * fh);
+		bool inside = mv > p.f1;
+		float dOut = a[i];
+		float dIn = b[i];
+		float F = p.f0;
+		float m;
+		if (dOut >= diag) { m = 0.0; } // nothing inside
+		else if (dIn >= diag) { m = 1.0; } // nothing outside
+		else {
+			float e = inside ? min(-dIn + p.f2, 0.0) : max(dOut - p.f2, 0.0);
+			if (p.ip == 1) { m = inside ? ((F <= 0.0) ? 1.0 : -e / F) : 0.0; }
+			else if (p.ip == 2) { m = (F <= 0.0) ? (inside ? 1.0 : 0.0) : 0.5 - e / F; }
+			else { m = inside ? 1.0 : ((F <= 0.0) ? 0.0 : 1.0 - e / F); }
+		}
+		float t = clamp(m, 0.0, 1.0);
+		float v = ((p.ip2 & 1) != 0) ? t * t * (3.0 - 2.0 * t) : t;
+		o[i] = ((p.ip2 & 2) != 0) ? 1.0 - v : v;
 	}
 
 	// ---- PATH QUERY and PATH MASK (P2d) --------------------------------------------------------------
@@ -2657,6 +2698,65 @@ bool Pasture3DGraphGPU::eval_grid(const godot::GraphProgram &p_prog, int p_gw, i
 				fd.f0 = (float)std::max(max_d, 0.0);
 				fd.f1 = (units == 1 && max_d > 0.0) ? (float)max_d : 1.0f;
 				plan.push_back(fd);
+				slot_buf[s] = out;
+			} break;
+			case GRAPH_OP_MASK_FEATHER: {
+				// The same JFA plan as the distance transform's SIGNED direction (both fields, seeded on
+				// either side of the threshold), then one pointwise ramp. Params unpack through the CPU's
+				// own mask_feather_params_from so the two cannot read the block differently.
+				const RID src = in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf;
+				if (n > (1 << 24)) {
+					return fail();
+				}
+				const MaskFeatherParams mp = mask_feather_params_from(P, 16);
+				int max_step = 1;
+				while (max_step < std::max(p_gw, p_gh)) {
+					max_step <<= 1;
+				}
+				auto build_field = [&](float want) -> RID {
+					const RID seed_a = empty_buf();
+					GraphDispatch sd{ seed_a, src, zero_buf, zero_buf, GKM_DT_SEED, 0 };
+					sd.f0 = (float)mp.threshold;
+					sd.f1 = want;
+					plan.push_back(sd);
+					RID cur = seed_a;
+					RID other = empty_buf();
+					for (int k = max_step / 2; k >= 1; k >>= 1) {
+						GraphDispatch jd{ other, cur, zero_buf, zero_buf, GKM_DT_JFA, 0 };
+						jd.f0 = (float)k;
+						plan.push_back(jd);
+						std::swap(cur, other);
+					}
+					GraphDispatch jd{ other, cur, zero_buf, zero_buf, GKM_DT_JFA, 0 };
+					jd.f0 = 1.0f;
+					plan.push_back(jd);
+					std::swap(cur, other);
+					const RID resolved = empty_buf();
+					plan.push_back({ resolved, cur, zero_buf, zero_buf, GKM_DT_RESOLVE, 0 });
+					return resolved;
+				};
+				const RID d_out = build_field(1.0f);
+				const RID d_in = build_field(0.0f);
+				const double fdx = (double)p_rect.size.x / (double)std::max(p_gw, 1);
+				const double fdz = (double)p_rect.size.y / (double)std::max(p_gh, 1);
+				const RID out = empty_buf();
+				GraphDispatch fd{ out, d_out, d_in, src, GKM_MASK_FEATHER, mp.side };
+				fd.f0 = (float)mp.feather;
+				fd.f1 = (float)mp.threshold;
+				fd.f2 = (float)(0.5 * std::min(fdx, fdz));
+				fd.ip2 = (mp.falloff == MASK_FEATHER_SMOOTH ? 1 : 0) | (mp.invert ? 2 : 0);
+				plan.push_back(fd);
+				slot_buf[s] = out;
+			} break;
+			case GRAPH_OP_WATER_MASK: {
+				// Channel 0 only, which is pointwise. The shore band is channel 1, and a graph that reads it
+				// never gets here: this plan holds one buffer per slot and the guard above refuses any wire
+				// off a secondary channel.
+				const RID src = in0[s] >= 0 ? slot_buf[in0[s]] : zero_buf;
+				const RID out = empty_buf();
+				GraphDispatch d{ out, src, zero_buf, zero_buf, GKM_WATER_MASK, 0 };
+				d.f0 = P[0]; // depth threshold, metres
+				plan.push_back(d);
 				slot_buf[s] = out;
 			} break;
 			case GRAPH_OP_EXPAND_SHRINK: {

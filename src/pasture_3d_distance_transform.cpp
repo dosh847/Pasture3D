@@ -100,13 +100,16 @@ void jfa_passes(std::vector<Site> &grid, int gw, int gh, int metric, double dx, 
 	jfa_sweep(grid, next, gw, gh, 1, metric, dx, dz);
 }
 
-// Distance from every cell to the nearest cell whose `inside` flag equals `want`.
+constexpr uint8_t DT_EXCLUDED = 2;
+
+// Distance from every cell to the nearest cell whose `inside` flag equals `want`. The flag is tri-state:
+// 0 outside, 1 inside, DT_EXCLUDED for a NaN cell, which matches neither `want` and so never seeds.
 void distance_field(const std::vector<uint8_t> &inside, bool want, int gw, int gh, int metric,
 		double dx, double dz, std::vector<double> &out) {
 	const int n = gw * gh;
 	std::vector<Site> sites((size_t)n);
 	for (int i = 0; i < n; i++) {
-		const bool is_seed = ((inside[(size_t)i] != 0) == want);
+		const bool is_seed = (inside[(size_t)i] == (want ? 1 : 0));
 		sites[(size_t)i] = is_seed ? Site{ (int32_t)(i % gw), (int32_t)(i / gw) }
 								   : Site{ NO_SITE, NO_SITE };
 	}
@@ -147,11 +150,12 @@ PackedFloat32Array godot::distance_transform_solve(const PackedFloat32Array &p_m
 	const double dx = (double)p_rect.size.x / (double)std::max(p_gw, 1);
 	const double dz = (double)p_rect.size.y / (double)std::max(p_gh, 1);
 
-	// NaN is the brush-loop mask (spec §3.4). It is neither inside nor outside: seeding it — or refusing
-	// to seed it — would both invent a boundary through a region the user explicitly excluded, and the
-	// distance field would then pull a discontinuity along every loop rim.
+	// NaN is the brush-loop mask (spec §3.4). It is neither inside nor outside, so it seeds NEITHER field:
+	// counting it as outside (as this once did, by leaving its flag 0) put a boundary on every hole's rim,
+	// so inside cells beside a hole read one cell from the edge. The GPU kernel never seeded NaN; the two
+	// now agree. A NaN cell is still a cell distances are measured ACROSS — it only cannot be a site.
 	const float *m = p_mask.ptr();
-	std::vector<uint8_t> inside((size_t)n, 0);
+	std::vector<uint8_t> inside((size_t)n, DT_EXCLUDED);
 	std::vector<uint8_t> valid((size_t)n, 0);
 	for (int i = 0; i < n; i++) {
 		if (std::isfinite(m[i])) {
@@ -176,15 +180,15 @@ PackedFloat32Array godot::distance_transform_solve(const PackedFloat32Array &p_m
 		switch (p_direction) {
 			case DISTANCE_TRANSFORM_INSIDE:
 				// Depth into the mask: 0 outside, growing toward the interior.
-				dist[(size_t)i] = inside[(size_t)i] ? d_in[(size_t)i] : 0.0;
+				dist[(size_t)i] = inside[(size_t)i] == 1 ? d_in[(size_t)i] : 0.0;
 				break;
 			case DISTANCE_TRANSFORM_SIGNED:
 				// Positive outside, negative inside, crossing zero at the threshold contour.
-				dist[(size_t)i] = inside[(size_t)i] ? -d_in[(size_t)i] : d_out[(size_t)i];
+				dist[(size_t)i] = inside[(size_t)i] == 1 ? -d_in[(size_t)i] : d_out[(size_t)i];
 				break;
 			case DISTANCE_TRANSFORM_OUTSIDE:
 			default:
-				dist[(size_t)i] = inside[(size_t)i] ? 0.0 : d_out[(size_t)i];
+				dist[(size_t)i] = inside[(size_t)i] == 1 ? 0.0 : d_out[(size_t)i];
 				break;
 		}
 	}

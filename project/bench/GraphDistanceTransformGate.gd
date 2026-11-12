@@ -1,7 +1,7 @@
 # Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
 #
 # GraphDistanceTransformGate — Pasture3DGraphNodeDistanceTransform, phase 2 of
-# PASTURE3D_GRAPH_TRANSFORMS_METRICS_SPEC.md §5.1. Criteria DA-DG.
+# PASTURE3D_GRAPH_TRANSFORMS_METRICS_SPEC.md §5.1. Criteria DA-DH.
 #
 # DB IS THE ONE THAT MATTERS. Hesiod measures distance in grid cells because its domain is the unit
 # square; Pasture3D measures in metres. A kernel that forgets the conversion still produces a plausible
@@ -38,6 +38,7 @@ func _ready() -> void:
 	_dd_native_matches_oracle()
 	_df_jfa_is_within_a_cell_of_exact()
 	_dg_gpu_parity()
+	_dh_nan_never_seeds()
 	print("\n=== %s (%d failures) ===\n" % ["DISTANCE TRANSFORM PASS" if _fail == 0 else "DISTANCE TRANSFORM FAIL", _fail])
 	get_tree().quit(0 if _fail == 0 else 1)
 
@@ -260,6 +261,83 @@ func _dg_gpu_parity() -> void:
 			% norm_gpu.size())
 	if not norm_gpu.is_empty():
 		_fail += 1; print("    !! the GPU accepted a config whose divisor it cannot compute")
+
+
+# --- DH. a NaN hole seeds neither field ----------------------------------------------------------------
+# NaN is the brush-loop mask: neither inside nor outside. The CPU kernel once left a NaN cell's flag at 0,
+# so it seeded the OUTSIDE field and every inside cell beside a hole read one cell from an edge that is
+# not there — while the GPU kernel, which never seeds NaN, read the true depth. The hole sits wholly inside
+# the blob, so with NaN seeding nothing the inside depth must equal the depth with the hole filled IN.
+func _dh_nan_never_seeds() -> void:
+	print("[DH] a NaN hole inside the mask seeds neither field (CPU, oracle and GPU agree)")
+	var holed := _blob_mask()
+	var filled_in := _blob_mask()
+	var filled_out := _blob_mask()
+	var hole := 0
+	for iz in GH:
+		for ix in GW:
+			var w := _cell_world(ix, iz, GW)
+			if absf(w.x - 30.0) < 15.0 and absf(w.y + 20.0) < 15.0:
+				var i := iz * GW + ix
+				holed[i] = NAN
+				filled_out[i] = 0.0
+				hole += 1
+	print("    hole = %d NaN cells, all inside the blob" % hole)
+	if hole == 0:
+		_fail += 1; print("    !! NO-SIGNAL — the hole selected no cells"); return
+
+	var got := _solve(holed, 1, 0, 0, 0.0)
+	var want := _solve(filled_in, 1, 0, 0, 0.0)
+	var as_outside := _solve(filled_out, 1, 0, 0, 0.0)
+	var d := 0.0
+	var ctrl := 0.0
+	for i in got.size():
+		if is_nan(holed[i]):
+			if not is_nan(got[i]):
+				_fail += 1; print("    !! cell %d: NaN in, %f out — the hole must pass through" % [i, got[i]]); return
+			continue
+		d = maxf(d, absf(got[i] - want[i]))
+		ctrl = maxf(ctrl, absf(as_outside[i] - want[i]))
+	print("    INSIDE depth: max |holed - hole filled in| = %.9f m (want 0)" % d)
+	if d > PARITY_EPS:
+		_fail += 1; print("    !! the hole moved the inside depth — a NaN cell is seeding the outside field")
+	print("    control: the hole filled OUT moves it by %.3f m (want > one cell, %.3f m)" % [ctrl, RECT.size.x / GW])
+	if ctrl <= RECT.size.x / GW:
+		_fail += 1; print("    !! control dead — an outside hole should pull the depth down near its rim")
+
+	var oracle := Pasture3DGraphNodeDevDistanceTransform.new()
+	oracle.threshold = 0.5
+	oracle.metric = 0
+	oracle.output_units = 0
+	oracle.max_distance = 0.0
+	for dir in [1, 2]:
+		oracle.direction = dir
+		var o: PackedFloat32Array = oracle.solve(holed, GW, GH, RECT)
+		var od := _max_abs_diff(_solve(holed, dir, 0, 0, 0.0), o)
+		print("    direction %d: max |native - oracle| = %.9f (want < %.9f)" % [dir, od, PARITY_EPS])
+		if od > PARITY_EPS:
+			_fail += 1; print("    !! the oracle seeds NaN differently from the C++ kernel")
+
+	if not ClassDB.class_has_method("Pasture3DUtil", "graph_eval_grid_gpu"):
+		return
+	var gpu: PackedFloat32Array = Pasture3DUtil.graph_eval_grid_gpu(
+			_graph(2, 0, 0, 0.0).compile_graph_program(), GW, GH, RECT, holed)
+	if gpu.is_empty():
+		print("    GPU: NO-SIGNAL (headless / no driver) — run windowed to compare the GPU around the hole")
+		return
+	var cpu := _solve(holed, 2, 0, 0, 0.0)
+	var gd := _max_abs_diff(gpu, cpu)
+	print("    GPU SIGNED: max |gpu - cpu| = %.8f (want < %.8f)" % [gd, GPU_TOL])
+	if gd > GPU_TOL:
+		_fail += 1; print("    !! the GPU and CPU disagree around a NaN hole")
+	var old := _solve(filled_out, 2, 0, 0, 0.0)
+	var od2 := 0.0
+	for i in gpu.size():
+		if not is_nan(holed[i]):
+			od2 = maxf(od2, absf(gpu[i] - old[i]))
+	print("    control: GPU vs the hole-as-outside field = %.3f m (want > %.8f)" % [od2, GPU_TOL])
+	if od2 <= GPU_TOL:
+		_fail += 1; print("    !! control dead — the GPU cannot tell a NaN hole from an outside one")
 
 
 # --- helpers ------------------------------------------------------------------------------------------
