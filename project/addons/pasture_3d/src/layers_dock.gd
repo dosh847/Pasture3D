@@ -455,6 +455,11 @@ func _collect_brush_owners(node: Node, owners: Dictionary) -> void:
 	var brush := node as Pasture3DTerrainBrush
 	if brush and brush.terrain == terrain and brush._layer_owner != "":
 		owners[brush._layer_owner] = true
+	# A graph sink's layer is owned by `<brush owner>#graph_color:<key>`, not by the brush owner itself, so
+	# without these every sink layer read "no tools assigned" while its graph was painting it.
+	if brush and brush.terrain == terrain:
+		for o in Pasture3DGraphChannelSinks.owners_for_brush(brush):
+			owners[o] = true
 	for c in node.get_children():
 		_collect_brush_owners(c, owners)
 

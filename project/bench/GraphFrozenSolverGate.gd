@@ -20,7 +20,9 @@
 #       control proving these ops really are natively supported when LIVE, since otherwise "declines
 #       native" would be true of everything and prove nothing.
 #   [B] FROZEN serves the cached solve against a CHANGED surface and reports itself stale; Bake re-solves
-#       and clears stale; and LIVE tracks the surface and never goes stale (the moving control).
+#       and clears stale; and LIVE tracks the surface and never goes stale (the moving control). "Served"
+#       and "re-solved" are read off the cache entry's KEY, not the output: a node may apply work after
+#       its freeze (DLA composes its frozen massif onto today's input), so its served output can move.
 extends Node
 
 const GW := 32
@@ -107,6 +109,7 @@ func _b_frozen_serves_cache(p_ops: Array) -> void:
 		# Staleness is the `_stale` flag, not the warning count: node_warnings() also carries a benign
 		# "holds N MB of frozen solve" notice, so counting warnings would read as stale when it is not.
 		var stale_fresh: bool = node._stale
+		var k1: int = node._cache_key
 
 		var r2: PackedFloat32Array
 		var r3: PackedFloat32Array
@@ -115,10 +118,12 @@ func _b_frozen_serves_cache(p_ops: Array) -> void:
 		# clears the flag, so a read taken below the Bake would report every solver as never having gone
 		# stale — which is what it did until this line moved up here.
 		var went_stale := false
+		var k2: int = k1
 		if reads_surface:
 			stimulus = "surface"
 			r2 = g.evaluate(GW, GH, RECT, null, surf_b)
 			went_stale = node._stale
+			k2 = node._cache_key
 			node.clear_cache()
 			r3 = g.evaluate(GW, GH, RECT, null, surf_b)
 		else:
@@ -130,16 +135,26 @@ func _b_frozen_serves_cache(p_ops: Array) -> void:
 			node.set("seed", int(node.get("seed")) + 7919)
 			r2 = g.evaluate(GW, GH, RECT, null, surf_a)
 			went_stale = node._stale
+			k2 = node._cache_key
 			node.clear_cache()
 			r3 = g.evaluate(GW, GH, RECT, null, surf_a)
 
-		var served: bool = _max_abs_diff(r1, r2) < EPS
-		var rebaked: bool = _max_abs_diff(r1, r3) > EPS
+		# SERVED and REBAKED are read off the cache ENTRY, not the output. A serve leaves the entry's key
+		# alone; a re-solve stores the key of what it solved. The output used to be the witness ("r2 == r1"),
+		# which is only right for a node whose output IS its cache. DLA composes its frozen massif onto
+		# TODAY's input after the freeze (03f5cb57, "the node filters its input"), so its served output
+		# moves with the surface by design, and this gate reported a correct freeze as broken. The key's
+		# control is `rebaked`: the same read after a clear must see the key move, or "unchanged" would
+		# also be what a key that never changes looks like.
+		var k3: int = node._cache_key
+		var served: bool = k2 == k1
+		var rebaked: bool = k3 != k1
+		var out_held: bool = _max_abs_diff(r1, r2) < EPS
 		var stale_cleared: bool = not node._stale
 
 		var ok: bool = not stale_fresh and served and went_stale and rebaked and stale_cleared and live_ok
-		print("    %-22s stimulus=%-7s fresh-not-stale=%s served=%s stale=%s rebaked=%s cleared=%s | LIVE never stale=%s"
-			% [op, stimulus, not stale_fresh, served, went_stale, rebaked, stale_cleared, live_ok])
+		print("    %-22s stimulus=%-7s fresh-not-stale=%s served=%s stale=%s rebaked=%s cleared=%s | LIVE never stale=%s | output held=%s"
+			% [op, stimulus, not stale_fresh, served, went_stale, rebaked, stale_cleared, live_ok, out_held])
 		if not ok:
 			_fail += 1
 			print("      !! %s did not honour its frozen cache" % op)

@@ -48,6 +48,7 @@ const ConstIntScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_no
 const ConstColorScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_const_color.gd")
 const ColorMixScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_color_mix.gd")
 const ColorBlendScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_color_blend.gd")
+const ColorInputScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_color_input.gd")
 const CombineScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_combine.gd")
 const ConstBoolScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_const_bool.gd")
 const ParamScript = preload("res://addons/pasture_3d/graph/pasture3d_graph_node_param.gd")
@@ -227,6 +228,7 @@ static func categories(p_include_dev: bool = false) -> Array[String]:
 static func entries(p_include_dev: bool = false) -> Array[Dictionary]:
 	var list: Array[Dictionary] = [
 		{"op": &"input", "title": "Input", "category": "Routing & Structural", "role": "Source", "script": InputScript, "tags": ["surface", "incoming", "host", "read"], "description": "Reads the incoming terrain surface handed to the graph."},
+		{"op": &"color_input", "title": "Color Input", "category": "Routing & Structural", "role": "Source", "script": ColorInputScript, "tags": ["color", "colour", "input", "existing", "passthrough", "transparent", "underneath", "keep"], "description": "The colour already on the terrain. Wire it into a Color Blend's A and the Color Sink leaves every cell no mask claims untouched, so several masked colours need no combined sink mask."},
 		{"op": &"output", "title": "Output", "category": "Routing & Structural", "role": "Sink", "script": OutputScript, "tags": ["sink", "result", "final", "surface"], "description": "The destination sink representing the graph's output surface."},
 		# The B1 terrain channel sinks (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.1). All four are TERMINAL:
 		# has_output() is false, so nothing wires from them, so no op is ever emitted for them and none

@@ -3765,13 +3765,31 @@ func _report_box_probe(p_box: AABB, p_before: PackedFloat32Array) -> void:
 
 func _clearable_layers_for_owner(owner: String) -> PackedInt32Array:
 	var all := _all_layers_for_owner(owner)
-	if not owner.begins_with(LAYER_BRUSH_OWNER_PREFIX):
+	var kept := _frozen_sink_owners(owner)
+	if not owner.begins_with(LAYER_BRUSH_OWNER_PREFIX) and kept.is_empty():
 		return all
 	var stack = terrain.data.get_layer_stack()
 	var out := PackedInt32Array()
 	for i in all:
-		if stack.get_layer(i).get_owner_id() != owner + "#base":
+		var oid: String = stack.get_layer(i).get_owner_id()
+		if oid != owner + "#base" and not kept.has(oid):
 			out.append(i)
+	return out
+
+
+## The sink layers of this brush's ACTIVE FROZEN graphs, which a bake must not clear. A frozen graph that
+## serves its cache does not re-run its sinks (`_run_stack_graph_sinks`), so clearing its layers here left
+## them empty; one that solves clears its own rect in the sink writer before it paints. Non-frozen graphs'
+## layers are cleared as before, and so is a layer no active graph names any more -- that is how a deleted
+## sink's paint goes away.
+func _frozen_sink_owners(owner: String) -> Dictionary:
+	var out := {}
+	if owner != graph_sink_owner_base() or force_sinks_on_served:
+		return out
+	for m in modifiers:
+		if m is Pasture3DNodeGraph and m.graph != null and m.is_active() 				and m.evaluation == Pasture3DNode.Evaluation.FROZEN:
+			for o in Pasture3DGraphChannelSinks.owners_for_graph(m.graph, owner):
+				out[o] = true
 	return out
 
 
@@ -6679,19 +6697,41 @@ func _commit_modifier_caches(p_stack: Dictionary, p_extent: String, p_frame: Arr
 ## the stack partway through -- after the modifiers above this one and before this graph's own output is
 ## composited. Post-bake heights are neither. A sink masking on ALTITUDE would answer about ground the
 ## graph never saw, and it would answer differently depending on where in the stack the graph sat.
+## Gate control: run a graph's sinks even when its frozen answer was served (the pre-2026-11-12 rule).
+var force_sinks_on_served := false
+
+
 func _run_stack_graph_sinks(p_stack: Dictionary) -> void:
 	for step in p_stack.get("gd", []):
 		var m = step.get("mod")
 		if m == null or not (m is Pasture3DNodeGraph) or m.graph == null:
 			continue
-		if (step.get("out", {}) as Dictionary).has("pending"):
+		var sout: Dictionary = step.get("out", {})
+		if bool(sout.get("served", false)) and not sout.has("pending") and not force_sinks_on_served:
+			# FROZEN, and the graph SERVED its cached answer instead of solving. The sinks freeze with it:
+			# their layers keep the paint of the solve that produced the served answer. Running them here
+			# re-tapped the graph over today's surface -- the taps it carries are keyed on the surface it
+			# SOLVED, so they missed, and every sink evaluated the whole graph again on the main thread. So
+			# any edit upstream of a frozen graph re-solved it after all, only for its sinks (2026-11-12).
+			# A Bake solves (not served), and a colour-only edit re-runs through `_rerun_graph_sinks`.
+			# `_clearable_layers_for_owner` keeps these layers out of the pre-bake clear for the same reason.
+			if Pasture3DBakeTrace.enabled:
+				Pasture3DBakeTrace.mark("%s sinks of %s: frozen, served %s; kept the last solve's paint" % [
+						name, m.display_name(), "STALE" if bool(sout.get("stale", false)) else "HIT"])
+			continue
+		if sout.has("pending"):
 			# Deferred driver pass 1: the graph is queued for the worker, not solved. Tapping it now was a
 			# whole synchronous solve on the main thread for paint pass 2 overwrites a moment later.
+			if Pasture3DBakeTrace.enabled:
+				Pasture3DBakeTrace.mark("%s sinks of %s: deferred to pass 2" % [name, m.display_name()])
 			continue
 		if m.last_gw <= 0 or m.last_gh <= 0 or m.last_input_surface.size() != m.last_gw * m.last_gh:
 			# No surface was recorded, so no graph step ran for this modifier this bake -- a road-complete
 			# stack, or a step the compiler dropped. Skipping is correct; writing from a stale surface
 			# would paint last bake's answer onto this bake's ground.
+			if Pasture3DBakeTrace.enabled:
+				Pasture3DBakeTrace.mark("%s sinks of %s: SKIPPED, no input surface recorded (%dx%d, %d cells)" % [
+						name, m.display_name(), m.last_gw, m.last_gh, m.last_input_surface.size()])
 			continue
 		m.stamp_params(self)
 		_run_graph_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface,
@@ -7032,13 +7072,18 @@ func _apply_road_step(p_step: Dictionary, p_vals: PackedFloat32Array,
 ## The owner base is THIS brush's layer owner, so a sink's reserved layer belongs to the brush and
 ## `bake_all_brushes()`'s per-layer-owner clearing keeps working unchanged (§9.1 rule 2). That is also
 ## what makes one undo restore a graph paint: it is one brush's layer, like every other brush layer.
+## The owner id this brush's graph sink layers are named from (Pasture3DGraphChannelSinks.owner_of).
+func graph_sink_owner_base() -> String:
+	return _layer_owner if _layer_owner != "" else BRUSH_OWNER_PREFIX + str(name)
+
+
 func _run_graph_sinks(p_graph, p_gw: int, p_gh: int, p_rect: Rect2, p_z: PackedFloat32Array,
 		p_pretapped: Dictionary = {}) -> void:
 	if p_graph == null or not terrain or not terrain.data:
 		return
 	if Pasture3DGraphChannelSinks.sinks_of(p_graph).is_empty():
 		return
-	var owner: String = _layer_owner if _layer_owner != "" else BRUSH_OWNER_PREFIX + str(name)
+	var owner := graph_sink_owner_base()
 	var report: Dictionary = Pasture3DGraphChannelSinks.run(p_graph, terrain, owner,
 			p_gw, p_gh, p_rect, p_z, p_pretapped)
 	# A refusal is NAMED. A sink that wrote nothing because its index was negative or its mask unwired
@@ -7046,6 +7091,11 @@ func _run_graph_sinks(p_graph, p_gw: int, p_gh: int, p_rect: Rect2, p_z: PackedF
 	# is about, and the reason this is a warning rather than a silent zero.
 	for msg in report.get("skipped", []):
 		push_warning("Pasture3D graph sink on '%s': %s" % [name, msg])
+	if Pasture3DBakeTrace.enabled:
+		Pasture3DBakeTrace.mark("%s channel sinks over %dx%d cells, rect %s: %d sink(s) wrote %d cell(s) into layer(s) %s%s" % [
+				name, p_gw, p_gh, p_rect, int(report.get("sinks", 0)), int(report.get("written", 0)),
+				report.get("layers", PackedInt32Array()),
+				"" if (report.get("skipped", []) as Array).is_empty() else "; skipped: " + "; ".join(report["skipped"])])
 
 
 # ---- B3 RUNTIME PUBLISH SINKS (PASTURE3D_GRAPH_VISUALIZATION_SPEC.md §9.3) ----

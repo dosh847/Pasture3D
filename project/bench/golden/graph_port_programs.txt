@@ -1,5 +1,7 @@
 input|unwired|4141833641
 input|wired|4141833641
+color_input|unwired|none
+color_input|wired|none
 output|unwired|3353860005
 output|wired|3042504799
 control_sink|unwired|none

@@ -522,6 +522,60 @@ static func _adopt_legacy_indexed_layer(p_data, p_owner: String, p_owner_base: S
 		layer.set_owner_id(p_owner)
 
 
+## The owner id of the layer `p_sink` writes for the brush whose owner base is `p_owner_base`: the base,
+## the sink kind's suffix, and `:layer_key` when it has one. The ONE rule: the writer creates layers under
+## it, and the Layers dock asks it which tool layers a graph still targets.
+static func owner_of(p_sink, p_owner_base: String) -> String:
+	var owner: String = "%s%s" % [p_owner_base, p_sink.sink_owner_suffix()]
+	var key: String = p_sink.layer_key if "layer_key" in p_sink else ""
+	if key != "":
+		owner += ":" + key
+	return owner
+
+
+## Every layer owner id `p_brush`'s graph modifiers write through their channel sinks. Disabled modifiers
+## count: their layers are kept, not orphaned, the way a disabled brush keeps its own.
+static func owners_for_brush(p_brush) -> Array[String]:
+	var out: Array[String] = []
+	if p_brush == null or not p_brush.has_method("graph_sink_owner_base"):
+		return out
+	var base: String = p_brush.graph_sink_owner_base()
+	for m in p_brush.modifiers:
+		if m is Pasture3DNodeGraph and m.graph != null:
+			for o in owners_for_graph(m.graph, base):
+				if not out.has(o):
+					out.append(o)
+	return out
+
+
+## The layer owner ids one graph's channel sinks write under the owner base `p_owner_base`.
+static func owners_for_graph(p_graph, p_owner_base: String) -> Array[String]:
+	var out: Array[String] = []
+	for ni in sinks_of(p_graph):
+		var o := owner_of(p_graph.nodes[ni], p_owner_base)
+		if not out.has(o):
+			out.append(o)
+	return out
+
+
+## A graph colour as the Color Sink writes it: straight RGB, and coverage = mask x alpha.
+##
+## ---- ALPHA IS COVERAGE, PREMULTIPLIED ----
+##
+## The writer used to ignore a graph colour's alpha and cover every cell by the mask alone. Colour Blend
+## and Color Mix carry alpha through (a lerp of RGBA, MIX takes B's alpha whole), so reading it as coverage
+## turns a blend chain into an "over" composite: blending `c` in at mask m over a transparent A gives
+## `(m * c.rgb, m)`, which is `c.rgb` at coverage m once divided back out. A second blend over that composes
+## the way layers do. Color Input is the transparent start of such a chain; an opaque colour is unchanged.
+## Mirrored by `set_colors_on_layer_grid` in C++.
+static func coverage_color(p_c: Color, p_mask: float) -> Color:
+	var a := clampf(p_c.a, 0.0, 1.0)
+	var w := minf(p_mask, 1.0) * a
+	if a <= 0.0:
+		return Color(0.0, 0.0, 0.0, 0.0)
+	return Color(clampf(p_c.r / a, 0.0, 1.0), clampf(p_c.g / a, 0.0, 1.0), clampf(p_c.b / a, 0.0, 1.0), w)
+
+
 static func _write_one(p_sink, p_index: int, p_data, p_owner_base: String, p_gw: int, p_gh: int,
 		p_rect: Rect2, p_mask: PackedFloat32Array, p_values: Dictionary, p_report: Dictionary,
 		p_cleared: Dictionary) -> int:
@@ -545,9 +599,7 @@ static func _write_one(p_sink, p_index: int, p_data, p_owner_base: String, p_gw:
 	# The suffix stays in both forms, so a Control Sink and a Color Sink that happen to share a key
 	# still get their own layers — different map types could not share a tile format anyway.
 	var key: String = p_sink.layer_key if "layer_key" in p_sink else ""
-	var owner: String = "%s%s" % [p_owner_base, p_sink.sink_owner_suffix()]
-	if key != "":
-		owner += ":" + key
+	var owner := owner_of(p_sink, p_owner_base)
 	var label: String = key if key != "" else p_sink.sink_layer_label()
 	_adopt_legacy_indexed_layer(p_data, owner, p_owner_base, p_sink, p_index)
 	var layer_id: int = p_data.create_owned_layer_typed(owner, label, Pasture3DGraphNodeChannelSink.BLEND_REPLACE,
@@ -595,8 +647,11 @@ static func _write_one(p_sink, p_index: int, p_data, p_owner_base: String, p_gw:
 			var wx: float = p_rect.position.x + (float(ix) + 0.5) * p_rect.size.x / float(p_gw)
 			var pos := Vector3(wx, 0.0, wz)
 			if is_color:
-				# Weighted by the mask, as the native writer: the colour feathers into what lies beneath.
-				p_data.set_color_on_layer(layer_id, pos, p_sink.color_at(p_values, row + ix), minf(m, 1.0), false)
+				# Weighted by mask x the colour's own alpha, as the native writer: see `coverage_color`.
+				var cov := coverage_color(p_sink.color_at(p_values, row + ix), m)
+				if not (cov.a > Pasture3DGraphNodeChannelSink.MASK_EPSILON):
+					continue
+				p_data.set_color_on_layer(layer_id, pos, Color(cov.r, cov.g, cov.b), cov.a, false)
 			else:
 				# Read the COMPOSITED word beneath, so the bits this sink does not author survive. See
 				# Pasture3DGraphNodeControlSink's header: under topmost-covered-wins there is no

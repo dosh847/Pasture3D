@@ -16,6 +16,9 @@
 #       this edit emitted nothing; asserted as "revision moved".
 #   [D] The brush heard the modifier: `_pending_sink_reruns` holds it after the edit, and the deferred
 #       flush empties it.
+#   [G] A FROZEN graph's sinks freeze with it: an upstream edit (the brush's height) re-bakes, the graph
+#       serves its cache, and no sink writes or taps. CONTROL: `force_sinks_on_served` (the old rule)
+#       writes on the same bake. A Bake that solves still writes.
 extends Node
 
 const N: int = 128
@@ -37,7 +40,8 @@ func _ready() -> void:
 	print("=== GraphColorSinkEditGate ===")
 	await _run()
 	await _paint_only()
-	if _checks < 19:
+	await _frozen()
+	if _checks < 29:
 		print("!! GATE INCOMPLETE: %d checks" % _checks)
 		_fail += 1
 	print("=== GraphColorSinkEditGate: %s (%d failures, %d checks) ===" % ["PASS" if _fail == 0 else "FAIL", _fail, _checks])
@@ -146,6 +150,14 @@ func _run() -> void:
 	_check(g.content_key() != rev1, "the revision moved (%d -> %d)" % [rev1, g.content_key()])
 	_check(sinks_hits[0] == 1, "and it did not take the colour-only route (%d)" % sinks_hits[0])
 
+	print("  [F] the Layers dock counts the sink's layer as assigned")
+	var expect := Pasture3DGraphChannelSinks.owner_of(sink, m.graph_sink_owner_base())
+	_check(t.data.find_layer_by_owner(expect) >= 0, "the sink wrote a layer under '%s'" % expect)
+	_check(Pasture3DGraphChannelSinks.owners_for_brush(m).has(expect), "owners_for_brush names that layer's owner")
+	m.modifiers = [] as Array[Pasture3DNode]
+	_check(not Pasture3DGraphChannelSinks.owners_for_brush(m).has(expect) and t.data.find_layer_by_owner(expect) >= 0,
+			"control: with the graph removed the layer remains but is no longer claimed (orphan)")
+
 	m.queue_free()
 	t.queue_free()
 
@@ -205,5 +217,67 @@ func _paint_only() -> void:
 	await get_tree().process_frame
 	var c2: Color = t.data.get_color(PROBE)
 	_check(_near(c2, Color.MAGENTA), "and repaints (%s)" % c2)
+	m.queue_free()
+	t.queue_free()
+
+
+func _bake(p_m) -> void:
+	p_m._stamp_cache.clear()
+	p_m._refresh_owner(p_m._layer_owner, false, [])
+	await get_tree().process_frame
+
+
+func _frozen() -> void:
+	print("  [G] a frozen graph's sinks do not re-run on an upstream edit")
+	var t := _terrain()
+	var m := _mound(t)
+	var g := Pasture3DTerrainGraph.create_empty()
+	var nodes: Array[Pasture3DGraphNode] = []
+	nodes.append(Pasture3DGraphNodeInput.new())      # 0
+	nodes.append(_mask())                            # 1 -> Output
+	nodes.append(Pasture3DGraphNodeOutput.new())     # 2
+	nodes.append(_mask())                            # 3 -> sink mask
+	var col := Pasture3DGraphNodeConstColor.new()
+	col.value = Color.RED
+	nodes.append(col)                                # 4
+	nodes.append(Pasture3DGraphNodeColorSink.new())  # 5
+	g.nodes = nodes
+	g.connections = [[0, 0, 1, 0], [1, 0, 2, 0], [0, 0, 3, 0], [3, 0, 5, 0], [4, 0, 5, 1]]
+	g.output_node = 2
+	var mod := Pasture3DNodeGraph.new()
+	mod.graph = g
+	mod.evaluation = Pasture3DNode.Evaluation.FROZEN
+	m.modifiers = [mod] as Array[Pasture3DNode]
+
+	Pasture3DGraphChannelSinks.write_count = 0
+	await _bake(m)
+	_check(Pasture3DGraphChannelSinks.write_count > 0, "the first bake solved and its sink wrote (%d)" % Pasture3DGraphChannelSinks.write_count)
+	_check(_near(t.data.get_color(PROBE), Color.RED), "and painted red")
+
+	Pasture3DGraphChannelSinks.write_count = 0
+	var taps0 := Pasture3DGraphChannelSinks.fallback_taps
+	m.height = 30.0
+	await _bake(m)
+	_check(Pasture3DGraphChannelSinks.write_count == 0 and Pasture3DGraphChannelSinks.fallback_taps == taps0,
+			"an upstream edit: no sink wrote (%d) or tapped (%d)" % [Pasture3DGraphChannelSinks.write_count,
+			Pasture3DGraphChannelSinks.fallback_taps - taps0])
+	_check(_near(t.data.get_color(PROBE), Color.RED), "the layer kept its paint")
+
+	m.force_sinks_on_served = true
+	m.height = 35.0
+	await _bake(m)
+	_check(Pasture3DGraphChannelSinks.write_count > 0, "control: the old rule writes on the same kind of bake (%d)" % Pasture3DGraphChannelSinks.write_count)
+	m.force_sinks_on_served = false
+
+	# The Bake button's route: drop this host's cache, then bake. The graph solves, so its sink runs.
+	Pasture3DGraphChannelSinks.write_count = 0
+	col.value = Color.BLUE # a colour edit on a frozen graph re-runs on its own route; flush it first
+	await get_tree().process_frame
+	Pasture3DGraphChannelSinks.write_count = 0
+	m.height = 40.0
+	mod.drop_cache_for_host(m)
+	await _bake(m)
+	_check(Pasture3DGraphChannelSinks.write_count > 0, "a Bake (cache dropped) solves and its sink writes (%d)" % Pasture3DGraphChannelSinks.write_count)
+	_check(_near(t.data.get_color(PROBE), Color.BLUE), "and paints the current colour")
 	m.queue_free()
 	t.queue_free()

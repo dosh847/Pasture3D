@@ -3356,6 +3356,26 @@ void Pasture3DData::set_color_on_layer(const int p_layer_id, const Vector3 &p_gl
 	region->set_modified(true);
 }
 
+// The texels a sink grid cell covers along one axis: every texel whose vertex `px * vs` lies in the cell's
+// half-open box [p_lo, p_hi). Returns false when the cell holds none (a cell finer than a texel).
+//
+// ---- WHY A CELL WRITES A RANGE AND NOT ONE TEXEL ----
+//
+// It wrote one: the texel under its centre. That is right only while a cell is one texel wide. A brush
+// baking at `bake_scale` 2 hands the sinks a grid twice as coarse as the terrain, so every other texel
+// on each axis was never written -- three in four uncovered -- and the layer showed as a field of dots
+// over whatever the base held (demo island, 2026-11-12). At 1:1 the range is exactly the old texel,
+// whichever way the grid is aligned: a brush's cell is centred on its vertex, a gate's starts at it, and
+// both boxes hold that vertex and no other.
+//
+// The write goes through `(px + 0.5) * vs`, the middle of the texel's world span, so the truncation in
+// `_global_to_region_pixel` cannot land one texel short on a vertex spacing that is not exact in floats.
+static inline bool sink_cell_texels(const double p_lo, const double p_hi, const double p_vs, int64_t &r_a, int64_t &r_b) {
+	r_a = (int64_t)Math::ceil(p_lo / p_vs);
+	r_b = (int64_t)Math::ceil(p_hi / p_vs) - 1;
+	return r_b >= r_a;
+}
+
 int Pasture3DData::set_colors_on_layer_grid(const int p_layer_id, const Rect2 &p_rect, const int p_gw, const int p_gh,
 		const PackedFloat32Array &p_mask, const float p_eps, const PackedColorArray &p_colors, const Color &p_fallback) {
 	const int n = (p_gw > 0 ? p_gw : 0) * (p_gh > 0 ? p_gh : 0);
@@ -3364,20 +3384,43 @@ int Pasture3DData::set_colors_on_layer_grid(const int p_layer_id, const Rect2 &p
 	}
 	const float *mask = p_mask.ptr();
 	const int nc = (int)p_colors.size();
+	const double vs = (double)_vertex_spacing;
 	const double sx = (double)p_rect.size.x / (double)p_gw;
 	const double sz = (double)p_rect.size.y / (double)p_gh;
 	int written = 0;
 	for (int iz = 0; iz < p_gh; iz++) {
-		const double wz = (double)p_rect.position.y + ((double)iz + 0.5) * sz;
+		const double z0 = (double)p_rect.position.y + (double)iz * sz;
+		int64_t pz0, pz1;
+		if (!sink_cell_texels(z0, z0 + sz, vs, pz0, pz1)) {
+			continue;
+		}
 		for (int ix = 0; ix < p_gw; ix++) {
 			const int i = iz * p_gw + ix;
 			if (!(mask[i] > p_eps)) {
 				continue;
 			}
-			const double wx = (double)p_rect.position.x + ((double)ix + 0.5) * sx;
-			// The mask is the cell's COVERAGE: the compositor lerps a colour layer by its weight, so a feathered
-			// mask feathers the colour into what lies beneath. At or under eps the cell stays uncovered.
-			set_color_on_layer(p_layer_id, Vector3(wx, 0.0, wz), i < nc ? p_colors[i] : p_fallback, MIN(mask[i], 1.f), false);
+			const double x0 = (double)p_rect.position.x + (double)ix * sx;
+			int64_t px0, px1;
+			if (!sink_cell_texels(x0, x0 + sx, vs, px0, px1)) {
+				continue;
+			}
+			// The cell's COVERAGE is mask x the colour's alpha: the compositor lerps a colour layer by its weight,
+			// so a feathered mask feathers the colour into what lies beneath. Graph colours are premultiplied (a
+			// Blend lerps RGBA together), so RGB is divided back out; a transparent colour -- Color Input --
+			// covers nothing and leaves what lies beneath. Mirrors Pasture3DGraphChannelSinks.coverage_color.
+			// At or under eps the cell stays uncovered.
+			const Color src = i < nc ? p_colors[i] : p_fallback;
+			const float ca = CLAMP(src.a, 0.f, 1.f);
+			const real_t w = MIN(mask[i], 1.f) * ca;
+			if (!(w > p_eps)) {
+				continue;
+			}
+			const Color c(CLAMP(src.r / ca, 0.f, 1.f), CLAMP(src.g / ca, 0.f, 1.f), CLAMP(src.b / ca, 0.f, 1.f), 1.f);
+			for (int64_t pz = pz0; pz <= pz1; pz++) {
+				for (int64_t px = px0; px <= px1; px++) {
+					set_color_on_layer(p_layer_id, Vector3((px + 0.5) * vs, 0.0, (pz + 0.5) * vs), c, w, false);
+				}
+			}
 			written++;
 		}
 	}
@@ -3393,32 +3436,51 @@ int Pasture3DData::set_controls_on_layer_grid(const int p_layer_id, const Rect2 
 	}
 	const float *mask = p_mask.ptr();
 	const int nb = (int)p_blend_field.size();
+	const double vs = (double)_vertex_spacing;
 	const double sx = (double)p_rect.size.x / (double)p_gw;
 	const double sz = (double)p_rect.size.y / (double)p_gh;
 	int written = 0;
 	for (int iz = 0; iz < p_gh; iz++) {
-		const double wz = (double)p_rect.position.y + ((double)iz + 0.5) * sz;
+		const double z0 = (double)p_rect.position.y + (double)iz * sz;
+		int64_t pz0, pz1;
+		if (!sink_cell_texels(z0, z0 + sz, vs, pz0, pz1)) {
+			continue;
+		}
 		for (int ix = 0; ix < p_gw; ix++) {
 			const int i = iz * p_gw + ix;
 			if (!(mask[i] > p_eps)) {
 				continue;
 			}
-			const double wx = (double)p_rect.position.x + ((double)ix + 0.5) * sx;
-			const Vector3 pos(wx, 0.0, wz);
-			uint32_t below = get_control(pos);
-			if (below == UINT32_MAX) {
-				below = 0;
-			}
-			const int base_id = p_preserve_base ? (int)get_base(below) : p_base;
-			if (base_id < 0 || base_id > 31) {
+			const double x0 = (double)p_rect.position.x + (double)ix * sx;
+			int64_t px0, px1;
+			if (!sink_cell_texels(x0, x0 + sx, vs, px0, px1)) {
 				continue;
 			}
 			const double blend = CLAMP((double)(i < nb ? p_blend_field[i] : p_blend), 0.0, 1.0);
 			const int blend_int = CLAMP((int)Math::round(blend * 255.0), 0, 255);
-			const uint32_t word = enc_base((uint8_t)base_id) | enc_overlay((uint8_t)p_overlay) |
-					enc_blend((uint8_t)blend_int) | (below & 0x3FFF);
-			set_control_on_layer(p_layer_id, pos, (int)word, 1.f, false);
-			written++;
+			bool any = false;
+			// Per TEXEL, not per cell: the carried bits and a preserved base are read from the word beneath
+			// each texel, which differs across a coarse cell.
+			for (int64_t pz = pz0; pz <= pz1; pz++) {
+				for (int64_t px = px0; px <= px1; px++) {
+					const Vector3 pos((px + 0.5) * vs, 0.0, (pz + 0.5) * vs);
+					uint32_t below = get_control(pos);
+					if (below == UINT32_MAX) {
+						below = 0;
+					}
+					const int base_id = p_preserve_base ? (int)get_base(below) : p_base;
+					if (base_id < 0 || base_id > 31) {
+						continue;
+					}
+					const uint32_t word = enc_base((uint8_t)base_id) | enc_overlay((uint8_t)p_overlay) |
+							enc_blend((uint8_t)blend_int) | (below & 0x3FFF);
+					set_control_on_layer(p_layer_id, pos, (int)word, 1.f, false);
+					any = true;
+				}
+			}
+			if (any) {
+				written++;
+			}
 		}
 	}
 	return written;

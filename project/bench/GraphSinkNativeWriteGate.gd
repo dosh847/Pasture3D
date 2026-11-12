@@ -9,6 +9,10 @@
 #   B  Control Sink: set_controls_on_layer_grid vs the loop, for a blend field, preserve_base, and a
 #      refused base (nothing written on either route). Control: overlay 8 instead of 7 reads back different.
 #   C  The native route is the one taken: native_writes counts the native calls and not the forced loop.
+#   E  A grid COARSER than the terrain covers every texel under it, for a gate-aligned grid and a
+#      brush-aligned one (cells centred on vertices, vertex spacing 2). It used to write one texel per
+#      cell, and a bake_scale 2 brush painted a field of dots (demo island, 2026-11-12). Controls: a cell
+#      masked off leaves its texels unpainted, and texels past the rect stay unpainted.
 #   D  Every criterion completed.
 #
 #   Godot_v4.7-stable_win64_console.exe --path project bench/GraphSinkNativeWriteGate.tscn
@@ -17,7 +21,7 @@ extends Node
 const GW := 32
 const GH := 32
 const RECT := Rect2(0.0, 0.0, 32.0, 32.0)
-const CRITERIA := ["A", "B", "C"]
+const CRITERIA := ["A", "B", "C", "E"]
 
 var _fail := 0
 var _seen := {}
@@ -26,7 +30,7 @@ var _native_calls := 0
 
 func _ready() -> void:
 	print("=== GraphSinkNativeWriteGate: native sink writes ===")
-	for entry in [["A", _a_color], ["B", _b_control], ["C", _c_route]]:
+	for entry in [["A", _a_color], ["B", _b_control], ["C", _c_route], ["E", _e_coarse]]:
 		entry[1].call()
 		if not _seen.has(entry[0]):
 			print("!! [%s] returned without reporting" % entry[0])
@@ -189,3 +193,65 @@ func _c_route() -> void:
 	# A wrote natively twice (the parity arm and its control) and B four times (blend field, preserve_base,
 	# the refused base, and the overlay control); the four forced loops made no native call.
 	_check("C", _native_calls == 6, "native writes %d (want 6: 2 colour + 4 control, loops 0)" % _native_calls)
+
+
+# --- E. a coarse grid covers every texel ----------------------------------------------------------------
+## Writes a gw x gh grid over p_rect (mask on except one cell) and counts, over texels [0, p_texels) on
+## each axis, how many read back the sink's red. Returns [red inside, red on the masked-off cell's texels,
+## red past the rect].
+func _coarse(p_vs: float, p_rect: Rect2, p_gw: int, p_gh: int, p_texels: int) -> Array:
+	var t := Pasture3D.new()
+	t.vertex_spacing = p_vs
+	add_child(t)
+	t.data.add_region_blankp(Vector3.ZERO)
+	var sink := Pasture3DGraphNodeColorSink.new()
+	sink.color = Color.RED
+	var mask := PackedFloat32Array()
+	mask.resize(p_gw * p_gh)
+	mask.fill(1.0)
+	var off := 2 * p_gw + 3 # cell (3, 2) is masked off
+	mask[off] = 0.0
+	var report := {"written": 0, "sinks": 0, "skipped": [], "layers": PackedInt32Array()}
+	Pasture3DGraphChannelSinks._write_one(sink, 0, t.data, "gate:", p_gw, p_gh, p_rect, mask, {}, report, {})
+	var sx := p_rect.size.x / p_gw
+	var sz := p_rect.size.y / p_gh
+	var inside := 0
+	var on_hole := 0
+	var past := 0
+	var hole_texels := 0
+	for pz in p_texels + 2:
+		for px in p_texels + 2:
+			var w := Vector3((px + 0.5) * p_vs, 0.0, (pz + 0.5) * p_vs)
+			var red := _near_red(t.data.get_color(w))
+			var vx := px * p_vs
+			var vz := pz * p_vs
+			var ix := floori((vx - p_rect.position.x) / sx)
+			var iz := floori((vz - p_rect.position.y) / sz)
+			if px >= p_texels or pz >= p_texels:
+				past += int(red)
+			elif iz * p_gw + ix == off:
+				hole_texels += 1
+				on_hole += int(red)
+			else:
+				inside += int(red)
+	t.queue_free()
+	return [inside, on_hole, past, p_texels * p_texels - hole_texels, hole_texels]
+
+
+func _near_red(c: Color) -> bool:
+	return c.r > 0.98 and c.g < 0.02 and c.b < 0.02
+
+
+func _e_coarse() -> void:
+	print("[E] a grid coarser than the terrain covers every texel")
+	# Gate-aligned: cells start on a vertex. 16 x 16 cells of 2 m over 32 m at 1 m spacing.
+	var a := _coarse(1.0, RECT, 16, 16, 32)
+	_check("E", a[0] == a[3], "gate-aligned 2 m cells over 1 m texels: %d of %d texels painted" % [a[0], a[3]])
+	_control(a[4] > 0 and a[1] == 0, "the masked-off cell's %d texels: %d painted (want 0)" % [a[4], a[1]])
+	_control(a[2] == 0, "texels past the rect: %d painted (want 0)" % a[2])
+	# Brush-aligned: the rect starts half a texel early, so cell centres sit on vertices. 8 x 8 cells of 4 m
+	# over 32 m at 2 m spacing (bake_scale 2): 16 texels per axis.
+	var b := _coarse(2.0, Rect2(-1.0, -1.0, 32.0, 32.0), 8, 8, 16)
+	_check("E", b[0] == b[3], "brush-aligned 4 m cells over 2 m texels: %d of %d texels painted" % [b[0], b[3]])
+	_control(b[4] > 0 and b[1] == 0, "the masked-off cell's %d texels: %d painted (want 0)" % [b[4], b[1]])
+	_control(b[2] == 0, "texels past the rect: %d painted (want 0)" % b[2])
