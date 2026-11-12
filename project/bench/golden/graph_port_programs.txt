@@ -112,6 +112,8 @@ water_mask|unwired|2186583094
 water_mask|wired|2313737142
 float_to_mask|unwired|3979003885
 float_to_mask|wired|2685437159
+mask_feather|unwired|1544708536
+mask_feather|wired|2271141974
 mudslide|unwired|2105573729
 mudslide|wired|1515304949
 recast_cliff|unwired|3607791439
@@ -230,6 +232,8 @@ dev_measure|unwired|none
 dev_measure|wired|none
 dev_float_to_mask|unwired|none
 dev_float_to_mask|wired|none
+dev_mask_feather|unwired|none
+dev_mask_feather|wired|none
 dev_value_ramp|unwired|none
 dev_value_ramp|wired|none
 dev_leveler|unwired|none

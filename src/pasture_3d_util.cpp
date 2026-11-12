@@ -56,6 +56,7 @@
 #include "pasture_3d_gavoronoise.h"
 #include "pasture_3d_mudslide.h"
 #include "pasture_3d_water_nodes.h"
+#include "pasture_3d_mask_feather.h"
 #include "pasture_3d_terrain_metrics.h"
 #include "pasture_3d_warp_downslope.h"
 #include "pasture_3d_displace.h"
@@ -1357,6 +1358,7 @@ Dictionary Pasture3DUtil::graph_op_ids() {
 		{ "coast_profile", GRAPH_OP_COAST_PROFILE },
 		{ "path_range", GRAPH_OP_PATH_RANGE },
 		{ "slope", GRAPH_OP_SLOPE },
+		{ "mask_feather", GRAPH_OP_MASK_FEATHER },
 		{ "wave_exposure", GRAPH_OP_WAVE_EXPOSURE },
 		{ "coastal_erosion", GRAPH_OP_COASTAL_EROSION },
 		{ "islet_scatter", GRAPH_OP_ISLET_SCATTER },
@@ -2058,6 +2060,12 @@ Dictionary Pasture3DUtil::coast_profile_grid(const PackedVector2Array &p_points,
 Dictionary Pasture3DUtil::slope_grid(const PackedFloat32Array &p_surface, const int p_gw, const int p_gh,
 		const Rect2 &p_rect, const PackedFloat32Array &p_params) {
 	return godot::slope_grid(p_surface, p_gw, p_gh, p_rect, p_params.ptr(), p_params.size());
+}
+
+PackedFloat32Array Pasture3DUtil::mask_feather_grid(const PackedFloat32Array &p_mask, const int p_gw,
+		const int p_gh, const Rect2 &p_rect, const PackedFloat32Array &p_params) {
+	return godot::mask_feather_solve(p_mask, p_gw, p_gh, p_rect,
+			godot::mask_feather_params_from(p_params.ptr(), p_params.size()));
 }
 
 Dictionary Pasture3DUtil::path_range_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_heights,
@@ -3505,6 +3513,8 @@ void Pasture3DUtil::_bind_methods() {
 			&Pasture3DUtil::coast_profile_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("slope_grid", "surface", "gw", "gh", "rect", "params"), &Pasture3DUtil::slope_grid);
+	ClassDB::bind_static_method("Pasture3DUtil",
+			D_METHOD("mask_feather_grid", "mask", "gw", "gh", "rect", "params"), &Pasture3DUtil::mask_feather_grid);
 	ClassDB::bind_static_method("Pasture3DUtil",
 			D_METHOD("path_range_grid", "points", "heights", "closed", "base", "amount", "gw", "gh", "rect", "params",
 					"part_starts"),

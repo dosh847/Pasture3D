@@ -215,6 +215,7 @@ bench/GraphHydraulicStreamLogGate.tscn
 bench/GraphHydraulicSaleveGate.tscn
 bench/GraphSaleveRetentionGate.tscn
 bench/GraphSaleveJaggedGate.tscn
+bench/GraphMaskFeatherGate.tscn
 bench/GraphStrataProfileGate.tscn
 bench/GraphPhase1BrushTest.tscn
 # --- Terrain graph, universal node parameter sockets & inline controls ---

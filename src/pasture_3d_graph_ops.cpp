@@ -39,6 +39,7 @@
 #include "pasture_3d_gavoronoise.h"
 #include "pasture_3d_mudslide.h"
 #include "pasture_3d_water_nodes.h"
+#include "pasture_3d_mask_feather.h"
 #include "pasture_3d_noise_jordan.h"
 #include "pasture_3d_noise_swiss.h"
 #include "pasture_3d_scree.h"
@@ -1629,6 +1630,15 @@ static void graph_eval_grid_core(const GraphProgram &p_prog, int p_gw, int p_gh,
 					const PackedFloat32Array a = res[ch_names[c]];
 					if (a.size() == n) std::copy_n(a.ptr(), n, dst);
 				}
+			} break;
+
+			case GRAPH_OP_MASK_FEATHER: {
+				// P[0] is also the `feather` value port, already resolved into P by graph_resolve_op_params.
+				PackedFloat32Array in_arr = get_grid_packed(in0[s], c_in0);
+				PackedFloat32Array res = mask_feather_solve(in_arr, p_gw, p_gh, p_rect,
+						mask_feather_params_from(P, 16));
+				if (res.size() == n) std::copy_n(res.ptr(), n, g_ptr);
+				else std::fill_n(g_ptr, n, 0.f);
 			} break;
 
 			case GRAPH_OP_SLOPE: {

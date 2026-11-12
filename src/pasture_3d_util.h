@@ -416,6 +416,9 @@ public:
 	// Slope: {degrees, mask, aspect}; params min_angle, max_angle, falloff, scale.
 	static Dictionary slope_grid(const PackedFloat32Array &p_surface, const int p_gw, const int p_gh,
 			const Rect2 &p_rect, const PackedFloat32Array &p_params);
+	// Mask Feather: params feather_m, side, falloff, threshold, invert (pasture_3d_mask_feather.h).
+	static PackedFloat32Array mask_feather_grid(const PackedFloat32Array &p_mask, const int p_gw, const int p_gh,
+			const Rect2 &p_rect, const PackedFloat32Array &p_params);
 
 	static Dictionary path_range_grid(const PackedVector2Array &p_points, const PackedFloat32Array &p_heights,
 			bool p_closed, const PackedFloat32Array &p_base, const PackedFloat32Array &p_amount, int p_gw, int p_gh,

@@ -294,6 +294,12 @@ pasture3d_graph_node_dev_leveler|out|2|level_value|4
 pasture3d_graph_node_dev_leveler|out|3|delta|11
 pasture3d_graph_node_dev_leveler|out|4|walls|1
 pasture3d_graph_node_dev_leveler|out_extra|names=5|types=5|port0=0
+pasture3d_graph_node_dev_mask_feather|counts|in=2|out=1|has_output=true
+pasture3d_graph_node_dev_mask_feather|in|0|in|1|0.0|-1|-
+pasture3d_graph_node_dev_mask_feather|in|1|feather|4|2.0|0|-
+pasture3d_graph_node_dev_mask_feather|in_extra|aux=-1|names=2|types=2
+pasture3d_graph_node_dev_mask_feather|out|0|out|1
+pasture3d_graph_node_dev_mask_feather|out_extra|names=1|types=1|port0=1
 pasture3d_graph_node_dev_measure|counts|in=2|out=2|has_output=true
 pasture3d_graph_node_dev_measure|in|0|in|0|0.0|-1|-
 pasture3d_graph_node_dev_measure|in|1|selection|1|1.0|-1|aux
@@ -796,6 +802,12 @@ pasture3d_graph_node_mask|in|5|strength|4|1.0|6|-
 pasture3d_graph_node_mask|in_extra|aux=-1|names=6|types=6
 pasture3d_graph_node_mask|out|0|out|1
 pasture3d_graph_node_mask|out_extra|names=1|types=1|port0=1
+pasture3d_graph_node_mask_feather|counts|in=2|out=1|has_output=true
+pasture3d_graph_node_mask_feather|in|0|in|1|0.0|-1|-
+pasture3d_graph_node_mask_feather|in|1|feather|4|2.0|0|-
+pasture3d_graph_node_mask_feather|in_extra|aux=-1|names=2|types=2
+pasture3d_graph_node_mask_feather|out|0|out|1
+pasture3d_graph_node_mask_feather|out_extra|names=1|types=1|port0=1
 pasture3d_graph_node_measure|counts|in=2|out=2|has_output=true
 pasture3d_graph_node_measure|in|0|in|0|0.0|-1|-
 pasture3d_graph_node_measure|in|1|selection|1|1.0|-1|aux
