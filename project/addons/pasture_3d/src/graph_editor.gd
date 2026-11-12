@@ -1031,6 +1031,29 @@ func _build_ui() -> void:
 
 # ---- Undo / Redo Helper -----------------------------------------------------------------------------
 
+## Declare or pick a parameter for Parameter node `p_node` (Pasture3DGraphParamRow): set the graph's
+## declarations to `p_list` and the node's id to `p_id`, as one undoable action.
+func apply_param_edit(p_graph: Pasture3DTerrainGraph, p_node: Pasture3DGraphNodeParam,
+		p_list: Array, p_id: StringName) -> void:
+	if p_graph == null or p_node == null:
+		return
+	var old_list: Array[Pasture3DGraphParam] = p_graph.parameters.duplicate()
+	var new_list: Array[Pasture3DGraphParam] = []
+	new_list.assign(p_list)
+	var declares := new_list.size() != old_list.size()
+	var ur = _get_undo_redo()
+	if ur is EditorUndoRedoManager:
+		ur.create_action("Declare Parameter" if declares else "Pick Parameter", UndoRedo.MERGE_DISABLE, p_graph)
+	else:
+		ur.create_action("Declare Parameter" if declares else "Pick Parameter")
+	if declares:
+		ur.add_do_property(p_graph, &"parameters", new_list)
+		ur.add_undo_property(p_graph, &"parameters", old_list)
+	ur.add_do_property(p_node, &"param_id", p_id)
+	ur.add_undo_property(p_node, &"param_id", p_node.param_id)
+	ur.commit_action()
+
+
 func _get_undo_redo():
 	if plugin != null:
 		return plugin.get_undo_redo()

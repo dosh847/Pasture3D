@@ -835,6 +835,10 @@ it: the node HOLDS its path, so each host's resolve writes the shared property, 
 * **Subgraphs.** An unwired PATH parameter inside an instance is pinned to no path: the instance has no
   host to resolve against, so wire a path into the Subgraph node's port. Ungroup replaces an unwired PATH
   parameter with an empty-key Spline Source carrying the declaration's spline settings.
+* **Declaring from the node.** Selecting a Parameter node puts Pasture3DGraphParamRow at the top of the
+  Inspector: a dropdown of the graph's declared parameters, and a New row (id, type, Declare) that appends a
+  declaration and points the node at it, as one undoable action (`Pasture3DGraphEditor.apply_param_edit`).
+  The modifier's Parameters section appears once the graph declares one. Gate: `GraphParamRowGate` RA–RD.
 * **Warnings.** The modifier warns when a PATH parameter resolves no spline on its host (an empty key on a
   brush with no spline child, or a key naming nothing). The node warns when the last stamp gave it no path.
 * **Gate.** `GraphPathParamGate`, PA–PG: each host evaluates its own spline (equal to Spline Source on that

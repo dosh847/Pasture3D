@@ -5,6 +5,8 @@
 #
 #   * a Pasture3DTerrainGraph, or a Pasture3DNodeGraph (the brush modifier that hosts one), gets a single
 #     "Edit in Graph Editor" button — neither object has a modifier stack to describe.
+#   * a Parameter node gets Pasture3DGraphParamRow: pick one of the graph's declared parameters, or declare
+#     a new one (id + type) on the graph, without opening the graph resource.
 #   * a Pasture3DTerrainBrush that runs a modifier stack gets a Pasture3DBrushGraphRow: Add/Open Graph,
 #     Bake Graph (shown only once a graph modifier exists) and the stack's Evaluation. A brush that does NOT run a stack (`_supports_modifiers()` false — Ridge,
 #     Trough, Splat, Sim) gets nothing, the same rule Pasture3DTerrainBrush._get_property_list applies to
@@ -22,6 +24,7 @@ extends EditorInspectorPlugin
 # Preloaded rather than referenced by class_name: the plugin script loads at editor startup, potentially
 # before a newly added class_name has entered the global class cache.
 const BrushGraphRow = preload("res://addons/pasture_3d/src/brush_graph_row.gd")
+const GraphParamRow = preload("res://addons/pasture_3d/src/graph_param_row.gd")
 
 var editor: Pasture3DGraphEditor
 var plugin: EditorPlugin
@@ -29,10 +32,19 @@ var plugin: EditorPlugin
 
 func _can_handle(p_object: Object) -> bool:
 	return p_object is Pasture3DTerrainGraph or p_object is Pasture3DNodeGraph \
-			or p_object is Pasture3DTerrainBrush or p_object is Pasture3D
+			or p_object is Pasture3DTerrainBrush or p_object is Pasture3D or p_object is Pasture3DGraphNodeParam
 
 
 func _parse_begin(p_object: Object) -> void:
+	# A Parameter node: pick a declared parameter or declare one, from the node (Pasture3DGraphParamRow).
+	if p_object is Pasture3DGraphNodeParam:
+		var g: Pasture3DTerrainGraph = editor.graph if editor != null else null
+		if g != null and not g.nodes.has(p_object):
+			g = null
+		add_custom_control(GraphParamRow.new().setup(g, p_object as Pasture3DGraphNodeParam,
+				editor.apply_param_edit if editor != null else Callable()))
+		return
+
 	if p_object is Pasture3D:
 		add_custom_control(_bake_trace_row())
 		return
