@@ -24,32 +24,30 @@
 [ext_resource type="Script" uid="uid://dxbr6g22moqyx" path="res://addons/pasture_3d/graph/pasture3d_graph_node_islet_scatter.gd" id="13_wn1x5"]
 [ext_resource type="Script" uid="uid://bwvpdrmih3yt6" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_mask.gd" id="15_l2dx1"]
 [ext_resource type="Script" uid="uid://dt3335up2p70l" path="res://addons/pasture_3d/graph/pasture3d_graph_node_shore_character.gd" id="16_mjtdv"]
+[ext_resource type="Script" uid="uid://dk62sstiu4u2a" path="res://addons/pasture_3d/graph/pasture3d_graph_node_color_sink.gd" id="17_a68ip"]
+[ext_resource type="Script" uid="uid://dby8ulk0ecuh" path="res://addons/pasture_3d/graph/pasture3d_graph_node_const_color.gd" id="18_cx7fp"]
 [ext_resource type="Script" uid="uid://bindlf2awqi6e" path="res://addons/pasture_3d/graph/pasture3d_graph_node_blend.gd" id="18_p4out"]
-[ext_resource type="Script" uid="uid://c04rd15bkl8hx" path="res://addons/pasture_3d/graph/pasture3d_graph_node_fractal.gd" id="20_kfedv"]
-[ext_resource type="Script" uid="uid://ccy61yjirqc87" path="res://addons/pasture_3d/graph/pasture3d_graph_node_mountain_cone.gd" id="28_lhpge"]
+[ext_resource type="Script" uid="uid://7kgetm8y0qv7" path="res://addons/pasture_3d/graph/pasture3d_graph_node_color_blend.gd" id="19_ukorx"]
+[ext_resource type="Script" uid="uid://57c4i2bewm26" path="res://addons/pasture_3d/graph/pasture3d_graph_node_saleve_stream_power.gd" id="30_7swx1"]
 [ext_resource type="Script" uid="uid://bc0174c1jwufg" path="res://addons/pasture_3d/graph/pasture3d_graph_node_reroute.gd" id="31_yo6hg"]
+[ext_resource type="Script" uid="uid://c0eewl4gmy813" path="res://addons/pasture_3d/graph/pasture3d_graph_frame_data.gd" id="32_b685y"]
 [ext_resource type="Script" uid="uid://ybwedanry756" path="res://addons/pasture_3d/graph/pasture3d_graph_node_hydraulic_saleve.gd" id="33_3nkqr"]
 [ext_resource type="Script" uid="uid://bdacqpu4t22i4" path="res://addons/pasture_3d/graph/pasture3d_graph_node_param.gd" id="33_ni3tk"]
-[ext_resource type="Script" uid="uid://dwc1xyw0tp6ik" path="res://addons/pasture_3d/graph/pasture3d_graph_node_mountain_range_radial.gd" id="43_1p3tm"]
-[ext_resource type="Script" uid="uid://b6fg15pksq0y2" path="res://addons/pasture_3d/graph/pasture3d_graph_node_mountain_tibesti.gd" id="44_wn1x5"]
-[ext_resource type="Script" uid="uid://bj10ochgiqrlg" path="res://addons/pasture_3d/connectors/pasture3d_ridge.gd" id="49_7qmf4"]
+[ext_resource type="Script" uid="uid://cfpxlr1nx1i5x" path="res://addons/pasture_3d/graph/pasture3d_graph_node_expand_shrink.gd" id="38_7swx1"]
+[ext_resource type="Script" uid="uid://br5raorbyrwhw" path="res://addons/pasture_3d/connectors/pasture3d_mound.gd" id="41_a68ip"]
+[ext_resource type="Script" uid="uid://djc6yocdtcwwh" path="res://addons/pasture_3d/graph/pasture3d_graph_node_mask_feather.gd" id="41_cx7fp"]
 [ext_resource type="Script" uid="uid://bbgjfav0p7rhm" path="res://addons/pasture_3d/graph/pasture3d_graph_node_path_range.gd" id="50_0h8r1"]
-[ext_resource type="Script" uid="uid://dojdh8yj7mhru" path="res://addons/pasture_3d/graph/pasture3d_graph_node_slope.gd" id="51_0h8r1"]
 [ext_resource type="Script" uid="uid://cma5ovnlhp6t4" path="res://addons/pasture_3d/graph/pasture3d_graph_node_range_splines.gd" id="52_quisv"]
 
 [sub_resource type="Pasture3DMaterial" id="Pasture3DMaterial_4515p"]
 _shader_parameters = {
 &"bias_distance": null,
 &"blend_sharpness": null,
-&"contour_color": null,
-&"contour_interval": null,
-&"contour_thickness": null,
 &"depth_blur": null,
 &"distant_normal_scale": null,
 &"flat_terrain_normals": null,
 &"mipmap_bias": null
 }
-show_contours = true
 show_checkered = true
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_hr7se"]
@@ -81,7 +79,7 @@ graph_position = Vector2(-880, 80)
 
 [sub_resource type="Resource" id="Resource_lhpge"]
 script = ExtResource("8_m7f8t")
-graph_position = Vector2(3040, 560)
+graph_position = Vector2(3200, 540)
 
 [sub_resource type="Resource" id="Resource_0oqof"]
 script = ExtResource("8_ff8bn")
@@ -200,11 +198,42 @@ graph_position = Vector2(1080, 800)
 script = ExtResource("31_yo6hg")
 graph_position = Vector2(1980, 800)
 
+[sub_resource type="Resource" id="Resource_7b6fo"]
+script = ExtResource("17_a68ip")
+graph_position = Vector2(3400, 1040)
+
+[sub_resource type="Resource" id="Resource_tcq52"]
+script = ExtResource("18_cx7fp")
+value = Color(0.93359375, 0.8669017, 0.78590757, 1)
+graph_position = Vector2(1960, 1060)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_nooeo"]
+script = ExtResource("19_ukorx")
+graph_position = Vector2(2880, 1080)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_g1owp"]
+script = ExtResource("18_cx7fp")
+value = Color(0.44921875, 0.20788135, 0.16073267, 1)
+graph_position = Vector2(1960, 1380)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_3xb28"]
+script = ExtResource("18_cx7fp")
+value = Color(0.37890625, 0.34972224, 0.19811548, 1)
+graph_position = Vector2(1980, 1600)
+
+[sub_resource type="Resource" id="Resource_5j0a4"]
+script = ExtResource("19_ukorx")
+graph_position = Vector2(2460, 1240)
+preview_on = true
+
 [sub_resource type="Resource" id="Resource_slh1f"]
 script = ExtResource("10_p4out")
 format_version = 3
-nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_lmt3e"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv"), SubResource("Resource_uxjvw"), SubResource("Resource_b18ah"), SubResource("Resource_6vjxx"), SubResource("Resource_kg4qs"), SubResource("Resource_kye8j"), SubResource("Resource_3wp7n"), SubResource("Resource_cwbmp"), SubResource("Resource_bhhrn"), SubResource("Resource_n6igq"), SubResource("Resource_c5hbv"), SubResource("Resource_elc4l"), SubResource("Resource_6rhur")])
-wires = [[2, &"path", 4, &"path"], [4, &"path", 3, &"path"], [3, &"path", 5, &"outline"], [5, &"height", 6, &"height"], [8, &"out", 9, &"in"], [10, &"path", 11, &"path"], [5, &"height", 12, &"height"], [6, &"exposure", 12, &"exposure"], [3, &"path", 13, &"outline"], [13, &"height", 7, &"height"], [7, &"height", 14, &"height"], [9, &"out", 14, &"exposure"], [14, &"height", 1, &"result"], [12, &"erosion", 8, &"in"], [6, &"exposure", 15, &"in"], [15, &"out", 16, &"in"], [16, &"out", 7, &"exposure"], [12, &"cliff", 13, &"cliff"]]
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_4img5"), SubResource("Resource_lhpge"), SubResource("Resource_lmt3e"), SubResource("Resource_m7f8t"), SubResource("Resource_kfedv"), SubResource("Resource_uxjvw"), SubResource("Resource_b18ah"), SubResource("Resource_6vjxx"), SubResource("Resource_kg4qs"), SubResource("Resource_kye8j"), SubResource("Resource_3wp7n"), SubResource("Resource_cwbmp"), SubResource("Resource_bhhrn"), SubResource("Resource_n6igq"), SubResource("Resource_c5hbv"), SubResource("Resource_elc4l"), SubResource("Resource_6rhur"), SubResource("Resource_7b6fo"), SubResource("Resource_tcq52"), SubResource("Resource_nooeo"), SubResource("Resource_g1owp"), SubResource("Resource_3xb28"), SubResource("Resource_5j0a4")])
+wires = [[2, &"path", 4, &"path"], [4, &"path", 3, &"path"], [3, &"path", 5, &"outline"], [5, &"height", 6, &"height"], [8, &"out", 9, &"in"], [10, &"path", 11, &"path"], [5, &"height", 12, &"height"], [6, &"exposure", 12, &"exposure"], [3, &"path", 13, &"outline"], [13, &"height", 7, &"height"], [7, &"height", 14, &"height"], [9, &"out", 14, &"exposure"], [14, &"height", 1, &"result"], [12, &"erosion", 8, &"in"], [6, &"exposure", 15, &"in"], [15, &"out", 16, &"in"], [16, &"out", 7, &"exposure"], [12, &"cliff", 13, &"cliff"], [13, &"beach", 19, &"mask"], [13, &"cliff", 22, &"mask"], [18, &"out", 19, &"a"], [20, &"out", 22, &"a"], [21, &"out", 22, &"b"], [22, &"out", 19, &"b"], [19, &"out", 17, &"color"]]
 output_node = 13
 metadata/_editor_selected_node = -1
 
@@ -248,59 +277,45 @@ point_count = 7
 
 [sub_resource type="Resource" id="Resource_exlmg"]
 script = ExtResource("5_hur8n")
-graph_position = Vector2(-60, 60)
-
-[sub_resource type="Resource" id="Resource_f5qo5"]
-script = ExtResource("28_lhpge")
-elevation = 35.0
-graph_position = Vector2(-460, 240)
-
-[sub_resource type="Resource" id="Resource_f8ujb"]
-script = ExtResource("18_p4out")
-graph_position = Vector2(380, 60)
+graph_position = Vector2(-500, 220)
 
 [sub_resource type="Resource" id="Resource_kov07"]
 script = ExtResource("8_m7f8t")
-graph_position = Vector2(760, 60)
+graph_position = Vector2(1220, 40)
+
+[sub_resource type="Resource" id="Resource_f5qo5"]
+script = ExtResource("33_ni3tk")
+param_id = &"spine"
+graph_position = Vector2(-460, 40)
+
+[sub_resource type="Resource" id="Resource_f8ujb"]
+script = ExtResource("50_0h8r1")
+peak_height = 10.0
+peak_spacing = 75.0
+end_taper = 20.0
+width_ratio = 1.15
+use_path_heights = true
+spur_spacing = 60.0
+spur_length = 20.0
+graph_position = Vector2(-20, 40)
 
 [sub_resource type="Resource" id="Resource_1pmxx"]
-script = ExtResource("43_1p3tm")
-elevation = 50.0
-graph_position = Vector2(-420, 440)
-preview_on = true
+script = ExtResource("30_7swx1")
+graph_position = Vector2(520, 200)
 
 [sub_resource type="Resource" id="Resource_4h7ik"]
-script = ExtResource("44_wn1x5")
-elevation = 70.0
-scale = 2.01
-graph_position = Vector2(-40, 220)
-preview_on = true
-
-[sub_resource type="Resource" id="Resource_ytgo3"]
-script = ExtResource("8_ff8bn")
-points = PackedVector2Array()
-half_widths = PackedFloat32Array()
-heights = PackedFloat32Array()
-part_starts = PackedInt32Array()
-source_label = "Plow/Pasture3DSpline"
-sample_half_widths = PackedFloat32Array()
-sample_shoulders = PackedFloat32Array()
-sample_verges = PackedFloat32Array()
-sample_suppress = PackedByteArray()
-sample_skip = PackedByteArray()
-
-[sub_resource type="Resource" id="Resource_gip2p"]
-script = ExtResource("9_hur8n")
-path = SubResource("Resource_ytgo3")
-graph_position = Vector2(80, 600)
+script = ExtResource("12_cbvqt")
+id = &"spine"
+type = 3
 
 [sub_resource type="Resource" id="Resource_wthob"]
 script = ExtResource("10_p4out")
 format_version = 3
-nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_exlmg"), SubResource("Resource_f5qo5"), SubResource("Resource_f8ujb"), SubResource("Resource_kov07"), SubResource("Resource_1pmxx"), SubResource("Resource_4h7ik"), SubResource("Resource_gip2p")])
-wires = [[0, &"height", 2, &"a"], [2, &"out", 3, &"result"], [5, &"out", 2, &"b"]]
-output_node = 3
-metadata/_editor_selected_node = 6
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_exlmg"), SubResource("Resource_kov07"), SubResource("Resource_f5qo5"), SubResource("Resource_f8ujb"), SubResource("Resource_1pmxx")])
+parameters = Array[ExtResource("12_cbvqt")]([SubResource("Resource_4h7ik")])
+wires = [[2, &"out", 3, &"path"], [0, &"height", 3, &"height"], [3, &"height", 4, &"in"], [4, &"height", 1, &"result"]]
+output_node = 1
+metadata/_editor_selected_node = -1
 
 [sub_resource type="Resource" id="Resource_h8tpa"]
 resource_name = "Terrain Graph"
@@ -311,14 +326,27 @@ evaluation = 1
 [sub_resource type="Curve3D" id="Curve3D_tcq52"]
 closed = true
 _data = {
-"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -148.48419, 12.634851, -148.48419, 0, 0, 0, 0, 0, 0, 148.48419, -9.642969, -148.48419, 0, 0, 0, 0, 0, 0, 148.48419, 5.041376, 148.48413, 0, 0, 0, 0, 0, 0, -148.48419, 12.840763, 148.48413),
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -148.48419, 29.166616, -148.48419, 0, 0, 0, 0, 0, 0, 148.48419, 2.6527119, -148.48419, 0, 0, 0, 0, 0, 0, 148.48419, 22.746466, 148.48413, 0, 0, 0, 0, 0, 0, -148.48419, 27.681479, 148.48413),
 "tilts": PackedFloat32Array(0, 0, 0, 0)
 }
 point_count = 4
 
+[sub_resource type="Curve3D" id="Curve3D_nooeo"]
+_data = {
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -89.932434, 55.923088, -81.08609, 0, 0, 0, 0, 0, 0, -24.940369, 57.3649, -53.989563, 0, 0, 0, 0, 0, 0, -4.917053, 52.460205, 50.890167, 0, 0, 0, 0, 0, 0, 74.362854, 52.460205, 79.516235),
+"tilts": PackedFloat32Array(0, 0, 0, 0)
+}
+point_count = 4
+
+[sub_resource type="Resource" id="Resource_p83el"]
+script = ExtResource("32_b685y")
+position_offset = Vector2(-590, -320)
+size = Vector2(1040, 440)
+attached_node_indices = PackedInt32Array(2, 7, 5, 4)
+
 [sub_resource type="Resource" id="Resource_vv3fa"]
 script = ExtResource("5_hur8n")
-graph_position = Vector2(-120, 0)
+graph_position = Vector2(-480, 300)
 
 [sub_resource type="Resource" id="Resource_twuk5"]
 script = ExtResource("8_m7f8t")
@@ -342,7 +370,7 @@ sample_skip = PackedByteArray()
 script = ExtResource("9_hur8n")
 spline_key = "PlateauHills/HillRange1/NorthWestHillsSpline"
 path = SubResource("Resource_lnv28")
-graph_position = Vector2(-520, -240)
+graph_position = Vector2(-560, -280)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_x6t63"]
@@ -361,7 +389,7 @@ preview_on = true
 script = ExtResource("9_l4h5e")
 wavelength = 120.0
 sigma = 60.0
-graph_position = Vector2(260, -240)
+graph_position = Vector2(220, -280)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_63p0j"]
@@ -371,7 +399,7 @@ peak_height = 100.0
 count = 12
 angle = 90.3
 wander = 2.35
-graph_position = Vector2(-120, -240)
+graph_position = Vector2(-160, -280)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_g0kwx"]
@@ -381,7 +409,7 @@ graph_position = Vector2(1180, -20)
 [sub_resource type="Resource" id="Resource_7swx1"]
 script = ExtResource("33_ni3tk")
 param_id = &"spine_area"
-graph_position = Vector2(-500, 20)
+graph_position = Vector2(-540, -20)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_5mv86"]
@@ -398,7 +426,8 @@ nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_vv3fa"), SubResourc
 parameters = Array[ExtResource("12_cbvqt")]([SubResource("Resource_5mv86")])
 wires = [[0, &"height", 3, &"height"], [5, &"path", 4, &"path"], [4, &"path", 3, &"path"], [3, &"height", 6, &"in"], [6, &"height", 1, &"result"], [7, &"out", 5, &"path"]]
 output_node = 1
-metadata/_editor_selected_node = 7
+frames = [SubResource("Resource_p83el")]
+metadata/_editor_selected_node = 4
 
 [sub_resource type="Resource" id="Resource_0rjiy"]
 resource_name = "Terrain Graph"
@@ -425,19 +454,16 @@ _data = {
 }
 point_count = 17
 
-[sub_resource type="Resource" id="Resource_q0c40"]
+[sub_resource type="Resource" id="Resource_ni3tk"]
 resource_name = "Terrain Graph"
 script = ExtResource("11_kfedv")
 graph = SubResource("Resource_yoxcx")
-param_overrides = {
-&"spine_area": "PlateauHills/HillRange4/NorthWestHillsSpline4"
-}
 evaluation = 1
 
 [sub_resource type="Curve3D" id="Curve3D_qky07"]
 closed = true
 _data = {
-"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -534.70557, -43.736244, -912.875, 0, 0, 0, 0, 0, 0, -403.83582, -43.64724, -923.9673, 0, 0, 0, 0, 0, 0, -158.99677, -44.394463, -797.11316, 0, 0, 0, 0, 0, 0, -66.8822, -77.90039, -745.9402, 0, 0, 0, 0, 0, 0, 172.80609, -46.795723, -653.2239, 0, 0, 0, 0, 0, 0, 295.78888, -43.56395, -704.73303, 0, 0, 0, 0, 0, 0, 465.32465, -46.414375, -648.36646, 0, 0, 0, 0, 0, 0, 355.6443, -41.54477, -494.4204, 0, 0, 0, 0, 0, 0, 362.07037, -27.138268, 206.53296, 0, 0, 0, 0, 0, 0, 461.70673, -59.20916, 638.83923, 0, 0, 0, 0, 0, 0, 348.2126, -55.60974, 948.27814, 0, 0, 0, 0, 0, 0, 236.7528, -57.011078, 1137.1517, 0, 0, 0, 0, 0, 0, -193.62622, -43.88656, 1053.6141, 0, 0, 0, 0, 0, 0, -375.58826, -43.586296, 821.4132, 0, 0, 0, 0, 0, 0, -414.61902, -47.982895, 568.7426, 0, 0, 0, 0, 0, 0, -421.23767, -44.299683, 316.8954, 0, 0, 0, 0, 0, 0, -499.99158, -43.950623, 121.22888, 0, 0, 0, 0, 0, 0, -632.0751, -43.849922, -274.56042, 0, 0, 0, 0, 0, 0, -565.078, -43.584183, -346.13196, 0, 0, 0, 0, 0, 0, -649.5658, -74.36456, -530.32104, 0, 0, 0, 0, 0, 0, -764.29724, -58.804085, -654.9098, 0, 0, 0, 0, 0, 0, -829.15894, -43.57186, -808.40674),
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -534.70557, -43.736244, -912.875, 0, 0, 0, 0, 0, 0, -403.83582, -43.64724, -923.9673, 0, 0, 0, 0, 0, 0, -158.99677, -44.394463, -797.11316, 0, 0, 0, 0, 0, 0, -66.8822, -77.90039, -745.9402, 0, 0, 0, 0, 0, 0, 172.80609, -46.795723, -653.2239, 0, 0, 0, 0, 0, 0, 295.78888, -43.56395, -704.73303, 0, 0, 0, 0, 0, 0, 465.32465, -46.414375, -648.36646, 0, 0, 0, 0, 0, 0, 480.2139, -64.08062, -477.3108, 0, 0, 0, 0, 0, 0, 362.07037, -27.138268, 206.53296, 0, 0, 0, 0, 0, 0, 461.70673, -59.20916, 638.83923, 0, 0, 0, 0, 0, 0, 348.2126, -55.60974, 948.27814, 0, 0, 0, 0, 0, 0, 236.7528, -57.011078, 1137.1517, 0, 0, 0, 0, 0, 0, -193.62622, -43.88656, 1053.6141, 0, 0, 0, 0, 0, 0, -375.58826, -43.586296, 821.4132, 0, 0, 0, 0, 0, 0, -414.61902, -47.982895, 568.7426, 0, 0, 0, 0, 0, 0, -421.23767, -44.299683, 316.8954, 0, 0, 0, 0, 0, 0, -499.99158, -43.950623, 121.22888, 0, 0, 0, 0, 0, 0, -632.0751, -43.849922, -274.56042, 0, 0, 0, 0, 0, 0, -565.078, -43.584183, -346.13196, 0, 0, 0, 0, 0, 0, -649.5658, -74.36456, -530.32104, 0, 0, 0, 0, 0, 0, -764.29724, -58.804085, -654.9098, 0, 0, 0, 0, 0, 0, -829.15894, -43.57186, -808.40674),
 "tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 }
 point_count = 22
@@ -445,10 +471,16 @@ point_count = 22
 [sub_resource type="Curve3D" id="Curve3D_63p0j"]
 closed = true
 _data = {
-"points": PackedVector3Array(0, 0, 0, 0, 0, 0, 0, 0, -20, 0, 0, 0, 0, 0, 0, 224.60974, 32.807625, 660.5849, 0, 0, 0, 0, 0, 0, 310.1017, 32.75259, 378.5511, 0, 0, 0, 0, 0, 0, 334.7581, 32.699036, 92.734985, 0, 0, 0, 0, 0, 0, 291.60187, 32.612377, -368.969, 0, 0, 0, 0, 0, 0, 252.9477, 38.739704, -619.58154, 0, 0, 0, 0, 0, 0, -200.69092, 32.047455, -341.1244, 0, 0, 0, 0, 0, 0, -345.82935, 33.77402, -545.3136, 0, 0, 0, 0, 0, 0, -373.23657, 35.137104, -743.8646, 0, 0, 0, 0, 0, 0, -556.7136, 36.60666, -866.734, 0, 0, 0, 0, 0, 0, -724.20874, 33.196045, -788.9857, 0, 0, 0, 0, 0, 0, -721.70776, 31.41061, -572.954, 0, 0, 0, 0, 0, 0, -647.46387, 34.031796, -425.28723, 0, 0, 0, 0, 0, 0, -676.8141, 36.573975, -267.18982, 0, 0, 0, 0, 0, 0, -483.4701, 35.34523, 432.19092, 0, 0, 0, 0, 0, 0, -457.61877, 34.190094, 837.1315, 0, 0, 0, 0, 0, 0, -279.42822, 18.817118, 881.87933, 0, 0, 0, 0, 0, 0, -87.29993, 20.72807, 1007.60876, 0, 0, 0, 0, 0, 0, 97.1651, 25.168552, 944.50745),
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, 0, 0, -20, 0, 0, 0, 0, 0, 0, 224.60974, 32.807625, 660.5849, 0, 0, 0, 0, 0, 0, 310.1017, 32.75259, 378.5511, 0, 0, 0, 0, 0, 0, 334.7581, 32.699036, 92.734985, 0, 0, 0, 0, 0, 0, 291.60187, 32.612377, -368.969, 0, 0, 0, 0, 0, 0, 256.2555, 34.474472, -621.0099, 0, 0, 0, 0, 0, 0, -200.69092, 32.047455, -341.1244, 0, 0, 0, 0, 0, 0, -345.82935, 33.77402, -545.3136, 0, 0, 0, 0, 0, 0, -373.23657, 35.137104, -743.8646, 0, 0, 0, 0, 0, 0, -556.7136, 36.60666, -866.734, 0, 0, 0, 0, 0, 0, -724.20874, 33.196045, -788.9857, 0, 0, 0, 0, 0, 0, -721.70776, 31.41061, -572.954, 0, 0, 0, 0, 0, 0, -647.46387, 34.031796, -425.28723, 0, 0, 0, 0, 0, 0, -676.8141, 36.573975, -267.18982, 0, 0, 0, 0, 0, 0, -483.4701, 35.34523, 432.19092, 0, 0, 0, 0, 0, 0, -457.61877, 34.190094, 837.1315, 0, 0, 0, 0, 0, 0, -279.42822, 18.817118, 881.87933, 0, 0, 0, 0, 0, 0, -87.29993, 20.72807, 1007.60876, 0, 0, 0, 0, 0, 0, 97.1651, 25.168552, 944.50745),
 "tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 }
 point_count = 19
+
+[sub_resource type="Resource" id="Resource_b685y"]
+resource_name = "Terrain Graph"
+script = ExtResource("11_kfedv")
+graph = SubResource("Resource_yoxcx")
+evaluation = 1
 
 [sub_resource type="Curve3D" id="Curve3D_q0c40"]
 closed = true
@@ -466,6 +498,15 @@ _data = {
 }
 point_count = 19
 
+[sub_resource type="Resource" id="Resource_q0c40"]
+resource_name = "Terrain Graph"
+script = ExtResource("11_kfedv")
+graph = SubResource("Resource_yoxcx")
+param_overrides = {
+&"spine_area": "PlateauHills/HillRange4/NorthWestHillsSpline4"
+}
+evaluation = 1
+
 [sub_resource type="Curve3D" id="Curve3D_7swx1"]
 closed = true
 _data = {
@@ -482,94 +523,136 @@ _data = {
 }
 point_count = 15
 
-[sub_resource type="Resource" id="Resource_rqwuq"]
+[sub_resource type="Resource" id="Resource_yo6hg"]
 script = ExtResource("5_hur8n")
-graph_position = Vector2(0, 140)
-preview_on = true
+graph_position = Vector2(140, 480)
+
+[sub_resource type="Resource" id="Resource_nkn6g"]
+script = ExtResource("8_m7f8t")
+graph_position = Vector2(2600, 440)
 
 [sub_resource type="Resource" id="Resource_8q7wg"]
-script = ExtResource("8_ff8bn")
-points = PackedVector2Array(-514.67096, -1552.772, -630.1058, -1138.0265, -867.99915, -1056.2037, -768.681, -821.4809, -762.45544, -564.9245, -780.6066, -402.94513)
-half_widths = PackedFloat32Array(12, 12, 12, 12, 12, 12)
-heights = PackedFloat32Array(43.654213, 147.56032, 97.975685, 148.98206, 105.094444, 95.69457)
-part_starts = PackedInt32Array()
-source_label = "Pasture3DLayerBrush/Ridge/Crest"
-sample_half_widths = PackedFloat32Array()
-sample_shoulders = PackedFloat32Array()
-sample_verges = PackedFloat32Array()
-sample_suppress = PackedByteArray()
-sample_skip = PackedByteArray()
+script = ExtResource("33_ni3tk")
+param_id = &"ridge"
+graph_position = Vector2(-660, 740)
 
-[sub_resource type="Resource" id="Resource_tt66w"]
-script = ExtResource("9_hur8n")
-spline_key = "Pasture3DLayerBrush/Ridge/Crest"
-path = SubResource("Resource_8q7wg")
-graph_position = Vector2(-20, -80)
-preview_on = true
-
-[sub_resource type="Resource" id="Resource_a1o0c"]
-script = ExtResource("8_m7f8t")
-graph_position = Vector2(2420, -60)
-
-[sub_resource type="Resource" id="Resource_4k064"]
+[sub_resource type="Resource" id="Resource_3nkqr"]
 script = ExtResource("50_0h8r1")
-peak_height = 60.0
-peak_spacing = 420.0
-peak_variation = 0.55
-end_taper = 250.0
-end_height = 0.44
-spur_spacing = 120.0
-spur_length = 360.0
+peak_height = 25.0
+peak_spacing = 60.0
+end_taper = 5.0
+width_ratio = 3.0
+spur_spacing = 60.0
+spur_length = 240.0
 spur_angle = 0.0
-graph_position = Vector2(480, 0)
+spur_angle_jitter = 45.0
+spur_wander = 0.28
+spur_levels = 2
+graph_position = Vector2(600, 660)
 preview_on = true
 
-[sub_resource type="Resource" id="Resource_b0u5i"]
-script = ExtResource("51_0h8r1")
-graph_position = Vector2(940, 140)
-collapsed = true
+[sub_resource type="Resource" id="Resource_ukorx"]
+script = ExtResource("11_lmt3e")
+step = 24.0
+graph_position = Vector2(-340, 740)
+
+[sub_resource type="Resource" id="Resource_cbvqt"]
+script = ExtResource("9_l4h5e")
+sigma = 40.0
+graph_position = Vector2(80, 740)
 preview_on = true
 
-[sub_resource type="Resource" id="Resource_ahukp"]
-script = ExtResource("33_3nkqr")
-graph_position = Vector2(1840, -100)
+[sub_resource type="Resource" id="Resource_3w2eb"]
+script = ExtResource("30_7swx1")
+graph_position = Vector2(1760, 660)
 
-[sub_resource type="Resource" id="Resource_heixe"]
+[sub_resource type="Resource" id="Resource_yom8w"]
+script = ExtResource("38_7swx1")
+mode = 1
+radius = 30.0
+graph_position = Vector2(1020, 920)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_6rwob"]
+script = ExtResource("41_cx7fp")
+feather = 40.0
+graph_position = Vector2(1380, 840)
+
+[sub_resource type="Resource" id="Resource_o2us2"]
 script = ExtResource("18_p4out")
-graph_position = Vector2(1460, -140)
+mode = 3
+graph_position = Vector2(2300, 480)
 
-[sub_resource type="Resource" id="Resource_2hnkd"]
-script = ExtResource("20_kfedv")
-feature_size = 196.0
-graph_position = Vector2(1040, -80)
+[sub_resource type="Resource" id="Resource_1p3tm"]
+script = ExtResource("12_cbvqt")
+id = &"ridge"
+type = 3
 
-[sub_resource type="Resource" id="Resource_b41or"]
+[sub_resource type="Resource" id="Resource_a68ip"]
 script = ExtResource("10_p4out")
 format_version = 3
-nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_rqwuq"), SubResource("Resource_tt66w"), SubResource("Resource_a1o0c"), SubResource("Resource_4k064"), SubResource("Resource_b0u5i"), SubResource("Resource_ahukp"), SubResource("Resource_heixe"), SubResource("Resource_2hnkd")])
-wires = [[0, &"height", 3, &"height"], [1, &"path", 3, &"path"], [3, &"height", 4, &"height"], [3, &"height", 6, &"a"], [7, &"out", 6, &"b"], [3, &"footprint", 6, &"mask"], [6, &"out", 5, &"in"], [5, &"height", 2, &"result"], [3, &"footprint", 5, &"mask"]]
-output_node = 2
-metadata/_editor_selected_node = 5
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_yo6hg"), SubResource("Resource_nkn6g"), SubResource("Resource_8q7wg"), SubResource("Resource_3nkqr"), SubResource("Resource_ukorx"), SubResource("Resource_cbvqt"), SubResource("Resource_3w2eb"), SubResource("Resource_yom8w"), SubResource("Resource_6rwob"), SubResource("Resource_o2us2")])
+parameters = Array[ExtResource("12_cbvqt")]([SubResource("Resource_1p3tm")])
+wires = [[0, &"height", 3, &"height"], [2, &"out", 4, &"path"], [4, &"path", 5, &"path"], [5, &"path", 3, &"path"], [3, &"height", 6, &"in"], [3, &"footprint", 7, &"in"], [7, &"out", 8, &"in"], [0, &"height", 9, &"a"], [6, &"height", 9, &"b"], [9, &"out", 1, &"result"], [8, &"out", 6, &"mask"]]
+output_node = 3
+metadata/_editor_selected_node = 6
 
-[sub_resource type="Resource" id="Resource_xwa3r"]
+[sub_resource type="Resource" id="Resource_cx7fp"]
+resource_name = "Terrain Graph"
 script = ExtResource("11_kfedv")
-graph = SubResource("Resource_b41or")
-evaluation = 1
+graph = SubResource("Resource_a68ip")
 
-[sub_resource type="Curve3D" id="Curve3D_b0u5i"]
+[sub_resource type="Curve3D" id="Curve3D_ukorx"]
 closed = true
 _data = {
-"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -179.37335, -83.77165, -478.62476, 0, 0, 0, 0, 0, 0, 261.03827, -81.63199, -693.96826, 0, 0, 0, 0, 0, 0, 398.68823, -66.6609, -339.32104, 0, 0, 0, 0, 0, 0, 405.01575, -88.03453, 215.71393, 0, 0, 0, 0, 0, 0, 254.30188, -81.629585, 597.2621, 0, 0, 0, 0, 0, 0, 105.67322, -76.63195, 863.39343, 0, 0, 0, 0, 0, 0, -231.18237, -84.50673, 887.13257, 0, 0, 0, 0, 0, 0, -445.41803, -82.22429, 741.85144, 0, 0, 0, 0, 0, 0, -521.5157, -83.109146, 105.581665, 0, 0, 0, 0, 0, 0, -646.9847, -81.4078, -161.13489),
-"tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -377.84668, 0.28957367, -198.89966, 0, 0, 0, 0, 0, 0, -220.73615, -33.73356, -582.8893, 0, 0, 0, 0, 0, 0, -34.028442, -70.31009, -669.4159, 0, 0, 0, 0, 0, 0, 447.45047, -61.193592, -708.7086, 0, 0, 0, 0, 0, 0, 466.0239, 2.1180115, -321.77734, 0, 0, 0, 0, 0, 0, 346.1291, 5.005028, -120.57007, 0, 0, 0, 0, 0, 0, 356.29846, -17.496414, 27.058228, 0, 0, 0, 0, 0, 0, 288.27856, -34.36019, 250.42096, 0, 0, 0, 0, 0, 0, 161.01367, -29.403084, 621.92145, 0, 0, 0, 0, 0, 0, -156.2356, -6.0675583, 608.3442, 0, 0, 0, 0, 0, 0, -288.7395, 2.3783493, 190.46204),
+"tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 }
-point_count = 10
+point_count = 11
 
-[sub_resource type="Curve3D" id="Curve3D_ahukp"]
+[sub_resource type="Curve3D" id="Curve3D_cbvqt"]
 _data = {
-"points": PackedVector3Array(0, 0, 0, 0, 0, 0, 204.8518, -72.525925, -517.9236, 0, 0, 0, 0, 0, 0, 89.41699, 31.38018, -103.1781, 0, 0, 0, 0, 0, 0, -148.47638, -18.204453, -21.355347, 0, 0, 0, 0, 0, 0, -49.158264, 32.801918, 213.3675, 0, 0, 0, 0, 0, 0, -42.93268, -11.085693, 469.9239, 0, 0, 0, 0, 0, 0, -61.083862, -20.485565, 631.90326),
-"tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0)
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, 340.22266, -33.583504, -517.7009, 0, 0, 0, 0, 0, 0, 321.1618, 31.93097, -160.53162, 0, 0, 0, 0, 0, 0, -71.03046, 38.47506, -232.15369, 0, 0, 0, 0, 0, 0, 209.77625, 4.117943, -17.404602, 0, 0, 0, 0, 0, 0, 74.583496, 18.144447, 283.52155),
+"tilts": PackedFloat32Array(0, 0, 0, 0, 0)
 }
-point_count = 6
+point_count = 5
+
+[sub_resource type="Resource" id="Resource_p1blu"]
+script = ExtResource("5_hur8n")
+graph_position = Vector2(40, 80)
+
+[sub_resource type="Resource" id="Resource_e06bg"]
+script = ExtResource("8_m7f8t")
+graph_position = Vector2(960, 80)
+
+[sub_resource type="Resource" id="Resource_t0lct"]
+script = ExtResource("30_7swx1")
+time_steps = 500
+slope_exponent = 1.9
+drainage_noise = 0.28
+graph_position = Vector2(400, 80)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_2p1i1"]
+script = ExtResource("10_p4out")
+format_version = 3
+nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_p1blu"), SubResource("Resource_e06bg"), SubResource("Resource_t0lct")])
+wires = [[0, &"height", 2, &"in"], [2, &"height", 1, &"result"]]
+metadata/_editor_selected_node = -1
+
+[sub_resource type="Resource" id="Resource_soe5a"]
+resource_name = "Terrain Graph"
+script = ExtResource("11_kfedv")
+graph = SubResource("Resource_2p1i1")
+evaluation = 1
+
+[sub_resource type="Curve3D" id="Curve3D_3w2eb"]
+closed = true
+_data = {
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -50, 10.20282, -50, 0, 0, 0, 0, 0, 0, -33.829468, 2.2427444, -105.40527, 0, 0, 0, 0, 0, 0, 0.09350586, 4.6619873, -98.77539, 0, 0, 0, 0, 0, 0, 64.3974, 4.844345, -110.269165, 0, 0, 0, 0, 0, 0, 50, 6.3007584, -50, 0, 0, 0, 0, 0, 0, 114.2168, 8.39183, -53.82776, 0, 0, 0, 0, 0, 0, 91.40112, 10.99881, 11.842468, 0, 0, 0, 0, 0, 0, 50, 9.920914, 50, 0, 0, 0, 0, 0, 0, 89.859314, 23.04634, 65.78546, 0, 0, 0, 0, 0, 0, 62.491943, 19.736061, 120.414, 0, 0, 0, 0, 0, 0, 2.595337, -0.7784805, 126.911316, 0, 0, 0, 0, 0, 0, -64.40662, -12.878044, 144.78326, 0, 0, 0, 0, 0, 0, -50, 5.5731583, 50, 0, 0, 0, 0, 0, 0, -99.40021, 4.530548, 85.684875, 0, 0, 0, 0, 0, 0, -86.68457, 8.331764, 12.96167, 0, 0, 0, 0, 0, 0, -90.76825, 3.7088547, -34.520386, 0, 0, 0, 0, 0, 0, -50, 10.20282, -50),
+"tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+}
+point_count = 17
 
 [node name="DemoIsland" type="Node3D" unique_id=915459138]
 
@@ -579,7 +662,6 @@ base_height = -50.0
 material = SubResource("Pasture3DMaterial_4515p")
 assets = SubResource("Pasture3DAssets_cbjtu")
 displacement_sharpness = 0.5
-show_contours = true
 show_checkered = true
 top_level = true
 metadata/_edit_lock_ = true
@@ -657,7 +739,7 @@ manager = NodePath("../../Pasture3DPoolManager")
 material = ExtResource("7_hqvrn")
 
 [node name="Plow" type="Node3D" parent="Pasture3D" unique_id=795140751 node_paths=PackedStringArray("terrain")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -688.5291, 10.857767, 1092.453)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -805.9228, 10.857767, 329.52185)
 script = ExtResource("3_n7ivs")
 terrain = NodePath("..")
 _layer_owner = "pasture3d_brush:Plow"
@@ -671,11 +753,14 @@ modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_h8tpa")])
 curve = SubResource("Curve3D_tcq52")
 
 [node name="Pasture3DSpline" type="Node3D" parent="Pasture3D/Plow" unique_id=971588529 node_paths=PackedStringArray("terrain")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 688.5291, -10.857767, -1092.453)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 13.213623, -10.857767, 12.637817)
 script = ExtResource("12_l4h5e")
 terrain = NodePath("../..")
 snap_to_surface = false
 metadata/_custom_type_script = "uid://bb60it81vfrir"
+
+[node name="Line1" type="Path3D" parent="Pasture3D/Plow/Pasture3DSpline" unique_id=954424399]
+curve = SubResource("Curve3D_nooeo")
 
 [node name="PlateauHills" type="Node3D" parent="Pasture3D" unique_id=1064614146 node_paths=PackedStringArray("terrain")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -487.463, 0, -959.8301)
@@ -727,7 +812,7 @@ modifier_margin = 30.0
 live_preview_resolution = 0
 _preview_coarse_baked = false
 bake_scale = 0
-modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_q0c40")])
+modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_ni3tk")])
 
 [node name="Area1" type="Path3D" parent="Pasture3D/PlateauHills/HillRange2" unique_id=1186373717]
 curve = SubResource("Curve3D_qky07")
@@ -753,7 +838,7 @@ modifier_margin = 30.0
 live_preview_resolution = 0
 _preview_coarse_baked = false
 bake_scale = 0
-modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_q0c40")])
+modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_b685y")])
 
 [node name="Area1" type="Path3D" parent="Pasture3D/PlateauHills/HillRange3" unique_id=1199602541]
 curve = SubResource("Curve3D_q0c40")
@@ -800,7 +885,7 @@ curve = SubResource("Curve3D_b685y")
 script = ExtResource("1_r5rvi")
 _layer_uid = "18b58f9cd1dc2fd"
 extent_mode = 1
-_base_key = "0e1a9add928711749c938022fb187d1c"
+_base_key = "ca3fe3c5bd4cba3738a47b5facf6478a"
 terrain = NodePath("..")
 modifier_margin = 0.0
 live_preview_resolution = 0
@@ -809,28 +894,43 @@ bake_scale = 0
 modifiers = Array[ExtResource("2_cbjtu")]([])
 metadata/_custom_type_script = "uid://cmrjbbng0gxfi"
 
-[node name="Ridge" type="Node3D" parent="Pasture3D/MountainRanges" unique_id=1721592338 node_paths=PackedStringArray("terrain")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -719.52277, 116.18014, -1034.8484)
-script = ExtResource("49_7qmf4")
+[node name="MountainRidgePlow" type="Node3D" parent="Pasture3D/MountainRanges" unique_id=858637892 node_paths=PackedStringArray("terrain")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -799.26294, 70.7299, -921.3352)
+script = ExtResource("3_n7ivs")
 terrain = NodePath("../..")
 _layer_owner = "pasture3d_layerbrush:18b58f9cd1dc2fd"
 modifier_margin = 0.0
 live_preview_resolution = 0
 _preview_coarse_baked = false
 bake_scale = 0
-modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_xwa3r")])
+modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_cx7fp")])
 
-[node name="Area1" type="Path3D" parent="Pasture3D/MountainRanges/Ridge" unique_id=1045539019]
-curve = SubResource("Curve3D_b0u5i")
+[node name="Area1" type="Path3D" parent="Pasture3D/MountainRanges/MountainRidgePlow" unique_id=536437769]
+curve = SubResource("Curve3D_ukorx")
 
-[node name="Crest" type="Node3D" parent="Pasture3D/MountainRanges/Ridge" unique_id=1841199032 node_paths=PackedStringArray("terrain")]
+[node name="MountainRidge" type="Node3D" parent="Pasture3D/MountainRanges/MountainRidgePlow" unique_id=1851844630 node_paths=PackedStringArray("terrain")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -71.65936, 0, 0)
 script = ExtResource("12_l4h5e")
-half_width = 12.0
 terrain = NodePath("../../..")
 snap_to_surface = false
+metadata/_custom_type_script = "uid://bb60it81vfrir"
 
-[node name="Line1" type="Path3D" parent="Pasture3D/MountainRanges/Ridge/Crest" unique_id=2098873218]
-curve = SubResource("Curve3D_ahukp")
+[node name="Line1" type="Path3D" parent="Pasture3D/MountainRanges/MountainRidgePlow/MountainRidge" unique_id=204669807]
+curve = SubResource("Curve3D_cbvqt")
+
+[node name="Mound" type="Node3D" parent="Pasture3D" unique_id=2136522629 node_paths=PackedStringArray("terrain")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -934.31366, 65.31923, 949.62445)
+script = ExtResource("41_a68ip")
+terrain = NodePath("..")
+_layer_owner = "pasture3d_brush:Mounds"
+modifier_margin = 0.0
+live_preview_resolution = 0
+_preview_coarse_baked = false
+bake_scale = 0
+modifiers = Array[ExtResource("2_cbjtu")]([SubResource("Resource_soe5a")])
+
+[node name="Loop1" type="Path3D" parent="Pasture3D/Mound" unique_id=1839601186]
+curve = SubResource("Curve3D_3w2eb")
 
 [node name="Pasture3DPoolManager" type="Pasture3DPoolManager" parent="." unique_id=67587526]
 
