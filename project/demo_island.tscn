@@ -369,27 +369,34 @@ script = ExtResource("52_quisv")
 mode = 2
 peak_height = 100.0
 count = 12
-angle = 90.30000000000001
+angle = 90.3
 wander = 2.35
 graph_position = Vector2(-120, -240)
 preview_on = true
 
 [sub_resource type="Resource" id="Resource_g0kwx"]
 script = ExtResource("33_3nkqr")
-stage1_mode = null
-uplift_gradient = null
-uplift_n = null
 graph_position = Vector2(1180, -20)
 
 [sub_resource type="Resource" id="Resource_7swx1"]
 script = ExtResource("33_ni3tk")
+param_id = &"spine_area"
 graph_position = Vector2(-500, 20)
+preview_on = true
+
+[sub_resource type="Resource" id="Resource_5mv86"]
+script = ExtResource("12_cbvqt")
+id = &"spine_area"
+label = "Spine Area"
+type = 3
+metadata/_custom_type_script = "uid://bk833psrrlg1o"
 
 [sub_resource type="Resource" id="Resource_yoxcx"]
 script = ExtResource("10_p4out")
 format_version = 3
 nodes = Array[ExtResource("4_ff8bn")]([SubResource("Resource_vv3fa"), SubResource("Resource_twuk5"), SubResource("Resource_mv5n3"), SubResource("Resource_x6t63"), SubResource("Resource_qky07"), SubResource("Resource_63p0j"), SubResource("Resource_g0kwx"), SubResource("Resource_7swx1")])
-wires = [[0, &"height", 3, &"height"], [2, &"path", 5, &"path"], [5, &"path", 4, &"path"], [4, &"path", 3, &"path"], [3, &"height", 6, &"in"], [6, &"height", 1, &"result"]]
+parameters = Array[ExtResource("12_cbvqt")]([SubResource("Resource_5mv86")])
+wires = [[0, &"height", 3, &"height"], [5, &"path", 4, &"path"], [4, &"path", 3, &"path"], [3, &"height", 6, &"in"], [6, &"height", 1, &"result"], [7, &"out", 5, &"path"]]
 output_node = 1
 metadata/_editor_selected_node = 7
 
@@ -397,6 +404,9 @@ metadata/_editor_selected_node = 7
 resource_name = "Terrain Graph"
 script = ExtResource("11_kfedv")
 graph = SubResource("Resource_yoxcx")
+param_overrides = {
+&"spine_area": "PlateauHills/HillRange1/NorthWestHillsSpline1"
+}
 evaluation = 1
 
 [sub_resource type="Curve3D" id="Curve3D_nkn6g"]
@@ -419,6 +429,9 @@ point_count = 17
 resource_name = "Terrain Graph"
 script = ExtResource("11_kfedv")
 graph = SubResource("Resource_yoxcx")
+param_overrides = {
+&"spine_area": "PlateauHills/HillRange4/NorthWestHillsSpline4"
+}
 evaluation = 1
 
 [sub_resource type="Curve3D" id="Curve3D_qky07"]
@@ -432,10 +445,10 @@ point_count = 22
 [sub_resource type="Curve3D" id="Curve3D_63p0j"]
 closed = true
 _data = {
-"points": PackedVector3Array(0, 0, 0, 0, 0, 0, 0, 0, -20, 0, 0, 0, 0, 0, 0, 224.60974, 32.807625, 660.5849, 0, 0, 0, 0, 0, 0, 310.1017, 32.75259, 378.5511, 0, 0, 0, 0, 0, 0, 334.7581, 32.699036, 92.734985, 0, 0, 0, 0, 0, 0, 291.60187, 32.612377, -368.969, 0, 0, 0, 0, 0, 0, 252.9477, 38.739704, -619.58154, 0, 0, 0, 0, 0, 0, -200.69092, 32.047455, -341.1244, 0, 0, 0, 0, 0, 0, -345.82935, 33.77402, -545.3136, 0, 0, 0, 0, 0, 0, -373.23657, 35.137104, -743.8646, 0, 0, 0, 0, 0, 0, -556.7136, 36.60666, -866.734, 0, 0, 0, 0, 0, 0, -724.20874, 33.196045, -788.9857, 0, 0, 0, 0, 0, 0, -721.70776, 31.41061, -572.954, 0, 0, 0, 0, 0, 0, -647.46387, 34.031796, -425.28723, 0, 0, 0, 0, 0, 0, -676.8141, 36.573975, -267.18982, 0, 0, 0, 0, 0, 0, -483.4701, 35.34523, 432.19092, 0, 0, 0, 0, 0, 0, -457.61877, 34.190094, 837.1315, 0, 0, 0, 0, 0, 0, -279.42822, 18.817118, 881.87933, 0, 0, 0, 0, 0, 0, -87.29993, 20.72807, 1007.60876, 0, 0, 0, 0, 0, 0, 97.1651, 25.168552, 944.50745, 0, 0, 0, 0, 0, 0, 0, 0, 20),
-"tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, 0, 0, -20, 0, 0, 0, 0, 0, 0, 224.60974, 32.807625, 660.5849, 0, 0, 0, 0, 0, 0, 310.1017, 32.75259, 378.5511, 0, 0, 0, 0, 0, 0, 334.7581, 32.699036, 92.734985, 0, 0, 0, 0, 0, 0, 291.60187, 32.612377, -368.969, 0, 0, 0, 0, 0, 0, 252.9477, 38.739704, -619.58154, 0, 0, 0, 0, 0, 0, -200.69092, 32.047455, -341.1244, 0, 0, 0, 0, 0, 0, -345.82935, 33.77402, -545.3136, 0, 0, 0, 0, 0, 0, -373.23657, 35.137104, -743.8646, 0, 0, 0, 0, 0, 0, -556.7136, 36.60666, -866.734, 0, 0, 0, 0, 0, 0, -724.20874, 33.196045, -788.9857, 0, 0, 0, 0, 0, 0, -721.70776, 31.41061, -572.954, 0, 0, 0, 0, 0, 0, -647.46387, 34.031796, -425.28723, 0, 0, 0, 0, 0, 0, -676.8141, 36.573975, -267.18982, 0, 0, 0, 0, 0, 0, -483.4701, 35.34523, 432.19092, 0, 0, 0, 0, 0, 0, -457.61877, 34.190094, 837.1315, 0, 0, 0, 0, 0, 0, -279.42822, 18.817118, 881.87933, 0, 0, 0, 0, 0, 0, -87.29993, 20.72807, 1007.60876, 0, 0, 0, 0, 0, 0, 97.1651, 25.168552, 944.50745),
+"tilts": PackedFloat32Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 }
-point_count = 20
+point_count = 19
 
 [sub_resource type="Curve3D" id="Curve3D_q0c40"]
 closed = true
@@ -519,9 +532,6 @@ preview_on = true
 
 [sub_resource type="Resource" id="Resource_ahukp"]
 script = ExtResource("33_3nkqr")
-stage1_mode = null
-uplift_gradient = null
-uplift_n = null
 graph_position = Vector2(1840, -100)
 
 [sub_resource type="Resource" id="Resource_heixe"]
