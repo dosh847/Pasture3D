@@ -19,6 +19,9 @@
 #   [G] A FROZEN graph's sinks freeze with it: an upstream edit (the brush's height) re-bakes, the graph
 #       serves its cache, and no sink writes or taps. CONTROL: `force_sinks_on_served` (the old rule)
 #       writes on the same bake. A Bake that solves still writes.
+#   [H] The same frozen graph on the DEFERRED driver (the editor's route): pass 1 queues the solve, pass 2
+#       SERVES the answer it just filed, and its sink must still paint. [G] baked synchronously, where a
+#       solve is a cache MISS, so it could not see the first frozen-skip skip pass 2 too (2026-11-12).
 extends Node
 
 const N: int = 128
@@ -41,7 +44,8 @@ func _ready() -> void:
 	await _run()
 	await _paint_only()
 	await _frozen()
-	if _checks < 29:
+	await _frozen_deferred()
+	if _checks < 36:
 		print("!! GATE INCOMPLETE: %d checks" % _checks)
 		_fail += 1
 	print("=== GraphColorSinkEditGate: %s (%d failures, %d checks) ===" % ["PASS" if _fail == 0 else "FAIL", _fail, _checks])
@@ -113,6 +117,8 @@ func _run() -> void:
 	g.output_node = 2
 	var mod := Pasture3DNodeGraph.new()
 	mod.graph = g
+	# LIVE: a colour edit repaints on its own only while Live; a frozen graph waits for a Bake ([G]).
+	mod.evaluation = Pasture3DNode.Evaluation.LIVE
 	m.modifiers = [mod] as Array[Pasture3DNode]
 
 	m._stamp_cache.clear()
@@ -181,6 +187,8 @@ func _paint_only() -> void:
 	g.connections = [[0, 0, 1, 0], [1, 0, 3, 0], [2, 0, 3, 1]]
 	var mod := Pasture3DNodeGraph.new()
 	mod.graph = g
+	# LIVE: a colour edit repaints on its own only while Live; a frozen graph waits for a Bake ([G]).
+	mod.evaluation = Pasture3DNode.Evaluation.LIVE
 	_check(g.output_index() < 0, "precondition: the graph has no Output")
 	_check(mod.is_sinks_only() and mod.is_active(), "a sink with no Output is active")
 	var bare := Pasture3DTerrainGraph.create_empty()
@@ -228,7 +236,7 @@ func _bake(p_m) -> void:
 
 
 func _frozen() -> void:
-	print("  [G] a frozen graph's sinks do not re-run on an upstream edit")
+	print("  [G] a frozen graph's sinks run on a Bake and on nothing else")
 	var t := _terrain()
 	var m := _mound(t)
 	var g := Pasture3DTerrainGraph.create_empty()
@@ -250,9 +258,23 @@ func _frozen() -> void:
 	m.modifiers = [mod] as Array[Pasture3DNode]
 
 	Pasture3DGraphChannelSinks.write_count = 0
+	mod.drop_cache_for_bake() # the Bake button: a frozen graph's sinks wait for one
 	await _bake(m)
-	_check(Pasture3DGraphChannelSinks.write_count > 0, "the first bake solved and its sink wrote (%d)" % Pasture3DGraphChannelSinks.write_count)
+	_check(Pasture3DGraphChannelSinks.write_count > 0, "the first Bake solved and its sink wrote (%d)" % Pasture3DGraphChannelSinks.write_count)
 	_check(_near(t.data.get_color(PROBE), Color.RED), "and painted red")
+	_check(not mod.sinks_requested, "the run consumed the Bake's request")
+
+	# Moving the brush re-solves a frozen graph whose cache misses -- but the paint waits for a Bake.
+	Pasture3DGraphChannelSinks.write_count = 0
+	m.position.x += 6.0
+	m._stamp_cache.clear()
+	await _bake(m)
+	_check(Pasture3DGraphChannelSinks.write_count == 0, "a move: no sink wrote (%d)" % Pasture3DGraphChannelSinks.write_count)
+	_check(_near(t.data.get_color(PROBE), Color.RED), "the layer kept its paint across the move")
+	_check(mod._stale, "and the graph says it is stale, so the warning asks for a Bake")
+	m.position.x -= 6.0
+	m._stamp_cache.clear()
+	await _bake(m)
 
 	Pasture3DGraphChannelSinks.write_count = 0
 	var taps0 := Pasture3DGraphChannelSinks.fallback_taps
@@ -269,15 +291,59 @@ func _frozen() -> void:
 	_check(Pasture3DGraphChannelSinks.write_count > 0, "control: the old rule writes on the same kind of bake (%d)" % Pasture3DGraphChannelSinks.write_count)
 	m.force_sinks_on_served = false
 
-	# The Bake button's route: drop this host's cache, then bake. The graph solves, so its sink runs.
+	# A colour edit on a frozen graph waits for the Bake too.
 	Pasture3DGraphChannelSinks.write_count = 0
-	col.value = Color.BLUE # a colour edit on a frozen graph re-runs on its own route; flush it first
+	col.value = Color.BLUE
 	await get_tree().process_frame
+	_check(Pasture3DGraphChannelSinks.write_count == 0 and _near(t.data.get_color(PROBE), Color.RED),
+			"a colour edit on a frozen graph paints nothing (%d cells)" % Pasture3DGraphChannelSinks.write_count)
+	# The brush row's Bake: drop this host's cache, then bake. The graph solves, so its sink runs.
 	Pasture3DGraphChannelSinks.write_count = 0
 	m.height = 40.0
 	mod.drop_cache_for_host(m)
 	await _bake(m)
 	_check(Pasture3DGraphChannelSinks.write_count > 0, "a Bake (cache dropped) solves and its sink writes (%d)" % Pasture3DGraphChannelSinks.write_count)
 	_check(_near(t.data.get_color(PROBE), Color.BLUE), "and paints the current colour")
+	m.queue_free()
+	t.queue_free()
+
+
+func _frozen_deferred() -> void:
+	print("  [H] a frozen graph on the deferred driver paints on pass 2")
+	var t := _terrain()
+	var m := _mound(t)
+	m.auto_refresh = false
+	m.force_deferred_erosion = true
+	var g := Pasture3DTerrainGraph.create_empty()
+	var nodes: Array[Pasture3DGraphNode] = []
+	nodes.append(Pasture3DGraphNodeInput.new())      # 0
+	nodes.append(_mask())                            # 1 -> Output
+	nodes.append(Pasture3DGraphNodeOutput.new())     # 2
+	nodes.append(_mask())                            # 3 -> sink mask
+	var col := Pasture3DGraphNodeConstColor.new()
+	col.value = Color.RED
+	nodes.append(col)                                # 4
+	nodes.append(Pasture3DGraphNodeColorSink.new())  # 5
+	g.nodes = nodes
+	g.connections = [[0, 0, 1, 0], [1, 0, 2, 0], [0, 0, 3, 0], [3, 0, 5, 0], [4, 0, 5, 1]]
+	g.output_node = 2
+	var mod := Pasture3DNodeGraph.new()
+	mod.graph = g
+	mod.evaluation = Pasture3DNode.Evaluation.FROZEN
+	m.modifiers = [mod] as Array[Pasture3DNode]
+	m._stamp_cache.clear()
+	mod.drop_cache_for_bake() # a Bake: the request has to survive pass 1 (deferred) and be honoured on pass 2
+	Pasture3DGraphChannelSinks.write_count = 0
+	var trace_was := Pasture3DBakeTrace.enabled
+	var box := [false]
+	var drive := func() -> void:
+		await m._bake_deferred(m._refresh_owner.bind(m._layer_owner, false, []), m._layer_owner, false)
+		box[0] = true
+	drive.call()
+	while not box[0]:
+		await get_tree().process_frame
+	Pasture3DBakeTrace.enabled = trace_was
+	_check(Pasture3DGraphChannelSinks.write_count > 0, "pass 2 ran the sink (%d cells)" % Pasture3DGraphChannelSinks.write_count)
+	_check(_near(t.data.get_color(PROBE), Color.RED), "and painted red (%s)" % t.data.get_color(PROBE))
 	m.queue_free()
 	t.queue_free()

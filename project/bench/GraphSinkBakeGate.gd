@@ -236,6 +236,8 @@ func _a_the_native_route_bakes_a_sink_layer() -> void:
 	var sink := _control_sink("A", 3, "")
 	var g := _graph([sink], [5.0])
 	var mod := Pasture3DNodeGraph.new()
+	# LIVE: a frozen graph paints only on a Bake; this fixture is about the write, not the freeze.
+	mod.evaluation = Pasture3DNode.Evaluation.LIVE
 	mod.graph = g
 	m.modifiers = [mod] as Array[Pasture3DNode]
 
@@ -276,6 +278,8 @@ func _b_the_gdscript_route_agrees() -> void:
 	var sink := _control_sink("B", 3, "")
 	var g := _graph([sink], [5.0])
 	var mod := Pasture3DNodeGraph.new()
+	# LIVE: a frozen graph paints only on a Bake; this fixture is about the write, not the freeze.
+	mod.evaluation = Pasture3DNode.Evaluation.LIVE
 	mod.graph = g
 	m.modifiers = [mod] as Array[Pasture3DNode]
 
@@ -293,6 +297,8 @@ func _b_the_gdscript_route_agrees() -> void:
 	var m2 := _mound(t2)
 	var sink2 := _control_sink("B2", 3, "")
 	var mod2 := Pasture3DNodeGraph.new()
+	# LIVE: a frozen graph paints only on a Bake; this fixture is about the write, not the freeze.
+	mod2.evaluation = Pasture3DNode.Evaluation.LIVE
 	mod2.graph = _graph([sink2], [5.0])
 	m2.modifiers = [mod2] as Array[Pasture3DNode]
 	Pasture3DGraphChannelSinks.write_count = 0
@@ -329,6 +335,8 @@ func _c_a_shared_layer_key_is_one_layer() -> void:
 	var a := _control_sink("A", 3, "shared")
 	var b := _control_sink("B", 7, "shared")
 	var mod := Pasture3DNodeGraph.new()
+	# LIVE: a frozen graph paints only on a Bake; this fixture is about the write, not the freeze.
+	mod.evaluation = Pasture3DNode.Evaluation.LIVE
 	mod.graph = _graph([a, b], [5.0, 35.0])
 	m.modifiers = [mod] as Array[Pasture3DNode]
 
@@ -365,6 +373,8 @@ func _d_an_empty_layer_key_is_the_default_layer() -> void:
 	var a := _control_sink("A", 3, "")
 	var b := _control_sink("B", 7, "")
 	var mod := Pasture3DNodeGraph.new()
+	# LIVE: a frozen graph paints only on a Bake; this fixture is about the write, not the freeze.
+	mod.evaluation = Pasture3DNode.Evaluation.LIVE
 	mod.graph = _graph([a, b], [5.0, 35.0])
 	m.modifiers = [mod] as Array[Pasture3DNode]
 
@@ -399,6 +409,8 @@ func _f_identity_is_the_key_or_the_default_never_the_index() -> void:
 	var t := _terrain()
 	var m := _mound(t)
 	var mod := Pasture3DNodeGraph.new()
+	# LIVE: a frozen graph paints only on a Bake; this fixture is about the write, not the freeze.
+	mod.evaluation = Pasture3DNode.Evaluation.LIVE
 	mod.graph = _graph([_control_sink("A", 3, ""), _control_sink("B", 7, "split")], [5.0, 35.0])
 	m.modifiers = [mod] as Array[Pasture3DNode]
 	await _bake(m)
@@ -414,6 +426,8 @@ func _f_identity_is_the_key_or_the_default_never_the_index() -> void:
 	m = _mound(t)
 	var sink := _control_sink("A", 3, "")
 	mod = Pasture3DNodeGraph.new()
+	# LIVE: a frozen graph paints only on a Bake; this fixture is about the write, not the freeze.
+	mod.evaluation = Pasture3DNode.Evaluation.LIVE
 	mod.graph = _graph([sink], [5.0])
 	m.modifiers = [mod] as Array[Pasture3DNode]
 	await _bake(m)
@@ -453,6 +467,8 @@ func _f_identity_is_the_key_or_the_default_never_the_index() -> void:
 	m = _mound(t)
 	sink = _control_sink("A", 3, "")
 	mod = Pasture3DNodeGraph.new()
+	# LIVE: a frozen graph paints only on a Bake; this fixture is about the write, not the freeze.
+	mod.evaluation = Pasture3DNode.Evaluation.LIVE
 	mod.graph = _graph([sink], [5.0])
 	m.modifiers = [mod] as Array[Pasture3DNode]
 	var legacy: String = "%s%s%d" % [m._layer_owner, sink.sink_owner_suffix(),

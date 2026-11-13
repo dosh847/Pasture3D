@@ -162,6 +162,11 @@ func _run_tests() -> void:
 	if mound == null:
 		_finish()
 		return
+	# LIVE: a frozen graph's sinks run only on a Bake, so a move leaves its colour where it was baked by
+	# design. Stale colour after a move is a Live question; the scene's graphs are frozen, so switch them.
+	for m in mound.modifiers:
+		if m is Pasture3DNodeGraph:
+			m.evaluation = Pasture3DNode.Evaluation.LIVE
 	var data = terr.data
 	var stack = data.get_layer_stack()
 	var owner_id: String = mound._layer_owner

@@ -468,6 +468,12 @@ enum FeatherMode {
 # declared on Pasture3DNode, which can spill it to disk (M6).
 ## Monotonic counter stamped onto an entry each time it is stored or served — the LRU order.
 var _access_tick: int = 0
+## A FROZEN graph's channel sinks run only when asked: set by every explicit Bake (`drop_cache_for_bake`,
+## `drop_cache_for_host`, `clear_cache` -- Bake to Brush, the brush row's Bake, Bake to All, Bake All
+## Brushes, a Parameter edit), consumed when the sinks run. Moving the brush or editing its spline re-solves
+## a frozen graph whose cache misses, but its colour stays as last baked until a Bake (user rule,
+## 2026-11-12: sinks bake automatically only while Live).
+var sinks_requested := false
 var _stale: bool = false
 
 ## Working input surface captured during brush rasterisation, used to render live 2D previews in Graph Editor
@@ -608,6 +614,8 @@ func drop_cache_for_host(p_host: Object) -> int:
 			gone.append(k)
 	for k in gone:
 		_cache.erase(k)
+	# Every caller is a Bake (the graph row's button, bake_graph), so the sinks are asked for too.
+	sinks_requested = true
 	return gone.size()
 
 
@@ -618,6 +626,7 @@ func drop_cache_for_bake() -> void:
 	_drop_spill()
 	_cache.clear()
 	_stale = false
+	sinks_requested = true
 
 
 ## Drop every cached evaluation, so the next refresh recomputes.
@@ -625,6 +634,7 @@ func clear_cache() -> void:
 	_drop_spill()
 	_cache.clear()
 	_stale = false
+	sinks_requested = true
 	_touch()
 
 

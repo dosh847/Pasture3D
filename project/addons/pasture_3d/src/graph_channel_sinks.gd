@@ -35,6 +35,13 @@ static var write_count: int = 0
 ## Times a layer's footprint was cleared (§8.1 step 2). Separately counted so a gate can tell "the clear
 ## ran and wrote nothing" from "the clear never ran".
 static var clear_count: int = 0
+## Layer ids a brush bake has ALREADY cleared over its box, or null outside a bake. Set by the brush around
+## its repaint so every sink in that bake shares one cleared set instead of one per `run()`. Without it the
+## members of a Pasture3DLayerBrush, whose Color Sinks all name the Layer's one colour row, each cleared
+## the row over their own rect (whole tiles) and wiped the members painted before them — only the last
+## member's colour survived. The bake's own pre-clear already dropped the row over every member's
+## footprint, so a second clear inside the bake had nothing left to do but destroy.
+static var bake_cleared: Variant = null
 
 
 ## Node indices of every channel sink in `p_graph`, in graph order. Empty is the common case and the
@@ -100,7 +107,7 @@ static func run(p_graph, p_terrain, p_owner_base: String, p_gw: int, p_gh: int, 
 	# time the second sink on a shared layer reads `get_control`, the first sink's write is already in the
 	# composite. A scratch grid of authored words was written here to solve that and removed again: its
 	# red watch passed with the grid cut out, because there was nothing for it to fix.
-	var cleared := {}
+	var cleared: Dictionary = bake_cleared if bake_cleared is Dictionary else {}
 	for ni in idx:
 		var sink: Pasture3DGraphNodeChannelSink = p_graph.nodes[ni]
 		var warn := sink.sink_warnings()

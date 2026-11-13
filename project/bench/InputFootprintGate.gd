@@ -170,6 +170,8 @@ func _mound(p_t: Pasture3D, p_graph: Pasture3DTerrainGraph, p_gd: bool) -> Pastu
 	path.curve = c
 	m.add_child(path)
 	var mod := Pasture3DNodeGraph.new()
+	# LIVE: a frozen graph paints only on a Bake; this fixture is about the write, not the freeze.
+	mod.evaluation = Pasture3DNode.Evaluation.LIVE
 	mod.graph = p_graph
 	m.modifiers = [mod] as Array[Pasture3DNode]
 	return m

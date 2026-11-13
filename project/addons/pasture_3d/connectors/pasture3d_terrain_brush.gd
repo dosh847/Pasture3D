@@ -1894,8 +1894,10 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array, p_onl
 		# _stamp_write's same-layer blend rather than by reading each other back through get_height.
 		for s in sibs:
 			s._defer_composite = true
+		var prev_cleared = _begin_sink_clear_scope(aff_layers)
 		for s in sibs:
 			s._paint_into(layer_id, blend)
+		_end_sink_clear_scope(prev_cleared)
 		for s in sibs:
 			s._defer_composite = false
 		if painted_box.size != Vector3.ZERO:
@@ -1970,6 +1972,32 @@ func _refresh_owner(owner: String, record_undo: bool, extra_clears: Array, p_onl
 ## honest way to know is to hash the surface (or the growth inputs), which means baking. Pass 1 answers
 ## it for real — a bake that finds everything already built produces no pending work and the driver
 ## returns after one pass.
+## Opens a bake-wide cleared set for the channel sinks the coming repaint runs, seeded with the layers the
+## bake has just cleared, and returns the previous set for the caller to restore. Every member of a Layer
+## brush writes its colour into one shared row; a sink that cleared that row again over its own rect would
+## erase the members painted before it in the same bake (Pasture3DGraphChannelSinks.bake_cleared). Layers the
+## pre-clear skipped (a frozen graph's) are not seeded, so the first sink to name one still clears it once.
+## Off (null) unless `sink_clear_scope_enabled`, which only a gate's control turns off.
+static var sink_clear_scope_enabled := true
+## Gate control: off, `_frozen_sink_owners` reads only this brush's graphs.
+static var shared_row_writers_enabled := true
+func _begin_sink_clear_scope(p_cleared_layers) -> Variant:
+	var prev = Pasture3DGraphChannelSinks.bake_cleared
+	if not sink_clear_scope_enabled:
+		return prev
+	var d := {}
+	if prev is Dictionary:
+		d = (prev as Dictionary).duplicate()
+	for lyr in p_cleared_layers:
+		d[int(lyr)] = true
+	Pasture3DGraphChannelSinks.bake_cleared = d
+	return prev
+
+
+## Closes a scope opened by `_begin_sink_clear_scope`.
+func _end_sink_clear_scope(p_prev) -> void:
+	Pasture3DGraphChannelSinks.bake_cleared = p_prev
+
 func _wants_deferred_bake() -> bool:
 	if not (Engine.is_editor_hint() or force_deferred_erosion):
 		return false
@@ -2655,7 +2683,8 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 		# This composite is required before painting: the rasterisers read get_height per cell for
 		# relative_to_terrain / follow_spline_height, so they must see the cleared base (not this tool's
 		# own previous dome) or the feature climbs each edit.
-		for lyr_idx in _clearable_layers_for_owner(owner):
+		var rect_aff := _clearable_layers_for_owner(owner)
+		for lyr_idx in rect_aff:
 			terrain.data.clear_layer_in_area(lyr_idx, clip_box, false)
 		terrain.data.composite_area(clip_box, false)
 		# Split the ring reading in two. The clear drops WHOLE TILES, so it can reach past the box on its
@@ -2704,6 +2733,7 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 						s._update_curve_cache(sp) # a re-seat is not an edit to re-bake on
 		var t_snap := Time.get_ticks_usec()
 		var box_tools: Array = []
+		var prev_cleared = _begin_sink_clear_scope(rect_aff)
 		for s in _tools_on_owner(owner):
 			if not s._overlaps_box(clip_box):
 				continue
@@ -2716,6 +2746,7 @@ func _refresh_owner_rect(owner: String, changed_ids: Dictionary, snap_all: bool 
 			s._defer_composite = false
 			s._clip_aabb = AABB()
 			painted += 1
+		_end_sink_clear_scope(prev_cleared)
 		if ci == 0:
 			_last_rect_clip = clip_box
 		_last_rect_clips.append(clip_box)
@@ -3782,14 +3813,33 @@ func _clearable_layers_for_owner(owner: String) -> PackedInt32Array:
 ## them empty; one that solves clears its own rect in the sink writer before it paints. Non-frozen graphs'
 ## layers are cleared as before, and so is a layer no active graph names any more -- that is how a deleted
 ## sink's paint goes away.
+##
+## A row is kept only when NO graph writing to it will run its sinks this bake. A Layer brush's members all
+## write one shared row, so every member counts, not just this one: keeping the row while a sibling
+## re-solved let that sibling's sink clear it over its own rect and erase the frozen members' paint, which
+## they then did not repaint (three frozen PaintIslands, only one showing, 2026-11-12). A graph runs its
+## sinks when it is LIVE, or FROZEN with a Bake asking for them (`sinks_requested`).
 func _frozen_sink_owners(owner: String) -> Dictionary:
 	var out := {}
 	if owner != graph_sink_owner_base() or force_sinks_on_served:
 		return out
-	for m in modifiers:
-		if m is Pasture3DNodeGraph and m.graph != null and m.is_active() 				and m.evaluation == Pasture3DNode.Evaluation.FROZEN:
+	var writers: Array = (_tools_on_owner(owner) if owner.begins_with(LAYER_BRUSH_OWNER_PREFIX)
+			and shared_row_writers_enabled else [self])
+	if not writers.has(self):
+		writers.append(self)
+	var runs := {}
+	for t in writers:
+		for m in t.modifiers:
+			if not (m is Pasture3DNodeGraph and m.graph != null and m.is_active()):
+				continue
+			var will_run: bool = m.evaluation != Pasture3DNode.Evaluation.FROZEN or m.sinks_requested
 			for o in Pasture3DGraphChannelSinks.owners_for_graph(m.graph, owner):
-				out[o] = true
+				if will_run:
+					runs[o] = true
+				else:
+					out[o] = true
+	for o in runs:
+		out.erase(o)
 	return out
 
 
@@ -4125,9 +4175,11 @@ func detach_placement() -> bool:
 	_clear_region_edited_flags()
 	# Drop the whole box (self + any mate samples in it), then repaint ONLY the mates back into it. Self is
 	# excluded, so its contribution is gone; mates are repainted from their unchanged curves (no snap).
-	for lyr_idx in _clearable_layers_for_owner(owner):
+	var det_aff := _clearable_layers_for_owner(owner)
+	for lyr_idx in det_aff:
 		terrain.data.clear_layer_in_area(lyr_idx, clip_box, false)
 	var blend := _layer_blend_for(layer_id)
+	var prev_cleared = _begin_sink_clear_scope(det_aff)
 	for s in _tools_on_owner(owner):
 		if s == self or not s._overlaps_box(clip_box):
 			continue
@@ -4136,6 +4188,7 @@ func detach_placement() -> bool:
 		s._paint_into(layer_id, blend)
 		s._defer_composite = false
 		s._clip_aabb = AABB()
+	_end_sink_clear_scope(prev_cleared)
 	terrain.data.composite_area(clip_box, false)
 	terrain.data.update_maps(_map_type(), false, false)
 	var stack = terrain.data.get_layer_stack() if (terrain and terrain.data and terrain.data.has_method("get_layer_stack")) else null
@@ -6187,6 +6240,10 @@ var _pending_sink_reruns: Dictionary = {}
 func _on_graph_sinks_edited(p_mod: Pasture3DNodeGraph) -> void:
 	if p_mod == null or not modifiers.has(p_mod):
 		return
+	if p_mod.evaluation == Pasture3DNode.Evaluation.FROZEN and not force_sinks_on_served:
+		# Frozen: the colour shows on the next Bake, like every other edit to a frozen graph.
+		p_mod.set_stale(true)
+		return
 	if _pending_sink_reruns.is_empty():
 		_flush_graph_sink_reruns.call_deferred()
 	_pending_sink_reruns[p_mod.get_instance_id()] = p_mod
@@ -6327,6 +6384,11 @@ func clear_erosion_caches() -> int:
 	for m in erosion_modifiers():
 		m.clear_cache()
 		n += 1
+	# Bake All repaints frozen graphs' colour too: their sinks run only when a Bake asks (`sinks_requested`).
+	# The solve itself is kept -- Bake All never dropped graph caches -- so this costs a sink pass, no solve.
+	for m in modifiers:
+		if m is Pasture3DNodeGraph:
+			m.sinks_requested = true
 	_live_last.clear() # a preview of a dropped solve is the same stale answer the clear is for
 	return n
 
@@ -6707,17 +6769,23 @@ func _run_stack_graph_sinks(p_stack: Dictionary) -> void:
 		if m == null or not (m is Pasture3DNodeGraph) or m.graph == null:
 			continue
 		var sout: Dictionary = step.get("out", {})
-		if bool(sout.get("served", false)) and not sout.has("pending") and not force_sinks_on_served:
-			# FROZEN, and the graph SERVED its cached answer instead of solving. The sinks freeze with it:
-			# their layers keep the paint of the solve that produced the served answer. Running them here
-			# re-tapped the graph over today's surface -- the taps it carries are keyed on the surface it
-			# SOLVED, so they missed, and every sink evaluated the whole graph again on the main thread. So
-			# any edit upstream of a frozen graph re-solved it after all, only for its sinks (2026-11-12).
-			# A Bake solves (not served), and a colour-only edit re-runs through `_rerun_graph_sinks`.
-			# `_clearable_layers_for_owner` keeps these layers out of the pre-bake clear for the same reason.
+		# A row this bake has cleared lost this graph's paint too, so freezing is no reason to skip it.
+		var row_cleared := _sink_rows_cleared(m)
+		var frozen: bool = m.evaluation == Pasture3DNode.Evaluation.FROZEN and not force_sinks_on_served
+		if frozen and not sout.has("pending") and not m.sinks_requested and not row_cleared:
+			# FROZEN and no Bake asked: the sinks keep the paint of the last Bake, whether the graph served its
+			# cache or re-solved because the brush moved or its spline changed. The user's rule (2026-11-12):
+			# sinks bake automatically only while Live. Running them on a served answer also re-tapped the
+			# whole graph on the main thread, since the taps it carries are keyed on the surface it SOLVED.
+			# A fresh solve the paint no longer matches marks the graph stale, so its warning says a Bake is
+			# owed. A Bake sets `sinks_requested` (drop_cache_for_bake / clear_cache) and the deferred
+			# driver's pass 2 then runs them; `_clearable_layers_for_owner` keeps the layers of graphs that
+			# will not run out of the pre-bake clear.
+			if not bool(sout.get("served", false)):
+				m.set_stale(true)
 			if Pasture3DBakeTrace.enabled:
-				Pasture3DBakeTrace.mark("%s sinks of %s: frozen, served %s; kept the last solve's paint" % [
-						name, m.display_name(), "STALE" if bool(sout.get("stale", false)) else "HIT"])
+				Pasture3DBakeTrace.mark("%s sinks of %s: frozen, no Bake requested (%s); kept the last Bake's paint" % [
+						name, m.display_name(), "served" if bool(sout.get("served", false)) else "re-solved"])
 			continue
 		if sout.has("pending"):
 			# Deferred driver pass 1: the graph is queued for the worker, not solved. Tapping it now was a
@@ -6733,10 +6801,33 @@ func _run_stack_graph_sinks(p_stack: Dictionary) -> void:
 				Pasture3DBakeTrace.mark("%s sinks of %s: SKIPPED, no input surface recorded (%dx%d, %d cells)" % [
 						name, m.display_name(), m.last_gw, m.last_gh, m.last_input_surface.size()])
 			continue
-		m.stamp_params(self)
-		_run_graph_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface,
-				m.sink_taps_for(m.last_input_surface, m.last_gw, m.last_gh))
-		_run_graph_runtime_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface)
+		m.sinks_requested = false
+		_run_one_graph_sinks(m)
+
+
+func _run_one_graph_sinks(m) -> void:
+	m.stamp_params(self)
+	_run_graph_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface,
+			m.sink_taps_for(m.last_input_surface, m.last_gw, m.last_gh))
+	_run_graph_runtime_sinks(m.graph, m.last_gw, m.last_gh, m.last_rect, m.last_input_surface)
+
+
+## Whether any layer `m`'s sinks write was cleared in the current bake scope.
+func _sink_rows_cleared(m) -> bool:
+	var cl = Pasture3DGraphChannelSinks.bake_cleared
+	if not (cl is Dictionary) or (cl as Dictionary).is_empty():
+		return false
+	if not is_instance_valid(terrain) or terrain.data == null or not terrain.data.has_method("get_layer_stack"):
+		return false
+	var owners := Pasture3DGraphChannelSinks.owners_for_graph(m.graph, graph_sink_owner_base())
+	if owners.is_empty():
+		return false
+	var stack = terrain.data.get_layer_stack()
+	for i in (cl as Dictionary):
+		var li := int(i)
+		if li >= 0 and li < stack.get_layer_count() and owners.has(String(stack.get_layer(li).get_owner_id())):
+			return true
+	return false
 
 
 ## The deferred queues by name, so `_commit_modifier_caches` can file an entry without knowing the
